@@ -1,5 +1,5 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { claudeConfigDirKeychainService, ClaudeQuotaProvider } from "./claude.js";
@@ -47,9 +47,15 @@ describe("claudeConfigDirKeychainService", () => {
     );
   });
 
-  it("is sensitive to a trailing slash", () => {
-    expect(claudeConfigDirKeychainService("/tmp/claude-work/")).not.toBe(
+  it("agrees on a path with and without a trailing slash", () => {
+    expect(claudeConfigDirKeychainService("/tmp/claude-work/")).toBe(
       claudeConfigDirKeychainService("/tmp/claude-work"),
+    );
+  });
+
+  it("expands a leading ~ to the home directory before hashing", () => {
+    expect(claudeConfigDirKeychainService("~/.claude-personal")).toBe(
+      claudeConfigDirKeychainService(join(homedir(), ".claude-personal")),
     );
   });
 });

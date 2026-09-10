@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { Logger } from "pino";
 import { z } from "zod";
@@ -361,8 +361,19 @@ export async function readClaudeKeychainCredentials(
  * first 8 hex characters of the sha256 digest of the absolute config dir path (no
  * trailing slash). Verified empirically against a real Keychain item on 2026-09-10.
  */
+function canonicalizeConfigDir(configDir: string): string {
+  const expanded =
+    configDir === "~" || configDir.startsWith("~/")
+      ? join(homedir(), configDir.slice(1))
+      : configDir;
+  return resolve(expanded);
+}
+
 export function claudeConfigDirKeychainService(configDir: string): string {
-  const hash = createHash("sha256").update(configDir).digest("hex").slice(0, 8);
+  const hash = createHash("sha256")
+    .update(canonicalizeConfigDir(configDir))
+    .digest("hex")
+    .slice(0, 8);
   return `${CLAUDE_KEYCHAIN_SERVICE}-${hash}`;
 }
 
@@ -508,6 +519,12 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
     const raw = this.keychainService
       ? await this.readConfigDirKeychainCredentials(this.keychainService)
       : await this.readKeychainCredentials();
+    if (raw === null && this.keychainService) {
+      this.logger.warn(
+        { keychainService: this.keychainService },
+        "No Keychain item found for derived Claude account entry",
+      );
+    }
     const parsed = ClaudeCredentialsSchema.safeParse(raw);
     return parsed.success ? this.toCredentialRecord(parsed.data) : null;
   }

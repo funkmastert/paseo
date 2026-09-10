@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import { createPaseoDaemon, type PaseoDaemon } from "../bootstrap.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
@@ -11,11 +11,13 @@ import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
 // This suite proves the claude-account-pool routing plugin's acceptance examples
 // end-to-end against a real in-process daemon with the real plugin installed. The
 // plugin lives outside this repo (see docs/plans/2026-09-10-001-feat-claude-account-pool-routing-plan.md,
-// unit U8); fork CI checkouts won't have it, so the whole suite skips cleanly when
-// the directory is absent.
+// unit U8). It is a local-only e2e suite (see docs/testing.md): it requires the
+// plugin checked out on disk, so it never runs in CI. Running it without the
+// plugin present is a loud failure, not a silent skip.
 const PLUGIN_ID = "claude-account-pool";
 const PLUGIN_DIR =
-  process.env.ACCOUNT_POOL_PLUGIN_DIR ?? "/Users/tylerthackray/paseo-plugins/claude-account-pool";
+  process.env.ACCOUNT_POOL_PLUGIN_DIR ??
+  path.join(homedir(), "paseo-plugins", "claude-account-pool");
 const pluginAvailable = existsSync(PLUGIN_DIR);
 
 // The plugin force-refreshes its pool and provider-id caches on the first hook
@@ -189,7 +191,17 @@ async function awaitPoolWarm(harness: PoolHarness, warmParentId: string): Promis
     .not.toBe("claude-leader");
 }
 
-describe.skipIf(!pluginAvailable)("account pool routing plugin (e2e)", () => {
+describe("account pool routing plugin (e2e)", () => {
+  beforeAll(() => {
+    if (!pluginAvailable) {
+      throw new Error(
+        `claude-account-pool plugin not found at ${PLUGIN_DIR}. This is a local-only e2e ` +
+          "suite that requires the plugin checked out on disk — set ACCOUNT_POOL_PLUGIN_DIR " +
+          "to its location, or check it out at the default path.",
+      );
+    }
+  });
+
   test("routes agent-initiated creates across the worker chain and falls back to the leader once the pool is dry", async () => {
     const harness = await createPoolHarness();
     try {

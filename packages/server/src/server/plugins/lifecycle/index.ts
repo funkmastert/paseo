@@ -159,8 +159,14 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create hooks cannot change the workspace directory");
     }
-    if (previous.callerAgentId !== next.callerAgentId) {
-      throw new Error("agent.create hooks cannot change callerAgentId");
+    const outputSpecifiesCallerAgentId =
+      typeof output === "object" && output !== null && "callerAgentId" in output;
+    if (outputSpecifiesCallerAgentId) {
+      if (previous.callerAgentId !== next.callerAgentId) {
+        throw new Error("agent.create hooks cannot change callerAgentId");
+      }
+    } else {
+      (result as { callerAgentId?: string }).callerAgentId = previous.callerAgentId;
     }
   }
   return result;
