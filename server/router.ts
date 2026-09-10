@@ -1,5 +1,6 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import type { HealthTracker } from "./health";
+import { createIntervalPoller } from "./interval-poller";
 import type { PoolCache } from "./pool";
 
 /** The subset of PaseoApi this module needs: reading the provider snapshot. */
@@ -36,39 +37,28 @@ export function createProviderIdCache(
   options: ProviderIdCacheOptions = {},
 ): ProviderIdCache {
   const intervalMs = options.intervalMs ?? DEFAULT_PROVIDER_ID_INTERVAL_MS;
-  const setIntervalFn = options.setIntervalFn ?? setInterval;
-  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
 
   let current: ReadonlySet<string> | null = null;
-  let pending: Promise<ReadonlySet<string> | null> | null = null;
 
-  async function load(): Promise<ReadonlySet<string> | null> {
-    try {
-      const snapshot = await paseo.providers.snapshot();
-      current = new Set(snapshot.entries.map((entry) => entry.provider));
-    } catch (error) {
-      console.error("[claude-account-pool] router: failed to refresh provider snapshot", error);
-    }
-    return current;
-  }
-
-  function refresh(): Promise<ReadonlySet<string> | null> {
-    if (!pending) {
-      pending = load().finally(() => {
-        pending = null;
-      });
-    }
-    return pending;
-  }
-
-  const timer = setIntervalFn(() => {
-    void refresh();
-  }, intervalMs);
+  const poller = createIntervalPoller({
+    intervalMs,
+    setIntervalFn: options.setIntervalFn,
+    clearIntervalFn: options.clearIntervalFn,
+    run: async () => {
+      try {
+        const snapshot = await paseo.providers.snapshot();
+        current = new Set(snapshot.entries.map((entry) => entry.provider));
+      } catch (error) {
+        console.error("[claude-account-pool] router: failed to refresh provider snapshot", error);
+      }
+      return current;
+    },
+  });
 
   return {
     get: () => current,
-    forceRefresh: refresh,
-    stop: () => clearIntervalFn(timer),
+    forceRefresh: () => poller.runOnce(),
+    stop: () => poller.stop(),
   };
 }
 

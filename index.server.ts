@@ -99,11 +99,17 @@ export default function contribute(server: PluginServerContext) {
     notifier?.onPermissionResolved(event.agent.id);
   });
 
+  const unregisterArchived = server.on("agent.archived", (event, context) => {
+    ensureStarted(context.paseo);
+    notifier?.onAgentArchived(event.agent.id);
+  });
+
   return () => {
     unregisterCreate();
     unregisterTurnEnded();
     unregisterPermissionRequested();
     unregisterPermissionResolved();
+    unregisterArchived();
     poolCache?.stop();
     providerIds?.stop();
     usagePoller?.stop();

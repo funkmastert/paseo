@@ -1,4 +1,5 @@
 import type { HealthTracker } from "./health";
+import { createIntervalPoller } from "./interval-poller";
 
 /**
  * Minimal shape this module needs from `paseo.providers.listUsage()`'s
@@ -53,33 +54,32 @@ const DEFAULT_INTERVAL_MS = 5 * 60_000;
 export function createUsagePoller(tracker: HealthTracker, options: UsagePollerOptions): UsagePoller {
   const { fetchUsage } = options;
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const setIntervalFn = options.setIntervalFn ?? setInterval;
-  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
 
-  async function pollOnce(): Promise<void> {
-    let result: UsagePollResult;
-    try {
-      result = await fetchUsage();
-    } catch {
-      return;
-    }
+  const poller = createIntervalPoller({
+    intervalMs,
+    setIntervalFn: options.setIntervalFn,
+    clearIntervalFn: options.clearIntervalFn,
+    run: async () => {
+      let result: UsagePollResult;
+      try {
+        result = await fetchUsage();
+      } catch {
+        return;
+      }
 
-    for (const provider of result.providers ?? []) {
-      const readings = provider.windows.map((window) => ({
-        window: window.id,
-        usedPct: window.usedPct ?? null,
-        resetsAt: window.resetsAt ? new Date(window.resetsAt) : null,
-      }));
-      tracker.reportUsage(provider.providerId, readings);
-    }
-  }
-
-  const timer = setIntervalFn(() => {
-    void pollOnce();
-  }, intervalMs);
+      for (const provider of result.providers ?? []) {
+        const readings = provider.windows.map((window) => ({
+          window: window.id,
+          usedPct: window.usedPct ?? null,
+          resetsAt: window.resetsAt ? new Date(window.resetsAt) : null,
+        }));
+        tracker.reportUsage(provider.providerId, readings);
+      }
+    },
+  });
 
   return {
-    pollOnce,
-    stop: () => clearIntervalFn(timer),
+    pollOnce: () => poller.runOnce(),
+    stop: () => poller.stop(),
   };
 }

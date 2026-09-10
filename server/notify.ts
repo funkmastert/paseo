@@ -31,6 +31,8 @@ export interface Notifier {
   onPermissionResolved(agentId: string): void;
   /** Wire to the agent.turn_ended lifecycle event: flushes anything held for retry. */
   onTurnEnded(agentId: string): void;
+  /** Wire to the agent.archived lifecycle event: prunes all per-agent notifier state. */
+  onAgentArchived(agentId: string): void;
   /** Unsubscribes from the health tracker. Safe to call more than once. */
   stop(): void;
 }
@@ -84,9 +86,14 @@ async function listAgentDirectory(paseo: NotifierPaseoApi): Promise<AgentDirecto
   });
 }
 
+type AgentDirectoryIndex = Map<string, AgentDirectoryRow>;
+
+function buildAgentDirectoryIndex(rows: AgentDirectoryRow[]): AgentDirectoryIndex {
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
 /** Walks parentAgentId up from startAgentId to the root agent with no parent. */
-function resolveRootLeader(rows: AgentDirectoryRow[], startAgentId: string): AgentDirectoryRow | null {
-  const byId = new Map(rows.map((row) => [row.id, row]));
+function resolveRootLeader(byId: AgentDirectoryIndex, startAgentId: string): AgentDirectoryRow | null {
   let current = byId.get(startAgentId);
   if (!current) {
     return null;
@@ -108,15 +115,15 @@ function resolveRootLeader(rows: AgentDirectoryRow[], startAgentId: string): Age
 
 /** Groups non-archived agents on `providerId` by their resolved root leader. */
 function groupAffectedChildrenByLeader(
-  rows: AgentDirectoryRow[],
+  byId: AgentDirectoryIndex,
   providerId: string,
 ): Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }> {
   const byLeader = new Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }>();
-  for (const row of rows) {
+  for (const row of byId.values()) {
     if (row.archived || row.provider !== providerId) {
       continue;
     }
-    const leader = resolveRootLeader(rows, row.id);
+    const leader = resolveRootLeader(byId, row.id);
     if (!leader || leader.id === row.id) {
       continue; // No resolvable leader, or the row is itself a root (not a routed child).
     }
@@ -219,7 +226,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     if (!rows) {
       return;
     }
-    const leader = resolveRootLeader(rows, episode.callerAgentId);
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
     if (!leader || poolDryNotifiedLeaders.has(leader.id)) {
       return;
     }
@@ -232,7 +239,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     if (!rows) {
       return;
     }
-    const leader = resolveRootLeader(rows, episode.callerAgentId);
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
     if (!leader || failOpenNotifiedLeaders.has(leader.id)) {
       return;
     }
@@ -245,13 +252,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
     if (!rows) {
       return;
     }
-    const groups = groupAffectedChildrenByLeader(rows, event.providerId);
-    for (const { leader, children } of groups.values()) {
-      if (children.length === 0) {
-        continue;
-      }
-      await deliver(leader.id, formatCapMessage(event, children));
-    }
+    const groups = groupAffectedChildrenByLeader(buildAgentDirectoryIndex(rows), event.providerId);
+    await Promise.allSettled(
+      Array.from(groups.values())
+        .filter(({ children }) => children.length > 0)
+        .map(({ leader, children }) => deliver(leader.id, formatCapMessage(event, children))),
+    );
   }
 
   const unsubscribeHealth = health.onChange((event: CapEvent) => {
@@ -287,6 +293,14 @@ export function createNotifier(options: NotifierOptions): Notifier {
     },
     onTurnEnded(agentId) {
       flushHeld(agentId);
+    },
+    onAgentArchived(agentId) {
+      // The agent is gone: drop any held sends rather than deliver them, and
+      // forget it entirely so its state doesn't linger past archival.
+      poolDryNotifiedLeaders.delete(agentId);
+      failOpenNotifiedLeaders.delete(agentId);
+      pendingPermissionCounts.delete(agentId);
+      heldSends.delete(agentId);
     },
     stop() {
       unsubscribeHealth();

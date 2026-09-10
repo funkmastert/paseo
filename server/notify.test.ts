@@ -241,6 +241,51 @@ describe("createNotifier", () => {
     notifier.stop();
   });
 
+  it("drops a held send for an archived leader instead of delivering it once permissions resolve", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onPermissionRequested("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+    expect(sendCalls).toHaveLength(0); // Held: leader-1 has a pending permission.
+
+    notifier.onAgentArchived("leader-1");
+    notifier.onPermissionResolved("leader-1");
+    await flush();
+
+    expect(sendCalls).toHaveLength(0); // Dropped, not delivered: leader-1 is archived.
+    notifier.stop();
+  });
+
+  it("clears a pending-permission count for an archived agent so it stops holding sends", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onPermissionRequested("leader-1");
+    notifier.onAgentArchived("leader-1");
+
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+
+    // The pending-permission entry was pruned on archival, so this delivers
+    // immediately instead of being held.
+    expect(sendCalls).toHaveLength(1);
+    notifier.stop();
+  });
+
   it("never calls agents.list or send synchronously inside notePoolDry/noteFailOpen/a health cap event", () => {
     const { paseo } = fakePaseo([]);
     const health = createHealthTracker();

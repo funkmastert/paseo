@@ -7,6 +7,7 @@ import {
   type PoolProviderEntry,
   type ResolvedPool,
 } from "../shared/pool-config";
+import { createIntervalPoller } from "./interval-poller";
 
 /** The subset of PaseoApi this module needs: reading daemon config. */
 export type PaseoConfigApi = PluginHandlerContext["paseo"];
@@ -89,33 +90,23 @@ const DEFAULT_INTERVAL_MS = 60_000;
  */
 export function createPoolCache(paseo: PaseoConfigApi, options: PoolCacheOptions = {}): PoolCache {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const setIntervalFn = options.setIntervalFn ?? setInterval;
-  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
 
   let current: PoolLoadResult = FAIL_OPEN_RESULT;
-  let pending: Promise<PoolLoadResult> | null = null;
 
-  function refresh(): Promise<PoolLoadResult> {
-    if (!pending) {
-      pending = loadPool(paseo)
-        .then((result) => {
-          current = result;
-          return result;
-        })
-        .finally(() => {
-          pending = null;
-        });
-    }
-    return pending;
-  }
-
-  const timer = setIntervalFn(() => {
-    void refresh();
-  }, intervalMs);
+  const poller = createIntervalPoller({
+    intervalMs,
+    setIntervalFn: options.setIntervalFn,
+    clearIntervalFn: options.clearIntervalFn,
+    run: async () => {
+      const result = await loadPool(paseo);
+      current = result;
+      return result;
+    },
+  });
 
   return {
     get: () => current,
-    forceRefresh: refresh,
-    stop: () => clearIntervalFn(timer),
+    forceRefresh: () => poller.runOnce(),
+    stop: () => poller.stop(),
   };
 }
