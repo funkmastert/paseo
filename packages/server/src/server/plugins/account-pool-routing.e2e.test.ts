@@ -18,15 +18,12 @@ const PLUGIN_DIR =
   process.env.ACCOUNT_POOL_PLUGIN_DIR ?? "/Users/tylerthackray/paseo-plugins/claude-account-pool";
 const pluginAvailable = existsSync(PLUGIN_DIR);
 
-// FRICTION: the plugin's pool cache and provider-id cache (server/pool.ts,
-// server/router.ts) start fail-open/empty and only refresh on a hardcoded 60s
-// setInterval tick or an explicit forceRefresh() call. index.server.ts never calls
-// forceRefresh() on startup, and no RPC exposes one, so there is no way for an
-// external harness to warm the cache faster than a real interval tick. Every test
-// below eats one ~62s wait for this reason -- see the final report for the
-// live-smoke implication (a freshly restarted daemon will fail-open route for up to
-// a minute before the pool engages).
-const POOL_CACHE_WARM_UP_MS = 62_000;
+// The plugin force-refreshes its pool and provider-id caches on the first hook
+// dispatch after capturing the paseo API, and self-heals on fail-open traffic
+// (throttled), so routing engages within roughly one RPC round-trip instead of
+// the cache timer's 60s tick. awaitPoolWarm() polls with throwaway probes until
+// routing engages; its 20s timeout sits far below the 60s interval, so these
+// tests double as a regression guard for the cold-start fix.
 
 const MODEL = "custom-model-x";
 const LIMIT_TEXT = "emit a turn failure: You've hit your limit for this account. Try again soon.";
@@ -177,6 +174,21 @@ async function createProbe(
   };
 }
 
+// Polls with throwaway routed probes (children of the given warm-up parent)
+// until the plugin's caches engage and a probe lands on a pool worker instead
+// of passing through to the requested provider.
+async function awaitPoolWarm(harness: PoolHarness, warmParentId: string): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const probe = await createProbe(harness, warmParentId, `Warm-${Date.now()}`);
+        return probe.provider;
+      },
+      { timeout: 20_000, interval: 500 },
+    )
+    .not.toBe("claude-leader");
+}
+
 describe.skipIf(!pluginAvailable)("account pool routing plugin (e2e)", () => {
   test("routes agent-initiated creates across the worker chain and falls back to the leader once the pool is dry", async () => {
     const harness = await createPoolHarness();
@@ -195,7 +207,15 @@ describe.skipIf(!pluginAvailable)("account pool routing plugin (e2e)", () => {
         "claude-leader",
       );
 
-      await new Promise((resolve) => setTimeout(resolve, POOL_CACHE_WARM_UP_MS));
+      // Warm probes hang off a separate leader so the AE-scenario leader's
+      // child list stays exactly the children this test creates.
+      const warmParent = await harness.client.createAgent({
+        provider: "claude-leader",
+        model: "leader-model",
+        cwd: harness.directory,
+        title: "Warm leader",
+      });
+      await awaitPoolWarm(harness, warmParent.id);
 
       // AE1 (R2): an agent-initiated create lands on the top-priority healthy
       // worker, preserving the caller's model choice.
@@ -304,46 +324,70 @@ describe.skipIf(!pluginAvailable)("account pool routing plugin (e2e)", () => {
         harness.leaderMessages.filter((message) => message.includes("every worker is capped"))
           .length;
       await expect.poll(countPoolDryMessages, { timeout: 5_000 }).toBe(1);
-
-      // AE5 (R9) is exercised by a separate, deliberately skipped scenario below
-      // -- see the comment there for why it cannot pass against the current
-      // fork state, independent of anything in this test file.
     } finally {
       await harness.close();
     }
   }, 180_000);
 
-  // AE5 (R9): "given three children are mid-task on account B when B caps, the
-  // leader receives one message naming account B, the reset time, and those
-  // children" -- the task brief asks for two children instead of three; either
-  // way this cannot pass against the current fork.
-  //
-  // Root cause, verified by reading the code rather than guessing from a timeout:
-  // notify.ts's resolveRootLeader/groupAffectedChildrenByLeader (server/notify.ts:71-114)
-  // walk a `parentAgentId` field on each `paseo.agents.list()` row to find a
-  // capped worker's creator. That field does not exist anywhere in this fork's
-  // wire protocol: AgentSnapshotPayloadSchema (packages/protocol/src/messages.ts:854-883)
-  // has no `parentAgentId` key, and toAgentPayload (packages/server/src/server/agent/agent-projections.ts:100-160)
-  // never sets one -- it only forwards `labels`, which carries a *different* key
-  // (`PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id"`, packages/protocol/src/agent-labels.ts:1)
-  // that notify.ts never reads. So resolveRootLeader(rows, childRow.id) always
-  // returns childRow itself (no parent found), groupAffectedChildrenByLeader's
-  // `leader.id === row.id` guard then skips every row, and processCapped finds
-  // zero groups to notify -- the R9 cap notification can never fire, for any
-  // multi-hop case, regardless of what this test does.
-  //
-  // This is a plugin/fork integration gap, not a test-harness limitation, so no
-  // amount of e2e cleverness here fixes it. It's covered today only by the
-  // plugin's notify.test.ts, which fakes the agent directory with parentAgentId
-  // already present and so never exercises the real wire shape. Flagging this
-  // for the live smoke and for whoever picks up the next plugin patch: either
-  // the fork needs a fifth patch exposing `parentAgentId` on
-  // AgentSnapshotPayload/AgentListItemPayload (derived from the
-  // `paseo.parent-agent-id` label, mirroring callerAgentId), or notify.ts needs
-  // to read the label directly.
-  test.skip("AE5: the leader receives one message naming a capped worker and its affected children", () => {
-    // Intentionally empty -- see the comment above for why this is skipped.
-  });
+  // AE5 (R9): when a worker account caps, the root leader receives exactly one
+  // message naming that account and its affected children. The plugin resolves
+  // parentage from the wire rows' `paseo.parent-agent-id` label, so this
+  // exercises the real payload shape end-to-end.
+  test("AE5: the leader receives one message naming a capped worker and its affected children", async () => {
+    const harness = await createPoolHarness();
+    try {
+      await configurePool(harness.client);
+      await harness.client.installDirectoryPlugin(PLUGIN_DIR, PLUGIN_ID);
+
+      const warmParent = await harness.client.createAgent({
+        provider: "claude-leader",
+        model: "leader-model",
+        cwd: harness.directory,
+        title: "Warm leader",
+      });
+      await awaitPoolWarm(harness, warmParent.id);
+
+      const parent = await harness.client.createAgent({
+        provider: "claude-leader",
+        model: "leader-model",
+        cwd: harness.directory,
+        title: "AE5 Leader",
+      });
+      const childOne = await harness.client.createAgent({
+        provider: "claude-leader",
+        model: MODEL,
+        cwd: harness.directory,
+        title: "AE5 Child One",
+        callerAgentId: parent.id,
+      });
+      const childTwo = await harness.client.createAgent({
+        provider: "claude-leader",
+        model: MODEL,
+        cwd: harness.directory,
+        title: "AE5 Child Two",
+        callerAgentId: parent.id,
+      });
+      expect(harness.daemon.agentManager.getAgent(childOne.id)?.config.provider).toBe("claude-w1");
+      expect(harness.daemon.agentManager.getAgent(childTwo.id)?.config.provider).toBe("claude-w1");
+
+      await harness.client.sendMessage(childOne.id, LIMIT_TEXT);
+
+      const namesChild = (message: string, id: string, title: string) =>
+        message.includes(id) || message.includes(title);
+      const isCapMessageForParent = (message: string) =>
+        message.includes("claude-w1") &&
+        namesChild(message, childOne.id, "AE5 Child One") &&
+        namesChild(message, childTwo.id, "AE5 Child Two");
+      await expect
+        .poll(() => harness.leaderMessages.filter(isCapMessageForParent).length, {
+          timeout: 15_000,
+          interval: 500,
+        })
+        .toBe(1);
+    } finally {
+      await harness.close();
+    }
+  }, 90_000);
 
   test("fails open when accountPool params are absent from every provider entry", async () => {
     const harness = await createPoolHarness();
@@ -389,26 +433,17 @@ describe.skipIf(!pluginAvailable)("account pool routing plugin (e2e)", () => {
         title: "Leader",
       });
 
-      await new Promise((resolve) => setTimeout(resolve, POOL_CACHE_WARM_UP_MS));
+      await awaitPoolWarm(harness, parent.id);
 
       const before = await createProbe(harness, parent.id, "Before reload");
       expect(before.provider).toBe("claude-w1");
 
       await harness.client.reloadPlugin(PLUGIN_ID);
 
-      // A reload constructs a fresh plugin module instance with a fresh,
-      // not-yet-constructed pool cache: ensureStarted() only builds the cache
-      // (still cold, per the warm-up comment at the top of this file) the
-      // first time a hook fires post-reload. Fire one now so the interval
-      // timer actually starts before we wait it out, or the wait below is
-      // spent before the cache even exists.
-      await harness.client.createAgent({
-        provider: "claude-leader",
-        model: "leader-model",
-        cwd: harness.directory,
-        title: "Post-reload cache kick",
-      });
-      await new Promise((resolve) => setTimeout(resolve, POOL_CACHE_WARM_UP_MS));
+      // A reload constructs a fresh plugin module instance whose caches build
+      // on the first post-reload hook dispatch and force-refresh immediately;
+      // the warm-up probes below are themselves those hook dispatches.
+      await awaitPoolWarm(harness, parent.id);
 
       const after = await createProbe(harness, parent.id, "After reload");
       expect(after.provider).toBe("claude-w1");
