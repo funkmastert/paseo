@@ -1,6 +1,7 @@
 import type { DaemonClientConfig } from "./daemon-client.js";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type {
+  ActiveTurnBehavior,
   AgentSnapshotPayload,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -256,6 +257,7 @@ export interface PaseoAgentTimelineRefetchOptions {
 
 export interface PaseoAgentSendOptions {
   messageId?: string;
+  activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
   attachments?: SendAgentMessageRequest["attachments"];
 }
