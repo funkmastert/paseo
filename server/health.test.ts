@@ -1,0 +1,149 @@
+import { describe, expect, it } from "vitest";
+import { createHealthTracker } from "./health";
+import { WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, weeklyModelWindow } from "./windows";
+
+const PROVIDER = "claude-worker-a";
+const OPUS_MODEL = "claude-opus-4-5";
+const SONNET_MODEL = "claude-sonnet-5";
+
+function trackerAt(initialNow: string, overrides: Parameters<typeof createHealthTracker>[0] = {}) {
+  let now = new Date(initialNow);
+  const tracker = createHealthTracker({ now: () => now, ...overrides });
+  return {
+    tracker,
+    advance(ms: number) {
+      now = new Date(now.getTime() + ms);
+    },
+    set(iso: string) {
+      now = new Date(iso);
+    },
+  };
+}
+
+describe("createHealthTracker", () => {
+  it("caps the account on limit-shaped failure text; non-limit text is a no-op", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "Network timeout, please retry");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+  });
+
+  it("parses reset time from failure text and from a usage reading's resetsAt", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit, resets at 2026-09-10T15:00:00Z");
+    const fromFailure = tracker.snapshot()[PROVIDER]?.["account"];
+    expect(fromFailure?.resetsAt?.toISOString()).toBe("2026-09-10T15:00:00.000Z");
+
+    const other = "claude-worker-b";
+    tracker.reportUsage(other, [
+      { window: WINDOW_FIVE_HOUR, usedPct: 95, resetsAt: new Date("2026-09-10T12:00:00Z") },
+    ]);
+    const fromUsage = tracker.snapshot()[other]?.[WINDOW_FIVE_HOUR];
+    expect(fromUsage?.resetsAt?.toISOString()).toBe("2026-09-10T12:00:00.000Z");
+  });
+
+  it("applies a default 5h TTL when no reset time is knowable, and expiry moves capped to probation", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    advance(5 * 60 * 60 * 1000 - 1);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    advance(2);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+  });
+
+  it("moves probation to healthy on a completed turn, back to capped on repeat failure, and to healthy on probation TTL expiry", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { probationTtlMs: 30 * 60 * 1000 });
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    advance(5 * 60 * 60 * 1000);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+
+    tracker.noteTurnCompleted(PROVIDER);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("healthy");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    advance(5 * 60 * 60 * 1000);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("probation");
+    advance(30 * 60 * 1000);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("healthy");
+  });
+
+  it("drained skips new spawns but stays last-resort eligible and emits no cap event; recovers when utilization drops", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    const events: unknown[] = [];
+    tracker.onChange((event) => events.push(event));
+
+    tracker.reportUsage(PROVIDER, [{ window: WINDOW_FIVE_HOUR, usedPct: 95, resetsAt: null }]);
+
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(true);
+    expect(events).toEqual([]);
+
+    tracker.reportUsage(PROVIDER, [{ window: WINDOW_FIVE_HOUR, usedPct: 10, resetsAt: null }]);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(events).toEqual([]);
+  });
+
+  it("tracks model-scoped windows independently: a weekly-Opus cap does not evacuate Sonnet work", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit — weekly Opus cap reached");
+
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+    expect(tracker.snapshot()[PROVIDER]?.[weeklyModelWindow("opus")]?.status).toBe("capped");
+  });
+
+  it("leaves state untouched on usage fetch failure (no reading = no change)", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    // No matching row for this provider in a usage payload: nothing changes.
+    tracker.reportUsage(PROVIDER, []);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("caps the whole account conservatively when a reactive failure has no window attribution", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("capped");
+  });
+
+  it("emits capped and recovered events exactly once per transition", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z");
+    const events: Array<{ providerId: string; window: string; kind: string }> = [];
+    tracker.onChange((event) => events.push(event));
+
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    tracker.reportTurnFailure(PROVIDER, "You've hit your limit");
+    expect(events.filter((e) => e.kind === "capped")).toHaveLength(1);
+
+    advance(5 * 60 * 60 * 1000);
+    tracker.noteTurnCompleted(PROVIDER);
+    tracker.noteTurnCompleted(PROVIDER);
+    expect(events.filter((e) => e.kind === "recovered")).toHaveLength(1);
+
+    expect(events).toEqual([
+      expect.objectContaining({ providerId: PROVIDER, window: "account", kind: "capped" }),
+      expect.objectContaining({ providerId: PROVIDER, window: "account", kind: "recovered" }),
+    ]);
+  });
+});
