@@ -4,7 +4,9 @@ import { createNotifier, type NotifierPaseoApi } from "./notify";
 
 interface FakeAgentRow {
   id: string;
-  parentAgentId: string | null;
+  /** Real daemon payloads carry parentage in labels; this is the default shape. */
+  parentAgentId?: string | null;
+  parentLabel?: string | null;
   title: string | null;
   provider: string;
   archivedAt?: string | null;
@@ -25,7 +27,9 @@ function fakePaseo(
     entries: rows.map((row) => ({
       agent: {
         id: row.id,
-        parentAgentId: row.parentAgentId,
+        // Only set when a test explicitly exercises the structural fallback.
+        parentAgentId: row.parentAgentId ?? null,
+        labels: row.parentLabel ? { "paseo.parent-agent-id": row.parentLabel } : {},
         title: row.title,
         provider: row.provider,
         archivedAt: row.archivedAt ?? null,
@@ -65,11 +69,11 @@ function fakeScheduler() {
 describe("createNotifier", () => {
   it("sends one steer message per affected leader naming the capped provider, reset time, and affected children", async () => {
     const rows: FakeAgentRow[] = [
-      { id: "leader-1", parentAgentId: null, title: "Leader One", provider: "human-claude" },
-      { id: "child-1", parentAgentId: "leader-1", title: "Child One", provider: "worker-a" },
-      { id: "child-2", parentAgentId: "child-1", title: "Child Two", provider: "worker-a" },
-      { id: "leader-2", parentAgentId: null, title: "Leader Two", provider: "human-claude" },
-      { id: "child-3", parentAgentId: "leader-2", title: "Child Three", provider: "worker-b" },
+      { id: "leader-1", parentLabel: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child One", provider: "worker-a" },
+      { id: "child-2", parentLabel: "child-1", title: "Child Two", provider: "worker-a" },
+      { id: "leader-2", parentLabel: null, title: "Leader Two", provider: "human-claude" },
+      { id: "child-3", parentLabel: "leader-2", title: "Child Three", provider: "worker-b" },
     ];
     const { paseo, sendCalls } = fakePaseo(rows);
     const health = createHealthTracker();
@@ -94,8 +98,8 @@ describe("createNotifier", () => {
 
   it("sends at most one pool-dry notification per leader per episode, and a health recovery re-arms it", async () => {
     const rows: FakeAgentRow[] = [
-      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
-      { id: "caller-1", parentAgentId: "leader-1", title: "Worker Agent", provider: "worker-a" },
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "caller-1", parentLabel: "leader-1", title: "Worker Agent", provider: "worker-a" },
     ];
     const { paseo, sendCalls } = fakePaseo(rows);
     const health = createHealthTracker();
@@ -122,7 +126,7 @@ describe("createNotifier", () => {
   });
 
   it("sends at most one fail-open notification per leader until notePoolRecovered re-arms it", async () => {
-    const rows: FakeAgentRow[] = [{ id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" }];
+    const rows: FakeAgentRow[] = [{ id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" }];
     const { paseo, sendCalls } = fakePaseo(rows);
     const health = createHealthTracker();
     const { schedule, flush } = fakeScheduler();
@@ -147,8 +151,8 @@ describe("createNotifier", () => {
 
   it("holds a notification for a leader with a pending permission and delivers it once permissions resolve", async () => {
     const rows: FakeAgentRow[] = [
-      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
-      { id: "child-1", parentAgentId: "leader-1", title: "Child", provider: "worker-a" },
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
     ];
     const { paseo, sendCalls } = fakePaseo(rows);
     const health = createHealthTracker();
@@ -170,8 +174,8 @@ describe("createNotifier", () => {
 
   it("retries a rejected steer send after the leader's next turn_ended", async () => {
     const rows: FakeAgentRow[] = [
-      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
-      { id: "child-1", parentAgentId: "leader-1", title: "Child", provider: "worker-a" },
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
     ];
     let shouldReject = true;
     const { paseo, sendCalls } = fakePaseo(rows, () => {
@@ -191,6 +195,48 @@ describe("createNotifier", () => {
     notifier.onTurnEnded("leader-1");
     await flush();
     expect(sendCalls).toHaveLength(2);
+
+    notifier.stop();
+  });
+
+  it("resolves parentage from labels across a multi-hop chain, not a structural parentAgentId field", async () => {
+    // The real daemon payload has no parentAgentId key at all; only labels
+    // carry parentage. Leave parentAgentId entirely absent to prove the
+    // labels path is what resolves this, not a structural fallback.
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "worker-child-1", parentLabel: "leader-1", title: "Worker Child", provider: "human-claude" },
+      { id: "grandchild-1", parentLabel: "worker-child-1", title: "Grandchild", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.noteFailOpen({ callerAgentId: "grandchild-1", reason: "pool-unconfigured" });
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].id).toBe("leader-1");
+
+    notifier.stop();
+  });
+
+  it("still honors a structural parentAgentId property when the daemon supplies one", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentAgentId: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.noteFailOpen({ callerAgentId: "child-1", reason: "pool-unconfigured" });
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].id).toBe("leader-1");
 
     notifier.stop();
   });

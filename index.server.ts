@@ -34,6 +34,19 @@ export default function contribute(server: PluginServerContext) {
     poolCache = createPoolCache(paseo);
     providerIds = createProviderIdCache(paseo);
     notifier = createNotifier({ paseo, health });
+
+    // Both caches start empty/fail-open and otherwise wait for their 60s
+    // interval tick. Without this, every create in the window after a
+    // daemon restart or plugin reload fails open (routes unprotected).
+    // Fire-and-forget on a microtask so this hook dispatch never awaits
+    // the refresh; the very first create can still race it, but the
+    // fail-open window shrinks from ~60s to one RPC round-trip.
+    const startedPoolCache = poolCache;
+    const startedProviderIds = providerIds;
+    queueMicrotask(() => {
+      void startedPoolCache.forceRefresh();
+      void startedProviderIds.forceRefresh();
+    });
     router = createRouter({
       poolCache,
       health,

@@ -48,18 +48,35 @@ interface QueuedSend {
   text: string;
 }
 
+// The daemon's agent list payload does not carry a structural
+// `parentAgentId` property; parentage travels in the row's `labels` record
+// under this key instead (labels are forwarded on the wire). This mirrors
+// the daemon's own PARENT_AGENT_ID_LABEL constant. The structural property
+// is still checked first so this keeps working if a future daemon adds it.
+const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+
+function resolveParentAgentId(agent: {
+  parentAgentId?: string | null;
+  labels?: Record<string, unknown> | null;
+}): string | null {
+  // TYPE NOTE: neither parentAgentId nor labels is on the installed
+  // @getpaseo/client AgentSnapshotPayload type yet; the daemon adds both to
+  // agent directory rows at runtime, mirroring the callerAgentId accepted on
+  // creation. Read them structurally rather than forking the SDK types.
+  if (typeof agent.parentAgentId === "string" && agent.parentAgentId.length > 0) {
+    return agent.parentAgentId;
+  }
+  const fromLabel = agent.labels?.[PARENT_AGENT_ID_LABEL];
+  return typeof fromLabel === "string" && fromLabel.length > 0 ? fromLabel : null;
+}
+
 async function listAgentDirectory(paseo: NotifierPaseoApi): Promise<AgentDirectoryRow[]> {
   const result = await paseo.agents.list();
   return result.entries.map((entry) => {
     const agent = entry.agent;
-    // TYPE NOTE: parentAgentId isn't on the installed @getpaseo/client
-    // AgentSnapshotPayload type yet; the daemon adds it to agent directory
-    // rows at runtime, mirroring the callerAgentId accepted on creation.
-    // Read it structurally rather than forking the SDK types.
-    const parentAgentId = (agent as { parentAgentId?: string | null }).parentAgentId ?? null;
     return {
       id: agent.id,
-      parentAgentId,
+      parentAgentId: resolveParentAgentId(agent),
       title: agent.title,
       provider: agent.provider,
       archived: agent.archivedAt != null,

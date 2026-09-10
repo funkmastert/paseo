@@ -240,6 +240,35 @@ describe("createRouter", () => {
     });
   });
 
+  it("throttles the failOpen-observed forceRefresh to at most once per throttle window", () => {
+    const poolCache = fakePoolCache({ workers: [], leader: null }, true);
+    const providerIds = fakeProviderIds([]);
+    let nowMs = 0;
+    const router = createRouter({
+      poolCache,
+      health: createHealthTracker(),
+      providerIds,
+      failOpenRefreshThrottleMs: 5000,
+      now: () => nowMs,
+    });
+
+    router(request({ callerAgentId: "c1" }), fakeContext);
+    router(request({ callerAgentId: "c1" }), fakeContext);
+    router(request({ callerAgentId: "c1" }), fakeContext);
+
+    expect(poolCache.forceRefresh).toHaveBeenCalledTimes(1);
+    expect(providerIds.forceRefresh).toHaveBeenCalledTimes(1);
+
+    nowMs = 4999;
+    router(request({ callerAgentId: "c1" }), fakeContext);
+    expect(poolCache.forceRefresh).toHaveBeenCalledTimes(1);
+
+    nowMs = 5000;
+    router(request({ callerAgentId: "c1" }), fakeContext);
+    expect(poolCache.forceRefresh).toHaveBeenCalledTimes(2);
+    expect(providerIds.forceRefresh).toHaveBeenCalledTimes(2);
+  });
+
   it("emits onPoolRecovered when the pool transitions from fail-open back to configured", () => {
     const health = createHealthTracker();
     const onPoolRecovered = vi.fn();

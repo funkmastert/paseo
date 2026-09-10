@@ -94,6 +94,15 @@ export interface RouterOptions {
   onFailOpen?: (episode: FailOpenEpisode) => void;
   /** Called when the pool cache transitions from fail-open back to a loaded pool. */
   onPoolRecovered?: () => void;
+  /**
+   * Minimum ms between forceRefresh() calls triggered by observing a
+   * fail-open pool on a create. Defaults to 5000. Keeps recovery from a
+   * transient config-read failure driven by traffic, not only the 60s
+   * cache timer, without hammering the daemon on a busy fail-open pool.
+   */
+  failOpenRefreshThrottleMs?: number;
+  /** Injectable clock for tests; defaults to Date.now. */
+  now?: () => number;
 }
 
 export type AgentCreateRouter = (
@@ -110,6 +119,9 @@ export type AgentCreateRouter = (
  */
 export function createRouter(options: RouterOptions): AgentCreateRouter {
   let wasFailOpen = false;
+  let lastFailOpenRefreshAt = -Infinity;
+  const throttleMs = options.failOpenRefreshThrottleMs ?? 5000;
+  const now = options.now ?? Date.now;
 
   return function routeAgentCreate(input) {
     const { request } = input;
@@ -117,6 +129,12 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
     const { pool, failOpen: poolFailOpen } = options.poolCache.get();
     if (poolFailOpen) {
       wasFailOpen = true;
+      const nowMs = now();
+      if (nowMs - lastFailOpenRefreshAt >= throttleMs) {
+        lastFailOpenRefreshAt = nowMs;
+        void options.poolCache.forceRefresh();
+        void options.providerIds.forceRefresh();
+      }
     } else if (wasFailOpen) {
       wasFailOpen = false;
       options.onPoolRecovered?.();
