@@ -1708,6 +1708,58 @@ describe("ClaudeAgentClient.listImportableSessions", () => {
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
     }
   });
+
+  test("uses the client's own configDir instead of the daemon's CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const cwd = "/tmp/paseo-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, "alt-session.jsonl");
+      await fs.writeFile(
+        sessionFile,
+        `${JSON.stringify({
+          isSidechain: false,
+          type: "user",
+          message: { role: "user", content: "Prompt from the alt account" },
+          cwd,
+          sessionId: "alt-session",
+        })}\n`,
+        "utf-8",
+      );
+      const timestamp = new Date("2026-06-01T12:00:00.000Z");
+      await fs.utimes(sessionFile, timestamp, timestamp);
+
+      const client = new ClaudeAgentClient({
+        logger: createTestLogger(),
+        resolveBinary: async () => "/test/claude/bin",
+        configDir: altConfigDir,
+      });
+
+      await expect(client.listImportableSessions({ limit: 1, cwd })).resolves.toEqual([
+        {
+          providerHandleId: "alt-session",
+          cwd,
+          title: "Prompt from the alt account",
+          firstPromptPreview: "Prompt from the alt account",
+          lastPromptPreview: "Prompt from the alt account",
+          lastActivityAt: timestamp,
+        },
+      ]);
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ClaudeAgentSession context window usage", () => {
@@ -2283,6 +2335,72 @@ describe("ClaudeAgentSession context window usage", () => {
         process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
       }
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves the persisted session jsonl under the client's own runtimeSettings.env.CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const sessionId = "session-alt-account";
+      const cwd = "/tmp/paseo-test-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+
+      const queryFactory = createQueryFactoryForTurns([
+        [
+          {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+            permissionMode: "default",
+          },
+          {
+            type: "result",
+            subtype: "success",
+            duration_ms: 10,
+            duration_api_ms: 8,
+            is_error: false,
+            num_turns: 1,
+            result: "done",
+            stop_reason: null,
+            total_cost_usd: 0,
+            usage: {},
+            permission_denials: [],
+            uuid: `${sessionId}-result`,
+            session_id: sessionId,
+          },
+        ],
+      ]);
+      const client = new ClaudeAgentClient({
+        logger,
+        queryFactory,
+        resolveBinary: async () => "/test/claude/bin",
+        runtimeSettings: { env: { CLAUDE_CONFIG_DIR: altConfigDir } },
+      });
+      const session = await client.createSession({ provider: "claude", cwd }, undefined, {
+        persistSession: false,
+      });
+      await session.run("turn");
+
+      // Simulate the claude binary writing a session transcript for this account.
+      await fs.writeFile(sessionFile, '{"type":"summary"}\n', "utf-8");
+
+      await session.close();
+
+      await expect(fs.access(sessionFile)).rejects.toThrow();
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
     }
   });
 

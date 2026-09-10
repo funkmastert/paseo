@@ -198,6 +198,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new ClaudeAgentClient({
       logger,
       runtimeSettings,
+      configDir: runtimeSettings?.env?.CLAUDE_CONFIG_DIR,
     }),
   codex: (logger, runtimeSettings, options) =>
     new CodexAppServerAgentClient(logger, runtimeSettings, {
