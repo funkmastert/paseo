@@ -1,5 +1,6 @@
 import type { Logger } from "pino";
 import type { ProviderUsage } from "../../server/messages.js";
+import type { ClaudeDerivedProviderEntry } from "./manifest.js";
 import { createProviderUsageFetchers } from "./manifest.js";
 import type { ProviderApiFetch, ProviderUsageFetcher } from "./provider.js";
 import { unavailableUsage } from "./usage.js";
@@ -10,6 +11,8 @@ export interface ProviderUsageServiceOptions {
   fetch?: ProviderApiFetch;
   cacheTtlMs?: number;
   now?: () => number;
+  /** Claude-derived custom provider entries, e.g. from `deriveClaudeProviderEntries`. */
+  claudeDerivedProviders?: readonly ClaudeDerivedProviderEntry[];
 }
 
 export interface ProviderUsageListResult {
@@ -31,10 +34,13 @@ export class ProviderUsageService {
     this.logger = options.logger.child({ module: "provider-usage-service" });
     this.fetchers =
       options.fetchers ??
-      createProviderUsageFetchers({
-        logger: this.logger,
-        fetch: options.fetch,
-      });
+      createProviderUsageFetchers(
+        {
+          logger: this.logger,
+          fetch: options.fetch,
+        },
+        options.claudeDerivedProviders,
+      );
     this.cacheTtlMs = options.cacheTtlMs ?? DEFAULT_PROVIDER_USAGE_CACHE_TTL_MS;
     this.now = options.now ?? Date.now;
   }

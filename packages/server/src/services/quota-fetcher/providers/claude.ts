@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
@@ -82,8 +83,19 @@ interface ClaudeCredentialRecord {
 
 interface ClaudeQuotaProviderOptions {
   logger: Logger;
+  providerId?: string;
+  displayName?: string;
   claudeHome?: string;
+  /**
+   * Keychain service name for a per-account-pool-entry item (see
+   * `claudeConfigDirKeychainService`). When set, the darwin Keychain fallback reads only
+   * this service, keyed by the OS username — it never falls back to the legacy
+   * account-less `Claude Code-credentials` item, which belongs to a different account.
+   * Leave unset for the daemon's own default Claude account.
+   */
+  keychainService?: string;
   claudeKeychainReader?: () => Promise<unknown | null>;
+  claudeConfigDirKeychainReader?: (service: string) => Promise<unknown | null>;
   platform?: typeof process.platform;
   fetch?: ProviderApiFetch;
 }
@@ -312,6 +324,18 @@ async function runSecurityCommand(args: string[]): Promise<string | null> {
   }
 }
 
+function parseClaudeKeychainRaw(raw: string | null): unknown | null {
+  if (!raw) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const creds = ClaudeCredentialsSchema.safeParse(parsed);
+  return creds.success && creds.data.claudeAiOauth?.accessToken ? parsed : null;
+}
+
 /** Read Claude Code's account-specific Keychain item, then try the legacy lookup. */
 export async function readClaudeKeychainCredentials(
   run: ClaudeKeychainCommandRunner = runSecurityCommand,
@@ -323,35 +347,62 @@ export async function readClaudeKeychainCredentials(
   ];
 
   for (const args of lookups) {
-    const raw = await run(args);
-    if (!raw) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    const creds = ClaudeCredentialsSchema.safeParse(parsed);
-    if (creds.success && creds.data.claudeAiOauth?.accessToken) return parsed;
+    const parsed = parseClaudeKeychainRaw(await run(args));
+    if (parsed) return parsed;
   }
   return null;
 }
 
+/**
+ * The Keychain service name for a `CLAUDE_CONFIG_DIR` other than Claude Code's own
+ * default — e.g. a second account used by an account-pool custom provider entry.
+ *
+ * Claude Code names these items `Claude Code-credentials-<hash>`, where `<hash>` is the
+ * first 8 hex characters of the sha256 digest of the absolute config dir path (no
+ * trailing slash). Verified empirically against a real Keychain item on 2026-09-10.
+ */
+export function claudeConfigDirKeychainService(configDir: string): string {
+  const hash = createHash("sha256").update(configDir).digest("hex").slice(0, 8);
+  return `${CLAUDE_KEYCHAIN_SERVICE}-${hash}`;
+}
+
+/**
+ * Read a per-config-dir Keychain item (see `claudeConfigDirKeychainService`). Unlike
+ * `readClaudeKeychainCredentials`, this never falls back to the account-less legacy
+ * service name — that item belongs to a different account.
+ */
+export async function readClaudeConfigDirKeychainCredentials(
+  service: string,
+  run: ClaudeKeychainCommandRunner = runSecurityCommand,
+  account: string = claudeKeychainAccount(),
+): Promise<unknown | null> {
+  return parseClaudeKeychainRaw(
+    await run(["find-generic-password", "-a", account, "-w", "-s", service]),
+  );
+}
+
 export class ClaudeQuotaProvider implements ProviderUsageFetcher {
-  readonly providerId = "claude";
-  readonly displayName = "Claude";
+  readonly providerId: string;
+  readonly displayName: string;
 
   private readonly logger: Logger;
   private readonly claudeHome: string;
+  private readonly keychainService: string | undefined;
   private readonly readKeychainCredentials: () => Promise<unknown | null>;
+  private readonly readConfigDirKeychainCredentials: (service: string) => Promise<unknown | null>;
   private readonly platform: typeof process.platform;
   private readonly fetchApi: ProviderApiFetch;
 
   constructor(options: ClaudeQuotaProviderOptions) {
+    this.providerId = options.providerId ?? "claude";
+    this.displayName = options.displayName ?? "Claude";
     this.logger = options.logger.child({ module: "claude-quota-provider" });
     this.claudeHome =
       options.claudeHome || process.env["CLAUDE_HOME"] || join(homedir(), ".claude");
+    this.keychainService = options.keychainService;
     this.readKeychainCredentials = options.claudeKeychainReader ?? readClaudeKeychainCredentials;
+    this.readConfigDirKeychainCredentials =
+      options.claudeConfigDirKeychainReader ?? readClaudeConfigDirKeychainCredentials;
     this.platform = options.platform ?? process.platform;
     this.fetchApi = options.fetch ?? fetch;
   }
@@ -454,7 +505,10 @@ export class ClaudeQuotaProvider implements ProviderUsageFetcher {
   }
 
   private async readKeychainCredential(): Promise<ClaudeCredentialRecord | null> {
-    const parsed = ClaudeCredentialsSchema.safeParse(await this.readKeychainCredentials());
+    const raw = this.keychainService
+      ? await this.readConfigDirKeychainCredentials(this.keychainService)
+      : await this.readKeychainCredentials();
+    const parsed = ClaudeCredentialsSchema.safeParse(raw);
     return parsed.success ? this.toCredentialRecord(parsed.data) : null;
   }
 

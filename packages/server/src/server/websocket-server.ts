@@ -85,6 +85,7 @@ import {
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
+import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
@@ -736,8 +737,11 @@ export class VoiceAssistantWebSocketServer {
       });
     });
 
+    // Claude-derived entries are captured once at construction; a config change that adds
+    // or edits one only takes effect after a daemon restart.
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,
+      claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
