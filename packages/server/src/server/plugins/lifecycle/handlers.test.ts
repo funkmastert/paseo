@@ -75,6 +75,63 @@ test("teardown aborts an active callback and removes its registrations", async (
   expect(hooks.catalog()).toEqual({ events: [], before: [] });
 });
 
+test("agent.create hooks receive callerAgentId and can pass it through unchanged", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  let observedCallerAgentId: string | undefined;
+  hooks.before("agent.create", ({ request }) => {
+    observedCallerAgentId = request.callerAgentId;
+    return request;
+  });
+  const output = await hooks.invoke(
+    "operation",
+    "before",
+    "agent.create",
+    {
+      config: { provider: "claude", cwd: "/project" },
+      callerAgentId: "agent-parent",
+    },
+    paseo,
+  );
+  expect(observedCallerAgentId).toBe("agent-parent");
+  expect(output).toMatchObject({ callerAgentId: "agent-parent" });
+});
+
+test("agent.create hooks omit callerAgentId for a create with no caller", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  let observedCallerAgentId: string | undefined = "unset";
+  hooks.before("agent.create", ({ request }) => {
+    observedCallerAgentId = request.callerAgentId;
+    return request;
+  });
+  await hooks.invoke(
+    "operation",
+    "before",
+    "agent.create",
+    { config: { provider: "claude", cwd: "/project" } },
+    paseo,
+  );
+  expect(observedCallerAgentId).toBeUndefined();
+});
+
+test("agent.create hooks reject changes to callerAgentId instead of silently ignoring them", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  hooks.before("agent.create", ({ request }) => {
+    return { ...request, callerAgentId: "agent-other" };
+  });
+  await expect(
+    hooks.invoke(
+      "operation",
+      "before",
+      "agent.create",
+      {
+        config: { provider: "claude", cwd: "/project" },
+        callerAgentId: "agent-parent",
+      },
+      paseo,
+    ),
+  ).rejects.toThrow("agent.create hooks cannot change callerAgentId");
+});
+
 test("session-open hooks reject changes to session identity instead of silently ignoring them", async () => {
   const hooks = new PluginHookHandlers(() => {});
   hooks.before("agent.session_open", ({ request }) => {

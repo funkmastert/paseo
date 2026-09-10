@@ -287,6 +287,9 @@ export interface CreateAgentOptions {
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
+  // The agent that initiated this create, if any. Threaded into the
+  // agent.create plugin hook read-only; absent for human-initiated creates.
+  callerAgentId?: string;
 }
 
 export interface AgentManagerOptions {
@@ -1216,6 +1219,7 @@ export class AgentManager {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
         env: options.env,
+        callerAgentId: options.callerAgentId,
       });
       config = { ...request.config, internal: config.internal };
       options = { ...options, env: request.env };

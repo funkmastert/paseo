@@ -8,18 +8,45 @@ import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
 import { createProviderSnapshotManagerStub } from "../../test-utils/session-stubs.js";
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
+import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
 import { createAgentCommand } from "./create.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
 const logger = createTestLogger();
 
-function createRealAgentManager(storage: AgentStorage): AgentManager {
+function createRealAgentManager(
+  storage: AgentStorage,
+  options?: { pluginLifecycle?: PluginLifecycle },
+): AgentManager {
   return new AgentManager({
     clients: createTestAgentClients(),
     registry: storage,
     logger,
+    pluginLifecycle: options?.pluginLifecycle,
   });
+}
+
+// Captures every `agent.create` before-hook request so tests can assert on
+// the payload the plugin system would have seen, without exercising the
+// plugin process/compiler machinery.
+function createCapturingPluginLifecycle(): {
+  pluginLifecycle: PluginLifecycle;
+  requests: Array<{ config: { provider: string; cwd: string }; callerAgentId?: string }>;
+} {
+  const requests: Array<{ config: { provider: string; cwd: string }; callerAgentId?: string }> = [];
+  const pluginLifecycle: PluginLifecycle = {
+    emit: () => {},
+    before: async (name, request) => {
+      if (name === "agent.create") {
+        requests.push(
+          request as { config: { provider: string; cwd: string }; callerAgentId?: string },
+        );
+      }
+      return request;
+    },
+  };
+  return { pluginLifecycle, requests };
 }
 
 async function removeRealAgentManagerWorkdir({
@@ -339,6 +366,124 @@ test("mcp create stamps the new worktree's workspaceId, not the parent's", async
     const storedChild = await storage.get(child.id);
     expect(storedChild?.workspaceId).toBe("ws-new-worktree");
     expect(child.cwd).toBe(join(workdir, "worktree", "packages", "app"));
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("mcp create forwards callerAgentId to the agent.create hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const { snapshot: parent } = await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+    requests.length = 0;
+
+    await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        title: "child",
+        initialPrompt: "do the thing",
+        background: true,
+        notifyOnFinish: false,
+        callerAgentId: parent.id,
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBe(parent.id);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("session create forwards callerAgentId to the agent.create hook for CLI/session-initiated creates", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const { snapshot: parent } = await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+    requests.length = 0;
+
+    await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        callerAgentId: parent.id,
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBe(parent.id);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("session create omits callerAgentId from the agent.create hook when no caller initiated it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-source",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBeUndefined();
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }

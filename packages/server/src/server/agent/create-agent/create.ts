@@ -58,6 +58,9 @@ export interface CreateAgentFromSessionInput {
   agentId?: string;
   config: AgentSessionConfig;
   workspaceId: string;
+  // The agent that initiated this create (a managed CLI/session invocation
+  // running on behalf of another agent), if any.
+  callerAgentId?: string;
   worktreeName?: string;
   initialPrompt?: string;
   clientMessageId?: string;
@@ -283,6 +286,7 @@ async function resolveSessionCreateAgent(
       labels: input.labels,
       initialPrompt: trimmedPrompt,
       env: input.env,
+      callerAgentId: input.callerAgentId,
       initialTitle: input.provisionalTitle,
       // A legacy git/worktreeName worktree creates a fresh workspace, so the
       // agent belongs to that workspace, not the source one. createdWorkspaceId
@@ -359,6 +363,7 @@ async function resolveMcpCreateAgent(
       workspaceId: intent.workspaceId,
       owner: input.owner,
       env: input.env,
+      callerAgentId: input.callerAgentId,
     },
     prompt: trimmedPrompt ? trimmedPrompt : undefined,
     setupContinuation,

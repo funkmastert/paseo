@@ -28,7 +28,11 @@ export const lifecycleEventNames = [
 export const beforeHookNames = ["agent.create", "agent.session_open", "workspace.create"] as const;
 
 const beforeSchemas = {
-  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true }).strict(),
+  "agent.create": CreateAgentRequestMessageSchema.pick({
+    config: true,
+    env: true,
+    callerAgentId: true,
+  }).strict(),
   "agent.session_open": z
     .object({
       agentId: z.string(),
@@ -154,6 +158,9 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
     const next = beforeSchemas["agent.create"].parse(result);
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create hooks cannot change the workspace directory");
+    }
+    if (previous.callerAgentId !== next.callerAgentId) {
+      throw new Error("agent.create hooks cannot change callerAgentId");
     }
   }
   return result;

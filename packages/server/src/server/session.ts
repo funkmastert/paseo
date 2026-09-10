@@ -3700,6 +3700,7 @@ export class Session {
           agentId,
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
+          callerAgentId: msg.callerAgentId,
           worktreeName,
           initialPrompt,
           clientMessageId,
