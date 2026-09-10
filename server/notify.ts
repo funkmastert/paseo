@@ -1,0 +1,278 @@
+import type { PluginHookContext } from "@getpaseo/plugin/server";
+import type { CapEvent, HealthTracker } from "./health";
+import type { FailOpenEpisode, PoolDryEpisode } from "./router";
+
+export type { FailOpenEpisode, PoolDryEpisode } from "./router";
+
+/** The subset of PaseoApi this module needs: listing and messaging agents. */
+export type NotifierPaseoApi = Pick<PluginHookContext["paseo"], "agents">;
+
+export interface NotifierOptions {
+  paseo: NotifierPaseoApi;
+  health: Pick<HealthTracker, "onChange">;
+  /**
+   * Defers work off the calling stack so notification sends never happen
+   * synchronously inside a lifecycle hook dispatch. Defaults to
+   * queueMicrotask; tests inject a controllable queue.
+   */
+  schedule?: (fn: () => void | Promise<void>) => void;
+}
+
+export interface Notifier {
+  /** Router calls this when it fell back to the leader because every worker was unhealthy. */
+  notePoolDry(episode: PoolDryEpisode): void;
+  /** Router calls this whenever it fails open. */
+  noteFailOpen(episode: FailOpenEpisode): void;
+  /** Router calls this when the pool cache recovers from fail-open, re-arming fail-open episodes. */
+  notePoolRecovered(): void;
+  /** Wire to the agent.permission_requested lifecycle event. */
+  onPermissionRequested(agentId: string): void;
+  /** Wire to the agent.permission_resolved lifecycle event. */
+  onPermissionResolved(agentId: string): void;
+  /** Wire to the agent.turn_ended lifecycle event: flushes anything held for retry. */
+  onTurnEnded(agentId: string): void;
+  /** Unsubscribes from the health tracker. Safe to call more than once. */
+  stop(): void;
+}
+
+interface AgentDirectoryRow {
+  id: string;
+  parentAgentId: string | null;
+  title: string | null;
+  provider: string;
+  archived: boolean;
+}
+
+interface QueuedSend {
+  leaderId: string;
+  text: string;
+}
+
+async function listAgentDirectory(paseo: NotifierPaseoApi): Promise<AgentDirectoryRow[]> {
+  const result = await paseo.agents.list();
+  return result.entries.map((entry) => {
+    const agent = entry.agent;
+    // TYPE NOTE: parentAgentId isn't on the installed @getpaseo/client
+    // AgentSnapshotPayload type yet; the daemon adds it to agent directory
+    // rows at runtime, mirroring the callerAgentId accepted on creation.
+    // Read it structurally rather than forking the SDK types.
+    const parentAgentId = (agent as { parentAgentId?: string | null }).parentAgentId ?? null;
+    return {
+      id: agent.id,
+      parentAgentId,
+      title: agent.title,
+      provider: agent.provider,
+      archived: agent.archivedAt != null,
+    };
+  });
+}
+
+/** Walks parentAgentId up from startAgentId to the root agent with no parent. */
+function resolveRootLeader(rows: AgentDirectoryRow[], startAgentId: string): AgentDirectoryRow | null {
+  const byId = new Map(rows.map((row) => [row.id, row]));
+  let current = byId.get(startAgentId);
+  if (!current) {
+    return null;
+  }
+  const seen = new Set<string>();
+  while (current.parentAgentId) {
+    if (seen.has(current.id)) {
+      break; // Cycle guard; should never happen against real directory data.
+    }
+    seen.add(current.id);
+    const parent = byId.get(current.parentAgentId);
+    if (!parent) {
+      break;
+    }
+    current = parent;
+  }
+  return current;
+}
+
+/** Groups non-archived agents on `providerId` by their resolved root leader. */
+function groupAffectedChildrenByLeader(
+  rows: AgentDirectoryRow[],
+  providerId: string,
+): Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }> {
+  const byLeader = new Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }>();
+  for (const row of rows) {
+    if (row.archived || row.provider !== providerId) {
+      continue;
+    }
+    const leader = resolveRootLeader(rows, row.id);
+    if (!leader || leader.id === row.id) {
+      continue; // No resolvable leader, or the row is itself a root (not a routed child).
+    }
+    let bucket = byLeader.get(leader.id);
+    if (!bucket) {
+      bucket = { leader, children: [] };
+      byLeader.set(leader.id, bucket);
+    }
+    bucket.children.push(row);
+  }
+  return byLeader;
+}
+
+function describeChild(row: AgentDirectoryRow): string {
+  return `${row.title ?? "untitled"} (${row.id})`;
+}
+
+function formatCapMessage(event: CapEvent, children: AgentDirectoryRow[]): string {
+  const resetPart = event.resetsAt ? ` It resets at ${event.resetsAt.toISOString()}.` : "";
+  const childList = children.map(describeChild).join(", ");
+  return (
+    `Account pool: provider "${event.providerId}" hit its "${event.window}" limit.${resetPart} ` +
+    `Affected children that were running there: ${childList}.`
+  );
+}
+
+function formatPoolDryMessage(episode: PoolDryEpisode): string {
+  return (
+    `Account pool: every worker is capped for model "${episode.requestedModel}". ` +
+    `New spawns are falling back to the leader account "${episode.leaderProviderId}".`
+  );
+}
+
+function formatFailOpenMessage(episode: FailOpenEpisode): string {
+  const target = episode.targetProviderId ? ` (target "${episode.targetProviderId}")` : "";
+  return (
+    `Account pool: routing failed open (${episode.reason}${target}). ` +
+    `Requests are proceeding without pool routing until this clears.`
+  );
+}
+
+export function createNotifier(options: NotifierOptions): Notifier {
+  const { paseo, health } = options;
+  const schedule = options.schedule ?? ((fn: () => void | Promise<void>) => queueMicrotask(fn));
+
+  const poolDryNotifiedLeaders = new Set<string>();
+  const failOpenNotifiedLeaders = new Set<string>();
+  const pendingPermissionCounts = new Map<string, number>();
+  const heldSends = new Map<string, QueuedSend[]>();
+
+  function hasPendingPermission(agentId: string): boolean {
+    return (pendingPermissionCounts.get(agentId) ?? 0) > 0;
+  }
+
+  function queueHeld(leaderId: string, text: string): void {
+    const list = heldSends.get(leaderId) ?? [];
+    list.push({ leaderId, text });
+    heldSends.set(leaderId, list);
+  }
+
+  async function deliver(leaderId: string, text: string): Promise<void> {
+    if (hasPendingPermission(leaderId)) {
+      queueHeld(leaderId, text);
+      return;
+    }
+    try {
+      const handle = paseo.agents.ref(leaderId);
+      // TYPE NOTE: activeTurnBehavior isn't on the installed @getpaseo/client
+      // PaseoAgentSendOptions type yet; the daemon adds runtime support for
+      // steering an active turn. Cast structurally rather than forking the
+      // SDK types.
+      await handle.send(text, { activeTurnBehavior: "steer" } as unknown as Parameters<typeof handle.send>[1]);
+    } catch {
+      queueHeld(leaderId, text); // Retried on this leader's next turn_ended.
+    }
+  }
+
+  function flushHeld(leaderId: string): void {
+    const list = heldSends.get(leaderId);
+    if (!list || list.length === 0) {
+      return;
+    }
+    heldSends.delete(leaderId);
+    for (const item of list) {
+      schedule(() => deliver(item.leaderId, item.text));
+    }
+  }
+
+  async function safeListDirectory(): Promise<AgentDirectoryRow[] | null> {
+    try {
+      return await listAgentDirectory(paseo);
+    } catch (error) {
+      console.error("[claude-account-pool] notify: failed to list agents for a notification", error);
+      return null;
+    }
+  }
+
+  async function processPoolDry(episode: PoolDryEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(rows, episode.callerAgentId);
+    if (!leader || poolDryNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolDryNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolDryMessage(episode));
+  }
+
+  async function processFailOpen(episode: FailOpenEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(rows, episode.callerAgentId);
+    if (!leader || failOpenNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    failOpenNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatFailOpenMessage(episode));
+  }
+
+  async function processCapped(event: CapEvent): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const groups = groupAffectedChildrenByLeader(rows, event.providerId);
+    for (const { leader, children } of groups.values()) {
+      if (children.length === 0) {
+        continue;
+      }
+      await deliver(leader.id, formatCapMessage(event, children));
+    }
+  }
+
+  const unsubscribeHealth = health.onChange((event: CapEvent) => {
+    if (event.kind === "capped") {
+      schedule(() => processCapped(event));
+    } else {
+      // A pool account transitioning back to healthy re-arms the pool-dry episode.
+      poolDryNotifiedLeaders.clear();
+    }
+  });
+
+  return {
+    notePoolDry(episode) {
+      schedule(() => processPoolDry(episode));
+    },
+    noteFailOpen(episode) {
+      schedule(() => processFailOpen(episode));
+    },
+    notePoolRecovered() {
+      failOpenNotifiedLeaders.clear();
+    },
+    onPermissionRequested(agentId) {
+      pendingPermissionCounts.set(agentId, (pendingPermissionCounts.get(agentId) ?? 0) + 1);
+    },
+    onPermissionResolved(agentId) {
+      const count = (pendingPermissionCounts.get(agentId) ?? 0) - 1;
+      if (count <= 0) {
+        pendingPermissionCounts.delete(agentId);
+        flushHeld(agentId);
+      } else {
+        pendingPermissionCounts.set(agentId, count);
+      }
+    },
+    onTurnEnded(agentId) {
+      flushHeld(agentId);
+    },
+    stop() {
+      unsubscribeHealth();
+    },
+  };
+}

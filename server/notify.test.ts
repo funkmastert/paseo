@@ -1,0 +1,219 @@
+import { describe, expect, it, vi } from "vitest";
+import { createHealthTracker } from "./health";
+import { createNotifier, type NotifierPaseoApi } from "./notify";
+
+interface FakeAgentRow {
+  id: string;
+  parentAgentId: string | null;
+  title: string | null;
+  provider: string;
+  archivedAt?: string | null;
+}
+
+interface FakeSendCall {
+  id: string;
+  text: string;
+  options: unknown;
+}
+
+function fakePaseo(
+  rows: FakeAgentRow[],
+  sendImpl?: (id: string, text: string, options: unknown) => Promise<void> | void,
+) {
+  const sendCalls: FakeSendCall[] = [];
+  const list = vi.fn().mockResolvedValue({
+    entries: rows.map((row) => ({
+      agent: {
+        id: row.id,
+        parentAgentId: row.parentAgentId,
+        title: row.title,
+        provider: row.provider,
+        archivedAt: row.archivedAt ?? null,
+      },
+    })),
+  });
+  const ref = (agentId: string) => ({
+    send: async (text: string, options: unknown) => {
+      sendCalls.push({ id: agentId, text, options });
+      if (sendImpl) {
+        await sendImpl(agentId, text, options);
+      }
+    },
+  });
+  const paseo = { agents: { list, ref } } as unknown as NotifierPaseoApi;
+  return { paseo, sendCalls, list };
+}
+
+/** Deterministic stand-in for the microtask/timer scheduler: queues fns and drains them (including any fns they schedule) on flush(). */
+function fakeScheduler() {
+  const pending: Array<() => void | Promise<void>> = [];
+  return {
+    schedule: (fn: () => void | Promise<void>) => {
+      pending.push(fn);
+    },
+    async flush() {
+      let iterations = 0;
+      while (pending.length > 0 && iterations < 50) {
+        const batch = pending.splice(0, pending.length);
+        await Promise.all(batch.map((fn) => fn()));
+        iterations += 1;
+      }
+    },
+  };
+}
+
+describe("createNotifier", () => {
+  it("sends one steer message per affected leader naming the capped provider, reset time, and affected children", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentAgentId: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentAgentId: "leader-1", title: "Child One", provider: "worker-a" },
+      { id: "child-2", parentAgentId: "child-1", title: "Child Two", provider: "worker-a" },
+      { id: "leader-2", parentAgentId: null, title: "Leader Two", provider: "human-claude" },
+      { id: "child-3", parentAgentId: "leader-2", title: "Child Three", provider: "worker-b" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    const resetsAt = "2026-01-01T03:00:00.000Z";
+    health.reportTurnFailure("worker-a", `hit your limit, resets at ${resetsAt}`);
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].id).toBe("leader-1");
+    expect(sendCalls[0].options).toEqual({ activeTurnBehavior: "steer" });
+    expect(sendCalls[0].text).toContain("worker-a");
+    expect(sendCalls[0].text).toContain(resetsAt);
+    expect(sendCalls[0].text).toContain("Child One");
+    expect(sendCalls[0].text).toContain("Child Two");
+    expect(sendCalls[0].text).not.toContain("Child Three");
+
+    notifier.stop();
+  });
+
+  it("sends at most one pool-dry notification per leader per episode, and a health recovery re-arms it", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
+      { id: "caller-1", parentAgentId: "leader-1", title: "Worker Agent", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-opus", leaderProviderId: "leader-provider" });
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+
+    // Cap then heal a window to emit a "recovered" CapEvent and re-arm the episode.
+    health.reportTurnFailure("worker-z", "hit your limit");
+    health.reportUsage("worker-z", [{ window: "account", usedPct: 10 }]);
+    await flush();
+
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
+    await flush();
+
+    expect(sendCalls).toHaveLength(2);
+    notifier.stop();
+  });
+
+  it("sends at most one fail-open notification per leader until notePoolRecovered re-arms it", async () => {
+    const rows: FakeAgentRow[] = [{ id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" }];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
+    notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    notifier.notePoolRecovered();
+    notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
+    await flush();
+    expect(sendCalls).toHaveLength(2);
+
+    notifier.stop();
+  });
+
+  it("holds a notification for a leader with a pending permission and delivers it once permissions resolve", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentAgentId: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onPermissionRequested("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+
+    expect(sendCalls).toHaveLength(0);
+
+    notifier.onPermissionResolved("leader-1");
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    notifier.stop();
+  });
+
+  it("retries a rejected steer send after the leader's next turn_ended", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentAgentId: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentAgentId: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    let shouldReject = true;
+    const { paseo, sendCalls } = fakePaseo(rows, () => {
+      if (shouldReject) {
+        shouldReject = false;
+        throw new Error("cannot steer: turn not active");
+      }
+    });
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    notifier.onTurnEnded("leader-1");
+    await flush();
+    expect(sendCalls).toHaveLength(2);
+
+    notifier.stop();
+  });
+
+  it("never calls agents.list or send synchronously inside notePoolDry/noteFailOpen/a health cap event", () => {
+    const { paseo } = fakePaseo([]);
+    const health = createHealthTracker();
+    const scheduled: Array<() => void | Promise<void>> = [];
+    const schedule = (fn: () => void | Promise<void>) => {
+      scheduled.push(fn);
+    };
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.notePoolDry({ callerAgentId: "c1", requestedModel: "m", leaderProviderId: "leader-provider" });
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+
+    notifier.noteFailOpen({ callerAgentId: "c1", reason: "pool-unconfigured" });
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+
+    health.reportTurnFailure("worker-a", "hit your limit");
+    expect(paseo.agents.list).not.toHaveBeenCalled();
+
+    expect(scheduled.length).toBeGreaterThan(0);
+    notifier.stop();
+  });
+});

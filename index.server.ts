@@ -1,9 +1,99 @@
-import type { PluginServerContext } from "@getpaseo/plugin/server";
-// Wiring only: hook registration that starts this cache from a lifecycle
-// event (and RPC exposure of its accessor) lands in a later unit.
-import { createPoolCache } from "./server/pool";
+import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import { createHealthTracker } from "./server/health";
+import { createNotifier, type Notifier } from "./server/notify";
+import { createPoolCache, type PoolCache } from "./server/pool";
+import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
+import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 
-export default function contribute(_server: PluginServerContext) {
-  void createPoolCache;
-  return () => {};
+function isPoolProvider(pool: PoolCache, providerId: string): boolean {
+  const { pool: resolved } = pool.get();
+  return (
+    resolved.workers.some((worker) => worker.providerId === providerId) ||
+    resolved.leader?.providerId === providerId
+  );
+}
+
+export default function contribute(server: PluginServerContext) {
+  const health = createHealthTracker();
+
+  let poolCache: PoolCache | null = null;
+  let providerIds: ProviderIdCache | null = null;
+  let usagePoller: UsagePoller | null = null;
+  let notifier: Notifier | null = null;
+  let router: AgentCreateRouter | null = null;
+
+  // The server contribution itself has no `paseo` handle (see
+  // PluginServerContext); every hook/observer callback receives one through
+  // its PluginHookContext, so the pool cache, usage poller, and notifier are
+  // started lazily from whichever hook fires first.
+  function ensureStarted(paseo: PluginHookContext["paseo"]): void {
+    if (poolCache) {
+      return;
+    }
+
+    poolCache = createPoolCache(paseo);
+    providerIds = createProviderIdCache(paseo);
+    notifier = createNotifier({ paseo, health });
+    router = createRouter({
+      poolCache,
+      health,
+      providerIds,
+      onPoolDry: (episode) => notifier?.notePoolDry(episode),
+      onFailOpen: (episode) => notifier?.noteFailOpen(episode),
+      onPoolRecovered: () => notifier?.notePoolRecovered(),
+    });
+
+    const fetchUsage: FetchUsageFn = async () => {
+      const result = await paseo.providers.listUsage();
+      return {
+        providers: result.providers.map((provider) => ({
+          providerId: provider.providerId,
+          windows: provider.windows.map((window) => ({
+            id: window.id,
+            usedPct: window.usedPct ?? null,
+            resetsAt: window.resetsAt ?? null,
+          })),
+        })),
+      };
+    };
+    usagePoller = createUsagePoller(health, { fetchUsage });
+  }
+
+  const unregisterCreate = server.before("agent.create", (input, context) => {
+    ensureStarted(context.paseo);
+    return router?.(input, context) ?? undefined;
+  });
+
+  const unregisterTurnEnded = server.on("agent.turn_ended", (event, context) => {
+    ensureStarted(context.paseo);
+    if (poolCache && isPoolProvider(poolCache, event.agent.provider)) {
+      if (event.outcome.kind === "failed") {
+        health.reportTurnFailure(event.agent.provider, event.outcome.error.message);
+      } else if (event.outcome.kind === "completed") {
+        health.noteTurnCompleted(event.agent.provider);
+      }
+    }
+    notifier?.onTurnEnded(event.agent.id);
+  });
+
+  const unregisterPermissionRequested = server.on("agent.permission_requested", (event, context) => {
+    ensureStarted(context.paseo);
+    notifier?.onPermissionRequested(event.agent.id);
+  });
+
+  const unregisterPermissionResolved = server.on("agent.permission_resolved", (event, context) => {
+    ensureStarted(context.paseo);
+    notifier?.onPermissionResolved(event.agent.id);
+  });
+
+  return () => {
+    unregisterCreate();
+    unregisterTurnEnded();
+    unregisterPermissionRequested();
+    unregisterPermissionResolved();
+    poolCache?.stop();
+    providerIds?.stop();
+    usagePoller?.stop();
+    notifier?.stop();
+  };
 }
