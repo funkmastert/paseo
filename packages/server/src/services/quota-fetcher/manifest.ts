@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ProviderOverrideSchema } from "../../server/agent/provider-launch-config.js";
 import type {
   ProviderUsageFetcher,
   ProviderUsageFetcherFactoryOptions,
@@ -83,23 +84,14 @@ export function createProviderUsageFetchers(
   return [...baseFetchers, ...derivedFetchers];
 }
 
-// Only the fields needed to identify a claude-derived account-pool entry and locate its
-// credentials. `.passthrough()` because the daemon config's mutable provider schema is
-// intentionally permissive (see MutableDaemonProviderConfigSchema) — this reads whatever
-// shape a persisted `agents.providers.<id>` entry with `extends: "claude"` actually has.
-const ClaudeDerivedProviderConfigSchema = z
+// ProviderOverrideSchema owns the persisted `agents.providers.<id>` shape (it is what the
+// daemon itself validates this map with); only the account-pool keychainService override,
+// which lives inside the schema's untyped `params` record, is typed locally on top.
+const AccountPoolParamsSchema = z
   .object({
-    extends: z.string().optional(),
-    label: z.string().optional(),
-    env: z.record(z.string(), z.string()).optional(),
-    params: z
+    accountPool: z
       .object({
-        accountPool: z
-          .object({
-            keychainService: z.string().optional(),
-          })
-          .passthrough()
-          .optional(),
+        keychainService: z.string().optional(),
       })
       .passthrough()
       .optional(),
@@ -119,17 +111,18 @@ export function deriveClaudeProviderEntries(
 
   const entries: ClaudeDerivedProviderEntry[] = [];
   for (const [providerId, rawConfig] of Object.entries(providers)) {
-    const result = ClaudeDerivedProviderConfigSchema.safeParse(rawConfig);
+    const result = ProviderOverrideSchema.safeParse(rawConfig);
     if (!result.success || result.data.extends !== "claude") continue;
 
     const claudeHome = result.data.env?.["CLAUDE_CONFIG_DIR"];
     if (!claudeHome) continue;
 
+    const params = AccountPoolParamsSchema.safeParse(result.data.params ?? {});
     entries.push({
       providerId,
       displayName: result.data.label ?? providerId,
       claudeHome,
-      keychainService: result.data.params?.accountPool?.keychainService,
+      keychainService: params.success ? params.data.accountPool?.keychainService : undefined,
     });
   }
   return entries;
