@@ -80,6 +80,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1");
     const resetsAt = "2026-01-01T03:00:00.000Z";
     health.reportTurnFailure("worker-a", `hit your limit, resets at ${resetsAt}`);
     await flush();
@@ -106,6 +107,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1");
     notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
     notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
     notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-opus", leaderProviderId: "leader-provider" });
@@ -132,6 +134,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1");
     notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
     notifier.noteFailOpen({ callerAgentId: "leader-1", reason: "pool-unconfigured" });
     await flush();
@@ -188,6 +191,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1"); // Leader is in steady state: boundary already observed.
     health.reportTurnFailure("worker-a", "hit your limit");
     await flush();
     expect(sendCalls).toHaveLength(1);
@@ -213,6 +217,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1");
     notifier.noteFailOpen({ callerAgentId: "grandchild-1", reason: "pool-unconfigured" });
     await flush();
 
@@ -232,6 +237,7 @@ describe("createNotifier", () => {
     const { schedule, flush } = fakeScheduler();
     const notifier = createNotifier({ paseo, health, schedule });
 
+    notifier.onTurnEnded("leader-1");
     notifier.noteFailOpen({ callerAgentId: "child-1", reason: "pool-unconfigured" });
     await flush();
 
@@ -276,12 +282,60 @@ describe("createNotifier", () => {
 
     notifier.onPermissionRequested("leader-1");
     notifier.onAgentArchived("leader-1");
+    // A late-arriving turn_ended re-establishes the steer boundary; the
+    // pending-permission count must not have survived archival.
+    notifier.onTurnEnded("leader-1");
 
     health.reportTurnFailure("worker-a", "hit your limit");
     await flush();
 
     // The pending-permission entry was pruned on archival, so this delivers
     // immediately instead of being held.
+    expect(sendCalls).toHaveLength(1);
+    notifier.stop();
+  });
+
+  it("holds a steer for a leader until this notifier instance has observed a turn boundary for it", async () => {
+    // A fresh notifier (e.g. after a plugin reload) can't know whether the
+    // leader is mid-permission-prompt, so it must not steer until turn_ended
+    // or permission_resolved proves the turn is at a safe point.
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+    expect(sendCalls).toHaveLength(0); // Held: no boundary observed yet.
+
+    notifier.onTurnEnded("leader-1");
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    notifier.stop();
+  });
+
+  it("serializes concurrent pool-dry episodes so exactly one delivers", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "caller-1", parentLabel: "leader-1", title: "Worker Agent", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onTurnEnded("leader-1");
+    // Same episode scheduled twice back-to-back with no await in between: both
+    // would otherwise be in flight across the agents.list() await at once.
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "claude-sonnet", leaderProviderId: "leader-provider" });
+    await flush();
+
     expect(sendCalls).toHaveLength(1);
     notifier.stop();
   });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import type { ResolvedPool } from "../shared/pool-config";
 import { createHealthTracker } from "./health";
+import { WINDOW_FIVE_HOUR } from "./windows";
 import type { PoolCache } from "./pool";
 import { createProviderIdCache, createRouter, type ProviderIdCache } from "./router";
 
@@ -26,7 +27,7 @@ function fakeProviderIds(ids: string[] | null): ProviderIdCache {
 function request(overrides: Record<string, unknown>): { request: CreateAgentRequest } {
   return {
     request: {
-      config: { provider: "unused", model: "claude-sonnet", cwd: "/tmp/work" },
+      config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp/work" },
       ...overrides,
     } as unknown as CreateAgentRequest,
   };
@@ -69,7 +70,7 @@ describe("createRouter", () => {
       request({
         callerAgentId: "caller-1",
         config: {
-          provider: "ignored",
+          provider: "claude",
           model: "claude-sonnet",
           modeId: "default",
           providerOptions: { foo: "bar" },
@@ -118,7 +119,7 @@ describe("createRouter", () => {
       leader: { providerId: "leader" },
     };
     const health = createHealthTracker();
-    health.reportTurnFailure("worker-a", "hit your limit for opus, resets at 3am");
+    health.reportTurnFailure("worker-a", "hit your limit — weekly opus cap reached, resets at 3am");
     const router = createRouter({
       poolCache: fakePoolCache(pool),
       health,
@@ -126,11 +127,11 @@ describe("createRouter", () => {
     });
 
     const sonnetResult = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-sonnet", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
       fakeContext,
     );
     const opusResult = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-opus", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-opus", cwd: "/tmp" } }),
       fakeContext,
     );
 
@@ -154,7 +155,7 @@ describe("createRouter", () => {
     });
 
     const result = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-sonnet", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
       fakeContext,
     );
 
@@ -178,7 +179,7 @@ describe("createRouter", () => {
     });
 
     const result = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-sonnet", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
       fakeContext,
     );
 
@@ -201,7 +202,7 @@ describe("createRouter", () => {
     });
 
     const result = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-sonnet", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
       fakeContext,
     );
 
@@ -228,7 +229,7 @@ describe("createRouter", () => {
     });
 
     const result = router(
-      request({ callerAgentId: "c1", config: { provider: "x", model: "claude-sonnet", cwd: "/tmp" } }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
       fakeContext,
     );
 
@@ -238,6 +239,179 @@ describe("createRouter", () => {
       reason: "target-missing-from-provider-snapshot",
       targetProviderId: "worker-a",
     });
+  });
+
+  it("passes a non-claude-family child (codex/gpt) through untouched with no fail-open event", () => {
+    const pool: ResolvedPool = {
+      workers: [{ providerId: "worker-a", priority: 1 }],
+      leader: { providerId: "leader" },
+    };
+    const onFailOpen = vi.fn();
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health: createHealthTracker(),
+      providerIds: fakeProviderIds(["worker-a", "leader"]),
+      onFailOpen,
+    });
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "codex/gpt-5.4", model: "gpt-5.4", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result).toBeUndefined();
+    expect(onFailOpen).not.toHaveBeenCalled();
+  });
+
+  it("skips the fail-open event too for a non-claude-family child when the pool is unconfigured", () => {
+    const onFailOpen = vi.fn();
+    const router = createRouter({
+      poolCache: fakePoolCache({ workers: [], leader: null }, true),
+      health: createHealthTracker(),
+      providerIds: fakeProviderIds([]),
+      onFailOpen,
+    });
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "codex/gpt-5.4", model: "gpt-5.4", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result).toBeUndefined();
+    expect(onFailOpen).not.toHaveBeenCalled();
+  });
+
+  it("rewrites a claude-provider child normally", () => {
+    const pool: ResolvedPool = {
+      workers: [{ providerId: "worker-a", priority: 1 }],
+      leader: { providerId: "leader" },
+    };
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health: createHealthTracker(),
+      providerIds: fakeProviderIds(["worker-a", "leader"]),
+    });
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("worker-a");
+  });
+
+  it("still normalizes through the healthy-selection chain when a pool worker is requested explicitly", () => {
+    const pool: ResolvedPool = {
+      workers: [
+        { providerId: "worker-a", priority: 1 },
+        { providerId: "worker-b", priority: 2 },
+      ],
+      leader: { providerId: "leader" },
+    };
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit");
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health,
+      providerIds: fakeProviderIds(["worker-a", "worker-b", "leader"]),
+    });
+
+    // Explicitly asking for the (capped) in-pool worker engages routing but
+    // doesn't pin the target: the ladder still picks the healthy sibling.
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "worker-a", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("worker-b");
+  });
+
+  it("lands on the top-priority drained worker with no pool-dry episode when every worker is drained", () => {
+    const pool: ResolvedPool = {
+      workers: [
+        { providerId: "worker-a", priority: 1 },
+        { providerId: "worker-b", priority: 2 },
+      ],
+      leader: { providerId: "leader" },
+    };
+    const health = createHealthTracker();
+    health.reportUsage("worker-a", [{ window: WINDOW_FIVE_HOUR, usedPct: 95 }]);
+    health.reportUsage("worker-b", [{ window: WINDOW_FIVE_HOUR, usedPct: 95 }]);
+    const onPoolDry = vi.fn();
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health,
+      providerIds: fakeProviderIds(["worker-a", "worker-b", "leader"]),
+      onPoolDry,
+    });
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("worker-a");
+    expect(onPoolDry).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the leader with a pool-dry episode when every worker is capped", () => {
+    const pool: ResolvedPool = {
+      workers: [
+        { providerId: "worker-a", priority: 1 },
+        { providerId: "worker-b", priority: 2 },
+      ],
+      leader: { providerId: "leader" },
+    };
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit");
+    health.reportTurnFailure("worker-b", "hit your limit");
+    const onPoolDry = vi.fn();
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health,
+      providerIds: fakeProviderIds(["worker-a", "worker-b", "leader"]),
+      onPoolDry,
+    });
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("leader");
+    expect(onPoolDry).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips a worker capped only on weekly_model_opus at tier 1 for a model-less create", () => {
+    const pool: ResolvedPool = {
+      workers: [
+        { providerId: "worker-a", priority: 1 },
+        { providerId: "worker-b", priority: 2 },
+      ],
+      leader: { providerId: "leader" },
+    };
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit — weekly opus cap reached");
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health,
+      providerIds: fakeProviderIds(["worker-a", "worker-b", "leader"]),
+    });
+
+    // No model requested: nothing to scope the cap against, so the opus-only
+    // cap must disqualify worker-a outright.
+    const modelless = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", cwd: "/tmp" } }),
+      fakeContext,
+    );
+    expect(modelless?.config.provider).toBe("worker-b");
+
+    // Contrast: a sonnet request can still use worker-a, since the cap is opus-scoped.
+    const sonnet = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+    expect(sonnet?.config.provider).toBe("worker-a");
   });
 
   it("throttles the failOpen-observed forceRefresh to at most once per throttle window", () => {

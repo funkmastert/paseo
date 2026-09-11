@@ -1,5 +1,6 @@
 import type { HealthTracker } from "./health";
 import { createIntervalPoller } from "./interval-poller";
+import { detectModelFamily, weeklyModelWindow } from "./windows";
 
 /**
  * Minimal shape this module needs from `paseo.providers.listUsage()`'s
@@ -44,6 +45,25 @@ export interface UsagePoller {
 
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 
+const WEEKLY_MODEL_WIRE_ID_PATTERN = /^weekly_model_(.+)$/;
+
+/**
+ * Normalizes a wire window id to the tracker's canonical window key. The
+ * daemon's `weekly_model_<name>` suffix isn't guaranteed to already be a
+ * canonical family label (it can be `limit.id` or an arbitrary normalized
+ * name) — route it through `detectModelFamily` so it lands on the same
+ * window key `health.ts` looks up via `weeklyModelWindow(family)`.
+ */
+function normalizeWindowId(id: string): string {
+  const match = id.match(WEEKLY_MODEL_WIRE_ID_PATTERN);
+  if (!match) {
+    return id;
+  }
+  const suffix = match[1];
+  const family = detectModelFamily(suffix);
+  return family ? weeklyModelWindow(family) : id;
+}
+
 /**
  * Polls `fetchUsage()` on an interval and feeds readings into a
  * HealthTracker. A fetch failure leaves tracker state untouched — it is
@@ -69,7 +89,7 @@ export function createUsagePoller(tracker: HealthTracker, options: UsagePollerOp
 
       for (const provider of result.providers ?? []) {
         const readings = provider.windows.map((window) => ({
-          window: window.id,
+          window: normalizeWindowId(window.id),
           usedPct: window.usedPct ?? null,
           resetsAt: window.resetsAt ? new Date(window.resetsAt) : null,
         }));

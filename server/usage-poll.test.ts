@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createUsagePoller } from "./usage-poll";
 import { createHealthTracker } from "./health";
-import { WINDOW_FIVE_HOUR } from "./windows";
+import { WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY } from "./windows";
 
 const PROVIDER = "claude-worker-a";
 
@@ -66,6 +66,50 @@ describe("createUsagePoller", () => {
     await vi.advanceTimersByTimeAsync(5000);
 
     expect(fetchUsage).not.toHaveBeenCalled();
+  });
+
+  it("maps real daemon wire ids onto the tracker's canonical windows end to end", async () => {
+    const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
+    const fetchUsage = vi.fn().mockResolvedValue({
+      providers: [
+        {
+          providerId: PROVIDER,
+          windows: [
+            { id: "five_hour", usedPct: 10, resetsAt: null },
+            { id: "weekly", usedPct: 10, resetsAt: null },
+            { id: "weekly_model_opus", usedPct: 100, resetsAt: null },
+          ],
+        },
+      ],
+    });
+
+    const poller = createUsagePoller(tracker, { fetchUsage, intervalMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(tracker.snapshot()[PROVIDER]?.[WINDOW_FIVE_HOUR]?.status).toBe("healthy");
+    expect(tracker.snapshot()[PROVIDER]?.[WINDOW_SEVEN_DAY]?.status).toBe("healthy");
+    expect(tracker.isHealthyFor(PROVIDER, "claude-opus-4-5")).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, "claude-sonnet-5")).toBe(true);
+    poller.stop();
+  });
+
+  it("routes a raw non-canonical model-scoped wire id onto the tracker's canonical family window", async () => {
+    const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
+    const fetchUsage = vi.fn().mockResolvedValue({
+      providers: [
+        {
+          providerId: PROVIDER,
+          windows: [{ id: "weekly_model_claude-opus-4-5", usedPct: 100, resetsAt: null }],
+        },
+      ],
+    });
+
+    const poller = createUsagePoller(tracker, { fetchUsage, intervalMs: 1000 });
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(tracker.isHealthyFor(PROVIDER, "claude-opus-4-5")).toBe(false);
+    expect(tracker.snapshot()[PROVIDER]?.["weekly_model_opus"]?.status).toBe("capped");
+    poller.stop();
   });
 
   it("pollOnce() triggers an immediate fetch without waiting for the interval", async () => {

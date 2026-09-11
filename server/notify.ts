@@ -173,6 +173,11 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const failOpenNotifiedLeaders = new Set<string>();
   const pendingPermissionCounts = new Map<string, number>();
   const heldSends = new Map<string, QueuedSend[]>();
+  // Leaders for which this notifier instance has seen a turn boundary
+  // (turn_ended or permission_resolved). A fresh instance (e.g. after a plugin
+  // reload) knows nothing about in-flight permission prompts, so steering is
+  // withheld until a boundary proves the leader is safe to steer.
+  const boundaryObservedLeaders = new Set<string>();
 
   function hasPendingPermission(agentId: string): boolean {
     return (pendingPermissionCounts.get(agentId) ?? 0) > 0;
@@ -185,7 +190,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
   }
 
   async function deliver(leaderId: string, text: string): Promise<void> {
-    if (hasPendingPermission(leaderId)) {
+    if (!boundaryObservedLeaders.has(leaderId) || hasPendingPermission(leaderId)) {
       queueHeld(leaderId, text);
       return;
     }
@@ -219,6 +224,16 @@ export function createNotifier(options: NotifierOptions): Notifier {
       console.error("[claude-account-pool] notify: failed to list agents for a notification", error);
       return null;
     }
+  }
+
+  // Serializes the process* functions so two episodes for the same leader
+  // can't interleave across their internal awaits and both pass the
+  // once-per-episode check.
+  let processingTail: Promise<void> = Promise.resolve();
+  function enqueue(fn: () => Promise<void>): Promise<void> {
+    const result = processingTail.then(fn);
+    processingTail = result.catch(() => {});
+    return result;
   }
 
   async function processPoolDry(episode: PoolDryEpisode): Promise<void> {
@@ -262,7 +277,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
 
   const unsubscribeHealth = health.onChange((event: CapEvent) => {
     if (event.kind === "capped") {
-      schedule(() => processCapped(event));
+      schedule(() => enqueue(() => processCapped(event)));
     } else {
       // A pool account transitioning back to healthy re-arms the pool-dry episode.
       poolDryNotifiedLeaders.clear();
@@ -271,10 +286,10 @@ export function createNotifier(options: NotifierOptions): Notifier {
 
   return {
     notePoolDry(episode) {
-      schedule(() => processPoolDry(episode));
+      schedule(() => enqueue(() => processPoolDry(episode)));
     },
     noteFailOpen(episode) {
-      schedule(() => processFailOpen(episode));
+      schedule(() => enqueue(() => processFailOpen(episode)));
     },
     notePoolRecovered() {
       failOpenNotifiedLeaders.clear();
@@ -283,6 +298,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       pendingPermissionCounts.set(agentId, (pendingPermissionCounts.get(agentId) ?? 0) + 1);
     },
     onPermissionResolved(agentId) {
+      boundaryObservedLeaders.add(agentId);
       const count = (pendingPermissionCounts.get(agentId) ?? 0) - 1;
       if (count <= 0) {
         pendingPermissionCounts.delete(agentId);
@@ -292,6 +308,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       }
     },
     onTurnEnded(agentId) {
+      boundaryObservedLeaders.add(agentId);
       flushHeld(agentId);
     },
     onAgentArchived(agentId) {
@@ -301,6 +318,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       failOpenNotifiedLeaders.delete(agentId);
       pendingPermissionCounts.delete(agentId);
       heldSends.delete(agentId);
+      boundaryObservedLeaders.delete(agentId);
     },
     stop() {
       unsubscribeHealth();

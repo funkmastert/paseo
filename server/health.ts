@@ -11,7 +11,7 @@ export interface WindowSnapshot {
   utilizationPct?: number;
 }
 
-/** One provider's windows, keyed by window id (e.g. "account", "five_hour", "weekly-opus"). */
+/** One provider's windows, keyed by window id (e.g. "account", "five_hour", "weekly_model_opus"). */
 export type ProviderSnapshot = Record<string, WindowSnapshot>;
 
 export type HealthSnapshot = Record<string, ProviderSnapshot>;
@@ -36,6 +36,8 @@ export interface HealthTrackerOptions {
   now?: () => Date;
   /** Utilization percent (0-100) at/above which a window is considered drained. Default 90. */
   drainThresholdPct?: number;
+  /** Utilization percent (0-100) at/above which a window is considered capped. Default 100. */
+  capThresholdPct?: number;
   /** Fallback cap duration when a reactive failure carries no parseable reset time. Default 5h. */
   defaultCapTtlMs?: number;
   /** How long a window stays in probation before auto-healing if no turn completes. Default 30min. */
@@ -47,14 +49,18 @@ export interface HealthTracker {
   reportTurnFailure(providerId: string, message: string): void;
   /** Proactive signal: feeds per-window usage readings. Windows not present are left untouched. */
   reportUsage(providerId: string, windows: UsageWindowReading[]): void;
-  /** Records that a spawn was dispatched to this account. Bookkeeping only. */
-  noteSpawn(providerId: string): void;
   /** A turn completed successfully: any window in probation for this provider heals to healthy. */
   noteTurnCompleted(providerId: string): void;
   /** True when the account is usable for a fresh spawn of the given model. */
   isHealthyFor(providerId: string, modelId: string): boolean;
   /** True when the account may still be used as a last resort (e.g. only drained, not capped). */
   isLastResortEligible(providerId: string): boolean;
+  /**
+   * True when every window ever observed for this account is usable (healthy or
+   * probation). Used for model-less spawns, where no model-scoped window can be
+   * picked so any known cap — including a per-model weekly one — disqualifies.
+   */
+  isHealthyForAllWindows(providerId: string): boolean;
   /** Debug/notification snapshot of every tracked (providerId, window) pair. */
   snapshot(): HealthSnapshot;
   /** Subscribes to cap/recovery transitions. Returns an unsubscribe function. */
@@ -62,6 +68,7 @@ export interface HealthTracker {
 }
 
 const DEFAULT_DRAIN_THRESHOLD_PCT = 90;
+const DEFAULT_CAP_THRESHOLD_PCT = 100;
 const DEFAULT_CAP_TTL_MS = 5 * 60 * 60 * 1000;
 const DEFAULT_PROBATION_TTL_MS = 30 * 60 * 1000;
 
@@ -87,6 +94,7 @@ function relevantWindows(modelId: string): string[] {
 export function createHealthTracker(options: HealthTrackerOptions = {}): HealthTracker {
   const now = options.now ?? (() => new Date());
   const drainThresholdPct = options.drainThresholdPct ?? DEFAULT_DRAIN_THRESHOLD_PCT;
+  const capThresholdPct = options.capThresholdPct ?? DEFAULT_CAP_THRESHOLD_PCT;
   const defaultCapTtlMs = options.defaultCapTtlMs ?? DEFAULT_CAP_TTL_MS;
   const probationTtlMs = options.probationTtlMs ?? DEFAULT_PROBATION_TTL_MS;
 
@@ -183,6 +191,13 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
         state.resetsAt = reading.resetsAt;
       }
 
+      if (reading.usedPct >= capThresholdPct) {
+        if (state.status !== "capped") {
+          toCapped(providerId, reading.window, state, reading.resetsAt ?? undefined);
+        }
+        continue;
+      }
+
       if (reading.usedPct >= drainThresholdPct) {
         if (state.status !== "capped") {
           state.status = "drained";
@@ -197,10 +212,6 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
         state.status = "healthy";
       }
     }
-  }
-
-  function noteSpawn(_providerId: string): void {
-    // Bookkeeping hook for future callers (e.g. last-resort tie-breaking); no state transition.
   }
 
   function noteTurnCompleted(providerId: string): void {
@@ -225,6 +236,17 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     for (const [window, state] of providerWindows) {
       settle(providerId, window, state);
       if (state.status === "capped") {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function isHealthyForAllWindows(providerId: string): boolean {
+    const providerWindows = windowsFor(providerId);
+    for (const [window, state] of providerWindows) {
+      settle(providerId, window, state);
+      if (state.status !== "healthy" && state.status !== "probation") {
         return false;
       }
     }
@@ -256,10 +278,10 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   return {
     reportTurnFailure,
     reportUsage,
-    noteSpawn,
     noteTurnCompleted,
     isHealthyFor,
     isLastResortEligible,
+    isHealthyForAllWindows,
     snapshot,
     onChange,
   };

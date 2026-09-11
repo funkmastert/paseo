@@ -37,9 +37,9 @@ function parseResetsAt(message: string, now: Date): Date | undefined {
     const hour24 = (hour12 % 12) + (isPm ? 12 : 0);
 
     const candidate = new Date(now);
-    candidate.setUTCHours(hour24, minute, 0, 0);
+    candidate.setHours(hour24, minute, 0, 0);
     if (candidate.getTime() <= now.getTime()) {
-      candidate.setUTCDate(candidate.getUTCDate() + 1);
+      candidate.setDate(candidate.getDate() + 1);
     }
     return candidate;
   }
@@ -48,12 +48,12 @@ function parseResetsAt(message: string, now: Date): Date | undefined {
 }
 
 function detectWindow(message: string): string | undefined {
-  const family = detectModelFamily(message);
-  if (family) {
-    return weeklyModelWindow(family);
-  }
   if (SESSION_WINDOW_PATTERN.test(message)) {
     return WINDOW_FIVE_HOUR;
+  }
+  const family = detectModelFamily(message);
+  if (family && WEEKLY_WINDOW_PATTERN.test(message)) {
+    return weeklyModelWindow(family);
   }
   if (WEEKLY_WINDOW_PATTERN.test(message)) {
     return WINDOW_SEVEN_DAY;

@@ -76,7 +76,7 @@ export interface FailOpenEpisode {
 
 export interface RouterOptions {
   poolCache: PoolCache;
-  health: Pick<HealthTracker, "isHealthyFor">;
+  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible" | "isHealthyForAllWindows">;
   providerIds: ProviderIdCache;
   /** Called when routing fell back to the leader because every worker was unhealthy. */
   onPoolDry?: (episode: PoolDryEpisode) => void;
@@ -102,10 +102,11 @@ export type AgentCreateRouter = (
 
 /**
  * `before("agent.create")` handler: rewrites `config.provider` for
- * agent-spawned children to a healthy pool worker, falling back to the
- * pool's leader as a last resort. Human-created requests (no callerAgentId)
- * and every failure mode are passthrough — this must never block agent
- * creation.
+ * agent-spawned claude-family children to a healthy pool worker, then to a
+ * drained-but-not-capped worker, then to the pool's leader as a last
+ * resort. Human-created requests (no callerAgentId), non-claude-family
+ * requests, and every failure mode are passthrough — this must never block
+ * agent creation.
  */
 export function createRouter(options: RouterOptions): AgentCreateRouter {
   let wasFailOpen = false;
@@ -139,13 +140,37 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
       return; // Human-created leaders, and schedule/heartbeat creates: untouched.
     }
 
+    // Only claude-family requests are pool members. A codex/gpt/etc. child
+    // spawned by an agent must pass through untouched — no rewrite, and no
+    // fail-open event, since the pool was never in play for it.
+    const requestedProvider = request.config.provider;
+    const isClaudeFamily =
+      requestedProvider === "claude" ||
+      pool.workers.some((worker) => worker.providerId === requestedProvider) ||
+      pool.leader?.providerId === requestedProvider;
+    if (!isClaudeFamily) {
+      return;
+    }
+
     if (poolFailOpen) {
       options.onFailOpen?.({ callerAgentId, reason: "pool-unconfigured" });
       return;
     }
 
+    // Selection ladder (workers are priority-sorted, so `find` yields the top
+    // eligible one):
+    //   1. healthy for the requested model — or, when no model was requested,
+    //      healthy on every window we've observed (a model-scoped cap can't be
+    //      matched against an unknown model, so it must disqualify);
+    //   2. last-resort eligible (drained but not capped) — no pool-dry episode;
+    //   3. the leader, with a pool-dry episode.
     const modelId = request.config.model ?? "";
-    const worker = pool.workers.find((candidate) => options.health.isHealthyFor(candidate.providerId, modelId));
+    const worker =
+      pool.workers.find((candidate) =>
+        modelId
+          ? options.health.isHealthyFor(candidate.providerId, modelId)
+          : options.health.isHealthyForAllWindows(candidate.providerId),
+      ) ?? pool.workers.find((candidate) => options.health.isLastResortEligible(candidate.providerId));
 
     let targetProviderId: string;
     let poolDry: PoolDryEpisode | undefined;

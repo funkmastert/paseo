@@ -22,13 +22,13 @@ describe("classify", () => {
     expect(result.resetsAt?.toISOString()).toBe("2026-09-10T15:00:00.000Z");
   });
 
-  it("parses a clock-time resetsAt relative to now, rolling to the next day if already passed", () => {
-    const now = new Date("2026-09-10T10:00:00Z");
+  it("parses a clock-time resetsAt relative to now (local time), rolling to the next day if already passed", () => {
+    const now = new Date(2026, 8, 10, 10, 0, 0);
     const later = classify("You've hit your limit, resets 3pm", now);
-    expect(later.resetsAt).toEqual(new Date("2026-09-10T15:00:00Z"));
+    expect(later.resetsAt).toEqual(new Date(2026, 8, 10, 15, 0, 0));
 
     const passed = classify("You've hit your limit, resets 3am", now);
-    expect(passed.resetsAt).toEqual(new Date("2026-09-11T03:00:00Z"));
+    expect(passed.resetsAt).toEqual(new Date(2026, 8, 11, 3, 0, 0));
   });
 
   it("hints the five_hour window for session-scoped language", () => {
@@ -44,6 +44,21 @@ describe("classify", () => {
   it("hints a model-scoped weekly window when a model family is named", () => {
     const result = classify("You've hit your limit — weekly Opus cap reached");
     expect(result.window).toBe(weeklyModelWindow("opus"));
+  });
+
+  it("session scope wins even when a model family is also named", () => {
+    const result = classify("You've hit your limit for this 5 hour session for opus");
+    expect(result.window).toBe(WINDOW_FIVE_HOUR);
+  });
+
+  it("hints a model-scoped weekly window for 'weekly <family> limit reached' phrasing", () => {
+    const result = classify("You've hit your limit — weekly opus limit reached");
+    expect(result.window).toBe(weeklyModelWindow("opus"));
+  });
+
+  it("leaves window undefined when a model family is named without weekly or session context", () => {
+    const result = classify("You've hit your limit for opus, resets at 3am");
+    expect(result.window).toBeUndefined();
   });
 
   it("leaves window undefined when the text gives no attribution", () => {
