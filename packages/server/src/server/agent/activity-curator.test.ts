@@ -515,4 +515,16 @@ describe("summarizeLatestActivityItem", () => {
     expect(summarizeLatestActivityItem({ type: "assistant_message", text: "   " })).toBeUndefined();
     expect(summarizeLatestActivityItem({ type: "reasoning", text: "" })).toBeUndefined();
   });
+
+  it("clamps a long external/MCP tool-call summary to the same cap as other branches", () => {
+    const item = toolCallItem({
+      callId: "mcp-1",
+      name: "mcp__github__search_code",
+      input: { query: "a".repeat(500) },
+    });
+
+    const result = summarizeLatestActivityItem(item);
+
+    expect(result?.length).toBeLessThanOrEqual(203);
+  });
 });

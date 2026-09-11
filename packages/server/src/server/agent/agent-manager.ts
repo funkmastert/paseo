@@ -3114,6 +3114,9 @@ export class AgentManager {
           agentId,
           epoch: this.timelineStore.getEpoch(agentId),
         });
+        // The replaced timeline may no longer contain the item the summary
+        // was derived from; drop it rather than show a summary of deleted content.
+        delete agent.lastActivitySummary;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);
@@ -4555,15 +4558,24 @@ export class AgentManager {
     // so the summary is computed here instead — per timeline ITEM, never per
     // streamed delta, since coalescing already collapsed same-window chunks
     // before this call.
+    //
+    // assistant_message/reasoning are excluded: the coalescer flushes them on
+    // a ~60ms timer with only that window's text, so every flush is a
+    // different mid-message fragment and would otherwise emit+persist a full
+    // agent snapshot every ~60ms while streaming. tool_call/todo/error/
+    // compaction/user_message items are discrete and drive the summary instead.
     const agent = this.agents.get(agentId);
     if (agent) {
-      const activitySummary = summarizeLatestActivityItem(item);
+      const activitySummary =
+        item.type === "assistant_message" || item.type === "reasoning"
+          ? undefined
+          : summarizeLatestActivityItem(item);
       if (activitySummary !== undefined && activitySummary !== agent.lastActivitySummary) {
         agent.lastActivitySummary = activitySummary;
         // Avoid an emitState storm: only broadcast when the summary actually
-        // changed (e.g. truncated assistant text stabilizes after the first
-        // chunk past the cap), not on every coalesced item.
-        this.emitState(agent);
+        // changed, not on every coalesced item. lastActivitySummary is
+        // live-only (never persisted), so skip the snapshot write too.
+        this.emitState(agent, { persist: false });
       }
 
       if (

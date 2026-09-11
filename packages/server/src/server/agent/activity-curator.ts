@@ -206,6 +206,23 @@ function curateProjectedActivityEntries(
  * previous summary instead of clobbering it with an empty line.
  */
 export function summarizeLatestActivityItem(item: AgentTimelineItem): string | undefined {
+  return clampActivitySummary(summarizeLatestActivityItemUnclamped(item));
+}
+
+// formatToolCallEntry's external/MCP tool branch returns `[Name] {json}` capped
+// at MAX_TOOL_INPUT_CHARS (400), double the MAX_TOOL_SUMMARY_CHARS (200) other
+// branches use — clamp here, once, regardless of which branch produced the text.
+function clampActivitySummary(summary: string | undefined): string | undefined {
+  if (summary === undefined) {
+    return undefined;
+  }
+  if (summary.length <= MAX_TOOL_SUMMARY_CHARS) {
+    return summary;
+  }
+  return `${summary.slice(0, MAX_TOOL_SUMMARY_CHARS - 3)}...`;
+}
+
+function summarizeLatestActivityItemUnclamped(item: AgentTimelineItem): string | undefined {
   switch (item.type) {
     case "user_message": {
       const text = formatToolSummary(item.text);

@@ -783,6 +783,167 @@ test("emits agent state for lastActivitySummary only when the summary text actua
   }
 });
 
+test("streamed assistant/reasoning deltas never update lastActivitySummary, but a tool_call still does", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-streaming-"));
+  class ManualTurnSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "manual-turn-1";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      }, 0);
+      return { turnId };
+    }
+  }
+  const session = new ManualTurnSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+        // Drain so foreground state transitions apply.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    let agentStateEmits = 0;
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          agentStateEmits += 1;
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Each of these simulates one coalesced flush window: a different
+    // mid-message fragment every time, which must never drive the summary.
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "Working on" },
+    });
+    await drain();
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "Working on it now" },
+    });
+    await drain();
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "reasoning", text: "Thinking about the next step" },
+    });
+    await drain();
+
+    expect(agentStateEmits).toBe(0);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBeUndefined();
+
+    const toolCall: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCall });
+    await drain();
+
+    unsubscribe();
+
+    expect(agentStateEmits).toBe(1);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/index.ts");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the stale activity summary from the emitted state", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-summary-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const toolCall: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCall });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/index.ts");
+
+    const emittedSummaries: Array<string | undefined> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedSummaries.push(event.agent.lastActivitySummary);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+    unsubscribe();
+
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBeUndefined();
+    expect(emittedSummaries[emittedSummaries.length - 1]).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("retries provider history hydration after a stream failure", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-retry-"));
   let attempts = 0;
