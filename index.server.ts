@@ -89,6 +89,10 @@ export default function contribute(server: PluginServerContext) {
     notifier?.onTurnEnded(event.agent.id);
   });
 
+  const unregisterCreated = server.on("agent.created", (event, context) => {
+    ensureStarted(context.paseo);
+    notifier?.onAgentCreated(event.agent.id);
+  });
   const unregisterPermissionRequested = server.on("agent.permission_requested", (event, context) => {
     ensureStarted(context.paseo);
     notifier?.onPermissionRequested(event.agent.id);
@@ -109,6 +113,7 @@ export default function contribute(server: PluginServerContext) {
     unregisterTurnEnded();
     unregisterPermissionRequested();
     unregisterPermissionResolved();
+    unregisterCreated();
     unregisterArchived();
     poolCache?.stop();
     providerIds?.stop();

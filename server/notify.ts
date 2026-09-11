@@ -26,6 +26,11 @@ export interface Notifier {
   /** Router calls this when the pool cache recovers from fail-open, re-arming fail-open episodes. */
   notePoolRecovered(): void;
   /** Wire to the agent.permission_requested lifecycle event. */
+  /** Wire to the agent.created lifecycle event: a leader whose creation this
+   * notifier observed is steer-safe from birth (it cannot carry a pending
+   * permission the notifier never saw), so the turn-boundary hold applies
+   * only to agents that pre-date the notifier (e.g. across a plugin reload). */
+  onAgentCreated(agentId: string): void;
   onPermissionRequested(agentId: string): void;
   /** Wire to the agent.permission_resolved lifecycle event. */
   onPermissionResolved(agentId: string): void;
@@ -293,6 +298,9 @@ export function createNotifier(options: NotifierOptions): Notifier {
     },
     notePoolRecovered() {
       failOpenNotifiedLeaders.clear();
+    },
+    onAgentCreated(agentId) {
+      boundaryObservedLeaders.add(agentId);
     },
     onPermissionRequested(agentId) {
       pendingPermissionCounts.set(agentId, (pendingPermissionCounts.get(agentId) ?? 0) + 1);

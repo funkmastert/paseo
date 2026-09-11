@@ -319,6 +319,27 @@ describe("createNotifier", () => {
     notifier.stop();
   });
 
+  it("treats a leader whose creation it observed as steer-safe without a turn boundary", async () => {
+    // A newborn agent cannot carry a pending permission the notifier never
+    // saw, so observing agent.created is as good as a turn boundary; the
+    // conservative hold applies only to agents that pre-date the notifier.
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onAgentCreated("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit");
+    await flush();
+    expect(sendCalls).toHaveLength(1); // Delivered: creation observed, no hold.
+
+    notifier.stop();
+  });
+
   it("serializes concurrent pool-dry episodes so exactly one delivers", async () => {
     const rows: FakeAgentRow[] = [
       { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
