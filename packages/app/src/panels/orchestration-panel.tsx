@@ -6,8 +6,8 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import invariant from "tiny-invariant";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { getProviderIcon } from "@/components/provider-icons";
+import { RowActionButton } from "@/components/row-action-button";
 import { StatusBadge } from "@/components/ui/status-badge";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
@@ -22,14 +22,18 @@ import { useSessionStore, type Agent } from "@/stores/session-store";
 import { useArchiveSubagent, useDetachSubagent } from "@/subagents";
 import type { Theme } from "@/styles/theme";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { getStatusDotColor } from "@/utils/status-dot-color";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { openPreferredWorkspaceTarget } from "@/workspace-tabs/open-beside";
-import { AccountBudgetStrip } from "@/orchestration/account-budget-strip";
 import {
-  buildOrchestrationRowOpenTarget,
+  AccountBudgetStrip,
+  DEFAULT_REFETCH_INTERVAL_MS,
+} from "@/orchestration/account-budget-strip";
+import {
   collectFinishedAgentsAcrossRoots,
   collectOrchestrationProviderIds,
   flattenOrchestrationTree,
+  resolveOrchestrationRowOpenAction,
   resolveOrchestrationTreeAttention,
   type OrchestrationFlatRow,
 } from "@/orchestration/orchestration-panel-model";
@@ -126,7 +130,7 @@ function OrchestrationHeader({
       <AccountBudgetStrip
         serverId={serverId}
         providerIds={providerIds}
-        refetchIntervalMs={75_000}
+        refetchIntervalMs={DEFAULT_REFETCH_INTERVAL_MS}
       />
       {showArchiveFinished ? (
         <Pressable
@@ -206,6 +210,9 @@ function OrchestrationRow({
   const handleDetach = useCallback(() => onDetach(agent.id), [agent.id, onDetach]);
 
   const actionsVisible = actionsAlwaysVisible || isHovered;
+  // Depth 0 is a tree root — nothing to detach it from — so the action never renders there even
+  // when the feature is enabled.
+  const showDetach = canDetach && row.depth > 0;
 
   return (
     <View onPointerEnter={handlePointerEnter} onPointerLeave={handlePointerLeave}>
@@ -259,7 +266,7 @@ function OrchestrationRow({
           style={actionsVisible ? styles.actionsVisible : styles.actionsHidden}
           pointerEvents={actionsVisible ? "auto" : "none"}
         >
-          {canDetach ? (
+          {showDetach ? (
             <RowActionButton
               accessibilityLabel={t("subagents.detachAction", { label: displayTitle })}
               testID={`orchestration-detach-${agent.id}`}
@@ -295,42 +302,6 @@ function OrchestrationRow({
   );
 }
 
-function RowActionButton({
-  accessibilityLabel,
-  testID,
-  tooltipLabel,
-  visible,
-  onPress,
-  children,
-}: {
-  accessibilityLabel: string;
-  testID: string;
-  tooltipLabel: string;
-  visible: boolean;
-  onPress: () => void;
-  children: (active: boolean) => ReactElement;
-}): ReactElement {
-  return (
-    <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
-      <TooltipTrigger asChild disabled={!visible}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={accessibilityLabel}
-          testID={testID}
-          onPress={onPress}
-          style={styles.actionButton}
-          hitSlop={8}
-        >
-          {({ hovered, pressed }) => children(hovered || pressed)}
-        </Pressable>
-      </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
-        <Text style={styles.tooltipText}>{tooltipLabel}</Text>
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 function OrchestrationPanel(): ReactElement {
   const { t } = useTranslation();
   const { serverId, workspaceId, tabId, target, openTab } = usePaneContext();
@@ -354,23 +325,26 @@ function OrchestrationPanel(): ReactElement {
 
   const handleOpenAgent = useCallback(
     (agent: Agent) => {
-      if (agent.workspaceId && agent.workspaceId !== workspaceId) {
-        navigateToAgent({ serverId, agentId: agent.id });
-        return;
+      const action = resolveOrchestrationRowOpenAction(agent, workspaceId);
+      switch (action.kind) {
+        case "cross-workspace":
+          navigateToAgent({ serverId, agentId: agent.id });
+          return;
+        case "same-workspace":
+          if (canSplit && workspaceKey) {
+            openPreferredWorkspaceTarget({
+              isCompact,
+              workspaceKey,
+              target: action.target,
+              source: "subagents",
+              preferences: openInSidePane,
+              parentTabId: tabId,
+            });
+            return;
+          }
+          openTab(action.target);
+          return;
       }
-      const rowTarget = buildOrchestrationRowOpenTarget(agent);
-      if (canSplit && workspaceKey) {
-        openPreferredWorkspaceTarget({
-          isCompact,
-          workspaceKey,
-          target: rowTarget,
-          source: "subagents",
-          preferences: openInSidePane,
-          parentTabId: tabId,
-        });
-        return;
-      }
-      openTab(rowTarget);
     },
     [canSplit, isCompact, openInSidePane, openTab, serverId, tabId, workspaceId, workspaceKey],
   );
@@ -416,104 +390,99 @@ function OrchestrationPanel(): ReactElement {
   );
 }
 
-const styles = StyleSheet.create((theme) => ({
-  container: { flex: 1, minHeight: 0 },
-  header: {
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[3],
-    gap: theme.spacing[3],
-    borderBottomWidth: theme.borderWidth[1],
-    borderBottomColor: theme.colors.border,
-  },
-  archiveFinishedButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    alignSelf: "flex-start",
-    paddingVertical: theme.spacing[1],
-  },
-  archiveFinishedLabel: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
-  },
-  archiveFinishedTrailing: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-  },
-  listContent: {
-    paddingVertical: theme.spacing[2],
-  },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    minHeight: 36,
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
-  },
-  rollupDot: {
-    width: 5,
-    height: 5,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.statusDotSuccess,
-    opacity: 0.55,
-  },
-  title: {
-    flexGrow: 1,
-    flexShrink: 1,
-    flexBasis: "auto",
-    minWidth: 0,
-    fontSize: theme.fontSize.base,
-    color: theme.colors.foreground,
-  },
-  subtitle: {
-    flexShrink: 2,
-    minWidth: 0,
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-  },
-  model: {
-    flexShrink: 0,
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-  },
-  time: {
-    flexShrink: 0,
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
-  },
-  actionsVisible: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-    opacity: 1,
-  },
-  actionsHidden: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[1],
-    opacity: 0,
-  },
-  actionButton: {
-    padding: theme.spacing[1],
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  tooltipText: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
-  },
-  emptyState: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 24,
-  },
-  emptyStateText: {
-    color: theme.colors.foregroundMuted,
-    textAlign: "center",
-  },
-}));
+const styles = StyleSheet.create((theme) => {
+  const attentionDotColor =
+    getStatusDotColor({ theme, bucket: "attention" }) ?? theme.colors.statusDotSuccess;
+  return {
+    container: { flex: 1, minHeight: 0 },
+    header: {
+      paddingHorizontal: theme.spacing[3],
+      paddingVertical: theme.spacing[3],
+      gap: theme.spacing[3],
+      borderBottomWidth: theme.borderWidth[1],
+      borderBottomColor: theme.colors.border,
+    },
+    archiveFinishedButton: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+      alignSelf: "flex-start",
+      paddingVertical: theme.spacing[1],
+    },
+    archiveFinishedLabel: {
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foreground,
+    },
+    archiveFinishedTrailing: {
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
+    },
+    listContent: {
+      paddingVertical: theme.spacing[2],
+    },
+    row: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+      minHeight: 36,
+      paddingHorizontal: theme.spacing[3],
+      paddingVertical: theme.spacing[2],
+    },
+    rollupDot: {
+      width: 5,
+      height: 5,
+      borderRadius: theme.borderRadius.full,
+      backgroundColor: attentionDotColor,
+      opacity: 0.55,
+    },
+    title: {
+      flexGrow: 1,
+      flexShrink: 1,
+      flexBasis: "auto",
+      minWidth: 0,
+      fontSize: theme.fontSize.base,
+      color: theme.colors.foreground,
+    },
+    subtitle: {
+      flexShrink: 2,
+      minWidth: 0,
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
+    },
+    model: {
+      flexShrink: 0,
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
+    },
+    time: {
+      flexShrink: 0,
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
+    },
+    actionsVisible: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[1],
+      opacity: 1,
+    },
+    actionsHidden: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[1],
+      opacity: 0,
+    },
+    emptyState: {
+      flex: 1,
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 24,
+    },
+    emptyStateText: {
+      color: theme.colors.foregroundMuted,
+      textAlign: "center",
+    },
+  };
+});
 
 export const orchestrationPanelRegistration = definePanel("orchestration", {
   component: OrchestrationPanel,

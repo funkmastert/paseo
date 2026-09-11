@@ -1876,6 +1876,7 @@ export const fr: TranslationResources = {
       subtitle: "Arborescence des agents",
       tooltip: "Afficher l’arborescence de l’agent principal et des sous-agents",
       emptyState: "Aucun agent dans cet espace de travail pour le moment",
+      usageUnavailable: "Utilisation non disponible",
     },
     diff: {
       changesLabel: "Modifications",

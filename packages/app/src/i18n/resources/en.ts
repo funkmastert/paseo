@@ -1835,6 +1835,7 @@ export const en = {
       subtitle: "Agent tree",
       tooltip: "View the leader and subagent tree",
       emptyState: "No agents in this workspace yet",
+      usageUnavailable: "Usage unavailable",
     },
     diff: {
       changesLabel: "Changes",

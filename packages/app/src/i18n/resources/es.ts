@@ -1871,6 +1871,7 @@ export const es: TranslationResources = {
       subtitle: "Árbol de agentes",
       tooltip: "Ver el árbol del agente líder y los subagentes",
       emptyState: "Aún no hay agentes en este espacio de trabajo",
+      usageUnavailable: "Uso no disponible",
     },
     diff: {
       changesLabel: "Cambios",

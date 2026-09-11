@@ -1,11 +1,11 @@
 import { useCallback, useMemo, type ReactElement } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
+import { RowActionButton } from "@/components/row-action-button";
 import { ComposerTrackActions, ComposerTrackPill, ComposerTrackRow } from "@/composer/tracks";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import {
@@ -316,23 +316,15 @@ function SubagentActionButton({
   onPress: () => void;
 }): ReactElement {
   return (
-    <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
-      <TooltipTrigger asChild disabled={!visible}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={accessibilityLabel}
-          testID={testID}
-          onPress={onPress}
-          style={styles.actionButton}
-          hitSlop={8}
-        >
-          {({ hovered, pressed }) => renderSubagentActionIcon(icon, hovered || pressed)}
-        </Pressable>
-      </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
-        <Text style={styles.tooltipText}>{tooltipLabel}</Text>
-      </TooltipContent>
-    </Tooltip>
+    <RowActionButton
+      accessibilityLabel={accessibilityLabel}
+      testID={testID}
+      tooltipLabel={tooltipLabel}
+      visible={visible}
+      onPress={onPress}
+    >
+      {(active) => renderSubagentActionIcon(icon, active)}
+    </RowActionButton>
   );
 }
 
@@ -367,14 +359,5 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[1],
     opacity: 0,
-  },
-  actionButton: {
-    padding: theme.spacing[1],
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  tooltipText: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
   },
 }));

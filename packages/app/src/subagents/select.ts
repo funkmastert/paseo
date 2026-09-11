@@ -17,7 +17,7 @@ export interface PaseoSubagentRow {
   subtitle: string | null;
   status: Agent["status"];
   turn: Agent["turn"];
-  requiresAttention: Agent["requiresAttention"];
+  requiresAttention: boolean;
   createdAt: Agent["createdAt"];
 }
 
@@ -53,7 +53,12 @@ interface SelectSubagentsParams {
 const EMPTY_SUBAGENT_ROWS: SubagentRow[] = [];
 const EMPTY_PROVIDER_SUBAGENT_ROWS: ProviderSubagentRow[] = [];
 
-function toSubagentRow(agent: Agent): SubagentRow {
+/**
+ * Adapts a managed `Agent` into the row shape every subagent/orchestration list renders. The
+ * single adapter for this mapping — `orchestration/select.ts` and `orchestration-panel-model.ts`
+ * both reuse it rather than re-declaring the same literal with their own defaults.
+ */
+export function toSubagentRow(agent: Agent): PaseoSubagentRow {
   return {
     kind: "paseo",
     id: agent.id,
@@ -63,7 +68,7 @@ function toSubagentRow(agent: Agent): SubagentRow {
     subtitle: agent.lastActivitySummary ?? null,
     status: agent.status,
     turn: agent.turn,
-    requiresAttention: agent.requiresAttention,
+    requiresAttention: agent.requiresAttention ?? false,
     createdAt: agent.createdAt,
   };
 }

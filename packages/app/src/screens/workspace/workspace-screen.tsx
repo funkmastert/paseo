@@ -348,6 +348,9 @@ function getFallbackTabOptionLabel(
   if (tab.target.kind === "commit_diff") {
     return tab.target.sha.slice(0, 7);
   }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
+  }
   return labels.agent;
 }
 

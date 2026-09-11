@@ -1,13 +1,11 @@
-import { memo, useCallback, useMemo, type ReactElement } from "react";
+import { memo, useCallback, type ReactElement } from "react";
 import { WorkspaceDiffStatPill } from "@/composer/diff-stat-pill";
 import { useWorkspaceHasDiffStat } from "@/composer/workspace-diff-stat";
 import { AgentTaskList } from "@/composer/task-list";
 import { ComposerTrackBar } from "@/composer/tracks";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
-import { findOrchestrationNode } from "@/orchestration/orchestration-panel-model";
 import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
 import { OrchestrationTrackPill } from "@/orchestration/orchestration-track-pill";
-import { useOrchestrationTree } from "@/orchestration/select";
 import { usePaneContext } from "@/panels/pane-context";
 import { useSettings } from "@/hooks/use-settings";
 import { PluginComposerPills } from "@/plugins";
@@ -117,12 +115,6 @@ export const AgentTracks = memo(function AgentTracks({
   }, [cwd, isCompact, openInSidePane, serverId, workspaceKey]);
 
   const hasChildren = subagentRows.length > 0;
-  const orchestrationRoots = useOrchestrationTree({ serverId });
-  const orchestrationNode = useMemo(
-    () => findOrchestrationNode(orchestrationRoots, agentId),
-    [agentId, orchestrationRoots],
-  );
-  const orchestrationRequiresAttention = orchestrationNode?.requiresAttentionInSubtree ?? false;
   const handleOpenOrchestration = useCallback(() => {
     openOrchestrationTab({
       isCompact,
@@ -161,7 +153,8 @@ export const AgentTracks = memo(function AgentTracks({
       />
       {hasChildren ? (
         <OrchestrationTrackPill
-          requiresAttention={orchestrationRequiresAttention}
+          serverId={serverId}
+          agentId={agentId}
           onPress={handleOpenOrchestration}
         />
       ) : null}

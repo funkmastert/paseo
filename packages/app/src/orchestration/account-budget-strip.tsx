@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Text, View } from "react-native";
+import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { ProviderUsageWindowBar } from "@/provider-usage/window-bar";
@@ -13,7 +14,7 @@ import {
 
 // Server caches usage for 5min; polling faster than that just re-serves the cache, so
 // this stays well under that ceiling without hammering the daemon.
-const DEFAULT_REFETCH_INTERVAL_MS = 75_000;
+export const DEFAULT_REFETCH_INTERVAL_MS = 75_000;
 
 export function AccountBudgetStrip({
   serverId,
@@ -60,6 +61,7 @@ const ThemedAccountUsageIcon = withUnistyles(AccountUsageIcon);
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 function AccountBudgetRow({ row, serverId }: { row: AccountBudgetRowViewModel; serverId: string }) {
+  const { t } = useTranslation();
   return (
     <View style={styles.row}>
       <View style={styles.header}>
@@ -74,7 +76,7 @@ function AccountBudgetRow({ row, serverId }: { row: AccountBudgetRowViewModel; s
         </Text>
       </View>
       {row.kind === "unavailable" ? (
-        <Text style={styles.muted}>Usage unavailable</Text>
+        <Text style={styles.muted}>{t("panels.orchestration.usageUnavailable")}</Text>
       ) : (
         <View style={styles.bars}>
           {row.windows.map((window) => (

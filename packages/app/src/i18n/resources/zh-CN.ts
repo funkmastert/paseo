@@ -1804,6 +1804,7 @@ export const zhCN: TranslationResources = {
       subtitle: "Agent 树",
       tooltip: "查看主 Agent 与 subagent 树",
       emptyState: "此工作区中还没有 Agent",
+      usageUnavailable: "用量不可用",
     },
     diff: {
       changesLabel: "更改",

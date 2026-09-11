@@ -1856,6 +1856,7 @@ export const ru: TranslationResources = {
       subtitle: "Дерево агентов",
       tooltip: "Просмотр дерева ведущего агента и субагентов",
       emptyState: "В этом рабочем пространстве пока нет агентов",
+      usageUnavailable: "Использование недоступно",
     },
     diff: {
       changesLabel: "Изменения",

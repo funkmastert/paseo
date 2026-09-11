@@ -5,7 +5,10 @@ import { Network } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { composerPillStyles } from "@/composer/pill-styles";
+import { findOrchestrationNode } from "@/orchestration/orchestration-panel-model";
+import { useOrchestrationTree } from "@/orchestration/select";
 import type { Theme } from "@/styles/theme";
+import { getStatusDotColor } from "@/utils/status-dot-color";
 
 const ThemedNetwork = withUnistyles(Network);
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
@@ -16,13 +19,21 @@ const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.for
  * agent has children — callers gate that, this component only draws the pill and its rollup dot.
  */
 export function OrchestrationTrackPill({
-  requiresAttention,
+  serverId,
+  agentId,
   onPress,
 }: {
-  requiresAttention: boolean;
+  serverId: string;
+  agentId: string;
   onPress: () => void;
 }) {
   const { t } = useTranslation();
+  const orchestrationRoots = useOrchestrationTree({ serverId });
+  const orchestrationNode = useMemo(
+    () => findOrchestrationNode(orchestrationRoots, agentId),
+    [agentId, orchestrationRoots],
+  );
+  const requiresAttention = orchestrationNode?.requiresAttentionInSubtree ?? false;
   const [isHovered, setIsHovered] = useState(false);
   const handleHoverIn = useCallback(() => setIsHovered(true), []);
   const handleHoverOut = useCallback(() => setIsHovered(false), []);
@@ -62,21 +73,25 @@ export function OrchestrationTrackPill({
   );
 }
 
-const styles = StyleSheet.create((theme) => ({
-  iconWrap: {
-    position: "relative",
-  },
-  attentionDot: {
-    position: "absolute",
-    top: -2,
-    right: -2,
-    width: 6,
-    height: 6,
-    borderRadius: theme.borderRadius.full,
-    backgroundColor: theme.colors.statusDotSuccess,
-  },
-  tooltipText: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
-  },
-}));
+const styles = StyleSheet.create((theme) => {
+  const attentionDotColor =
+    getStatusDotColor({ theme, bucket: "attention" }) ?? theme.colors.statusDotSuccess;
+  return {
+    iconWrap: {
+      position: "relative",
+    },
+    attentionDot: {
+      position: "absolute",
+      top: -2,
+      right: -2,
+      width: 6,
+      height: 6,
+      borderRadius: theme.borderRadius.full,
+      backgroundColor: attentionDotColor,
+    },
+    tooltipText: {
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foreground,
+    },
+  };
+});

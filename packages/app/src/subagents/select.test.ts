@@ -338,6 +338,21 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("cwd");
   });
 
+  it("defaults requiresAttention to false when the agent field is undefined", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({ id: "child", parentAgentId: "parent", requiresAttention: undefined }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]?.requiresAttention).toBe(false);
+  });
+
   it("carries the agent's live activity summary as the row subtitle", () => {
     setAgents([
       makeAgent({ id: "parent" }),

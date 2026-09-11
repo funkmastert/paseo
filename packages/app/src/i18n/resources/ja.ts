@@ -1843,6 +1843,7 @@ export const ja: TranslationResources = {
       subtitle: "エージェントツリー",
       tooltip: "リーダーとサブエージェントのツリーを表示",
       emptyState: "このワークスペースにはまだエージェントがありません",
+      usageUnavailable: "使用状況は利用できません",
     },
     diff: {
       changesLabel: "変更",

@@ -1825,6 +1825,7 @@ export const ar: TranslationResources = {
       subtitle: "شجرة الوكلاء",
       tooltip: "عرض شجرة الوكيل الرئيسي والوكلاء الفرعيين",
       emptyState: "لا يوجد وكلاء في مساحة العمل هذه بعد",
+      usageUnavailable: "الاستخدام غير متوفر",
     },
     diff: {
       changesLabel: "التغييرات",

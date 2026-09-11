@@ -1,4 +1,4 @@
-import type { PaseoSubagentRow } from "@/subagents/select";
+import { toSubagentRow } from "@/subagents/select";
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { listFinishedAgentsInSubtree, type OrchestrationTreeNode } from "./select";
@@ -66,14 +66,37 @@ export function findOrchestrationNode(
   return null;
 }
 
-/** Every finished agent across every root's subtree — the header's "Archive finished" bulk set. */
+/**
+ * Every finished agent across every root's descendants — the header's "Archive finished" bulk
+ * set. Roots are excluded: a root is a tree leader, and archiving a finished leader is not the
+ * same action as archiving its finished subagents.
+ */
 export function collectFinishedAgentsAcrossRoots(roots: readonly OrchestrationTreeNode[]): Agent[] {
-  return roots.flatMap((root) => listFinishedAgentsInSubtree(root));
+  return roots.flatMap((root) => root.children.flatMap(listFinishedAgentsInSubtree));
 }
 
 /** A row opens the agent panel for its own agent — the payload the open-target helper expects. */
 export function buildOrchestrationRowOpenTarget(agent: Agent): WorkspaceTabTarget {
   return { kind: "agent", agentId: agent.id };
+}
+
+/**
+ * What pressing a row should do: open its tab target in the current workspace, or navigate to a
+ * different workspace entirely (a child agent can live in a workspace other than its parent's).
+ */
+export type OrchestrationRowOpenAction =
+  | { kind: "same-workspace"; target: WorkspaceTabTarget }
+  | { kind: "cross-workspace"; workspaceId: string };
+
+/** Decides which of the two open actions a row press should take, for `handleOpenAgent` to run. */
+export function resolveOrchestrationRowOpenAction(
+  agent: Agent,
+  currentWorkspaceId: string,
+): OrchestrationRowOpenAction {
+  if (agent.workspaceId && agent.workspaceId !== currentWorkspaceId) {
+    return { kind: "cross-workspace", workspaceId: agent.workspaceId };
+  }
+  return { kind: "same-workspace", target: buildOrchestrationRowOpenTarget(agent) };
 }
 
 /**
@@ -92,18 +115,5 @@ export function groupAgentsByParent(agents: readonly Agent[]): Map<string | null
   return groups;
 }
 
-/** Adapts an Agent into the row shape `runArchiveFinished` reads, mirroring select.ts's own. */
-export function toOrchestrationArchiveRow(agent: Agent): PaseoSubagentRow {
-  return {
-    kind: "paseo",
-    id: agent.id,
-    provider: agent.provider,
-    title: agent.title,
-    description: null,
-    subtitle: agent.lastActivitySummary ?? null,
-    status: agent.status,
-    turn: agent.turn,
-    requiresAttention: agent.requiresAttention ?? false,
-    createdAt: agent.createdAt,
-  };
-}
+/** Adapts an Agent into the row shape `runArchiveFinished` reads — the shared adapter from subagents/select.ts. */
+export const toOrchestrationArchiveRow = toSubagentRow;

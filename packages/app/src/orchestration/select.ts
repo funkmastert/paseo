@@ -2,7 +2,7 @@ import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import { isFinishedSubagent } from "@/subagents/archive-finished";
-import type { PaseoSubagentRow } from "@/subagents/select";
+import { toSubagentRow } from "@/subagents/select";
 import { useSessionStore, type Agent } from "@/stores/session-store";
 
 type SessionStoreSnapshot = ReturnType<typeof useSessionStore.getState>;
@@ -111,22 +111,6 @@ export function useOrchestrationTree(
   );
 }
 
-/** Adapts an Agent into the minimal row shape `isFinishedSubagent` reads, without duplicating its status check. */
-function toFinishedCheckRow(agent: Agent): PaseoSubagentRow {
-  return {
-    kind: "paseo",
-    id: agent.id,
-    provider: agent.provider,
-    title: agent.title,
-    description: null,
-    subtitle: agent.lastActivitySummary ?? null,
-    status: agent.status,
-    turn: agent.turn,
-    requiresAttention: agent.requiresAttention ?? false,
-    createdAt: agent.createdAt,
-  };
-}
-
 /**
  * Every finished (idle or error) Paseo agent in a subtree, including the node itself — the set a
  * tree-level "Archive finished" bulk action should act on. Reuses the subagents track's finished
@@ -135,7 +119,7 @@ function toFinishedCheckRow(agent: Agent): PaseoSubagentRow {
 export function listFinishedAgentsInSubtree(node: OrchestrationTreeNode): Agent[] {
   const finished: Agent[] = [];
   const visit = (current: OrchestrationTreeNode) => {
-    if (isFinishedSubagent(toFinishedCheckRow(current.agent))) {
+    if (isFinishedSubagent(toSubagentRow(current.agent))) {
       finished.push(current.agent);
     }
     for (const child of current.children) visit(child);

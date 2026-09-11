@@ -1857,6 +1857,7 @@ export const ptBR: TranslationResources = {
       subtitle: "Árvore de agentes",
       tooltip: "Ver a árvore do agente líder e dos subagentes",
       emptyState: "Ainda não há agentes neste espaço de trabalho",
+      usageUnavailable: "Uso indisponível",
     },
     diff: {
       changesLabel: "Alterações",

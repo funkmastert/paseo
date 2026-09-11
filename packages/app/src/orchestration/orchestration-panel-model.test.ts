@@ -8,6 +8,7 @@ import {
   findOrchestrationNode,
   flattenOrchestrationTree,
   groupAgentsByParent,
+  resolveOrchestrationRowOpenAction,
   resolveOrchestrationTreeAttention,
   toOrchestrationArchiveRow,
 } from "./orchestration-panel-model";
@@ -154,19 +155,18 @@ describe("findOrchestrationNode", () => {
 });
 
 describe("collectFinishedAgentsAcrossRoots", () => {
-  it("aggregates finished agents across every root, not just one", () => {
+  it("aggregates finished descendants across every root, excluding the roots themselves", () => {
     setAgents([
       makeAgent({ id: "root-a", status: "idle" }),
-      makeAgent({ id: "child-a", parentAgentId: "root-a", status: "running" }),
-      makeAgent({ id: "root-b", status: "error" }),
+      makeAgent({ id: "child-a", parentAgentId: "root-a", status: "idle" }),
+      makeAgent({ id: "root-b", status: "idle" }),
       makeAgent({ id: "child-b", parentAgentId: "root-b", status: "idle" }),
+      makeAgent({ id: "grandchild-b", parentAgentId: "child-b", status: "running" }),
     ]);
 
     const finished = collectFinishedAgentsAcrossRoots(buildTree());
 
-    expect(finished.map((agent) => agent.id).sort()).toEqual(
-      ["child-b", "root-a", "root-b"].sort(),
-    );
+    expect(finished.map((agent) => agent.id).sort()).toEqual(["child-a", "child-b"].sort());
   });
 });
 
@@ -175,6 +175,30 @@ describe("buildOrchestrationRowOpenTarget", () => {
     const agent = makeAgent({ id: "agent-1" });
 
     expect(buildOrchestrationRowOpenTarget(agent)).toEqual({ kind: "agent", agentId: "agent-1" });
+  });
+});
+
+describe("resolveOrchestrationRowOpenAction", () => {
+  it("opens in the current workspace when the agent has no workspaceId or matches it", () => {
+    const agent = makeAgent({ id: "agent-1", workspaceId: "workspace-1" });
+
+    expect(resolveOrchestrationRowOpenAction(agent, "workspace-1")).toEqual({
+      kind: "same-workspace",
+      target: { kind: "agent", agentId: "agent-1" },
+    });
+    expect(resolveOrchestrationRowOpenAction(makeAgent({ id: "agent-2" }), "workspace-1")).toEqual({
+      kind: "same-workspace",
+      target: { kind: "agent", agentId: "agent-2" },
+    });
+  });
+
+  it("navigates to the agent's own workspace when it differs from the current one", () => {
+    const agent = makeAgent({ id: "agent-1", workspaceId: "workspace-2" });
+
+    expect(resolveOrchestrationRowOpenAction(agent, "workspace-1")).toEqual({
+      kind: "cross-workspace",
+      workspaceId: "workspace-2",
+    });
   });
 });
 

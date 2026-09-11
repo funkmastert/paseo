@@ -1835,6 +1835,7 @@ export const ko: TranslationResources = {
       subtitle: "에이전트 트리",
       tooltip: "리더와 하위 에이전트 트리 보기",
       emptyState: "이 워크스페이스에는 아직 에이전트가 없습니다",
+      usageUnavailable: "사용량을 사용할 수 없음",
     },
     diff: {
       changesLabel: "변경 사항",
