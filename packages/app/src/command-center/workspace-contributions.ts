@@ -25,6 +25,7 @@ export interface WorkspaceCommandCenterLabels {
   changes: string;
   files: string;
   pullRequest: string;
+  openOrchestration: string;
   openPanel(name: string, placement: WorkspacePanelPlacement): string;
   previousTab: string;
   nextTab: string;
@@ -68,6 +69,7 @@ export interface WorkspaceCommandCenterIcons {
   changes?: CommandCenterIcon;
   files?: CommandCenterIcon;
   pullRequest?: CommandCenterIcon;
+  orchestration?: CommandCenterIcon;
   previousTab?: CommandCenterIcon;
   nextTab?: CommandCenterIcon;
   close?: CommandCenterIcon;
@@ -121,6 +123,9 @@ export interface WorkspaceCommandCenterSource {
   activeTabKind: WorkspaceTabTarget["kind"] | null;
   activeTabIndex: number;
   activeTabCount: number;
+  /** Opens the orchestration panel tab — a normal panel-registry kind, not routed through the
+   * explorer-sidebar `WorkspacePanelTarget` machinery `buildPanelContributions` uses below. */
+  openOrchestration: () => void;
   /** Null on a non-git workspace, or before gitRuntime resolves. Omits Copy branch name. */
   currentBranch: string | null;
   isPinned: boolean;
@@ -255,6 +260,25 @@ function buildPanelContributions(
     }
   }
   return contributions;
+}
+
+// A plain callback, not `buildQueryAction` through `WorkspacePanelTarget` like the changes/files/PR
+// trio above: those route through the explorer-sidebar split-placement machinery
+// (`resolveCommandCenterPanelTarget` in workspace-screen.tsx), and orchestration is a normal
+// panel-registry tab kind with Explorer hosting deferred (KTD4) — it has no placement variants.
+function buildOrchestrationContribution(
+  source: WorkspaceCommandCenterSource,
+): CommandCenterContribution {
+  return buildWorkspaceCallback({
+    source,
+    id: "tab:open:orchestration",
+    rank: 7,
+    title: source.labels.openOrchestration,
+    keywords: ["open", "orchestration", "tree", "subagents", "leader"],
+    icon: source.icons.orchestration,
+    run: source.openOrchestration,
+    visibility: "query",
+  });
 }
 
 function buildActiveTabContributions(
@@ -577,6 +601,7 @@ export function buildWorkspaceCommandCenterContributions(
   const contributions = [
     ...buildCreationContributions(source),
     ...buildPanelContributions(source),
+    buildOrchestrationContribution(source),
     ...buildActiveTabContributions(source),
     ...(source.capabilities.canSplitPanes ? buildPaneContributions(source) : []),
   ];

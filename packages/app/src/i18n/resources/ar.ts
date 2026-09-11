@@ -1820,6 +1820,12 @@ export const ar: TranslationResources = {
       emptyTitle: "لا يوجد طلب سحب بعد",
       emptyDescription: "أنشئ طلب سحب لنسخة العمل هذه لعرض تفاصيله هنا.",
     },
+    orchestration: {
+      label: "التنسيق",
+      subtitle: "شجرة الوكلاء",
+      tooltip: "عرض شجرة الوكيل الرئيسي والوكلاء الفرعيين",
+      emptyState: "لا يوجد وكلاء في مساحة العمل هذه بعد",
+    },
     diff: {
       changesLabel: "التغييرات",
       diffLabel: "الفرق",

@@ -26,11 +26,12 @@ function source(gitActions: GitActions): {
   copiedPaths: number;
   copiedBranchNames: number;
   toggledLabels: Array<{ name: string; assigned: boolean }>;
+  orchestrationOpenCount: number;
 } {
   const runGitActions: GitAction[] = [];
   const dispatched: KeyboardActionDefinition[] = [];
   const toggledLabels: Array<{ name: string; assigned: boolean }> = [];
-  const counters = { copiedPaths: 0, copiedBranchNames: 0 };
+  const counters = { copiedPaths: 0, copiedBranchNames: 0, orchestrationOpens: 0 };
   return {
     value: {
       gitActions,
@@ -44,6 +45,7 @@ function source(gitActions: GitActions): {
         changes: "Changes",
         files: "Files",
         pullRequest: "Pull request",
+        openOrchestration: "Open Orchestration",
         openPanel: (name, placement) => `Open ${name} ${placement}`,
         previousTab: "Previous tab",
         nextTab: "Next tab",
@@ -88,6 +90,9 @@ function source(gitActions: GitActions): {
       activeTabKind: null,
       activeTabIndex: -1,
       activeTabCount: 0,
+      openOrchestration: () => {
+        counters.orchestrationOpens += 1;
+      },
       currentBranch: null,
       isPinned: false,
       labelCatalog: null,
@@ -112,6 +117,9 @@ function source(gitActions: GitActions): {
     get copiedBranchNames() {
       return counters.copiedBranchNames;
     },
+    get orchestrationOpenCount() {
+      return counters.orchestrationOpens;
+    },
   };
 }
 
@@ -131,6 +139,18 @@ describe("workspace command center contributions", () => {
     expect(defaultGitContributions.map((item) => item.id)).toEqual(["git:commit"]);
     defaultGitContributions[0].run();
     expect(fixture.runGitActions).toEqual([primary]);
+  });
+
+  it("offers an Open Orchestration action that calls the source's open callback", () => {
+    const fixture = source({ primary: null, secondary: [], menu: [] });
+
+    const contributions = buildWorkspaceCommandCenterContributions(fixture.value);
+    const orchestration = contributions.find((item) => item.id === "tab:open:orchestration");
+
+    expect(orchestration).toBeDefined();
+    expect(orchestration?.presentation).toMatchObject({ title: "Open Orchestration" });
+    void orchestration?.run();
+    expect(fixture.orchestrationOpenCount).toBe(1);
   });
 
   it("does not duplicate a primary action retained in the secondary policy list", () => {

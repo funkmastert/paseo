@@ -1866,6 +1866,12 @@ export const es: TranslationResources = {
       emptyTitle: "Aún no hay ninguna solicitud de extracción",
       emptyDescription: "Crea una solicitud para este checkout y consulta aquí sus detalles.",
     },
+    orchestration: {
+      label: "Orquestación",
+      subtitle: "Árbol de agentes",
+      tooltip: "Ver el árbol del agente líder y los subagentes",
+      emptyState: "Aún no hay agentes en este espacio de trabajo",
+    },
     diff: {
       changesLabel: "Cambios",
       diffLabel: "Diferencia",

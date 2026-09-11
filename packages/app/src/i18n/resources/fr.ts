@@ -1871,6 +1871,12 @@ export const fr: TranslationResources = {
       emptyDescription:
         "Créez une demande de fusion pour cette copie de travail afin d’afficher ses détails ici.",
     },
+    orchestration: {
+      label: "Orchestration",
+      subtitle: "Arborescence des agents",
+      tooltip: "Afficher l’arborescence de l’agent principal et des sous-agents",
+      emptyState: "Aucun agent dans cet espace de travail pour le moment",
+    },
     diff: {
       changesLabel: "Modifications",
       diffLabel: "Diff",

@@ -1799,6 +1799,12 @@ export const zhCN: TranslationResources = {
       emptyTitle: "尚无拉取请求",
       emptyDescription: "为此检出创建拉取请求后，可在此处查看其详情。",
     },
+    orchestration: {
+      label: "编排",
+      subtitle: "Agent 树",
+      tooltip: "查看主 Agent 与 subagent 树",
+      emptyState: "此工作区中还没有 Agent",
+    },
     diff: {
       changesLabel: "更改",
       diffLabel: "Diff",

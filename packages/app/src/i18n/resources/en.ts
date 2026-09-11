@@ -1830,6 +1830,12 @@ export const en = {
       emptyTitle: "No pull request yet",
       emptyDescription: "Create a pull request for this checkout to see its details here.",
     },
+    orchestration: {
+      label: "Orchestration",
+      subtitle: "Agent tree",
+      tooltip: "View the leader and subagent tree",
+      emptyState: "No agents in this workspace yet",
+    },
     diff: {
       changesLabel: "Changes",
       diffLabel: "Diff",

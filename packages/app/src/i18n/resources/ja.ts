@@ -1838,6 +1838,12 @@ export const ja: TranslationResources = {
       emptyDescription:
         "このチェックアウトのプルリクエストを作成すると、ここに詳細が表示されます。",
     },
+    orchestration: {
+      label: "オーケストレーション",
+      subtitle: "エージェントツリー",
+      tooltip: "リーダーとサブエージェントのツリーを表示",
+      emptyState: "このワークスペースにはまだエージェントがありません",
+    },
     diff: {
       changesLabel: "変更",
       diffLabel: "差分",

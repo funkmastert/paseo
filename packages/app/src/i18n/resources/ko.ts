@@ -1830,6 +1830,12 @@ export const ko: TranslationResources = {
       emptyTitle: "아직 풀 리퀘스트가 없습니다",
       emptyDescription: "이 체크아웃에 풀 리퀘스트를 만들면 세부 정보가 여기에 표시됩니다.",
     },
+    orchestration: {
+      label: "오케스트레이션",
+      subtitle: "에이전트 트리",
+      tooltip: "리더와 하위 에이전트 트리 보기",
+      emptyState: "이 워크스페이스에는 아직 에이전트가 없습니다",
+    },
     diff: {
       changesLabel: "변경 사항",
       diffLabel: "Diff",

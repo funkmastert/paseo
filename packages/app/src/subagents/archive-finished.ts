@@ -21,7 +21,10 @@ export interface ArchiveFinishedOutcome {
 export type ManagedSubagentSnapshot = Pick<Agent, "id" | "status" | "parentAgentId" | "archivedAt">;
 
 export interface ArchiveFinishedSubagentsDeps {
-  parentAgentId: string;
+  // `null` for a row with no live parent (a tree root, e.g. in the orchestration panel's
+  // multi-root bulk archive) — canArchiveManagedSubagent compares this against the agent's
+  // own `parentAgentId`, which is `string | null` on `Agent`.
+  parentAgentId: string | null;
   getManagedSubagent: (id: string) => ManagedSubagentSnapshot | undefined;
   archiveManagedSubagent: (id: string) => Promise<void>;
   dismissProviderSubagents: (ids: string[]) => void;
@@ -41,7 +44,7 @@ export function isFinishedSubagent(row: SubagentRow): boolean {
 
 function canArchiveManagedSubagent(
   agent: ManagedSubagentSnapshot | undefined,
-  parentAgentId: string,
+  parentAgentId: string | null,
 ): boolean {
   return Boolean(
     agent &&
@@ -163,11 +166,21 @@ export function createArchiveFinishedSubagents(
   };
 }
 
-async function runArchiveFinished(
+export interface ArchiveFinishedRunResult {
+  outcome: ArchiveFinishedOutcome;
+  retryableFailureIds: Set<string>;
+}
+
+/**
+ * The archive loop itself, split out of `createArchiveFinishedSubagents` so a caller with a
+ * different lifecycle than the subagent track's live-subscribed pill — the orchestration panel's
+ * multi-root bulk archive is the other caller — can drive it directly instead of re-deriving it.
+ */
+export async function runArchiveFinished(
   rows: readonly SubagentRow[],
   deps: ArchiveFinishedSubagentsDeps,
   reportProgress: (completedCount: number) => void,
-): Promise<{ outcome: ArchiveFinishedOutcome; retryableFailureIds: Set<string> }> {
+): Promise<ArchiveFinishedRunResult> {
   const providerIds = rows.filter((row) => row.kind === "provider").map((row) => row.id);
   const paseoIds = rows.filter((row) => row.kind === "paseo").map((row) => row.id);
   let completedCount = 0;

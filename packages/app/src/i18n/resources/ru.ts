@@ -1851,6 +1851,12 @@ export const ru: TranslationResources = {
       emptyTitle: "PR пока нет",
       emptyDescription: "Создайте PR для этой рабочей копии, чтобы увидеть здесь сведения о нём.",
     },
+    orchestration: {
+      label: "Оркестрация",
+      subtitle: "Дерево агентов",
+      tooltip: "Просмотр дерева ведущего агента и субагентов",
+      emptyState: "В этом рабочем пространстве пока нет агентов",
+    },
     diff: {
       changesLabel: "Изменения",
       diffLabel: "Дифф",

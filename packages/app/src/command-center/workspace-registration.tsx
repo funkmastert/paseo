@@ -14,6 +14,7 @@ import {
   Globe,
   ListChecks,
   Move,
+  Network,
   PanelRight,
   Pencil,
   Pin,
@@ -29,7 +30,9 @@ import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/l
 import { GIT_ACTION_ICONS } from "@/git/action-icons";
 import { useGitActionRunner, useGitActions } from "@/git/use-actions";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
+import { useSettings } from "@/hooks/use-settings";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
+import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
 import { useToast } from "@/contexts/toast-context";
 import { type ShortcutOverrides } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher-context";
@@ -71,6 +74,7 @@ const WORKSPACE_COMMAND_CENTER_ICONS = {
   changes: getCommandCenterIcon(GitCompareArrows),
   files: getCommandCenterIcon(Files),
   pullRequest: getCommandCenterIcon(GitPullRequest),
+  orchestration: getCommandCenterIcon(Network),
   previousTab: getCommandCenterIcon(ArrowLeft),
   nextTab: getCommandCenterIcon(ArrowRight),
   close: getCommandCenterIcon(X),
@@ -161,6 +165,31 @@ function useWorkspaceLabelCatalog(
   return { labelCatalog, toggleLabel };
 }
 
+/**
+ * Opens the orchestration tab, pulled out for the same reason `useWorkspaceLabelCatalog` is:
+ * keeps `useWorkspaceCommandCenterActions` under the complexity limit.
+ */
+function useOpenOrchestration(input: {
+  isCompact: boolean;
+  workspaceKey: string | null;
+}): () => void {
+  const { isCompact, workspaceKey } = input;
+  const canSplit = supportsDesktopPaneSplits() && !isCompact;
+  const openInSidePane = useSettings((settings) => settings.openInSidePane);
+  return useCallback(() => {
+    openOrchestrationTab({
+      isCompact,
+      canSplit,
+      workspaceKey,
+      preferences: openInSidePane,
+      openTab: (target) => {
+        if (!workspaceKey) return;
+        useWorkspaceLayoutStore.getState().openTab({ workspaceKey, target, intent: "reveal" });
+      },
+    });
+  }, [canSplit, isCompact, openInSidePane, workspaceKey]);
+}
+
 export function useWorkspaceCommandCenterActions(): void {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const { t } = useTranslation();
@@ -194,6 +223,7 @@ export function useWorkspaceCommandCenterActions(): void {
   const currentBranch = fields?.currentBranch ?? null;
   const isPinned = fields?.pinnedAt != null;
   const isCompact = useIsCompactFormFactor();
+  const openOrchestration = useOpenOrchestration({ isCompact, workspaceKey });
   const canPin = useHostFeature(serverId, "workspacePinning");
   const persistenceKey =
     serverId && fields
@@ -245,6 +275,9 @@ export function useWorkspaceCommandCenterActions(): void {
           changes: t("workspace.tabs.actions.changes"),
           files: t("workspace.tabs.actions.files"),
           pullRequest: t("workspace.tabs.actions.pullRequest"),
+          openOrchestration: t("shell.commandCenter.open", {
+            name: t("panels.orchestration.label"),
+          }),
           openPanel: (name, placement) => t(OPEN_PANEL_LABEL_KEYS[placement], { name }),
           previousTab: t("settings.shortcuts.help.previousTab"),
           nextTab: t("settings.shortcuts.help.nextTab"),
@@ -293,6 +326,7 @@ export function useWorkspaceCommandCenterActions(): void {
         activeTabKind,
         activeTabIndex,
         activeTabCount: focusedTabs.length,
+        openOrchestration,
         currentBranch,
         isPinned,
         labelCatalog,
@@ -320,6 +354,7 @@ export function useWorkspaceCommandCenterActions(): void {
       isPinned,
       keyboardActionDispatcher,
       labelCatalog,
+      openOrchestration,
       overrides,
       runGitAction,
       t,

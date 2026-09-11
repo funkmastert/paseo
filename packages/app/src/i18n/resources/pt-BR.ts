@@ -1852,6 +1852,12 @@ export const ptBR: TranslationResources = {
       emptyTitle: "Ainda não há pull request",
       emptyDescription: "Crie um pull request para este checkout para ver os detalhes aqui.",
     },
+    orchestration: {
+      label: "Orquestração",
+      subtitle: "Árvore de agentes",
+      tooltip: "Ver a árvore do agente líder e dos subagentes",
+      emptyState: "Ainda não há agentes neste espaço de trabalho",
+    },
     diff: {
       changesLabel: "Alterações",
       diffLabel: "Diff",
