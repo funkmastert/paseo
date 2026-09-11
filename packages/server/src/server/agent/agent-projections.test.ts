@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AGENT_LIFECYCLE_STATUSES } from "./agent-manager.js";
 import {
   buildStoredAgentPayload,
+  toAgentListItemPayload,
   toAgentPayload,
   toRecentProviderSessionDescriptorPayload,
   toStoredAgentRecord,
@@ -470,6 +471,53 @@ describe("toAgentPayload", () => {
     const payload = toAgentPayload(agent);
 
     expect(payload.features).toEqual(features);
+  });
+
+  it("includes lastActivitySummary when set", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Read] src/index.ts" });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.lastActivitySummary).toBe("[Read] src/index.ts");
+  });
+
+  it("omits lastActivitySummary when not set", () => {
+    const agent = createManagedAgent({ lastActivitySummary: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("lastActivitySummary");
+  });
+});
+
+describe("buildStoredAgentPayload", () => {
+  it("omits lastActivitySummary for persisted records, which never carry it", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Read] src/index.ts" });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("lastActivitySummary");
+  });
+});
+
+describe("toAgentListItemPayload", () => {
+  it("carries lastActivitySummary through from the snapshot payload", () => {
+    const agent = createManagedAgent({ lastActivitySummary: "[Shell] npm test" });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.lastActivitySummary).toBe("[Shell] npm test");
+  });
+
+  it("omits lastActivitySummary when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ lastActivitySummary: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("lastActivitySummary");
   });
 });
 

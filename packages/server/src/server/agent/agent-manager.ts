@@ -77,6 +77,7 @@ import {
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { summarizeLatestActivityItem } from "./activity-curator.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
@@ -405,6 +406,13 @@ interface ManagedAgentBase {
   activeTurnStartedAt: Date | null;
   lastUsage?: AgentUsage;
   lastError?: string;
+  /**
+   * One-line "what is this agent doing right now" summary, computed
+   * server-side from the latest timeline item. Live-only: not persisted to
+   * disk (see agent-storage.ts's StoredAgentRecord), so it starts absent
+   * again after a daemon restart until the next timeline item arrives.
+   */
+  lastActivitySummary?: string;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -4541,14 +4549,29 @@ export class AgentManager {
       timestamp: row.timestamp,
     });
 
-    if (
-      item.type === "tool_call" &&
-      item.status === "completed" &&
-      item.detail?.type === "shell" &&
-      commandMayHaveChangedExternalState(item.detail.command)
-    ) {
-      const agent = this.agents.get(agentId);
-      if (agent) {
+    // Single choke point for every timeline item, regardless of which path
+    // dispatched it: coalesced assistant/reasoning/tool_call flushes (the
+    // AgentStreamCoalescer's onFlush callback) never reach onStreamTimelineEvent,
+    // so the summary is computed here instead — per timeline ITEM, never per
+    // streamed delta, since coalescing already collapsed same-window chunks
+    // before this call.
+    const agent = this.agents.get(agentId);
+    if (agent) {
+      const activitySummary = summarizeLatestActivityItem(item);
+      if (activitySummary !== undefined && activitySummary !== agent.lastActivitySummary) {
+        agent.lastActivitySummary = activitySummary;
+        // Avoid an emitState storm: only broadcast when the summary actually
+        // changed (e.g. truncated assistant text stabilizes after the first
+        // chunk past the cap), not on every coalesced item.
+        this.emitState(agent);
+      }
+
+      if (
+        item.type === "tool_call" &&
+        item.status === "completed" &&
+        item.detail?.type === "shell" &&
+        commandMayHaveChangedExternalState(item.detail.command)
+      ) {
         this.onWorkspaceStateMayHaveChanged?.({ cwd: agent.cwd });
       }
     }

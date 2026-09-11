@@ -87,6 +87,13 @@ export interface Agent {
   runtimeInfo?: AgentRuntimeInfo;
   lastUsage?: AgentUsage;
   lastError?: string | null;
+  /**
+   * One-line "what is this agent doing right now" summary, computed
+   * server-side from the latest timeline item. Absent on old daemons and
+   * while idle before any timeline item has arrived; keeps its last value
+   * while the agent is idle so rows show recent activity.
+   */
+  lastActivitySummary?: string;
   title: string | null;
   cwd: string;
   workspaceId?: string;

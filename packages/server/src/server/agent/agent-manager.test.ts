@@ -691,6 +691,98 @@ test("uses an injected timeline store without making it a production requirement
   }
 });
 
+test("emits agent state for lastActivitySummary only when the summary text actually changes", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-dedup-"));
+  class ManualTurnSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "manual-turn-1";
+      // Only fire turn_started — never turn_completed — so the test controls
+      // every timeline push and no unrelated emitState call races with it.
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      }, 0);
+      return { turnId };
+    }
+  }
+  const session = new ManualTurnSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+        // Drain so foreground state transitions apply.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const observedSummaries: string[] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          const summary = event.agent.lastActivitySummary;
+          if (typeof summary === "string") {
+            observedSummaries.push(summary);
+          }
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const toolCallA: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    const toolCallB: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-2",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/other.ts", content: "y" },
+    };
+
+    // Session events process through an internal per-agent promise queue
+    // (enqueueSessionEvent/sessionEventTails), not synchronously with
+    // pushEvent — drain it after each push so processing order is observed.
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Same summary text twice in a row must not double-emit; a real change must.
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallA });
+    await drain();
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallA });
+    await drain();
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallB });
+    await drain();
+
+    unsubscribe();
+
+    expect(observedSummaries).toEqual(["[Read] src/index.ts", "[Read] src/other.ts"]);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/other.ts");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("retries provider history hydration after a stream failure", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-retry-"));
   let attempts = 0;

@@ -146,6 +146,10 @@ export function toAgentPayload(
     payload.lastError = agent.lastError;
   }
 
+  if (agent.lastActivitySummary !== undefined) {
+    payload.lastActivitySummary = agent.lastActivitySummary;
+  }
+
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
   if (agent.attention.requiresAttention) {
@@ -268,6 +272,9 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     attentionTimestamp: agent.attentionTimestamp ?? null,
     labels: agent.labels,
     ...(agent.providerUnavailable ? { providerUnavailable: true } : {}),
+    ...(agent.lastActivitySummary !== undefined
+      ? { lastActivitySummary: agent.lastActivitySummary }
+      : {}),
   };
 }
 
