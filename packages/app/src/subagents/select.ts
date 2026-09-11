@@ -13,7 +13,8 @@ export interface PaseoSubagentRow {
   title: Agent["title"];
   /** Managed agents have a real title, so the union's task line is always absent for them. */
   description: null;
-  subtitle: null;
+  /** The agent's current-activity summary, when the daemon has computed one. */
+  subtitle: string | null;
   status: Agent["status"];
   turn: Agent["turn"];
   requiresAttention: Agent["requiresAttention"];
@@ -59,7 +60,7 @@ function toSubagentRow(agent: Agent): SubagentRow {
     provider: agent.provider,
     title: agent.title,
     description: null,
-    subtitle: null,
+    subtitle: agent.lastActivitySummary ?? null,
     status: agent.status,
     turn: agent.turn,
     requiresAttention: agent.requiresAttention,

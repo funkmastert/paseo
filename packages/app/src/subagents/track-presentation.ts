@@ -29,8 +29,10 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
   const description = resolveRowLabel(row.description);
   const title = resolveRowLabel(row.title);
   const label = description ?? title;
-  const providerSubtitle = row.kind === "provider" ? resolveRowLabel(row.subtitle) : null;
-  const subtitle = providerSubtitle ?? (description ? title : null);
+  // Paseo rows carry the agent's live activity summary in `subtitle`; provider rows carry their
+  // own compact context there. Either way it wins over the title-as-subtitle fallback below.
+  const rowSubtitle = resolveRowLabel(row.subtitle);
+  const subtitle = rowSubtitle ?? (description ? title : null);
   const status = presentationStatus(row);
   return {
     key: `${row.kind}_subagent_${row.id}`,
@@ -40,7 +42,7 @@ export function buildSubagentRowPresentationData(row: SubagentRow): SubagentRowP
     titleState: label ? "ready" : "loading",
     statusBucket: deriveSidebarStateBucket({
       status,
-      requiresAttention: false,
+      requiresAttention: row.requiresAttention,
     }),
   };
 }
@@ -72,9 +74,10 @@ export interface SubagentPillPresentation {
  * "1 failed" over a child that is still working says the fan-out has stopped. Every state present
  * gets its own mark and its own count, in the order the sidebar's status groups list them.
  *
- * It stays one line because subagent rows only ever reach three states — see
- * `buildSubagentRowPresentationData`, which reports no attention of its own — so the pill is two
- * segments at worst, and falls back to naming what it opens once nothing is happening.
+ * It stays one line because subagent rows only ever reach three non-done states in practice
+ * (failed, attention, running — `needs_input` needs a pending-permission count the row doesn't
+ * carry), so the pill is three segments at worst, and falls back to naming what it opens once
+ * nothing is happening.
  */
 export function buildSubagentPillPresentation(
   t: TFunction,

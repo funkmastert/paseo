@@ -17,7 +17,7 @@ function row(
     provider: overrides.provider ?? "codex",
     title: overrides.title ?? `Agent ${overrides.id}`,
     description: null,
-    subtitle: null,
+    subtitle: overrides.subtitle ?? null,
     status: overrides.status ?? "idle",
     turn:
       overrides.turn ??
@@ -198,11 +198,22 @@ describe("buildSubagentRowPresentationData", () => {
     );
   });
 
-  it("ignores requiresAttention on the source row when computing the bucket", () => {
+  it("maps an idle row with requiresAttention to the attention status bucket", () => {
     expect(
       buildSubagentRowPresentationData(row({ id: "a", status: "idle", requiresAttention: true }))
         .statusBucket,
-    ).toBe("done");
+    ).toBe("attention");
+  });
+
+  it("uses the agent's live activity summary as the subtitle when present", () => {
+    const presentation = buildSubagentRowPresentationData(
+      row({ id: "a", subtitle: "Running the test suite" }),
+    );
+    expect(presentation.subtitle).toBe("Running the test suite");
+  });
+
+  it("falls back to no subtitle for a managed row with no activity summary", () => {
+    expect(buildSubagentRowPresentationData(row({ id: "a" })).subtitle).toBe("");
   });
 });
 

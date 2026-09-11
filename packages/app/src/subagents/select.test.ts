@@ -338,6 +338,26 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("cwd");
   });
 
+  it("carries the agent's live activity summary as the row subtitle", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "child",
+        parentAgentId: "parent",
+        lastActivitySummary: "Running the test suite",
+      }),
+      makeAgent({ id: "quiet-child", parentAgentId: "parent" }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows.map((row) => row.subtitle)).toEqual(["Running the test suite", null]);
+  });
+
   it("moves a child when parentAgentId changes", () => {
     const child = makeAgent({ id: "child", parentAgentId: "parent-a" });
     setAgents([makeAgent({ id: "parent-a" }), makeAgent({ id: "parent-b" }), child]);
