@@ -2251,6 +2251,8 @@ export const ptBR: TranslationResources = {
         closePane: "Fechar painel",
         newTerminal: "Novo terminal",
         searchFiles: "Pesquisar arquivos",
+        historyBack: "Voltar",
+        historyForward: "Avançar",
         toggleCommandCenter: "Alternar central de comandos",
         showKeyboardShortcuts: "Mostrar atalhos de teclado",
         toggleLeftSidebar: "Alternar barra lateral esquerda",

@@ -25,6 +25,9 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import invariant from "tiny-invariant";
 import { SidebarMenuToggle } from "@/components/headers/menu-header";
+import { HistoryBackButton } from "@/components/navigation/history-back-button";
+import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
+import { canGoBack, goBack, useNavigationHistoryStore } from "@/stores/navigation-history-store";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { ScreenTitle } from "@/components/headers/screen-title";
 import { HostBadge } from "@/hosts/host-badge";
@@ -1818,6 +1821,25 @@ function WorkspaceScreenContent({
 
     return () => handler.remove();
   }, [isExplorerSidebarShowing, isMobile, isRouteFocused, showMobileAgent]);
+
+  useEffect(() => {
+    // Cross-workspace/tab navigation history (see docs/plans/2026-09-12-001-feat-global-back-history-plan.md).
+    // Only consumes the press when there's somewhere to go back to; otherwise
+    // falls through to the OS default (this listener returns false, so the
+    // next-registered handler -- or the system -- takes it from here).
+    if (!isRouteFocused || !isNative) {
+      return;
+    }
+
+    const handler = BackHandler.addEventListener("hardwareBackPress", () => {
+      if (!canGoBack(useNavigationHistoryStore.getState())) {
+        return false;
+      }
+      return goBack(buildNavigationHistoryReplayDeps());
+    });
+
+    return () => handler.remove();
+  }, [isRouteFocused]);
 
   const workspaceLayout = useWorkspaceLayoutStore((state) =>
     persistenceKey ? (state.layoutByWorkspace[persistenceKey] ?? null) : null,
@@ -3895,6 +3917,7 @@ function WorkspaceScreenContent({
           left={
             <>
               <SidebarMenuToggle />
+              <HistoryBackButton />
               <WorkspaceHeaderTitleBar
                 isLoading={isWorkspaceHeaderLoading}
                 title={workspaceHeaderTitle}

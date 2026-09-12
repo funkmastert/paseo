@@ -2321,6 +2321,8 @@ export const en = {
         closePane: "Close pane",
         newTerminal: "New terminal",
         searchFiles: "Search files",
+        historyBack: "Go back",
+        historyForward: "Go forward",
         toggleCommandCenter: "Toggle command center",
         showKeyboardShortcuts: "Show keyboard shortcuts",
         toggleLeftSidebar: "Toggle left sidebar",

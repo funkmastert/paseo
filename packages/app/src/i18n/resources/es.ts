@@ -2269,6 +2269,8 @@ export const es: TranslationResources = {
         closePane: "Cerrar panel",
         newTerminal: "Nueva terminal",
         searchFiles: "Buscar archivos",
+        historyBack: "Retroceder",
+        historyForward: "Avanzar",
         toggleCommandCenter: "Alternar centro de comando",
         showKeyboardShortcuts: "Mostrar atajos de teclado",
         toggleLeftSidebar: "Alternar barra lateral izquierda",

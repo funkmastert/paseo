@@ -2272,6 +2272,8 @@ export const fr: TranslationResources = {
         closePane: "Fermer le volet",
         newTerminal: "Nouvelle borne",
         searchFiles: "Rechercher des fichiers",
+        historyBack: "Précédent",
+        historyForward: "Suivant",
         toggleCommandCenter: "Basculer le centre de commande",
         showKeyboardShortcuts: "Afficher les raccourcis clavier",
         toggleLeftSidebar: "Basculer la barre latérale gauche",

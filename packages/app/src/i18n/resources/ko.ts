@@ -2227,6 +2227,8 @@ export const ko: TranslationResources = {
         closePane: "창 닫기",
         newTerminal: "새 터미널",
         searchFiles: "파일 검색",
+        historyBack: "뒤로 가기",
+        historyForward: "앞으로 가기",
         toggleCommandCenter: "명령 센터 토글",
         showKeyboardShortcuts: "키보드 단축키 표시",
         toggleLeftSidebar: "왼쪽 사이드바 토글",
