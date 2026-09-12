@@ -26,6 +26,7 @@ interface ProjectionOptions {
   title?: string | null;
   createdAt?: string;
   internal?: boolean;
+  titleManuallySet?: boolean;
 }
 
 interface RecentProviderSessionProjectionOptions {
@@ -94,6 +95,7 @@ export function toStoredAgentRecord(
       : null,
     internal: options?.internal,
     owner: agent.owner,
+    titleManuallySet: options?.titleManuallySet,
   } satisfies StoredAgentRecord;
 }
 

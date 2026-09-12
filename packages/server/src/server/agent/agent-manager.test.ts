@@ -4933,6 +4933,190 @@ test("updateAgentMetadata bumps updatedAt for stored agents", async () => {
   expect(Date.parse(after!.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
 });
 
+test("setTitle marks titleManuallySet", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-set-title-manual-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000210",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const before = await storage.get(snapshot.id);
+  expect(before?.titleManuallySet).toBeFalsy();
+
+  await manager.setTitle(snapshot.id, "Renamed by user");
+
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Renamed by user");
+  expect(after?.titleManuallySet).toBe(true);
+});
+
+test("applyGeneratedTitle updates a live agent's title without marking it manually set", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000211",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const before = await storage.get(snapshot.id);
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "  Generated task title  ");
+
+  expect(applied).toBe(true);
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Generated task title");
+  expect(after?.titleManuallySet).toBeFalsy();
+  expect(Date.parse(after!.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
+});
+
+test("applyGeneratedTitle no-ops once the title was manually set", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-manual-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000212",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setTitle(snapshot.id, "Manually renamed");
+  const before = await storage.get(snapshot.id);
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "Generated task title");
+
+  expect(applied).toBe(false);
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Manually renamed");
+  expect(after?.updatedAt).toBe(before!.updatedAt);
+});
+
+test("applyGeneratedTitle no-ops when the title is already the generated value", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-unchanged-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000213",
+  });
+
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Same title" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const before = await storage.get(snapshot.id);
+  expect(before?.title).toBe("Same title");
+  expect(before?.titleManuallySet).toBeFalsy();
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "Same title");
+
+  expect(applied).toBe(false);
+  const after = await storage.get(snapshot.id);
+  expect(after?.updatedAt).toBe(before!.updatedAt);
+});
+
+test("onAgentTurnFinished fires once per running->idle transition, even while turn 1's attention is unread", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000214",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.runAgent(snapshot.id, "say hello");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).toHaveBeenCalledTimes(1);
+  expect(onAgentTurnFinished).toHaveBeenNthCalledWith(1, { agentId: snapshot.id, cwd: workdir });
+
+  const afterTurn1 = await storage.get(snapshot.id);
+  expect(afterTurn1?.requiresAttention).toBe(true);
+
+  // Turn 1's attention is still unread (never cleared) when turn 2 finishes.
+  await manager.runAgent(snapshot.id, "say hello again");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).toHaveBeenCalledTimes(2);
+  expect(onAgentTurnFinished).toHaveBeenNthCalledWith(2, { agentId: snapshot.id, cwd: workdir });
+});
+
+test("onAgentTurnFinished does not fire for an idle->idle transition", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-idle-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000215",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  // The agent is already idle after creation; renaming emits state without a turn.
+  await manager.setTitle(snapshot.id, "Renamed while idle");
+
+  expect(onAgentTurnFinished).not.toHaveBeenCalled();
+});
+
+test("onAgentTurnFinished does not fire for internal agents", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-internal-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000216",
+  });
+
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, internal: true },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.runAgent(snapshot.id, "say hello");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).not.toHaveBeenCalled();
+});
+
 test("persists live mode, model, and thinking changes without an external snapshot subscriber", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-live-persist-"));
   const storagePath = join(workdir, "agents");

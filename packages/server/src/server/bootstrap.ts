@@ -207,6 +207,7 @@ import {
 } from "./auth.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -919,6 +920,11 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  // The title tracker needs the AgentManager instance it's scheduling
+  // refreshes against, but AgentManager needs a callback at construction
+  // time. Break the cycle with a reassignable closure; pointed at the real
+  // tracker once it's constructed below.
+  let handleAgentTurnFinished: (params: { agentId: string; cwd: string }) => void = () => {};
   const agentManager = new AgentManager({
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
@@ -928,6 +934,7 @@ export async function createPaseoDaemon(
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
+    onAgentTurnFinished: (params) => handleAgentTurnFinished(params),
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
@@ -1086,6 +1093,16 @@ export async function createPaseoDaemon(
     },
     logger,
   });
+
+  const agentTitleTracker = new AgentTitleTracker({
+    agentManager,
+    agentStorage,
+    providerSnapshotManager,
+    workspaceGitService,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    logger,
+  });
+  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,

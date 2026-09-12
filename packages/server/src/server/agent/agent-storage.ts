@@ -75,6 +75,11 @@ const STORED_AGENT_SCHEMA = z.object({
   internal: z.boolean().optional(),
   archivedAt: z.string().nullable().optional(),
   owner: AgentOwnerSchema.optional(),
+  // True once the title was set through the rename path (setTitle /
+  // writeStoredMetadata's title patch) rather than at creation. Protects a
+  // human- or tool-renamed title from being overwritten by the background
+  // title tracker; unset for creation-time titles, which stay refreshable.
+  titleManuallySet: z.boolean().optional(),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -239,18 +244,23 @@ export class AgentStorage {
 
   async applySnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean },
+    options?: { title?: string | null; internal?: boolean; titleManuallySet?: boolean },
   ): Promise<void> {
     await this.load();
     const hasTitleOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "title");
     const hasInternalOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "internal");
+    const hasTitleManuallySetOverride =
+      options !== undefined && Object.prototype.hasOwnProperty.call(options, "titleManuallySet");
     await this.queueRecordMutation(agent.id, (existing) => {
       const record = toStoredAgentRecord(agent, {
         title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
         createdAt: existing?.createdAt,
         internal: hasInternalOverride ? options?.internal : (agent.internal ?? existing?.internal),
+        titleManuallySet: hasTitleManuallySetOverride
+          ? options?.titleManuallySet
+          : existing?.titleManuallySet,
       });
 
       // Preserve soft-delete/archive status across snapshot flushes. The

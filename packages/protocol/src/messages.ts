@@ -136,6 +136,7 @@ const MutableStructuredGenerationProviderSchema = z
 const MutableMetadataGenerationConfigSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).default([]),
+    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
   })
   .passthrough();
 

@@ -301,6 +301,9 @@ export interface AgentManagerOptions {
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
   onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  // Fired once per running->idle transition (a finished turn), skipping
+  // internal agents. Independent of attention tracking — see emitState().
+  onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
@@ -736,6 +739,7 @@ export class AgentManager {
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
   private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  private onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
@@ -748,6 +752,7 @@ export class AgentManager {
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
+    this.onAgentTurnFinished = options.onAgentTurnFinished;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
     this.configurePaseoTools(options);
@@ -1967,8 +1972,36 @@ export class AgentManager {
       return;
     }
     this.touchUpdatedAt(agent);
-    await this.persistSnapshot(agent, { title: normalizedTitle });
+    await this.persistSnapshot(agent, { title: normalizedTitle, titleManuallySet: true });
     this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Applies a background-generated title (see AgentTitleTracker). Unlike
+   * setTitle(), this never marks the title manually set, and re-checks
+   * titleManuallySet/unchanged-title against storage at write time so a
+   * rename racing an in-flight refresh always wins.
+   */
+  async applyGeneratedTitle(agentId: string, title: string): Promise<boolean> {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return false;
+    }
+    const record = this.registry ? await this.registry.get(agentId) : null;
+    if (record?.titleManuallySet) {
+      return false;
+    }
+    if (record?.title === trimmed) {
+      return false;
+    }
+    this.touchUpdatedAt(agent);
+    await this.persistSnapshot(agent, { title: trimmed });
+    this.emitState(agent, { persist: false });
+    return true;
   }
 
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
@@ -2005,7 +2038,7 @@ export class AgentManager {
 
     const nextRecord = {
       ...record,
-      ...(patch.title ? { title: patch.title } : {}),
+      ...(patch.title ? { title: patch.title, titleManuallySet: true } : {}),
       ...(patch.labels ? { labels: applyLabelPatch(record.labels, patch.labels) } : {}),
       updatedAt: this.nextStoredUpdatedAt(record),
     };
@@ -3804,7 +3837,7 @@ export class AgentManager {
 
   private async persistSnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean },
+    options?: { title?: string | null; internal?: boolean; titleManuallySet?: boolean },
   ): Promise<void> {
     if (!this.registry) {
       return;
@@ -4709,8 +4742,15 @@ export class AgentManager {
   }
 
   private emitState(agent: ManagedAgent, options?: { persist?: boolean }): void {
+    // Capture the pre-transition status independently of checkAndSetAttention:
+    // that method early-returns once attention is already unread, which would
+    // otherwise swallow a turn-2 finish while turn 1's attention is uncleared.
+    const previousStatus = this.previousStatuses.get(agent.id);
     // Keep attention as an edge-triggered unread signal, not a level signal.
     this.checkAndSetAttention(agent);
+    if (previousStatus === "running" && agent.lifecycle === "idle" && !agent.internal) {
+      this.onAgentTurnFinished?.({ agentId: agent.id, cwd: agent.cwd });
+    }
     if (options?.persist !== false) {
       this.enqueueBackgroundPersist(agent);
     }
