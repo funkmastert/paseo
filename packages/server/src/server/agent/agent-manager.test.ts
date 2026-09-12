@@ -945,6 +945,165 @@ test("rewind clears the stale activity summary from the emitted state", async ()
   }
 });
 
+async function createLiveEventAgent(workdir: string): Promise<{
+  manager: AgentManager;
+  agentId: string;
+  session: TestAgentSession;
+}> {
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let capturedSession: TestAgentSession | null = null;
+  class LiveEventClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new TestAgentSession(config);
+      return capturedSession;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new LiveEventClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  return { manager, agentId: snapshot.id, session: capturedSession! };
+}
+
+test("turn_completed with a positive turnTokenDelta updates the token-rate buckets and total, adding no new emitState", async () => {
+  async function runScenario(turnTokenDelta: number | undefined) {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-"));
+    try {
+      const { manager, agentId, session } = await createLiveEventAgent(workdir);
+      let emits = 0;
+      const unsubscribe = manager.subscribe(
+        (event) => {
+          if (event.type === "agent_state" && event.agent.id === agentId) emits += 1;
+        },
+        { agentId, replayState: false },
+      );
+
+      session.pushEvent({
+        type: "turn_completed",
+        provider: "codex",
+        turnId: "turn-1",
+        usage: { inputTokens: 5 },
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      unsubscribe();
+
+      const agent = manager.getAgent(agentId);
+      return { emits, tokenRateBuckets: agent?.tokenRateBuckets, totalTokens: agent?.totalTokens };
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  }
+
+  const withoutDelta = await runScenario(undefined);
+  const withDelta = await runScenario(40);
+
+  expect(withoutDelta.tokenRateBuckets).toBeUndefined();
+  expect(withoutDelta.totalTokens).toBeUndefined();
+  expect(withDelta.tokenRateBuckets).toEqual([expect.objectContaining({ tokens: 40 })]);
+  expect(withDelta.totalTokens).toBe(40);
+  // The bucket/total update rides whatever emitState the turn_completed handler already fires
+  // for lifecycle bookkeeping — it must not add a broadcast of its own.
+  expect(withDelta.emits).toBe(withoutDelta.emits);
+});
+
+test("turn_completed ignores a zero or negative turnTokenDelta", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-zero-"));
+  try {
+    const { agentId, session, manager } = await createLiveEventAgent(workdir);
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 0,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-2",
+      turnTokenDelta: -5,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const agent = manager.getAgent(agentId);
+    expect(agent?.tokenRateBuckets).toBeUndefined();
+    expect(agent?.totalTokens).toBeUndefined();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the token-rate buckets and total from the emitted state", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-token-rate-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 40,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.tokenRateBuckets).toBeDefined();
+    expect(manager.getAgent(agent.id)?.totalTokens).toBe(40);
+
+    const emittedTotals: Array<number | undefined> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedTotals.push(event.agent.totalTokens);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+    unsubscribe();
+
+    expect(manager.getAgent(agent.id)?.tokenRateBuckets).toBeUndefined();
+    expect(manager.getAgent(agent.id)?.totalTokens).toBeUndefined();
+    expect(emittedTotals[emittedTotals.length - 1]).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("retries provider history hydration after a stream failure", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-retry-"));
   let attempts = 0;

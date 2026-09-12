@@ -46,6 +46,7 @@ import {
   type SteerResult,
   type AgentStreamEvent,
   type AgentTimelineItem,
+  type AgentTokenRateBucket,
   type AgentUsage,
   type AgentRuntimeInfo,
   type ImportedTimelineEntry,
@@ -89,6 +90,7 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
+import { recordTokenDelta } from "./token-rate-tracker.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -425,6 +427,17 @@ interface ManagedAgentBase {
    * again after a daemon restart until the next timeline item arrives.
    */
   lastActivitySummary?: string;
+  /**
+   * Trailing-window token-burn ring buffer, fed by provider-local `turnTokenDelta` on
+   * `turn_completed` (Claude only in phase 1). Live-only like `lastActivitySummary`: not
+   * persisted, not in `toStoredAgentRecord`, cleared on rewind. Lazily created on first turn —
+   * an idle agent costs nothing. Rate is derived from this at read time (agent-projections.ts),
+   * never stored directly. See token-rate-tracker.ts and
+   * docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+   */
+  tokenRateBuckets?: AgentTokenRateBucket[];
+  /** Live-only lifetime token total, alongside tokenRateBuckets — same clearing rules. */
+  totalTokens?: number;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -3293,6 +3306,10 @@ export class AgentManager {
         // The replaced timeline may no longer contain the item the summary
         // was derived from; drop it rather than show a summary of deleted content.
         delete agent.lastActivitySummary;
+        // The rewound-away turns' token burn no longer reflects what's ahead; start the
+        // trailing-window tracker fresh rather than report a rate computed from erased history.
+        delete agent.tokenRateBuckets;
+        delete agent.totalTokens;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);
@@ -4533,6 +4550,14 @@ export class AgentManager {
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits
     // it from the completion event.
+    if (typeof event.turnTokenDelta === "number" && event.turnTokenDelta > 0) {
+      agent.tokenRateBuckets = recordTokenDelta(
+        agent.tokenRateBuckets ?? [],
+        event.turnTokenDelta,
+        Date.now(),
+      );
+      agent.totalTokens = (agent.totalTokens ?? 0) + event.turnTokenDelta;
+    }
     agent.lastError = undefined;
     if (
       !isForegroundEvent &&

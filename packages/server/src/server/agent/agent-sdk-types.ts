@@ -236,6 +236,18 @@ export interface AgentUsage {
   contextWindowUsedTokens?: number;
 }
 
+/** One 30s slice of a token-rate ring buffer — see token-rate-tracker.ts. */
+export interface AgentTokenRateBucket {
+  bucketStartMs: number;
+  tokens: number;
+}
+
+/** Trailing-window burn rate, computed from the ring buffer at read time. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",
@@ -419,7 +431,18 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      /**
+       * Provider-local per-turn token delta (input + output + cached-read), used to feed
+       * token-rate-tracker.ts. Claude only in phase 1 — other providers omit it rather than
+       * report a fake zero. See docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+       */
+      turnTokenDelta?: number;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

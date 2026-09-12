@@ -20,6 +20,7 @@ import type {
 import type { ManagedAgent } from "./agent-manager.js";
 import type { JsonValue } from "../json-utils.js";
 import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import { computeTokenRate } from "./token-rate-tracker.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
@@ -152,6 +153,15 @@ export function toAgentPayload(
     payload.lastActivitySummary = agent.lastActivitySummary;
   }
 
+  const recentTokenRate = computeTokenRate(agent.tokenRateBuckets, Date.now());
+  if (recentTokenRate !== undefined) {
+    payload.recentTokenRate = recentTokenRate;
+  }
+
+  if (agent.totalTokens !== undefined) {
+    payload.totalTokens = agent.totalTokens;
+  }
+
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
   if (agent.attention.requiresAttention) {
@@ -277,6 +287,8 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.lastActivitySummary !== undefined
       ? { lastActivitySummary: agent.lastActivitySummary }
       : {}),
+    ...(agent.recentTokenRate !== undefined ? { recentTokenRate: agent.recentTokenRate } : {}),
+    ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
   };
 }
 

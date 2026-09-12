@@ -1984,6 +1984,27 @@ class ClaudeContextUsageState {
     }
   }
 
+  /**
+   * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Claude's
+   * result `usage` is already scoped to this turn (main agent loop only), unlike `modelUsage`
+   * which accumulates across the whole query() call — so no diffing against a prior snapshot is
+   * needed here, just this turn's raw usage numbers.
+   */
+  buildTurnTokenDelta(message: SDKResultMessage): number | undefined {
+    if (!message.usage) {
+      return undefined;
+    }
+    const inputTokens =
+      typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : 0;
+    const outputTokens =
+      typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : 0;
+    const cachedInputTokens =
+      typeof message.usage.cache_read_input_tokens === "number"
+        ? message.usage.cache_read_input_tokens
+        : 0;
+    return inputTokens + outputTokens + cachedInputTokens;
+  }
+
   private streamUsedTokens(): number | undefined {
     if (
       typeof this.streamRequestInputTokens !== "number" ||
@@ -4469,7 +4490,13 @@ class ClaudeAgentSession implements AgentSession {
           },
         });
       }
-      events.push({ type: "turn_completed", provider: "claude", usage });
+      const turnTokenDelta = this.contextUsage.buildTurnTokenDelta(message);
+      events.push({
+        type: "turn_completed",
+        provider: "claude",
+        usage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
+      });
       return;
     }
     const errorMessage =

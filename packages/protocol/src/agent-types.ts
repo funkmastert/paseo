@@ -184,6 +184,12 @@ export interface AgentUsage {
   contextWindowUsedTokens?: number;
 }
 
+/** Trailing-window burn rate (tokens/min), computed server-side from a ring buffer. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",
@@ -375,7 +381,13 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      turnTokenDelta?: number;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

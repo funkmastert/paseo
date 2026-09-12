@@ -17,6 +17,7 @@ import type {
   AgentPersistenceHandle,
   AgentSessionConfig,
 } from "./agent-sdk-types.js";
+import { recordTokenDelta, TOKEN_RATE_TRACKER_WINDOW_MS } from "./token-rate-tracker.js";
 
 type ManagedAgentOverrides = Omit<Partial<ManagedAgent>, "config" | "pendingPermissions"> & {
   config?: Partial<AgentSessionConfig>;
@@ -488,6 +489,47 @@ describe("toAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("lastActivitySummary");
   });
+
+  it("includes recentTokenRate and totalTokens when the buckets have current activity", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.recentTokenRate).toEqual({
+      tokensPerMinute: expect.any(Number),
+      asOfMs: expect.any(Number),
+    });
+    expect(payload.totalTokens).toBe(40);
+  });
+
+  it("omits recentTokenRate and totalTokens when never recorded", () => {
+    const agent = createManagedAgent({ tokenRateBuckets: undefined, totalTokens: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    expect(payload).not.toHaveProperty("totalTokens");
+  });
+
+  it("omits recentTokenRate once every bucket has aged out of the trailing window", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta(
+        [],
+        40,
+        Date.now() - TOKEN_RATE_TRACKER_WINDOW_MS - 60_000,
+      ),
+      totalTokens: 40,
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    // totalTokens is a lifetime counter, independent of the trailing-window rate.
+    expect(payload.totalTokens).toBe(40);
+  });
 });
 
 describe("buildStoredAgentPayload", () => {
@@ -499,6 +541,19 @@ describe("buildStoredAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("lastActivitySummary");
   });
+
+  it("omits recentTokenRate and totalTokens for persisted records, which never carry them", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("recentTokenRate");
+    expect(payload).not.toHaveProperty("totalTokens");
+  });
 });
 
 describe("toAgentListItemPayload", () => {
@@ -509,6 +564,29 @@ describe("toAgentListItemPayload", () => {
     const listItem = toAgentListItemPayload(snapshot);
 
     expect(listItem.lastActivitySummary).toBe("[Shell] npm test");
+  });
+
+  it("carries recentTokenRate and totalTokens through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      tokenRateBuckets: recordTokenDelta([], 40, Date.now()),
+      totalTokens: 40,
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.recentTokenRate).toEqual(snapshot.recentTokenRate);
+    expect(listItem.totalTokens).toBe(40);
+  });
+
+  it("omits recentTokenRate and totalTokens when the snapshot doesn't have them", () => {
+    const agent = createManagedAgent({ tokenRateBuckets: undefined, totalTokens: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("recentTokenRate");
+    expect(listItem).not.toHaveProperty("totalTokens");
   });
 
   it("omits lastActivitySummary when the snapshot doesn't have one", () => {

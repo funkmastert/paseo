@@ -2990,6 +2990,42 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
+  test("turn_completed carries turnTokenDelta summed from input, output, and cached-read usage", async () => {
+    const session = await createSessionForTurns([[createInitMessage(), createSuccessResult()]]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      // createSuccessResult's default usage: input_tokens: 10, cache_read_input_tokens: 5,
+      // output_tokens: 7 — the token-rate tracker's per-turn delta is their sum, 22.
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "turn_completed",
+          provider: "claude",
+          turnTokenDelta: 22,
+        }),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("turn_completed omits turnTokenDelta when the result carries no usage", async () => {
+    const session = await createSessionForTurns([
+      [createInitMessage(), createSuccessResult({ usage: undefined })],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+
+      expect(turnCompleted).toBeDefined();
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
   test("repeated compacting statuses open a single compaction marker", async () => {
     const session = await createSessionForTurns([
       [

@@ -291,6 +291,7 @@ import type {
   AgentProviderNotice,
   ToolCallDetail,
   ToolCallTimelineItem,
+  AgentTokenRate,
   AgentUsage,
   JsonValue,
 } from "./agent-types.js";
@@ -433,6 +434,11 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   totalCostUsd: z.number().optional(),
   contextWindowMaxTokens: z.number().optional(),
   contextWindowUsedTokens: z.number().optional(),
+});
+
+const AgentTokenRateSchema: z.ZodType<AgentTokenRate> = z.object({
+  tokensPerMinute: z.number(),
+  asOfMs: z.number(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -875,6 +881,8 @@ export const AgentSnapshotPayloadSchema = z.object({
   lastUsage: AgentUsageSchema.optional(),
   lastError: z.string().optional(),
   lastActivitySummary: z.string().optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
   title: z.string().nullable(),
   labels: z.record(z.string(), z.string()).default({}),
   requiresAttention: z.boolean().optional(),
@@ -906,6 +914,8 @@ export const AgentListItemPayloadSchema = z.object({
   labels: z.record(z.string(), z.string()).default({}),
   providerUnavailable: z.boolean().optional(),
   lastActivitySummary: z.string().optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
