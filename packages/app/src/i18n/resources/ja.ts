@@ -705,6 +705,10 @@ export const ja: TranslationResources = {
         workspacePathCopiedLabel: "ワークスペースパス",
         branchNameCopiedLabel: "ブランチ名",
       },
+      history: {
+        recentMenu: "最近",
+        empty: "最近の履歴はありません",
+      },
     },
     scripts: {
       title: "スクリプト",

@@ -703,6 +703,10 @@ export const ko: TranslationResources = {
         workspacePathCopiedLabel: "워크스페이스 경로",
         branchNameCopiedLabel: "브랜치 이름",
       },
+      history: {
+        recentMenu: "최근",
+        empty: "최근 기록 없음",
+      },
     },
     scripts: {
       title: "스크립트",

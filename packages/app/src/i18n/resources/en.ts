@@ -699,6 +699,10 @@ export const en = {
         workspacePathCopiedLabel: "Workspace path",
         branchNameCopiedLabel: "Branch name",
       },
+      history: {
+        recentMenu: "Recent",
+        empty: "No recent history",
+      },
     },
     scripts: {
       title: "Scripts",

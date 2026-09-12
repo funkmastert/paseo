@@ -4,6 +4,8 @@ import {
   ArrowDownToLine,
   ArrowLeft,
   ArrowRight,
+  ChevronLeft,
+  ChevronRight,
   Columns2,
   Copy,
   Files,
@@ -32,12 +34,22 @@ import { useGitActionRunner, useGitActions } from "@/git/use-actions";
 import { useKeyboardShortcutOverrides } from "@/hooks/use-keyboard-shortcut-overrides";
 import { useSettings } from "@/hooks/use-settings";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
+import { useHistoryRecentMenuEntries } from "@/components/navigation/use-history-recent-menu-entries";
 import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
 import { useToast } from "@/contexts/toast-context";
 import { type ShortcutOverrides } from "@/keyboard/keyboard-shortcuts";
 import { useKeyboardActionDispatcher } from "@/keyboard/keyboard-action-dispatcher-context";
+import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
 import { useHostFeature } from "@/runtime/host-features";
 import { useActiveWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
+import {
+  canGoBack,
+  canGoForward,
+  goBack,
+  goBackTo,
+  goForward,
+  useNavigationHistoryStore,
+} from "@/stores/navigation-history-store";
 import { useWorkspaceDirectory, useWorkspaceFields } from "@/stores/session-store-hooks";
 import {
   collectAllTabs,
@@ -62,6 +74,7 @@ import {
   buildWorkspaceCommandCenterContributions,
   type WorkspaceCommandCenterLabelChoice,
   type WorkspaceCommandCenterShortcuts,
+  type WorkspaceCommandCenterSource,
 } from "./workspace-contributions";
 import { resolveWorkspaceCommandCenterShortcuts } from "./workspace-shortcuts";
 
@@ -77,6 +90,8 @@ const WORKSPACE_COMMAND_CENTER_ICONS = {
   orchestration: getCommandCenterIcon(Network),
   previousTab: getCommandCenterIcon(ArrowLeft),
   nextTab: getCommandCenterIcon(ArrowRight),
+  historyBack: getCommandCenterIcon(ChevronLeft),
+  historyForward: getCommandCenterIcon(ChevronRight),
   close: getCommandCenterIcon(X),
   rename: getCommandCenterIcon(Pencil),
   reload: getCommandCenterIcon(RotateCw),
@@ -190,6 +205,51 @@ function useOpenOrchestration(input: {
   }, [canSplit, isCompact, openInSidePane, workspaceKey]);
 }
 
+/**
+ * "Go back" / "Go forward" / "Recent" contributions, pulled out for the same reason
+ * `useWorkspaceLabelCatalog` and `useOpenOrchestration` are: keeps
+ * `useWorkspaceCommandCenterActions` under the complexity limit. Dispatches to the exact same
+ * `goBack`/`goForward`/`goBackTo` the back button and its keyboard shortcuts use (see
+ * `history-back-button.tsx` and `use-keyboard-shortcuts.ts`), and reuses
+ * `useHistoryRecentMenuEntries` so the command palette's "Recent" list can't drift from the
+ * back button's own recent-history menu.
+ */
+function useHistoryCommandCenterSource(): WorkspaceCommandCenterSource["history"] {
+  const canBack = useNavigationHistoryStore(canGoBack);
+  const canForward = useNavigationHistoryStore(canGoForward);
+  const recentEntries = useHistoryRecentMenuEntries();
+
+  const handleGoBack = useCallback(() => {
+    goBack(buildNavigationHistoryReplayDeps());
+  }, []);
+  const handleGoForward = useCallback(() => {
+    goForward(buildNavigationHistoryReplayDeps());
+  }, []);
+
+  const recent = useMemo(
+    () =>
+      recentEntries.map((item) => ({
+        id: String(item.depth),
+        label: item.secondary ? `${item.primary} · ${item.secondary}` : item.primary,
+        run: () => {
+          goBackTo(item.depth, buildNavigationHistoryReplayDeps());
+        },
+      })),
+    [recentEntries],
+  );
+
+  return useMemo(
+    () => ({
+      canGoBack: canBack,
+      canGoForward: canForward,
+      goBack: handleGoBack,
+      goForward: handleGoForward,
+      recent,
+    }),
+    [canBack, canForward, handleGoBack, handleGoForward, recent],
+  );
+}
+
 export function useWorkspaceCommandCenterActions(): void {
   const keyboardActionDispatcher = useKeyboardActionDispatcher();
   const { t } = useTranslation();
@@ -224,6 +284,7 @@ export function useWorkspaceCommandCenterActions(): void {
   const isPinned = fields?.pinnedAt != null;
   const isCompact = useIsCompactFormFactor();
   const openOrchestration = useOpenOrchestration({ isCompact, workspaceKey });
+  const history = useHistoryCommandCenterSource();
   const canPin = useHostFeature(serverId, "workspacePinning");
   const persistenceKey =
     serverId && fields
@@ -281,6 +342,9 @@ export function useWorkspaceCommandCenterActions(): void {
           openPanel: (name, placement) => t(OPEN_PANEL_LABEL_KEYS[placement], { name }),
           previousTab: t("settings.shortcuts.help.previousTab"),
           nextTab: t("settings.shortcuts.help.nextTab"),
+          historyBack: t("settings.shortcuts.help.historyBack"),
+          historyForward: t("settings.shortcuts.help.historyForward"),
+          historyRecentGroup: t("workspace.header.history.recentMenu"),
           closeCurrentTab: t("settings.shortcuts.help.closeCurrentTab"),
           renameTab: t("workspace.tabs.menu.rename"),
           reloadAgent: t("workspace.tabs.menu.reloadAgent"),
@@ -329,6 +393,7 @@ export function useWorkspaceCommandCenterActions(): void {
         openOrchestration,
         currentBranch,
         isPinned,
+        history,
         labelCatalog,
         dispatch: (action) => {
           clearCommandCenterFocusRestoreElement();
@@ -349,6 +414,7 @@ export function useWorkspaceCommandCenterActions(): void {
       currentBranch,
       focusedTabs.length,
       gitActions,
+      history,
       isCompact,
       isGit,
       isPinned,

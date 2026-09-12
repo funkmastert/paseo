@@ -703,6 +703,10 @@ export const ar: TranslationResources = {
         workspacePathCopiedLabel: "مسار Workspace",
         branchNameCopiedLabel: "اسم الفرع",
       },
+      history: {
+        recentMenu: "الأخيرة",
+        empty: "لا يوجد سجل حديث",
+      },
     },
     scripts: {
       title: "البرامج النصية",

@@ -4,6 +4,7 @@ import {
   canGoBack,
   canGoForward,
   goBack,
+  goBackTo,
   goForward,
   NAVIGATION_HISTORY_MAX_ENTRIES,
   pruneWorkspace,
@@ -196,6 +197,118 @@ describe("navigation history store", () => {
         backStack: [entry("a"), entry("b")],
         forwardStack: [],
       });
+    });
+  });
+
+  describe("goBackTo", () => {
+    it("with depth 1 behaves exactly like a single goBack", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      const before = useNavigationHistoryStore.getState();
+
+      const { deps, replayed } = createDeps();
+      expect(goBackTo(1, deps)).toBe(true);
+      expect(replayed).toEqual([entry("b")]);
+      expect(useNavigationHistoryStore.getState()).toEqual({
+        backStack: [entry("a"), entry("b")],
+        forwardStack: [entry("c")],
+      });
+
+      // Sanity check against calling goBack() the same number of times on fresh state.
+      useNavigationHistoryStore.setState(before);
+      goBack(createDeps().deps);
+      expect(useNavigationHistoryStore.getState()).toEqual({
+        backStack: [entry("a"), entry("b")],
+        forwardStack: [entry("c")],
+      });
+    });
+
+    it("jumps multiple entries in one call, moving each one passed over to the forward stack", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      recordNavigationHistory(entry("d"));
+
+      const { deps, replayed } = createDeps();
+      expect(goBackTo(3, deps)).toBe(true);
+      expect(replayed).toEqual([entry("a")]);
+      expect(useNavigationHistoryStore.getState()).toEqual({
+        backStack: [entry("a")],
+        // Pushed in the order goBack() would bump them off one call at a time: current first,
+        // then each intermediate stop.
+        forwardStack: [entry("d"), entry("c"), entry("b")],
+      });
+    });
+
+    it("matches calling goBack() the same number of times in a row", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      recordNavigationHistory(entry("d"));
+      goBack(createDeps().deps);
+      goBack(createDeps().deps);
+      const viaRepeatedGoBack = useNavigationHistoryStore.getState();
+
+      useNavigationHistoryStore.setState({
+        backStack: [entry("a"), entry("b"), entry("c"), entry("d")],
+        forwardStack: [],
+      });
+      goBackTo(2, createDeps().deps);
+
+      expect(useNavigationHistoryStore.getState()).toEqual(viaRepeatedGoBack);
+    });
+
+    it("skips and discards stale entries along the way without counting them toward depth", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b")); // stale
+      recordNavigationHistory(entry("c"));
+      recordNavigationHistory(entry("d"));
+
+      const { deps, replayed } = createDeps({
+        isEntryValid: (candidate) => candidate.workspaceId !== "b",
+      });
+      // Depth 2 should reach "a" (the second *valid* entry behind "d"), skipping "b" entirely.
+      expect(goBackTo(2, deps)).toBe(true);
+      expect(replayed).toEqual([entry("a")]);
+      expect(useNavigationHistoryStore.getState()).toEqual({
+        backStack: [entry("a")],
+        forwardStack: [entry("d"), entry("c")],
+      });
+    });
+
+    it("stops short and still applies the hops it could complete when depth exceeds history", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+
+      const { deps, replayed } = createDeps();
+      expect(goBackTo(5, deps)).toBe(true);
+      expect(replayed).toEqual([entry("a")]);
+      expect(useNavigationHistoryStore.getState()).toEqual({
+        backStack: [entry("a")],
+        forwardStack: [entry("b")],
+      });
+    });
+
+    it("returns false and leaves state untouched when there's nothing to go back to", () => {
+      recordNavigationHistory(entry("a"));
+      const before = useNavigationHistoryStore.getState();
+
+      const { deps, replayed } = createDeps();
+      expect(goBackTo(1, deps)).toBe(false);
+      expect(replayed).toEqual([]);
+      expect(useNavigationHistoryStore.getState()).toEqual(before);
+    });
+
+    it("rejects a non-positive or non-integer depth", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+
+      const { deps, replayed } = createDeps();
+      expect(goBackTo(0, deps)).toBe(false);
+      expect(goBackTo(-1, deps)).toBe(false);
+      expect(goBackTo(1.5, deps)).toBe(false);
+      expect(replayed).toEqual([]);
     });
   });
 

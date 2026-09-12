@@ -709,6 +709,10 @@ export const es: TranslationResources = {
         workspacePathCopiedLabel: "RutaWorkspace",
         branchNameCopiedLabel: "Nombre de la sucursal",
       },
+      history: {
+        recentMenu: "Recientes",
+        empty: "Sin historial reciente",
+      },
     },
     scripts: {
       title: "Scripts",

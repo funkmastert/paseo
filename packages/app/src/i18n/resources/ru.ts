@@ -709,6 +709,10 @@ export const ru: TranslationResources = {
         workspacePathCopiedLabel: "Путь к рабочему пространству",
         branchNameCopiedLabel: "Имя ветки",
       },
+      history: {
+        recentMenu: "Недавние",
+        empty: "Нет недавней истории",
+      },
     },
     scripts: {
       title: "Скрипты",

@@ -709,6 +709,10 @@ export const fr: TranslationResources = {
         workspacePathCopiedLabel: "CheminWorkspace",
         branchNameCopiedLabel: "Nom de la succursale",
       },
+      history: {
+        recentMenu: "Récents",
+        empty: "Aucun historique récent",
+      },
     },
     scripts: {
       title: "Scripts",

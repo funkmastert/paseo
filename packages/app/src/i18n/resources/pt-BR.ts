@@ -706,6 +706,10 @@ export const ptBR: TranslationResources = {
         workspacePathCopiedLabel: "Caminho do workspace",
         branchNameCopiedLabel: "Nome da branch",
       },
+      history: {
+        recentMenu: "Recentes",
+        empty: "Nenhum histórico recente",
+      },
     },
     scripts: {
       title: "Scripts",

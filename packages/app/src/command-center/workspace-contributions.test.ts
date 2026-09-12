@@ -19,7 +19,14 @@ function gitAction(id: GitAction["id"], label: string): GitAction {
   };
 }
 
-function source(gitActions: GitActions): {
+function source(
+  gitActions: GitActions,
+  historyOverrides: {
+    canGoBack?: boolean;
+    canGoForward?: boolean;
+    recent?: readonly { id: string; label: string; run: () => void }[];
+  } = {},
+): {
   value: WorkspaceCommandCenterSource;
   runGitActions: GitAction[];
   dispatched: KeyboardActionDefinition[];
@@ -27,11 +34,19 @@ function source(gitActions: GitActions): {
   copiedBranchNames: number;
   toggledLabels: Array<{ name: string; assigned: boolean }>;
   orchestrationOpenCount: number;
+  historyBackCount: number;
+  historyForwardCount: number;
 } {
   const runGitActions: GitAction[] = [];
   const dispatched: KeyboardActionDefinition[] = [];
   const toggledLabels: Array<{ name: string; assigned: boolean }> = [];
-  const counters = { copiedPaths: 0, copiedBranchNames: 0, orchestrationOpens: 0 };
+  const counters = {
+    copiedPaths: 0,
+    copiedBranchNames: 0,
+    orchestrationOpens: 0,
+    historyBacks: 0,
+    historyForwards: 0,
+  };
   return {
     value: {
       gitActions,
@@ -49,6 +64,9 @@ function source(gitActions: GitActions): {
         openPanel: (name, placement) => `Open ${name} ${placement}`,
         previousTab: "Previous tab",
         nextTab: "Next tab",
+        historyBack: "Go back",
+        historyForward: "Go forward",
+        historyRecentGroup: "Recent",
         closeCurrentTab: "Close current tab",
         renameTab: "Rename",
         reloadAgent: "Reload agent",
@@ -95,6 +113,17 @@ function source(gitActions: GitActions): {
       },
       currentBranch: null,
       isPinned: false,
+      history: {
+        canGoBack: historyOverrides.canGoBack ?? false,
+        canGoForward: historyOverrides.canGoForward ?? false,
+        goBack: () => {
+          counters.historyBacks += 1;
+        },
+        goForward: () => {
+          counters.historyForwards += 1;
+        },
+        recent: historyOverrides.recent ?? [],
+      },
       labelCatalog: null,
       dispatch: (action) => dispatched.push(action),
       runGitAction: (action) => runGitActions.push(action),
@@ -119,6 +148,12 @@ function source(gitActions: GitActions): {
     },
     get orchestrationOpenCount() {
       return counters.orchestrationOpens;
+    },
+    get historyBackCount() {
+      return counters.historyBacks;
+    },
+    get historyForwardCount() {
+      return counters.historyForwards;
     },
   };
 }
@@ -406,5 +441,63 @@ describe("workspace command center contributions", () => {
       { name: "bug", assigned: false },
       { name: "urgent", assigned: true },
     ]);
+  });
+
+  it("omits Go back / Go forward when there's nothing to go to", () => {
+    const fixture = source({ primary: null, secondary: [], menu: [] });
+
+    const contributions = buildWorkspaceCommandCenterContributions(fixture.value);
+
+    expect(contributions.some((item) => item.id === "workspace:history:back")).toBe(false);
+    expect(contributions.some((item) => item.id === "workspace:history:forward")).toBe(false);
+  });
+
+  it("lists Go back / Go forward when history allows it, and runs the same goBack/goForward", () => {
+    const fixture = source(
+      { primary: null, secondary: [], menu: [] },
+      { canGoBack: true, canGoForward: true },
+    );
+
+    const contributions = buildWorkspaceCommandCenterContributions(fixture.value);
+    const back = contributions.find((item) => item.id === "workspace:history:back");
+    const forward = contributions.find((item) => item.id === "workspace:history:forward");
+
+    expect(back?.presentation).toMatchObject({ kind: "action", title: "Go back" });
+    expect(forward?.presentation).toMatchObject({ kind: "action", title: "Go forward" });
+
+    back?.run();
+    forward?.run();
+
+    expect(fixture.historyBackCount).toBe(1);
+    expect(fixture.historyForwardCount).toBe(1);
+  });
+
+  it("lists a choice per recent-history entry and runs its jump on select", () => {
+    const jumped: string[] = [];
+    const fixture = source(
+      { primary: null, secondary: [], menu: [] },
+      {
+        recent: [
+          { id: "1", label: "Fix the flaky test", run: () => jumped.push("1") },
+          { id: "2", label: "My Workspace", run: () => jumped.push("2") },
+        ],
+      },
+    );
+
+    const contributions = buildWorkspaceCommandCenterContributions(fixture.value);
+    const recentEntries = contributions.filter((item) =>
+      item.id.startsWith("workspace:history:recent:"),
+    );
+
+    expect(recentEntries).toHaveLength(2);
+    expect(recentEntries[0]?.presentation).toMatchObject({
+      kind: "choice",
+      path: ["Recent", "Fix the flaky test"],
+      selected: false,
+    });
+
+    recentEntries[1]?.run();
+
+    expect(jumped).toEqual(["2"]);
   });
 });

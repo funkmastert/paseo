@@ -38,7 +38,8 @@ export const useNavigationHistoryStore = create<NavigationHistoryState>(() => ({
   forwardStack: [],
 }));
 
-function entriesEqual(a: NavHistoryEntry, b: NavHistoryEntry): boolean {
+/** Exported for the recent-history menu's de-dup pass -- see history-recent-menu-model.ts. */
+export function entriesEqual(a: NavHistoryEntry, b: NavHistoryEntry): boolean {
   if (a.serverId !== b.serverId || a.workspaceId !== b.workspaceId) {
     return false;
   }
@@ -146,6 +147,66 @@ export function goBack(deps: NavigationHistoryReplayDeps): boolean {
       return state;
     }
     return { backStack, forwardStack: pushCapped(state.forwardStack, current) };
+  });
+  if (!target) {
+    return false;
+  }
+  deps.replay(target);
+  return true;
+}
+
+/**
+ * Jumps directly to the entry `depth` steps behind the current location -- what calling `goBack`
+ * `depth` times in a row would land on, with every entry passed over (the current one, plus each
+ * intermediate stop) moved onto the forward stack in the same order those calls would produce.
+ * Stale entries along the way are discarded exactly as `goBack` discards them, and don't count
+ * toward `depth` -- only entries `deps.isEntryValid` accepts do.
+ *
+ * Used by the recent-history menu, where an item's position already encodes its depth (see
+ * `history-recent-menu-model.ts`'s `selectRecentHistoryEntries`). A single state update and a
+ * single replay, rather than `depth` separate ones, so the app doesn't visibly navigate through
+ * every entry in between on the way to the one the user picked.
+ *
+ * If there aren't `depth` valid entries behind the current one, this stops at the last one it
+ * could reach (still moving what it passed over to the forward stack) rather than failing
+ * outright -- the same "run out of history" outcome `goBack` reaches one call at a time.
+ */
+export function goBackTo(depth: number, deps: NavigationHistoryReplayDeps): boolean {
+  if (!Number.isInteger(depth) || depth < 1) {
+    return false;
+  }
+  let target: NavHistoryEntry | null = null;
+  useNavigationHistoryStore.setState((state) => {
+    const backStack = [...state.backStack];
+    let forwardStack = state.forwardStack;
+    let hopsCompleted = 0;
+    while (hopsCompleted < depth) {
+      const current = backStack.pop();
+      if (current === undefined) {
+        break;
+      }
+      let hopTarget: NavHistoryEntry | null = null;
+      while (backStack.length > 0) {
+        const candidate = backStack.at(-1);
+        if (candidate && deps.isEntryValid(candidate)) {
+          hopTarget = candidate;
+          break;
+        }
+        backStack.pop();
+      }
+      if (!hopTarget) {
+        // Nothing valid left behind `current` -- put it back and stop short of `depth`.
+        backStack.push(current);
+        break;
+      }
+      forwardStack = pushCapped(forwardStack, current);
+      hopsCompleted += 1;
+    }
+    if (hopsCompleted === 0) {
+      return state;
+    }
+    target = backStack.at(-1) ?? null;
+    return { backStack, forwardStack };
   });
   if (!target) {
     return false;

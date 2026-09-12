@@ -699,6 +699,10 @@ export const zhCN: TranslationResources = {
         workspacePathCopiedLabel: "Workspace 路径",
         branchNameCopiedLabel: "分支名称",
       },
+      history: {
+        recentMenu: "最近",
+        empty: "暂无最近记录",
+      },
     },
     scripts: {
       title: "Scripts",

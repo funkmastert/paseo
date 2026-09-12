@@ -29,6 +29,10 @@ export interface WorkspaceCommandCenterLabels {
   openPanel(name: string, placement: WorkspacePanelPlacement): string;
   previousTab: string;
   nextTab: string;
+  historyBack: string;
+  historyForward: string;
+  /** Section/path title for the recent-history "choice" list -- see `buildHistoryContributions`. */
+  historyRecentGroup: string;
   closeCurrentTab: string;
   renameTab: string;
   reloadAgent: string;
@@ -72,6 +76,8 @@ export interface WorkspaceCommandCenterIcons {
   orchestration?: CommandCenterIcon;
   previousTab?: CommandCenterIcon;
   nextTab?: CommandCenterIcon;
+  historyBack?: CommandCenterIcon;
+  historyForward?: CommandCenterIcon;
   close?: CommandCenterIcon;
   rename?: CommandCenterIcon;
   reload?: CommandCenterIcon;
@@ -129,6 +135,15 @@ export interface WorkspaceCommandCenterSource {
   /** Null on a non-git workspace, or before gitRuntime resolves. Omits Copy branch name. */
   currentBranch: string | null;
   isPinned: boolean;
+  /** The same global back/forward navigation history the back button and its shortcuts use. */
+  history: {
+    canGoBack: boolean;
+    canGoForward: boolean;
+    goBack(): void;
+    goForward(): void;
+    /** Up to `HISTORY_RECENT_MENU_MAX_ENTRIES` entries, most recent first; already labeled. */
+    recent: readonly { id: string; label: string; run: () => void }[];
+  };
   /**
    * The host's label catalog, each entry told whether the current workspace carries it. Null
    * before the catalog has loaded — omits the whole group rather than showing it empty.
@@ -279,6 +294,68 @@ function buildOrchestrationContribution(
     run: source.openOrchestration,
     visibility: "query",
   });
+}
+
+/**
+ * "Go back" / "Go forward" dispatch straight to the same `goBack`/`goForward` the back button and
+ * its keyboard shortcuts use (see `use-keyboard-shortcuts.ts`) -- a plain callback rather than a
+ * `KeyboardActionDefinition`, since that pair isn't routed through the dispatcher/handler registry
+ * either. Each is omitted rather than shown disabled when there's nothing to go to, matching
+ * `buildActiveTabContributions`'s "omit the whole set when not applicable" rule.
+ *
+ * "Recent" is a list-style command, one choice per entry, the same shape `buildLabelContributions`
+ * uses for the labels picker below -- precedent for showing several dynamic items as individual
+ * command-center entries rather than a single contribution.
+ */
+function buildHistoryContributions(
+  source: WorkspaceCommandCenterSource,
+): CommandCenterContribution[] {
+  const contributions: CommandCenterContribution[] = [];
+  if (source.history.canGoBack) {
+    contributions.push(
+      buildWorkspaceCallback({
+        source,
+        id: "workspace:history:back",
+        rank: 33,
+        title: source.labels.historyBack,
+        keywords: ["back", "history", "navigate", "previous"],
+        icon: source.icons.historyBack,
+        run: source.history.goBack,
+        visibility: "query",
+      }),
+    );
+  }
+  if (source.history.canGoForward) {
+    contributions.push(
+      buildWorkspaceCallback({
+        source,
+        id: "workspace:history:forward",
+        rank: 34,
+        title: source.labels.historyForward,
+        keywords: ["forward", "history", "navigate", "next"],
+        icon: source.icons.historyForward,
+        run: source.history.goForward,
+        visibility: "query",
+      }),
+    );
+  }
+  for (const [index, item] of source.history.recent.entries()) {
+    contributions.push({
+      id: `workspace:history:recent:${item.id}`,
+      group: "workspace",
+      groupRank: -1,
+      rank: 35 + index,
+      keywords: ["back", "history", "recent", "navigate"],
+      visibility: "query",
+      run: item.run,
+      presentation: {
+        kind: "choice",
+        path: [source.labels.historyRecentGroup, item.label] as const,
+        selected: false,
+      },
+    });
+  }
+  return contributions;
 }
 
 function buildActiveTabContributions(
@@ -603,6 +680,7 @@ export function buildWorkspaceCommandCenterContributions(
     ...buildPanelContributions(source),
     buildOrchestrationContribution(source),
     ...buildActiveTabContributions(source),
+    ...buildHistoryContributions(source),
     ...(source.capabilities.canSplitPanes ? buildPaneContributions(source) : []),
   ];
 
