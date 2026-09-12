@@ -25,6 +25,7 @@ import {
   buildSubagentPillPresentation,
   buildSubagentRowPresentationData,
   countFinishedSubagents,
+  selectVisibleSubagentRows,
 } from "./track-presentation";
 
 const ThemedArchive = withUnistyles(Archive);
@@ -96,6 +97,9 @@ export function SubagentsTrack({
   const pill = buildSubagentPillPresentation(t, rows);
   const finishedCount = countFinishedSubagents(rows);
   const showArchiveFinished = finishedCount > 0 || isArchivingFinished || isArchiveFinishedFailed;
+  // Same population the pill counted (see selectVisibleSubagentRows) — a pill reading "2 failed"
+  // opens on those 2 rows, not every finished sibling the pill never mentioned.
+  const visibleRows = selectVisibleSubagentRows(rows);
 
   return (
     <ComposerTrackPill
@@ -105,7 +109,7 @@ export function SubagentsTrack({
       panelTitle={t("subagents.title")}
     >
       {showArchiveFinished && onArchiveFinished ? (
-        <ComposerTrackActions divided={rows.length > 0}>
+        <ComposerTrackActions divided={visibleRows.length > 0}>
           <ArchiveFinishedRow
             status={archiveFinishedStatus}
             disabled={isArchivingFinished}
@@ -113,7 +117,7 @@ export function SubagentsTrack({
           />
         </ComposerTrackActions>
       ) : null}
-      {rows.map((row) => (
+      {visibleRows.map((row) => (
         <SubagentsTrackRow
           key={row.id}
           row={row}

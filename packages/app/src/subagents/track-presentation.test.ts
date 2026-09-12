@@ -6,6 +6,7 @@ import {
   buildSubagentRowPresentationData,
   countFinishedSubagents,
   resolveRowLabel,
+  selectVisibleSubagentRows,
 } from "./track-presentation";
 
 function row(
@@ -95,6 +96,49 @@ describe("buildSubagentPillPresentation", () => {
       segments: [{ bucket: null, text: "0 subagents" }],
       accessibilityLabel: "0 subagents",
     });
+  });
+});
+
+describe("selectVisibleSubagentRows", () => {
+  // Pins the bug report: a pill reading "2 failed" must open on exactly 2 rows, not on every
+  // finished sibling the pill never mentioned — regardless of how many of those exist.
+  it("matches the pill's count when some children are active — the reported bug", () => {
+    const rows = [
+      row({ id: "failed-1", status: "error" }),
+      row({ id: "failed-2", status: "error" }),
+      ...Array.from({ length: 10 }, (_unused, index) =>
+        row({ id: `done-${index}`, status: "idle" }),
+      ),
+    ];
+    const pill = buildSubagentPillPresentation(i18n.t, rows);
+    const totalPillCount = pill.segments.reduce((sum, segment) => {
+      const match = /^(\d+)/.exec(segment.text);
+      return sum + (match ? Number(match[1]) : 0);
+    }, 0);
+    const visible = selectVisibleSubagentRows(rows);
+
+    expect(pill.segments).toEqual([{ bucket: "failed", text: "2 failed" }]);
+    expect(visible.map((r) => r.id)).toEqual(["failed-1", "failed-2"]);
+    expect(visible.length).toBe(totalPillCount);
+  });
+
+  it("shows every row once nothing is active, matching the pill's total label", () => {
+    const rows = [row({ id: "a", status: "idle" }), row({ id: "b", status: "idle" })];
+    const pill = buildSubagentPillPresentation(i18n.t, rows);
+    const visible = selectVisibleSubagentRows(rows);
+
+    expect(pill.segments).toEqual([{ bucket: null, text: "2 subagents" }]);
+    expect(visible.length).toBe(rows.length);
+  });
+
+  it("keeps only the active states when the fan-out mixes failed, working, and done children", () => {
+    const rows = [
+      row({ id: "failed", status: "error" }),
+      row({ id: "working", status: "running" }),
+      row({ id: "done", status: "idle" }),
+    ];
+    const visible = selectVisibleSubagentRows(rows);
+    expect(visible.map((r) => r.id).sort()).toEqual(["failed", "working"]);
   });
 });
 
