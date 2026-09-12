@@ -1104,6 +1104,121 @@ test("rewind clears the token-rate buckets and total from the emitted state", as
   }
 });
 
+test("rewind clears tokenBurnAlert and tokenBurnMonitorState from the live agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-token-burn-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    manager.setTokenBurnAlert(agent.id, {
+      trigger: "rate",
+      ratePerMinute: 50_000,
+      firstBreachedAt: new Date().toISOString(),
+    });
+    manager.setTokenBurnMonitorState(agent.id, {
+      consecutiveAboveRate: 3,
+      consecutiveBelowRate: 0,
+      rateFired: true,
+      nextTotalThreshold: 5_000_000,
+    });
+    expect(manager.getAgent(agent.id)?.tokenBurnAlert).toBeDefined();
+    expect(manager.getTokenBurnMonitorState(agent.id)).toBeDefined();
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+
+    expect(manager.getAgent(agent.id)?.tokenBurnAlert).toBeUndefined();
+    expect(manager.getTokenBurnMonitorState(agent.id)).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("listAgentsForTokenBurnMonitor exposes a lean, scope-neutral view including internal agents", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-burn-list-"));
+  try {
+    const { manager, agentId } = await createLiveEventAgent(workdir);
+    const summaries = manager.listAgentsForTokenBurnMonitor(Date.now());
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({
+      id: agentId,
+      internal: false,
+      isDelegated: false,
+      tokenRate: undefined,
+      totalTokens: undefined,
+    });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("setTokenBurnAlert emits state and projects tokenBurnAlert on the wire payload; clearTokenBurnAlert removes it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-burn-alert-"));
+  try {
+    const { manager, agentId } = await createLiveEventAgent(workdir);
+    const emitted: Array<boolean> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) {
+          emitted.push(event.agent.tokenBurnAlert !== undefined);
+        }
+      },
+      { agentId, replayState: false },
+    );
+
+    manager.setTokenBurnAlert(agentId, {
+      trigger: "total",
+      totalTokens: 5_000_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    });
+
+    const agent = manager.getAgent(agentId);
+    expect(agent?.tokenBurnAlert).toEqual({
+      trigger: "total",
+      totalTokens: 5_000_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    });
+    expect(toAgentPayload(agent!).tokenBurnAlert).toEqual(agent?.tokenBurnAlert);
+    expect(emitted.at(-1)).toBe(true);
+
+    manager.clearTokenBurnAlert(agentId);
+    expect(manager.getAgent(agentId)?.tokenBurnAlert).toBeUndefined();
+    expect(emitted.at(-1)).toBe(false);
+
+    unsubscribe();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("retries provider history hydration after a stream failure", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-history-retry-"));
   let attempts = 0;

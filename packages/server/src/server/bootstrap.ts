@@ -208,6 +208,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
+import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -446,6 +447,14 @@ export interface PaseoDaemonConfig {
       thinkingOptionId?: string;
     }>;
   };
+  tokenBurnMonitor?: {
+    enabled?: boolean;
+    ratePerMinute?: number;
+    sustainedMinutes?: number;
+    totalTokens?: number;
+    scope?: "all" | "topLevelOnly";
+    breachBatchThreshold?: number;
+  };
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
@@ -525,6 +534,12 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function withTokenBurnMonitorConfig(
+  config: Pick<PaseoDaemonConfig, "tokenBurnMonitor">,
+): Pick<MutableDaemonConfig, "tokenBurnMonitor"> {
+  return config.tokenBurnMonitor !== undefined ? { tokenBurnMonitor: config.tokenBurnMonitor } : {};
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -547,6 +562,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     metadataGeneration: {
       providers: config.metadataGeneration?.providers ?? [],
     },
+    ...withTokenBurnMonitorConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -671,6 +687,7 @@ export async function createPaseoDaemon(
     appBaseUrl = typeof value === "string" ? value : "https://app.paseo.sh";
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
+  let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
   const scriptHealthMonitor = new ScriptHealthMonitor({
     serviceProxy,
@@ -1739,6 +1756,20 @@ export async function createPaseoDaemon(
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
+            // Wired here (rather than beside AgentTitleTracker, above) because it needs the
+            // push sender wsServer resolved (injected override, or its own
+            // createPushNotifications) — not available until wsServer exists.
+            agentTokenBurnMonitor = new AgentTokenBurnMonitor({
+              agentManager,
+              agentStorage,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readDaemonConfig: () => ({
+                tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
+              }),
+              logger,
+            });
+            agentTokenBurnMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -1810,6 +1841,7 @@ export async function createPaseoDaemon(
     terminalManager.killAll();
     await speechService.stop();
     agentManager.stopProviderSubagentSweep();
+    agentTokenBurnMonitor?.stop();
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {

@@ -530,6 +530,27 @@ describe("toAgentPayload", () => {
     // totalTokens is a lifetime counter, independent of the trailing-window rate.
     expect(payload.totalTokens).toBe(40);
   });
+
+  it("includes tokenBurnAlert when the monitor has set one", () => {
+    const tokenBurnAlert = {
+      trigger: "rate" as const,
+      ratePerMinute: 50_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    };
+    const agent = createManagedAgent({ tokenBurnAlert });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.tokenBurnAlert).toEqual(tokenBurnAlert);
+  });
+
+  it("omits tokenBurnAlert when the monitor hasn't set one", () => {
+    const agent = createManagedAgent({ tokenBurnAlert: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("tokenBurnAlert");
+  });
 });
 
 describe("buildStoredAgentPayload", () => {
@@ -553,6 +574,23 @@ describe("buildStoredAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("recentTokenRate");
     expect(payload).not.toHaveProperty("totalTokens");
+  });
+
+  it("omits tokenBurnAlert for persisted records — it's live-only and never stored", () => {
+    const agent = createManagedAgent({
+      tokenBurnAlert: {
+        trigger: "total",
+        totalTokens: 5_000_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    expect(record).not.toHaveProperty("tokenBurnAlert");
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("tokenBurnAlert");
   });
 });
 
@@ -587,6 +625,30 @@ describe("toAgentListItemPayload", () => {
 
     expect(listItem).not.toHaveProperty("recentTokenRate");
     expect(listItem).not.toHaveProperty("totalTokens");
+  });
+
+  it("carries tokenBurnAlert through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      tokenBurnAlert: {
+        trigger: "rate",
+        ratePerMinute: 50_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.tokenBurnAlert).toEqual(snapshot.tokenBurnAlert);
+  });
+
+  it("omits tokenBurnAlert when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ tokenBurnAlert: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("tokenBurnAlert");
   });
 
   it("omits lastActivitySummary when the snapshot doesn't have one", () => {

@@ -639,6 +639,7 @@ export function resolveConfigFromPersisted(
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
+    tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
     configReload: {

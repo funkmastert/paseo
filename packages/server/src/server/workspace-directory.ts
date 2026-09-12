@@ -376,6 +376,7 @@ export class WorkspaceDirectory {
             pendingPermissionCount: agent.pendingPermissions?.length ?? 0,
             requiresAttention: agent.requiresAttention,
             attentionReason: agent.attentionReason ?? null,
+            tokenBurnAlert: agent.tokenBurnAlert !== undefined,
           })
         : "running";
 
@@ -525,6 +526,7 @@ export class WorkspaceDirectory {
           pendingPermissionCount: agent.pendingPermissions?.length ?? 0,
           requiresAttention: agent.requiresAttention,
           attentionReason: agent.attentionReason ?? null,
+          tokenBurnAlert: agent.tokenBurnAlert !== undefined,
         });
         return derived === winningBucket;
       })

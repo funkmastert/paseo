@@ -975,6 +975,98 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-toggles tokenBurnMonitor.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            tokenBurnMonitor: { ratePerMinute: 40_000, sustainedMinutes: 5 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        tokenBurnMonitor: { ratePerMinute: 40_000, sustainedMinutes: 5 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ tokenBurnMonitor: { enabled: false } });
+
+    expect(next.tokenBurnMonitor).toEqual({
+      ratePerMinute: 40_000,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.tokenBurnMonitor).toEqual({
+      ratePerMinute: 40_000,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+  });
+
+  test("patch persists metadata generation providers without disturbing tokenBurnMonitor", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            tokenBurnMonitor: { enabled: false, totalTokens: 1_000_000 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        tokenBurnMonitor: { enabled: false, totalTokens: 1_000_000 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({
+      metadataGeneration: { providers: [{ provider: "codex", model: "gpt-5.4-mini" }] },
+    });
+
+    expect(next.tokenBurnMonitor).toEqual({ enabled: false, totalTokens: 1_000_000 });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.tokenBurnMonitor).toEqual({ enabled: false, totalTokens: 1_000_000 });
+  });
+
   test("patch persists custom ACP provider overrides into config.json", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

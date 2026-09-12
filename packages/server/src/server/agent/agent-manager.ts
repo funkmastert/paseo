@@ -16,7 +16,7 @@ import {
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
-import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
+import type { ProviderOptions, ToolPolicy, TokenBurnAlert } from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
@@ -90,7 +90,8 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
-import { recordTokenDelta } from "./token-rate-tracker.js";
+import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
+import type { TokenBurnMonitorState } from "./token-burn-detector.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -257,6 +258,21 @@ export type AgentAttentionCallback = (params: {
 }) => void;
 
 export type AgentArchivedCallback = (agentId: string) => Promise<void> | void;
+
+/**
+ * Lean per-agent view for AgentTokenBurnMonitor's sweep — deliberately not a full ManagedAgent
+ * clone (Object.assign in listAgents() copies pending permissions, session handles, etc. the
+ * monitor never touches). Includes internal agents, unlike listAgents(): the monitor decides
+ * for itself whether internal agents are in scope.
+ */
+export interface TokenBurnMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  isDelegated: boolean;
+  tokenRate: number | undefined;
+  totalTokens: number | undefined;
+}
 
 export interface ProviderAvailability {
   provider: AgentProvider;
@@ -438,6 +454,18 @@ interface ManagedAgentBase {
   tokenRateBuckets?: AgentTokenRateBucket[];
   /** Live-only lifetime token total, alongside tokenRateBuckets — same clearing rules. */
   totalTokens?: number;
+  /**
+   * Live-only breach state set by AgentTokenBurnMonitor via setTokenBurnAlert/clearTokenBurnAlert.
+   * Not persisted, cleared on rewind alongside tokenRateBuckets/totalTokens. Deliberately not
+   * part of `attention`/attentionReason — see TokenBurnAlert's doc comment.
+   */
+  tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * Live-only per-agent bookkeeping (consecutive-sweep counters, ratchet threshold, re-arm
+   * state) the monitor threads between sweeps. Never projected to the wire, never persisted.
+   * See token-burn-detector.ts.
+   */
+  tokenBurnMonitorState?: TokenBurnMonitorState;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -1022,6 +1050,17 @@ export class AgentManager {
       .map((agent) => Object.assign({}, agent));
   }
 
+  listAgentsForTokenBurnMonitor(nowMs: number): TokenBurnMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      isDelegated: isDelegatedAgent(agent),
+      tokenRate: computeTokenRate(agent.tokenRateBuckets, nowMs)?.tokensPerMinute,
+      totalTokens: agent.totalTokens,
+    }));
+  }
+
   async listImportableSessions(
     options?: ImportablePersistedAgentQueryOptions,
   ): Promise<ManagedImportableSessionsResult> {
@@ -1195,6 +1234,32 @@ export class AgentManager {
   getAgent(id: string): ManagedAgent | null {
     const agent = this.agents.get(id);
     return agent ? { ...agent } : null;
+  }
+
+  /** Read-modify-write slot for AgentTokenBurnMonitor's per-agent consecutive-sweep bookkeeping. */
+  getTokenBurnMonitorState(agentId: string): TokenBurnMonitorState | undefined {
+    return this.agents.get(agentId)?.tokenBurnMonitorState;
+  }
+
+  setTokenBurnMonitorState(agentId: string, state: TokenBurnMonitorState): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnMonitorState = state;
+  }
+
+  /** Sets the live breach badge and broadcasts the new snapshot. See TokenBurnAlert's doc comment. */
+  setTokenBurnAlert(agentId: string, alert: TokenBurnAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearTokenBurnAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.tokenBurnAlert) return;
+    delete agent.tokenBurnAlert;
+    this.emitState(agent, { persist: false });
   }
 
   async waitForAgentClose(agentId: string): Promise<void> {
@@ -3316,6 +3381,8 @@ export class AgentManager {
         // trailing-window tracker fresh rather than report a rate computed from erased history.
         delete agent.tokenRateBuckets;
         delete agent.totalTokens;
+        delete agent.tokenBurnAlert;
+        delete agent.tokenBurnMonitorState;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);

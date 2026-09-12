@@ -291,6 +291,52 @@ describe("wire schema compatibility", () => {
     expect(parsed.capabilities.supportsRewindBoth).toBe(false);
   });
 
+  test("old clients strip an unknown tokenBurnAlert field from new daemon snapshots", () => {
+    // Models an old client's schema, generated before tokenBurnAlert existed. The proof this
+    // additive-optional field (rather than extending the closed attentionReason enum) is
+    // wire-safe: the old schema has no notion of tokenBurnAlert, so it silently strips the
+    // extra key instead of failing to parse — see agent-types.ts's TokenBurnAlert doc comment.
+    const LegacySnapshotSchema = AgentSnapshotPayloadSchema.omit({ tokenBurnAlert: true });
+    const payloadFromNewDaemon = {
+      id: "agent-1",
+      provider: "claude",
+      cwd: "/tmp/project",
+      model: null,
+      thinkingOptionId: null,
+      effectiveThinkingOptionId: null,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "running",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      attentionReason: null,
+      tokenBurnAlert: {
+        trigger: "rate",
+        ratePerMinute: 50_000,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacySnapshotSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("tokenBurnAlert");
+
+    const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.tokenBurnAlert).toEqual(payloadFromNewDaemon.tokenBurnAlert);
+  });
+
   test("notification timeline items parse their level and message", () => {
     expect(
       AgentTimelineItemPayloadSchema.parse({

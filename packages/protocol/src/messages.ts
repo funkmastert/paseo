@@ -151,6 +151,22 @@ const MutableMetadataGenerationPatchSchema = z
   })
   .passthrough();
 
+// Live-toggleable like metadataGeneration.titleTracking (553af7e5e) — mirrors its
+// mutable/patch split for the same reason: `.partial()` on the config schema would make an
+// absent field indistinguishable from an explicit reset.
+const MutableTokenBurnMonitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableTokenBurnMonitorPatchSchema = MutableTokenBurnMonitorConfigSchema;
+
 export const TerminalProfileSchema = z
   .object({
     id: z.string(),
@@ -255,6 +271,7 @@ export const MutableDaemonConfigSchema = z
     browserTools: MutableBrowserToolsConfigSchema.default({ enabled: false }),
     providers: z.record(z.string(), MutableDaemonProviderConfigSchema).default({}),
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
+    tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
@@ -276,6 +293,7 @@ export const MutableDaemonConfigPatchSchema = z
       .optional(),
     removeProviders: z.array(z.string().min(1)).optional(),
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
+    tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -305,6 +323,7 @@ import type {
   AgentTokenRate,
   AgentUsage,
   JsonValue,
+  TokenBurnAlert,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -450,6 +469,13 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
 const AgentTokenRateSchema: z.ZodType<AgentTokenRate> = z.object({
   tokensPerMinute: z.number(),
   asOfMs: z.number(),
+});
+
+const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
+  trigger: z.enum(["rate", "total"]),
+  ratePerMinute: z.number().optional(),
+  totalTokens: z.number().optional(),
+  firstBreachedAt: z.string(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -901,6 +927,7 @@ export const AgentSnapshotPayloadSchema = z.object({
   attentionTimestamp: z.string().nullable().optional(),
   archivedAt: z.string().nullable().optional(),
   providerUnavailable: z.boolean().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -927,6 +954,7 @@ export const AgentListItemPayloadSchema = z.object({
   lastActivitySummary: z.string().optional(),
   recentTokenRate: AgentTokenRateSchema.optional(),
   totalTokens: z.number().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

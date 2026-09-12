@@ -178,6 +178,17 @@ const AgentMetadataGenerationSchema = z
   })
   .strict();
 
+const AgentTokenBurnMonitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -324,6 +335,7 @@ export const PersistedConfigSchema = z
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
+        tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

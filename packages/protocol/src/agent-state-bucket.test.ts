@@ -60,6 +60,57 @@ describe("deriveAgentStateBucket", () => {
       }),
     ).toBe("done");
   });
+
+  it("treats a token-burn alert as attention-worthy on its own, independent of attentionReason", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "idle",
+        pendingPermissionCount: 0,
+        requiresAttention: false,
+        attentionReason: null,
+        tokenBurnAlert: true,
+      }),
+    ).toBe("attention");
+  });
+
+  it("doesn't let a token-burn alert override a higher-priority bucket", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "idle",
+        pendingPermissionCount: 1,
+        requiresAttention: false,
+        attentionReason: null,
+        tokenBurnAlert: true,
+      }),
+    ).toBe("needs_input");
+  });
+
+  it("surfaces a token-burn alert as attention even while the agent is still running", () => {
+    // The monitor's whole point is catching a runaway agent mid-burn — which means the agent
+    // is, by definition, still running when the alert fires. If "running" wins here, the alert
+    // is invisible in the UI for exactly the case it exists to catch.
+    expect(
+      deriveAgentStateBucket({
+        status: "running",
+        pendingPermissionCount: 0,
+        requiresAttention: false,
+        attentionReason: null,
+        tokenBurnAlert: true,
+      }),
+    ).toBe("attention");
+  });
+
+  it("stays done when there's no token-burn alert and nothing else attention-worthy", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "idle",
+        pendingPermissionCount: 0,
+        requiresAttention: false,
+        attentionReason: null,
+        tokenBurnAlert: false,
+      }),
+    ).toBe("done");
+  });
 });
 
 describe("getWorkspaceStateBucketPriority", () => {

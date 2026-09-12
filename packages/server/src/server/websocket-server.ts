@@ -936,6 +936,11 @@ export class VoiceAssistantWebSocketServer {
     this.sendMessageToSockets(this.sessions.keys(), message);
   }
 
+  /** The push sender this instance resolved (injected override, or its own createPushNotifications). */
+  public getPushNotificationSender(): PushNotificationSender {
+    return this.pushNotificationSender;
+  }
+
   public listSessions(): Session[] {
     return Array.from(
       new Set(

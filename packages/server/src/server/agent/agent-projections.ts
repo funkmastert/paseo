@@ -162,6 +162,10 @@ export function toAgentPayload(
     payload.totalTokens = agent.totalTokens;
   }
 
+  if (agent.tokenBurnAlert !== undefined) {
+    payload.tokenBurnAlert = agent.tokenBurnAlert;
+  }
+
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
   if (agent.attention.requiresAttention) {
@@ -289,6 +293,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
       : {}),
     ...(agent.recentTokenRate !== undefined ? { recentTokenRate: agent.recentTokenRate } : {}),
     ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
+    ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
   };
 }
 

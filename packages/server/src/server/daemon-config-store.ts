@@ -23,6 +23,7 @@ interface SupportedMutableConfigPatch {
   providers?: MutableDaemonConfig["providers"];
   removeProviders?: string[];
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
+  tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
@@ -191,6 +192,7 @@ const RELOADABLE_PATHS = [
   "agents.providers",
   "agents.catalogRefreshTimeoutMs",
   "agents.metadataGeneration",
+  "agents.tokenBurnMonitor",
   "agents.skills.selection",
   "pluginsEnabled",
 ] as const;
@@ -214,6 +216,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.providers", "providers"],
   ["agents.catalogRefreshTimeoutMs", "catalogRefreshTimeoutMs"],
   ["agents.metadataGeneration", "metadataGeneration"],
+  ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.skills.selection", "skills.selection"],
   ["pluginsEnabled", "pluginsEnabled"],
 ]);
@@ -274,6 +277,12 @@ function pickMetadataGenerationPatch(
   };
 }
 
+function pickTokenBurnMonitorPatch(
+  tokenBurnMonitor: MutableDaemonConfigPatch["tokenBurnMonitor"],
+): Pick<SupportedMutableConfigPatch, "tokenBurnMonitor"> {
+  return tokenBurnMonitor === undefined ? {} : { tokenBurnMonitor };
+}
+
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...(patch.relay?.enabled !== undefined ? { relay: { enabled: patch.relay.enabled } } : {}),
@@ -286,6 +295,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...(patch.providers !== undefined ? { providers: patch.providers } : {}),
     ...(patch.removeProviders !== undefined ? { removeProviders: patch.removeProviders } : {}),
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
+    ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...(patch.autoArchiveAfterMerge !== undefined
       ? { autoArchiveAfterMerge: patch.autoArchiveAfterMerge }
       : {}),
@@ -677,6 +687,18 @@ function mergeMetadataGenerationForPersist(
   };
 }
 
+type PersistedTokenBurnMonitor = NonNullable<PersistedConfig["agents"]>["tokenBurnMonitor"];
+
+function mergeTokenBurnMonitorForPersist(
+  persisted: PersistedTokenBurnMonitor,
+  patch: SupportedMutableConfigPatch["tokenBurnMonitor"],
+): PersistedTokenBurnMonitor {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 function mergeMutableAgentPatch(
   persistedAgents: PersistedConfig["agents"],
   patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
@@ -685,6 +707,7 @@ function mergeMutableAgentPatch(
   if (
     patch.providers === undefined &&
     patch.metadataGeneration === undefined &&
+    patch.tokenBurnMonitor === undefined &&
     patch.skills === undefined &&
     removeProviders.length === 0
   ) {
@@ -709,6 +732,12 @@ function mergeMutableAgentPatch(
     removeProviders,
   );
   if (metadataGeneration !== undefined) next["metadataGeneration"] = metadataGeneration;
+
+  const tokenBurnMonitor = mergeTokenBurnMonitorForPersist(
+    persistedAgents?.tokenBurnMonitor,
+    patch.tokenBurnMonitor,
+  );
+  if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

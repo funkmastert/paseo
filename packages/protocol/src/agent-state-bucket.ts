@@ -9,6 +9,14 @@ export interface AgentStateBucketInput {
   pendingPermissionCount?: number;
   requiresAttention?: boolean;
   attentionReason?: AgentAttentionReason;
+  /**
+   * Presence of a live token-burn breach. Attention-worthy independent of `attentionReason` —
+   * that enum is closed on the wire and a token-burn alert deliberately never joins it. Unlike
+   * requiresAttention, this can be true while `status === "running"` (a runaway agent is by
+   * definition still running), so it outranks "running" below. See
+   * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
+   */
+  tokenBurnAlert?: boolean;
 }
 
 const WORKSPACE_STATE_BUCKET_PRIORITY = {
@@ -25,6 +33,12 @@ export function deriveAgentStateBucket(input: AgentStateBucketInput): WorkspaceS
   }
   if (input.status === "error" || input.attentionReason === "error") {
     return "failed";
+  }
+  // Checked before the running status below: a token-burn alert fires *while* the agent is
+  // still running (that's the case it exists to catch), unlike requiresAttention, which is
+  // edge-triggered only at turn completion and never co-occurs with "running" in practice.
+  if (input.tokenBurnAlert) {
+    return "attention";
   }
   if (input.status === "running") {
     return "running";
