@@ -1261,9 +1261,15 @@ export class AgentManager {
         config,
         env: options.env,
         callerAgentId: options.callerAgentId,
+        labels: options.labels,
+        initialPrompt: options.initialPrompt,
       });
       config = { ...request.config, internal: config.internal };
-      options = { ...options, env: request.env };
+      // labels are mutable by design; initialPrompt is read-only context for
+      // the hook — the actual prompt was already resolved by the caller and
+      // is sent independently after this create completes, so a hook's
+      // mutation of it here is intentionally dropped rather than applied.
+      options = { ...options, env: request.env, labels: request.labels };
     }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
