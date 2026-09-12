@@ -873,6 +873,108 @@ describe("DaemonConfigStore", () => {
     expect(persisted.agents?.metadataGeneration).toEqual({ providers: [] });
   });
 
+  test("patch persists title tracking without disturbing metadata generation providers", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            metadataGeneration: {
+              providers: [{ provider: "claude", model: "haiku" }],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: { providers: [{ provider: "claude", model: "haiku" }] },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ metadataGeneration: { titleTracking: { enabled: false } } });
+
+    expect(next.metadataGeneration.providers).toEqual([{ provider: "claude", model: "haiku" }]);
+    expect(next.metadataGeneration.titleTracking).toEqual({ enabled: false });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.metadataGeneration).toEqual({
+      providers: [{ provider: "claude", model: "haiku" }],
+      titleTracking: { enabled: false },
+    });
+  });
+
+  test("patch persists metadata generation providers without disturbing title tracking", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            metadataGeneration: {
+              providers: [{ provider: "claude", model: "haiku" }],
+              titleTracking: { enabled: false },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: {
+          providers: [{ provider: "claude", model: "haiku" }],
+          titleTracking: { enabled: false },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({
+      metadataGeneration: { providers: [{ provider: "codex", model: "gpt-5.4-mini" }] },
+    });
+
+    expect(next.metadataGeneration.providers).toEqual([
+      { provider: "codex", model: "gpt-5.4-mini" },
+    ]);
+    expect(next.metadataGeneration.titleTracking).toEqual({ enabled: false });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.metadataGeneration).toEqual({
+      providers: [{ provider: "codex", model: "gpt-5.4-mini" }],
+      titleTracking: { enabled: false },
+    });
+  });
+
   test("patch persists custom ACP provider overrides into config.json", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

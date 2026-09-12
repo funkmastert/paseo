@@ -140,6 +140,17 @@ const MutableMetadataGenerationConfigSchema = z
   })
   .passthrough();
 
+// Patch-only variant: `providers` has no default here. `.partial()` on the
+// config schema above would apply the `.default([])` to a patch that never
+// mentioned `providers` at all (only `titleTracking`), making the two
+// indistinguishable and silently clearing the caller's stored providers.
+const MutableMetadataGenerationPatchSchema = z
+  .object({
+    providers: z.array(MutableStructuredGenerationProviderSchema).optional(),
+    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+  })
+  .passthrough();
+
 export const TerminalProfileSchema = z
   .object({
     id: z.string(),
@@ -264,7 +275,7 @@ export const MutableDaemonConfigPatchSchema = z
       .record(z.string(), MutableDaemonProviderConfigSchema.partial().passthrough())
       .optional(),
     removeProviders: z.array(z.string().min(1)).optional(),
-    metadataGeneration: MutableMetadataGenerationConfigSchema.partial().optional(),
+    metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
