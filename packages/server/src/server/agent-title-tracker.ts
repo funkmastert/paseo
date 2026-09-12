@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
@@ -91,9 +92,13 @@ export class AgentTitleTracker {
   private readonly logger: AgentTitleTrackerLogger;
   private readonly debounceMs: number;
   private readonly generate: typeof generateStructuredAgentResponseWithFallback;
-  // Live-only, precedent: lastActivitySummary (agent-manager.ts). The last
-  // user-message text a title was generated from, so an unchanged message
-  // never triggers a second LLM call.
+  // Live-only, precedent: lastActivitySummary (agent-manager.ts). A
+  // fingerprint of the last user-message text a title was generated from, so
+  // an unchanged message never triggers a second LLM call. Stores a hash
+  // rather than the raw text — the comparison only needs equality, and this
+  // keeps a per-agent entry bounded regardless of message length. Evicted in
+  // scheduleRefresh()/refresh() as soon as the agent is found missing or
+  // archived, so this map doesn't grow unbounded across agent churn.
   private readonly lastGeneratedFromByAgentId = new Map<string, string>();
   private readonly pendingTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -110,7 +115,17 @@ export class AgentTitleTracker {
       generateStructuredAgentResponseWithFallback;
   }
 
+  private fingerprintMessage(text: string): string {
+    return createHash("sha256").update(text).digest("hex");
+  }
+
   scheduleRefresh(input: { agentId: string; cwd: string }): void {
+    if (!this.agentManager.getAgent(input.agentId)) {
+      // Agent is gone; nothing to schedule, and any tracked dedup entry for
+      // it is now dead weight.
+      this.lastGeneratedFromByAgentId.delete(input.agentId);
+      return;
+    }
     const existing = this.pendingTimers.get(input.agentId);
     if (existing) {
       clearTimeout(existing);
@@ -130,11 +145,16 @@ export class AgentTitleTracker {
     }
 
     if (!this.agentManager.getAgent(input.agentId)) {
+      this.lastGeneratedFromByAgentId.delete(input.agentId);
       return;
     }
 
     const record = await this.agentStorage.get(input.agentId);
-    if (!record || record.titleManuallySet || record.archivedAt) {
+    if (!record || record.archivedAt) {
+      this.lastGeneratedFromByAgentId.delete(input.agentId);
+      return;
+    }
+    if (record.titleManuallySet) {
       return;
     }
 
@@ -144,7 +164,8 @@ export class AgentTitleTracker {
     if (!latestUserMessage) {
       return;
     }
-    if (this.lastGeneratedFromByAgentId.get(input.agentId) === latestUserMessage) {
+    const latestUserMessageFingerprint = this.fingerprintMessage(latestUserMessage);
+    if (this.lastGeneratedFromByAgentId.get(input.agentId) === latestUserMessageFingerprint) {
       return;
     }
 
@@ -190,7 +211,7 @@ export class AgentTitleTracker {
       return;
     }
 
-    this.lastGeneratedFromByAgentId.set(input.agentId, latestUserMessage);
+    this.lastGeneratedFromByAgentId.set(input.agentId, latestUserMessageFingerprint);
     await this.agentManager.applyGeneratedTitle(input.agentId, result.title);
   }
 }

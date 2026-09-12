@@ -2155,7 +2155,13 @@ export class AgentManager {
       return false;
     }
     this.touchUpdatedAt(agent);
-    await this.persistSnapshot(agent, { title: trimmed });
+    const applied = await this.persistSnapshot(agent, {
+      title: trimmed,
+      skipIfTitleManuallySet: true,
+    });
+    if (!applied) {
+      return false;
+    }
     this.emitState(agent, { persist: false });
     return true;
   }
@@ -3997,16 +4003,21 @@ export class AgentManager {
 
   private async persistSnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean; titleManuallySet?: boolean },
-  ): Promise<void> {
+    options?: {
+      title?: string | null;
+      internal?: boolean;
+      titleManuallySet?: boolean;
+      skipIfTitleManuallySet?: boolean;
+    },
+  ): Promise<boolean> {
     if (!this.registry) {
-      return;
+      return false;
     }
     // Don't persist internal agents - they're ephemeral system tasks
     if (agent.internal) {
-      return;
+      return false;
     }
-    await this.registry.applySnapshot(agent, options);
+    return this.registry.applySnapshot(agent, options);
   }
 
   private requireRegistry(): AgentStorage {
@@ -4992,9 +5003,11 @@ export class AgentManager {
   }
 
   private enqueueBackgroundPersist(agent: ManagedAgent): void {
-    const task = this.persistSnapshot(agent).catch((err) => {
-      this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
-    });
+    const task = this.persistSnapshot(agent)
+      .then(() => undefined)
+      .catch((err) => {
+        this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
+      });
     this.trackBackgroundTask(task);
   }
 

@@ -194,6 +194,102 @@ describe("AgentTitleTracker", () => {
     expect(applyGeneratedTitle).toHaveBeenCalledWith("agent-1", "Fix the login bug");
   });
 
+  test("evicts the dedup entry once the agent is archived, so a later un-archival re-triggers generation for the same message", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    const agentManager = createFakeAgentManager({});
+    let record: Partial<StoredAgentRecord> | null = { title: "Old title" };
+    const agentStorage = {
+      get: vi.fn(async () => record as StoredAgentRecord | null),
+    } as Pick<AgentStorage, "get">;
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage,
+      readDaemonConfig: () => ({}),
+      logger: createLogger(),
+      debounceMs: 0,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    // Agent gets archived — refresh() bails out on the archived check. The
+    // dedup entry for it should be evicted here, not left behind forever.
+    record = { title: "Old title", archivedAt: "2026-01-01T00:00:00Z" };
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    // Agent is un-archived with the exact same latest user message. If the
+    // entry was evicted, this is indistinguishable from a fresh agent and
+    // generation runs again; if it leaked, the stale fingerprint still
+    // matches and generation stays skipped.
+    record = { title: "Old title" };
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(2);
+  });
+
+  test("evicts the dedup entry once the agent disappears from the live registry", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    const liveAgentIds = new Set(["agent-1"]);
+    const agentManager = createFakeAgentManager({ liveAgentIds });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({}),
+      logger: createLogger(),
+      debounceMs: 0,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    // Agent goes away — scheduleRefresh() should notice and drop the dedup
+    // entry rather than leave it keyed to a dead agent id forever.
+    liveAgentIds.delete("agent-1");
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    // Same agent id becomes live again (e.g. id reuse is impossible in
+    // practice, but this isolates the eviction from every other guard) with
+    // the exact same latest user message as before.
+    liveAgentIds.add("agent-1");
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(2);
+  });
+
+  test("bounds the stored per-agent dedup fingerprint regardless of message length", async () => {
+    const hugeMessage = "x".repeat(10_000);
+    const structured = createStructuredGenerator({ title: "New title" });
+    const agentManager = createFakeAgentManager({
+      timeline: [{ type: "user_message", text: hugeMessage }],
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({}),
+      logger: createLogger(),
+      debounceMs: 0,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    const stored = (
+      tracker as unknown as { lastGeneratedFromByAgentId: Map<string, string> }
+    ).lastGeneratedFromByAgentId.get("agent-1");
+    expect(stored).toBeDefined();
+    expect(stored!.length).toBeLessThanOrEqual(500);
+  });
+
   test("swallows and logs a structured generation failure without applying a title", async () => {
     const structured = createStructuredGenerator({ error: new Error("boom") });
     const applyGeneratedTitle = vi.fn(async () => true);

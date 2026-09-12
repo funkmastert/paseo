@@ -1192,4 +1192,39 @@ describe("DaemonConfigStore reload", () => {
       overrideControlledPaths: [],
     });
   });
+
+  function agentModelPolicyOf(config: MutableDaemonConfig): unknown {
+    return (config as unknown as { agentModelPolicy?: unknown }).agentModelPolicy;
+  }
+
+  test("reload carries a runtime agentModelPolicy patch forward across an unrelated disk edit that doesn't have the key", () => {
+    const { paseoHome, store, persisted } = createReloadableStore();
+    store.patch({ agentModelPolicy: { policyId: "memory-value" } });
+
+    // Simulate an external disk rewrite that never recorded the
+    // plugin-owned agentModelPolicy key at all (e.g. another writer that
+    // only round-trips built-in daemon fields) -- reload()'s resolved
+    // mutable config (reloadableConfig, mirroring
+    // createInitialMutableDaemonConfig) has no notion of the key either.
+    writeConfig(paseoHome, {
+      ...persisted,
+      daemon: { ...persisted.daemon, browserTools: { enabled: true } },
+    });
+
+    store.reload();
+
+    expect(agentModelPolicyOf(store.get())).toEqual({ policyId: "memory-value" });
+  });
+
+  test("reload prefers the on-disk agentModelPolicy over the in-memory value once the persisted file has the key", () => {
+    const { paseoHome, store } = createReloadableStore();
+    store.patch({ agentModelPolicy: { policyId: "memory-value" } });
+
+    const onDisk = loadPersistedConfig(paseoHome);
+    writeConfig(paseoHome, { ...onDisk, agentModelPolicy: { policyId: "disk-value" } });
+
+    store.reload();
+
+    expect(agentModelPolicyOf(store.get())).toEqual({ policyId: "disk-value" });
+  });
 });

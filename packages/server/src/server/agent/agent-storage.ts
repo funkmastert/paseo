@@ -174,7 +174,14 @@ export class AgentStorage {
         return undefined;
       }
 
-      const record = mutate(this.cache.get(agentId) ?? null);
+      const existing = this.cache.get(agentId) ?? null;
+      const record = mutate(existing);
+      if (record === existing) {
+        // Mutation declined to change anything (e.g. a generated-title write
+        // that lost the race to a manual rename); skip the redundant disk
+        // write and cache update.
+        return undefined;
+      }
       await this.writeRecord(record);
       return undefined;
     });
@@ -244,8 +251,13 @@ export class AgentStorage {
 
   async applySnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean; titleManuallySet?: boolean },
-  ): Promise<void> {
+    options?: {
+      title?: string | null;
+      internal?: boolean;
+      titleManuallySet?: boolean;
+      skipIfTitleManuallySet?: boolean;
+    },
+  ): Promise<boolean> {
     await this.load();
     const hasTitleOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "title");
@@ -253,7 +265,18 @@ export class AgentStorage {
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "internal");
     const hasTitleManuallySetOverride =
       options !== undefined && Object.prototype.hasOwnProperty.call(options, "titleManuallySet");
+    let applied = true;
     await this.queueRecordMutation(agent.id, (existing) => {
+      // The manual-rename check has to happen here, against the record as it
+      // stands right before this write commits, not against whatever the
+      // caller read earlier. A generated-title write queued behind a manual
+      // rename would otherwise clobber it: the caller's earlier
+      // titleManuallySet read is stale by the time its write reaches the
+      // front of this per-agent queue.
+      if (options?.skipIfTitleManuallySet && existing?.titleManuallySet) {
+        applied = false;
+        return existing;
+      }
       const record = toStoredAgentRecord(agent, {
         title: hasTitleOverride ? (options?.title ?? null) : (existing?.title ?? null),
         createdAt: existing?.createdAt,
@@ -271,6 +294,7 @@ export class AgentStorage {
       }
       return record;
     });
+    return applied;
   }
 
   async setTitle(agentId: string, title: string): Promise<void> {

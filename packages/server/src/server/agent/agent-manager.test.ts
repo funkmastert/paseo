@@ -5334,6 +5334,39 @@ test("applyGeneratedTitle no-ops once the title was manually set", async () => {
   expect(after?.updatedAt).toBe(before!.updatedAt);
 });
 
+test("applyGeneratedTitle does not clobber a manual rename that races between its guard read and its write", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-race-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000214",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  // Simulate a manual rename landing between applyGeneratedTitle's
+  // titleManuallySet guard read (registry.get) and the queued write it
+  // triggers: intercept that read, race a setTitle() ahead of it, then let
+  // the (now stale) read resolve as it originally would have.
+  const originalGet = storage.get.bind(storage);
+  vi.spyOn(storage, "get").mockImplementationOnce(async (agentId: string) => {
+    const record = await originalGet(agentId);
+    await manager.setTitle(snapshot.id, "Renamed while generating");
+    return record;
+  });
+
+  await manager.applyGeneratedTitle(snapshot.id, "Generated task title");
+
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Renamed while generating");
+  expect(after?.titleManuallySet).toBe(true);
+});
+
 test("applyGeneratedTitle no-ops when the title is already the generated value", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-unchanged-"));
   const storagePath = join(workdir, "agents");

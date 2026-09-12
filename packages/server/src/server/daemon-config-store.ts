@@ -418,6 +418,26 @@ export class DaemonConfigStore {
     return this.current;
   }
 
+  // agentModelPolicy is opaque plugin-owned config (persisted-config.ts) that
+  // reloadSource.resolve()/createInitialMutableDaemonConfig has no notion of
+  // (same gap the constructor's startup lift, above, works around), so it's
+  // never present on resolved.mutable. Reload's job is to pick up disk
+  // edits, so prefer the freshly-read persisted value when the file has the
+  // key; fall back to carrying the in-memory value forward (like `plugins`,
+  // in reload() below) only when the disk file has no key at all, so an
+  // unrelated reload doesn't wipe a plugin's runtime patch() that hasn't
+  // been written back to this exact file.
+  private resolveReloadedAgentModelPolicy(
+    persisted: PersistedConfig,
+  ): { agentModelPolicy: Record<string, unknown> } | Record<string, never> {
+    if (persisted.agentModelPolicy !== undefined) {
+      return { agentModelPolicy: persisted.agentModelPolicy };
+    }
+    const current = (this.current as unknown as { agentModelPolicy?: Record<string, unknown> })
+      .agentModelPolicy;
+    return current !== undefined ? { agentModelPolicy: current } : {};
+  }
+
   public reload(): DaemonConfigReloadResult {
     if (!this.reloadSource) {
       throw new Error("Daemon config reload is unavailable for this daemon instance");
@@ -430,6 +450,7 @@ export class DaemonConfigStore {
     const desired = MutableDaemonConfigSchema.parse({
       ...resolved.mutable,
       plugins: this.current.plugins,
+      ...this.resolveReloadedAgentModelPolicy(persisted),
     });
     const changedSinceLastApply = diffPaths(this.lastKnownPersisted, persisted);
     const overrideControlledPaths = compactOwnedPaths(
