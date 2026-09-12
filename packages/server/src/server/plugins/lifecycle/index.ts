@@ -32,6 +32,8 @@ const beforeSchemas = {
     config: true,
     env: true,
     callerAgentId: true,
+    labels: true,
+    initialPrompt: true,
   }).strict(),
   "agent.session_open": z
     .object({
@@ -90,6 +92,7 @@ export function describeHookAgent(agent: {
     provider: agent.provider,
     cwd: agent.cwd,
     title: agent.title ?? null,
+    labels: agent.labels,
   };
 }
 
@@ -167,6 +170,24 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
       }
     } else {
       (result as { callerAgentId?: string }).callerAgentId = previous.callerAgentId;
+    }
+    // labels and initialPrompt are legitimately mutable by hooks, unlike
+    // callerAgentId, so there's no immutability guard here. But a legacy hook
+    // that returns a fresh object without spreading the original request
+    // (e.g. `{ config, env }`) would otherwise silently wipe them: labels has
+    // a wire-schema default of {}, so an omitted key parses back to {} rather
+    // than staying untouched, and initialPrompt would parse to absent instead
+    // of its original value. Backfill from the original request whenever the
+    // hook's raw output doesn't mention the key at all.
+    const outputSpecifiesLabels =
+      typeof output === "object" && output !== null && "labels" in output;
+    if (!outputSpecifiesLabels) {
+      (result as { labels?: Record<string, string> }).labels = previous.labels;
+    }
+    const outputSpecifiesInitialPrompt =
+      typeof output === "object" && output !== null && "initialPrompt" in output;
+    if (!outputSpecifiesInitialPrompt) {
+      (result as { initialPrompt?: string }).initialPrompt = previous.initialPrompt;
     }
   }
   return result;
