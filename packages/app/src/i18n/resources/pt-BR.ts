@@ -279,7 +279,10 @@ export const ptBR: TranslationResources = {
       archived: "Arquivado",
       pending: "{{count}} pendente(s)",
       attention: "Atenção",
+      tokenBurnWarning: "Consumo alto",
+      tokenBurnDanger: "Consumo muito alto",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
       hostOffline: "Host offline",
       runningAgent: "Este agente ainda está em execução. Arquivá-lo interromperá o agente.",

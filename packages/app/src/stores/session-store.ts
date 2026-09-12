@@ -30,6 +30,7 @@ import type {
   AgentProvider,
   AgentMode,
   AgentCapabilityFlags,
+  AgentTokenRate,
   AgentUsage,
   AgentPersistenceHandle,
 } from "@getpaseo/protocol/agent-types";
@@ -94,6 +95,14 @@ export interface Agent {
    * while the agent is idle so rows show recent activity.
    */
   lastActivitySummary?: string;
+  /**
+   * Trailing-window token-burn rate (tokens/min), computed server-side. Claude only in phase 1
+   * — absent on other providers and on old daemons, not a fabricated zero. Feeds
+   * token-burn-tone-model.ts at the list owner; never rendered directly.
+   */
+  recentTokenRate?: AgentTokenRate;
+  /** Live-only lifetime token total alongside recentTokenRate — tooltip/long-press only. */
+  totalTokens?: number;
   title: string | null;
   cwd: string;
   workspaceId?: string;

@@ -279,7 +279,10 @@ export const ja: TranslationResources = {
       archived: "アーカイブ済み",
       pending: "{{count}}件保留中",
       attention: "注意",
+      tokenBurnWarning: "高消費",
+      tokenBurnDanger: "非常に高い消費",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · 合計 {{total}}",
     archiveSheet: {
       hostOffline: "ホストオフライン",
       runningAgent: "このエージェントはまだ実行中です。アーカイブするとエージェントが停止します。",

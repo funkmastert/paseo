@@ -278,7 +278,10 @@ export const ru: TranslationResources = {
       archived: "В архиве",
       pending: "На рассмотрении: {{count}}",
       attention: "Внимание",
+      tokenBurnWarning: "Высокий расход",
+      tokenBurnDanger: "Очень высокий расход",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · всего {{total}}",
     archiveSheet: {
       hostOffline: "Хост не в сети",
       runningAgent: "Этот агент всё ещё работает. Перемещение в архив остановит его.",

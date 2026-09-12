@@ -277,7 +277,10 @@ export const ko: TranslationResources = {
       archived: "보관됨",
       pending: "대기 {{count}}개",
       attention: "주의",
+      tokenBurnWarning: "높은 소비량",
+      tokenBurnDanger: "매우 높은 소비량",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · 총 {{total}}",
     archiveSheet: {
       hostOffline: "호스트 오프라인",
       runningAgent: "이 에이전트는 아직 실행 중입니다. 보관하면 에이전트가 중지됩니다.",

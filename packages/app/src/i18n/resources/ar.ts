@@ -276,7 +276,10 @@ export const ar: TranslationResources = {
       archived: "مؤرشف",
       pending: "{{count}}معلق",
       attention: "انتباه",
+      tokenBurnWarning: "استهلاك مرتفع",
+      tokenBurnDanger: "استهلاك مرتفع جدًا",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
     archiveSheet: {
       hostOffline: "Host غير متصل",
       runningAgent: "هذا الوكيل لا يزال قيد التشغيل. ستؤدي أرشفته إلى إيقاف الوكيل.",

@@ -338,6 +338,39 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("cwd");
   });
 
+  it("passes recentTokenRate through when the agent has one", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "child",
+        parentAgentId: "parent",
+        recentTokenRate: { tokensPerMinute: 6_200, asOfMs: 1_700_000_000_000 },
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]).toMatchObject({
+      recentTokenRate: { tokensPerMinute: 6_200, asOfMs: 1_700_000_000_000 },
+    });
+  });
+
+  it("omits recentTokenRate when the agent doesn't have one", () => {
+    setAgents([makeAgent({ id: "parent" }), makeAgent({ id: "child", parentAgentId: "parent" })]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]).not.toHaveProperty("recentTokenRate");
+  });
+
   it("defaults requiresAttention to false when the agent field is undefined", () => {
     setAgents([
       makeAgent({ id: "parent" }),

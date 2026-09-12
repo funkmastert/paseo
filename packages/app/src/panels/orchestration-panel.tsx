@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type ReactElement } from "react";
+import { useCallback, useMemo, useRef, useState, type ReactElement } from "react";
 import { FlatList, Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Network, Unlink } from "lucide-react-native";
@@ -8,6 +8,7 @@ import { AgentStatusDot } from "@/components/agent-status-dot";
 import { getProviderIcon } from "@/components/provider-icons";
 import { RowActionButton } from "@/components/row-action-button";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { TokenBurnBadge } from "@/components/token-burn-badge";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
@@ -39,6 +40,11 @@ import {
 } from "@/orchestration/orchestration-panel-model";
 import { useOrchestrationTree } from "@/orchestration/select";
 import { useArchiveFinishedInTree } from "@/orchestration/use-archive-finished-in-tree";
+import {
+  deriveTokenBurnTones,
+  type TokenBurnSibling,
+  type TokenBurnTone,
+} from "@/utils/token-burn-tone-model";
 
 const ThemedNetwork = withUnistyles(Network);
 const ThemedArchive = withUnistyles(Archive);
@@ -178,6 +184,7 @@ interface OrchestrationRowProps {
   row: OrchestrationFlatRow;
   serverId: string;
   canDetach: boolean;
+  tokenBurnTone?: TokenBurnTone;
   onPress: (agent: Agent) => void;
   onArchive: (agentId: string) => void;
   onDetach: (agentId: string) => void;
@@ -187,6 +194,7 @@ function OrchestrationRow({
   row,
   serverId,
   canDetach,
+  tokenBurnTone,
   onPress,
   onArchive,
   onDetach,
@@ -249,6 +257,14 @@ function OrchestrationRow({
         {agent.requiresAttention ? (
           <StatusBadge label={t("agentList.badges.attention")} variant="error" />
         ) : null}
+        {tokenBurnTone ? (
+          <TokenBurnBadge
+            tone={tokenBurnTone}
+            tokensPerMinute={agent.recentTokenRate?.tokensPerMinute ?? 0}
+            totalTokens={agent.totalTokens}
+            testID={`orchestration-token-burn-${agent.id}`}
+          />
+        ) : null}
         {agent.lastActivitySummary ? (
           <Text style={styles.subtitle} numberOfLines={1}>
             {agent.lastActivitySummary}
@@ -310,6 +326,20 @@ function OrchestrationPanel(): ReactElement {
   const roots = useOrchestrationTree({ serverId });
   const rows = useMemo(() => flattenOrchestrationTree(roots), [roots]);
   const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
+
+  // Collection rows never independently subscribe to token-rate data — the list owner derives
+  // the keyed tone model once per render (docs/coding-standards.md). previousTonesRef persists
+  // across renders so deriveTokenBurnTones can apply enter/exit hysteresis.
+  const previousTokenBurnTonesRef = useRef<ReadonlyMap<string, TokenBurnTone>>(new Map());
+  const tokenBurnTones = useMemo(() => {
+    const siblings: TokenBurnSibling[] = rows.map((row) => ({
+      id: row.agent.id,
+      recentTokenRate: row.agent.recentTokenRate,
+    }));
+    const next = deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
+    previousTokenBurnTonesRef.current = next;
+    return next;
+  }, [rows]);
   const finishedAgents = useMemo(() => collectFinishedAgentsAcrossRoots(roots), [roots]);
   const archiveFinished = useArchiveFinishedInTree({ serverId, agents: finishedAgents });
 
@@ -355,12 +385,20 @@ function OrchestrationPanel(): ReactElement {
         row={item}
         serverId={serverId}
         canDetach={canDetachSubagents}
+        tokenBurnTone={tokenBurnTones.get(item.agent.id)}
         onPress={handleOpenAgent}
         onArchive={archiveAgentRow}
         onDetach={detachAgentRow}
       />
     ),
-    [archiveAgentRow, canDetachSubagents, detachAgentRow, handleOpenAgent, serverId],
+    [
+      archiveAgentRow,
+      canDetachSubagents,
+      detachAgentRow,
+      handleOpenAgent,
+      serverId,
+      tokenBurnTones,
+    ],
   );
 
   const keyExtractor = useCallback((item: OrchestrationFlatRow) => item.agent.id, []);

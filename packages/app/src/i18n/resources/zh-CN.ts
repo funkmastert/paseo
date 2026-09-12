@@ -276,7 +276,10 @@ export const zhCN: TranslationResources = {
       archived: "已归档",
       pending: "{{count}} 个待处理",
       attention: "需要注意",
+      tokenBurnWarning: "消耗较高",
+      tokenBurnDanger: "消耗过高",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · 共 {{total}}",
     archiveSheet: {
       hostOffline: "Host 离线",
       runningAgent: "此 Agent 仍在运行。归档会停止该 Agent。",

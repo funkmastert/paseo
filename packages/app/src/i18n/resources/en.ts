@@ -274,7 +274,10 @@ export const en = {
       archived: "Archived",
       pending: "{{count}} pending",
       attention: "Attention",
+      tokenBurnWarning: "High burn",
+      tokenBurnDanger: "Very high burn",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
       hostOffline: "Host offline",
       runningAgent: "This agent is still running. Archiving it will stop the agent.",

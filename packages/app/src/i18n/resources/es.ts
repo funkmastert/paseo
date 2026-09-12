@@ -279,7 +279,10 @@ export const es: TranslationResources = {
       archived: "Archivado",
       pending: "{{count}}pendiente",
       attention: "Atención",
+      tokenBurnWarning: "Consumo alto",
+      tokenBurnDanger: "Consumo muy alto",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
       hostOffline: "Hostfuera de línea",
       runningAgent: "Este agente todavía está ejecutándose. Archivarlo detendrá al agente.",

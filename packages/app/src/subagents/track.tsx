@@ -1,10 +1,11 @@
-import { useCallback, useMemo, type ReactElement } from "react";
+import { useCallback, useMemo, useRef, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
 import { RowActionButton } from "@/components/row-action-button";
+import { TokenBurnBadge } from "@/components/token-burn-badge";
 import { ComposerTrackActions, ComposerTrackPill, ComposerTrackRow } from "@/composer/tracks";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
@@ -13,6 +14,11 @@ import {
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
 import type { Theme } from "@/styles/theme";
+import {
+  deriveTokenBurnTones,
+  type TokenBurnSibling,
+  type TokenBurnTone,
+} from "@/utils/token-burn-tone-model";
 import type { SubagentRow } from "./select";
 import type { ArchiveFinishedStatus } from "./use-archive-finished";
 import {
@@ -67,6 +73,20 @@ export function SubagentsTrack({
 }: SubagentsTrackProps): ReactElement | null {
   const { t } = useTranslation();
 
+  // Collection rows never independently subscribe to token-rate data — the list owner derives
+  // the keyed tone model once per render (docs/coding-standards.md). previousTonesRef persists
+  // across renders so deriveTokenBurnTones can apply enter/exit hysteresis. Must run before the
+  // early return below so hook order stays stable regardless of `rows`.
+  const previousTokenBurnTonesRef = useRef<ReadonlyMap<string, TokenBurnTone>>(new Map());
+  const tokenBurnTones = useMemo(() => {
+    const siblings: TokenBurnSibling[] = rows
+      .filter((row): row is Extract<SubagentRow, { kind: "paseo" }> => row.kind === "paseo")
+      .map((row) => ({ id: row.id, recentTokenRate: row.recentTokenRate }));
+    const next = deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
+    previousTokenBurnTonesRef.current = next;
+    return next;
+  }, [rows]);
+
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";
   if (rows.length === 0 && !isArchivingFinished && !isArchiveFinishedFailed) {
@@ -98,6 +118,7 @@ export function SubagentsTrack({
           key={row.id}
           row={row}
           serverId={serverId}
+          tokenBurnTone={tokenBurnTones.get(row.id)}
           onOpenSubagent={onOpenSubagent}
           onOpenProviderSubagent={onOpenProviderSubagent}
           onArchiveSubagent={onArchiveSubagent}
@@ -169,6 +190,7 @@ function ArchiveFinishedRow({
 interface SubagentsTrackRowProps {
   serverId: string;
   row: SubagentRow;
+  tokenBurnTone?: TokenBurnTone;
   onOpenSubagent: (id: string) => void;
   onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
@@ -178,6 +200,7 @@ interface SubagentsTrackRowProps {
 function SubagentsTrackRow({
   serverId,
   row,
+  tokenBurnTone,
   onOpenSubagent,
   onOpenProviderSubagent,
   onArchiveSubagent,
@@ -188,6 +211,7 @@ function SubagentsTrackRow({
   const presentation = useMemo(() => buildRowPresentation(row, serverId), [row, serverId]);
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
+  const tokensPerMinute = row.kind === "paseo" ? (row.recentTokenRate?.tokensPerMinute ?? 0) : 0;
   const handlePress = useCallback(() => {
     if (row.kind === "provider") {
       onOpenProviderSubagent(row.parentAgentId, row.id);
@@ -215,6 +239,13 @@ function SubagentsTrackRow({
             {presentation.subtitle}
           </Text>
         ) : null}
+        {tokenBurnTone && row.kind === "paseo" ? (
+          <TokenBurnBadge
+            tone={tokenBurnTone}
+            tokensPerMinute={tokensPerMinute}
+            testID={`subagents-track-token-burn-${row.id}`}
+          />
+        ) : null}
         {row.kind === "paseo" ? (
           <SubagentRowActions
             rowId={row.id}
@@ -235,6 +266,8 @@ function SubagentsTrackRow({
       presentation,
       row.kind,
       row.id,
+      tokenBurnTone,
+      tokensPerMinute,
     ],
   );
 

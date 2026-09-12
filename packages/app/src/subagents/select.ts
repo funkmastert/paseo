@@ -6,6 +6,7 @@ import { useSessionStore, type Agent } from "@/stores/session-store";
 import { trackActiveProviderSubagentParent } from "@/data/push-router";
 import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
+import type { AgentTokenRate } from "@getpaseo/protocol/agent-types";
 
 export interface PaseoSubagentRow {
   kind: "paseo";
@@ -20,6 +21,8 @@ export interface PaseoSubagentRow {
   turn: Agent["turn"];
   requiresAttention: boolean;
   createdAt: Agent["createdAt"];
+  /** Raw wire value, passed through for the list owner's token-burn-tone-model computation. */
+  recentTokenRate?: AgentTokenRate;
 }
 
 export interface ProviderSubagentRow {
@@ -71,6 +74,7 @@ export function toSubagentRow(agent: Agent): PaseoSubagentRow {
     turn: agent.turn,
     requiresAttention: agent.requiresAttention ?? false,
     createdAt: agent.createdAt,
+    ...(agent.recentTokenRate ? { recentTokenRate: agent.recentTokenRate } : {}),
   };
 }
 
