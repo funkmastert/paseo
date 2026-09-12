@@ -63,11 +63,15 @@ describe("contribute (index.server)", () => {
     expect(configGet).not.toHaveBeenCalled();
     expect(providersSnapshot).not.toHaveBeenCalled();
 
-    // Flush the microtask queue.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Flush the microtask queue, including the chained policy -> catalog
+    // refresh (policyCache.forceRefresh().then(() => catalogCache.forceRefresh())).
+    for (let i = 0; i < 5; i += 1) {
+      await Promise.resolve();
+    }
 
-    expect(configGet).toHaveBeenCalledTimes(1);
+    // Twice: the pool cache and the role-policy cache each read daemon
+    // config independently (mirrors pool.ts's own config.get() call).
+    expect(configGet).toHaveBeenCalledTimes(2);
     expect(providersSnapshot).toHaveBeenCalledTimes(1);
 
     cleanup();
