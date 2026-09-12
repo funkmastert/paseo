@@ -33,6 +33,7 @@ import type {
   AgentTokenRate,
   AgentUsage,
   AgentPersistenceHandle,
+  TokenBurnAlert,
 } from "@getpaseo/protocol/agent-types";
 import type {
   ServerInfoStatusPayload,
@@ -103,6 +104,12 @@ export interface Agent {
   recentTokenRate?: AgentTokenRate;
   /** Live-only lifetime token total alongside recentTokenRate — tooltip/long-press only. */
   totalTokens?: number;
+  /**
+   * Live breach state set by the daemon-side token-burn monitor. Attention-worthy independent
+   * of attentionReason — see agent-state-bucket.ts and
+   * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
+   */
+  tokenBurnAlert?: TokenBurnAlert;
   title: string | null;
   cwd: string;
   workspaceId?: string;
