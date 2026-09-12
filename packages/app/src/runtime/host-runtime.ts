@@ -2166,7 +2166,7 @@ export class HostRuntimeStore {
       // good (the daemon dedupes by snapshot fingerprint). Mark the caches stale so active
       // queries refetch now and evicted ones on their next mount.
       void invalidateCheckoutGitQueriesForServer(queryClient, serverId);
-      invalidateServerDataQueriesAfterReconnect({ queryClient, serverId });
+      invalidateServerDataQueriesAfterReconnect({ queryClient, serverId, client: snapshot.client });
       void queryClient.invalidateQueries({ queryKey: schedulesQueryBaseKey });
     }
   }

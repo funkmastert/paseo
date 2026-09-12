@@ -3,6 +3,7 @@ import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore, type Agent } from "@/stores/session-store";
+import { trackActiveProviderSubagentParent } from "@/data/push-router";
 import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
 
@@ -165,6 +166,16 @@ export function useSubagentsForParent(params: SelectSubagentsParams): SubagentRo
       () => undefined,
     );
   }, [client, params.parentAgentId, params.serverId, supported]);
+
+  // Registers this mount's interest in the parent's provider-subagent list so a reconnect can
+  // repair it (`invalidateServerDataQueriesAfterReconnect` in push-router.ts) even though the
+  // `DaemonClient` instance never changes identity across reconnects and this effect above never
+  // refires on its own. Refcounted so multiple mounted parents (nested panels, tab switches)
+  // don't drop tracking for each other on unmount.
+  useEffect(() => {
+    if (!supported) return;
+    return trackActiveProviderSubagentParent(params.serverId, params.parentAgentId);
+  }, [params.parentAgentId, params.serverId, supported]);
 
   return useMemo(() => {
     if (params.providerParentSubagentId) return providerRows;

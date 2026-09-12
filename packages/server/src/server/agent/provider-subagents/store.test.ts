@@ -84,6 +84,50 @@ describe("ProviderSubagentStore", () => {
     });
   });
 
+  test("lastActivityAt tracks timeline chatter that arrives without a descriptor upsert", () => {
+    const subagents = new ProviderSubagentStore();
+    subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      status: "running",
+      timestamp: "2026-07-12T10:00:00.000Z",
+    });
+    subagents.apply("parent-a", "codex", {
+      type: "timeline",
+      id: "child-1",
+      item: { type: "assistant_message", text: "still working" },
+      timestamp: "2026-07-12T10:05:00.000Z",
+    });
+
+    // A "timeline" input event streams content without touching the descriptor's `updatedAt` —
+    // a subagent that's only chatting through the timeline must not look stale by that field
+    // alone.
+    expect(subagents.lastActivityAt("parent-a", "child-1")).toBe("2026-07-12T10:05:00.000Z");
+  });
+
+  test("lastActivityAt falls back to the descriptor's own updatedAt when it is newer", () => {
+    const subagents = new ProviderSubagentStore();
+    subagents.apply("parent-a", "codex", {
+      type: "timeline",
+      id: "child-1",
+      item: { type: "assistant_message", text: "early chatter" },
+      timestamp: "2026-07-12T10:00:00.000Z",
+    });
+    subagents.apply("parent-a", "codex", {
+      type: "upsert",
+      id: "child-1",
+      status: "completed",
+      timestamp: "2026-07-12T10:05:00.000Z",
+    });
+
+    expect(subagents.lastActivityAt("parent-a", "child-1")).toBe("2026-07-12T10:05:00.000Z");
+  });
+
+  test("lastActivityAt returns null for an unknown descriptor", () => {
+    const subagents = new ProviderSubagentStore();
+    expect(subagents.lastActivityAt("parent-a", "missing-child")).toBeNull();
+  });
+
   test("pages provider history on projected item boundaries", () => {
     const subagents = new ProviderSubagentStore();
     for (let index = 0; index < 101; index += 1) {

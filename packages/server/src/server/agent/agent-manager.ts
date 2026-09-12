@@ -93,6 +93,10 @@ import { withTimeout } from "../../utils/promise-timeout.js";
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+// Reconciliation for provider subagents stuck "running" because their terminal SDK event never
+// arrived (docs/agent-lifecycle.md caveats). See docs/plans/2026-09-12-003-fix-subagent-list-accuracy-plan.md.
+const DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS = 15 * 60 * 1000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -318,6 +322,11 @@ export interface AgentManagerOptions {
     agentId: string;
     expectedTurnId: string;
   }) => Promise<void>;
+  /** How often `sweepStaleProviderSubagents` runs once `startProviderSubagentSweep` is called. */
+  staleProviderSubagentSweepIntervalMs?: number;
+  /** How long a "running" provider subagent may go without timeline/descriptor activity before
+   * the sweep terminalizes it, even while its parent agent stays open. */
+  staleProviderSubagentLivenessMs?: number;
   logger: Logger;
 }
 
@@ -744,6 +753,9 @@ export class AgentManager {
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  private readonly staleProviderSubagentSweepIntervalMs: number;
+  private readonly staleProviderSubagentLivenessMs: number;
+  private staleProviderSubagentSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
@@ -766,6 +778,9 @@ export class AgentManager {
         options.rescueTimeouts?.interruptSessionMs ?? INTERRUPT_SESSION_TIMEOUT_MS,
     };
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
+    const providerSubagentSweepConfig = this.resolveProviderSubagentSweepConfig(options);
+    this.staleProviderSubagentSweepIntervalMs = providerSubagentSweepConfig.sweepIntervalMs;
+    this.staleProviderSubagentLivenessMs = providerSubagentSweepConfig.livenessMs;
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
       timers: { setTimeout, clearTimeout },
@@ -778,6 +793,19 @@ export class AgentManager {
       providerDefinitions: options.providerDefinitions ?? {},
       clients: options.clients ?? {},
     });
+  }
+
+  private resolveProviderSubagentSweepConfig(options: AgentManagerOptions): {
+    sweepIntervalMs: number;
+    livenessMs: number;
+  } {
+    return {
+      sweepIntervalMs:
+        options.staleProviderSubagentSweepIntervalMs ??
+        DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS,
+      livenessMs:
+        options.staleProviderSubagentLivenessMs ?? DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS,
+    };
   }
 
   private configurePaseoTools(options: AgentManagerOptions): void {
@@ -1711,6 +1739,115 @@ export class AgentManager {
       });
       this.dispatch({ type: "provider_subagent", event });
     }
+  }
+
+  /**
+   * Periodic reconciliation for provider subagents that `cancelRunningProviderSubagents` never
+   * reaches: it only fires from `closeAgentRuntime`, so a descriptor whose terminal SDK event was
+   * dropped stays "running" forever while its parent sits open (root cause #2 in the fix plan).
+   * Runs on an interval independent of any single agent's lifecycle — see
+   * `startProviderSubagentSweep`.
+   */
+  startProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void this.sweepStaleProviderSubagents().catch((error) => {
+        this.logger.error({ err: error }, "Failed to sweep stale provider subagents");
+      });
+    }, this.staleProviderSubagentSweepIntervalMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.staleProviderSubagentSweepTimer = timer;
+  }
+
+  stopProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      clearInterval(this.staleProviderSubagentSweepTimer);
+      this.staleProviderSubagentSweepTimer = null;
+    }
+  }
+
+  /**
+   * Terminalizes "running" provider-subagent descriptors that can be positively evaluated as
+   * stuck, via two independent signals:
+   *  - the owning agent is closed (no longer live) or archived — defense-in-depth for a
+   *    `cancelRunningProviderSubagents` call that was skipped or lost.
+   *  - no descriptor or timeline activity for `staleProviderSubagentLivenessMs`, even though the
+   *    parent agent is still open — the case `cancelRunningProviderSubagents` structurally can't
+   *    catch, since nothing closes the parent.
+   * A descriptor this can't positively evaluate (registry unavailable/erroring, no activity
+   * timestamp to read) is left alone rather than guessed at — false terminalization is worse than
+   * a late one.
+   */
+  async sweepStaleProviderSubagents(now: Date = new Date()): Promise<void> {
+    const runningByParent = new Map<string, ProviderSubagentDescriptor[]>();
+    for (const subagent of this.providerSubagents.listAll()) {
+      if (subagent.status !== "running") {
+        continue;
+      }
+      const siblings = runningByParent.get(subagent.parentAgentId);
+      if (siblings) {
+        siblings.push(subagent);
+      } else {
+        runningByParent.set(subagent.parentAgentId, [subagent]);
+      }
+    }
+    if (runningByParent.size === 0) {
+      return;
+    }
+
+    for (const [parentAgentId, subagents] of runningByParent) {
+      const parentClosed = await this.isProviderSubagentParentClosed(parentAgentId);
+      for (const subagent of subagents) {
+        if (parentClosed) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+          continue;
+        }
+        const lastActivityAt = this.providerSubagents.lastActivityAt(parentAgentId, subagent.id);
+        if (!lastActivityAt) {
+          continue;
+        }
+        const lastActivityMs = Date.parse(lastActivityAt);
+        if (Number.isNaN(lastActivityMs)) {
+          continue;
+        }
+        if (now.getTime() - lastActivityMs >= this.staleProviderSubagentLivenessMs) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+        }
+      }
+    }
+  }
+
+  /** `true` only once positively confirmed closed/archived; `false` for a live or unresolvable
+   * agent so the caller falls back to the liveness check instead of guessing. */
+  private async isProviderSubagentParentClosed(parentAgentId: string): Promise<boolean> {
+    if (this.agents.has(parentAgentId)) {
+      return false;
+    }
+    if (!this.registry) {
+      return false;
+    }
+    try {
+      const record = await this.registry.get(parentAgentId);
+      // Mirrors sweepOrphanedSchedules: a missing or archived record is the positive signal that
+      // the agent is gone for good.
+      return !record || Boolean(record.archivedAt);
+    } catch {
+      return false;
+    }
+  }
+
+  private terminalizeStaleProviderSubagent(
+    parentAgentId: string,
+    subagent: ProviderSubagentDescriptor,
+  ): void {
+    const event = this.providerSubagents.apply(parentAgentId, subagent.provider, {
+      type: "upsert",
+      id: subagent.id,
+      status: "canceled",
+    });
+    this.dispatch({ type: "provider_subagent", event });
   }
 
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {

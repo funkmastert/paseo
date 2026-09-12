@@ -22,6 +22,7 @@ import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
+import type { ProviderSubagentStore } from "./provider-subagents/store.js";
 import type {
   AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
@@ -4818,6 +4819,172 @@ test("force provider hydration removes children absent from current history", as
       subagentId: "removed-by-rewind",
     },
   });
+});
+
+test("sweepStaleProviderSubagents cancels a running provider subagent stale past the liveness threshold, even while its parent stays open", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-stale-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+    staleProviderSubagentLivenessMs: 15 * 60 * 1000,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: {
+      type: "upsert",
+      id: "stuck-child",
+      title: "Stuck child",
+      status: "running",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Its terminal SDK event never arrives, and the parent agent stays open — the case
+  // `cancelRunningProviderSubagents` (only invoked from `closeAgentRuntime`) structurally can't
+  // reach. Just under the 15-minute liveness threshold: left alone.
+  await manager.sweepStaleProviderSubagents(new Date("2026-01-01T00:14:59.000Z"));
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "stuck-child", status: "running" }),
+  ]);
+
+  // Past the threshold: the sweep terminalizes it.
+  await manager.sweepStaleProviderSubagents(new Date("2026-01-01T00:15:00.000Z"));
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "stuck-child", status: "canceled" }),
+  ]);
+});
+
+test("sweepStaleProviderSubagents leaves a fresh running provider subagent alone", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-fresh-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "fresh-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "fresh-child", status: "running" }),
+  ]);
+});
+
+test("sweepStaleProviderSubagents cancels a running provider subagent whose parent is confirmed closed and archived", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-archived-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "orphaned-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Simulates the state `cancelRunningProviderSubagents` normally prevents: the parent's runtime
+  // is gone and its record is archived, but the descriptor never got canceled (e.g. a crash
+  // between the two). No public path reaches this — `closeAgentRuntime` always cancels running
+  // children before removing the live agent — so it's reproduced directly for this
+  // defense-in-depth branch.
+  const managerInternals = manager as unknown as { agents: Map<string, unknown> };
+  managerInternals.agents.delete(snapshot.id);
+  const record = await storage.get(snapshot.id);
+  if (!record) {
+    throw new Error("expected a persisted record for the created agent");
+  }
+  await storage.upsert({ ...record, archivedAt: "2026-01-01T00:00:00.000Z" });
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(
+    (manager as unknown as { providerSubagents: ProviderSubagentStore }).providerSubagents.list(
+      snapshot.id,
+    ),
+  ).toEqual([expect.objectContaining({ id: "orphaned-child", status: "canceled" })]);
+});
+
+test("sweepStaleProviderSubagents leaves a running provider subagent alone when its parent is merely off-memory (not positively closed)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-ambiguous-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "unloaded-parent-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Not live and not archived is ambiguous — it could simply be lazily unloaded, matching the
+  // "never touch what it can't positively evaluate" rule. Its own descriptor is fresh, so the
+  // liveness check must not fire either.
+  const managerInternals = manager as unknown as { agents: Map<string, unknown> };
+  managerInternals.agents.delete(snapshot.id);
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(
+    (manager as unknown as { providerSubagents: ProviderSubagentStore }).providerSubagents.list(
+      snapshot.id,
+    ),
+  ).toEqual([expect.objectContaining({ id: "unloaded-parent-child", status: "running" })]);
 });
 
 test("reloadAgentSession preserves current title when config title is unset", async () => {

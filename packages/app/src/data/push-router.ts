@@ -16,6 +16,7 @@ import {
   providersSnapshotQueryKey,
   providersSnapshotQueryRoot,
 } from "@/data/providers-snapshot";
+import { refreshProviderSubagents } from "@/subagents/provider-store";
 
 type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
@@ -139,6 +140,63 @@ const RECONNECT_REPAIR_POLICIES: ReconnectRepairPolicy[] = [
 ];
 const reconnectSubscriptionRepairsByServerId = new Map<string, Set<() => void>>();
 
+type ProviderSubagentsRefreshClient = Pick<
+  import("@getpaseo/client/internal/daemon-client").DaemonClient,
+  "listProviderSubagents"
+>;
+
+// Reconnect repair for the provider-subagent list lives outside `RECONNECT_REPAIR_POLICIES`
+// because it re-issues an RPC (`refreshProviderSubagents`) rather than invalidating a
+// react-query cache entry — the descriptor store is a plain zustand map, not a query. The active
+// set is refcounted so multiple mounted consumers of the same (serverId, parentAgentId) — e.g.
+// `useSubagentsForParent` and `provider-subagent-panel.tsx` — don't clobber each other's tracking
+// on unmount.
+const activeProviderSubagentParentsByServerId = new Map<string, Map<string, number>>();
+
+/** Registers a mounted consumer's interest in a parent's provider-subagent list so a later
+ * reconnect can re-fetch it. Returns the matching unregister function; call it on unmount or
+ * before re-registering for a different parent. */
+export function trackActiveProviderSubagentParent(
+  serverId: string,
+  parentAgentId: string,
+): () => void {
+  let parents = activeProviderSubagentParentsByServerId.get(serverId);
+  if (!parents) {
+    parents = new Map();
+    activeProviderSubagentParentsByServerId.set(serverId, parents);
+  }
+  parents.set(parentAgentId, (parents.get(parentAgentId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const current = activeProviderSubagentParentsByServerId.get(serverId);
+    const count = current?.get(parentAgentId);
+    if (!current || count === undefined) return;
+    if (count <= 1) {
+      current.delete(parentAgentId);
+      if (current.size === 0) {
+        activeProviderSubagentParentsByServerId.delete(serverId);
+      }
+    } else {
+      current.set(parentAgentId, count - 1);
+    }
+  };
+}
+
+function repairProviderSubagentsAfterReconnect(input: {
+  serverId: string;
+  client: ProviderSubagentsRefreshClient;
+}): void {
+  const parents = activeProviderSubagentParentsByServerId.get(input.serverId);
+  if (!parents) return;
+  for (const parentAgentId of parents.keys()) {
+    void refreshProviderSubagents(input.client, input.serverId, parentAgentId).catch(
+      () => undefined,
+    );
+  }
+}
+
 export function checkoutDiffPushRoute(input: {
   enabled: boolean;
   serverId: string;
@@ -178,6 +236,8 @@ export function workspaceTerminalsPushRoute(input: {
 export function invalidateServerDataQueriesAfterReconnect(input: {
   queryClient: QueryClient;
   serverId: string;
+  /** When present, also re-issues `listProviderSubagents` for every tracked parent (Fix 1). */
+  client?: ProviderSubagentsRefreshClient | null;
 }): void {
   for (const policy of RECONNECT_REPAIR_POLICIES) {
     policy.invalidate(input);
@@ -185,6 +245,9 @@ export function invalidateServerDataQueriesAfterReconnect(input: {
   for (const repairSubscriptions of reconnectSubscriptionRepairsByServerId.get(input.serverId) ??
     []) {
     repairSubscriptions();
+  }
+  if (input.client) {
+    repairProviderSubagentsAfterReconnect({ serverId: input.serverId, client: input.client });
   }
 }
 

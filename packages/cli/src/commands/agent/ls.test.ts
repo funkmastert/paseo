@@ -1,5 +1,51 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentLsFetchOptions } from "./ls.js";
+import type { AgentSnapshotPayload } from "@getpaseo/protocol/messages";
+import { buildAgentLsFetchOptions, toListItem } from "./ls.js";
+
+const BASE_AGENT: AgentSnapshotPayload = {
+  id: "00000000-0000-4000-8000-000000000001",
+  provider: "claude",
+  cwd: "/tmp/project",
+  model: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  lastUserMessageAt: null,
+  status: "idle",
+  capabilities: {
+    supportsStreaming: true,
+    supportsSessionPersistence: true,
+    supportsDynamicModes: true,
+    supportsMcpServers: true,
+    supportsReasoningStream: true,
+    supportsToolInvocations: true,
+  },
+  currentModeId: null,
+  availableModes: [],
+  pendingPermissions: [],
+  persistence: null,
+  title: null,
+  labels: {},
+};
+
+describe("toListItem", () => {
+  it("carries archivedAt and labels through for --json output", () => {
+    const item = toListItem({
+      ...BASE_AGENT,
+      archivedAt: "2026-01-02T00:00:00.000Z",
+      labels: { "paseo.parentAgentId": "parent-1" },
+    });
+
+    expect(item.archivedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(item.labels).toEqual({ "paseo.parentAgentId": "parent-1" });
+  });
+
+  it("defaults archivedAt to null for an active agent", () => {
+    const item = toListItem(BASE_AGENT);
+
+    expect(item.archivedAt).toBeNull();
+    expect(item.labels).toEqual({});
+  });
+});
 
 describe("buildAgentLsFetchOptions", () => {
   it("fetches active agents by default", () => {
