@@ -2,8 +2,7 @@ const fs = require("fs");
 const path = require("path");
 
 const { smokePackagedDesktopApp } = require("../e2e/packaged-app-smoke.js");
-
-const EXECUTABLE_NAME = "Paseo";
+const { resolveExecutableNameFromContext } = require("./executable-name.js");
 
 // electron-builder arch enum → Node.js arch string
 const ARCH_MAP = { 0: "ia32", 1: "x64", 2: "armv7l", 3: "arm64", 4: "universal" };
@@ -73,11 +72,22 @@ function pruneSharpLibvips(nodeModules, platform, arch) {
   }
 }
 
-function pruneNativeModules(appOutDir, platform, arch) {
+function pruneNativeModules(appOutDir, platform, arch, executableName) {
   const resourcesDir =
     platform === "darwin"
-      ? path.join(appOutDir, `${EXECUTABLE_NAME}.app`, "Contents", "Resources")
+      ? path.join(appOutDir, `${executableName}.app`, "Contents", "Resources")
       : path.join(appOutDir, "resources");
+
+  // The resources dir is derived from the packaged executable name (see
+  // executable-name.js). If it doesn't exist, that name resolution is wrong
+  // rather than there being nothing to prune — fail loudly instead of
+  // silently shipping an unpruned, oversized bundle.
+  if (!fs.existsSync(resourcesDir)) {
+    throw new Error(
+      `afterPack: expected packaged resources at ${resourcesDir} but it does not exist. ` +
+        `Executable name resolution (${executableName}) may not match the actual packaged app.`,
+    );
+  }
 
   const nodeModules = path.join(resourcesDir, "app.asar.unpacked", "node_modules");
   if (!fs.existsSync(nodeModules)) return;
@@ -112,8 +122,9 @@ function fmtMB(bytes) {
 exports.default = async function afterPack(context) {
   const platform = context.electronPlatformName;
   const arch = ARCH_MAP[context.arch] || process.arch;
+  const executableName = resolveExecutableNameFromContext(context);
 
-  pruneNativeModules(context.appOutDir, platform, arch);
+  pruneNativeModules(context.appOutDir, platform, arch, executableName);
 
   if (platform === "linux" || platform === "win32") {
     if (arch !== process.arch) {
@@ -121,17 +132,18 @@ exports.default = async function afterPack(context) {
         `Skipping packaged-app smoke: build arch ${arch} differs from host ${process.arch}.`,
       );
     } else {
-      await smokeUnpackedAppIfRequested(context.appOutDir);
+      await smokeUnpackedAppIfRequested(context.appOutDir, executableName);
     }
   }
 };
 
-async function smokeUnpackedAppIfRequested(appOutDir) {
+async function smokeUnpackedAppIfRequested(appOutDir, executableName) {
   if (process.env.PASEO_DESKTOP_SMOKE !== "1") {
     return;
   }
 
   await smokePackagedDesktopApp({
     appPath: appOutDir,
+    executableName,
   });
 }
