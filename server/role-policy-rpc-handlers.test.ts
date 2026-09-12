@@ -68,6 +68,32 @@ function context(paseo: PluginHandlerContext["paseo"]): PluginHandlerContext {
   return { paseo };
 }
 
+/**
+ * Simulates the real daemon config store: `patch` mutates a shared,
+ * in-memory document that subsequent `get` calls observe, with a small
+ * delay on both so two in-flight write() calls actually interleave instead
+ * of resolving synchronously in call order.
+ */
+function fakeConcurrentPaseo(initialConfig: Record<string, unknown>): PluginHandlerContext["paseo"] {
+  let stored = { ...initialConfig };
+  const get = vi.fn(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return { requestId: "r", config: { ...stored } };
+  });
+  const patch = vi.fn(async (p: Record<string, unknown>) => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    stored = { ...stored, ...p };
+    return { requestId: "p", config: {} };
+  });
+  return {
+    config: { get, patch },
+    providers: {
+      listModels: vi.fn().mockResolvedValue({ models: [] }),
+      refresh: vi.fn().mockResolvedValue({}),
+    },
+  } as unknown as PluginHandlerContext["paseo"];
+}
+
 describe("role-model-policy RPC handlers", () => {
   describe("read", () => {
     it("returns the fresh-read policy, not the (possibly stale) cache", async () => {
@@ -170,6 +196,33 @@ describe("role-model-policy RPC handlers", () => {
       if (result.status !== "saved") throw new Error("expected saved");
       expect(result.warning).toMatch(/cache reload exploded/);
       expect(policyCache.forceRefresh).toHaveBeenCalledTimes(1);
+    });
+
+    it("F1: concurrent writes against the same revision — exactly one saved, one conflict, final doc is the saved one", async () => {
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps());
+      const paseo = fakeConcurrentPaseo({ agentModelPolicy: VALID_POLICY });
+
+      const patchA = {
+        roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "workerA" } : r)),
+        agentTypeMappings: VALID_POLICY.agentTypeMappings,
+      };
+      const patchB = {
+        roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "workerB" } : r)),
+        agentTypeMappings: VALID_POLICY.agentTypeMappings,
+      };
+
+      const [resultA, resultB] = await Promise.all([
+        handlers.write({ revision: VALID_POLICY.revision, patch: patchA }, context(paseo)),
+        handlers.write({ revision: VALID_POLICY.revision, patch: patchB }, context(paseo)),
+      ]);
+
+      expect([resultA.status, resultB.status].sort()).toEqual(["conflict", "saved"]);
+
+      const saved = resultA.status === "saved" ? resultA : resultB;
+      if (saved.status !== "saved") throw new Error("expected exactly one saved result");
+
+      const final = await handlers.read({}, context(paseo));
+      expect(final.policy).toEqual(saved.policy);
     });
 
     it("rejects writes while the stored policy is malformed, without touching storage", async () => {

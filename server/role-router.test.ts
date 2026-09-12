@@ -226,7 +226,12 @@ describe("createRoleRouter", () => {
     expect(first?.config.model).toBe("claude-opus-4"); // still uses models[0]
     expect(second?.config.model).toBe("claude-opus-4");
     expect(onRoleUnavailable).toHaveBeenCalledTimes(1);
-    expect(onRoleUnavailable).toHaveBeenCalledWith({ callerAgentId: "c1", roleId: "worker", requestedModel: "claude/claude-opus-4" });
+    expect(onRoleUnavailable).toHaveBeenCalledWith({
+      callerAgentId: "c1",
+      roleId: "worker",
+      requestedModel: "claude/claude-opus-4",
+      reason: "no-eligible-model",
+    });
 
     // Recovery: catalog now has the model and the worker is healthy -> selected, not unavailable.
     const router2 = createRoleRouter({
@@ -267,6 +272,69 @@ describe("createRoleRouter", () => {
     currentCatalog = new Map(); // goes unavailable again
     router(request({ callerAgentId: "c1" }), fakeContext);
     expect(onRoleUnavailable).toHaveBeenCalledTimes(2); // re-armed
+  });
+
+  it("F2: cross-family rewrite to an unregistered provider family passes through untouched and fires role-unavailable with a distinct reason", () => {
+    const onRoleUnavailable = vi.fn();
+    const pool: ResolvedPool = { workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "leader" } };
+    // Registry the account router actually knows about: "deadfamily" was
+    // removed from daemon config, so it's absent here even though the
+    // role's models[0] still names it.
+    const providerIds = { get: () => new Set(["claude", "worker-a", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const router = createRoleRouter({
+      ...baseOptions({ poolCache: fakePoolCache(pool), onRoleUnavailable }),
+      policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
+      catalogCache: fakeCatalogCache(new Map()), // "deadfamily" never resolves in the catalog either
+      providerIds,
+    });
+
+    const initial = request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } });
+    const result = router(initial, fakeContext);
+
+    expect(result).toBeUndefined(); // pass-through = recovered, not blocked: request untouched
+    const finalProvider = (result ?? initial.request).config.provider;
+    expect(providerIds.get().has(finalProvider)).toBe(true); // still a provider the registry actually knows
+
+    expect(onRoleUnavailable).toHaveBeenCalledTimes(1);
+    expect(onRoleUnavailable).toHaveBeenCalledWith({
+      callerAgentId: "c1",
+      roleId: "worker",
+      requestedModel: "deadfamily/some-model",
+      reason: "provider-not-registered",
+    });
+  });
+
+  it("F3: never propagates a throw from the policy cache — logs and returns undefined (pass-through)", () => {
+    const throwingPolicyCache = {
+      get: () => {
+        throw new Error("policy cache exploded");
+      },
+      isMalformed: () => false,
+      lastError: () => undefined,
+      forceRefresh: vi.fn(),
+      stop: vi.fn(),
+    };
+    const router = createRoleRouter(baseOptions({ policyCache: throwingPolicyCache }));
+
+    let result: ReturnType<typeof router> = undefined;
+    expect(() => {
+      result = router(request({ callerAgentId: "c1" }), fakeContext);
+    }).not.toThrow();
+    expect(result).toBeUndefined();
+  });
+
+  it("F3: never propagates a throw from deep in role resolution (missing standard role) — logs and returns undefined", () => {
+    // A policy missing every standard role forces requireStandardRole (via
+    // resolveRole's classify()) to throw when there's no title/prompt text
+    // to classify against.
+    const corruptPolicy = { ...DEFAULT_POLICY, roles: [] };
+    const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(corruptPolicy) }));
+
+    let result: ReturnType<typeof router> = undefined;
+    expect(() => {
+      result = router(request({ callerAgentId: "c1" }), fakeContext);
+    }).not.toThrow();
+    expect(result).toBeUndefined();
   });
 
   it("never skips or blocks a requested subagent create in any outcome", () => {

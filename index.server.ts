@@ -74,13 +74,16 @@ export default function contribute(server: PluginServerContext) {
       poolCache,
       health,
       recentAgentTypes,
+      providerIds,
       onDeclaredRoleUnknown: (episode) =>
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
         ),
       onRoleUnavailable: (episode) =>
         console.error(
-          `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
+          episode.reason === "provider-not-registered"
+            ? `[claude-account-pool] role-router: role "${episode.roleId}"'s resolved provider is not registered with the daemon for caller "${episode.callerAgentId}" (wanted "${episode.requestedModel}"); passing the request through untouched`
+            : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
         ),
     });
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({

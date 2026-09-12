@@ -59,6 +59,84 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * Serializes async work through a promise chain: each queued task starts
+ * only after the previous one has settled (fulfilled or rejected), so a
+ * caller's read-check-write span never interleaves with another caller's.
+ * Scoped to one `createRoleModelPolicyRpcHandlers` instance, matching the
+ * lifetime of the plugin process that owns the handler.
+ */
+function createMutex(): <T>(task: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return function run<T>(task: () => Promise<T>): Promise<T> {
+    const result = tail.then(task, task);
+    // Swallow rejection here so a failed task doesn't wedge the chain for
+    // the next caller; the caller's own promise (`result`) still rejects.
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}
+
+/**
+ * The `write` critical section: read-current -> check-revision -> patch.
+ * Always invoked through `createRoleModelPolicyRpcHandlers`'s write mutex —
+ * never call this directly from a handler.
+ */
+async function performWrite(
+  input: RpcInput<typeof roleModelPolicyRpc.write>,
+  paseo: PluginHandlerContext["paseo"],
+  deps: RoleModelPolicyRpcDeps,
+): Promise<RpcOutput<typeof roleModelPolicyRpc.write>> {
+  const current = await loadRolePolicy(paseo, deps.policyCache.get());
+  if (current.malformed) {
+    return {
+      status: "invalid",
+      error: `the stored policy is malformed and cannot be edited until it's fixed: ${current.error ?? "unknown error"}`,
+    };
+  }
+  if (input.revision !== current.policy.revision) {
+    return { status: "conflict", error: "the policy changed since you loaded it", policy: current.policy };
+  }
+
+  const candidateDoc = { roles: input.patch.roles, agentTypeMappings: input.patch.agentTypeMappings };
+  if (sameDocument(candidateDoc, current.policy)) {
+    // Semantic no-op: nothing to persist, revision stays put.
+    return { status: "saved", policy: current.policy };
+  }
+
+  const candidate: RoleModelPolicy = {
+    schemaVersion: 1,
+    roles: input.patch.roles,
+    agentTypeMappings: input.patch.agentTypeMappings,
+    revision: randomUUID(),
+  };
+  const parsed = RoleModelPolicySchema.safeParse(candidate);
+  if (!parsed.success) {
+    return { status: "invalid", error: parsed.error.message };
+  }
+
+  try {
+    await paseo.config.patch({ agentModelPolicy: parsed.data });
+  } catch (error) {
+    return { status: "invalid", error: `failed to save: ${errorMessage(error)}` };
+  }
+
+  let warning: string | undefined;
+  try {
+    await deps.policyCache.forceRefresh();
+    if (deps.policyCache.isMalformed()) {
+      warning = `saved, but the routing cache failed to reload it: ${deps.policyCache.lastError() ?? "unknown error"}`;
+    }
+  } catch (error) {
+    warning = `saved, but the routing cache failed to reload it: ${errorMessage(error)}`;
+  }
+
+  return { status: "saved", policy: parsed.data, warning };
+}
+
+/**
  * Handler factory for the settings screen's RPC surface. Takes the same
  * long-lived caches `index.server.ts` builds for the routing hook — `read`
  * and `write` bypass `policyCache` for a fresh `paseo.config.get()` (the
@@ -68,58 +146,23 @@ function errorMessage(error: unknown): string {
  * actually do right now.
  */
 export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): RoleModelPolicyRpcHandlers {
+  // `write`'s read-current -> check-revision -> patch span crosses microtask
+  // boundaries (multiple awaits), and the plugin RPC dispatcher does not
+  // serialize inbound calls — without this, two concurrent writes can both
+  // read the same current revision, both pass the check, and both patch,
+  // silently losing whichever one wrote first. Routed through this mutex,
+  // the second writer's read happens after the first's patch, so it
+  // correctly observes the new revision and reports `conflict`.
+  const withWriteLock = createMutex();
+
   return {
     async read(_input, { paseo }) {
       const result = await loadRolePolicy(paseo, deps.policyCache.get());
       return { policy: result.policy, malformed: result.malformed, error: result.error };
     },
 
-    async write(input, { paseo }) {
-      const current = await loadRolePolicy(paseo, deps.policyCache.get());
-      if (current.malformed) {
-        return {
-          status: "invalid",
-          error: `the stored policy is malformed and cannot be edited until it's fixed: ${current.error ?? "unknown error"}`,
-        };
-      }
-      if (input.revision !== current.policy.revision) {
-        return { status: "conflict", error: "the policy changed since you loaded it", policy: current.policy };
-      }
-
-      const candidateDoc = { roles: input.patch.roles, agentTypeMappings: input.patch.agentTypeMappings };
-      if (sameDocument(candidateDoc, current.policy)) {
-        // Semantic no-op: nothing to persist, revision stays put.
-        return { status: "saved", policy: current.policy };
-      }
-
-      const candidate: RoleModelPolicy = {
-        schemaVersion: 1,
-        roles: input.patch.roles,
-        agentTypeMappings: input.patch.agentTypeMappings,
-        revision: randomUUID(),
-      };
-      const parsed = RoleModelPolicySchema.safeParse(candidate);
-      if (!parsed.success) {
-        return { status: "invalid", error: parsed.error.message };
-      }
-
-      try {
-        await paseo.config.patch({ agentModelPolicy: parsed.data });
-      } catch (error) {
-        return { status: "invalid", error: `failed to save: ${errorMessage(error)}` };
-      }
-
-      let warning: string | undefined;
-      try {
-        await deps.policyCache.forceRefresh();
-        if (deps.policyCache.isMalformed()) {
-          warning = `saved, but the routing cache failed to reload it: ${deps.policyCache.lastError() ?? "unknown error"}`;
-        }
-      } catch (error) {
-        warning = `saved, but the routing cache failed to reload it: ${errorMessage(error)}`;
-      }
-
-      return { status: "saved", policy: parsed.data, warning };
+    write(input, { paseo }) {
+      return withWriteLock(() => performWrite(input, paseo, deps));
     },
 
     async listModels(input, { paseo }) {
