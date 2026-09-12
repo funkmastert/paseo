@@ -1,11 +1,20 @@
-import type { ReactElement } from "react";
+import { useMemo, type ReactElement } from "react";
 import { Pressable, Text } from "react-native";
 import { useTranslation } from "react-i18next";
-import { StyleSheet } from "react-native-unistyles";
+import { Gauge } from "lucide-react-native";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { formatTokenCount } from "@/components/context-window-meter.utils";
+import type { Theme } from "@/styles/theme";
 import type { TokenBurnTone } from "@/utils/token-burn-tone-model";
+
+const ThemedGauge = withUnistyles(Gauge);
+
+const LEADING_ICON_SIZE = 12;
+
+const warningIconColorMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
+const dangerIconColorMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
 
 /**
  * The one place a `TokenBurnTone` becomes UI: an icon-and-label `StatusBadge` (never color alone
@@ -32,12 +41,25 @@ export function TokenBurnBadge({
     rate: formatTokenCount(tokensPerMinute),
     total: totalTokens !== undefined ? formatTokenCount(totalTokens) : "—",
   });
+  const leadingIcon = useMemo(
+    () => (
+      <ThemedGauge
+        size={LEADING_ICON_SIZE}
+        uniProps={tone === "danger" ? dangerIconColorMapping : warningIconColorMapping}
+      />
+    ),
+    [tone],
+  );
 
   return (
     <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile>
       <TooltipTrigger asChild>
         <Pressable accessibilityRole="text" testID={testID} hitSlop={4}>
-          <StatusBadge label={label} variant={tone === "danger" ? "error" : "warning"} />
+          <StatusBadge
+            label={label}
+            variant={tone === "danger" ? "error" : "warning"}
+            leading={leadingIcon}
+          />
         </Pressable>
       </TooltipTrigger>
       <TooltipContent side="top" align="center" offset={8}>

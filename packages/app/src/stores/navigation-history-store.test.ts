@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NavHistoryEntry, NavigationHistoryReplayDeps } from "./navigation-history-store";
 import {
   canGoBack,
@@ -15,6 +15,11 @@ import {
 
 function entry(workspaceId: string, serverId = "server-1"): NavHistoryEntry {
   return { serverId, workspaceId };
+}
+
+function noop(): void {
+  // Swallows the expected "replay failed; history left unchanged" log so the rollback tests
+  // don't spam the console.
 }
 
 function createDeps(overrides: Partial<NavigationHistoryReplayDeps> = {}) {
@@ -352,6 +357,70 @@ describe("navigation history store", () => {
       const { deps, replayed } = createDeps({ isEntryValid: () => false });
       expect(goBack(deps)).toBe(false);
       expect(replayed).toEqual([]);
+    });
+  });
+
+  describe("replay failure rolls back the commit", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(noop);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("goBack: a throwing replay leaves both stacks byte-identical and returns false", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      const before = useNavigationHistoryStore.getState();
+
+      const deps: NavigationHistoryReplayDeps = {
+        isEntryValid: () => true,
+        replay: () => {
+          throw new Error("replay failed");
+        },
+      };
+
+      expect(goBack(deps)).toBe(false);
+      expect(useNavigationHistoryStore.getState()).toEqual(before);
+    });
+
+    it("goBackTo: a throwing replay leaves both stacks byte-identical and returns false", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      recordNavigationHistory(entry("d"));
+      const before = useNavigationHistoryStore.getState();
+
+      const deps: NavigationHistoryReplayDeps = {
+        isEntryValid: () => true,
+        replay: () => {
+          throw new Error("replay failed");
+        },
+      };
+
+      expect(goBackTo(2, deps)).toBe(false);
+      expect(useNavigationHistoryStore.getState()).toEqual(before);
+    });
+
+    it("goForward: a throwing replay leaves both stacks byte-identical and returns false", () => {
+      recordNavigationHistory(entry("a"));
+      recordNavigationHistory(entry("b"));
+      recordNavigationHistory(entry("c"));
+      goBack(createDeps().deps);
+      goBack(createDeps().deps);
+      const before = useNavigationHistoryStore.getState();
+
+      const deps: NavigationHistoryReplayDeps = {
+        isEntryValid: () => true,
+        replay: () => {
+          throw new Error("replay failed");
+        },
+      };
+
+      expect(goForward(deps)).toBe(false);
+      expect(useNavigationHistoryStore.getState()).toEqual(before);
     });
   });
 });

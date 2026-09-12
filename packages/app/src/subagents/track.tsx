@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
@@ -83,10 +83,14 @@ export function SubagentsTrack({
     const siblings: TokenBurnSibling[] = rows
       .filter((row): row is Extract<SubagentRow, { kind: "paseo" }> => row.kind === "paseo")
       .map((row) => ({ id: row.id, recentTokenRate: row.recentTokenRate }));
-    const next = deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
-    previousTokenBurnTonesRef.current = next;
-    return next;
+    return deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
   }, [rows]);
+  // Committing the ref belongs in an effect, not the memo factory — useMemo must stay pure
+  // (React may call it speculatively/twice under Strict Mode) while the hysteresis ref needs
+  // exactly one write per commit.
+  useEffect(() => {
+    previousTokenBurnTonesRef.current = tokenBurnTones;
+  }, [tokenBurnTones]);
 
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";

@@ -124,6 +124,8 @@ export function canGoForward(state: NavigationHistoryState): boolean {
  * valid remains behind the current entry.
  */
 export function goBack(deps: NavigationHistoryReplayDeps): boolean {
+  const { backStack: previousBackStack, forwardStack: previousForwardStack } =
+    useNavigationHistoryStore.getState();
   let target: NavHistoryEntry | null = null;
   useNavigationHistoryStore.setState((state) => {
     if (state.backStack.length === 0) {
@@ -151,7 +153,19 @@ export function goBack(deps: NavigationHistoryReplayDeps): boolean {
   if (!target) {
     return false;
   }
-  deps.replay(target);
+  try {
+    deps.replay(target);
+  } catch (error) {
+    // The stacks already committed above, ahead of the replay. If replay throws, the
+    // navigation never actually happened, so roll the commit back rather than leaving the
+    // stacks pointing somewhere the app never went.
+    useNavigationHistoryStore.setState({
+      backStack: previousBackStack,
+      forwardStack: previousForwardStack,
+    });
+    console.error("[navigation-history] goBack replay failed; history left unchanged", error);
+    return false;
+  }
   return true;
 }
 
@@ -175,6 +189,8 @@ export function goBackTo(depth: number, deps: NavigationHistoryReplayDeps): bool
   if (!Number.isInteger(depth) || depth < 1) {
     return false;
   }
+  const { backStack: previousBackStack, forwardStack: previousForwardStack } =
+    useNavigationHistoryStore.getState();
   let target: NavHistoryEntry | null = null;
   useNavigationHistoryStore.setState((state) => {
     const backStack = [...state.backStack];
@@ -211,7 +227,17 @@ export function goBackTo(depth: number, deps: NavigationHistoryReplayDeps): bool
   if (!target) {
     return false;
   }
-  deps.replay(target);
+  try {
+    deps.replay(target);
+  } catch (error) {
+    // Same rationale as goBack: replay failed, so undo the hop(s) already committed above.
+    useNavigationHistoryStore.setState({
+      backStack: previousBackStack,
+      forwardStack: previousForwardStack,
+    });
+    console.error("[navigation-history] goBackTo replay failed; history left unchanged", error);
+    return false;
+  }
   return true;
 }
 
@@ -220,6 +246,8 @@ export function goBackTo(depth: number, deps: NavigationHistoryReplayDeps): bool
  * and replays the first valid one found.
  */
 export function goForward(deps: NavigationHistoryReplayDeps): boolean {
+  const { backStack: previousBackStack, forwardStack: previousForwardStack } =
+    useNavigationHistoryStore.getState();
   let target: NavHistoryEntry | null = null;
   useNavigationHistoryStore.setState((state) => {
     const forwardStack = [...state.forwardStack];
@@ -241,6 +269,16 @@ export function goForward(deps: NavigationHistoryReplayDeps): boolean {
   if (!target) {
     return false;
   }
-  deps.replay(target);
+  try {
+    deps.replay(target);
+  } catch (error) {
+    // Same rationale as goBack: replay failed, so undo the commit above.
+    useNavigationHistoryStore.setState({
+      backStack: previousBackStack,
+      forwardStack: previousForwardStack,
+    });
+    console.error("[navigation-history] goForward replay failed; history left unchanged", error);
+    return false;
+  }
   return true;
 }

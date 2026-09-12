@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import { FlatList, Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Network, Unlink } from "lucide-react-native";
@@ -336,10 +336,14 @@ function OrchestrationPanel(): ReactElement {
       id: row.agent.id,
       recentTokenRate: row.agent.recentTokenRate,
     }));
-    const next = deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
-    previousTokenBurnTonesRef.current = next;
-    return next;
+    return deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
   }, [rows]);
+  // Committing the ref belongs in an effect, not the memo factory — useMemo must stay pure
+  // (React may call it speculatively/twice under Strict Mode) while the hysteresis ref needs
+  // exactly one write per commit.
+  useEffect(() => {
+    previousTokenBurnTonesRef.current = tokenBurnTones;
+  }, [tokenBurnTones]);
   const finishedAgents = useMemo(() => collectFinishedAgentsAcrossRoots(roots), [roots]);
   const archiveFinished = useArchiveFinishedInTree({ serverId, agents: finishedAgents });
 

@@ -209,6 +209,7 @@ import {
 } from "@/workspace/file-open";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
+import { resolveWorkspaceHardwareBackAction } from "@/screens/workspace/workspace-hardware-back-model";
 import { useHasPullRequest } from "@/panels/pull-request";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
@@ -1807,39 +1808,37 @@ function WorkspaceScreenContent({
   );
 
   useEffect(() => {
-    // Back dismisses the compact overlay only. On a wide native layout the
-    // explorer is a tab, `showMobileAgent` has no rendered consumer, and
-    // returning true would swallow Back with nothing to show for it.
-    if (!isRouteFocused || isWeb || !isMobile || !isExplorerSidebarShowing) {
-      return;
-    }
-
-    const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      showMobileAgent();
-      return true;
-    });
-
-    return () => handler.remove();
-  }, [isExplorerSidebarShowing, isMobile, isRouteFocused, showMobileAgent]);
-
-  useEffect(() => {
-    // Cross-workspace/tab navigation history (see docs/plans/2026-09-12-001-feat-global-back-history-plan.md).
-    // Only consumes the press when there's somewhere to go back to; otherwise
-    // falls through to the OS default (this listener returns false, so the
-    // next-registered handler -- or the system -- takes it from here).
+    // Consolidated hardware Back handling (see docs/plans/2026-09-12-001-feat-global-back-history-plan.md
+    // for the history half). Dismissing the compact overlay and cross-workspace/tab history
+    // navigation both want the same `hardwareBackPress` event; registering them as two separate
+    // effects made "who wins" depend on registration order, since BackHandler dispatches
+    // listeners LIFO and stops at the first one that returns true. One handler reading both
+    // pieces of state through resolveWorkspaceHardwareBackAction makes the priority explicit:
+    // dismissing the overlay always wins, and only falls through to history when it's closed.
+    // On a wide native layout the explorer is a tab, not an overlay, so `isOverlayOpen` is
+    // always false there and this falls straight through to history navigation.
     if (!isRouteFocused || !isNative) {
       return;
     }
 
     const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      if (!canGoBack(useNavigationHistoryStore.getState())) {
-        return false;
+      const action = resolveWorkspaceHardwareBackAction({
+        isOverlayOpen: isMobile && isExplorerSidebarShowing,
+        canGoBack: canGoBack(useNavigationHistoryStore.getState()),
+      });
+      switch (action) {
+        case "dismissOverlay":
+          showMobileAgent();
+          return true;
+        case "historyBack":
+          return goBack(buildNavigationHistoryReplayDeps());
+        case "unhandled":
+          return false;
       }
-      return goBack(buildNavigationHistoryReplayDeps());
     });
 
     return () => handler.remove();
-  }, [isRouteFocused]);
+  }, [isExplorerSidebarShowing, isMobile, isRouteFocused, showMobileAgent]);
 
   const workspaceLayout = useWorkspaceLayoutStore((state) =>
     persistenceKey ? (state.layoutByWorkspace[persistenceKey] ?? null) : null,
