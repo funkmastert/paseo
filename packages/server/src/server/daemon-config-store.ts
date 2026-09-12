@@ -31,6 +31,10 @@ interface SupportedMutableConfigPatch {
   skills?: MutableDaemonConfig["skills"];
   pluginsEnabled?: boolean;
   plugins?: MutableDaemonConfig["plugins"];
+  // Opaque plugin-owned config (see persisted-config.ts). Not part of the
+  // typed wire shape — MutableDaemonConfigPatchSchema is `.passthrough()`,
+  // so this is read/forwarded structurally rather than narrowed further.
+  agentModelPolicy?: Record<string, unknown>;
 }
 
 interface LoggerLike {
@@ -276,6 +280,9 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...(patch.agentProfiles !== undefined ? { agentProfiles: patch.agentProfiles } : {}),
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
     ...(patch.plugins !== undefined ? { plugins: patch.plugins } : {}),
+    ...(patch.agentModelPolicy !== undefined
+      ? { agentModelPolicy: patch.agentModelPolicy as Record<string, unknown> }
+      : {}),
   };
 }
 
@@ -332,14 +339,24 @@ export class DaemonConfigStore {
   ) {
     this.paseoHome = paseoHome;
     this.logger = getLogger(logger);
+    const startupPersisted =
+      options.startupPersisted ?? loadPersistedConfig(paseoHome, this.logger);
     this.current = MutableDaemonConfigSchema.parse({
       ...initial,
       relay: initial.relay ?? { enabled: true },
+      // Opaque plugin-owned config (persisted-config.ts) isn't threaded
+      // through the caller-supplied `initial` config the way built-in
+      // fields are (bootstrap.ts's createInitialMutableDaemonConfig has no
+      // notion of it) — lift it straight from the on-disk file so a plugin's
+      // config.patch() from a previous process survives a daemon restart.
+      ...(startupPersisted.agentModelPolicy !== undefined
+        ? { agentModelPolicy: startupPersisted.agentModelPolicy }
+        : {}),
     });
     this.relayEnabledMutable = options.relayEnabledMutable ?? true;
     this.reloadSource = options.reloadSource;
-    this.startupPersisted = options.startupPersisted ?? loadPersistedConfig(paseoHome, this.logger);
-    this.lastKnownPersisted = this.startupPersisted;
+    this.startupPersisted = startupPersisted;
+    this.lastKnownPersisted = startupPersisted;
   }
 
   public get(): MutableDaemonConfig {
@@ -588,6 +605,7 @@ function mergeMutablePatchIntoPersistedConfig(params: {
     ...persisted,
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
     ...(patch.plugins !== undefined ? { plugins: patch.plugins } : {}),
+    ...(patch.agentModelPolicy !== undefined ? { agentModelPolicy: patch.agentModelPolicy } : {}),
     ...(daemon ? { daemon } : { daemon: undefined }),
     ...(agents ? { agents } : { agents: undefined }),
   } as PersistedConfig;

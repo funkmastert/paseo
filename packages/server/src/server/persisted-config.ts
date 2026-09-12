@@ -313,6 +313,11 @@ export const PersistedConfigSchema = z
     providers: ProvidersSchema.optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    // Opaque plugin-owned config (e.g. claude-account-pool's role-model
+    // policy: docs/plans/2026-09-12-004-feat-agent-model-policy-plan.md
+    // §2.4). The daemon persists and round-trips this verbatim; the owning
+    // plugin validates its own shape and fails closed on malformed data.
+    agentModelPolicy: z.record(z.string(), z.unknown()).optional(),
     worktrees: WorktreesConfigSchema.optional(),
     agents: z
       .object({
