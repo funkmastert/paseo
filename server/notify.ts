@@ -16,6 +16,13 @@ export interface NotifierOptions {
    * queueMicrotask; tests inject a controllable queue.
    */
   schedule?: (fn: () => void | Promise<void>) => void;
+  /**
+   * Injectable clock for tests; defaults to `() => new Date()`. Drives the
+   * resetsAt-in-the-past check that drops a stale cap notification at
+   * delivery time (e.g. one held behind a pending permission until well
+   * after its window already reset).
+   */
+  now?: () => Date;
 }
 
 export interface Notifier {
@@ -53,6 +60,8 @@ interface AgentDirectoryRow {
 interface QueuedSend {
   leaderId: string;
   text: string;
+  /** Cap-notification-only: the window's reset time, re-checked at delivery time. */
+  resetsAt?: Date;
 }
 
 // The daemon's agent list payload does not carry a structural
@@ -173,6 +182,7 @@ function formatFailOpenMessage(episode: FailOpenEpisode): string {
 export function createNotifier(options: NotifierOptions): Notifier {
   const { paseo, health } = options;
   const schedule = options.schedule ?? ((fn: () => void | Promise<void>) => queueMicrotask(fn));
+  const now = options.now ?? (() => new Date());
 
   const poolDryNotifiedLeaders = new Set<string>();
   const failOpenNotifiedLeaders = new Set<string>();
@@ -188,15 +198,24 @@ export function createNotifier(options: NotifierOptions): Notifier {
     return (pendingPermissionCounts.get(agentId) ?? 0) > 0;
   }
 
-  function queueHeld(leaderId: string, text: string): void {
+  function queueHeld(leaderId: string, text: string, resetsAt?: Date): void {
     const list = heldSends.get(leaderId) ?? [];
-    list.push({ leaderId, text });
+    list.push({ leaderId, text, resetsAt });
     heldSends.set(leaderId, list);
   }
 
-  async function deliver(leaderId: string, text: string): Promise<void> {
+  async function deliver(leaderId: string, text: string, resetsAt?: Date): Promise<void> {
+    if (resetsAt && resetsAt.getTime() <= now().getTime()) {
+      // The window this notification was about already reset — e.g. it sat
+      // behind a pending permission (or a rejected steer) until after
+      // resetsAt passed. Drop it rather than deliver a stale duplicate.
+      console.debug(
+        `[claude-account-pool] notify: dropping stale cap notification for leader "${leaderId}" (resetsAt ${resetsAt.toISOString()} already passed)`,
+      );
+      return;
+    }
     if (!boundaryObservedLeaders.has(leaderId) || hasPendingPermission(leaderId)) {
-      queueHeld(leaderId, text);
+      queueHeld(leaderId, text, resetsAt);
       return;
     }
     try {
@@ -207,7 +226,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
       // SDK types.
       await handle.send(text, { activeTurnBehavior: "steer" } as unknown as Parameters<typeof handle.send>[1]);
     } catch {
-      queueHeld(leaderId, text); // Retried on this leader's next turn_ended.
+      queueHeld(leaderId, text, resetsAt); // Retried on this leader's next turn_ended.
     }
   }
 
@@ -218,7 +237,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     }
     heldSends.delete(leaderId);
     for (const item of list) {
-      schedule(() => deliver(item.leaderId, item.text));
+      schedule(() => deliver(item.leaderId, item.text, item.resetsAt));
     }
   }
 
@@ -276,7 +295,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     await Promise.allSettled(
       Array.from(groups.values())
         .filter(({ children }) => children.length > 0)
-        .map(({ leader, children }) => deliver(leader.id, formatCapMessage(event, children))),
+        .map(({ leader, children }) => deliver(leader.id, formatCapMessage(event, children), event.resetsAt)),
     );
   }
 

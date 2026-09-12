@@ -214,6 +214,39 @@ describe("createRouter", () => {
     });
   });
 
+  it("throttles the target-missing-from-provider-snapshot fail-open log to once per window across a burst", () => {
+    const pool: ResolvedPool = {
+      workers: [{ providerId: "worker-a", priority: 1 }],
+      leader: { providerId: "leader" },
+    };
+    const health = createHealthTracker();
+    let nowMs = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const router = createRouter({
+      poolCache: fakePoolCache(pool),
+      health,
+      providerIds: fakeProviderIds(["leader"]), // worker-a missing from snapshot
+      now: () => nowMs,
+    });
+
+    for (let i = 0; i < 5; i++) {
+      router(
+        request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+        fakeContext,
+      );
+    }
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+
+    nowMs += 60_000;
+    router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+      fakeContext,
+    );
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+
+    errorSpy.mockRestore();
+  });
+
   it("treats an unloaded provider snapshot (still null) as unknown and fails open rather than guessing", () => {
     const pool: ResolvedPool = {
       workers: [{ providerId: "worker-a", priority: 1 }],

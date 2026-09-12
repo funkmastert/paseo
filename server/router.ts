@@ -1,6 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import type { HealthTracker } from "./health";
 import { createIntervalPoller } from "./interval-poller";
+import { createLogThrottle } from "./log-throttle";
 import type { PoolCache } from "./pool";
 
 /** The subset of PaseoApi this module needs: reading the provider snapshot. */
@@ -91,7 +92,12 @@ export interface RouterOptions {
    * cache timer, without hammering the daemon on a busy fail-open pool.
    */
   failOpenRefreshThrottleMs?: number;
-  /** Injectable clock for tests; defaults to Date.now. */
+  /**
+   * Injectable clock for tests; defaults to Date.now. Also drives the
+   * per-target-provider throttle on the "missing from provider snapshot"
+   * fail-open log, so a burst of creates against the same dead target logs
+   * once per minute instead of once per request.
+   */
   now?: () => number;
 }
 
@@ -113,6 +119,7 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
   let lastFailOpenRefreshAt = -Infinity;
   const throttleMs = options.failOpenRefreshThrottleMs ?? 5000;
   const now = options.now ?? Date.now;
+  const logThrottle = createLogThrottle({ now });
 
   return function routeAgentCreate(input) {
     const { request } = input;
@@ -186,9 +193,11 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
 
     const providerIds = options.providerIds.get();
     if (providerIds === null || !providerIds.has(targetProviderId)) {
-      console.error(
-        `[claude-account-pool] router: target provider "${targetProviderId}" is not in the provider snapshot; passing the request through untouched`,
-      );
+      logThrottle(`target-missing:${targetProviderId}`, () => {
+        console.error(
+          `[claude-account-pool] router: target provider "${targetProviderId}" is not in the provider snapshot; passing the request through untouched`,
+        );
+      });
       options.onFailOpen?.({
         callerAgentId,
         reason: "target-missing-from-provider-snapshot",

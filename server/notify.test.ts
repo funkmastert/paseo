@@ -78,7 +78,14 @@ describe("createNotifier", () => {
     const { paseo, sendCalls } = fakePaseo(rows);
     const health = createHealthTracker();
     const { schedule, flush } = fakeScheduler();
-    const notifier = createNotifier({ paseo, health, schedule });
+    // Fixed clock, deliberately before resetsAt: delivery must not depend on
+    // wall-clock time relative to a fixture date.
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
 
     notifier.onTurnEnded("leader-1");
     const resetsAt = "2026-01-01T03:00:00.000Z";
@@ -380,6 +387,56 @@ describe("createNotifier", () => {
     expect(paseo.agents.list).not.toHaveBeenCalled();
 
     expect(scheduled.length).toBeGreaterThan(0);
+    notifier.stop();
+  });
+
+  it("drops a held cap notification whose window already reset by delivery time, without sending it", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    let currentTime = new Date("2026-01-01T00:00:00.000Z");
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const notifier = createNotifier({ paseo, health, schedule, now: () => currentTime });
+
+    // Held behind a pending permission, so it can't deliver immediately.
+    notifier.onPermissionRequested("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T00:30:00.000Z");
+    await flush();
+    expect(sendCalls).toHaveLength(0);
+
+    // The window's reset time has now passed while the notification sat held.
+    currentTime = new Date("2026-01-01T00:30:01.000Z");
+    notifier.onPermissionResolved("leader-1");
+    await flush();
+
+    expect(sendCalls).toHaveLength(0); // Dropped, not delivered: stale by delivery time.
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+    expect(debugSpy.mock.calls[0][0]).toContain("leader-1");
+
+    debugSpy.mockRestore();
+    notifier.stop();
+  });
+
+  it("delivers a cap notification whose window has not yet reset at delivery time", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const currentTime = new Date("2026-01-01T00:00:00.000Z");
+    const notifier = createNotifier({ paseo, health, schedule, now: () => currentTime });
+
+    notifier.onTurnEnded("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T00:30:00.000Z");
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
     notifier.stop();
   });
 });

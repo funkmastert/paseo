@@ -1,6 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import { AGENT_TYPE_LABEL } from "../shared/role-policy-schema";
 import type { HealthTracker } from "./health";
+import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
@@ -47,6 +48,12 @@ export interface RoleRouterOptions {
   onDeclaredRoleUnknown?: (episode: DeclaredRoleUnknownEpisode) => void;
   /** Called (deduplicated per role, re-armed on recovery) when a role has no eligible model and falls back to models[0]. */
   onRoleUnavailable?: (episode: RoleUnavailableEpisode) => void;
+  /**
+   * Injectable clock for tests; defaults to Date.now. Drives the throttle on
+   * the "unexpected error resolving role" fail-open log, so a role that
+   * keeps failing to resolve logs once per minute instead of once per create.
+   */
+  now?: () => number;
 }
 
 export type RoleCreateRouter = (
@@ -92,6 +99,7 @@ function familyOfProvider(pool: FamilyResolvablePool, providerId: string): strin
 export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredUnknownSeen = new Set<string>();
   const unavailableRoleIds = new Set<string>();
+  const logThrottle = createLogThrottle({ now: options.now });
 
   return function routeRoleForCreate(input) {
     try {
@@ -101,11 +109,14 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
       // is meant to fail open already, but a throw anywhere in resolve/select
       // (e.g. requireStandardRole on a corrupt policy) would otherwise
       // propagate straight to createAgent's rejection. Log and pass through
-      // instead of blocking the create.
-      console.error(
-        "[claude-account-pool] role-router: unexpected error resolving role; passing the request through untouched",
-        error,
-      );
+      // instead of blocking the create. Throttled: a role stuck failing to
+      // resolve would otherwise log identically on every create.
+      logThrottle("unexpected-error", () => {
+        console.error(
+          "[claude-account-pool] role-router: unexpected error resolving role; passing the request through untouched",
+          error,
+        );
+      });
       return undefined;
     }
   };

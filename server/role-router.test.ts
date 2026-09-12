@@ -323,6 +323,34 @@ describe("createRoleRouter", () => {
     expect(result).toBeUndefined();
   });
 
+  it("F3: throttles the unexpected-error fail-open log to once per window across a burst of identical failures", () => {
+    const throwingPolicyCache = {
+      get: () => {
+        throw new Error("policy cache exploded");
+      },
+      isMalformed: () => false,
+      lastError: () => undefined,
+      forceRefresh: vi.fn(),
+      stop: vi.fn(),
+    };
+    let nowMs = 0;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const router = createRoleRouter(
+      baseOptions({ policyCache: throwingPolicyCache, now: () => nowMs }),
+    );
+
+    for (let i = 0; i < 5; i++) {
+      router(request({ callerAgentId: "c1" }), fakeContext);
+    }
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+
+    nowMs += 60_000;
+    router(request({ callerAgentId: "c1" }), fakeContext);
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+
+    errorSpy.mockRestore();
+  });
+
   it("F3: never propagates a throw from deep in role resolution (missing standard role) — logs and returns undefined", () => {
     // A policy missing every standard role forces requireStandardRole (via
     // resolveRole's classify()) to throw when there's no title/prompt text
