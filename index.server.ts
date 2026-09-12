@@ -5,9 +5,11 @@ import { createNotifier, type Notifier } from "./server/notify";
 import { createPoolCache, type PoolCache } from "./server/pool";
 import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-agent-types";
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
+import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
 import { createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
+import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
 import { AGENT_TYPE_LABEL, rolePolicyFamilies } from "./shared/role-policy-schema";
 
 function isPoolProvider(pool: PoolCache, providerId: string): boolean {
@@ -30,6 +32,7 @@ export default function contribute(server: PluginServerContext) {
   let catalogCache: ModelCatalogCache | null = null;
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
+  let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
 
   // The server contribution itself has no `paseo` handle (see
   // PluginServerContext); every hook/observer callback receives one through
@@ -79,6 +82,13 @@ export default function contribute(server: PluginServerContext) {
         console.error(
           `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
         ),
+    });
+    roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({
+      policyCache,
+      catalogCache,
+      poolCache,
+      health,
+      recentAgentTypes,
     });
     router = createRouter({
       poolCache,
@@ -158,6 +168,30 @@ export default function contribute(server: PluginServerContext) {
   const unregisterArchived = server.on("agent.archived", (event, context) => {
     ensureStarted(context.paseo);
     notifier?.onAgentArchived(event.agent.id);
+  });
+
+  // Settings-screen RPC surface. Each handler ensures the shared caches
+  // exist first — a settings screen can open before any agent.create/agent.*
+  // event has ever fired this plugin process.
+  server.handle(roleModelPolicyRpc.read, (input, context) => {
+    ensureStarted(context.paseo);
+    return roleModelPolicyRpcHandlers!.read(input, context);
+  });
+  server.handle(roleModelPolicyRpc.write, (input, context) => {
+    ensureStarted(context.paseo);
+    return roleModelPolicyRpcHandlers!.write(input, context);
+  });
+  server.handle(roleModelPolicyRpc.listModels, (input, context) => {
+    ensureStarted(context.paseo);
+    return roleModelPolicyRpcHandlers!.listModels(input, context);
+  });
+  server.handle(roleModelPolicyRpc.recentAgentTypes, (input, context) => {
+    ensureStarted(context.paseo);
+    return roleModelPolicyRpcHandlers!.recentAgentTypes(input, context);
+  });
+  server.handle(roleModelPolicyRpc.explain, (input, context) => {
+    ensureStarted(context.paseo);
+    return roleModelPolicyRpcHandlers!.explain(input, context);
   });
 
   return () => {

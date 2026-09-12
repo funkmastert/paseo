@@ -1,0 +1,179 @@
+import { randomUUID } from "node:crypto";
+import type { PluginHandlerContext } from "@getpaseo/plugin/server";
+import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
+import { RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
+import { roleModelPolicyRpc } from "../shared/role-policy-rpc";
+import type { HealthTracker } from "./health";
+import type { ModelCatalogCache } from "./model-catalog";
+import type { PoolCache } from "./pool";
+import type { RecentAgentTypes } from "./recent-agent-types";
+import { loadRolePolicy, type PolicyCache } from "./role-policy";
+import { selectModel } from "./role-availability";
+import { resolveRole } from "./role-resolve";
+import { AGENT_TYPE_LABEL } from "../shared/role-policy-schema";
+
+export interface RoleModelPolicyRpcDeps {
+  policyCache: PolicyCache;
+  catalogCache: ModelCatalogCache;
+  poolCache: PoolCache;
+  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible">;
+  recentAgentTypes: RecentAgentTypes;
+}
+
+export interface RoleModelPolicyRpcHandlers {
+  read(
+    input: RpcInput<typeof roleModelPolicyRpc.read>,
+    context: PluginHandlerContext,
+  ): Promise<RpcOutput<typeof roleModelPolicyRpc.read>>;
+  write(
+    input: RpcInput<typeof roleModelPolicyRpc.write>,
+    context: PluginHandlerContext,
+  ): Promise<RpcOutput<typeof roleModelPolicyRpc.write>>;
+  listModels(
+    input: RpcInput<typeof roleModelPolicyRpc.listModels>,
+    context: PluginHandlerContext,
+  ): Promise<RpcOutput<typeof roleModelPolicyRpc.listModels>>;
+  recentAgentTypes(
+    input: RpcInput<typeof roleModelPolicyRpc.recentAgentTypes>,
+    context: PluginHandlerContext,
+  ): Promise<RpcOutput<typeof roleModelPolicyRpc.recentAgentTypes>>;
+  explain(
+    input: RpcInput<typeof roleModelPolicyRpc.explain>,
+    context: PluginHandlerContext,
+  ): Promise<RpcOutput<typeof roleModelPolicyRpc.explain>>;
+}
+
+/** Two documents are semantically equal when their editable fields serialize identically (order-sensitive: array order is meaningful). */
+function sameDocument(
+  a: { roles: RoleModelPolicy["roles"]; agentTypeMappings: RoleModelPolicy["agentTypeMappings"] },
+  b: { roles: RoleModelPolicy["roles"]; agentTypeMappings: RoleModelPolicy["agentTypeMappings"] },
+): boolean {
+  return (
+    JSON.stringify(a.roles) === JSON.stringify(b.roles) &&
+    JSON.stringify(a.agentTypeMappings) === JSON.stringify(b.agentTypeMappings)
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Handler factory for the settings screen's RPC surface. Takes the same
+ * long-lived caches `index.server.ts` builds for the routing hook — `read`
+ * and `write` bypass `policyCache` for a fresh `paseo.config.get()` (the
+ * settings screen must see the true current revision, not a up-to-60s-stale
+ * cache entry), while `listModels`/`recentAgentTypes`/`explain` reuse the
+ * cache instances so "test this name" mirrors what the router would
+ * actually do right now.
+ */
+export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): RoleModelPolicyRpcHandlers {
+  return {
+    async read(_input, { paseo }) {
+      const result = await loadRolePolicy(paseo, deps.policyCache.get());
+      return { policy: result.policy, malformed: result.malformed, error: result.error };
+    },
+
+    async write(input, { paseo }) {
+      const current = await loadRolePolicy(paseo, deps.policyCache.get());
+      if (current.malformed) {
+        return {
+          status: "invalid",
+          error: `the stored policy is malformed and cannot be edited until it's fixed: ${current.error ?? "unknown error"}`,
+        };
+      }
+      if (input.revision !== current.policy.revision) {
+        return { status: "conflict", error: "the policy changed since you loaded it", policy: current.policy };
+      }
+
+      const candidateDoc = { roles: input.patch.roles, agentTypeMappings: input.patch.agentTypeMappings };
+      if (sameDocument(candidateDoc, current.policy)) {
+        // Semantic no-op: nothing to persist, revision stays put.
+        return { status: "saved", policy: current.policy };
+      }
+
+      const candidate: RoleModelPolicy = {
+        schemaVersion: 1,
+        roles: input.patch.roles,
+        agentTypeMappings: input.patch.agentTypeMappings,
+        revision: randomUUID(),
+      };
+      const parsed = RoleModelPolicySchema.safeParse(candidate);
+      if (!parsed.success) {
+        return { status: "invalid", error: parsed.error.message };
+      }
+
+      try {
+        await paseo.config.patch({ agentModelPolicy: parsed.data });
+      } catch (error) {
+        return { status: "invalid", error: `failed to save: ${errorMessage(error)}` };
+      }
+
+      let warning: string | undefined;
+      try {
+        await deps.policyCache.forceRefresh();
+        if (deps.policyCache.isMalformed()) {
+          warning = `saved, but the routing cache failed to reload it: ${deps.policyCache.lastError() ?? "unknown error"}`;
+        }
+      } catch (error) {
+        warning = `saved, but the routing cache failed to reload it: ${errorMessage(error)}`;
+      }
+
+      return { status: "saved", policy: parsed.data, warning };
+    },
+
+    async listModels(input, { paseo }) {
+      const catalog: Record<string, string[]> = {};
+      if (input.force) {
+        try {
+          // TYPE NOTE: same structural-read rationale as model-catalog.ts —
+          // family ids come from free-form policy config, not necessarily a
+          // known AgentProvider literal.
+          type RefreshOptions = Parameters<typeof paseo.providers.refresh>[0];
+          await paseo.providers.refresh({ providers: input.families } as RefreshOptions);
+        } catch {
+          // Best-effort: fall through to per-family listModels below, which
+          // still returns whatever the daemon currently has.
+        }
+      }
+      for (const family of input.families) {
+        try {
+          const result = await paseo.providers.listModels(
+            family as Parameters<typeof paseo.providers.listModels>[0],
+          );
+          catalog[family] = (result.models ?? []).map((model) => model.id);
+        } catch {
+          catalog[family] = [];
+        }
+      }
+      if (input.force) {
+        // Best-effort warm of the routing hook's own cache; never blocks the response.
+        void deps.catalogCache.forceRefresh().catch(() => {});
+      }
+      return { catalog };
+    },
+
+    async recentAgentTypes() {
+      return { values: deps.recentAgentTypes.list() };
+    },
+
+    async explain(input) {
+      const policy = deps.policyCache.get();
+      const resolution = resolveRole(policy, {
+        labels: input.agentType !== undefined ? { [AGENT_TYPE_LABEL]: input.agentType } : undefined,
+        title: input.title,
+      });
+      const catalog = deps.catalogCache.get();
+      const { pool } = deps.poolCache.get();
+      const outcome = selectModel(resolution.role, catalog, pool, deps.health);
+
+      return {
+        roleId: resolution.role.id,
+        roleName: resolution.role.name,
+        tier: resolution.tier,
+        outcome: outcome.outcome,
+        ...(outcome.outcome !== "unconfigured" ? { provider: outcome.provider, model: outcome.model } : {}),
+      };
+    },
+  };
+}

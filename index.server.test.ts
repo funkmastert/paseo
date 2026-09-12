@@ -24,6 +24,9 @@ function fakeServer() {
       onHandlers.set(name, handler);
       return () => onHandlers.delete(name);
     }) as PluginServerContext["on"],
+    // Settings-screen RPC registrations aren't exercised by this test; a
+    // no-op is enough to let contribute() finish wiring without throwing.
+    handle: vi.fn(),
   } as unknown as PluginServerContext;
   return { server, beforeHandlers, onHandlers };
 }
