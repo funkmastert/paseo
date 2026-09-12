@@ -215,16 +215,28 @@ function buildCommandRowState(args: BuildCommandRowPropsArgs) {
   return { hasError, hasLog, isExpandable, isAutoExpanded, showDetail, processedLog };
 }
 
-function useWorkspaceSetupSnapshot(serverId: string, workspaceId: string) {
+export interface WorkspaceSetupSnapshotResult {
+  snapshot: WorkspaceSetupSnapshot | null;
+  // A null snapshot is a legitimate settled response (no setup ever ran and the
+  // workspace isn't blocked) — hasResolved distinguishes that from "still waiting
+  // on the initial fetch" so callers don't spin forever on a normal empty answer.
+  hasResolved: boolean;
+}
+
+export function useWorkspaceSetupSnapshot(
+  serverId: string,
+  workspaceId: string,
+): WorkspaceSetupSnapshotResult {
   const client = useHostRuntimeClient(serverId);
   const key = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
   const snapshot = useWorkspaceSetupStore((state) => (key ? (state.snapshots[key] ?? null) : null));
   const upsertProgress = useWorkspaceSetupStore((state) => state.upsertProgress);
-  const requestedRef = useRef(false);
+  const requestedKeyRef = useRef<string | null>(null);
+  const [settledKey, setSettledKey] = useState<string | null>(null);
 
   useEffect(() => {
-    if (snapshot || requestedRef.current || !client) return;
-    requestedRef.current = true;
+    if (snapshot || requestedKeyRef.current === key || !client) return;
+    requestedKeyRef.current = key;
     client
       .fetchWorkspaceSetupStatus(workspaceId)
       .then((response) => {
@@ -238,10 +250,13 @@ function useWorkspaceSetupSnapshot(serverId: string, workspaceId: string) {
       })
       .catch(() => {
         // Server may not support this yet — ignore.
+      })
+      .finally(() => {
+        setSettledKey(key);
       });
-  }, [client, snapshot, serverId, upsertProgress, workspaceId]);
+  }, [client, snapshot, serverId, upsertProgress, workspaceId, key]);
 
-  return snapshot;
+  return { snapshot, hasResolved: snapshot != null || settledKey === key };
 }
 
 function useExpandedSetupCommands() {
@@ -272,13 +287,18 @@ function SetupPanel() {
   const { serverId, target } = usePaneContext();
   invariant(target.kind === "setup", "SetupPanel requires setup target");
 
-  const snapshot = useWorkspaceSetupSnapshot(serverId, target.workspaceId);
+  const { snapshot, hasResolved } = useWorkspaceSetupSnapshot(serverId, target.workspaceId);
 
   const commands = snapshot?.detail.commands ?? EMPTY_COMMANDS;
   const log = snapshot?.detail.log ?? "";
+  // A resolved fetch with no snapshot means the daemon has nothing to report (no
+  // setup ever ran, nothing blocked) — treat it the same as an explicit "completed,
+  // nothing to show" snapshot rather than falling through to an empty command list.
   const hasNoSetupCommands =
-    snapshot?.status === "completed" && commands.length === 0 && log.trim().length === 0;
-  const isWaiting = !snapshot || (snapshot.status === "running" && commands.length === 0);
+    (snapshot?.status === "completed" || (hasResolved && !snapshot)) &&
+    commands.length === 0 &&
+    log.trim().length === 0;
+  const isWaiting = !hasResolved || (snapshot?.status === "running" && commands.length === 0);
 
   const { expandedIndices, manuallyCollapsed, toggleExpanded } = useExpandedSetupCommands();
 
