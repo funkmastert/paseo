@@ -574,6 +574,76 @@ describe("OpenCodeAgentClient adapter smoke tests", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
+  test("turn_completed omits turnTokenDelta on the first turn, then reports growth on the next", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession(buildConfig(cwd));
+    const stepFinishEvent = (messageId: string, input: number, output: number): unknown => ({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: `prt_${messageId}`,
+          sessionID: "session-1",
+          messageID: messageId,
+          type: "step-finish",
+          tokens: { input, output },
+        },
+      },
+    });
+
+    openCodeClient.sessionPromptAsyncEvents = [
+      ...assistantMessageEvents({ messageId: "msg_turn_1" }),
+      stepFinishEvent("msg_turn_1", 100, 50),
+      { type: "session.idle", properties: { sessionID: "session-1" } },
+    ];
+    const turn1 = await collectTurnEvents(streamSession(session, "First"));
+    const turn1Completed = turn1.events.find((event) => event.type === "turn_completed");
+    expect(turn1Completed).toBeDefined();
+    expect(turn1Completed).not.toHaveProperty("turnTokenDelta");
+
+    openCodeClient.sessionPromptAsyncEvents = [
+      ...assistantMessageEvents({ messageId: "msg_turn_2" }),
+      stepFinishEvent("msg_turn_2", 200, 100),
+      { type: "session.idle", properties: { sessionID: "session-1" } },
+    ];
+    const turn2 = await collectTurnEvents(streamSession(session, "Second"));
+    const turn2Completed = turn2.events.find((event) => event.type === "turn_completed");
+    expect(turn2Completed).toEqual(
+      expect.objectContaining({ type: "turn_completed", turnTokenDelta: 300 }),
+    );
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  test("turn_completed omits turnTokenDelta when the turn reports no step-finish usage", async () => {
+    const cwd = tmpCwd();
+    const runtime = new TestOpenCodeHarness();
+    const openCodeClient = new TestOpenCodeClient();
+    openCodeClient.sessionPromptAsyncEvents = assistantTurnEvents({ messageId: "msg_no_usage" });
+    runtime.enqueueClient(openCodeClient);
+    const client = new OpenCodeAgentClient(logger, undefined, {
+      serverManager: runtime,
+      createClient: runtime.createClient,
+    });
+    const session = await client.createSession(buildConfig(cwd));
+
+    const turn = await collectTurnEvents(streamSession(session, "No usage reported"));
+
+    const turnCompleted = turn.events.find((event) => event.type === "turn_completed");
+    expect(turnCompleted).toBeDefined();
+    expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+
+    await session.close();
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
   test("manual compact hides the generated summary text", async () => {
     const cwd = tmpCwd();
     const runtime = new TestOpenCodeHarness();
@@ -1181,6 +1251,36 @@ describe("OpenCode adapter normalization", () => {
       totalCostUsd: 0.25,
     });
     expect(__openCodeInternals.hasNormalizedOpenCodeUsage(usage)).toBe(true);
+  });
+
+  test("consumeCumulativeTokenDelta re-baselines without a delta on the first observation", () => {
+    expect(__openCodeInternals.consumeCumulativeTokenDelta(1_000, undefined)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+  });
+
+  test("consumeCumulativeTokenDelta returns the growth since the last baseline", () => {
+    expect(__openCodeInternals.consumeCumulativeTokenDelta(1_500, 1_000)).toEqual({
+      delta: 500,
+      nextBaseline: 1_500,
+    });
+  });
+
+  test("consumeCumulativeTokenDelta clamps a reset/reconnect drop instead of reporting garbage", () => {
+    // The total dropped below the baseline (session reset, reconnect) — no delta, but the
+    // baseline still advances to the new (lower) total so the drop doesn't linger forever.
+    expect(__openCodeInternals.consumeCumulativeTokenDelta(200, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 200,
+    });
+  });
+
+  test("consumeCumulativeTokenDelta suppresses a zero delta", () => {
+    expect(__openCodeInternals.consumeCumulativeTokenDelta(1_000, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
   });
 
   test("resolves context window max tokens from assistant message metadata", () => {

@@ -931,6 +931,24 @@ function filterCodexThreadsByCwd(
   );
 }
 
+/**
+ * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Codex's
+ * `thread/tokenUsage/updated` notification carries `last` — the last exchange's own usage, not
+ * a session-cumulative total (unlike OpenCode/ACP) — so this just sums the fields already
+ * extracted by `toAgentUsage`, mirroring the Claude adapter's `buildTurnTokenDelta`.
+ */
+export function buildCodexTurnTokenDelta(usage: AgentUsage | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  const inputTokens = typeof usage.inputTokens === "number" ? usage.inputTokens : 0;
+  const outputTokens = typeof usage.outputTokens === "number" ? usage.outputTokens : 0;
+  const cachedInputTokens =
+    typeof usage.cachedInputTokens === "number" ? usage.cachedInputTokens : 0;
+  const total = inputTokens + outputTokens + cachedInputTokens;
+  return total > 0 ? total : undefined;
+}
+
 export function toAgentUsage(tokenUsage: unknown): AgentUsage | undefined {
   const usage = toObjectRecord(tokenUsage);
   if (!usage) return undefined;
@@ -3359,6 +3377,14 @@ export class CodexAppServerAgentSession implements AgentSession {
   private warnedInvalidNotificationPayloads = new Set<string>();
   private warnedIncompleteEditToolCallIds = new Set<string>();
   private latestUsage: AgentUsage | undefined;
+  /**
+   * The most recent `thread/tokenUsage/updated` usage, consumed exactly once by the next
+   * `turn_completed` to feed the token-rate tracker. `usage.last` is already scoped to the last
+   * exchange (not a session-cumulative total), so no diffing is needed here, unlike OpenCode/ACP
+   * — but unlike `latestUsage` it must be cleared after each turn so a turn with no new usage
+   * notification doesn't re-report the previous turn's tokens as its own.
+   */
+  private pendingTurnTokenUsage: AgentUsage | undefined;
   private latestPlanResult: { callId: string; text: string; turnId: string | null } | null = null;
   private readonly userMessageTurnIndexes = new Map<string, number>();
   private readonly userMessageTurnIds: string[] = [];
@@ -5952,10 +5978,13 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.planModeEnabled && this.latestPlanResult?.text) {
         this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
       }
+      const turnTokenDelta = buildCodexTurnTokenDelta(this.pendingTurnTokenUsage);
+      this.pendingTurnTokenUsage = undefined;
       this.emitEvent({
         type: "turn_completed",
         provider: CODEX_PROVIDER,
         usage: this.latestUsage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
       });
     }
     this.activeForegroundTurnId = null;
@@ -5968,6 +5997,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private resetTurnTrackingState(): void {
+    this.pendingTurnTokenUsage = undefined;
     this.latestPlanResult = null;
     this.emittedItemStartedIds.clear();
     this.emittedItemCompletedIds.clear();
@@ -6019,6 +6049,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   ): void {
     this.latestUsage = toAgentUsage(parsed.tokenUsage);
     if (this.latestUsage) {
+      this.pendingTurnTokenUsage = this.latestUsage;
       this.notifySubscribers({
         type: "usage_updated",
         provider: CODEX_PROVIDER,

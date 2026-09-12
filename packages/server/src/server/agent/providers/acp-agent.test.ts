@@ -21,6 +21,7 @@ import {
   type SpawnedACPProcess,
   type SessionStateResponse,
   buildACPClientCapabilities,
+  consumeACPTurnTokenDelta,
   createLoggedNdJsonStream,
   deriveModelDefinitionsFromACP,
   deriveModesFromACP,
@@ -702,6 +703,49 @@ describe("mapACPUsage", () => {
       inputTokens: 11,
       outputTokens: 7,
       cachedInputTokens: 5,
+    });
+  });
+});
+
+describe("consumeACPTurnTokenDelta", () => {
+  test("re-baselines without a delta on the first observation", () => {
+    expect(consumeACPTurnTokenDelta(1_000, undefined)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+  });
+
+  test("returns the growth since the last baseline", () => {
+    expect(consumeACPTurnTokenDelta(1_800, 1_000)).toEqual({
+      delta: 800,
+      nextBaseline: 1_800,
+    });
+  });
+
+  test("clamps a reset/reconnect drop instead of reporting garbage", () => {
+    // totalTokens dropped below the baseline (session reset, reconnect) — no delta, but the
+    // baseline still advances to the new (lower) total so the drop doesn't linger forever.
+    expect(consumeACPTurnTokenDelta(200, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 200,
+    });
+  });
+
+  test("suppresses a zero delta", () => {
+    expect(consumeACPTurnTokenDelta(1_000, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+  });
+
+  test("keeps the existing baseline when totalTokens is missing", () => {
+    expect(consumeACPTurnTokenDelta(undefined, 1_000)).toEqual({
+      delta: undefined,
+      nextBaseline: 1_000,
+    });
+    expect(consumeACPTurnTokenDelta(null, undefined)).toEqual({
+      delta: undefined,
+      nextBaseline: undefined,
     });
   });
 });
@@ -2798,6 +2842,71 @@ describe("ACPAgentSession", () => {
       turnId,
     });
     expect(asInternals<ACPSessionInternals>(session).activeForegroundTurnId).toBeNull();
+  });
+
+  test("turn_completed omits turnTokenDelta on the first turn, then reports session-total growth on the next", async () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    let resolvePrompt!: (value: PromptResponse) => void;
+    const prompt = vi.fn(
+      () =>
+        new Promise<PromptResponse>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    asInternals<ACPSessionInternals>(session).connection = { prompt };
+    session.subscribe((event) => events.push(event));
+
+    await session.startTurn("first");
+    resolvePrompt({
+      stopReason: "end_turn",
+      usage: { inputTokens: 800, outputTokens: 200, totalTokens: 1_000 },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turn1Completed = events.find((event) => event.type === "turn_completed");
+    expect(turn1Completed).toBeDefined();
+    expect(turn1Completed).not.toHaveProperty("turnTokenDelta");
+
+    await session.startTurn("second");
+    resolvePrompt({
+      stopReason: "end_turn",
+      usage: { inputTokens: 1_100, outputTokens: 300, totalTokens: 1_400 },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turnCompletedEvents = events.filter((event) => event.type === "turn_completed");
+    expect(turnCompletedEvents).toHaveLength(2);
+    expect(turnCompletedEvents[1]).toMatchObject({ type: "turn_completed", turnTokenDelta: 400 });
+  });
+
+  test("turn_completed omits turnTokenDelta when ACP reports no usage", async () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    let resolvePrompt!: (value: PromptResponse) => void;
+    const prompt = vi.fn(
+      () =>
+        new Promise<PromptResponse>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+    );
+
+    asInternals<ACPSessionInternals>(session).sessionId = "session-1";
+    asInternals<ACPSessionInternals>(session).connection = { prompt };
+    session.subscribe((event) => events.push(event));
+
+    await session.startTurn("hello");
+    resolvePrompt({ stopReason: "end_turn" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const turnCompleted = events.find((event) => event.type === "turn_completed");
+    expect(turnCompleted).toBeDefined();
+    expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
   });
 
   test("startTurn emits the submitted user message even when ACP does not echo it", async () => {

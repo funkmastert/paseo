@@ -17,6 +17,7 @@ import type {
 } from "../agent-sdk-types.js";
 import {
   buildCodexAppServerEnv,
+  buildCodexTurnTokenDelta,
   CodexAppServerAgentClient,
   CodexAppServerAgentSession,
   codexMicrosoftStoreBinaryCandidates,
@@ -1980,6 +1981,22 @@ describe("Codex app-server provider", () => {
       cachedInputTokens: 5000,
       outputTokens: 15000,
     });
+  });
+
+  test("buildCodexTurnTokenDelta sums input, output, and cached-read tokens", () => {
+    expect(
+      buildCodexTurnTokenDelta({
+        inputTokens: 30000,
+        cachedInputTokens: 5000,
+        outputTokens: 15000,
+      }),
+    ).toBe(50000);
+  });
+
+  test("buildCodexTurnTokenDelta returns undefined when usage is absent or all-zero", () => {
+    expect(buildCodexTurnTokenDelta(undefined)).toBeUndefined();
+    expect(buildCodexTurnTokenDelta({})).toBeUndefined();
+    expect(buildCodexTurnTokenDelta({ inputTokens: 0, outputTokens: 0 })).toBeUndefined();
   });
 
   test("normalizes raw output schemas for Codex structured outputs", () => {
@@ -5603,7 +5620,46 @@ describe("Codex app-server provider", () => {
         contextWindowMaxTokens: 200000,
         contextWindowUsedTokens: 50000,
       },
+      turnTokenDelta: 50000,
     });
+  });
+
+  test("omits turnTokenDelta on turn completion when no token usage was ever reported", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    const turnCompleted = events.find((event) => event.type === "turn_completed");
+    expect(turnCompleted).toBeDefined();
+    expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+  });
+
+  test("does not re-report the previous turn's tokens when a later turn gets no new usage update", () => {
+    const session = createSession();
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    asInternals(session).handleNotification("thread/tokenUsage/updated", {
+      tokenUsage: {
+        last: { inputTokens: 10000, cachedInputTokens: 0, outputTokens: 5000 },
+      },
+    });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+    asInternals(session).handleNotification("turn/started", { turn: { id: "test-turn-2" } });
+    asInternals(session).handleNotification("turn/completed", {
+      turn: { status: "completed", error: null },
+    });
+
+    const turnCompletedEvents = events.filter((event) => event.type === "turn_completed");
+    expect(turnCompletedEvents).toHaveLength(2);
+    expect(turnCompletedEvents[0]).toHaveProperty("turnTokenDelta", 15000);
+    expect(turnCompletedEvents[1]).not.toHaveProperty("turnTokenDelta");
   });
 
   test("streams Codex assistant message deltas and does not replay completed text", () => {
