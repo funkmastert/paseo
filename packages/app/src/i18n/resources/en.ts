@@ -1917,6 +1917,7 @@ export const en = {
     },
     authAction: "Authenticate",
     reauthAction: "Re-authenticate",
+    authError: "Authentication failed: {{error}}",
     reportedBy: "Reported by {{agent}}",
     expand: "Expand MCP status",
     collapse: "Collapse MCP status",

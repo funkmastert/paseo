@@ -1548,8 +1548,10 @@ export async function createPaseoDaemon(
   // MCP gateway (U1/U2): daemon-side client + auth authority for brokered external MCP
   // servers, and the /mcp/gateway/* routes agent sessions relay through. Constructed with
   // whatever `mcpGateway` config the daemon started with — live reconfiguration is out of
-  // scope here (see McpGateway's class doc) — and started below once the daemon's own
-  // reachable base URL is known (needed for the OAuth redirect_uri, KTD3).
+  // scope here (see McpGateway's class doc) — and started (fire-and-forget, below, after
+  // wsServer is accepting connections) once the daemon's own reachable base URL is known
+  // (needed for the OAuth redirect_uri, KTD3). Non-blocking so an unreachable upstream
+  // never delays the daemon that manages all agents from coming up.
   const mcpGateway = new McpGateway({
     paseoHome: config.paseoHome,
     config: resolveMcpGatewayConfig(daemonConfigStore.get().mcpGateway),
@@ -1741,7 +1743,6 @@ export async function createPaseoDaemon(
               serviceProxyPublicBaseUrl,
               boundListenTarget,
             );
-            await mcpGateway.start();
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
@@ -1876,6 +1877,13 @@ export async function createPaseoDaemon(
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
             worktreeDiskMonitor?.start();
+            // Fire-and-forget, like worktreeDiskMonitor above: an unreachable upstream
+            // must not delay the daemon that manages all agents from accepting
+            // connections. Errors surface per-server via getServerState()/mcp_status_update
+            // rather than here.
+            void mcpGateway.start().catch((error: unknown) => {
+              logger.warn({ err: error }, "MCP gateway failed to start one or more servers");
+            });
             // Wired here (rather than at construction, above) for the same reason as the
             // token-burn monitor below: the push sender doesn't exist until wsServer does.
             mcpGateway.setNotifier({

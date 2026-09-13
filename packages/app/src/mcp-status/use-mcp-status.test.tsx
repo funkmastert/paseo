@@ -118,4 +118,32 @@ describe("useMcpStatus", () => {
     expect(startMcpGatewayAuthMock).toHaveBeenCalledWith("zeeq");
     expect(openExternalUrlMock).toHaveBeenCalledWith("https://example.com/authorize");
   });
+
+  it("resolves with the daemon's error instead of throwing on a known auth failure", async () => {
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true } },
+          agents: new Map(),
+        },
+      },
+    };
+    startMcpGatewayAuthMock.mockResolvedValue({
+      requestId: "req-2",
+      authorizationUrl: null,
+      error: "zeeq uses static auth and cannot be re-authenticated interactively",
+    });
+
+    const { result } = renderHook(() => useMcpStatus(), { wrapper });
+
+    const authResult = await result.current.startAuth("zeeq");
+
+    expect(authResult).toEqual({
+      requestId: "req-2",
+      authorizationUrl: null,
+      error: "zeeq uses static auth and cannot be re-authenticated interactively",
+    });
+    // A resolved known failure never opens a URL — the caller surfaces `error` inline instead.
+    expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
 });

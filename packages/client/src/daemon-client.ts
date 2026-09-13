@@ -3095,9 +3095,14 @@ export class DaemonClient {
       "agent_attention_required",
       "agent_permission_request",
       "agent_permission_resolved",
-      // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
-      "mcp_status_update",
     ];
+    // COMPAT(mcpStatus): added in v0.8.1. An older daemon's SessionEventSubscription enum
+    // doesn't know "mcp_status_update" and parses the array strictly, so sending it
+    // unconditionally would reject the whole subscription request. Remove gating once the
+    // daemon floor is >= v0.8.1.
+    if (this.lastServerInfoMessage?.features?.mcpStatus === true) {
+      events.push("mcp_status_update");
+    }
     if (this.eventListeners.size === 0 && !this.messageHandlers.has("providers_snapshot_update")) {
       this.providerSnapshotUpdates.clear();
     }

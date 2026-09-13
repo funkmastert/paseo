@@ -1925,6 +1925,7 @@ export const ja: TranslationResources = {
     },
     authAction: "認証する",
     reauthAction: "再認証する",
+    authError: "認証に失敗しました: {{error}}",
     reportedBy: "{{agent}} が報告",
     expand: "MCPステータスを展開",
     collapse: "MCPステータスを折りたたむ",

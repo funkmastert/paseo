@@ -16,7 +16,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { experimental_createMCPClient } from "ai";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -156,7 +156,12 @@ describe("MCP gateway proxy + OAuth callback (local e2e, fixture upstream)", () 
     await daemon.start();
 
     try {
-      expect(daemon.mcpGateway.getServerState("fixture")?.status).toBe("needs-auth");
+      // The gateway's initial connect pass is fire-and-forget from bootstrap (an
+      // unreachable upstream must never delay daemon startup), so `daemon.start()`
+      // resolving doesn't guarantee it has finished attempting to connect yet.
+      await vi.waitFor(() => {
+        expect(daemon.mcpGateway.getServerState("fixture")?.status).toBe("needs-auth");
+      });
 
       // A garbage `state` never touches the exchange step and writes nothing.
       const badStateResponse = await fetch(

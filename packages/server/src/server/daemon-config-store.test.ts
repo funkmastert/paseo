@@ -38,6 +38,7 @@ function reloadableConfig(
     app: { baseUrl: "https://app.paseo.sh" },
     pluginsEnabled: persisted.pluginsEnabled ?? false,
     plugins: persisted.plugins ?? {},
+    mcpGateway: persisted.mcpGateway,
   };
 }
 
@@ -1110,7 +1111,13 @@ describe("DaemonConfigStore", () => {
     expect(persisted.worktrees?.diskSweeper).toEqual({ enabled: false });
   });
 
-  test("patch live-toggles mcpGateway.enabled without disturbing configured servers", () => {
+  // Note: patch() (a direct config.patch RPC call, as opposed to reload() picking up an
+  // externally-edited config.json) always applies to the in-memory config and persists —
+  // that's unrelated to RELOADABLE_PATHS and unaffected by mcpGateway's removal from it.
+  // What it does NOT do is reconfigure the already-running McpGateway instance, which is
+  // constructed once in bootstrap.ts and never observes config changes; see the
+  // restart-required reload() test below for the case RELOADABLE_PATHS actually governs.
+  test("patch updates mcpGateway.enabled in memory and persists it (live gateway reconfiguration is not wired)", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
 
@@ -1169,7 +1176,7 @@ describe("DaemonConfigStore", () => {
     });
   });
 
-  test("patch merges a single mcpGateway server field without dropping sibling servers", () => {
+  test("patch merges a single mcpGateway server field in memory without dropping sibling servers", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
 
@@ -1460,6 +1467,42 @@ describe("DaemonConfigStore reload", () => {
       overrideControlledPaths: [],
     });
     expect(store.get().relay?.enabled).toBe(false);
+  });
+
+  // U1 originally listed "mcpGateway" in RELOADABLE_PATHS as if the running McpGateway
+  // would pick up the edit the way diskSweeper/tokenBurnMonitor do. It doesn't: the
+  // gateway is constructed once in bootstrap.ts and never observes config changes, so an
+  // externally-edited mcpGateway section must report as restart-required, not applied.
+  test("reports an externally-edited mcpGateway as restart-required, not applied live", () => {
+    const { paseoHome, store, persisted } = createReloadableStore({
+      initialPersisted: {
+        version: 1,
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+          },
+        },
+      },
+    });
+
+    writeConfig(paseoHome, {
+      ...persisted,
+      mcpGateway: {
+        enabled: false,
+        servers: {
+          zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+        },
+      },
+    });
+
+    const result = store.reload();
+
+    expect(result.appliedPaths).not.toContain("mcpGateway");
+    expect(result.restartRequiredPaths).toContain("mcpGateway.enabled");
+    // The store's own in-memory value still updates (persistence + in-memory config
+    // stay correct) — it's the running gateway instance that doesn't observe this.
+    expect(store.get().mcpGateway?.enabled).toBe(false);
   });
 
   test("keeps overridden leaves separate from restart-required siblings", () => {

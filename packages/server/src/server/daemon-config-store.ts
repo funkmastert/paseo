@@ -200,7 +200,13 @@ const RELOADABLE_PATHS = [
   "agents.tokenBurnMonitor",
   "agents.skills.selection",
   "worktrees.diskSweeper",
-  "mcpGateway",
+  // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
+  // and never observes config changes (its class doc calls live reconfiguration "wired
+  // at the bootstrap layer in a later unit" — that unit doesn't exist yet). Listing it
+  // here would make reload() report an mcpGateway edit as applied when the live gateway
+  // never picked it up. Leave it out of RELOADABLE_PATHS — honesty over convenience —
+  // until the gateway actually subscribes to config changes; PERSISTED_TO_MUTABLE_PATH
+  // still maps it, so persistence and in-memory config both stay correct.
   "pluginsEnabled",
 ] as const;
 

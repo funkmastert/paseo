@@ -35,7 +35,19 @@ export class McpGatewayOAuthStateStore {
     this.ttlMs = ttlMs;
   }
 
+  /**
+   * Invalidates a prior state before minting the new one — last-start-wins semantics.
+   * Two devices starting auth for the same server otherwise both mint a valid state, but
+   * the PKCE code verifier in the token store is keyed by serverName only (KTD4), so the
+   * second start's `saveCodeVerifier()` silently clobbers the first's. Without this, the
+   * first device's callback would reach the exchange and fail on a mismatched verifier —
+   * confusing, since nothing about that error says "someone else restarted this flow".
+   * Invalidating the old state here makes the first callback fail fast on the existing
+   * unknown/expired-state 400 path instead, and guarantees the verifier a callback ever
+   * successfully exchanges against always belongs to the one state that can still consume.
+   */
   create(serverName: string, now: number = Date.now()): string {
+    this.invalidateFor(serverName);
     const state = randomUUID();
     this.entries.set(state, { serverName, expiresAt: now + this.ttlMs });
     return state;
@@ -49,6 +61,16 @@ export class McpGatewayOAuthStateStore {
       return undefined;
     }
     return entry.serverName;
+  }
+
+  /** Removes any existing state entries for a server. Called from `create()` so starting a
+   * new auth flow always invalidates an in-flight one for the same server. */
+  invalidateFor(serverName: string): void {
+    for (const [state, entry] of this.entries) {
+      if (entry.serverName === serverName) {
+        this.entries.delete(state);
+      }
+    }
   }
 }
 

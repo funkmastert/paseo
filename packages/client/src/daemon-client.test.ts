@@ -384,6 +384,47 @@ test("sets the complete viewed timeline subscription only when the daemon suppor
   });
 });
 
+test("gates mcp_status_update on the mcpStatus feature so an old daemon's stricter enum isn't sent an unknown event", async () => {
+  const legacyTransport = createMockTransport();
+  const legacyClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_legacy",
+    transportFactory: () => legacyTransport.transport,
+    reconnect: { enabled: false },
+  });
+  const supportedTransport = createMockTransport();
+  const supportedClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_supported",
+    transportFactory: () => supportedTransport.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(legacyClient, supportedClient);
+
+  const legacyConnect = legacyClient.connect();
+  legacyTransport.triggerOpen({ features: { explicitEventSubscriptions: true } });
+  await legacyConnect;
+  legacyTransport.sent.length = 0;
+
+  const supportedConnect = supportedClient.connect();
+  supportedTransport.triggerOpen({
+    features: { explicitEventSubscriptions: true, mcpStatus: true },
+  });
+  await supportedConnect;
+  supportedTransport.sent.length = 0;
+
+  legacyClient.on(() => {});
+  supportedClient.on(() => {});
+
+  const legacyRequest = parseSentFrame(legacyTransport.sent.at(-1));
+  const supportedRequest = parseSentFrame(supportedTransport.sent.at(-1));
+
+  expect(legacyRequest.type).toBe("session.events.set_subscription.request");
+  expect(legacyRequest.events).not.toContain("mcp_status_update");
+  expect(supportedRequest.type).toBe("session.events.set_subscription.request");
+  expect(supportedRequest.events).toContain("mcp_status_update");
+});
+
 test("normalizes legacy and dedicated agent attention notifications", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({

@@ -55,6 +55,25 @@ describe("McpGatewayOAuthStateStore", () => {
     expect(store.consume(zeeqState, 1)).toBe("zeeq");
     expect(store.consume(githubState, 1)).toBe("github");
   });
+
+  test("starting a second flow for the same server invalidates the first's state (last-start-wins)", () => {
+    const store = new McpGatewayOAuthStateStore();
+    const first = store.create("zeeq", 0);
+    const second = store.create("zeeq", 0);
+    expect(first).not.toBe(second);
+    // The earlier device's callback hits the existing unknown/expired-state path cleanly.
+    expect(store.consume(first, 1)).toBeUndefined();
+    expect(store.consume(second, 1)).toBe("zeeq");
+  });
+
+  test("invalidateFor removes a server's state without touching other servers'", () => {
+    const store = new McpGatewayOAuthStateStore();
+    const zeeqState = store.create("zeeq", 0);
+    const githubState = store.create("github", 0);
+    store.invalidateFor("zeeq");
+    expect(store.consume(zeeqState, 1)).toBeUndefined();
+    expect(store.consume(githubState, 1)).toBe("github");
+  });
 });
 
 describe("createGatewayOAuthClientProvider", () => {
@@ -117,6 +136,37 @@ describe("createGatewayOAuthClientProvider", () => {
   test("codeVerifier() throws when nothing was saved, rather than returning an empty PKCE value", () => {
     const { provider } = buildProvider("github");
     expect(() => provider.codeVerifier()).toThrow();
+  });
+
+  test("a second flow's state() clobbers the first's code verifier, but only the second's state survives to exchange against it", async () => {
+    const tokenStore = new McpGatewayTokenStore(createTempHome());
+    const stateStore = new McpGatewayOAuthStateStore();
+    const redirectUrl = "https://daemon.example.test/mcp/gateway/oauth/callback";
+    const deviceA = createGatewayOAuthClientProvider({
+      serverName: "zeeq",
+      tokenStore,
+      stateStore,
+      redirectUrl,
+    });
+    const deviceB = createGatewayOAuthClientProvider({
+      serverName: "zeeq",
+      tokenStore,
+      stateStore,
+      redirectUrl,
+    });
+
+    const stateA = (await deviceA.state?.()) as string;
+    await deviceA.saveCodeVerifier("verifier-a");
+
+    const stateB = (await deviceB.state?.()) as string;
+    await deviceB.saveCodeVerifier("verifier-b");
+
+    // Device A's state was invalidated the moment device B started a new flow.
+    expect(stateStore.consume(stateA)).toBeUndefined();
+    expect(stateStore.consume(stateB)).toBe("zeeq");
+    // The token store only ever holds one verifier per server, and it's the latest one —
+    // the same one the only state that can still consume would exchange against.
+    expect(await deviceB.codeVerifier()).toBe("verifier-b");
   });
 
   test("redirectToAuthorization() invokes the onRedirect hook instead of navigating a browser", () => {

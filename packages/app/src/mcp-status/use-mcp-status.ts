@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useShallow } from "zustand/shallow";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { QueryKey } from "@tanstack/react-query";
@@ -60,17 +61,25 @@ function useMcpStatusSessionReports(
   serverId: string | null,
   fallbackAgentLabel: string,
 ): McpStatusSessionReport[] {
-  const agents = useSessionStore((state) =>
-    serverId ? (state.sessions[serverId]?.agents ?? null) : null,
+  // Select only the agents that carry init-reported statuses. The store copies the agents
+  // Map on every agent update but reuses untouched agent objects, so useShallow keeps
+  // unrelated agent churn (turns, titles, activity) from re-deriving reports for this
+  // always-mounted strip — the selection only changes when a reporting agent itself does.
+  const reportingAgents = useSessionStore(
+    useShallow((state) => {
+      const agents = serverId ? state.sessions[serverId]?.agents : undefined;
+      if (!agents) return [];
+      return Array.from(agents.values()).filter(
+        (agent) => (agent.mcpServerStatuses?.length ?? 0) > 0,
+      );
+    }),
   );
 
   return useMemo(() => {
-    if (!agents) return [];
     const reports: McpStatusSessionReport[] = [];
-    for (const agent of agents.values()) {
-      if (!agent.mcpServerStatuses?.length) continue;
+    for (const agent of reportingAgents) {
       const agentLabel = agentLabelFallback(agent.title, fallbackAgentLabel);
-      for (const status of agent.mcpServerStatuses) {
+      for (const status of agent.mcpServerStatuses ?? []) {
         reports.push({
           agentId: agent.id,
           agentLabel,
@@ -80,7 +89,7 @@ function useMcpStatusSessionReports(
       }
     }
     return reports;
-  }, [agents, fallbackAgentLabel]);
+  }, [reportingAgents, fallbackAgentLabel]);
 }
 
 export interface UseMcpStatusResult {

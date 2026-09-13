@@ -1953,6 +1953,7 @@ export const es: TranslationResources = {
     },
     authAction: "Autenticar",
     reauthAction: "Reautenticar",
+    authError: "Fallo en la autenticación: {{error}}",
     reportedBy: "Reportado por {{agent}}",
     expand: "Expandir estado de MCP",
     collapse: "Contraer estado de MCP",

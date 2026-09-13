@@ -1938,6 +1938,7 @@ export const ru: TranslationResources = {
     },
     authAction: "Авторизоваться",
     reauthAction: "Повторная авторизация",
+    authError: "Ошибка аутентификации: {{error}}",
     reportedBy: "Сообщено агентом {{agent}}",
     expand: "Развернуть статус MCP",
     collapse: "Свернуть статус MCP",
