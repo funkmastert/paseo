@@ -1,4 +1,5 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
@@ -1543,11 +1544,15 @@ export class Session {
     // gated by the same explicit-subscription mechanism, so old clients never receive it.
     this.unsubscribeMcpGatewayStatus = this.agentManager.onMcpGatewayStatusChange((snapshot) => {
       if (!this.wantsEvent("mcp_status_update")) return;
-      this.emit({
-        type: "mcp_status_update",
-        payload: { servers: snapshot, generatedAt: new Date().toISOString() },
-      });
+      this.emit(this.mcpStatusUpdateMessage(snapshot));
     });
+  }
+
+  private mcpStatusUpdateMessage(servers: McpGatewaySnapshotEntry[]) {
+    return {
+      type: "mcp_status_update" as const,
+      payload: { servers, generatedAt: new Date().toISOString() },
+    };
   }
 
   private subscribeToRegistryMutations(): void {
@@ -2378,13 +2383,7 @@ export class Session {
         if (msg.events.includes("mcp_status_update")) {
           const snapshot = this.agentManager.getMcpGatewaySnapshot();
           if (snapshot.length > 0) {
-            this.emitForSource(
-              {
-                type: "mcp_status_update",
-                payload: { servers: snapshot, generatedAt: new Date().toISOString() },
-              },
-              source,
-            );
+            this.emitForSource(this.mcpStatusUpdateMessage(snapshot), source);
           }
         }
         return undefined;
@@ -4372,9 +4371,6 @@ export class Session {
   }
 
   /**
-   * Handle list commands request for an agent
-   */
-  /**
    * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
    * action). Never throws to the caller — `AgentManager.startMcpGatewayAuthorization` rejects
    * for an unknown server, a static-auth server (nothing to authorize interactively), or a
@@ -4398,8 +4394,7 @@ export class Session {
         payload: {
           requestId: request.requestId,
           authorizationUrl: null,
-          error:
-            error instanceof Error ? error.message : "Failed to start MCP gateway authorization",
+          error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
         },
       });
     }

@@ -4614,12 +4614,11 @@ class ClaudeAgentSession implements AgentSession {
       sessionId: msgRecord.sessionId,
       session: isObjectRecord(msgRecord.session) ? { id: msgRecord.session.id } : null,
     }).trim();
+    // Defensive: some fixtures/older CLIs omit mcp_servers even though the current
+    // SDK type declares it required. Never crash the init handshake over it.
+    const mcpServerStatuses = Array.isArray(message.mcp_servers) ? message.mcp_servers : [];
     if (!newSessionId) {
-      return {
-        threadStartedSessionId: null,
-        notice: null,
-        mcpServerStatuses: Array.isArray(message.mcp_servers) ? message.mcp_servers : [],
-      };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses };
     }
     const existingSessionId = this.claudeSessionId;
     let threadStartedSessionId: string | null = null;
@@ -4665,9 +4664,6 @@ class ClaudeAgentSession implements AgentSession {
       this.lastRuntimeModel = message.model;
       this.cachedRuntimeInfo = null;
     }
-    // Defensive: some fixtures/older CLIs omit mcp_servers even though the current
-    // SDK type declares it required. Never crash the init handshake over it.
-    const mcpServerStatuses = Array.isArray(message.mcp_servers) ? message.mcp_servers : [];
     return { threadStartedSessionId, notice, mcpServerStatuses };
   }
 

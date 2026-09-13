@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   UnauthorizedError,
@@ -19,6 +20,7 @@ import {
   buildMcpGatewayNotificationPayload,
   type McpGatewayNotifiableStatus,
 } from "@getpaseo/protocol/mcp-notification";
+import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 
 import {
   applyServerEvent,
@@ -108,29 +110,6 @@ function isAuthFailure(error: unknown): boolean {
     return error.code !== undefined && AUTH_FAILURE_HTTP_CODES.has(error.code);
   }
   return false;
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** Order-sensitive: safe because `servers` is populated once at construction and never reordered. */
-function sameSnapshot(
-  a: readonly McpGatewaySnapshotEntry[],
-  b: readonly McpGatewaySnapshotEntry[],
-): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((entry, index) => {
-    const other = b[index];
-    return (
-      other !== undefined &&
-      entry.name === other.name &&
-      entry.status === other.status &&
-      entry.critical === other.critical &&
-      entry.lastChangedAt === other.lastChangedAt &&
-      entry.error === other.error
-    );
-  });
 }
 
 type McpGatewayChangeListener = (snapshot: McpGatewaySnapshotEntry[]) => void;
@@ -278,7 +257,9 @@ export class McpGateway {
 
   private notifyStatusChange(): void {
     const snapshot = this.getSnapshot();
-    if (sameSnapshot(this.lastEmittedSnapshot, snapshot)) return;
+    // Order-sensitive compare is safe: `servers` is populated once at construction and
+    // never reordered, and getSnapshot() omits `error` rather than setting it undefined.
+    if (isDeepStrictEqual(this.lastEmittedSnapshot, snapshot)) return;
     this.lastEmittedSnapshot = snapshot;
     for (const listener of this.events.listeners("change")) {
       (listener as McpGatewayChangeListener)(snapshot);
@@ -513,7 +494,7 @@ export class McpGateway {
         runtime,
         isAuthFailure(error)
           ? { type: "needsAuth" }
-          : { type: "connectionFailed", error: errorMessage(error) },
+          : { type: "connectionFailed", error: getErrorMessage(error) },
       );
       this.logger?.warn({ err: error, server: name }, "MCP gateway server connection failed");
     }

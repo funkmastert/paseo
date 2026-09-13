@@ -108,15 +108,22 @@ export class McpGatewayTokenStore {
     return record?.auth === "oauth" ? record : undefined;
   }
 
+  private patchOAuthRecord(
+    serverName: string,
+    patch: Partial<Omit<McpGatewayOAuthTokenRecord, "auth">>,
+  ): void {
+    this.setRecord(serverName, {
+      ...(this.getOAuthRecord(serverName) ?? { auth: "oauth" }),
+      ...patch,
+    });
+  }
+
   getOAuthTokens(serverName: string): OAuthTokens | undefined {
     return this.getOAuthRecord(serverName)?.tokens;
   }
 
   saveOAuthTokens(serverName: string, tokens: OAuthTokens): void {
-    this.setRecord(serverName, {
-      ...(this.getOAuthRecord(serverName) ?? { auth: "oauth" }),
-      tokens,
-    });
+    this.patchOAuthRecord(serverName, { tokens });
   }
 
   getClientInformation(serverName: string): OAuthClientInformationFull | undefined {
@@ -124,10 +131,7 @@ export class McpGatewayTokenStore {
   }
 
   saveClientInformation(serverName: string, clientInformation: OAuthClientInformationFull): void {
-    this.setRecord(serverName, {
-      ...(this.getOAuthRecord(serverName) ?? { auth: "oauth" }),
-      clientInformation,
-    });
+    this.patchOAuthRecord(serverName, { clientInformation });
   }
 
   getCodeVerifier(serverName: string): string | undefined {
@@ -135,10 +139,7 @@ export class McpGatewayTokenStore {
   }
 
   saveCodeVerifier(serverName: string, codeVerifier: string): void {
-    this.setRecord(serverName, {
-      ...(this.getOAuthRecord(serverName) ?? { auth: "oauth" }),
-      codeVerifier,
-    });
+    this.patchOAuthRecord(serverName, { codeVerifier });
   }
 
   getStaticHeaders(serverName: string): Record<string, string> | undefined {
