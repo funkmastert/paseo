@@ -1028,6 +1028,9 @@ export const ptBR: TranslationResources = {
         generic: "Configure o {{brand}} neste host para usar seus recursos.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · medido há {{timeAgo}}",
+    },
   },
   workspaceLabels: {
     title: "Etiquetas",
@@ -1107,6 +1110,7 @@ export const ptBR: TranslationResources = {
         changeRequest: "Pull request",
         checks: "Verificações",
         services: "Serviços",
+        diskUsage: "Uso de disco",
         labels: "Etiquetas",
         diff: "Estatísticas de diff",
         timestamp: "Última atividade",

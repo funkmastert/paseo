@@ -149,6 +149,7 @@ export interface WorkspaceDescriptor {
   githubRuntime?: WorkspaceDescriptorPayload["githubRuntime"];
   forge?: WorkspaceDescriptorPayload["forge"];
   project?: ProjectPlacementPayload;
+  diskUsage?: WorkspaceDescriptorPayload["diskUsage"];
 }
 
 export function normalizeWorkspaceDescriptor(
@@ -187,6 +188,7 @@ export function normalizeWorkspaceDescriptor(
     githubRuntime: payload.githubRuntime,
     forge: payload.forge,
     project: payload.project,
+    diskUsage: payload.diskUsage ?? null,
   };
 }
 

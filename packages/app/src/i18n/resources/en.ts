@@ -1015,6 +1015,9 @@ export const en = {
         generic: "Set up {{brand}} on this host to use its features.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · sampled {{timeAgo}} ago",
+    },
   },
   workspaceLabels: {
     title: "Labels",
@@ -1091,6 +1094,7 @@ export const en = {
         changeRequest: "Pull request",
         checks: "Checks",
         services: "Services",
+        diskUsage: "Disk usage",
         labels: "Labels",
         diff: "Diff stats",
         timestamp: "Last activity",

@@ -1037,6 +1037,9 @@ export const es: TranslationResources = {
         generic: "Configura {{brand}} en este host para usar sus funciones.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · muestreado hace {{timeAgo}}",
+    },
   },
   workspaceLabels: {
     title: "Etiquetas",
@@ -1116,6 +1119,7 @@ export const es: TranslationResources = {
         changeRequest: "Pull request",
         checks: "Comprobaciones",
         services: "Servicios",
+        diskUsage: "Uso de disco",
         labels: "Etiquetas",
         diff: "Estadísticas de cambios",
         timestamp: "Última actividad",

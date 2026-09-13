@@ -1017,6 +1017,9 @@ export const ja: TranslationResources = {
         generic: "このホストで {{brand}} をセットアップすると、その機能を使えます。",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · {{timeAgo}}前にサンプリング",
+    },
   },
   workspaceLabels: {
     title: "ラベル",
@@ -1093,6 +1096,7 @@ export const ja: TranslationResources = {
         changeRequest: "プルリクエスト",
         checks: "チェック",
         services: "サービス",
+        diskUsage: "ディスク使用量",
         labels: "ラベル",
         diff: "差分統計",
         timestamp: "最終アクティビティ",

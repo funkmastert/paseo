@@ -1021,6 +1021,9 @@ export const ru: TranslationResources = {
         generic: "Настройте {{brand}} на этом хосте, чтобы использовать его функции.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · измерено {{timeAgo}} назад",
+    },
   },
   workspaceLabels: {
     title: "Метки",
@@ -1097,6 +1100,7 @@ export const ru: TranslationResources = {
         changeRequest: "PR",
         checks: "Проверки",
         services: "Сервисы",
+        diskUsage: "Использование диска",
         labels: "Метки",
         diff: "Статистика изменений",
         timestamp: "Последняя активность",

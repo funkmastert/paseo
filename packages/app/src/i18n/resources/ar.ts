@@ -1006,6 +1006,9 @@ export const ar: TranslationResources = {
         generic: "قم بإعداد {{brand}} على هذا المضيف لاستخدام ميزاته.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · تم القياس قبل {{timeAgo}}",
+    },
   },
   workspaceLabels: {
     title: "التسميات",
@@ -1082,6 +1085,7 @@ export const ar: TranslationResources = {
         changeRequest: "طلب السحب",
         checks: "الفحوصات",
         services: "الخدمات",
+        diskUsage: "استخدام القرص",
         labels: "التسميات",
         diff: "إحصائيات الفروق",
         timestamp: "آخر نشاط",

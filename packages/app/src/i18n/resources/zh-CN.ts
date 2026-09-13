@@ -998,6 +998,9 @@ export const zhCN: TranslationResources = {
         generic: "在此主机上设置 {{brand}} 以使用其功能。",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · {{timeAgo}}前采样",
+    },
   },
   workspaceLabels: {
     title: "标签",
@@ -1074,6 +1077,7 @@ export const zhCN: TranslationResources = {
         changeRequest: "拉取请求",
         checks: "检查",
         services: "服务",
+        diskUsage: "磁盘用量",
         labels: "标签",
         diff: "差异统计",
         timestamp: "最近活动",

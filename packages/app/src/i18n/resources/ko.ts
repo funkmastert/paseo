@@ -1013,6 +1013,9 @@ export const ko: TranslationResources = {
         generic: "해당 기능을 사용하려면 이 호스트에 {{brand}}를 설정하세요.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · {{timeAgo}} 전 측정",
+    },
   },
   workspaceLabels: {
     title: "레이블",
@@ -1089,6 +1092,7 @@ export const ko: TranslationResources = {
         changeRequest: "풀 리퀘스트",
         checks: "검사",
         services: "서비스",
+        diskUsage: "디스크 사용량",
         labels: "레이블",
         diff: "Diff 통계",
         timestamp: "마지막 활동",
