@@ -237,6 +237,7 @@ function OrchestrationRow({
           requiresAttention={agent.requiresAttention}
           attentionReason={agent.attentionReason}
           pendingPermissionCount={agent.pendingPermissions.length}
+          animated
         />
         {row.descendantRequiresAttention ? (
           <View
