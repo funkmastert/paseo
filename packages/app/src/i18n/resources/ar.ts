@@ -1892,6 +1892,25 @@ export const ar: TranslationResources = {
   sidebarCallout: {
     dismiss: "رفض",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "خوادم MCP متصلة",
+      issues: "مشاكل MCP: {{names}}",
+    },
+    status: {
+      connected: "متصل",
+      connecting: "جاري الاتصال",
+      needsAuth: "يتطلب المصادقة",
+      error: "خطأ",
+      disabled: "معطل",
+      sessionReported: "مشكلة في الجلسة",
+    },
+    authAction: "المصادقة",
+    reauthAction: "إعادة المصادقة",
+    reportedBy: "أُبلغ عنها من {{agent}}",
+    expand: "توسيع حالة MCP",
+    collapse: "طي حالة MCP",
+  },
   contextWindow: {
     title: "نافذة السياق",
     used: "تم استخدام{{percentage}}%",

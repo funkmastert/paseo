@@ -16,12 +16,14 @@ import {
   providersSnapshotQueryKey,
   providersSnapshotQueryRoot,
 } from "@/data/providers-snapshot";
+import { mcpStatusQueryKey, type McpStatusPayload } from "@/mcp-status/use-mcp-status";
 import { refreshProviderSubagents } from "@/subagents/provider-store";
 
 type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
   { type: "providers_snapshot_update" }
 >;
+type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -31,6 +33,7 @@ type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
 type ServerDataEventType =
   | "providers_snapshot_update"
+  | "mcp_status_update"
   | "checkout_diff_update"
   | "subscribe_checkout_diff_response"
   | "status"
@@ -288,6 +291,22 @@ export async function applyProvidersSnapshotUpdate(input: {
   }
 }
 
+/**
+ * Applies an `mcp_status_update` push straight into the query cache (KTD7). Unlike the
+ * providers-snapshot flow, the payload already carries the full current state — no RPC
+ * round trip is needed to fill in the rest.
+ */
+export function applyMcpStatusUpdate(input: {
+  queryClient: QueryClient;
+  serverId: string;
+  message: McpStatusUpdateMessage;
+}): void {
+  input.queryClient.setQueryData<McpStatusPayload>(
+    mcpStatusQueryKey(input.serverId),
+    input.message.payload,
+  );
+}
+
 export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const activeCheckoutDiffSubscriptions = new Map<string, CheckoutDiffRoute>();
   const activeTerminalSubscriptions = new Map<string, WorkspaceTerminalsRoute>();
@@ -364,6 +383,9 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
       /* Query state owns fetch failures; reconnect/refetch repairs them. */
     });
   });
+  const unsubscribeMcpStatus = input.client.on("mcp_status_update", (message) => {
+    applyMcpStatusUpdate({ queryClient: input.queryClient, serverId: input.serverId, message });
+  });
   const unsubscribeDaemonConfig = input.client.on("status", (message) => {
     applyDaemonConfigStatus({ queryClient: input.queryClient, serverId: input.serverId, message });
   });
@@ -412,6 +434,7 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
     }
     unsubscribeQueryCache();
     unsubscribeProviders();
+    unsubscribeMcpStatus();
     unsubscribeDaemonConfig();
     unsubscribeCheckoutDiffUpdate();
     unsubscribeCheckoutDiffResponse();

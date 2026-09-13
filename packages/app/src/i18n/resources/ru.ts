@@ -1923,6 +1923,25 @@ export const ru: TranslationResources = {
   sidebarCallout: {
     dismiss: "Закрыть",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "Серверы MCP подключены",
+      issues: "Проблемы MCP: {{names}}",
+    },
+    status: {
+      connected: "Подключено",
+      connecting: "Подключение",
+      needsAuth: "Требуется аутентификация",
+      error: "Ошибка",
+      disabled: "Отключено",
+      sessionReported: "Проблема сессии",
+    },
+    authAction: "Авторизоваться",
+    reauthAction: "Повторная авторизация",
+    reportedBy: "Сообщено агентом {{agent}}",
+    expand: "Развернуть статус MCP",
+    collapse: "Свернуть статус MCP",
+  },
   contextWindow: {
     title: "Контекстное окно",
     used: "Использовано: {{percentage}}%",

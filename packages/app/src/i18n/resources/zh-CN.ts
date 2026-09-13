@@ -1871,6 +1871,25 @@ export const zhCN: TranslationResources = {
   sidebarCallout: {
     dismiss: "关闭",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCP 服务器已连接",
+      issues: "MCP 问题：{{names}}",
+    },
+    status: {
+      connected: "已连接",
+      connecting: "连接中",
+      needsAuth: "需要授权",
+      error: "错误",
+      disabled: "已禁用",
+      sessionReported: "会话问题",
+    },
+    authAction: "授权",
+    reauthAction: "重新授权",
+    reportedBy: "由 {{agent}} 报告",
+    expand: "展开 MCP 状态",
+    collapse: "收起 MCP 状态",
+  },
   contextWindow: {
     title: "上下文窗口",
     used: "已使用 {{percentage}}%",

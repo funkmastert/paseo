@@ -1943,6 +1943,25 @@ export const fr: TranslationResources = {
   sidebarCallout: {
     dismiss: "Rejeter",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "Serveurs MCP connectés",
+      issues: "Problèmes MCP : {{names}}",
+    },
+    status: {
+      connected: "Connecté",
+      connecting: "Connexion en cours",
+      needsAuth: "Authentification requise",
+      error: "Erreur",
+      disabled: "Désactivé",
+      sessionReported: "Problème de session",
+    },
+    authAction: "S'authentifier",
+    reauthAction: "Se réauthentifier",
+    reportedBy: "Signalé par {{agent}}",
+    expand: "Développer l'état MCP",
+    collapse: "Réduire l'état MCP",
+  },
   contextWindow: {
     title: "Fenêtre contextuelle",
     used: "{{percentage}}% utilisé",

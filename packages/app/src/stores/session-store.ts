@@ -36,6 +36,7 @@ import type {
   TokenBurnAlert,
 } from "@getpaseo/protocol/agent-types";
 import type {
+  AgentMcpServerStatus,
   ServerInfoStatusPayload,
   ProjectPlacementPayload,
   ServerCapabilities,
@@ -96,6 +97,14 @@ export interface Agent {
    * while the agent is idle so rows show recent activity.
    */
   lastActivitySummary?: string;
+  /**
+   * Provider-reported MCP server statuses from the SDK's init message (KTD8), captured
+   * verbatim each turn. Live-only like `lastActivitySummary`: absent until the first init
+   * message arrives, keeps its last value while idle. Covers stdio/pass-through servers, which
+   * have no daemon-side gateway state (mcp-status/use-mcp-status.ts) — the app's only visibility
+   * into their health (AE3).
+   */
+  mcpServerStatuses?: AgentMcpServerStatus[];
   /**
    * Trailing-window token-burn rate (tokens/min), computed server-side. Claude only in phase 1
    * — absent on other providers and on old daemons, not a fabricated zero. Feeds

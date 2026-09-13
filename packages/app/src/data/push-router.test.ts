@@ -6,7 +6,9 @@ import { buildTerminalsQueryKey } from "@/screens/workspace/terminals/state";
 import { daemonConfigQueryKey } from "@/data/daemon-config";
 import { daemonPairingOfferQueryKey } from "@/data/daemon-pairing";
 import { providersSnapshotQueryKey } from "@/data/providers-snapshot";
+import { mcpStatusQueryKey, type McpStatusPayload } from "@/mcp-status/use-mcp-status";
 import {
+  applyMcpStatusUpdate,
   checkoutDiffPushRoute,
   invalidateServerDataQueriesAfterReconnect,
   mountServerDataPushRouter,
@@ -18,6 +20,7 @@ type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
   { type: "providers_snapshot_update" }
 >;
+type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -27,6 +30,7 @@ type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
 type RouterMessage =
   | ProvidersSnapshotUpdateMessage
+  | McpStatusUpdateMessage
   | CheckoutDiffUpdateMessage
   | SubscribeCheckoutDiffResponseMessage
   | StatusMessage
@@ -60,6 +64,7 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
 } {
   const handlers: Record<RouterMessageType, RouterHandler[]> = {
     providers_snapshot_update: [],
+    mcp_status_update: [],
     checkout_diff_update: [],
     subscribe_checkout_diff_response: [],
     status: [],
@@ -694,5 +699,26 @@ describe("server data push router", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(listProviderSubagents).not.toHaveBeenCalled();
+  });
+});
+
+describe("applyMcpStatusUpdate", () => {
+  it("writes the push payload straight into the mcp status query cache (no RPC round trip)", () => {
+    const queryClient = new QueryClient();
+    const serverId = "server-1";
+    const payload: McpStatusPayload = {
+      servers: [{ name: "zeeq", status: "needs-auth", critical: true, lastChangedAt: 1 }],
+      generatedAt: "2026-09-12T00:00:00.000Z",
+    };
+
+    applyMcpStatusUpdate({
+      queryClient,
+      serverId,
+      message: { type: "mcp_status_update", payload },
+    });
+
+    expect(queryClient.getQueryData(mcpStatusQueryKey(serverId))).toEqual(payload);
+    // A different server's cache entry is untouched.
+    expect(queryClient.getQueryData(mcpStatusQueryKey("server-2"))).toBeUndefined();
   });
 });

@@ -49,6 +49,7 @@ import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
 import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-routes";
 import { openHostOverview } from "@/navigation/settings-navigation";
+import { McpStatusStrip } from "@/mcp-status/mcp-status-strip";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -602,6 +603,8 @@ function MobileSidebar({
           />
         )}
 
+        <McpStatusStrip />
+
         <SidebarFooter
           theme={theme}
           handleOpenProject={handleOpenProject}
@@ -778,6 +781,7 @@ function DesktopSidebar({
         )}
 
         <SidebarCalloutSlot />
+        <McpStatusStrip />
 
         <SidebarFooter
           theme={theme}

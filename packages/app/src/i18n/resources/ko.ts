@@ -1902,6 +1902,25 @@ export const ko: TranslationResources = {
   sidebarCallout: {
     dismiss: "닫기",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCP 서버 연결됨",
+      issues: "MCP 문제: {{names}}",
+    },
+    status: {
+      connected: "연결됨",
+      connecting: "연결 중",
+      needsAuth: "인증 필요",
+      error: "오류",
+      disabled: "사용 안 함",
+      sessionReported: "세션 문제",
+    },
+    authAction: "인증",
+    reauthAction: "재인증",
+    reportedBy: "{{agent}}가 보고함",
+    expand: "MCP 상태 펼치기",
+    collapse: "MCP 상태 접기",
+  },
   contextWindow: {
     title: "컨텍스트 윈도우",
     used: "{{percentage}}% 사용됨",

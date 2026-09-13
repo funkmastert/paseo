@@ -1938,6 +1938,25 @@ export const es: TranslationResources = {
   sidebarCallout: {
     dismiss: "Despedir",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "Servidores MCP conectados",
+      issues: "Problemas de MCP: {{names}}",
+    },
+    status: {
+      connected: "Conectado",
+      connecting: "Conectando",
+      needsAuth: "Requiere autenticación",
+      error: "Error",
+      disabled: "Deshabilitado",
+      sessionReported: "Problema de sesión",
+    },
+    authAction: "Autenticar",
+    reauthAction: "Reautenticar",
+    reportedBy: "Reportado por {{agent}}",
+    expand: "Expandir estado de MCP",
+    collapse: "Contraer estado de MCP",
+  },
   contextWindow: {
     title: "ventana contextual",
     used: "{{percentage}}% utilizado",

@@ -1902,6 +1902,25 @@ export const en = {
   sidebarCallout: {
     dismiss: "Dismiss",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCP servers connected",
+      issues: "MCP issues: {{names}}",
+    },
+    status: {
+      connected: "Connected",
+      connecting: "Connecting",
+      needsAuth: "Needs auth",
+      error: "Error",
+      disabled: "Disabled",
+      sessionReported: "Session issue",
+    },
+    authAction: "Authenticate",
+    reauthAction: "Re-authenticate",
+    reportedBy: "Reported by {{agent}}",
+    expand: "Expand MCP status",
+    collapse: "Collapse MCP status",
+  },
   contextWindow: {
     title: "Context window",
     used: "{{percentage}}% used",

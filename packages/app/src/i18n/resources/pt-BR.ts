@@ -1924,6 +1924,25 @@ export const ptBR: TranslationResources = {
   sidebarCallout: {
     dismiss: "Dispensar",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "Servidores MCP conectados",
+      issues: "Problemas de MCP: {{names}}",
+    },
+    status: {
+      connected: "Conectado",
+      connecting: "Conectando",
+      needsAuth: "Requer autenticação",
+      error: "Erro",
+      disabled: "Desativado",
+      sessionReported: "Problema de sessão",
+    },
+    authAction: "Autenticar",
+    reauthAction: "Reautenticar",
+    reportedBy: "Reportado por {{agent}}",
+    expand: "Expandir status do MCP",
+    collapse: "Recolher status do MCP",
+  },
   contextWindow: {
     title: "Janela de contexto",
     used: "{{percentage}}% usado",

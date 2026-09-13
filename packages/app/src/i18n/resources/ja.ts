@@ -1910,6 +1910,25 @@ export const ja: TranslationResources = {
   sidebarCallout: {
     dismiss: "閉じる",
   },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCPサーバーは接続済み",
+      issues: "MCPの問題: {{names}}",
+    },
+    status: {
+      connected: "接続済み",
+      connecting: "接続中",
+      needsAuth: "認証が必要",
+      error: "エラー",
+      disabled: "無効",
+      sessionReported: "セッションの問題",
+    },
+    authAction: "認証する",
+    reauthAction: "再認証する",
+    reportedBy: "{{agent}} が報告",
+    expand: "MCPステータスを展開",
+    collapse: "MCPステータスを折りたたむ",
+  },
   contextWindow: {
     title: "コンテキストウィンドウ",
     used: "{{percentage}}%使用",
