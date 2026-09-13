@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -92,6 +100,28 @@ describe("McpGatewayTokenStore", () => {
 
     expect(store.getStaticHeaders("slack")).toEqual({ Authorization: "Bearer static-secret" });
     expect(store.getOAuthTokens("slack")).toBeUndefined();
+  });
+
+  test("getOAuthExtraHeaders reads operator-seeded extra headers, undefined otherwise", () => {
+    const paseoHome = createTempHome();
+    const store = new McpGatewayTokenStore(paseoHome);
+    store.saveOAuthTokens("github", { access_token: "at-1", token_type: "Bearer" });
+    store.saveStaticHeaders("slack", { Authorization: "Bearer s" });
+
+    const tokensPath = path.join(paseoHome, TOKENS_RELATIVE_PATH);
+    const file = JSON.parse(readFileSync(tokensPath, "utf8"));
+    file.servers.zeeq = {
+      auth: "oauth",
+      extraHeaders: { "x-zeeq-prompts-repo": "wonderly/mobile" },
+    };
+    writeFileSync(tokensPath, JSON.stringify(file));
+
+    const reloaded = new McpGatewayTokenStore(paseoHome);
+    expect(reloaded.getOAuthExtraHeaders("zeeq")).toEqual({
+      "x-zeeq-prompts-repo": "wonderly/mobile",
+    });
+    expect(reloaded.getOAuthExtraHeaders("github")).toBeUndefined();
+    expect(reloaded.getOAuthExtraHeaders("slack")).toBeUndefined();
   });
 
   test("deleteServer removes only the named server's record", () => {

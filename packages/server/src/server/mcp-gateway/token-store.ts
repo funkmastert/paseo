@@ -25,6 +25,10 @@ const OAuthTokenRecordSchema = z.object({
   tokens: OAuthTokensSchema.optional(),
   clientInformation: OAuthClientInformationFullSchema.optional(),
   codeVerifier: z.string().optional(),
+  /** Non-auth headers an OAuth upstream additionally requires (e.g. zeeq's
+   * `x-zeeq-prompts-repo` selector). Kept here rather than config for the same
+   * broadcast reason as static headers, even when the value isn't secret. */
+  extraHeaders: z.record(z.string(), z.string()).optional(),
 });
 
 const StaticTokenRecordSchema = z.object({
@@ -140,6 +144,10 @@ export class McpGatewayTokenStore {
 
   saveCodeVerifier(serverName: string, codeVerifier: string): void {
     this.patchOAuthRecord(serverName, { codeVerifier });
+  }
+
+  getOAuthExtraHeaders(serverName: string): Record<string, string> | undefined {
+    return this.getOAuthRecord(serverName)?.extraHeaders;
   }
 
   getStaticHeaders(serverName: string): Record<string, string> | undefined {

@@ -475,6 +475,9 @@ export class McpGateway {
           return;
         }
         authProvider = this.buildOAuthProvider(name);
+        // The SDK's authProvider owns Authorization; extraHeaders ride requestInit for
+        // OAuth upstreams that additionally require non-auth headers (see token-store.ts).
+        headers = this.tokenStore.getOAuthExtraHeaders(name);
       }
 
       const transport = this.buildTransport({

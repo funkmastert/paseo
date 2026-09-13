@@ -66,6 +66,8 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
  */
 async function startFixtureMcpServer(options: {
   expectedAuthorizationHeader?: string;
+  /** Additional non-auth headers every request must carry exactly (401 otherwise). */
+  expectedHeaders?: Record<string, string>;
 }): Promise<{ url: string }> {
   const mcpServer = new McpServer({ name: "fixture-mcp-server", version: "1.0.0" });
   mcpServer.registerTool(
@@ -92,6 +94,13 @@ async function startFixtureMcpServer(options: {
         res.statusCode = 401;
         res.end();
         return;
+      }
+      for (const [key, value] of Object.entries(options.expectedHeaders ?? {})) {
+        if (req.headers[key.toLowerCase()] !== value) {
+          res.statusCode = 401;
+          res.end();
+          return;
+        }
       }
       try {
         const body = req.method === "POST" ? await readJsonBody(req) : undefined;
@@ -245,6 +254,43 @@ describe("McpGateway", () => {
 
     expect(gateway.getServerState("slack")?.status).toBe("connected");
     expect(gateway.getClient("slack")).toBeDefined();
+  });
+
+  test("an OAuth server with stored extraHeaders sends them alongside the SDK's Authorization", async () => {
+    const fixture = await startFixtureMcpServer({
+      expectedAuthorizationHeader: "Bearer at-oauth",
+      expectedHeaders: { "x-zeeq-prompts-repo": "wonderly/mobile" },
+    });
+    const paseoHome = createTempHome();
+    const tokensPath = path.join(paseoHome, "mcp-gateway", "tokens.json");
+    mkdirSync(path.dirname(tokensPath), { recursive: true });
+    // Written the way an operator seeds it: extraHeaders live only in the token record.
+    writeFileSync(
+      tokensPath,
+      JSON.stringify({
+        version: 1,
+        servers: {
+          zeeq: {
+            auth: "oauth",
+            tokens: { access_token: "at-oauth", token_type: "Bearer" },
+            extraHeaders: { "x-zeeq-prompts-repo": "wonderly/mobile" },
+          },
+        },
+      }),
+    );
+
+    const gateway = new McpGateway({
+      paseoHome,
+      oauthRedirectBaseUrl: "http://daemon.example.test:6767",
+      config: {
+        enabled: true,
+        servers: { zeeq: { url: fixture.url, transport: "http", auth: "oauth", critical: true } },
+      },
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("zeeq")?.status).toBe("connected");
   });
 
   test("a static-auth server with the wrong stored header lands in needs-auth, not error", async () => {
