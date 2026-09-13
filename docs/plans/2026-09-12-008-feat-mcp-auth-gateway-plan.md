@@ -36,6 +36,7 @@ MCP OAuth state lives per `CLAUDE_CONFIG_DIR`. The account pool deliberately run
 - **One global gateway now; per-project segregation later.** All projects share the gateway's server set; splitting work vs personal server sets is a future evolution. (session-settled: user-directed — "we can use the same one for everything but some day I'll segregate things into work and personal projects.")
 - **Persistent global status UI.** MCP auth state lives in an always-visible header-level strip, not a settings page. Compact/collapsible given contested header real estate. (session-settled: user-directed.)
 - **Remote OAuth-class servers are the target; local stdio servers pass through untouched in v1.** (session-settled: user-approved — the stdio class is not what breaks on account swaps.)
+- **Zeeq and agent-gateway are critical-tier.** Their unavailability is treated as materially more serious than other servers' — louder surfacing, immediate notification. (session-settled: user-directed.)
 - **Broker availability spans accounts by design.** A server previously authed in only one dir (e.g. slack) becomes available to every account's sessions. (session-settled: user-approved via call-out — treated as the point, not a leak.)
 
 ```mermaid
@@ -65,7 +66,8 @@ flowchart TB
 
 **Coverage**
 
-- R9. The initial brokered set covers the owner's active MCPs: GitHub, Linear, Notion, Figma, Zeeq, Slack; adding another MCP requires configuration only, not code.
+- R9. The initial brokered set covers the owner's active MCPs: GitHub, Linear, Notion, Figma, Zeeq, Slack, and agent-gateway; adding another MCP requires configuration only, not code.
+- R11. Servers carry a configurable criticality tier. Critical servers (initially Zeeq and agent-gateway) get prominent strip treatment and an immediate push notification on auth loss or unavailability; non-critical servers surface in the strip without a push.
 - R10. Workspaces that use no MCPs are unaffected in behavior and performance.
 
 ### Key Flows
@@ -86,6 +88,7 @@ flowchart TB
 ### Acceptance Examples
 
 - AE1. **Covers R1, R3.** Given GitHub was authed once at the daemon, when a worker agent on the backup account calls a GitHub MCP tool, then the call succeeds with no auth prompt and no per-dir setup.
+- AE5. **Covers R11.** Given Zeeq loses auth while GitHub also loses auth, then Zeeq produces an immediate push and prominent strip state while GitHub changes strip state only.
 - AE2. **Covers R4, R8.** Given Linear's token expired while an agent is mid-task, when the owner re-auths from the strip, then the same running agent's next Linear call succeeds and exactly one expiry notification was sent.
 - AE3. **Covers R7.** Given a session whose SDK reports a failed MCP server at init, then that state is visible in the UI rather than silently absent.
 - AE4. **Covers R10.** Given a workspace that uses no MCP tools, then its agent sessions show no MCP-related latency, prompts, or errors introduced by the gateway.
