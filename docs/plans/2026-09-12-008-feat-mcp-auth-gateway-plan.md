@@ -62,7 +62,7 @@ flowchart TB
 - R5. A persistent, globally visible strip lists every configured MCP with its current auth state (healthy / needs auth / erroring) at a glance.
 - R6. Authenticating or re-authenticating any MCP is a one-click action from that strip.
 - R7. Per-session MCP server status reported by the provider SDK is captured and surfaced instead of discarded.
-- R8. When a brokered MCP loses authentication, the owner is notified (push, consistent with the existing monitor notifications) in addition to the strip state change.
+- R8. When a brokered MCP loses authentication, the strip state changes and the owner is notified per the server's criticality tier (R11), using the existing monitor notification path.
 
 **Coverage**
 
@@ -89,7 +89,7 @@ flowchart TB
 
 - AE1. **Covers R1, R3.** Given GitHub was authed once at the daemon, when a worker agent on the backup account calls a GitHub MCP tool, then the call succeeds with no auth prompt and no per-dir setup.
 - AE5. **Covers R11.** Given Zeeq loses auth while GitHub also loses auth, then Zeeq produces an immediate push and prominent strip state while GitHub changes strip state only.
-- AE2. **Covers R4, R8.** Given Linear's token expired while an agent is mid-task, when the owner re-auths from the strip, then the same running agent's next Linear call succeeds and exactly one expiry notification was sent.
+- AE2. **Covers R4, R8.** Given Zeeq's token expired while an agent is mid-task, when the owner re-auths from the strip, then the same running agent's next Zeeq call succeeds and exactly one expiry notification was sent.
 - AE3. **Covers R7.** Given a session whose SDK reports a failed MCP server at init, then that state is visible in the UI rather than silently absent.
 - AE4. **Covers R10.** Given a workspace that uses no MCP tools, then its agent sessions show no MCP-related latency, prompts, or errors introduced by the gateway.
 
