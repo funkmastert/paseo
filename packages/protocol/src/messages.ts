@@ -136,6 +136,87 @@ const MutableStructuredGenerationProviderSchema = z
 const MutableMetadataGenerationConfigSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).default([]),
+    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+  })
+  .passthrough();
+
+// Patch-only variant: `providers` has no default here. `.partial()` on the
+// config schema above would apply the `.default([])` to a patch that never
+// mentioned `providers` at all (only `titleTracking`), making the two
+// indistinguishable and silently clearing the caller's stored providers.
+const MutableMetadataGenerationPatchSchema = z
+  .object({
+    providers: z.array(MutableStructuredGenerationProviderSchema).optional(),
+    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+  })
+  .passthrough();
+
+// Live-toggleable like metadataGeneration.titleTracking (553af7e5e) — mirrors its
+// mutable/patch split for the same reason: `.partial()` on the config schema would make an
+// absent field indistinguishable from an explicit reset.
+const MutableTokenBurnMonitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableTokenBurnMonitorPatchSchema = MutableTokenBurnMonitorConfigSchema;
+
+// Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
+// `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
+// reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const MutableDiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDiskSweeperPatchSchema = MutableDiskSweeperConfigSchema;
+
+// New top-level config section (KTD9), same mutable/patch split for the same reason as
+// diskSweeper/tokenBurnMonitor above. Exported (unlike its siblings) because the server's
+// McpGateway service (packages/server/src/server/mcp-gateway/gateway.ts) needs the config
+// shape too; persisted-config.ts keeps its own `.strict()` copy for on-disk validation
+// rather than importing this `.passthrough()` wire schema, matching that file's existing
+// disk-sweeper/token-burn-monitor precedent of not sharing schemas across the wire/disk
+// boundary. Static-auth header VALUES never live here — only that a server uses static
+// auth (`auth: "static"`) — because this config is broadcast in full to every client; the
+// header value lives in the daemon's private 0600 token store, keyed by server name.
+export const MutableMcpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .passthrough();
+
+export const MutableMcpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerConfigSchema).optional(),
+  })
+  .passthrough();
+
+// Patch-only variant: like `providers` below, a per-server patch may touch a single field
+// (e.g. flip `critical` alone) without repeating `url`/`transport`, so `url`/`transport`
+// can't be required here the way they are on the full config schema above.
+const MutableMcpGatewayServerPatchSchema = MutableMcpGatewayServerConfigSchema.partial();
+
+const MutableMcpGatewayPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerPatchSchema).optional(),
   })
   .passthrough();
 
@@ -243,6 +324,9 @@ export const MutableDaemonConfigSchema = z
     browserTools: MutableBrowserToolsConfigSchema.default({ enabled: false }),
     providers: z.record(z.string(), MutableDaemonProviderConfigSchema).default({}),
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
+    tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
+    diskSweeper: MutableDiskSweeperConfigSchema.optional(),
+    mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
@@ -263,7 +347,10 @@ export const MutableDaemonConfigPatchSchema = z
       .record(z.string(), MutableDaemonProviderConfigSchema.partial().passthrough())
       .optional(),
     removeProviders: z.array(z.string().min(1)).optional(),
-    metadataGeneration: MutableMetadataGenerationConfigSchema.partial().optional(),
+    metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
+    tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
+    diskSweeper: MutableDiskSweeperPatchSchema.optional(),
+    mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -277,6 +364,8 @@ export const MutableDaemonConfigPatchSchema = z
 
 export type MutableDaemonConfig = z.infer<typeof MutableDaemonConfigSchema>;
 export type MutableDaemonConfigPatch = z.infer<typeof MutableDaemonConfigPatchSchema>;
+export type MutableMcpGatewayConfig = z.infer<typeof MutableMcpGatewayConfigSchema>;
+export type MutableMcpGatewayServerConfig = z.infer<typeof MutableMcpGatewayServerConfigSchema>;
 import type {
   AgentCapabilityFlags,
   AgentModelDefinition,
@@ -290,8 +379,10 @@ import type {
   AgentProviderNotice,
   ToolCallDetail,
   ToolCallTimelineItem,
+  AgentTokenRate,
   AgentUsage,
   JsonValue,
+  TokenBurnAlert,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -432,6 +523,18 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   totalCostUsd: z.number().optional(),
   contextWindowMaxTokens: z.number().optional(),
   contextWindowUsedTokens: z.number().optional(),
+});
+
+const AgentTokenRateSchema: z.ZodType<AgentTokenRate> = z.object({
+  tokensPerMinute: z.number(),
+  asOfMs: z.number(),
+});
+
+const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
+  trigger: z.enum(["rate", "total"]),
+  ratePerMinute: z.number().optional(),
+  totalTokens: z.number().optional(),
+  firstBreachedAt: z.string(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -851,6 +954,15 @@ const AgentActiveTurnPayloadSchema = z.object({
   startedAt: z.string().nullable(),
 });
 
+// Per-agent init-reported MCP server statuses (KTD8): the SDK's own init
+// message reports `{name, status}[]` verbatim (status is a provider-defined
+// string, not a closed enum), captured live-only, no COMPAT tag needed —
+// a permanently-optional additive field like lastActivitySummary.
+const AgentMcpServerStatusSchema = z.object({
+  name: z.string(),
+  status: z.string(),
+});
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,
@@ -873,6 +985,10 @@ export const AgentSnapshotPayloadSchema = z.object({
   runtimeInfo: AgentRuntimeInfoSchema.optional(),
   lastUsage: AgentUsageSchema.optional(),
   lastError: z.string().optional(),
+  lastActivitySummary: z.string().optional(),
+  mcpServerStatuses: z.array(AgentMcpServerStatusSchema).optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
   title: z.string().nullable(),
   labels: z.record(z.string(), z.string()).default({}),
   requiresAttention: z.boolean().optional(),
@@ -880,9 +996,11 @@ export const AgentSnapshotPayloadSchema = z.object({
   attentionTimestamp: z.string().nullable().optional(),
   archivedAt: z.string().nullable().optional(),
   providerUnavailable: z.boolean().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
+export type AgentMcpServerStatus = z.infer<typeof AgentMcpServerStatusSchema>;
 
 export const AgentListItemPayloadSchema = z.object({
   id: z.string(),
@@ -903,6 +1021,10 @@ export const AgentListItemPayloadSchema = z.object({
   attentionTimestamp: z.string().nullable().optional(),
   labels: z.record(z.string(), z.string()).default({}),
   providerUnavailable: z.boolean().optional(),
+  lastActivitySummary: z.string().optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
@@ -3046,6 +3168,16 @@ export const HubExecutionControlRequestSchema = z.object({
 
 export type HubExecutionControlRequest = z.infer<typeof HubExecutionControlRequestSchema>;
 
+// Starts interactive OAuth for one brokered MCP gateway server (U6/KTD3). Returns the
+// authorization URL for the client to open via the existing external-URL opener; completion
+// arrives later via the callback route + `mcp_status_update`, so there is no long-poll RPC.
+export const McpGatewayAuthStartRequestSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.request"),
+  requestId: z.string(),
+  name: z.string(),
+});
+export type McpGatewayAuthStartRequest = z.infer<typeof McpGatewayAuthStartRequestSchema>;
+
 // These connection event streams have no directory bootstrap or timeline membership.
 export const SessionEventSubscriptionSchema = z.enum([
   "project.update",
@@ -3053,6 +3185,8 @@ export const SessionEventSubscriptionSchema = z.enum([
   "agent_attention_required",
   "agent_permission_request",
   "agent_permission_resolved",
+  // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+  "mcp_status_update",
 ]);
 export type SessionEventSubscription = z.infer<typeof SessionEventSubscriptionSchema>;
 export const SessionEventsSetSubscriptionRequestSchema = z.object({
@@ -3070,6 +3204,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   HubExecutionAgentCreateRequestSchema,
   HubExecutionAgentValidateRequestSchema,
   HubExecutionControlRequestSchema,
+  McpGatewayAuthStartRequestSchema,
   BrowserAutomationExecuteResponseSchema,
   VoiceAudioChunkMessageSchema,
   AbortRequestMessageSchema,
@@ -3589,6 +3724,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
+        mcpStatus: z.boolean().optional(),
       })
       .optional(),
   })
@@ -3860,6 +3997,17 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
   .optional()
   .nullable();
 
+// Sampled by the daemon-side WorktreeDiskMonitor via `du -sk`, never computed client-side.
+// `bytes` is the last successful sample; `sampledAt` lets the client show its age and decide
+// whether it's worth trusting. Absent entirely until the workspace has been sampled at least
+// once — see docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+export const WorkspaceDiskUsageSchema = z.object({
+  bytes: z.number(),
+  sampledAt: z.string(),
+});
+
+export type WorkspaceDiskUsage = z.infer<typeof WorkspaceDiskUsageSchema>;
+
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
     id: z.string(),
@@ -3924,6 +4072,7 @@ export const WorkspaceDescriptorPayloadSchema = z
     project: ProjectPlacementPayloadSchema.optional(),
     // COMPAT(directorySync): sequence of this latest directory projection.
     syncSeq: z.number().int().positive().optional(),
+    diskUsage: WorkspaceDiskUsageSchema.nullable().optional(),
   })
   .transform((workspace) => ({
     ...workspace,
@@ -5947,6 +6096,43 @@ export const RefreshProvidersSnapshotResponseMessageSchema = z.object({
   }),
 });
 
+// Per-server connection status for the MCP auth gateway (KTD9's state machine in
+// packages/server/src/server/mcp-gateway/state.ts). `status` mirrors
+// `McpGatewayServerStatus` there — duplicated rather than imported because the
+// protocol package can't depend on the server package.
+export const McpGatewayStatusEntrySchema = z.object({
+  name: z.string(),
+  status: z.enum(["disabled", "connecting", "connected", "needs-auth", "error"]),
+  critical: z.boolean(),
+  lastChangedAt: z.number(),
+  error: z.string().optional(),
+});
+
+// COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+// Copies the providers_snapshot_update pattern exactly (KTD7): new session message,
+// SessionEventSubscriptionSchema entry, feature flag, permission mapping to
+// daemon.read, feature-gated emission so old clients never receive it.
+export const McpStatusUpdateMessageSchema = z.object({
+  type: z.literal("mcp_status_update"),
+  payload: z.object({
+    servers: z.array(McpGatewayStatusEntrySchema),
+    generatedAt: z.string(),
+  }),
+});
+
+// Response to McpGatewayAuthStartRequestSchema (U6/KTD3). `authorizationUrl` is null only
+// when `error` is set — unknown server, a static-auth server with nothing to authorize
+// interactively, or a discovery/PKCE failure surfaced as a friendly message. Never carries
+// tokens or the PKCE verifier — the authorization URL itself is public (challenge only).
+export const McpGatewayAuthStartResponseMessageSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.response"),
+  payload: z.object({
+    requestId: z.string(),
+    authorizationUrl: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
 export const ProviderDiagnosticResponseMessageSchema = z.object({
   type: z.literal("provider_diagnostic_response"),
@@ -6636,6 +6822,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   GetProvidersSnapshotResponseMessageSchema,
   ProvidersSnapshotUpdateMessageSchema,
   RefreshProvidersSnapshotResponseMessageSchema,
+  McpStatusUpdateMessageSchema,
+  McpGatewayAuthStartResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   ListCommandsResponseSchema,
@@ -6811,6 +6999,11 @@ export type GetProvidersSnapshotResponseMessage = z.infer<
 export type ProvidersSnapshotUpdateMessage = z.infer<typeof ProvidersSnapshotUpdateMessageSchema>;
 export type RefreshProvidersSnapshotResponseMessage = z.infer<
   typeof RefreshProvidersSnapshotResponseMessageSchema
+>;
+export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
+export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
+export type McpGatewayAuthStartResponseMessage = z.infer<
+  typeof McpGatewayAuthStartResponseMessageSchema
 >;
 export type ProviderDiagnosticResponseMessage = z.infer<
   typeof ProviderDiagnosticResponseMessageSchema

@@ -184,6 +184,27 @@ export interface AgentUsage {
   contextWindowUsedTokens?: number;
 }
 
+/** Trailing-window burn rate (tokens/min), computed server-side from a ring buffer. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
+}
+
+/**
+ * Live breach state set by the daemon-side AgentTokenBurnMonitor when an agent trips the
+ * configured rate or cumulative-total threshold. Additive-optional on the wire and
+ * deliberately NOT a member of the closed `attentionReason` enum — every wire surface for
+ * that enum is a non-catching `z.enum(["finished","error","permission"])`, so adding a value
+ * there breaks parsing on every shipped client. See
+ * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
+ */
+export interface TokenBurnAlert {
+  trigger: "rate" | "total";
+  ratePerMinute?: number;
+  totalTokens?: number;
+  firstBreachedAt: string;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",
@@ -375,7 +396,13 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      turnTokenDelta?: number;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

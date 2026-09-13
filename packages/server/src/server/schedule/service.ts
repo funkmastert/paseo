@@ -30,6 +30,11 @@ import type {
 import type { FirstAgentContext } from "@getpaseo/protocol/messages";
 
 const SCHEDULE_TICK_INTERVAL_MS = 1000;
+// Orphaned schedules whose target agent was deleted/archived while the daemon was down (or
+// before completeForAgent existed) only got swept at startup. A schedule orphaned mid-session
+// (e.g. an archive that bypassed completeForAgent) would tick forever until the next restart —
+// re-run the same idempotent sweep on an interval so it self-heals without one.
+const DEFAULT_ORPHANED_SCHEDULE_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 
 // A run failed because its target no longer exists: the agent was deleted or
 // archived, or a new-agent cwd was removed. These are permanent, so the schedule
@@ -240,6 +245,8 @@ export interface ScheduleServiceOptions {
   archiveWorkspace: (workspaceId: string) => Promise<void>;
   now?: () => Date;
   runner?: (schedule: StoredSchedule, runId: string) => Promise<ScheduleExecutionResult>;
+  /** How often `sweepOrphanedSchedules` re-runs after the startup sweep. */
+  orphanedScheduleSweepIntervalMs?: number;
 }
 
 export class ScheduleService {
@@ -261,7 +268,9 @@ export class ScheduleService {
     runId: string,
   ) => Promise<ScheduleExecutionResult>;
   private readonly runningScheduleIds = new Set<string>();
+  private readonly orphanedScheduleSweepIntervalMs: number;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: ScheduleServiceOptions) {
     this.store = new ScheduleStore(join(options.paseoHome, "schedules"));
@@ -274,6 +283,8 @@ export class ScheduleService {
     this.archiveWorkspace = options.archiveWorkspace;
     this.now = options.now ?? (() => new Date());
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
+    this.orphanedScheduleSweepIntervalMs =
+      options.orphanedScheduleSweepIntervalMs ?? DEFAULT_ORPHANED_SCHEDULE_SWEEP_INTERVAL_MS;
   }
 
   async start(): Promise<void> {
@@ -289,12 +300,24 @@ export class ScheduleService {
     }, SCHEDULE_TICK_INTERVAL_MS);
     (timer as unknown as { unref?: () => void }).unref?.();
     this.tickTimer = timer;
+
+    const sweepTimer = setInterval(() => {
+      void this.sweepOrphanedSchedules().catch((error) => {
+        this.logger.error({ err: error }, "Failed to sweep orphaned schedules");
+      });
+    }, this.orphanedScheduleSweepIntervalMs);
+    (sweepTimer as unknown as { unref?: () => void }).unref?.();
+    this.orphanSweepTimer = sweepTimer;
   }
 
   async stop(): Promise<void> {
     if (this.tickTimer) {
       clearInterval(this.tickTimer);
       this.tickTimer = null;
+    }
+    if (this.orphanSweepTimer) {
+      clearInterval(this.orphanSweepTimer);
+      this.orphanSweepTimer = null;
     }
   }
 

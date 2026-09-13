@@ -686,6 +686,30 @@ export function mapACPUsage(usage: Usage | null | undefined): AgentUsage | undef
   };
 }
 
+/**
+ * Diffs ACP's session-cumulative `Usage.totalTokens` against the snapshot taken at the previous
+ * turn boundary, returning this turn's own delta plus the baseline to carry forward. Local to
+ * the ACP adapter — deliberately not shared with other providers' diffing, since each adapter's
+ * usage semantics differ and a shared helper invites a shared bug. Undefined `previousBaseline`
+ * means "first observation this session" (start or resume): only re-baseline, never report the
+ * whole pre-existing total as one giant turn. A non-positive diff (a reset or reconnect dropped
+ * the total) is also never reported — the baseline still advances so the reset self-heals for
+ * the next turn instead of compounding a bad reading.
+ */
+export function consumeACPTurnTokenDelta(
+  totalTokens: number | null | undefined,
+  previousBaseline: number | undefined,
+): { delta: number | undefined; nextBaseline: number | undefined } {
+  if (typeof totalTokens !== "number" || !Number.isFinite(totalTokens)) {
+    return { delta: undefined, nextBaseline: previousBaseline };
+  }
+  if (previousBaseline === undefined) {
+    return { delta: undefined, nextBaseline: totalTokens };
+  }
+  const delta = totalTokens - previousBaseline;
+  return { delta: delta > 0 ? delta : undefined, nextBaseline: totalTokens };
+}
+
 export function resolveACPModeSelection({
   modeId,
   availableModes,
@@ -1682,6 +1706,14 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   private initialCommandsWaitTimeoutMs: number;
   private readonly extensionCommandsParser?: ACPExtensionCommandsParser;
   private currentTurnUsage: AgentUsage | undefined;
+  /**
+   * Snapshot of `Usage.totalTokens` as of the last turn_completed emission. ACP's `Usage` is
+   * documented as "sum of all token types across session" — a session-cumulative running total,
+   * not a per-turn figure — so `turnTokenDelta` must be derived by diffing against this baseline.
+   * Undefined until the first turn completes this session, so a resumed/reconnected session
+   * re-baselines instead of reporting its whole pre-existing total as one giant turn.
+   */
+  private lastKnownTotalTokens: number | undefined;
   private activeForegroundTurnId: string | null = null;
   private fallbackAssistantMessageId: string | null = null;
   private closed = false;
@@ -3090,14 +3122,21 @@ export class ACPAgentSession implements AgentSession, ACPClient {
       case "max_tokens":
       case "max_turn_requests":
       case "refusal":
-      default:
+      default: {
+        const { delta: turnTokenDelta, nextBaseline } = consumeACPTurnTokenDelta(
+          response.usage?.totalTokens,
+          this.lastKnownTotalTokens,
+        );
+        this.lastKnownTotalTokens = nextBaseline;
         this.finishTurn({
           type: "turn_completed",
           provider: this.provider,
           usage: this.currentTurnUsage,
           turnId,
+          ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
         });
         break;
+      }
     }
   }
 

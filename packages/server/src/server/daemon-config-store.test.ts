@@ -38,6 +38,7 @@ function reloadableConfig(
     app: { baseUrl: "https://app.paseo.sh" },
     pluginsEnabled: persisted.pluginsEnabled ?? false,
     plugins: persisted.plugins ?? {},
+    mcpGateway: persisted.mcpGateway,
   };
 }
 
@@ -873,6 +874,408 @@ describe("DaemonConfigStore", () => {
     expect(persisted.agents?.metadataGeneration).toEqual({ providers: [] });
   });
 
+  test("patch persists title tracking without disturbing metadata generation providers", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            metadataGeneration: {
+              providers: [{ provider: "claude", model: "haiku" }],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: { providers: [{ provider: "claude", model: "haiku" }] },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ metadataGeneration: { titleTracking: { enabled: false } } });
+
+    expect(next.metadataGeneration.providers).toEqual([{ provider: "claude", model: "haiku" }]);
+    expect(next.metadataGeneration.titleTracking).toEqual({ enabled: false });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.metadataGeneration).toEqual({
+      providers: [{ provider: "claude", model: "haiku" }],
+      titleTracking: { enabled: false },
+    });
+  });
+
+  test("patch persists metadata generation providers without disturbing title tracking", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            metadataGeneration: {
+              providers: [{ provider: "claude", model: "haiku" }],
+              titleTracking: { enabled: false },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        metadataGeneration: {
+          providers: [{ provider: "claude", model: "haiku" }],
+          titleTracking: { enabled: false },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({
+      metadataGeneration: { providers: [{ provider: "codex", model: "gpt-5.4-mini" }] },
+    });
+
+    expect(next.metadataGeneration.providers).toEqual([
+      { provider: "codex", model: "gpt-5.4-mini" },
+    ]);
+    expect(next.metadataGeneration.titleTracking).toEqual({ enabled: false });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.metadataGeneration).toEqual({
+      providers: [{ provider: "codex", model: "gpt-5.4-mini" }],
+      titleTracking: { enabled: false },
+    });
+  });
+
+  test("patch live-toggles tokenBurnMonitor.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            tokenBurnMonitor: { ratePerMinute: 40_000, sustainedMinutes: 5 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        tokenBurnMonitor: { ratePerMinute: 40_000, sustainedMinutes: 5 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ tokenBurnMonitor: { enabled: false } });
+
+    expect(next.tokenBurnMonitor).toEqual({
+      ratePerMinute: 40_000,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.tokenBurnMonitor).toEqual({
+      ratePerMinute: 40_000,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+  });
+
+  test("patch live-toggles worktrees.diskSweeper.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          worktrees: {
+            diskSweeper: { retentionDays: 3, maxDeletionsPerTick: 2 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        diskSweeper: { retentionDays: 3, maxDeletionsPerTick: 2 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ diskSweeper: { enabled: false } });
+
+    expect(next.diskSweeper).toEqual({
+      retentionDays: 3,
+      maxDeletionsPerTick: 2,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.worktrees?.diskSweeper).toEqual({
+      retentionDays: 3,
+      maxDeletionsPerTick: 2,
+      enabled: false,
+    });
+  });
+
+  test("patch persists diskSweeper without disturbing an existing worktrees.root", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          worktrees: { root: "/custom/worktrees" },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+
+    store.patch({ diskSweeper: { enabled: false } });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.worktrees?.root).toBe("/custom/worktrees");
+    expect(persisted.worktrees?.diskSweeper).toEqual({ enabled: false });
+  });
+
+  // Note: patch() (a direct config.patch RPC call, as opposed to reload() picking up an
+  // externally-edited config.json) always applies to the in-memory config and persists —
+  // that's unrelated to RELOADABLE_PATHS and unaffected by mcpGateway's removal from it.
+  // What it does NOT do is reconfigure the already-running McpGateway instance, which is
+  // constructed once in bootstrap.ts and never observes config changes; see the
+  // restart-required reload() test below for the case RELOADABLE_PATHS actually governs.
+  test("patch updates mcpGateway.enabled in memory and persists it (live gateway reconfiguration is not wired)", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          mcpGateway: {
+            enabled: true,
+            servers: {
+              zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+          },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ mcpGateway: { enabled: false } });
+
+    expect(next.mcpGateway).toEqual({
+      enabled: false,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.mcpGateway).toEqual({
+      enabled: false,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+  });
+
+  test("patch merges a single mcpGateway server field in memory without dropping sibling servers", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          mcpGateway: {
+            enabled: true,
+            servers: {
+              github: { url: "https://github.example.test/mcp", transport: "http" },
+              zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: false },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            github: { url: "https://github.example.test/mcp", transport: "http" },
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: false },
+          },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ mcpGateway: { servers: { zeeq: { critical: true } } } });
+
+    expect(next.mcpGateway?.servers).toEqual({
+      github: { url: "https://github.example.test/mcp", transport: "http" },
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.mcpGateway?.servers).toEqual({
+      github: { url: "https://github.example.test/mcp", transport: "http" },
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+    });
+  });
+
+  test("patch persists metadata generation providers without disturbing tokenBurnMonitor", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            tokenBurnMonitor: { enabled: false, totalTokens: 1_000_000 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        tokenBurnMonitor: { enabled: false, totalTokens: 1_000_000 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({
+      metadataGeneration: { providers: [{ provider: "codex", model: "gpt-5.4-mini" }] },
+    });
+
+    expect(next.tokenBurnMonitor).toEqual({ enabled: false, totalTokens: 1_000_000 });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.tokenBurnMonitor).toEqual({ enabled: false, totalTokens: 1_000_000 });
+  });
+
   test("patch persists custom ACP provider overrides into config.json", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
@@ -1066,6 +1469,42 @@ describe("DaemonConfigStore reload", () => {
     expect(store.get().relay?.enabled).toBe(false);
   });
 
+  // U1 originally listed "mcpGateway" in RELOADABLE_PATHS as if the running McpGateway
+  // would pick up the edit the way diskSweeper/tokenBurnMonitor do. It doesn't: the
+  // gateway is constructed once in bootstrap.ts and never observes config changes, so an
+  // externally-edited mcpGateway section must report as restart-required, not applied.
+  test("reports an externally-edited mcpGateway as restart-required, not applied live", () => {
+    const { paseoHome, store, persisted } = createReloadableStore({
+      initialPersisted: {
+        version: 1,
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+          },
+        },
+      },
+    });
+
+    writeConfig(paseoHome, {
+      ...persisted,
+      mcpGateway: {
+        enabled: false,
+        servers: {
+          zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+        },
+      },
+    });
+
+    const result = store.reload();
+
+    expect(result.appliedPaths).not.toContain("mcpGateway");
+    expect(result.restartRequiredPaths).toContain("mcpGateway.enabled");
+    // The store's own in-memory value still updates (persistence + in-memory config
+    // stay correct) — it's the running gateway instance that doesn't observe this.
+    expect(store.get().mcpGateway?.enabled).toBe(false);
+  });
+
   test("keeps overridden leaves separate from restart-required siblings", () => {
     const { paseoHome, store } = createReloadableStore({
       initialPersisted: { version: 1 },
@@ -1191,5 +1630,40 @@ describe("DaemonConfigStore reload", () => {
       restartRequiredPaths: [],
       overrideControlledPaths: [],
     });
+  });
+
+  function agentModelPolicyOf(config: MutableDaemonConfig): unknown {
+    return (config as unknown as { agentModelPolicy?: unknown }).agentModelPolicy;
+  }
+
+  test("reload carries a runtime agentModelPolicy patch forward across an unrelated disk edit that doesn't have the key", () => {
+    const { paseoHome, store, persisted } = createReloadableStore();
+    store.patch({ agentModelPolicy: { policyId: "memory-value" } });
+
+    // Simulate an external disk rewrite that never recorded the
+    // plugin-owned agentModelPolicy key at all (e.g. another writer that
+    // only round-trips built-in daemon fields) -- reload()'s resolved
+    // mutable config (reloadableConfig, mirroring
+    // createInitialMutableDaemonConfig) has no notion of the key either.
+    writeConfig(paseoHome, {
+      ...persisted,
+      daemon: { ...persisted.daemon, browserTools: { enabled: true } },
+    });
+
+    store.reload();
+
+    expect(agentModelPolicyOf(store.get())).toEqual({ policyId: "memory-value" });
+  });
+
+  test("reload prefers the on-disk agentModelPolicy over the in-memory value once the persisted file has the key", () => {
+    const { paseoHome, store } = createReloadableStore();
+    store.patch({ agentModelPolicy: { policyId: "memory-value" } });
+
+    const onDisk = loadPersistedConfig(paseoHome);
+    writeConfig(paseoHome, { ...onDisk, agentModelPolicy: { policyId: "disk-value" } });
+
+    store.reload();
+
+    expect(agentModelPolicyOf(store.get())).toEqual({ policyId: "disk-value" });
   });
 });

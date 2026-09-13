@@ -22,7 +22,13 @@ interface SupportedMutableConfigPatch {
   browserTools?: { enabled?: boolean };
   providers?: MutableDaemonConfig["providers"];
   removeProviders?: string[];
-  metadataGeneration?: MutableDaemonConfig["metadataGeneration"];
+  metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
+  tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
+  diskSweeper?: MutableDaemonConfig["diskSweeper"];
+  // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
+  // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
+  // must reference the patch-shaped type, not MutableDaemonConfig's full-config shape.
+  mcpGateway?: MutableDaemonConfigPatch["mcpGateway"];
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
@@ -31,6 +37,10 @@ interface SupportedMutableConfigPatch {
   skills?: MutableDaemonConfig["skills"];
   pluginsEnabled?: boolean;
   plugins?: MutableDaemonConfig["plugins"];
+  // Opaque plugin-owned config (see persisted-config.ts). Not part of the
+  // typed wire shape — MutableDaemonConfigPatchSchema is `.passthrough()`,
+  // so this is read/forwarded structurally rather than narrowed further.
+  agentModelPolicy?: Record<string, unknown>;
 }
 
 interface LoggerLike {
@@ -187,7 +197,16 @@ const RELOADABLE_PATHS = [
   "agents.providers",
   "agents.catalogRefreshTimeoutMs",
   "agents.metadataGeneration",
+  "agents.tokenBurnMonitor",
   "agents.skills.selection",
+  "worktrees.diskSweeper",
+  // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
+  // and never observes config changes (its class doc calls live reconfiguration "wired
+  // at the bootstrap layer in a later unit" — that unit doesn't exist yet). Listing it
+  // here would make reload() report an mcpGateway edit as applied when the live gateway
+  // never picked it up. Leave it out of RELOADABLE_PATHS — honesty over convenience —
+  // until the gateway actually subscribes to config changes; PERSISTED_TO_MUTABLE_PATH
+  // still maps it, so persistence and in-memory config both stay correct.
   "pluginsEnabled",
 ] as const;
 
@@ -210,7 +229,10 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.providers", "providers"],
   ["agents.catalogRefreshTimeoutMs", "catalogRefreshTimeoutMs"],
   ["agents.metadataGeneration", "metadataGeneration"],
+  ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.skills.selection", "skills.selection"],
+  ["worktrees.diskSweeper", "diskSweeper"],
+  ["mcpGateway", "mcpGateway"],
   ["pluginsEnabled", "pluginsEnabled"],
 ]);
 
@@ -249,6 +271,45 @@ function compactOwnedPaths(paths: readonly string[], owners: readonly string[]):
   return Array.from(compacted).sort();
 }
 
+function pickMetadataGenerationPatch(
+  metadataGeneration: MutableDaemonConfigPatch["metadataGeneration"],
+): Pick<SupportedMutableConfigPatch, "metadataGeneration"> {
+  if (
+    metadataGeneration?.providers === undefined &&
+    metadataGeneration?.titleTracking === undefined
+  ) {
+    return {};
+  }
+  return {
+    metadataGeneration: {
+      ...(metadataGeneration.providers !== undefined
+        ? { providers: metadataGeneration.providers }
+        : {}),
+      ...(metadataGeneration.titleTracking !== undefined
+        ? { titleTracking: metadataGeneration.titleTracking }
+        : {}),
+    },
+  };
+}
+
+function pickTokenBurnMonitorPatch(
+  tokenBurnMonitor: MutableDaemonConfigPatch["tokenBurnMonitor"],
+): Pick<SupportedMutableConfigPatch, "tokenBurnMonitor"> {
+  return tokenBurnMonitor === undefined ? {} : { tokenBurnMonitor };
+}
+
+function pickDiskSweeperPatch(
+  diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
+): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
+  return diskSweeper === undefined ? {} : { diskSweeper };
+}
+
+function pickMcpGatewayPatch(
+  mcpGateway: MutableDaemonConfigPatch["mcpGateway"],
+): Pick<SupportedMutableConfigPatch, "mcpGateway"> {
+  return mcpGateway === undefined ? {} : { mcpGateway };
+}
+
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...(patch.relay?.enabled !== undefined ? { relay: { enabled: patch.relay.enabled } } : {}),
@@ -260,9 +321,10 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
       : {}),
     ...(patch.providers !== undefined ? { providers: patch.providers } : {}),
     ...(patch.removeProviders !== undefined ? { removeProviders: patch.removeProviders } : {}),
-    ...(patch.metadataGeneration?.providers !== undefined
-      ? { metadataGeneration: { providers: patch.metadataGeneration.providers } }
-      : {}),
+    ...pickMetadataGenerationPatch(patch.metadataGeneration),
+    ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
+    ...pickDiskSweeperPatch(patch.diskSweeper),
+    ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
       ? { autoArchiveAfterMerge: patch.autoArchiveAfterMerge }
       : {}),
@@ -276,6 +338,9 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...(patch.agentProfiles !== undefined ? { agentProfiles: patch.agentProfiles } : {}),
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
     ...(patch.plugins !== undefined ? { plugins: patch.plugins } : {}),
+    ...(patch.agentModelPolicy !== undefined
+      ? { agentModelPolicy: patch.agentModelPolicy as Record<string, unknown> }
+      : {}),
   };
 }
 
@@ -332,14 +397,24 @@ export class DaemonConfigStore {
   ) {
     this.paseoHome = paseoHome;
     this.logger = getLogger(logger);
+    const startupPersisted =
+      options.startupPersisted ?? loadPersistedConfig(paseoHome, this.logger);
     this.current = MutableDaemonConfigSchema.parse({
       ...initial,
       relay: initial.relay ?? { enabled: true },
+      // Opaque plugin-owned config (persisted-config.ts) isn't threaded
+      // through the caller-supplied `initial` config the way built-in
+      // fields are (bootstrap.ts's createInitialMutableDaemonConfig has no
+      // notion of it) — lift it straight from the on-disk file so a plugin's
+      // config.patch() from a previous process survives a daemon restart.
+      ...(startupPersisted.agentModelPolicy !== undefined
+        ? { agentModelPolicy: startupPersisted.agentModelPolicy }
+        : {}),
     });
     this.relayEnabledMutable = options.relayEnabledMutable ?? true;
     this.reloadSource = options.reloadSource;
-    this.startupPersisted = options.startupPersisted ?? loadPersistedConfig(paseoHome, this.logger);
-    this.lastKnownPersisted = this.startupPersisted;
+    this.startupPersisted = startupPersisted;
+    this.lastKnownPersisted = startupPersisted;
   }
 
   public get(): MutableDaemonConfig {
@@ -401,6 +476,26 @@ export class DaemonConfigStore {
     return this.current;
   }
 
+  // agentModelPolicy is opaque plugin-owned config (persisted-config.ts) that
+  // reloadSource.resolve()/createInitialMutableDaemonConfig has no notion of
+  // (same gap the constructor's startup lift, above, works around), so it's
+  // never present on resolved.mutable. Reload's job is to pick up disk
+  // edits, so prefer the freshly-read persisted value when the file has the
+  // key; fall back to carrying the in-memory value forward (like `plugins`,
+  // in reload() below) only when the disk file has no key at all, so an
+  // unrelated reload doesn't wipe a plugin's runtime patch() that hasn't
+  // been written back to this exact file.
+  private resolveReloadedAgentModelPolicy(
+    persisted: PersistedConfig,
+  ): { agentModelPolicy: Record<string, unknown> } | Record<string, never> {
+    if (persisted.agentModelPolicy !== undefined) {
+      return { agentModelPolicy: persisted.agentModelPolicy };
+    }
+    const current = (this.current as unknown as { agentModelPolicy?: Record<string, unknown> })
+      .agentModelPolicy;
+    return current !== undefined ? { agentModelPolicy: current } : {};
+  }
+
   public reload(): DaemonConfigReloadResult {
     if (!this.reloadSource) {
       throw new Error("Daemon config reload is unavailable for this daemon instance");
@@ -413,6 +508,7 @@ export class DaemonConfigStore {
     const desired = MutableDaemonConfigSchema.parse({
       ...resolved.mutable,
       plugins: this.current.plugins,
+      ...this.resolveReloadedAgentModelPolicy(persisted),
     });
     const changedSinceLastApply = diffPaths(this.lastKnownPersisted, persisted);
     const overrideControlledPaths = compactOwnedPaths(
@@ -584,13 +680,104 @@ function mergeMutablePatchIntoPersistedConfig(params: {
   const { persisted, patch, removeProviders, persistRelayEnabled } = params;
   const daemon = mergeMutableDaemonPatch(persisted.daemon, patch, persistRelayEnabled);
   const agents = mergeMutableAgentPatch(persisted.agents, patch, removeProviders);
+  const worktrees = mergeMutableWorktreesPatch(persisted.worktrees, patch);
+  const mcpGateway = mergeMcpGatewayForPersist(persisted.mcpGateway, patch.mcpGateway);
   return {
     ...persisted,
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
     ...(patch.plugins !== undefined ? { plugins: patch.plugins } : {}),
+    ...(patch.agentModelPolicy !== undefined ? { agentModelPolicy: patch.agentModelPolicy } : {}),
     ...(daemon ? { daemon } : { daemon: undefined }),
     ...(agents ? { agents } : { agents: undefined }),
+    ...(worktrees ? { worktrees } : { worktrees: undefined }),
+    ...(mcpGateway !== undefined ? { mcpGateway } : {}),
   } as PersistedConfig;
+}
+
+type PersistedMetadataGeneration = NonNullable<PersistedConfig["agents"]>["metadataGeneration"];
+
+function mergeMetadataGenerationForPersist(
+  persisted: PersistedMetadataGeneration,
+  patch: SupportedMutableConfigPatch["metadataGeneration"],
+  removeProviders: readonly string[],
+): PersistedMetadataGeneration {
+  let providers = persisted?.providers;
+  if (patch?.providers !== undefined) {
+    providers = patch.providers;
+  } else if (removeProviders.length > 0 && providers) {
+    const removed = new Set(removeProviders);
+    providers = providers.filter((entry) => !removed.has(entry.provider));
+  }
+  const titleTracking =
+    patch?.titleTracking !== undefined ? patch.titleTracking : persisted?.titleTracking;
+
+  if (providers === undefined && titleTracking === undefined) {
+    return undefined;
+  }
+  return {
+    ...(providers !== undefined ? { providers } : {}),
+    ...(titleTracking !== undefined ? { titleTracking } : {}),
+  };
+}
+
+type PersistedTokenBurnMonitor = NonNullable<PersistedConfig["agents"]>["tokenBurnMonitor"];
+
+function mergeTokenBurnMonitorForPersist(
+  persisted: PersistedTokenBurnMonitor,
+  patch: SupportedMutableConfigPatch["tokenBurnMonitor"],
+): PersistedTokenBurnMonitor {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
+type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
+
+function mergeDiskSweeperForPersist(
+  persisted: PersistedDiskSweeper,
+  patch: SupportedMutableConfigPatch["diskSweeper"],
+): PersistedDiskSweeper {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
+type PersistedMcpGateway = PersistedConfig["mcpGateway"];
+
+// Reuses the same `deepMerge` as the live `this.current` merge (rather than a bespoke
+// shallow merge) so a partial patch — e.g. `{ servers: { zeeq: { critical: false } } }` —
+// merges per-server-field identically on disk and in memory instead of the persisted file
+// wholesale-replacing `servers` while the live config only updates the one named field.
+function mergeMcpGatewayForPersist(
+  persisted: PersistedMcpGateway,
+  patch: SupportedMutableConfigPatch["mcpGateway"],
+): PersistedMcpGateway {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedMcpGateway;
+}
+
+function mergeMutableWorktreesPatch(
+  persistedWorktrees: PersistedConfig["worktrees"],
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+): PersistedConfig["worktrees"] {
+  if (patch.diskSweeper === undefined) {
+    return persistedWorktrees;
+  }
+
+  const next = { ...persistedWorktrees } as NonNullable<PersistedConfig["worktrees"]>;
+  const diskSweeper = mergeDiskSweeperForPersist(
+    persistedWorktrees?.diskSweeper,
+    patch.diskSweeper,
+  );
+  if (diskSweeper !== undefined) next.diskSweeper = diskSweeper;
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 function mergeMutableAgentPatch(
@@ -601,6 +788,7 @@ function mergeMutableAgentPatch(
   if (
     patch.providers === undefined &&
     patch.metadataGeneration === undefined &&
+    patch.tokenBurnMonitor === undefined &&
     patch.skills === undefined &&
     removeProviders.length === 0
   ) {
@@ -619,16 +807,18 @@ function mergeMutableAgentPatch(
   if (providerOverrides) next["providers"] = providerOverrides;
   else delete next["providers"];
 
-  if (patch.metadataGeneration?.providers !== undefined) {
-    next["metadataGeneration"] = { providers: patch.metadataGeneration.providers };
-  } else if (removeProviders.length > 0 && persistedAgents?.metadataGeneration?.providers) {
-    const removed = new Set(removeProviders);
-    next["metadataGeneration"] = {
-      providers: persistedAgents.metadataGeneration.providers.filter(
-        (entry) => !removed.has(entry.provider),
-      ),
-    };
-  }
+  const metadataGeneration = mergeMetadataGenerationForPersist(
+    persistedAgents?.metadataGeneration,
+    patch.metadataGeneration,
+    removeProviders,
+  );
+  if (metadataGeneration !== undefined) next["metadataGeneration"] = metadataGeneration;
+
+  const tokenBurnMonitor = mergeTokenBurnMonitorForPersist(
+    persistedAgents?.tokenBurnMonitor,
+    patch.tokenBurnMonitor,
+  );
+  if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

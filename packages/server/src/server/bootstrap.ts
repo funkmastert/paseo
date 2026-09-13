@@ -133,6 +133,8 @@ import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
+import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
@@ -207,6 +209,9 @@ import {
 } from "./auth.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { AgentTitleTracker } from "./agent-title-tracker.js";
+import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
+import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -259,6 +264,34 @@ function createAgentMcpBaseUrl(listenTarget: ListenTarget | null): string | null
     "/mcp/agents",
     `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`,
   ).toString();
+}
+
+// KTD3: the MCP gateway's OAuth redirect_uri must be the daemon's own stable reachable base
+// URL, never a literal loopback, when reachable from elsewhere (e.g. a phone's browser). This
+// loopback form is the fallback when no such public base URL is configured — the strip's auth
+// action is responsible for saying so when that's the case (U7).
+function createMcpGatewayLoopbackBaseUrl(listenTarget: ListenTarget | null): string | null {
+  if (!listenTarget || listenTarget.type !== "tcp") {
+    return null;
+  }
+  const host = resolveAgentMcpClientHost(listenTarget.host);
+  return `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`;
+}
+
+function resolveMcpGatewayConfig(config: MutableDaemonConfig["mcpGateway"]): McpGatewayConfig {
+  return config ?? { enabled: false };
+}
+
+/** Broken out so its branches don't add to createPaseoDaemon's/logAndResolve's own complexity. */
+function applyMcpGatewayOAuthRedirectBaseUrl(
+  gateway: McpGateway,
+  serviceProxyPublicBaseUrl: string | null,
+  boundListenTarget: ListenTarget | null,
+): void {
+  const baseUrl = serviceProxyPublicBaseUrl ?? createMcpGatewayLoopbackBaseUrl(boundListenTarget);
+  if (baseUrl) {
+    gateway.setOAuthRedirectBaseUrl(baseUrl);
+  }
 }
 
 function createTerminalActivityUrl(listenTarget: ListenTarget | null): string | null {
@@ -395,6 +428,7 @@ export interface PaseoDaemonConfig {
   trustedProxies?: true | string[];
   mcpEnabled?: boolean;
   mcpInjectIntoAgents?: boolean;
+  mcpGateway?: MutableDaemonConfig["mcpGateway"];
   browserToolsEnabled?: boolean;
   git?: {
     maxProcessesPerSecond: number;
@@ -445,6 +479,22 @@ export interface PaseoDaemonConfig {
       thinkingOptionId?: string;
     }>;
   };
+  tokenBurnMonitor?: {
+    enabled?: boolean;
+    ratePerMinute?: number;
+    sustainedMinutes?: number;
+    totalTokens?: number;
+    scope?: "all" | "topLevelOnly";
+    breachBatchThreshold?: number;
+  };
+  diskSweeper?: {
+    enabled?: boolean;
+    sweepIntervalMs?: number;
+    retentionDays?: number;
+    maxDeletionsPerTick?: number;
+    minFreeGB?: number;
+    sampleTimeoutMs?: number;
+  };
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
@@ -467,6 +517,8 @@ export interface PaseoDaemon {
   serviceProxy: ServiceProxySubsystem;
   scriptRuntimeStore: WorkspaceScriptRuntimeStore;
   browserToolsBroker: BrowserToolsBroker;
+  mcpGateway: McpGateway;
+  getMcpGatewayAuthToken(): string;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -524,6 +576,24 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function withTokenBurnMonitorConfig(
+  config: Pick<PaseoDaemonConfig, "tokenBurnMonitor">,
+): Pick<MutableDaemonConfig, "tokenBurnMonitor"> {
+  return config.tokenBurnMonitor !== undefined ? { tokenBurnMonitor: config.tokenBurnMonitor } : {};
+}
+
+function withDiskSweeperConfig(
+  config: Pick<PaseoDaemonConfig, "diskSweeper">,
+): Pick<MutableDaemonConfig, "diskSweeper"> {
+  return config.diskSweeper !== undefined ? { diskSweeper: config.diskSweeper } : {};
+}
+
+function withMcpGatewayConfig(
+  config: Pick<PaseoDaemonConfig, "mcpGateway">,
+): Pick<MutableDaemonConfig, "mcpGateway"> {
+  return config.mcpGateway !== undefined ? { mcpGateway: config.mcpGateway } : {};
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -546,6 +616,9 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     metadataGeneration: {
       providers: config.metadataGeneration?.providers ?? [],
     },
+    ...withTokenBurnMonitorConfig(config),
+    ...withDiskSweeperConfig(config),
+    ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -638,6 +711,12 @@ export async function createPaseoDaemon(
   // pattern.
   const agentMcpAuthToken = randomUUID();
 
+  // Distinct capability token authenticating sessions to the MCP gateway's brokered-server
+  // proxy (/mcp/gateway/*, KTD1). Deliberately never the same value as agentMcpAuthToken above:
+  // the two surfaces protect different things (the daemon's own agent-control MCP vs. brokered
+  // external accounts), so leaking one must never grant the other.
+  const mcpGatewayAuthToken = randomUUID();
+
   const listenTarget = parseListenString(config.listen);
 
   const app = express();
@@ -670,6 +749,12 @@ export async function createPaseoDaemon(
     appBaseUrl = typeof value === "string" ? value : "https://app.paseo.sh";
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
+  let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
+  // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
+  // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
+  // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
+  // wsServer doesn't exist yet at that point either.
+  let worktreeDiskMonitor: WorktreeDiskMonitor | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
   const scriptHealthMonitor = new ScriptHealthMonitor({
     serviceProxy,
@@ -865,6 +950,16 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  worktreeDiskMonitor = new WorktreeDiskMonitor({
+    projectRegistry,
+    workspaceRegistry,
+    paseoHome: config.paseoHome,
+    worktreesBaseRoot: config.worktreesRoot,
+    serverId,
+    getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
+    readDaemonConfig: () => ({ diskSweeper: daemonConfigStore.get().diskSweeper }),
+    logger,
+  });
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
@@ -919,6 +1014,11 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  // The title tracker needs the AgentManager instance it's scheduling
+  // refreshes against, but AgentManager needs a callback at construction
+  // time. Break the cycle with a reassignable closure; pointed at the real
+  // tracker once it's constructed below.
+  let handleAgentTurnFinished: (params: { agentId: string; cwd: string }) => void = () => {};
   const agentManager = new AgentManager({
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
@@ -928,6 +1028,7 @@ export async function createPaseoDaemon(
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
+    onAgentTurnFinished: (params) => handleAgentTurnFinished(params),
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
@@ -1086,6 +1187,16 @@ export async function createPaseoDaemon(
     },
     logger,
   });
+
+  const agentTitleTracker = new AgentTitleTracker({
+    agentManager,
+    agentStorage,
+    providerSnapshotManager,
+    workspaceGitService,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    logger,
+  });
+  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
@@ -1340,6 +1451,7 @@ export async function createPaseoDaemon(
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
   await scheduleService.start();
+  agentManager.startProviderSubagentSweep();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1432,6 +1544,30 @@ export async function createPaseoDaemon(
   agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
   setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
+
+  // MCP gateway (U1/U2): daemon-side client + auth authority for brokered external MCP
+  // servers, and the /mcp/gateway/* routes agent sessions relay through. Constructed with
+  // whatever `mcpGateway` config the daemon started with — live reconfiguration is out of
+  // scope here (see McpGateway's class doc) — and started (fire-and-forget, below, after
+  // wsServer is accepting connections) once the daemon's own reachable base URL is known
+  // (needed for the OAuth redirect_uri, KTD3). Non-blocking so an unreachable upstream
+  // never delays the daemon that manages all agents from coming up.
+  const mcpGateway = new McpGateway({
+    paseoHome: config.paseoHome,
+    config: resolveMcpGatewayConfig(daemonConfigStore.get().mcpGateway),
+    logger,
+  });
+  installMcpGatewayRoutes(app, {
+    gateway: mcpGateway,
+    capabilityToken: mcpGatewayAuthToken,
+    password: config.auth?.password,
+    mcpDebug: config.mcpDebug,
+    logger,
+  });
+  // U3: wires the gateway + its distinct capability token into session injection
+  // (`prepareSessionConfig`'s `withRuntimeMcpGatewayServers`). Deferred to a setter rather than
+  // a constructor option because the gateway is built after the agent manager.
+  agentManager.setMcpGateway(mcpGateway, mcpGatewayAuthToken);
 
   let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;
@@ -1599,10 +1735,22 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
+            // KTD3: prefer the daemon's configured public base URL (the service-proxy
+            // precedent) over the loopback fallback, so a reachable-from-elsewhere daemon
+            // gets a redirect_uri a remote browser can actually complete OAuth against.
+            applyMcpGatewayOAuthRedirectBaseUrl(
+              mcpGateway,
+              serviceProxyPublicBaseUrl,
+              boundListenTarget,
+            );
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
+            // U3: the same loopback-normalized base the /mcp/agents entry uses (agent
+            // subprocesses run on this machine, same as the daemon) — distinct from the
+            // OAuth redirect base URL (KTD3), which prefers a publicly reachable address.
+            agentManager.setMcpGatewayBaseUrl(createMcpGatewayLoopbackBaseUrl(boundListenTarget));
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;
@@ -1717,10 +1865,45 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              worktreeDiskMonitor
+                ? {
+                    get: (workspaceId) => worktreeDiskMonitor!.getDiskUsage(workspaceId),
+                    requestSample: (workspaceId, cwd) =>
+                      worktreeDiskMonitor!.requestSample(workspaceId, cwd),
+                  }
+                : undefined,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
+            worktreeDiskMonitor?.start();
+            // Fire-and-forget, like worktreeDiskMonitor above: an unreachable upstream
+            // must not delay the daemon that manages all agents from accepting
+            // connections. Errors surface per-server via getServerState()/mcp_status_update
+            // rather than here.
+            void mcpGateway.start().catch((error: unknown) => {
+              logger.warn({ err: error }, "MCP gateway failed to start one or more servers");
+            });
+            // Wired here (rather than at construction, above) for the same reason as the
+            // token-burn monitor below: the push sender doesn't exist until wsServer does.
+            mcpGateway.setNotifier({
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+            });
+            // Wired here (rather than beside AgentTitleTracker, above) because it needs the
+            // push sender wsServer resolved (injected override, or its own
+            // createPushNotifications) — not available until wsServer exists.
+            agentTokenBurnMonitor = new AgentTokenBurnMonitor({
+              agentManager,
+              agentStorage,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readDaemonConfig: () => ({
+                tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
+              }),
+              logger,
+            });
+            agentTokenBurnMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -1791,6 +1974,10 @@ export async function createPaseoDaemon(
     await agentProviderRuntime.shutdown();
     terminalManager.killAll();
     await speechService.stop();
+    agentManager.stopProviderSubagentSweep();
+    agentTokenBurnMonitor?.stop();
+    worktreeDiskMonitor?.stop();
+    await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
@@ -1822,6 +2009,10 @@ export async function createPaseoDaemon(
     serviceProxy,
     scriptRuntimeStore,
     browserToolsBroker,
+    // The gateway instance and its distinct capability token (KTD1) — the accessor session
+    // injection (U3) will need to build brokered `mcpServers` entries.
+    mcpGateway,
+    getMcpGatewayAuthToken: () => mcpGatewayAuthToken,
     start,
     stop,
     getListenTarget: () => boundListenTarget,

@@ -236,6 +236,18 @@ export interface AgentUsage {
   contextWindowUsedTokens?: number;
 }
 
+/** One 30s slice of a token-rate ring buffer — see token-rate-tracker.ts. */
+export interface AgentTokenRateBucket {
+  bucketStartMs: number;
+  tokens: number;
+}
+
+/** Trailing-window burn rate, computed from the ring buffer at read time. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",
@@ -419,7 +431,18 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      /**
+       * Provider-local per-turn token delta (input + output + cached-read), used to feed
+       * token-rate-tracker.ts. Claude only in phase 1 — other providers omit it rather than
+       * report a fake zero. See docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+       */
+      turnTokenDelta?: number;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";
@@ -472,7 +495,23 @@ export type AgentStreamEvent =
       type: "provider_subagent";
       provider: AgentProvider;
       event: import("./provider-subagents/store.js").ProviderSubagentInputEvent;
+    }
+  | {
+      type: "mcp_server_statuses";
+      provider: AgentProvider;
+      statuses: AgentMcpServerStatus[];
     };
+
+/**
+ * A single provider-reported MCP server status from the SDK's init message (KTD8).
+ * `status` is whatever string the provider reports (not a closed enum) — captured
+ * verbatim, live-only, no COMPAT tag needed (a permanently-optional additive field,
+ * like `lastActivitySummary`).
+ */
+export interface AgentMcpServerStatus {
+  name: string;
+  status: string;
+}
 
 export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
   return "turnId" in event ? event.turnId : undefined;
@@ -618,6 +657,13 @@ export interface AgentSessionConfig {
   providerOptions?: ProviderOptions;
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
+  /**
+   * Runtime-only per-launch signal (KTD5/KTD6): the MCP gateway is enabled for this launch, so
+   * the Claude adapter should set `strictMcpConfig` and re-inject per-dir stdio entries itself.
+   * Never persisted — stripped from storage the same way the brokered `mcpServers` entries are
+   * (`stripMcpGatewayServers` in `runtime-mcp-config.ts`).
+   */
+  mcpGatewayEnabled?: boolean;
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.

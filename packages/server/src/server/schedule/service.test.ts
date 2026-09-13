@@ -1901,6 +1901,64 @@ describe("ScheduleService", () => {
     await service2.stop();
   });
 
+  test("periodic sweep completes an agent-target schedule orphaned mid-session, not just at startup", async () => {
+    const manager = new AgentManager({
+      logger: createTestLogger(),
+      clients: createTestAgentClients(),
+      registry: agentStorage,
+    });
+    const agent = await manager.createAgent({ provider: "claude", cwd: tempDir }, undefined, {
+      workspaceId: undefined,
+    });
+    // A short real interval, polled for via `vi.waitFor` below, rather than fake timers: the
+    // service's own timer calls `.unref()` (so it never keeps the process alive), and Vitest's
+    // fake-timer shim doesn't advance an unref'd interval the way a real one runs.
+    const service = createScheduleService({
+      paseoHome: tempDir,
+      logger: createTestLogger(),
+      agentManager: manager,
+      agentStorage,
+      providerSnapshotManager: NO_UNATTENDED_SCHEDULE_POLICY,
+      now: () => now,
+      runner: async () => ({ agentId: null, output: "ok" }),
+      orphanedScheduleSweepIntervalMs: 20,
+    });
+    const created = await service.create({
+      prompt: "Watch scheduled agent",
+      cadence: { type: "every", everyMs: 60_000 },
+      target: { type: "agent", agentId: agent.id },
+      runOnCreate: false,
+    });
+
+    try {
+      await service.start();
+
+      const beforeArchive = await service.inspect(created.id);
+      expect(beforeArchive.status).not.toBe("completed");
+
+      // Simulate an archive that bypassed `completeForAgent` — e.g. the daemon's
+      // `setAgentArchivedCallback` wiring never firing for this path — leaving the schedule
+      // pointed at a dead target with nothing to notice it until the next sweep.
+      const record = await agentStorage.get(agent.id);
+      if (!record) {
+        throw new Error("expected a persisted record for the created agent");
+      }
+      await agentStorage.upsert({ ...record, archivedAt: now.toISOString() });
+
+      // The startup sweep already ran and found nothing wrong; only the periodic re-run should
+      // catch this.
+      await vi.waitFor(async () => {
+        const inspected = await service.inspect(created.id);
+        expect(inspected.status).toBe("completed");
+      });
+
+      const afterSweep = await service.inspect(created.id);
+      expect(afterSweep.nextRunAt).toBeNull();
+    } finally {
+      await service.stop();
+    }
+  });
+
   test("startup recovery archives an interrupted run workspace with an associated agent", async () => {
     const service1 = createScheduleService({
       paseoHome: tempDir,

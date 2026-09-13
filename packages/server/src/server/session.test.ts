@@ -382,6 +382,8 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       listAgents: vi.fn(() => []),
       listProviderSubagentActivity: vi.fn(() => []),
       subscribe: vi.fn(() => () => {}),
+      onMcpGatewayStatusChange: vi.fn(() => () => {}),
+      getMcpGatewaySnapshot: vi.fn(() => []),
       ...options.agentManager,
     }),
     agentStorage: asAgentStorage({
@@ -5392,6 +5394,203 @@ test("sends project updates only to capable sockets in a retained session", asyn
         type: "project.update",
         payload: expect.objectContaining({ kind: "upsert" }),
       }),
+    },
+  ]);
+});
+
+test("mcp_status_update is feature-gated: delivered only to sockets that subscribed to it", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  let gatewayListener: ((snapshot: unknown[]) => void) | undefined;
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      onMcpGatewayStatusChange: (listener: (snapshot: unknown[]) => void) => {
+        gatewayListener = listener;
+        return () => {};
+      },
+    },
+  });
+
+  const unsubscribedSocket = {};
+  const subscribedSocket = {};
+  session.updateClientCapabilities(
+    { [CLIENT_CAPS.explicitEventSubscriptions]: true },
+    unsubscribedSocket,
+  );
+  session.updateClientCapabilities(
+    { [CLIENT_CAPS.explicitEventSubscriptions]: true },
+    subscribedSocket,
+  );
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-1",
+    },
+    subscribedSocket,
+  );
+  targetedMessages.length = 0;
+
+  if (!gatewayListener) throw new Error("Gateway status listener was not installed");
+  const snapshot = [{ name: "zeeq", status: "needs-auth", critical: true, lastChangedAt: 1 }];
+  gatewayListener(snapshot);
+
+  expect(targetedMessages).toEqual([
+    {
+      source: subscribedSocket,
+      message: expect.objectContaining({
+        type: "mcp_status_update",
+        payload: expect.objectContaining({ servers: snapshot }),
+      }),
+    },
+  ]);
+  expect(messages).toEqual([]);
+});
+
+test("subscribing to mcp_status_update eagerly delivers the current gateway snapshot", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const snapshot = [{ name: "zeeq", status: "connected", critical: true, lastChangedAt: 7 }];
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      onMcpGatewayStatusChange: vi.fn(() => () => {}),
+      getMcpGatewaySnapshot: vi.fn(() => snapshot),
+    },
+  });
+
+  const socket = {};
+  session.updateClientCapabilities({ [CLIENT_CAPS.explicitEventSubscriptions]: true }, socket);
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-eager",
+    },
+    socket,
+  );
+
+  const eager = targetedMessages.filter(({ message }) => message.type === "mcp_status_update");
+  expect(eager).toEqual([
+    {
+      source: socket,
+      message: expect.objectContaining({
+        type: "mcp_status_update",
+        payload: expect.objectContaining({ servers: snapshot }),
+      }),
+    },
+  ]);
+  expect(messages).toEqual([]);
+});
+
+test("subscribing to mcp_status_update with an empty gateway snapshot emits nothing eagerly", async () => {
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const session = createSessionForTest({ targetedMessages });
+
+  const socket = {};
+  session.updateClientCapabilities({ [CLIENT_CAPS.explicitEventSubscriptions]: true }, socket);
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-empty",
+    },
+    socket,
+  );
+
+  expect(targetedMessages.filter(({ message }) => message.type === "mcp_status_update")).toEqual(
+    [],
+  );
+});
+
+test("mcp_gateway.auth.start.request against an unknown server returns an error response (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      startMcpGatewayAuthorization: vi
+        .fn()
+        .mockRejectedValue(new Error('Unknown MCP gateway server "never-configured"')),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-1",
+    name: "never-configured",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-1",
+        authorizationUrl: null,
+        error: 'Unknown MCP gateway server "never-configured"',
+      },
+    },
+  ]);
+});
+
+test("mcp_gateway.auth.start.request against a static-auth server returns an error response (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      startMcpGatewayAuthorization: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('MCP gateway server "slack" uses static auth; nothing to authorize'),
+        ),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-2",
+    name: "slack",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-2",
+        authorizationUrl: null,
+        error: 'MCP gateway server "slack" uses static auth; nothing to authorize',
+      },
+    },
+  ]);
+});
+
+test("mcp_gateway.auth.start.request happy path returns the authorization URL (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const startMcpGatewayAuthorization = vi.fn().mockResolvedValue({
+    authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: { startMcpGatewayAuthorization },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-3",
+    name: "github",
+  });
+
+  expect(startMcpGatewayAuthorization).toHaveBeenCalledWith("github");
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-3",
+        authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+        error: null,
+      },
     },
   ]);
 });

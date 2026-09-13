@@ -384,6 +384,47 @@ test("sets the complete viewed timeline subscription only when the daemon suppor
   });
 });
 
+test("gates mcp_status_update on the mcpStatus feature so an old daemon's stricter enum isn't sent an unknown event", async () => {
+  const legacyTransport = createMockTransport();
+  const legacyClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_legacy",
+    transportFactory: () => legacyTransport.transport,
+    reconnect: { enabled: false },
+  });
+  const supportedTransport = createMockTransport();
+  const supportedClient = new DaemonClient({
+    url: "ws://test",
+    clientId: "mcp_status_gate_supported",
+    transportFactory: () => supportedTransport.transport,
+    reconnect: { enabled: false },
+  });
+  clients.push(legacyClient, supportedClient);
+
+  const legacyConnect = legacyClient.connect();
+  legacyTransport.triggerOpen({ features: { explicitEventSubscriptions: true } });
+  await legacyConnect;
+  legacyTransport.sent.length = 0;
+
+  const supportedConnect = supportedClient.connect();
+  supportedTransport.triggerOpen({
+    features: { explicitEventSubscriptions: true, mcpStatus: true },
+  });
+  await supportedConnect;
+  supportedTransport.sent.length = 0;
+
+  legacyClient.on(() => {});
+  supportedClient.on(() => {});
+
+  const legacyRequest = parseSentFrame(legacyTransport.sent.at(-1));
+  const supportedRequest = parseSentFrame(supportedTransport.sent.at(-1));
+
+  expect(legacyRequest.type).toBe("session.events.set_subscription.request");
+  expect(legacyRequest.events).not.toContain("mcp_status_update");
+  expect(supportedRequest.type).toBe("session.events.set_subscription.request");
+  expect(supportedRequest.events).toContain("mcp_status_update");
+});
+
 test("normalizes legacy and dedicated agent attention notifications", async () => {
   const mock = createMockTransport();
   const client = new DaemonClient({
@@ -6094,6 +6135,89 @@ test("sends provider.usage.list.request and resolves provider.usage.list.respons
         ],
       },
     ],
+  });
+});
+
+test("sends mcp_gateway.auth.start.request and resolves the authorization URL (U6)", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("github", { requestId: "auth-1" });
+
+  expect(JSON.parse(assertStr(mock.sent[0]))).toEqual({
+    type: "session",
+    message: {
+      type: "mcp_gateway.auth.start.request",
+      requestId: "auth-1",
+      name: "github",
+    },
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-1",
+        authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+        error: null,
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-1",
+    authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+    error: null,
+  });
+});
+
+test("resolves mcp_gateway.auth.start.response with an error for an unknown server", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("never-configured", { requestId: "auth-2" });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-2",
+        authorizationUrl: null,
+        error: 'Unknown MCP gateway server "never-configured"',
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-2",
+    authorizationUrl: null,
+    error: 'Unknown MCP gateway server "never-configured"',
   });
 });
 

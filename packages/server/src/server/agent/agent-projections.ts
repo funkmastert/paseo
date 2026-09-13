@@ -20,12 +20,14 @@ import type {
 import type { ManagedAgent } from "./agent-manager.js";
 import type { JsonValue } from "../json-utils.js";
 import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import { computeTokenRate } from "./token-rate-tracker.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
   title?: string | null;
   createdAt?: string;
   internal?: boolean;
+  titleManuallySet?: boolean;
 }
 
 interface RecentProviderSessionProjectionOptions {
@@ -94,6 +96,7 @@ export function toStoredAgentRecord(
       : null,
     internal: options?.internal,
     owner: agent.owner,
+    titleManuallySet: options?.titleManuallySet,
   } satisfies StoredAgentRecord;
 }
 
@@ -144,6 +147,27 @@ export function toAgentPayload(
 
   if (agent.lastError !== undefined) {
     payload.lastError = agent.lastError;
+  }
+
+  if (agent.lastActivitySummary !== undefined) {
+    payload.lastActivitySummary = agent.lastActivitySummary;
+  }
+
+  if (agent.mcpServerStatuses !== undefined) {
+    payload.mcpServerStatuses = agent.mcpServerStatuses;
+  }
+
+  const recentTokenRate = computeTokenRate(agent.tokenRateBuckets, Date.now());
+  if (recentTokenRate !== undefined) {
+    payload.recentTokenRate = recentTokenRate;
+  }
+
+  if (agent.totalTokens !== undefined) {
+    payload.totalTokens = agent.totalTokens;
+  }
+
+  if (agent.tokenBurnAlert !== undefined) {
+    payload.tokenBurnAlert = agent.tokenBurnAlert;
   }
 
   // Handle attention state
@@ -268,6 +292,12 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     attentionTimestamp: agent.attentionTimestamp ?? null,
     labels: agent.labels,
     ...(agent.providerUnavailable ? { providerUnavailable: true } : {}),
+    ...(agent.lastActivitySummary !== undefined
+      ? { lastActivitySummary: agent.lastActivitySummary }
+      : {}),
+    ...(agent.recentTokenRate !== undefined ? { recentTokenRate: agent.recentTokenRate } : {}),
+    ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
+    ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
   };
 }
 

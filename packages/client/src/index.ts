@@ -1,6 +1,7 @@
 import type { DaemonClientConfig } from "./daemon-client.js";
 import type { AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type {
+  ActiveTurnBehavior,
   AgentSnapshotPayload,
   CreateAgentRequestMessage,
   FetchWorkspacesRequestMessage,
@@ -14,6 +15,7 @@ import type {
   ProjectListRequestMessage,
   ProjectListResponseMessage,
   ListProviderModesResponseMessage,
+  McpGatewayAuthStartResponseMessage,
   MutableDaemonConfig,
   MutableDaemonConfigPatch,
   ProviderDiagnosticResponseMessage,
@@ -256,6 +258,7 @@ export interface PaseoAgentTimelineRefetchOptions {
 
 export interface PaseoAgentSendOptions {
   messageId?: string;
+  activeTurnBehavior?: ActiveTurnBehavior;
   images?: Array<{ data: string; mimeType: string }>;
   attachments?: SendAgentMessageRequest["attachments"];
 }
@@ -429,6 +432,21 @@ export interface PaseoProviderActions {
   subscribe(handler: (update: PaseoProviderSnapshotUpdate) => void): () => void;
 }
 
+export type PaseoMcpGatewayAuthStartResult = McpGatewayAuthStartResponseMessage["payload"];
+
+export interface PaseoMcpGatewayActions {
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server); open `authorizationUrl` via the platform's external-
+   * URL opener. Completion arrives later via the `mcp_status_update` subscription, not this call.
+   */
+  startAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<PaseoMcpGatewayAuthStartResult>;
+}
+
 export interface PaseoConfigActions {
   /**
    * Reads daemon config through the existing config RPC. Provider profiles,
@@ -456,6 +474,7 @@ export interface PaseoApi {
   readonly agents: PaseoAgentActions;
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
+  readonly mcpGateway: PaseoMcpGatewayActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -573,6 +592,9 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     config: {
       get: (requestId) => daemonClient.getDaemonConfig(requestId),
       patch: (patch, requestId) => daemonClient.patchDaemonConfig(patch, requestId),
+    },
+    mcpGateway: {
+      startAuth: (name, options) => daemonClient.startMcpGatewayAuth(name, options),
     },
   };
 }

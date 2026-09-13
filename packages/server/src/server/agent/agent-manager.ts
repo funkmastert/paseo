@@ -4,6 +4,7 @@ import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   AGENT_LIFECYCLE_STATUSES,
   type AgentLifecycleStatus,
@@ -16,7 +17,7 @@ import {
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
-import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
+import type { ProviderOptions, ToolPolicy, TokenBurnAlert } from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
@@ -29,6 +30,7 @@ import {
   type AgentResumeSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentSlashCommand,
   type AgentMode,
   type AgentPermissionRequest,
@@ -46,6 +48,7 @@ import {
   type SteerResult,
   type AgentStreamEvent,
   type AgentTimelineItem,
+  type AgentTokenRateBucket,
   type AgentUsage,
   type AgentRuntimeInfo,
   type ImportedTimelineEntry,
@@ -77,8 +80,14 @@ import {
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { summarizeLatestActivityItem } from "./activity-curator.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  stripInternalPaseoMcpServer,
+  withRuntimeMcpGatewayServers,
+  withRuntimePaseoMcpServer,
+} from "./runtime-mcp-config.js";
+import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -88,10 +97,16 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
+import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
+import type { TokenBurnMonitorState } from "./token-burn-detector.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+// Reconciliation for provider subagents stuck "running" because their terminal SDK event never
+// arrived (docs/agent-lifecycle.md caveats). See docs/plans/2026-09-12-003-fix-subagent-list-accuracy-plan.md.
+const DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS = 15 * 60 * 1000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -251,6 +266,21 @@ export type AgentAttentionCallback = (params: {
 
 export type AgentArchivedCallback = (agentId: string) => Promise<void> | void;
 
+/**
+ * Lean per-agent view for AgentTokenBurnMonitor's sweep — deliberately not a full ManagedAgent
+ * clone (Object.assign in listAgents() copies pending permissions, session handles, etc. the
+ * monitor never touches). Includes internal agents, unlike listAgents(): the monitor decides
+ * for itself whether internal agents are in scope.
+ */
+export interface TokenBurnMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  isDelegated: boolean;
+  tokenRate: number | undefined;
+  totalTokens: number | undefined;
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -287,6 +317,9 @@ export interface CreateAgentOptions {
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
+  // The agent that initiated this create, if any. Threaded into the
+  // agent.create plugin hook read-only; absent for human-initiated creates.
+  callerAgentId?: string;
 }
 
 export interface AgentManagerOptions {
@@ -297,10 +330,20 @@ export interface AgentManagerOptions {
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
   onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  // Fired once per running->idle transition (a finished turn), skipping
+  // internal agents. Independent of attention tracking — see emitState().
+  onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
+  /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
+  mcpGateway?: Pick<
+    McpGateway,
+    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+  >;
+  /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
+  mcpGatewayAuthToken?: string;
   paseoToolsEnabled?: boolean;
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
@@ -311,6 +354,11 @@ export interface AgentManagerOptions {
     agentId: string;
     expectedTurnId: string;
   }) => Promise<void>;
+  /** How often `sweepStaleProviderSubagents` runs once `startProviderSubagentSweep` is called. */
+  staleProviderSubagentSweepIntervalMs?: number;
+  /** How long a "running" provider subagent may go without timeline/descriptor activity before
+   * the sweep terminalizes it, even while its parent agent stays open. */
+  staleProviderSubagentLivenessMs?: number;
   logger: Logger;
 }
 
@@ -402,6 +450,45 @@ interface ManagedAgentBase {
   activeTurnStartedAt: Date | null;
   lastUsage?: AgentUsage;
   lastError?: string;
+  /**
+   * One-line "what is this agent doing right now" summary, computed
+   * server-side from the latest timeline item. Live-only: not persisted to
+   * disk (see agent-storage.ts's StoredAgentRecord), so it starts absent
+   * again after a daemon restart until the next timeline item arrives.
+   */
+  lastActivitySummary?: string;
+  /**
+   * Provider-reported MCP server statuses from the SDK's init message (KTD8), captured
+   * verbatim each turn. Live-only like `lastActivitySummary`: not persisted, not in
+   * `toStoredAgentRecord`, cleared on rewind. There is no SDK push event for later
+   * changes, so this is only as fresh as the most recent turn's init message — it
+   * covers stdio/pass-through servers; the gateway's own state is authoritative for
+   * brokered ones (see mcp-gateway/gateway.ts's `getSnapshot`/"change" event).
+   */
+  mcpServerStatuses?: AgentMcpServerStatus[];
+  /**
+   * Trailing-window token-burn ring buffer, fed by provider-local `turnTokenDelta` on
+   * `turn_completed` (Claude only in phase 1). Live-only like `lastActivitySummary`: not
+   * persisted, not in `toStoredAgentRecord`, cleared on rewind. Lazily created on first turn —
+   * an idle agent costs nothing. Rate is derived from this at read time (agent-projections.ts),
+   * never stored directly. See token-rate-tracker.ts and
+   * docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+   */
+  tokenRateBuckets?: AgentTokenRateBucket[];
+  /** Live-only lifetime token total, alongside tokenRateBuckets — same clearing rules. */
+  totalTokens?: number;
+  /**
+   * Live-only breach state set by AgentTokenBurnMonitor via setTokenBurnAlert/clearTokenBurnAlert.
+   * Not persisted, cleared on rewind alongside tokenRateBuckets/totalTokens. Deliberately not
+   * part of `attention`/attentionReason — see TokenBurnAlert's doc comment.
+   */
+  tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * Live-only per-agent bookkeeping (consecutive-sweep counters, ratchet threshold, re-arm
+   * state) the monitor threads between sweeps. Never projected to the wire, never persisted.
+   * See token-burn-detector.ts.
+   */
+  tokenBurnMonitorState?: TokenBurnMonitorState;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -715,6 +802,12 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
+  private mcpGateway: Pick<
+    McpGateway,
+    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+  > | null = null;
+  private mcpGatewayAuthToken: string | null = null;
+  private mcpGatewayBaseUrl: string | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -725,10 +818,14 @@ export class AgentManager {
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
   private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  private onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  private readonly staleProviderSubagentSweepIntervalMs: number;
+  private readonly staleProviderSubagentLivenessMs: number;
+  private staleProviderSubagentSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
@@ -737,8 +834,10 @@ export class AgentManager {
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
+    this.onAgentTurnFinished = options.onAgentTurnFinished;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.configureMcpGateway(options);
     this.configurePaseoTools(options);
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
@@ -750,6 +849,9 @@ export class AgentManager {
         options.rescueTimeouts?.interruptSessionMs ?? INTERRUPT_SESSION_TIMEOUT_MS,
     };
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
+    const providerSubagentSweepConfig = this.resolveProviderSubagentSweepConfig(options);
+    this.staleProviderSubagentSweepIntervalMs = providerSubagentSweepConfig.sweepIntervalMs;
+    this.staleProviderSubagentLivenessMs = providerSubagentSweepConfig.livenessMs;
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
       timers: { setTimeout, clearTimeout },
@@ -764,9 +866,27 @@ export class AgentManager {
     });
   }
 
+  private resolveProviderSubagentSweepConfig(options: AgentManagerOptions): {
+    sweepIntervalMs: number;
+    livenessMs: number;
+  } {
+    return {
+      sweepIntervalMs:
+        options.staleProviderSubagentSweepIntervalMs ??
+        DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS,
+      livenessMs:
+        options.staleProviderSubagentLivenessMs ?? DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS,
+    };
+  }
+
   private configurePaseoTools(options: AgentManagerOptions): void {
     this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
     this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
+  }
+
+  private configureMcpGateway(options: AgentManagerOptions): void {
+    this.mcpGateway = options?.mcpGateway ?? null;
+    this.mcpGatewayAuthToken = options?.mcpGatewayAuthToken ?? null;
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
@@ -821,6 +941,52 @@ export class AgentManager {
 
   setMcpBaseUrl(url: string | null): void {
     this.mcpBaseUrl = url;
+  }
+
+  /**
+   * Wires the gateway instance + its distinct capability token in after both are constructed
+   * (bootstrap builds the gateway after the agent manager, mirroring `setPaseoToolCatalogFactory`'s
+   * deferred-wiring pattern rather than a constructor-order dependency).
+   */
+  setMcpGateway(
+    gateway: Pick<
+      McpGateway,
+      "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+    > | null,
+    authToken: string | null,
+  ): void {
+    this.mcpGateway = gateway;
+    this.mcpGatewayAuthToken = authToken;
+  }
+
+  /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
+  setMcpGatewayBaseUrl(url: string | null): void {
+    this.mcpGatewayBaseUrl = url;
+  }
+
+  /** Current per-server gateway status snapshot (U4/KTD7's `mcp_status_update` wire surface). */
+  getMcpGatewaySnapshot(): McpGatewaySnapshotEntry[] {
+    return this.mcpGateway?.getSnapshot() ?? [];
+  }
+
+  /** Subscribes to gateway status changes; returns an unsubscribe function. No-ops when disabled. */
+  onMcpGatewayStatusChange(listener: (snapshot: McpGatewaySnapshotEntry[]) => void): () => void {
+    const gateway = this.mcpGateway;
+    if (!gateway) return () => {};
+    gateway.on("change", listener);
+    return () => gateway.off("change", listener);
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered server (U6/KTD3's auth RPC), delegating to the
+   * gateway's own validation (unknown server, static-auth server) — this just adds the
+   * "no gateway configured at all" case the wire handler can't see otherwise.
+   */
+  async startMcpGatewayAuthorization(name: string): Promise<{ authorizationUrl: string }> {
+    if (!this.mcpGateway) {
+      throw new Error("MCP gateway is not enabled");
+    }
+    return this.mcpGateway.startAuthorization(name);
   }
 
   prepareForShutdown(): void {
@@ -963,6 +1129,17 @@ export class AgentManager {
     return Array.from(this.agents.values())
       .filter((agent) => !agent.internal)
       .map((agent) => Object.assign({}, agent));
+  }
+
+  listAgentsForTokenBurnMonitor(nowMs: number): TokenBurnMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      isDelegated: isDelegatedAgent(agent),
+      tokenRate: computeTokenRate(agent.tokenRateBuckets, nowMs)?.tokensPerMinute,
+      totalTokens: agent.totalTokens,
+    }));
   }
 
   async listImportableSessions(
@@ -1140,6 +1317,32 @@ export class AgentManager {
     return agent ? { ...agent } : null;
   }
 
+  /** Read-modify-write slot for AgentTokenBurnMonitor's per-agent consecutive-sweep bookkeeping. */
+  getTokenBurnMonitorState(agentId: string): TokenBurnMonitorState | undefined {
+    return this.agents.get(agentId)?.tokenBurnMonitorState;
+  }
+
+  setTokenBurnMonitorState(agentId: string, state: TokenBurnMonitorState): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnMonitorState = state;
+  }
+
+  /** Sets the live breach badge and broadcasts the new snapshot. See TokenBurnAlert's doc comment. */
+  setTokenBurnAlert(agentId: string, alert: TokenBurnAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearTokenBurnAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.tokenBurnAlert) return;
+    delete agent.tokenBurnAlert;
+    this.emitState(agent, { persist: false });
+  }
+
   async waitForAgentClose(agentId: string): Promise<void> {
     // Loading during reload must wait for the replacement, not resume another writer.
     await this.lifecycleMutationTails.get(agentId);
@@ -1216,9 +1419,16 @@ export class AgentManager {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
         env: options.env,
+        callerAgentId: options.callerAgentId,
+        labels: options.labels,
+        initialPrompt: options.initialPrompt,
       });
       config = { ...request.config, internal: config.internal };
-      options = { ...options, env: request.env };
+      // labels are mutable by design; initialPrompt is read-only context for
+      // the hook — the actual prompt was already resolved by the caller and
+      // is sent independently after this create completes, so a hook's
+      // mutation of it here is intentionally dropped rather than applied.
+      options = { ...options, env: request.env, labels: request.labels };
     }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
@@ -1696,6 +1906,115 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Periodic reconciliation for provider subagents that `cancelRunningProviderSubagents` never
+   * reaches: it only fires from `closeAgentRuntime`, so a descriptor whose terminal SDK event was
+   * dropped stays "running" forever while its parent sits open (root cause #2 in the fix plan).
+   * Runs on an interval independent of any single agent's lifecycle — see
+   * `startProviderSubagentSweep`.
+   */
+  startProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void this.sweepStaleProviderSubagents().catch((error) => {
+        this.logger.error({ err: error }, "Failed to sweep stale provider subagents");
+      });
+    }, this.staleProviderSubagentSweepIntervalMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.staleProviderSubagentSweepTimer = timer;
+  }
+
+  stopProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      clearInterval(this.staleProviderSubagentSweepTimer);
+      this.staleProviderSubagentSweepTimer = null;
+    }
+  }
+
+  /**
+   * Terminalizes "running" provider-subagent descriptors that can be positively evaluated as
+   * stuck, via two independent signals:
+   *  - the owning agent is closed (no longer live) or archived — defense-in-depth for a
+   *    `cancelRunningProviderSubagents` call that was skipped or lost.
+   *  - no descriptor or timeline activity for `staleProviderSubagentLivenessMs`, even though the
+   *    parent agent is still open — the case `cancelRunningProviderSubagents` structurally can't
+   *    catch, since nothing closes the parent.
+   * A descriptor this can't positively evaluate (registry unavailable/erroring, no activity
+   * timestamp to read) is left alone rather than guessed at — false terminalization is worse than
+   * a late one.
+   */
+  async sweepStaleProviderSubagents(now: Date = new Date()): Promise<void> {
+    const runningByParent = new Map<string, ProviderSubagentDescriptor[]>();
+    for (const subagent of this.providerSubagents.listAll()) {
+      if (subagent.status !== "running") {
+        continue;
+      }
+      const siblings = runningByParent.get(subagent.parentAgentId);
+      if (siblings) {
+        siblings.push(subagent);
+      } else {
+        runningByParent.set(subagent.parentAgentId, [subagent]);
+      }
+    }
+    if (runningByParent.size === 0) {
+      return;
+    }
+
+    for (const [parentAgentId, subagents] of runningByParent) {
+      const parentClosed = await this.isProviderSubagentParentClosed(parentAgentId);
+      for (const subagent of subagents) {
+        if (parentClosed) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+          continue;
+        }
+        const lastActivityAt = this.providerSubagents.lastActivityAt(parentAgentId, subagent.id);
+        if (!lastActivityAt) {
+          continue;
+        }
+        const lastActivityMs = Date.parse(lastActivityAt);
+        if (Number.isNaN(lastActivityMs)) {
+          continue;
+        }
+        if (now.getTime() - lastActivityMs >= this.staleProviderSubagentLivenessMs) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+        }
+      }
+    }
+  }
+
+  /** `true` only once positively confirmed closed/archived; `false` for a live or unresolvable
+   * agent so the caller falls back to the liveness check instead of guessing. */
+  private async isProviderSubagentParentClosed(parentAgentId: string): Promise<boolean> {
+    if (this.agents.has(parentAgentId)) {
+      return false;
+    }
+    if (!this.registry) {
+      return false;
+    }
+    try {
+      const record = await this.registry.get(parentAgentId);
+      // Mirrors sweepOrphanedSchedules: a missing or archived record is the positive signal that
+      // the agent is gone for good.
+      return !record || Boolean(record.archivedAt);
+    } catch {
+      return false;
+    }
+  }
+
+  private terminalizeStaleProviderSubagent(
+    parentAgentId: string,
+    subagent: ProviderSubagentDescriptor,
+  ): void {
+    const event = this.providerSubagents.apply(parentAgentId, subagent.provider, {
+      type: "upsert",
+      id: subagent.id,
+      status: "canceled",
+    });
+    this.dispatch({ type: "provider_subagent", event });
+  }
+
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {
     return this.runLifecycleMutation(agentId, () => this.archiveAgentUnlocked(agentId));
   }
@@ -1955,8 +2274,42 @@ export class AgentManager {
       return;
     }
     this.touchUpdatedAt(agent);
-    await this.persistSnapshot(agent, { title: normalizedTitle });
+    await this.persistSnapshot(agent, { title: normalizedTitle, titleManuallySet: true });
     this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Applies a background-generated title (see AgentTitleTracker). Unlike
+   * setTitle(), this never marks the title manually set, and re-checks
+   * titleManuallySet/unchanged-title against storage at write time so a
+   * rename racing an in-flight refresh always wins.
+   */
+  async applyGeneratedTitle(agentId: string, title: string): Promise<boolean> {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return false;
+    }
+    const record = this.registry ? await this.registry.get(agentId) : null;
+    if (record?.titleManuallySet) {
+      return false;
+    }
+    if (record?.title === trimmed) {
+      return false;
+    }
+    this.touchUpdatedAt(agent);
+    const applied = await this.persistSnapshot(agent, {
+      title: trimmed,
+      skipIfTitleManuallySet: true,
+    });
+    if (!applied) {
+      return false;
+    }
+    this.emitState(agent, { persist: false });
+    return true;
   }
 
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
@@ -1993,7 +2346,7 @@ export class AgentManager {
 
     const nextRecord = {
       ...record,
-      ...(patch.title ? { title: patch.title } : {}),
+      ...(patch.title ? { title: patch.title, titleManuallySet: true } : {}),
       ...(patch.labels ? { labels: applyLabelPatch(record.labels, patch.labels) } : {}),
       updatedAt: this.nextStoredUpdatedAt(record),
     };
@@ -3102,6 +3455,18 @@ export class AgentManager {
           agentId,
           epoch: this.timelineStore.getEpoch(agentId),
         });
+        // The replaced timeline may no longer contain the item the summary
+        // was derived from; drop it rather than show a summary of deleted content.
+        delete agent.lastActivitySummary;
+        // Stale until the next turn's init message re-reports it (KTD8) — drop rather
+        // than show statuses captured before the rewind.
+        delete agent.mcpServerStatuses;
+        // The rewound-away turns' token burn no longer reflects what's ahead; start the
+        // trailing-window tracker fresh rather than report a rate computed from erased history.
+        delete agent.tokenRateBuckets;
+        delete agent.totalTokens;
+        delete agent.tokenBurnAlert;
+        delete agent.tokenBurnMonitorState;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);
@@ -3789,16 +4154,21 @@ export class AgentManager {
 
   private async persistSnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean },
-  ): Promise<void> {
+    options?: {
+      title?: string | null;
+      internal?: boolean;
+      titleManuallySet?: boolean;
+      skipIfTitleManuallySet?: boolean;
+    },
+  ): Promise<boolean> {
     if (!this.registry) {
-      return;
+      return false;
     }
     // Don't persist internal agents - they're ephemeral system tasks
     if (agent.internal) {
-      return;
+      return false;
     }
-    await this.registry.applySnapshot(agent, options);
+    return this.registry.applySnapshot(agent, options);
   }
 
   private requireRegistry(): AgentStorage {
@@ -4251,9 +4621,23 @@ export class AgentManager {
       case "permission_resolved":
         this.onStreamPermissionResolved({ agent, event, options, flags });
         return undefined;
+      case "mcp_server_statuses":
+        this.onStreamMcpServerStatuses(agent, event);
+        return undefined;
       default:
         return undefined;
     }
+  }
+
+  private onStreamMcpServerStatuses(
+    agent: ActiveManagedAgent,
+    event: Extract<AgentStreamEvent, { type: "mcp_server_statuses" }>,
+  ): void {
+    // Avoid an emitState storm on every turn: only broadcast (and skip persisting,
+    // live-only like lastActivitySummary) when the reported statuses actually changed.
+    if (isDeepStrictEqual(agent.mcpServerStatuses, event.statuses)) return;
+    agent.mcpServerStatuses = event.statuses;
+    this.emitState(agent, { persist: false });
   }
 
   private onStreamThreadStarted(agent: ActiveManagedAgent): void {
@@ -4342,6 +4726,14 @@ export class AgentManager {
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits
     // it from the completion event.
+    if (typeof event.turnTokenDelta === "number" && event.turnTokenDelta > 0) {
+      agent.tokenRateBuckets = recordTokenDelta(
+        agent.tokenRateBuckets ?? [],
+        event.turnTokenDelta,
+        Date.now(),
+      );
+      agent.totalTokens = (agent.totalTokens ?? 0) + event.turnTokenDelta;
+    }
     agent.lastError = undefined;
     if (
       !isForegroundEvent &&
@@ -4537,14 +4929,38 @@ export class AgentManager {
       timestamp: row.timestamp,
     });
 
-    if (
-      item.type === "tool_call" &&
-      item.status === "completed" &&
-      item.detail?.type === "shell" &&
-      commandMayHaveChangedExternalState(item.detail.command)
-    ) {
-      const agent = this.agents.get(agentId);
-      if (agent) {
+    // Single choke point for every timeline item, regardless of which path
+    // dispatched it: coalesced assistant/reasoning/tool_call flushes (the
+    // AgentStreamCoalescer's onFlush callback) never reach onStreamTimelineEvent,
+    // so the summary is computed here instead — per timeline ITEM, never per
+    // streamed delta, since coalescing already collapsed same-window chunks
+    // before this call.
+    //
+    // assistant_message/reasoning are excluded: the coalescer flushes them on
+    // a ~60ms timer with only that window's text, so every flush is a
+    // different mid-message fragment and would otherwise emit+persist a full
+    // agent snapshot every ~60ms while streaming. tool_call/todo/error/
+    // compaction/user_message items are discrete and drive the summary instead.
+    const agent = this.agents.get(agentId);
+    if (agent) {
+      const activitySummary =
+        item.type === "assistant_message" || item.type === "reasoning"
+          ? undefined
+          : summarizeLatestActivityItem(item);
+      if (activitySummary !== undefined && activitySummary !== agent.lastActivitySummary) {
+        agent.lastActivitySummary = activitySummary;
+        // Avoid an emitState storm: only broadcast when the summary actually
+        // changed, not on every coalesced item. lastActivitySummary is
+        // live-only (never persisted), so skip the snapshot write too.
+        this.emitState(agent, { persist: false });
+      }
+
+      if (
+        item.type === "tool_call" &&
+        item.status === "completed" &&
+        item.detail?.type === "shell" &&
+        commandMayHaveChangedExternalState(item.detail.command)
+      ) {
         this.onWorkspaceStateMayHaveChanged?.({ cwd: agent.cwd });
       }
     }
@@ -4670,8 +5086,15 @@ export class AgentManager {
   }
 
   private emitState(agent: ManagedAgent, options?: { persist?: boolean }): void {
+    // Capture the pre-transition status independently of checkAndSetAttention:
+    // that method early-returns once attention is already unread, which would
+    // otherwise swallow a turn-2 finish while turn 1's attention is uncleared.
+    const previousStatus = this.previousStatuses.get(agent.id);
     // Keep attention as an edge-triggered unread signal, not a level signal.
     this.checkAndSetAttention(agent);
+    if (previousStatus === "running" && agent.lifecycle === "idle" && !agent.internal) {
+      this.onAgentTurnFinished?.({ agentId: agent.id, cwd: agent.cwd });
+    }
     if (options?.persist !== false) {
       this.enqueueBackgroundPersist(agent);
     }
@@ -4745,9 +5168,11 @@ export class AgentManager {
   }
 
   private enqueueBackgroundPersist(agent: ManagedAgent): void {
-    const task = this.persistSnapshot(agent).catch((err) => {
-      this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
-    });
+    const task = this.persistSnapshot(agent)
+      .then(() => undefined)
+      .catch((err) => {
+        this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
+      });
     this.trackBackgroundTask(task);
   }
 
@@ -5044,14 +5469,22 @@ export class AgentManager {
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
     const launchConfig = this.applyDaemonAppendSystemPrompt(
-      withRuntimePaseoMcpServer({
-        config: storedConfig,
-        agentId,
-        mcpBaseUrl:
-          this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-            ? this.mcpBaseUrl
-            : null,
-        mcpAuthToken: this.mcpAuthToken,
+      withRuntimeMcpGatewayServers({
+        config: withRuntimePaseoMcpServer({
+          config: storedConfig,
+          agentId,
+          mcpBaseUrl:
+            this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
+              ? this.mcpBaseUrl
+              : null,
+          mcpAuthToken: this.mcpAuthToken,
+        }),
+        // v1 targets the Claude adapter only (Scope Boundaries) — strictMcpConfig's stdio
+        // drop only has a re-injection counterpart there today.
+        enabled: storedConfig.provider === "claude" && (this.mcpGateway?.enabled ?? false),
+        gatewayBaseUrl: this.mcpGatewayBaseUrl,
+        serverNames: this.mcpGateway?.getServerNames() ?? [],
+        gatewayAuthToken: this.mcpGatewayAuthToken,
       }),
     );
     return { storedConfig, launchConfig, paseoToolPolicy };

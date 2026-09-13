@@ -2,24 +2,97 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, vi } from "vitest";
+import { createPaseoApi } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { createTestAgentClients } from "../../test-utils/fake-agent-client.js";
+import type { TestAgentClientOptions } from "../../test-utils/fake-agent-client.js";
 import { createProviderSnapshotManagerStub } from "../../test-utils/session-stubs.js";
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
+import { PluginHookHandlers } from "../../plugins/lifecycle/index.js";
+import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
 import { createAgentCommand } from "./create.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
 const logger = createTestLogger();
+const hookPaseo = createPaseoApi(
+  new DaemonClient({ url: "ws://127.0.0.1:1/ws", clientId: "create-test-lifecycle" }),
+);
 
-function createRealAgentManager(storage: AgentStorage): AgentManager {
+function createRealAgentManager(
+  storage: AgentStorage,
+  options?: { pluginLifecycle?: PluginLifecycle; clients?: TestAgentClientOptions },
+): AgentManager {
   return new AgentManager({
-    clients: createTestAgentClients(),
+    clients: createTestAgentClients(options?.clients),
     registry: storage,
     logger,
+    pluginLifecycle: options?.pluginLifecycle,
   });
+}
+
+// Captures every `agent.create` before-hook request so tests can assert on
+// the payload the plugin system would have seen, without exercising the
+// plugin process/compiler machinery.
+function createCapturingPluginLifecycle(): {
+  pluginLifecycle: PluginLifecycle;
+  requests: Array<{
+    config: { provider: string; cwd: string };
+    callerAgentId?: string;
+    labels?: Record<string, string>;
+    initialPrompt?: string;
+  }>;
+} {
+  const requests: Array<{
+    config: { provider: string; cwd: string };
+    callerAgentId?: string;
+    labels?: Record<string, string>;
+    initialPrompt?: string;
+  }> = [];
+  const pluginLifecycle: PluginLifecycle = {
+    emit: () => {},
+    before: async (name, request) => {
+      if (name === "agent.create") {
+        requests.push(
+          request as {
+            config: { provider: string; cwd: string };
+            callerAgentId?: string;
+            labels?: Record<string, string>;
+            initialPrompt?: string;
+          },
+        );
+      }
+      return request;
+    },
+  };
+  return { pluginLifecycle, requests };
+}
+
+// Wires the real hook composition/validation machinery (PluginHookHandlers)
+// behind the PluginLifecycle interface AgentManager expects, so hook
+// registrations here exercise the actual backfill/immutability logic instead
+// of a hand-rolled stand-in.
+function createRealHookPluginLifecycle(): {
+  pluginLifecycle: PluginLifecycle;
+  hooks: PluginHookHandlers;
+} {
+  const hooks = new PluginHookHandlers(() => {});
+  const pluginLifecycle: PluginLifecycle = {
+    emit: () => {},
+    before: async (name, request) => {
+      return (await hooks.invoke(
+        "test-hook",
+        "before",
+        name,
+        request,
+        hookPaseo,
+      )) as typeof request;
+    },
+  };
+  return { pluginLifecycle, hooks };
 }
 
 async function removeRealAgentManagerWorkdir({
@@ -339,6 +412,312 @@ test("mcp create stamps the new worktree's workspaceId, not the parent's", async
     const storedChild = await storage.get(child.id);
     expect(storedChild?.workspaceId).toBe("ws-new-worktree");
     expect(child.cwd).toBe(join(workdir, "worktree", "packages", "app"));
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("mcp create forwards callerAgentId to the agent.create hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const { snapshot: parent } = await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+    requests.length = 0;
+
+    await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        title: "child",
+        initialPrompt: "do the thing",
+        background: true,
+        notifyOnFinish: false,
+        callerAgentId: parent.id,
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBe(parent.id);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("session create forwards callerAgentId to the agent.create hook for CLI/session-initiated creates", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+  const providerSnapshotManager = createProviderSnapshotManagerStub().manager;
+
+  try {
+    const { snapshot: parent } = await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+    requests.length = 0;
+
+    await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-parent",
+        callerAgentId: parent.id,
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBe(parent.id);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("session create omits callerAgentId from the agent.create hook when no caller initiated it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-source",
+        labels: {},
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.callerAgentId).toBeUndefined();
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("mcp create forwards labels and initialPrompt to the agent.create hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        workspaceId: "ws-create-test",
+        title: "child",
+        initialPrompt: "do the thing",
+        labels: { "paseo.agent-type": "reviewer" },
+        background: true,
+        notifyOnFinish: false,
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.labels).toEqual({ "paseo.agent-type": "reviewer" });
+    expect(requests[0]?.initialPrompt).toBe("do the thing");
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("session create forwards labels and initialPrompt to the agent.create hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, requests } = createCapturingPluginLifecycle();
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "session",
+        config: { provider: "codex", cwd: workdir },
+        workspaceId: "ws-source",
+        initialPrompt: "do the thing",
+        labels: { "paseo.agent-type": "reviewer" },
+        provisionalTitle: null,
+        firstAgentContext: { attachments: [] },
+        buildSessionConfig: async (config) => ({ sessionConfig: config }),
+      },
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.labels).toEqual({ "paseo.agent-type": "reviewer" });
+    expect(requests[0]?.initialPrompt).toBe("do the thing");
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a hook mutating labels persists the mutated labels on the created agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, hooks } = createRealHookPluginLifecycle();
+  hooks.before("agent.create", ({ request }) => {
+    return { ...request, labels: { ...request.labels, "paseo.agent-role": "leader" } };
+  });
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    const { snapshot } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        workspaceId: "ws-create-test",
+        title: "child",
+        initialPrompt: "do the thing",
+        labels: { "paseo.agent-type": "reviewer" },
+        background: true,
+        notifyOnFinish: false,
+      },
+    );
+
+    const stored = await storage.get(snapshot.id);
+    expect(stored?.labels).toEqual({
+      "paseo.agent-type": "reviewer",
+      "paseo.agent-role": "leader",
+    });
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a hook returning a fresh object without labels leaves the original labels intact on the created agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, hooks } = createRealHookPluginLifecycle();
+  // A legacy hook that returns a fresh object without spreading the
+  // original request — labels must be backfilled from the request rather
+  // than wiped to the wire schema's {} default.
+  hooks.before("agent.create", ({ request }) => {
+    return { config: request.config, env: request.env };
+  });
+  const agentManager = createRealAgentManager(storage, { pluginLifecycle });
+
+  try {
+    const { snapshot } = await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        workspaceId: "ws-create-test",
+        title: "child",
+        initialPrompt: "do the thing",
+        labels: { "paseo.agent-type": "reviewer" },
+        background: true,
+        notifyOnFinish: false,
+      },
+    );
+
+    const stored = await storage.get(snapshot.id);
+    expect(stored?.labels).toEqual({ "paseo.agent-type": "reviewer" });
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a hook mutating initialPrompt does not alter the prompt actually sent to the provider", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const { pluginLifecycle, hooks } = createRealHookPluginLifecycle();
+  hooks.before("agent.create", ({ request }) => {
+    return { ...request, initialPrompt: "hook-injected prompt" };
+  });
+  const observedPrompts: unknown[] = [];
+  const agentManager = createRealAgentManager(storage, {
+    pluginLifecycle,
+    clients: { onStartTurn: (prompt) => observedPrompts.push(prompt) },
+  });
+
+  try {
+    await createAgentCommand(
+      {
+        agentManager,
+        agentStorage: storage,
+        logger,
+        providerSnapshotManager: createProviderSnapshotManagerStub().manager,
+      },
+      {
+        kind: "mcp",
+        provider: "codex",
+        cwd: workdir,
+        workspaceId: "ws-create-test",
+        title: "child",
+        initialPrompt: "do the thing",
+        background: true,
+        notifyOnFinish: false,
+      },
+    );
+
+    expect(observedPrompts).toEqual(["do the thing"]);
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }

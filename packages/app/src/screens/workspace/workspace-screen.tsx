@@ -25,6 +25,9 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import invariant from "tiny-invariant";
 import { SidebarMenuToggle } from "@/components/headers/menu-header";
+import { HistoryBackButton } from "@/components/navigation/history-back-button";
+import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
+import { canGoBack, goBack, useNavigationHistoryStore } from "@/stores/navigation-history-store";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { ScreenTitle } from "@/components/headers/screen-title";
 import { HostBadge } from "@/hosts/host-badge";
@@ -206,6 +209,7 @@ import {
 } from "@/workspace/file-open";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
+import { resolveWorkspaceHardwareBackAction } from "@/screens/workspace/workspace-hardware-back-model";
 import { useHasPullRequest } from "@/panels/pull-request";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
@@ -315,6 +319,7 @@ function getFallbackTabOptionLabel(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -347,6 +352,9 @@ function getFallbackTabOptionLabel(
   if (tab.target.kind === "commit_diff") {
     return tab.target.sha.slice(0, 7);
   }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
+  }
   return labels.agent;
 }
 
@@ -362,6 +370,7 @@ function getFallbackTabOptionDescription(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -399,6 +408,9 @@ function getFallbackTabOptionDescription(
   }
   if (tab.target.kind === "plugin") {
     return tab.target.panelId;
+  }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
   }
   return tab.target.path;
 }
@@ -599,6 +611,7 @@ function MobileWorkspaceTabOption({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );
@@ -1795,16 +1808,33 @@ function WorkspaceScreenContent({
   );
 
   useEffect(() => {
-    // Back dismisses the compact overlay only. On a wide native layout the
-    // explorer is a tab, `showMobileAgent` has no rendered consumer, and
-    // returning true would swallow Back with nothing to show for it.
-    if (!isRouteFocused || isWeb || !isMobile || !isExplorerSidebarShowing) {
+    // Consolidated hardware Back handling (see docs/plans/2026-09-12-001-feat-global-back-history-plan.md
+    // for the history half). Dismissing the compact overlay and cross-workspace/tab history
+    // navigation both want the same `hardwareBackPress` event; registering them as two separate
+    // effects made "who wins" depend on registration order, since BackHandler dispatches
+    // listeners LIFO and stops at the first one that returns true. One handler reading both
+    // pieces of state through resolveWorkspaceHardwareBackAction makes the priority explicit:
+    // dismissing the overlay always wins, and only falls through to history when it's closed.
+    // On a wide native layout the explorer is a tab, not an overlay, so `isOverlayOpen` is
+    // always false there and this falls straight through to history navigation.
+    if (!isRouteFocused || !isNative) {
       return;
     }
 
     const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      showMobileAgent();
-      return true;
+      const action = resolveWorkspaceHardwareBackAction({
+        isOverlayOpen: isMobile && isExplorerSidebarShowing,
+        canGoBack: canGoBack(useNavigationHistoryStore.getState()),
+      });
+      switch (action) {
+        case "dismissOverlay":
+          showMobileAgent();
+          return true;
+        case "historyBack":
+          return goBack(buildNavigationHistoryReplayDeps());
+        case "unhandled":
+          return false;
+      }
     });
 
     return () => handler.remove();
@@ -2365,6 +2395,7 @@ function WorkspaceScreenContent({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );
@@ -3885,6 +3916,7 @@ function WorkspaceScreenContent({
           left={
             <>
               <SidebarMenuToggle />
+              <HistoryBackButton />
               <WorkspaceHeaderTitleBar
                 isLoading={isWorkspaceHeaderLoading}
                 title={workspaceHeaderTitle}

@@ -715,6 +715,10 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type McpGatewayAuthStartPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.auth.start.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -3092,6 +3096,13 @@ export class DaemonClient {
       "agent_permission_request",
       "agent_permission_resolved",
     ];
+    // COMPAT(mcpStatus): added in v0.8.1. An older daemon's SessionEventSubscription enum
+    // doesn't know "mcp_status_update" and parses the array strictly, so sending it
+    // unconditionally would reject the whole subscription request. Remove gating once the
+    // daemon floor is >= v0.8.1.
+    if (this.lastServerInfoMessage?.features?.mcpStatus === true) {
+      events.push("mcp_status_update");
+    }
     if (this.eventListeners.size === 0 && !this.messageHandlers.has("providers_snapshot_update")) {
       this.providerSnapshotUpdates.clear();
     }
@@ -4978,6 +4989,25 @@ export class DaemonClient {
       },
       responseType: "provider_diagnostic_response",
       timeout: 180000,
+    });
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server) — the caller opens `authorizationUrl` via the
+   * existing external-URL opener; completion arrives later via `mcp_status_update`.
+   */
+  async startMcpGatewayAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayAuthStartPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.auth.start.request",
+        name,
+      },
     });
   }
 

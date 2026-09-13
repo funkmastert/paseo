@@ -170,6 +170,7 @@ const SidebarRowItemsSchema = z
     host: z.boolean().catch(DEFAULT_SIDEBAR_ROW_ITEMS.host),
     changeRequest: z.boolean().catch(DEFAULT_SIDEBAR_ROW_ITEMS.changeRequest),
     services: z.boolean().optional().catch(undefined),
+    diskUsage: z.boolean().optional().catch(undefined),
     labels: z.boolean().catch(DEFAULT_SIDEBAR_ROW_ITEMS.labels),
     // COMPAT(sidebarRowItemsChecks): migrated in v0.3.0, remove after 2027-08-05.
     checks: z.boolean().optional().catch(undefined),
@@ -296,6 +297,7 @@ const StoredAppSettingsSchema = z
         services:
           stored.sidebarRowItems.services ??
           (stored.sidebarRowItems.scripts === false ? false : DEFAULT_SIDEBAR_ROW_ITEMS.services),
+        diskUsage: stored.sidebarRowItems.diskUsage ?? DEFAULT_SIDEBAR_ROW_ITEMS.diskUsage,
       },
       toolCallDetailLevel,
       needsWrite,

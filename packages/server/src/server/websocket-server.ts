@@ -26,6 +26,7 @@ import {
   type ServerCapabilities,
   type WSOutboundMessage,
   wrapSessionMessage,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import { asUint8Array, decodeBinaryFrame } from "@getpaseo/protocol/binary-frames/index";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
@@ -85,6 +86,7 @@ import {
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
+import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
@@ -560,6 +562,8 @@ export class VoiceAssistantWebSocketServer {
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly mcpBaseUrl: string | null;
@@ -650,6 +654,10 @@ export class VoiceAssistantWebSocketServer {
     pluginRuntime?: SessionOptions["pluginRuntime"],
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
+    worktreeDiskUsage: {
+      get?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+      requestSample?: (workspaceId: string, cwd: string) => void;
+    } = {},
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -672,6 +680,8 @@ export class VoiceAssistantWebSocketServer {
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
+    this.getWorktreeDiskUsage = worktreeDiskUsage.get;
+    this.requestWorktreeDiskUsageSample = worktreeDiskUsage.requestSample;
     const requiredServices = requireWebSocketServices({
       scheduleService,
       checkoutDiffManager,
@@ -736,8 +746,11 @@ export class VoiceAssistantWebSocketServer {
       });
     });
 
+    // Claude-derived entries are captured once at construction; a config change that adds
+    // or edits one only takes effect after a daemon restart.
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,
+      claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
@@ -930,6 +943,11 @@ export class VoiceAssistantWebSocketServer {
       return;
     }
     this.sendMessageToSockets(this.sessions.keys(), message);
+  }
+
+  /** The push sender this instance resolved (injected override, or its own createPushNotifications). */
+  public getPushNotificationSender(): PushNotificationSender {
+    return this.pushNotificationSender;
   }
 
   public listSessions(): Session[] {
@@ -1423,6 +1441,8 @@ export class VoiceAssistantWebSocketServer {
       workspaceGitService: this.workspaceGitService,
       workspaceAutoName: this.workspaceAutoName,
       daemonConfigStore: this.daemonConfigStore,
+      getWorktreeDiskUsage: this.getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample: this.requestWorktreeDiskUsageSample,
       pluginRuntime: this.pluginRuntime,
       orchestrationSkills: this.orchestrationSkills,
       mcpBaseUrl: this.mcpBaseUrl,
@@ -1644,6 +1664,8 @@ export class VoiceAssistantWebSocketServer {
         providersSnapshot: true,
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
         providersSnapshotCwd: true,
+        // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
+        mcpStatus: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

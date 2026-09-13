@@ -357,6 +357,40 @@ describe("AgentStorage", () => {
     expect(record?.lastStatus).toBe("running");
   });
 
+  test("applySnapshot with skipIfTitleManuallySet drops the write when the queued-ahead record was manually titled", async () => {
+    const agentId = "agent-skip-if-manual";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+    await storage.applySnapshot(createManagedAgent({ id: agentId }), {
+      title: "Manually renamed",
+      titleManuallySet: true,
+    });
+    const beforeManual = await storage.get(agentId);
+
+    const applied = await storage.applySnapshot(createManagedAgent({ id: agentId }), {
+      title: "Generated title",
+      skipIfTitleManuallySet: true,
+    });
+
+    expect(applied).toBe(false);
+    const record = await storage.get(agentId);
+    expect(record?.title).toBe("Manually renamed");
+    expect(record).toEqual(beforeManual);
+  });
+
+  test("applySnapshot with skipIfTitleManuallySet applies normally when the title was not manually set", async () => {
+    const agentId = "agent-skip-if-manual-not-set";
+    await storage.applySnapshot(createManagedAgent({ id: agentId }));
+
+    const applied = await storage.applySnapshot(createManagedAgent({ id: agentId }), {
+      title: "Generated title",
+      skipIfTitleManuallySet: true,
+    });
+
+    expect(applied).toBe(true);
+    const record = await storage.get(agentId);
+    expect(record?.title).toBe("Generated title");
+  });
+
   test("applySnapshot projects metadata after in-flight archival writes", async () => {
     const agentId = "agent-pending-write";
     await storage.applySnapshot(createManagedAgent({ id: agentId }));

@@ -2,7 +2,6 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   type AgentDefinition,
@@ -34,6 +33,7 @@ import {
   findClaudeModel,
   getClaudeModelsWithSettings,
   normalizeClaudeRuntimeModelId,
+  resolveClaudeConfigDir,
   resolveConfiguredClaudeModel,
 } from "./models.js";
 import {
@@ -42,6 +42,7 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
+import { readPerDirStdioMcpServers } from "../../../mcp-gateway/per-dir-stdio.js";
 import { parsePartialJsonObject } from "./partial-json.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { ClaudeTaskState } from "./task-state.js";
@@ -95,6 +96,7 @@ import {
   type AgentCreateSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentMetadata,
   type AgentMode,
   type AgentModelDefinition,
@@ -1613,7 +1615,7 @@ export class ClaudeAgentClient implements AgentClient {
   async listImportableSessions(
     options?: ListImportableSessionsOptions,
   ): Promise<ImportableProviderSession[]> {
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = resolveClaudeConfigDir(this.configDir);
     const sessionsRoot = options?.cwd
       ? claudeProjectDirSync(options.cwd, { configDir })
       : path.join(configDir, "projects");
@@ -1982,6 +1984,27 @@ class ClaudeContextUsageState {
       this.compactedContextWindowUsedTokens = undefined;
       this.completedResultTurns += 1;
     }
+  }
+
+  /**
+   * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Claude's
+   * result `usage` is already scoped to this turn (main agent loop only), unlike `modelUsage`
+   * which accumulates across the whole query() call — so no diffing against a prior snapshot is
+   * needed here, just this turn's raw usage numbers.
+   */
+  buildTurnTokenDelta(message: SDKResultMessage): number | undefined {
+    if (!message.usage) {
+      return undefined;
+    }
+    const inputTokens =
+      typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : 0;
+    const outputTokens =
+      typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : 0;
+    const cachedInputTokens =
+      typeof message.usage.cache_read_input_tokens === "number"
+        ? message.usage.cache_read_input_tokens
+        : 0;
+    return inputTokens + outputTokens + cachedInputTokens;
   }
 
   private streamUsedTokens(): number | undefined {
@@ -3318,6 +3341,8 @@ class ClaudeAgentSession implements AgentSession {
       base.mcpServers = this.normalizeMcpServers(this.config.mcpServers);
     }
 
+    this.applyMcpGatewayOptions(base);
+
     if (this.config.model) {
       base.model = this.config.model;
     }
@@ -3332,6 +3357,36 @@ class ClaudeAgentSession implements AgentSession {
       ];
     }
     return base;
+  }
+
+  /**
+   * U3/KTD5: the MCP gateway replaces per-dir remote server definitions for sessions it
+   * covers. `strictMcpConfig` is the only SDK switch that stops per-dir servers from loading
+   * via `settingSources`, but it drops locally-defined stdio entries too — so re-inject those
+   * verbatim ourselves, sourced from the same config dir + project `.mcp.json` the CLI would
+   * otherwise have read them from. `this.config.mcpGatewayEnabled` is a per-launch signal set
+   * by `withRuntimeMcpGatewayServers` (agent-manager); it's absent when the gateway is
+   * disabled, so this no-ops byte-identically then (R10).
+   */
+  private applyMcpGatewayOptions(base: ClaudeOptions): void {
+    if (!this.config.mcpGatewayEnabled) {
+      return;
+    }
+    base.strictMcpConfig = true;
+    const stdioServers = readPerDirStdioMcpServers({
+      configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
+      projectDir: this.config.cwd,
+      logger: this.logger,
+    });
+    if (Object.keys(stdioServers).length === 0) {
+      return;
+    }
+    base.mcpServers = {
+      ...this.normalizeMcpServers(stdioServers),
+      // Anything already present (brokered gateway entries, or the session's own stored
+      // config) wins over an auto-discovered stdio entry of the same name.
+      ...base.mcpServers,
+    };
   }
 
   private buildSettingsOptions(
@@ -4258,6 +4313,14 @@ class ClaudeAgentSession implements AgentSession {
           sessionId: sessionUpdate.threadStartedSessionId,
         });
       }
+      // Every init message re-reports MCP server statuses (KTD8): there is no SDK push
+      // event for later changes, so re-capturing each turn is how stdio/pass-through
+      // servers' statuses stay current. AgentManager dedupes before broadcasting.
+      events.push({
+        type: "mcp_server_statuses",
+        provider: "claude",
+        statuses: sessionUpdate.mcpServerStatuses,
+      });
       return;
     }
     if (message.subtype === "status") {
@@ -4469,7 +4532,13 @@ class ClaudeAgentSession implements AgentSession {
           },
         });
       }
-      events.push({ type: "turn_completed", provider: "claude", usage });
+      const turnTokenDelta = this.contextUsage.buildTurnTokenDelta(message);
+      events.push({
+        type: "turn_completed",
+        provider: "claude",
+        usage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
+      });
       return;
     }
     const errorMessage =
@@ -4533,9 +4602,10 @@ class ClaudeAgentSession implements AgentSession {
   private handleSystemMessage(message: SDKSystemMessage): {
     threadStartedSessionId: string | null;
     notice: AgentTimelineItem | null;
+    mcpServerStatuses: AgentMcpServerStatus[];
   } {
     if (message.subtype !== "init") {
-      return { threadStartedSessionId: null, notice: null };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses: [] };
     }
 
     const msgRecord = toObjectRecord(message) ?? {};
@@ -4544,8 +4614,11 @@ class ClaudeAgentSession implements AgentSession {
       sessionId: msgRecord.sessionId,
       session: isObjectRecord(msgRecord.session) ? { id: msgRecord.session.id } : null,
     }).trim();
+    // Defensive: some fixtures/older CLIs omit mcp_servers even though the current
+    // SDK type declares it required. Never crash the init handshake over it.
+    const mcpServerStatuses = Array.isArray(message.mcp_servers) ? message.mcp_servers : [];
     if (!newSessionId) {
-      return { threadStartedSessionId: null, notice: null };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses };
     }
     const existingSessionId = this.claudeSessionId;
     let threadStartedSessionId: string | null = null;
@@ -4591,7 +4664,7 @@ class ClaudeAgentSession implements AgentSession {
       this.lastRuntimeModel = message.model;
       this.cachedRuntimeInfo = null;
     }
-    return { threadStartedSessionId, notice };
+    return { threadStartedSessionId, notice, mcpServerStatuses };
   }
 
   private readMissingResumedConversationError(message: SDKMessage): string | null {
@@ -5021,7 +5094,7 @@ class ClaudeAgentSession implements AgentSession {
   private resolveHistoryPath(sessionId: string): string | null {
     const cwd = this.config.cwd;
     if (!cwd) return null;
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR);
     const candidates = [cwd];
     try {
       const realCwd = fs.realpathSync(cwd);

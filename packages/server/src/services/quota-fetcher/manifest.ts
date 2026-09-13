@@ -1,9 +1,11 @@
+import { z } from "zod";
+import { ProviderOverrideSchema } from "../../server/agent/provider-launch-config.js";
 import type {
   ProviderUsageFetcher,
   ProviderUsageFetcherFactoryOptions,
   ProviderUsageFetcherManifestEntry,
 } from "./provider.js";
-import { ClaudeQuotaProvider } from "./providers/claude.js";
+import { ClaudeQuotaProvider, claudeConfigDirKeychainService } from "./providers/claude.js";
 import { CodexQuotaProvider } from "./providers/codex.js";
 import { CopilotQuotaProvider } from "./providers/copilot.js";
 import { CursorQuotaProvider } from "./providers/cursor.js";
@@ -55,8 +57,73 @@ export const PROVIDER_USAGE_FETCHERS: readonly ProviderUsageFetcherManifestEntry
   },
 ];
 
+export interface ClaudeDerivedProviderEntry {
+  providerId: string;
+  displayName: string;
+  claudeHome: string;
+  /** Explicit override for `params.accountPool.keychainService`; see docs/providers.md. */
+  keychainService?: string;
+}
+
 export function createProviderUsageFetchers(
   options: ProviderUsageFetcherFactoryOptions,
+  claudeDerivedEntries: readonly ClaudeDerivedProviderEntry[] = [],
 ): ProviderUsageFetcher[] {
-  return PROVIDER_USAGE_FETCHERS.map((entry) => entry.create(options));
+  const baseFetchers = PROVIDER_USAGE_FETCHERS.map((entry) => entry.create(options));
+  const derivedFetchers = claudeDerivedEntries.map(
+    (entry) =>
+      new ClaudeQuotaProvider({
+        logger: options.logger,
+        fetch: options.fetch,
+        providerId: entry.providerId,
+        displayName: entry.displayName,
+        claudeHome: entry.claudeHome,
+        keychainService: entry.keychainService ?? claudeConfigDirKeychainService(entry.claudeHome),
+      }),
+  );
+  return [...baseFetchers, ...derivedFetchers];
+}
+
+// ProviderOverrideSchema owns the persisted `agents.providers.<id>` shape (it is what the
+// daemon itself validates this map with); only the account-pool keychainService override,
+// which lives inside the schema's untyped `params` record, is typed locally on top.
+const AccountPoolParamsSchema = z
+  .object({
+    accountPool: z
+      .object({
+        keychainService: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+/**
+ * Derive one entry per claude-derived custom provider (`extends: "claude"` with its own
+ * `env.CLAUDE_CONFIG_DIR`) from the daemon's provider config, for use with
+ * `createProviderUsageFetchers`. An entry missing `CLAUDE_CONFIG_DIR` is skipped — it has
+ * no distinct account to fetch usage for.
+ */
+export function deriveClaudeProviderEntries(
+  providers: Record<string, unknown> | undefined,
+): ClaudeDerivedProviderEntry[] {
+  if (!providers) return [];
+
+  const entries: ClaudeDerivedProviderEntry[] = [];
+  for (const [providerId, rawConfig] of Object.entries(providers)) {
+    const result = ProviderOverrideSchema.safeParse(rawConfig);
+    if (!result.success || result.data.extends !== "claude") continue;
+
+    const claudeHome = result.data.env?.["CLAUDE_CONFIG_DIR"];
+    if (!claudeHome) continue;
+
+    const params = AccountPoolParamsSchema.safeParse(result.data.params ?? {});
+    entries.push({
+      providerId,
+      displayName: result.data.label ?? providerId,
+      claudeHome,
+      keychainService: params.success ? params.data.accountPool?.keychainService : undefined,
+    });
+  }
+  return entries;
 }

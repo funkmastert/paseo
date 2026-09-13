@@ -1,4 +1,5 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
@@ -19,11 +20,13 @@ import {
   type WorkspaceScriptListRequest,
   type WorkspaceScriptStartRequest,
   type WorkspaceScriptStopRequest,
+  type McpGatewayAuthStartRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import type {
   TerminalManager,
@@ -480,6 +483,10 @@ export interface SessionOptions {
   workspaceGitService: WorkspaceGitService;
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
+  /** Reads the daemon-wide WorktreeDiskMonitor's last sample for a workspace, if any. */
+  getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  /** Fire-and-forget: asks the monitor to sample a workspace outside its normal rotation. */
+  requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   pluginRuntime?: {
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
@@ -693,6 +700,8 @@ export class Session {
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly workspaceRecovery: WorkspaceRecoveryService;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
@@ -700,6 +709,7 @@ export class Session {
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
+  private unsubscribeMcpGatewayStatus: (() => void) | null = null;
   private registryMutationQueue: Promise<void> = Promise.resolve();
   private projectUpdateQueue: Promise<void> = Promise.resolve();
   private isCleanedUp = false;
@@ -789,6 +799,8 @@ export class Session {
       workspaceGitService,
       workspaceAutoName,
       daemonConfigStore,
+      getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample,
       pluginRuntime,
       orchestrationSkills,
       stt,
@@ -996,6 +1008,8 @@ export class Session {
         })
       : null;
     this.daemonConfigStore = daemonConfigStore;
+    this.getWorktreeDiskUsage = getWorktreeDiskUsage;
+    this.requestWorktreeDiskUsageSample = requestWorktreeDiskUsageSample;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1088,6 +1102,9 @@ export class Session {
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
+      getDiskUsage: (workspaceId) => this.getWorktreeDiskUsage?.(workspaceId),
+      requestDiskUsageSample: (workspaceId, cwd) =>
+        this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
     });
 
     this.voiceSession = new VoiceSession({
@@ -1523,6 +1540,19 @@ export class Session {
         });
     }
     this.providerCatalogSession.start();
+    // COMPAT(mcpStatus): copies providers_snapshot_update's push pattern (KTD7) —
+    // gated by the same explicit-subscription mechanism, so old clients never receive it.
+    this.unsubscribeMcpGatewayStatus = this.agentManager.onMcpGatewayStatusChange((snapshot) => {
+      if (!this.wantsEvent("mcp_status_update")) return;
+      this.emit(this.mcpStatusUpdateMessage(snapshot));
+    });
+  }
+
+  private mcpStatusUpdateMessage(servers: McpGatewaySnapshotEntry[]) {
+    return {
+      type: "mcp_status_update" as const,
+      payload: { servers, generatedAt: new Date().toISOString() },
+    };
   }
 
   private subscribeToRegistryMutations(): void {
@@ -2346,6 +2376,16 @@ export class Session {
           },
           source,
         );
+        // COMPAT(mcpStatus): the gateway only pushes on state changes, so a client that
+        // connects after the gateway has settled would see an empty strip until the next
+        // real transition. Hand the newly-subscribing source the current snapshot eagerly;
+        // skipped when empty so gateway-less daemons emit nothing (R10).
+        if (msg.events.includes("mcp_status_update")) {
+          const snapshot = this.agentManager.getMcpGatewaySnapshot();
+          if (snapshot.length > 0) {
+            this.emitForSource(this.mcpStatusUpdateMessage(snapshot), source);
+          }
+        }
         return undefined;
       }
       case "agent.timeline.set_subscription.request": {
@@ -2737,6 +2777,9 @@ export class Session {
     switch (msg.type) {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
+        return;
+      case "mcp_gateway.auth.start.request":
+        await this.handleMcpGatewayAuthStartRequest(msg);
         return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
@@ -3700,6 +3743,7 @@ export class Session {
           agentId,
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
+          callerAgentId: msg.callerAgentId,
           worktreeName,
           initialPrompt,
           clientMessageId,
@@ -4327,8 +4371,35 @@ export class Session {
   }
 
   /**
-   * Handle list commands request for an agent
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Never throws to the caller — `AgentManager.startMcpGatewayAuthorization` rejects
+   * for an unknown server, a static-auth server (nothing to authorize interactively), or a
+   * disabled/unconfigured gateway, and all three land in the response's `error` field rather
+   * than an `rpc_error`, matching the workspace-script RPCs' error-in-payload convention.
    */
+  private async handleMcpGatewayAuthStartRequest(
+    request: McpGatewayAuthStartRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.startMcpGatewayAuthorization(
+        request.name,
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: { requestId: request.requestId, authorizationUrl, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
+        },
+      });
+    }
+  }
+
   private async handleListCommandsRequest(
     msg: Extract<SessionInboundMessage, { type: "list_commands_request" }>,
   ): Promise<void> {
@@ -4526,6 +4597,8 @@ export class Session {
         markWorkspaceArchiving: (workspaceIds, archivingAt) =>
           this.markWorkspaceArchiving(workspaceIds, archivingAt),
         clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+        requestDiskUsageSample: (workspaceId, cwd) =>
+          this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
         killTerminalsForWorkspace: (workspaceId) =>
           this.terminalController.killTerminalsForWorkspace(workspaceId),
         sessionLogger: this.sessionLogger,
@@ -6851,6 +6924,8 @@ export class Session {
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>
             this.markWorkspaceArchiving(workspaceIds, archivingAt),
           clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+          requestDiskUsageSample: (workspaceId, cwd) =>
+            this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
           assertWorkspaceAutomationAllowed: (workspaceId) =>
             assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
           killTerminalsForWorkspace: (workspaceId) =>
@@ -7803,6 +7878,7 @@ export class Session {
     if (
       msg.type === "project.update" ||
       msg.type === "providers_snapshot_update" ||
+      msg.type === "mcp_status_update" ||
       msg.type === "agent_attention_required" ||
       msg.type === "agent_permission_request" ||
       msg.type === "agent_permission_resolved"
@@ -7908,6 +7984,8 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
+    this.unsubscribeMcpGatewayStatus?.();
+    this.unsubscribeMcpGatewayStatus = null;
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

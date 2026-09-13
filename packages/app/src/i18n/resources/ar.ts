@@ -276,7 +276,10 @@ export const ar: TranslationResources = {
       archived: "مؤرشف",
       pending: "{{count}}معلق",
       attention: "انتباه",
+      tokenBurnWarning: "استهلاك مرتفع",
+      tokenBurnDanger: "استهلاك مرتفع جدًا",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
     archiveSheet: {
       hostOffline: "Host غير متصل",
       runningAgent: "هذا الوكيل لا يزال قيد التشغيل. ستؤدي أرشفته إلى إيقاف الوكيل.",
@@ -703,6 +706,10 @@ export const ar: TranslationResources = {
         workspacePathCopiedLabel: "مسار Workspace",
         branchNameCopiedLabel: "اسم الفرع",
       },
+      history: {
+        recentMenu: "الأخيرة",
+        empty: "لا يوجد سجل حديث",
+      },
     },
     scripts: {
       title: "البرامج النصية",
@@ -837,7 +844,7 @@ export const ar: TranslationResources = {
           updateCurrent: "التحديث غير متاح لأن هذا الفرع محدث بالفعل باستخدام{{baseRef}}",
           mergePrNoGithub: "دمج PR غير متاح الآن لأن GitHub غير متصل",
           archiveNotWorktree:
-            "الأرشيف غير متاح هنا لأنه لم يتم إنشاء مساحة العمل هذه كشجرة عمل Paseo",
+            "الأرشيف غير متاح هنا لأنه لم يتم إنشاء مساحة العمل هذه كشجرة عمل Bozeo",
           mergePrNoForge: "دمج {{noun}} غير متاح الآن لأن {{brand}} غير متصل",
           mergePrMissing: "دمج PR غير متاح لأنه لا يوجد طلب سحب حتى الآن",
           mergePrDraft: "دمج PR غير متاح لأن طلب السحب لا يزال مسودة",
@@ -999,6 +1006,9 @@ export const ar: TranslationResources = {
         generic: "قم بإعداد {{brand}} على هذا المضيف لاستخدام ميزاته.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · تم القياس قبل {{timeAgo}}",
+    },
   },
   workspaceLabels: {
     title: "التسميات",
@@ -1075,6 +1085,7 @@ export const ar: TranslationResources = {
         changeRequest: "طلب السحب",
         checks: "الفحوصات",
         services: "الخدمات",
+        diskUsage: "استخدام القرص",
         labels: "التسميات",
         diff: "إحصائيات الفروق",
         timestamp: "آخر نشاط",
@@ -1122,7 +1133,7 @@ export const ar: TranslationResources = {
       discord: "Discord",
       github: "إنشاء مشكلة على GitHub",
       whatsNew: "ما الجديد",
-      appName: "Paseo",
+      appName: "Bozeo",
     },
     sections: {
       sessions: "السجل",
@@ -1269,7 +1280,7 @@ export const ar: TranslationResources = {
       close: "إغلاق النافذة",
     },
     quitting: {
-      title: "جارٍ إنهاء Paseo...",
+      title: "جارٍ إنهاء Bozeo...",
       detail: "إيقاف البرنامج الخفي المحلي.",
     },
     daemon: {
@@ -1283,20 +1294,20 @@ export const ar: TranslationResources = {
       },
       management: {
         title: "إدارة البرنامج الخفي المدمج",
-        hint: "اسمح لـ Paseo ببدء تشغيل البرنامج الخفي المدمج وإيقافه",
+        hint: "اسمح لـ Bozeo ببدء تشغيل البرنامج الخفي المدمج وإيقافه",
         pauseTitle: "وقفة المدمج في البرنامج الخفي",
         pauseMessage:
           "سيؤدي هذا إلى إيقاف البرنامج الخفي المدمج على الفور. سيتم إيقاف تشغيل الوكلاء والمحطات الطرفية المتصلة بالبرنامج الخفي المدمج.",
         pauseAndStop: "وقفة وتوقف",
         registrationFailed:
-          "Built-in daemon started, but Paseo could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.",
+          "Built-in daemon started, but Bozeo could not save the localhost connection. Toggle daemon management off and on again, or add localhost manually.",
         pausedStopFailed:
-          "تم إيقاف إدارة البرنامج الخفي المضمنة مؤقتًا، لكن لم يتمكن Paseo من إيقاف البرنامج الخفي.",
+          "تم إيقاف إدارة البرنامج الخفي المضمنة مؤقتًا، لكن لم يتمكن Bozeo من إيقاف البرنامج الخفي.",
         updateFailed: "غير قادر على تحديث إدارة البرنامج الخفي المضمنة.",
       },
       keepRunning: {
         title: "استمر في تشغيل البرنامج الخفي بعد الإقلاع عن التدخين",
-        hint: "يستمر تشغيل Daemon عند إنهاء Paseo",
+        hint: "يستمر تشغيل Daemon عند إنهاء Bozeo",
       },
       logs: {
         title: "ملف السجل",
@@ -1362,7 +1373,7 @@ export const ar: TranslationResources = {
     },
     rosetta: {
       title: "قم بتنزيل نسخة Apple Silicon",
-      runningIntel: "أنت تقوم بتشغيل إصدار Intel من Paseo ضمن Rosetta على Apple Silicon.",
+      runningIntel: "أنت تقوم بتشغيل إصدار Intel من Bozeo ضمن Rosetta على Apple Silicon.",
       highCpu:
         "يؤدي هذا إلى ارتفاع استخدام وحدة المعالجة المركزية. قم بتنزيل إصدار Apple Silicon لإصلاحه.",
       download: "تحميل",
@@ -1405,7 +1416,7 @@ export const ar: TranslationResources = {
         microphone: "لم يتم التحقق من حالة الميكروفون بعد.",
       },
       testNotification: {
-        title: "اختبار الإخطار Paseo",
+        title: "اختبار الإخطار Bozeo",
         body: "إذا كان بإمكانك رؤية ذلك، فهذا يعني أن إشعارات سطح المكتب تعمل.",
         notDelivered: "لم يتم تسليم الإخطار. تحقق من إعدادات النظام > الإشعارات.",
         failed: "فشل في إرسال الإخطار.",
@@ -1419,7 +1430,7 @@ export const ar: TranslationResources = {
     },
   },
   rootError: {
-    title: "واجه Paseo مشكلة.",
+    title: "واجه Bozeo مشكلة.",
     body: "جرّب مرة أخرى لإعادة تحميل التطبيق. إذا استمر حدوث ذلك، فأرفق التفاصيل أدناه عند الإبلاغ عنه.",
     details: "التفاصيل",
   },
@@ -1513,7 +1524,7 @@ export const ar: TranslationResources = {
     },
   },
   onboarding: {
-    title: "مرحبا بكم في Paseo",
+    title: "مرحبا بكم في Bozeo",
     subtitle: "قم بتوصيل جهاز الكمبيوتر الخاص بك للبدء",
     actions: {
       settings: "إعدادات",
@@ -1601,7 +1612,7 @@ export const ar: TranslationResources = {
     },
     direct: {
       title: "اتصال مباشر",
-      helper: "أدخل عنوان خادم Paseo.",
+      helper: "أدخل عنوان خادم Bozeo.",
       fields: {
         host: "Host",
         port: "ميناء",
@@ -1644,7 +1655,7 @@ export const ar: TranslationResources = {
     },
     remoteSsh: {
       title: "SSH عن بُعد",
-      helper: "الاتصال بخادم Paseo يعمل على المضيف البعيد.",
+      helper: "الاتصال بخادم Bozeo يعمل على المضيف البعيد.",
       fields: {
         target: "مضيف SSH",
       },
@@ -1699,15 +1710,15 @@ export const ar: TranslationResources = {
       enableDescription:
         "يتيح التتابع لهذا الجهاز الاتصال من أي مكان. حركة مرور الإقران مشفرة من طرف إلى طرف.",
       relayDocs: "كيفية عمل التتابع",
-      relayDocsAccessibility: "اقرأ كيفية عمل تتابع Paseo",
+      relayDocsAccessibility: "اقرأ كيفية عمل تتابع Bozeo",
       enableRelay: "تمكين التتابع",
       enablingRelay: "جارٍ التمكين...",
       notNow: "ليس الآن",
       directConnectionHint:
         "بدون التتابع، اتصل مباشرة عبر TCP أو Tailscale أو شبكة VPN أخرى. لن يتم إنشاء رمز QR.",
-      updateRequired: "حدّث المضيف لتمكين التتابع من Paseo Desktop.",
+      updateRequired: "حدّث المضيف لتمكين التتابع من Bozeo Desktop.",
       unavailable: "عرض الاقتران غير متاح.",
-      hint: "قم بمسح رمز QR هذا باستخدام Paseo على هاتفك، أو انسخ الرابط أدناه.",
+      hint: "قم بمسح رمز QR هذا باستخدام Bozeo على هاتفك، أو انسخ الرابط أدناه.",
       securityWarning:
         "تعامل مع رابط الاقتران هذا ككلمة مرور. يمكن لأي شخص يملكه الوصول إلى هذا البرنامج الخفي.",
       qrUnavailable: "رمز QR غير متاح.",
@@ -1742,7 +1753,7 @@ export const ar: TranslationResources = {
   serviceUrl: {
     title: "افتح الخدمة URL",
     message: "افتح{{url}}؟",
-    inPaseo: "في Paseo",
+    inBozeo: "في Bozeo",
     externalBrowser: "متصفح خارجي",
     dontAskAgain: "لا تسأل مرة أخرى",
   },
@@ -1820,6 +1831,13 @@ export const ar: TranslationResources = {
       emptyTitle: "لا يوجد طلب سحب بعد",
       emptyDescription: "أنشئ طلب سحب لنسخة العمل هذه لعرض تفاصيله هنا.",
     },
+    orchestration: {
+      label: "التنسيق",
+      subtitle: "شجرة الوكلاء",
+      tooltip: "عرض شجرة الوكيل الرئيسي والوكلاء الفرعيين",
+      emptyState: "لا يوجد وكلاء في مساحة العمل هذه بعد",
+      usageUnavailable: "الاستخدام غير متوفر",
+    },
     diff: {
       changesLabel: "التغييرات",
       diffLabel: "الفرق",
@@ -1873,6 +1891,26 @@ export const ar: TranslationResources = {
   },
   sidebarCallout: {
     dismiss: "رفض",
+  },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "خوادم MCP متصلة",
+      issues: "مشاكل MCP: {{names}}",
+    },
+    status: {
+      connected: "متصل",
+      connecting: "جاري الاتصال",
+      needsAuth: "يتطلب المصادقة",
+      error: "خطأ",
+      disabled: "معطل",
+      sessionReported: "مشكلة في الجلسة",
+    },
+    authAction: "المصادقة",
+    reauthAction: "إعادة المصادقة",
+    authError: "فشلت المصادقة: {{error}}",
+    reportedBy: "أُبلغ عنها من {{agent}}",
+    expand: "توسيع حالة MCP",
+    collapse: "طي حالة MCP",
   },
   contextWindow: {
     title: "نافذة السياق",
@@ -1944,7 +1982,7 @@ export const ar: TranslationResources = {
       send: "إرسال",
       sending: "جارٍ الإرسال...",
       sentTitle: "تم إرسال إشعار الاختبار",
-      sentDescription: "سلّم Paseo الإشعار إلى نظام التشغيل.",
+      sentDescription: "سلّم Bozeo الإشعار إلى نظام التشغيل.",
       sendFailedTitle: "تعذر إرسال إشعار الاختبار",
     },
     hostSections: {
@@ -1963,14 +2001,14 @@ export const ar: TranslationResources = {
     metadataGeneration: {
       title: "إنشاء البيانات الوصفية",
       description:
-        "اختر النموذج الذي يستخدمه Paseo لعناوين مساحات العمل وأسماء الفروع ورسائل الالتزام ومسودات طلبات السحب",
+        "اختر النموذج الذي يستخدمه Bozeo لعناوين مساحات العمل وأسماء الفروع ورسائل الالتزام ومسودات طلبات السحب",
       selection: "اختيار النموذج",
       automatic: "تلقائي",
       preferred: "يدوي",
-      automaticHint: "يختار Paseo نموذجًا سريعًا متاحًا",
-      preferredHint: "اختر النموذج الذي يستخدمه Paseo",
+      automaticHint: "يختار Bozeo نموذجًا سريعًا متاحًا",
+      preferredHint: "اختر النموذج الذي يستخدمه Bozeo",
       model: "النموذج",
-      fallbackHint: "إذا لم يكن متاحًا، يستخدم Paseo نموذجًا آخر متاحًا",
+      fallbackHint: "إذا لم يكن متاحًا، يستخدم Bozeo نموذجًا آخر متاحًا",
       docs: "الوثائق",
       saveError: "تعذر تحديث إنشاء البيانات الوصفية",
     },
@@ -1979,7 +2017,7 @@ export const ar: TranslationResources = {
       browserData: {
         title: "بيانات المتصفح",
         siteData: "ملفات تعريف الارتباط وبيانات المواقع",
-        description: "تتشارك علامات تبويب المتصفح تسجيلات الدخول وبيانات المواقع عبر Paseo.",
+        description: "تتشارك علامات تبويب المتصفح تسجيلات الدخول وبيانات المواقع عبر Bozeo.",
         clear: "مسح بيانات المتصفح",
         clearing: "جارٍ المسح...",
         confirmTitle: "هل تريد مسح بيانات المتصفح؟",
@@ -2007,7 +2045,7 @@ export const ar: TranslationResources = {
         description: "مكان فتح عناوين URL من تشغيل البرامج النصية",
         options: {
           ask: "بسأل",
-          inApp: "في Paseo",
+          inApp: "في Bozeo",
           external: "متصفح خارجي",
         },
       },
@@ -2092,7 +2130,7 @@ export const ar: TranslationResources = {
         label: "تحديثات التطبيق",
         readyToInstall: "جاهز للتثبيت:{{version}}",
         installTitle: "تثبيت تحديث سطح المكتب",
-        installMessage: "يؤدي هذا إلى تحديث Paseo على هذا الكمبيوتر",
+        installMessage: "يؤدي هذا إلى تحديث Bozeo على هذا الكمبيوتر",
         installConfirm: "تثبيت التحديث",
         update: "تحديث",
         updateTo: "التحديث إلى{{version}}",
@@ -2210,6 +2248,8 @@ export const ar: TranslationResources = {
         closePane: "إغلاق الجزء",
         newTerminal: "محطة جديدة",
         searchFiles: "البحث في الملفات",
+        historyBack: "رجوع",
+        historyForward: "للأمام",
         toggleCommandCenter: "تبديل مركز القيادة",
         showKeyboardShortcuts: "إظهار اختصارات لوحة المفاتيح",
         toggleLeftSidebar: "تبديل الشريط الجانبي الأيسر",
@@ -2322,10 +2362,10 @@ export const ar: TranslationResources = {
         title: "مهارات التنسيق",
         description: "قم بتعليم عملائك كيفية التنسيق من خلال CLI",
         updateAvailable: "التحديث متاح",
-        updateTitle: "تحديث مهارات Paseo ؟",
+        updateTitle: "تحديث مهارات Bozeo ؟",
         updateFallback: "مزامنة المهارات المجمعة لجهازك.",
-        uninstallTitle: "إلغاء تثبيت مهارات Paseo ؟",
-        uninstallMessage: "يزيل جميع مهارات تنسيق Paseo من ~/.agents ، ~/.claude ، ~/.codex.",
+        uninstallTitle: "إلغاء تثبيت مهارات Bozeo ؟",
+        uninstallMessage: "يزيل جميع مهارات تنسيق Bozeo من ~/.agents ، ~/.claude ، ~/.codex.",
         choose: "اختيار المهارات",
         chooseAll: "كل المهارات",
         chooseAllHint: "أبقِ جميع المهارات المرفقة مثبتة، بما فيها ما يُضاف لاحقًا.",
@@ -2465,15 +2505,15 @@ export const ar: TranslationResources = {
             "هذا المضيف غير متصل. انتظر حتى يصبح متصلاً بالإنترنت قبل إعادة التشغيل.",
           offlineTitle: "Host غير متصل",
           offlineMessage:
-            "هذا المضيف غير متصل.  يقوم Paseo بإعادة الاتصال تلقائيًا - انتظر حتى يتم الاتصال بالإنترنت مرة أخرى قبل إعادة التشغيل.",
+            "هذا المضيف غير متصل.  يقوم Bozeo بإعادة الاتصال تلقائيًا - انتظر حتى يتم الاتصال بالإنترنت مرة أخرى قبل إعادة التشغيل.",
           requestFailedTitle: "خطأ",
           requestFailedMessage:
-            "فشل في إرسال طلب إعادة التشغيل.  يقوم Paseo بإعادة الاتصال تلقائيًا - حاول مرة أخرى بمجرد ظهور المضيف على أنه متصل بالإنترنت.",
+            "فشل في إرسال طلب إعادة التشغيل.  يقوم Bozeo بإعادة الاتصال تلقائيًا - حاول مرة أخرى بمجرد ظهور المضيف على أنه متصل بالإنترنت.",
           dialogFailedMessage: "غير قادر على فتح مربع حوار تأكيد إعادة التشغيل.",
         },
         update: {
           desktopManagedHint:
-            "يدير Paseo Desktop هذا البرنامج الخفي. حدّث Paseo Desktop على المضيف.",
+            "يدير Bozeo Desktop هذا البرنامج الخفي. حدّث Bozeo Desktop على المضيف.",
           title: "Update daemon",
           hint: "Update the daemon to the latest version and restart it",
           confirm: "Update",
@@ -2633,7 +2673,7 @@ export const ar: TranslationResources = {
         newScript: "نص جديد",
         editScript: "تحرير{{name}}",
         runAsService: "تشغيل كخدمة",
-        serviceHint: "يشرف Paseo على العملية ويعين منفذًا عبر $PASEO_PORT",
+        serviceHint: "يشرف Bozeo على العملية ويعين منفذًا عبر $PASEO_PORT",
         actions: {
           add: "إضافة البرنامج النصي",
           edit: "يحرر",
@@ -2642,7 +2682,7 @@ export const ar: TranslationResources = {
       },
       metadata: {
         title: "توليد البيانات الوصفية",
-        info: "تعليمات خاصة بالمشروع يتم إدخالها في الذكاء الاصطناعي الذي يستخدمه Paseo لإنشاء بيانات التعريف - استخدمها لفرض اصطلاحات فريقك مثل تسمية الفرع أو نمط الالتزام أو تنسيق PR",
+        info: "تعليمات خاصة بالمشروع يتم إدخالها في الذكاء الاصطناعي الذي يستخدمه Bozeo لإنشاء بيانات التعريف - استخدمها لفرض اصطلاحات فريقك مثل تسمية الفرع أو نمط الالتزام أو تنسيق PR",
         branchName: "اسماء الفروع",
         branchNamePlaceholder: "بادئة الفروع بـ fet/ أو Fix/, mb/ للفروع الشخصية",
         commitMessage: "ارتكاب الرسائل",

@@ -49,6 +49,8 @@ export interface ArchiveDependencies {
   emitWorkspaceUpdatesForWorkspaceIds: (workspaceIds: Iterable<string>) => Promise<void>;
   markWorkspaceArchiving: (workspaceIds: Iterable<string>, archivingAt: string) => void;
   clearWorkspaceArchiving: (workspaceIds: Iterable<string>) => void;
+  /** Fire-and-forget: asks the WorktreeDiskMonitor to sample a workspace's backing directory. */
+  requestDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   killTerminalsForWorkspace: (workspaceId: string) => Promise<void>;
   stopWorkspaceSetup?: (workspaceId: string) => Promise<void>;
   assertWorkspaceAutomationAllowed?: (workspaceId: string) => Promise<void>;
@@ -356,6 +358,15 @@ async function maybeRemoveDirectory(
   const backing = target.backing;
   if (!backing?.isPaseoOwnedWorktree) {
     return false;
+  }
+
+  // Archive-time sample: freshens the disk-usage indicator right as the workspace goes idle,
+  // before teardown/delete below might remove or shrink it — most successful deletes below make
+  // this moot immediately, but it matters for the failure/skip paths this function returns
+  // `false` from, where the directory lingers and the sweeper (worktree-disk-monitor.ts) only
+  // catches up to it later.
+  for (const workspaceId of archivedWorkspaceIds) {
+    dependencies.requestDiskUsageSample?.(workspaceId, backing.path);
   }
 
   const archivedWorkspaceIdSet = new Set(archivedWorkspaceIds);

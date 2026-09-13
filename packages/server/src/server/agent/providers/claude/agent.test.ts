@@ -778,6 +778,152 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  describe("MCP gateway session injection (U3)", () => {
+    async function createFixtureDirs(): Promise<{ configDir: string; projectDir: string }> {
+      const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-config-"));
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-project-"));
+      return { configDir, projectDir };
+    }
+
+    test("sets strictMcpConfig and merges brokered + re-injected stdio entries", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(configDir, ".claude.json"),
+          JSON.stringify({
+            mcpServers: {
+              "global-tool": { type: "stdio", command: "global-tool-bin" },
+              // A remote per-dir entry: must NOT survive strictMcpConfig suppression.
+              notion: { type: "http", url: "https://mcp.notion.com/mcp" },
+            },
+          }),
+        );
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({
+            mcpServers: { "project-tool": { type: "stdio", command: "./scripts/tool.sh" } },
+          }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBe(true);
+        expect(options.mcpServers).toMatchObject({
+          github: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/gateway/github",
+            headers: { Authorization: "Bearer gw-token" },
+          },
+          "global-tool": { type: "stdio", command: "global-tool-bin" },
+          "project-tool": { type: "stdio", command: "./scripts/tool.sh" },
+        });
+        expect(options.mcpServers.notion).toBeUndefined();
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("a brokered/stored entry wins over a same-named re-injected stdio entry", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { github: { type: "stdio", command: "local-shim" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.mcpServers.github).toMatchObject({
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/gateway/github",
+        });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("no-ops byte-identically when the gateway is disabled (R10)", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        // Even with stdio entries on disk, nothing should be read when the per-launch
+        // `mcpGatewayEnabled` signal is absent — proving R10/AE4's "no cost when unused".
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-tool": { type: "stdio", command: "tool" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpServers: { hub: { type: "http", url: "http://127.0.0.1/hub" } },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBeUndefined();
+        expect(options.mcpServers).toEqual({ hub: { type: "http", url: "http://127.0.0.1/hub" } });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("lists fast mode only for supported Opus models", async () => {
     const client = new ClaudeAgentClient({ logger, resolveBinary: async () => "/test/claude/bin" });
 
@@ -1708,6 +1854,58 @@ describe("ClaudeAgentClient.listImportableSessions", () => {
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
     }
   });
+
+  test("uses the client's own configDir instead of the daemon's CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const cwd = "/tmp/paseo-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, "alt-session.jsonl");
+      await fs.writeFile(
+        sessionFile,
+        `${JSON.stringify({
+          isSidechain: false,
+          type: "user",
+          message: { role: "user", content: "Prompt from the alt account" },
+          cwd,
+          sessionId: "alt-session",
+        })}\n`,
+        "utf-8",
+      );
+      const timestamp = new Date("2026-06-01T12:00:00.000Z");
+      await fs.utimes(sessionFile, timestamp, timestamp);
+
+      const client = new ClaudeAgentClient({
+        logger: createTestLogger(),
+        resolveBinary: async () => "/test/claude/bin",
+        configDir: altConfigDir,
+      });
+
+      await expect(client.listImportableSessions({ limit: 1, cwd })).resolves.toEqual([
+        {
+          providerHandleId: "alt-session",
+          cwd,
+          title: "Prompt from the alt account",
+          firstPromptPreview: "Prompt from the alt account",
+          lastPromptPreview: "Prompt from the alt account",
+          lastActivityAt: timestamp,
+        },
+      ]);
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ClaudeAgentSession context window usage", () => {
@@ -2283,6 +2481,72 @@ describe("ClaudeAgentSession context window usage", () => {
         process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
       }
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves the persisted session jsonl under the client's own runtimeSettings.env.CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const sessionId = "session-alt-account";
+      const cwd = "/tmp/paseo-test-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+
+      const queryFactory = createQueryFactoryForTurns([
+        [
+          {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+            permissionMode: "default",
+          },
+          {
+            type: "result",
+            subtype: "success",
+            duration_ms: 10,
+            duration_api_ms: 8,
+            is_error: false,
+            num_turns: 1,
+            result: "done",
+            stop_reason: null,
+            total_cost_usd: 0,
+            usage: {},
+            permission_denials: [],
+            uuid: `${sessionId}-result`,
+            session_id: sessionId,
+          },
+        ],
+      ]);
+      const client = new ClaudeAgentClient({
+        logger,
+        queryFactory,
+        resolveBinary: async () => "/test/claude/bin",
+        runtimeSettings: { env: { CLAUDE_CONFIG_DIR: altConfigDir } },
+      });
+      const session = await client.createSession({ provider: "claude", cwd }, undefined, {
+        persistSession: false,
+      });
+      await session.run("turn");
+
+      // Simulate the claude binary writing a session transcript for this account.
+      await fs.writeFile(sessionFile, '{"type":"summary"}\n', "utf-8");
+
+      await session.close();
+
+      await expect(fs.access(sessionFile)).rejects.toThrow();
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
     }
   });
 
@@ -2867,6 +3131,42 @@ describe("ClaudeAgentSession context window usage", () => {
             event.type === "turn_completed" && event.usage.contextWindowUsedTokens !== undefined,
         ),
       ).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("turn_completed carries turnTokenDelta summed from input, output, and cached-read usage", async () => {
+    const session = await createSessionForTurns([[createInitMessage(), createSuccessResult()]]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      // createSuccessResult's default usage: input_tokens: 10, cache_read_input_tokens: 5,
+      // output_tokens: 7 — the token-rate tracker's per-turn delta is their sum, 22.
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "turn_completed",
+          provider: "claude",
+          turnTokenDelta: 22,
+        }),
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("turn_completed omits turnTokenDelta when the result carries no usage", async () => {
+    const session = await createSessionForTurns([
+      [createInitMessage(), createSuccessResult({ usage: undefined })],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+
+      expect(turnCompleted).toBeDefined();
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
     } finally {
       await session.close();
     }

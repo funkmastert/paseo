@@ -4,6 +4,8 @@ import { useWorkspaceHasDiffStat } from "@/composer/workspace-diff-stat";
 import { AgentTaskList } from "@/composer/task-list";
 import { ComposerTrackBar } from "@/composer/tracks";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
+import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
+import { OrchestrationTrackPill } from "@/orchestration/orchestration-track-pill";
 import { usePaneContext } from "@/panels/pane-context";
 import { useSettings } from "@/hooks/use-settings";
 import { PluginComposerPills } from "@/plugins";
@@ -112,6 +114,18 @@ export const AgentTracks = memo(function AgentTracks({
     });
   }, [cwd, isCompact, openInSidePane, serverId, workspaceKey]);
 
+  const hasChildren = subagentRows.length > 0;
+  const handleOpenOrchestration = useCallback(() => {
+    openOrchestrationTab({
+      isCompact,
+      canSplit,
+      workspaceKey,
+      preferences: openInSidePane,
+      parentTabId: tabId,
+      openTab,
+    });
+  }, [canSplit, isCompact, openInSidePane, openTab, tabId, workspaceKey]);
+
   if (
     !hasWorkspaceDiffStat &&
     !hasAgentTracks({
@@ -137,6 +151,13 @@ export const AgentTracks = memo(function AgentTracks({
         archiveFinishedStatus={archiveFinishedStatus}
         onDetachSubagent={canDetachSubagents ? detachSubagent : undefined}
       />
+      {hasChildren ? (
+        <OrchestrationTrackPill
+          serverId={serverId}
+          agentId={agentId}
+          onPress={handleOpenOrchestration}
+        />
+      ) : null}
       <PluginComposerPills
         serverId={serverId}
         workspaceId={workspaceId}

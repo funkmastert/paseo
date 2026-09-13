@@ -184,7 +184,7 @@ const WorkspaceDraftTabSetupStorageSchema = z.strictObject({
   thinkingOptionId: z.string().nullable(),
   featureValues: z.record(z.string(), z.union([z.boolean(), z.string(), z.null()])),
 });
-const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
+export const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("new_tab") }),
   z.strictObject({
     kind: z.literal("draft"),
@@ -202,6 +202,7 @@ const WorkspaceTabTargetStorageSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("changes_tree") }),
   z.strictObject({ kind: z.literal("files") }),
   z.strictObject({ kind: z.literal("pull_request") }),
+  z.strictObject({ kind: z.literal("orchestration") }),
   z.strictObject({
     kind: z.literal("file"),
     path: z.string(),

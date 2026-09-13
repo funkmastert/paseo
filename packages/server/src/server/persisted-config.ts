@@ -81,10 +81,50 @@ const ProvidersSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.tokenBurnMonitor (66f76986a) — same mutable/patch split for the
+// same reason: `.partial()` on the config schema would make an absent field indistinguishable
+// from an explicit reset. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const DiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .strict();
+
 const WorktreesConfigSchema = z
   .object({
     root: z.string().min(1).optional(),
     servicePorts: PaseoServicePortAllocationSchema.optional(),
+    diskSweeper: DiskSweeperConfigSchema.optional(),
+  })
+  .strict();
+
+const McpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .strict();
+
+// New top-level section (KTD9), same mutable/patch split as diskSweeper/tokenBurnMonitor —
+// see the `MutableMcpGatewayConfigSchema` comment in @getpaseo/protocol/messages for why this
+// isn't shared with the wire schema. Adding a server is config-only (R9): drop an entry into
+// `servers` and it's picked up on reload/restart, no code change. Criticality (R11) is seeded
+// here by the operator, not hardcoded — e.g. `zeeq`/`agent-gateway` marked `critical: true`.
+// Static-auth header VALUES never live here — only that a server uses static auth
+// (`auth: "static"`) — because `MutableDaemonConfig` is broadcast in full to every connected
+// client; the value lives in the daemon's private 0600 token store, keyed by server name
+// (mcp-gateway/token-store.ts).
+const McpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), McpGatewayServerConfigSchema).optional(),
   })
   .strict();
 
@@ -174,6 +214,18 @@ const StructuredGenerationProviderConfigSchema = z
 const AgentMetadataGenerationSchema = z
   .object({
     providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
+    titleTracking: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+  })
+  .strict();
+
+const AgentTokenBurnMonitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -312,12 +364,19 @@ export const PersistedConfigSchema = z
     providers: ProvidersSchema.optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    // Opaque plugin-owned config (e.g. claude-account-pool's role-model
+    // policy: docs/plans/2026-09-12-004-feat-agent-model-policy-plan.md
+    // §2.4). The daemon persists and round-trips this verbatim; the owning
+    // plugin validates its own shape and fails closed on malformed data.
+    agentModelPolicy: z.record(z.string(), z.unknown()).optional(),
     worktrees: WorktreesConfigSchema.optional(),
+    mcpGateway: McpGatewayConfigSchema.optional(),
     agents: z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
+        tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

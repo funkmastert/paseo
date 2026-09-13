@@ -9,6 +9,8 @@ export interface NavigateToAgentInput {
   // (cold deep-links). Otherwise the workspace is read from the store.
   workspaceId?: string | null;
   pin?: boolean;
+  /** Forwarded to `navigateToWorkspace` -- see its `fromHistoryReplay` doc. */
+  fromHistoryReplay?: boolean;
 }
 
 export interface AgentNavTarget {
@@ -41,5 +43,6 @@ export function resolveNavigateToAgent(
     workspaceId,
     target: { kind: "agent", agentId: input.agentId },
     pin: input.pin,
+    fromHistoryReplay: input.fromHistoryReplay,
   });
 }

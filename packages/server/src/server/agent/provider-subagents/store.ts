@@ -142,6 +142,27 @@ export class ProviderSubagentStore {
     return [...this.descriptors.values()];
   }
 
+  /**
+   * Most recent activity for a subagent, across both descriptor upserts and raw timeline
+   * appends — `apply()`'s "timeline" input event streams content without touching the
+   * descriptor's `updatedAt`, so a chatty-but-otherwise-quiet subagent would look stale by
+   * `updatedAt` alone. Returns `null` only when the descriptor itself is unknown.
+   */
+  lastActivityAt(parentAgentId: string, subagentId: string): string | null {
+    const key = storeKey(parentAgentId, subagentId);
+    const descriptor = this.descriptors.get(key);
+    if (!descriptor) {
+      return null;
+    }
+    const lastTimelineTimestamp = this.timelines.has(key)
+      ? this.timelines.getLastRowTimestamp(key)
+      : null;
+    if (!lastTimelineTimestamp || lastTimelineTimestamp < descriptor.updatedAt) {
+      return descriptor.updatedAt;
+    }
+    return lastTimelineTimestamp;
+  }
+
   get(parentAgentId: string, subagentId: string): ProviderSubagentDescriptor | null {
     return this.descriptors.get(storeKey(parentAgentId, subagentId)) ?? null;
   }

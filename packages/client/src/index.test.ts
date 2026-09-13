@@ -231,6 +231,7 @@ test("createPaseoApi borrows daemon capabilities without exposing connection own
   expect(Object.keys(paseo).sort()).toEqual([
     "agents",
     "config",
+    "mcpGateway",
     "projects",
     "providers",
     "terminals",
@@ -709,6 +710,7 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
     text: "hello",
     messageId: "message-sdk",
   });
+  expect(sendRequest.activeTurnBehavior).toBeUndefined();
 
   ws.message(
     sessionMessage({
@@ -722,6 +724,32 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
     }),
   );
   await sendPromise;
+
+  const steerSendPromise = agent.send("keep going", {
+    messageId: "message-sdk-steer",
+    activeTurnBehavior: "steer",
+  });
+  const steerSendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(steerSendRequest).toMatchObject({
+    type: "send_agent_message_request",
+    agentId: "agent_sdk",
+    text: "keep going",
+    messageId: "message-sdk-steer",
+    activeTurnBehavior: "steer",
+  });
+
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: steerSendRequest.requestId,
+        agentId: "agent_sdk",
+        accepted: true,
+        error: null,
+      },
+    }),
+  );
+  await steerSendPromise;
 
   const runPromise = agent.run("finish the task", {
     messageId: "run-message-sdk",

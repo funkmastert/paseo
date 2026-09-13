@@ -16,6 +16,7 @@ import {
 } from "./navigation";
 import { useSessionStore } from "@/stores/session-store";
 import { useWorkspaceLayoutStore } from "@/stores/workspace-layout-store";
+import { recordNavigationHistoryUnlessReplay } from "@/stores/navigation-history-store";
 import { stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit } from "@/utils/host-route-browser";
 import { navigateToHostWorkspaceRoute } from "@/navigation/workspace-route-navigation";
 
@@ -60,7 +61,12 @@ export function getIsLastWorkspaceSelectionHydrated(): boolean {
 }
 
 export function navigateToWorkspace(input: NavigateToWorkspaceInput): string {
-  return navigateToWorkspacePure(input, navigateDeps());
+  const route = navigateToWorkspacePure(input, navigateDeps());
+  // Skips recording when input.fromHistoryReplay is set, so a Back/Forward
+  // replay doesn't re-record itself. The "background" openTab intent never
+  // routes through this function, so it needs no special-casing here.
+  recordNavigationHistoryUnlessReplay(input);
+  return route;
 }
 
 export function navigateToLastWorkspace(): boolean {

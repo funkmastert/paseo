@@ -20,6 +20,8 @@ async function fetchProviderUsage(client: ProviderUsageClient): Promise<Provider
 
 interface UseProviderUsageOptions {
   enabled?: boolean;
+  /** Polling interval in ms. Omit to keep the default no-polling behavior. */
+  refetchInterval?: number;
 }
 
 export function useProviderUsage(
@@ -55,6 +57,7 @@ export function useProviderUsage(
     refetchOnMount: true,
     refetchOnReconnect: false,
     refetchOnWindowFocus: false,
+    ...(options.refetchInterval !== undefined ? { refetchInterval: options.refetchInterval } : {}),
   });
 
   const refresh = useCallback(async () => {
