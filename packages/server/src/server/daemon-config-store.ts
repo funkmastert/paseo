@@ -25,6 +25,10 @@ interface SupportedMutableConfigPatch {
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
+  // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
+  // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
+  // must reference the patch-shaped type, not MutableDaemonConfig's full-config shape.
+  mcpGateway?: MutableDaemonConfigPatch["mcpGateway"];
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
@@ -196,6 +200,7 @@ const RELOADABLE_PATHS = [
   "agents.tokenBurnMonitor",
   "agents.skills.selection",
   "worktrees.diskSweeper",
+  "mcpGateway",
   "pluginsEnabled",
 ] as const;
 
@@ -221,6 +226,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
+  ["mcpGateway", "mcpGateway"],
   ["pluginsEnabled", "pluginsEnabled"],
 ]);
 
@@ -292,6 +298,12 @@ function pickDiskSweeperPatch(
   return diskSweeper === undefined ? {} : { diskSweeper };
 }
 
+function pickMcpGatewayPatch(
+  mcpGateway: MutableDaemonConfigPatch["mcpGateway"],
+): Pick<SupportedMutableConfigPatch, "mcpGateway"> {
+  return mcpGateway === undefined ? {} : { mcpGateway };
+}
+
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...(patch.relay?.enabled !== undefined ? { relay: { enabled: patch.relay.enabled } } : {}),
@@ -306,6 +318,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickDiskSweeperPatch(patch.diskSweeper),
+    ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
       ? { autoArchiveAfterMerge: patch.autoArchiveAfterMerge }
       : {}),
@@ -662,6 +675,7 @@ function mergeMutablePatchIntoPersistedConfig(params: {
   const daemon = mergeMutableDaemonPatch(persisted.daemon, patch, persistRelayEnabled);
   const agents = mergeMutableAgentPatch(persisted.agents, patch, removeProviders);
   const worktrees = mergeMutableWorktreesPatch(persisted.worktrees, patch);
+  const mcpGateway = mergeMcpGatewayForPersist(persisted.mcpGateway, patch.mcpGateway);
   return {
     ...persisted,
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
@@ -670,6 +684,7 @@ function mergeMutablePatchIntoPersistedConfig(params: {
     ...(daemon ? { daemon } : { daemon: undefined }),
     ...(agents ? { agents } : { agents: undefined }),
     ...(worktrees ? { worktrees } : { worktrees: undefined }),
+    ...(mcpGateway !== undefined ? { mcpGateway } : {}),
   } as PersistedConfig;
 }
 
@@ -721,6 +736,25 @@ function mergeDiskSweeperForPersist(
     return persisted;
   }
   return { ...persisted, ...patch };
+}
+
+type PersistedMcpGateway = PersistedConfig["mcpGateway"];
+
+// Reuses the same `deepMerge` as the live `this.current` merge (rather than a bespoke
+// shallow merge) so a partial patch — e.g. `{ servers: { zeeq: { critical: false } } }` —
+// merges per-server-field identically on disk and in memory instead of the persisted file
+// wholesale-replacing `servers` while the live config only updates the one named field.
+function mergeMcpGatewayForPersist(
+  persisted: PersistedMcpGateway,
+  patch: SupportedMutableConfigPatch["mcpGateway"],
+): PersistedMcpGateway {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedMcpGateway;
 }
 
 function mergeMutableWorktreesPatch(

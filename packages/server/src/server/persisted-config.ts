@@ -103,6 +103,31 @@ const WorktreesConfigSchema = z
   })
   .strict();
 
+const McpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .strict();
+
+// New top-level section (KTD9), same mutable/patch split as diskSweeper/tokenBurnMonitor —
+// see the `MutableMcpGatewayConfigSchema` comment in @getpaseo/protocol/messages for why this
+// isn't shared with the wire schema. Adding a server is config-only (R9): drop an entry into
+// `servers` and it's picked up on reload/restart, no code change. Criticality (R11) is seeded
+// here by the operator, not hardcoded — e.g. `zeeq`/`agent-gateway` marked `critical: true`.
+// Static-auth header VALUES never live here — only that a server uses static auth
+// (`auth: "static"`) — because `MutableDaemonConfig` is broadcast in full to every connected
+// client; the value lives in the daemon's private 0600 token store, keyed by server name
+// (mcp-gateway/token-store.ts).
+const McpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), McpGatewayServerConfigSchema).optional(),
+  })
+  .strict();
+
 const BcryptHashSchema = z.string().regex(/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/, {
   message: "Expected a bcrypt hash",
 });
@@ -345,6 +370,7 @@ export const PersistedConfigSchema = z
     // plugin validates its own shape and fails closed on malformed data.
     agentModelPolicy: z.record(z.string(), z.unknown()).optional(),
     worktrees: WorktreesConfigSchema.optional(),
+    mcpGateway: McpGatewayConfigSchema.optional(),
     agents: z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),

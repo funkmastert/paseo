@@ -1110,6 +1110,122 @@ describe("DaemonConfigStore", () => {
     expect(persisted.worktrees?.diskSweeper).toEqual({ enabled: false });
   });
 
+  test("patch live-toggles mcpGateway.enabled without disturbing configured servers", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          mcpGateway: {
+            enabled: true,
+            servers: {
+              zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+          },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ mcpGateway: { enabled: false } });
+
+    expect(next.mcpGateway).toEqual({
+      enabled: false,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.mcpGateway).toEqual({
+      enabled: false,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+  });
+
+  test("patch merges a single mcpGateway server field without dropping sibling servers", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          mcpGateway: {
+            enabled: true,
+            servers: {
+              github: { url: "https://github.example.test/mcp", transport: "http" },
+              zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: false },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        mcpGateway: {
+          enabled: true,
+          servers: {
+            github: { url: "https://github.example.test/mcp", transport: "http" },
+            zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: false },
+          },
+        },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ mcpGateway: { servers: { zeeq: { critical: true } } } });
+
+    expect(next.mcpGateway?.servers).toEqual({
+      github: { url: "https://github.example.test/mcp", transport: "http" },
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.mcpGateway?.servers).toEqual({
+      github: { url: "https://github.example.test/mcp", transport: "http" },
+      zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+    });
+  });
+
   test("patch persists metadata generation providers without disturbing tokenBurnMonitor", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

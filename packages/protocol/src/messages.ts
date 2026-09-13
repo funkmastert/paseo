@@ -183,6 +183,43 @@ const MutableDiskSweeperConfigSchema = z
 
 const MutableDiskSweeperPatchSchema = MutableDiskSweeperConfigSchema;
 
+// New top-level config section (KTD9), same mutable/patch split for the same reason as
+// diskSweeper/tokenBurnMonitor above. Exported (unlike its siblings) because the server's
+// McpGateway service (packages/server/src/server/mcp-gateway/gateway.ts) needs the config
+// shape too; persisted-config.ts keeps its own `.strict()` copy for on-disk validation
+// rather than importing this `.passthrough()` wire schema, matching that file's existing
+// disk-sweeper/token-burn-monitor precedent of not sharing schemas across the wire/disk
+// boundary. Static-auth header VALUES never live here — only that a server uses static
+// auth (`auth: "static"`) — because this config is broadcast in full to every client; the
+// header value lives in the daemon's private 0600 token store, keyed by server name.
+export const MutableMcpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .passthrough();
+
+export const MutableMcpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerConfigSchema).optional(),
+  })
+  .passthrough();
+
+// Patch-only variant: like `providers` below, a per-server patch may touch a single field
+// (e.g. flip `critical` alone) without repeating `url`/`transport`, so `url`/`transport`
+// can't be required here the way they are on the full config schema above.
+const MutableMcpGatewayServerPatchSchema = MutableMcpGatewayServerConfigSchema.partial();
+
+const MutableMcpGatewayPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerPatchSchema).optional(),
+  })
+  .passthrough();
+
 export const TerminalProfileSchema = z
   .object({
     id: z.string(),
@@ -289,6 +326,7 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
+    mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
@@ -312,6 +350,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
+    mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -325,6 +364,8 @@ export const MutableDaemonConfigPatchSchema = z
 
 export type MutableDaemonConfig = z.infer<typeof MutableDaemonConfigSchema>;
 export type MutableDaemonConfigPatch = z.infer<typeof MutableDaemonConfigPatchSchema>;
+export type MutableMcpGatewayConfig = z.infer<typeof MutableMcpGatewayConfigSchema>;
+export type MutableMcpGatewayServerConfig = z.infer<typeof MutableMcpGatewayServerConfigSchema>;
 import type {
   AgentCapabilityFlags,
   AgentModelDefinition,

@@ -137,6 +137,68 @@ describe("PersistedConfigSchema worktrees config", () => {
   });
 });
 
+describe("PersistedConfigSchema mcpGateway config", () => {
+  test("accepts an OAuth server with criticality seeded", () => {
+    const parsed = PersistedConfigSchema.parse({
+      mcpGateway: {
+        enabled: true,
+        servers: {
+          zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+        },
+      },
+    });
+
+    expect(parsed.mcpGateway).toEqual({
+      enabled: true,
+      servers: {
+        zeeq: { url: "https://zeeq.example.test/mcp", transport: "http", critical: true },
+      },
+    });
+  });
+
+  test("accepts a static-auth server config without ever accepting a token value", () => {
+    const parsed = PersistedConfigSchema.parse({
+      mcpGateway: {
+        servers: {
+          slack: { url: "https://slack.example.test/mcp", transport: "sse", auth: "static" },
+        },
+      },
+    });
+
+    expect(parsed.mcpGateway?.servers?.slack).toEqual({
+      url: "https://slack.example.test/mcp",
+      transport: "sse",
+      auth: "static",
+    });
+  });
+
+  test("rejects an unknown transport", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        mcpGateway: {
+          servers: { github: { url: "https://github.example.test/mcp", transport: "websocket" } },
+        },
+      }),
+    ).toThrow();
+  });
+
+  test("rejects an unknown field, e.g. a stray token value", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        mcpGateway: {
+          servers: {
+            github: {
+              url: "https://github.example.test/mcp",
+              transport: "http",
+              token: "should-never-be-here",
+            },
+          },
+        },
+      }),
+    ).toThrow();
+  });
+});
+
 describe("PersistedConfigSchema provider credentials", () => {
   test("accepts separate OpenAI STT and TTS credentials", () => {
     const parsed = PersistedConfigSchema.parse({
