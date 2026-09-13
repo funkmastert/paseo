@@ -9,8 +9,22 @@ import { afterEach, describe, expect, test } from "vitest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { McpGateway } from "./gateway.js";
+import { evaluateTransitionNotification, McpGateway } from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
+
+interface FakePushPayload {
+  title: string;
+  body: string;
+  data: Record<string, unknown>;
+}
+
+function createFakePushSender() {
+  const sent: FakePushPayload[] = [];
+  return {
+    sender: { send: async (payload: FakePushPayload) => void sent.push(payload) },
+    sent,
+  };
+}
 
 const tempDirs: string[] = [];
 const fixtureServers: Array<() => Promise<void>> = [];
@@ -345,5 +359,228 @@ describe("McpGateway", () => {
     await gateway.reconnect("slack");
 
     expect(gateway.getServerState("slack")?.status).toBe("connected");
+  });
+});
+
+describe("criticality notifications (U5)", () => {
+  test("a critical server going to needs-auth fires exactly one push", async () => {
+    const push = createFakePushSender();
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: {
+          zeeq: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+        },
+      },
+      notifier: { pushNotificationSender: push.sender, serverId: "server-1" },
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("zeeq")?.status).toBe("needs-auth");
+    expect(push.sent).toEqual([
+      {
+        title: "MCP server needs re-authentication",
+        body: "zeeq lost its connection and needs you to sign in again.",
+        data: { serverId: "server-1", name: "zeeq", reason: "mcp_gateway_needs_auth" },
+      },
+    ]);
+  });
+
+  test("a non-critical server going to needs-auth fires no push", async () => {
+    const push = createFakePushSender();
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: {
+          github: { url: "http://127.0.0.1:1/mcp", transport: "http", auth: "static" },
+        },
+      },
+      notifier: { pushNotificationSender: push.sender, serverId: "server-1" },
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("github")?.status).toBe("needs-auth");
+    expect(push.sent).toEqual([]);
+  });
+
+  test("a repeat sweep that lands back in needs-auth without recovering does not re-fire", async () => {
+    const push = createFakePushSender();
+    const paseoHome = createTempHome();
+    const gateway = new McpGateway({
+      paseoHome,
+      config: {
+        enabled: true,
+        servers: {
+          zeeq: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+        },
+      },
+      notifier: { pushNotificationSender: push.sender, serverId: "server-1" },
+    });
+
+    await gateway.start();
+    expect(push.sent).toHaveLength(1);
+
+    // Still no stored token: reconnect() cycles needs-auth -> connecting -> needs-auth again,
+    // the same unhealthy episode as before — must not fire a second push.
+    await gateway.reconnect("zeeq");
+    expect(gateway.getServerState("zeeq")?.status).toBe("needs-auth");
+    expect(push.sent).toHaveLength(1);
+  });
+
+  test("more than 3 transitions in one connect pass batch into a single push", async () => {
+    const push = createFakePushSender();
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: {
+          zeeq: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+          agentGateway: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+          github: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+          slack: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+        },
+      },
+      notifier: { pushNotificationSender: push.sender, serverId: "server-1" },
+    });
+
+    await gateway.start();
+
+    expect(push.sent).toEqual([
+      {
+        title: "Multiple MCP servers need attention",
+        body: "4 critical MCP servers lost their connection.",
+        data: {
+          serverId: "server-1",
+          name: expect.any(String),
+          names: expect.arrayContaining(["zeeq", "agentGateway", "github", "slack"]),
+          reason: "mcp_gateway_multi",
+        },
+      },
+    ]);
+  });
+
+  test("omitting a notifier sends no pushes but still tracks state normally", async () => {
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: {
+          zeeq: {
+            url: "http://127.0.0.1:1/mcp",
+            transport: "http",
+            auth: "static",
+            critical: true,
+          },
+        },
+      },
+    });
+
+    await expect(gateway.start()).resolves.toBeUndefined();
+    expect(gateway.getServerState("zeeq")?.status).toBe("needs-auth");
+  });
+});
+
+describe("evaluateTransitionNotification (U5 pure episode logic)", () => {
+  test("fires exactly once for a critical server entering an unhealthy status", () => {
+    const first = evaluateTransitionNotification({
+      status: "needs-auth",
+      critical: true,
+      alreadyNotified: false,
+    });
+    expect(first).toEqual({ notify: true, nextNotified: true });
+
+    const repeat = evaluateTransitionNotification({
+      status: "needs-auth",
+      critical: true,
+      alreadyNotified: first.nextNotified,
+    });
+    expect(repeat).toEqual({ notify: false, nextNotified: true });
+  });
+
+  test("never fires for a non-critical server", () => {
+    expect(
+      evaluateTransitionNotification({
+        status: "needs-auth",
+        critical: false,
+        alreadyNotified: false,
+      }),
+    ).toEqual({ notify: false, nextNotified: false });
+    expect(
+      evaluateTransitionNotification({ status: "error", critical: false, alreadyNotified: false }),
+    ).toEqual({ notify: false, nextNotified: false });
+  });
+
+  test("reaching connected re-arms the episode for the next unhealthy transition", () => {
+    const notified = evaluateTransitionNotification({
+      status: "needs-auth",
+      critical: true,
+      alreadyNotified: false,
+    });
+    expect(notified.nextNotified).toBe(true);
+
+    const recovered = evaluateTransitionNotification({
+      status: "connected",
+      critical: true,
+      alreadyNotified: notified.nextNotified,
+    });
+    expect(recovered).toEqual({ notify: false, nextNotified: false });
+
+    const secondEpisode = evaluateTransitionNotification({
+      status: "error",
+      critical: true,
+      alreadyNotified: recovered.nextNotified,
+    });
+    expect(secondEpisode).toEqual({ notify: true, nextNotified: true });
+  });
+
+  test("intermediate connecting/disabled statuses leave the episode flag untouched", () => {
+    expect(
+      evaluateTransitionNotification({
+        status: "connecting",
+        critical: true,
+        alreadyNotified: true,
+      }),
+    ).toEqual({ notify: false, nextNotified: true });
+    expect(
+      evaluateTransitionNotification({
+        status: "disabled",
+        critical: true,
+        alreadyNotified: false,
+      }),
+    ).toEqual({ notify: false, nextNotified: false });
   });
 });

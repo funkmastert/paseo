@@ -1876,6 +1876,12 @@ export async function createPaseoDaemon(
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
             worktreeDiskMonitor?.start();
+            // Wired here (rather than at construction, above) for the same reason as the
+            // token-burn monitor below: the push sender doesn't exist until wsServer does.
+            mcpGateway.setNotifier({
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+            });
             // Wired here (rather than beside AgentTitleTracker, above) because it needs the
             // push sender wsServer resolved (injected override, or its own
             // createPushNotifications) — not available until wsServer exists.

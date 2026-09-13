@@ -14,6 +14,11 @@ import type {
   MutableMcpGatewayConfig,
   MutableMcpGatewayServerConfig,
 } from "@getpaseo/protocol/messages";
+import {
+  buildBatchedMcpGatewayNotificationPayload,
+  buildMcpGatewayNotificationPayload,
+  type McpGatewayNotifiableStatus,
+} from "@getpaseo/protocol/mcp-notification";
 
 import {
   applyServerEvent,
@@ -27,6 +32,7 @@ import {
   McpGatewayOAuthStateStore,
 } from "./oauth.js";
 import { McpGatewayTokenStore } from "./token-store.js";
+import type { PushNotificationSender } from "../push/index.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -48,6 +54,48 @@ interface McpGatewayServerRuntime {
   config: McpGatewayServerConfig;
   state: McpGatewayServerState;
   client?: Client;
+  /** Whether the current unhealthy episode (if any) already produced a push (U5). */
+  notified: boolean;
+}
+
+const NOTIFICATION_BATCH_THRESHOLD = 3;
+
+interface EvaluateTransitionNotificationInput {
+  status: McpGatewayServerState["status"];
+  critical: boolean;
+  alreadyNotified: boolean;
+}
+
+interface EvaluateTransitionNotificationResult {
+  notify: boolean;
+  nextNotified: boolean;
+}
+
+/**
+ * Pure per-server episode logic (R8/R11, KTD11): a critical server gets exactly one
+ * notification per unhealthy episode (needs-auth or error) — repeat sweeps that land back in
+ * the same unhealthy status don't re-fire. Reaching "connected" re-arms the episode so the
+ * next excursion notifies again. Non-critical servers never notify (AE5). Kept pure and
+ * exported so the episode/re-arm sequencing is directly testable without live network I/O —
+ * `gateway.ts` has no public API to force a connected server back to unhealthy yet (that
+ * lands with the mid-session failure hook in a later unit).
+ */
+export function evaluateTransitionNotification(
+  input: EvaluateTransitionNotificationInput,
+): EvaluateTransitionNotificationResult {
+  if (input.status === "connected") {
+    return { notify: false, nextNotified: false };
+  }
+  if (input.status !== "needs-auth" && input.status !== "error") {
+    return { notify: false, nextNotified: input.alreadyNotified };
+  }
+  if (!input.critical) {
+    return { notify: false, nextNotified: input.alreadyNotified };
+  }
+  if (input.alreadyNotified) {
+    return { notify: false, nextNotified: true };
+  }
+  return { notify: true, nextNotified: true };
 }
 
 const AUTH_FAILURE_HTTP_CODES = new Set([401, 403]);
@@ -104,6 +152,12 @@ function nextConnectEvent(
   }
 }
 
+/** Push-notification seam for critical-server auth loss (U5/KTD11). Tests inject a fake. */
+export interface McpGatewayNotifier {
+  pushNotificationSender: PushNotificationSender;
+  serverId: string;
+}
+
 export interface McpGatewayOptions {
   paseoHome: string;
   config: McpGatewayConfig;
@@ -112,6 +166,8 @@ export interface McpGatewayOptions {
   logger?: LoggerLike;
   /** Overridable for tests; defaults to the private 0600 file store under `paseoHome`. */
   tokenStore?: McpGatewayTokenStore;
+  /** Omit to disable push notifications entirely — mirrors R10's "pay no cost" posture. */
+  notifier?: McpGatewayNotifier;
 }
 
 /**
@@ -138,6 +194,11 @@ export class McpGateway {
   private readonly servers = new Map<string, McpGatewayServerRuntime>();
   private readonly events = new EventEmitter();
   private lastEmittedSnapshot: McpGatewaySnapshotEntry[] = [];
+  private notifier: McpGatewayNotifier | undefined;
+  private readonly pendingNotifications: Array<{
+    name: string;
+    status: McpGatewayNotifiableStatus;
+  }> = [];
 
   constructor(options: McpGatewayOptions) {
     this.config = options.config;
@@ -145,6 +206,7 @@ export class McpGateway {
     this.tokenStore =
       options.tokenStore ?? new McpGatewayTokenStore(options.paseoHome, options.logger);
     this.oauthRedirectBaseUrl = options.oauthRedirectBaseUrl;
+    this.notifier = options.notifier;
 
     if (!this.config.enabled) {
       return;
@@ -153,12 +215,19 @@ export class McpGateway {
       this.servers.set(name, {
         config: serverConfig,
         state: createDisabledServerState(),
+        notified: false,
       });
     }
   }
 
   get enabled(): boolean {
     return this.config.enabled === true;
+  }
+
+  /** Lazy-set like `setOAuthRedirectBaseUrl`: bootstrap constructs the gateway before the
+   * WebSocket server that owns the push sender exists. */
+  setNotifier(notifier: McpGatewayNotifier): void {
+    this.notifier = notifier;
   }
 
   getServerNames(): string[] {
@@ -224,11 +293,13 @@ export class McpGateway {
   async start(): Promise<void> {
     if (!this.enabled) return;
     await Promise.all(Array.from(this.servers.keys()).map((name) => this.connectServer(name)));
+    await this.flushPendingNotifications();
   }
 
   /** Re-attempts a connection, e.g. after a re-auth completes at the daemon (R4). */
   async reconnect(name: string): Promise<void> {
     await this.connectServer(name);
+    await this.flushPendingNotifications();
   }
 
   /** Closes every connected upstream client. Best-effort — called at daemon shutdown. */
@@ -311,10 +382,66 @@ export class McpGateway {
         });
   }
 
-  /** Applies a state transition and notifies "change" subscribers (deduped in notifyStatusChange). */
-  private transitionRuntime(runtime: McpGatewayServerRuntime, event: McpGatewayServerEvent): void {
+  /**
+   * Applies a state transition, notifies "change" subscribers (deduped in
+   * notifyStatusChange), and queues a push notification for a critical server's unhealthy
+   * episode (U5) — flushed by the caller's connect pass (`start()`/`reconnect()`) via
+   * `flushPendingNotifications()`.
+   */
+  private transitionRuntime(
+    name: string,
+    runtime: McpGatewayServerRuntime,
+    event: McpGatewayServerEvent,
+  ): void {
     runtime.state = applyServerEvent(runtime.state, event);
     this.notifyStatusChange();
+
+    const result = evaluateTransitionNotification({
+      status: runtime.state.status,
+      critical: runtime.config.critical === true,
+      alreadyNotified: runtime.notified,
+    });
+    runtime.notified = result.nextNotified;
+    if (result.notify && this.notifier) {
+      // `notify` only ever comes back true for "needs-auth" or "error" (see
+      // evaluateTransitionNotification), so this narrowing is safe.
+      this.pendingNotifications.push({
+        name,
+        status: runtime.state.status as McpGatewayNotifiableStatus,
+      });
+    }
+  }
+
+  /** Sends whatever notifications a connect pass queued — one push per server, or one
+   * combined push when the pass pushed more than `NOTIFICATION_BATCH_THRESHOLD` servers
+   * unhealthy at once (U5). No-ops when no notifier is configured. */
+  private async flushPendingNotifications(): Promise<void> {
+    if (this.pendingNotifications.length === 0) return;
+    const transitions = this.pendingNotifications.splice(0, this.pendingNotifications.length);
+    if (!this.notifier) return;
+
+    try {
+      if (transitions.length > NOTIFICATION_BATCH_THRESHOLD) {
+        await this.notifier.pushNotificationSender.send(
+          buildBatchedMcpGatewayNotificationPayload({
+            serverId: this.notifier.serverId,
+            transitions,
+          }),
+        );
+        return;
+      }
+      for (const transition of transitions) {
+        await this.notifier.pushNotificationSender.send(
+          buildMcpGatewayNotificationPayload({
+            serverId: this.notifier.serverId,
+            name: transition.name,
+            status: transition.status,
+          }),
+        );
+      }
+    } catch (error) {
+      this.logger?.warn({ err: error }, "Failed to send MCP gateway push notification");
+    }
   }
 
   private async connectServer(name: string): Promise<void> {
@@ -323,7 +450,7 @@ export class McpGateway {
 
     const event = nextConnectEvent(runtime.state.status);
     if (!event) return;
-    this.transitionRuntime(runtime, event);
+    this.transitionRuntime(name, runtime, event);
 
     try {
       let headers: Record<string, string> | undefined;
@@ -332,7 +459,7 @@ export class McpGateway {
       if (runtime.config.auth === "static") {
         headers = this.tokenStore.getStaticHeaders(name);
         if (!headers) {
-          this.transitionRuntime(runtime, { type: "needsAuth" });
+          this.transitionRuntime(name, runtime, { type: "needsAuth" });
           return;
         }
       } else {
@@ -340,7 +467,7 @@ export class McpGateway {
         // Connecting without a stored token would only ever produce an UnauthorizedError, so
         // skip the network round trip and land directly in needs-auth.
         if (!this.tokenStore.getOAuthTokens(name)) {
-          this.transitionRuntime(runtime, { type: "needsAuth" });
+          this.transitionRuntime(name, runtime, { type: "needsAuth" });
           return;
         }
         authProvider = this.buildOAuthProvider(name);
@@ -356,9 +483,10 @@ export class McpGateway {
       await client.connect(transport);
 
       runtime.client = client;
-      this.transitionRuntime(runtime, { type: "connected" });
+      this.transitionRuntime(name, runtime, { type: "connected" });
     } catch (error) {
       this.transitionRuntime(
+        name,
         runtime,
         isAuthFailure(error)
           ? { type: "needsAuth" }
