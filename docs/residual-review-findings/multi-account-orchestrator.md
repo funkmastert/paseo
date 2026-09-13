@@ -25,6 +25,7 @@ Source: ce-code-review run `20260912-225824-7cf575a6` (9 personas + independent 
 - OAuth token-endpoint error bodies land verbatim in `daemon.log` via the SDK's raw-body fallback — redact before sharing logs. (security)
 - Env-var expansion in stdio re-injection is inferred from documented `.mcp.json` syntax, not verified against the minified SDK source. (U3 implementation note)
 - No automatic retry/backoff for a server in `error` status; recovery rides the strip's Reauth button (which forces a retry transition even for non-auth failures — non-obvious from UI copy). (reliability)
+- New require cycle `host-runtime.ts -> push-router.ts -> use-mcp-status.ts -> host-runtime.ts` (browser-test console; repo tolerates cycles but this one is new — break by moving the query key/apply helper out of the hook module). (browser smoke)
 
 ## Testing gaps (union)
 
