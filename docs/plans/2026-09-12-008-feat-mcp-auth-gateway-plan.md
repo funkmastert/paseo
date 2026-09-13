@@ -15,7 +15,7 @@ execution: code
 
 - **Objective:** Make MCP authentication survive the multi-account pool — authenticate each external MCP once at the Bozeo daemon, have every agent session on every account receive working MCPs automatically, and keep auth state visible in a persistent global UI with one-click re-auth.
 - **Product authority:** Tyler (fork owner), settled in the 2026-09-12 brainstorm dialogue. The sibling ideas raised in the same conversation (steer-without-interrupt, rapid-mode toggle, leaders-always-orchestrate) are not active scope here.
-- **Open blockers:** none for planning; OQ1 resolves during planning.
+- **Open blockers:** none.
 
 ---
 
@@ -106,11 +106,7 @@ flowchart TB
 
 - Single-user machine; daemon-held tokens are an accepted trust posture.
 - The strip must reach every fork client surface (desktop, self-hosted web on phone).
-- Assumption: projects without MCP usage need no migration (verified against the owner's statement; see OQ1 for the inventory).
-
-### Outstanding Questions
-
-- OQ1 (Deferred to Planning): the full inventory of MCP-consuming projects on this machine — including whether EtsyBot and DayTrader use any MCPs — so R9's initial set is complete.
+- Verified inventory (2026-09-12): EtsyBot and DayTrader use no MCP servers; the only project-scoped server on the machine is `zeeq` (mobile repo), already in R9's set. All other MCP usage is the session-global set, so R9 covers the machine and non-MCP projects need no migration.
 
 ### Sources
 
