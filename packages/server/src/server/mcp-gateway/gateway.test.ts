@@ -254,6 +254,75 @@ describe("McpGateway", () => {
     ]);
   });
 
+  test("emits change with the new snapshot when a server's status transitions", async () => {
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: { zeeq: { url: "http://127.0.0.1:1/mcp", transport: "http", critical: true } },
+      },
+    });
+
+    const changes: unknown[] = [];
+    gateway.on("change", (snapshot) => changes.push(snapshot));
+
+    await gateway.start();
+
+    // Each real transition notifies: disabled -> connecting -> needs-auth (no stored tokens).
+    expect(changes).toEqual([
+      [{ name: "zeeq", status: "connecting", critical: true, lastChangedAt: expect.any(Number) }],
+      [{ name: "zeeq", status: "needs-auth", critical: true, lastChangedAt: expect.any(Number) }],
+    ]);
+  });
+
+  test("does not re-emit change for a redundant reconnect() once already connected", async () => {
+    const fixture = await startFixtureMcpServer({
+      expectedAuthorizationHeader: "Bearer late-secret",
+    });
+    const paseoHome = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(paseoHome);
+    tokenStore.saveStaticHeaders("slack", { Authorization: "Bearer late-secret" });
+
+    const gateway = new McpGateway({
+      paseoHome,
+      config: {
+        enabled: true,
+        servers: { slack: { url: fixture.url, transport: "http", auth: "static" } },
+      },
+    });
+
+    await gateway.start();
+    expect(gateway.getServerState("slack")?.status).toBe("connected");
+
+    const changes: unknown[] = [];
+    gateway.on("change", (snapshot) => changes.push(snapshot));
+
+    // Already connected: the state machine has no "connect again" transition, so this
+    // is a no-op that must not re-emit a duplicate snapshot.
+    await gateway.reconnect("slack");
+
+    expect(changes).toEqual([]);
+  });
+
+  test("off() stops delivering further change events", async () => {
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: { zeeq: { url: "http://127.0.0.1:1/mcp", transport: "http" } },
+      },
+    });
+
+    const changes: unknown[] = [];
+    const listener = (snapshot: unknown) => changes.push(snapshot);
+    gateway.on("change", listener);
+    gateway.off("change", listener);
+
+    await gateway.start();
+
+    expect(changes).toEqual([]);
+  });
+
   test("reconnect() re-attempts a needs-auth server after tokens are saved (R4)", async () => {
     const fixture = await startFixtureMcpServer({
       expectedAuthorizationHeader: "Bearer late-secret",

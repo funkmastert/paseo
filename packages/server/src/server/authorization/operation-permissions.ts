@@ -327,6 +327,9 @@ const OUTBOUND_PERMISSION = {
   "loop/logs/response": "automation.manage",
   "loop/run/response": "automation.manage",
   "loop/stop/response": "automation.manage",
+  // COMPAT(mcpStatus): added in v0.8.1. Copies providers_snapshot_update's
+  // permission mapping (KTD7).
+  mcp_status_update: "daemon.read",
   open_in_editor_response: "workspace.read",
   open_project_response: "workspace.manage",
   paseo_worktree_archive_response: "workspace.manage",

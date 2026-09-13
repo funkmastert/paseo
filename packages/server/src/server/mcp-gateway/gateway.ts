@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   UnauthorizedError,
@@ -63,6 +64,27 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Order-sensitive: safe because `servers` is populated once at construction and never reordered. */
+function sameSnapshot(
+  a: readonly McpGatewaySnapshotEntry[],
+  b: readonly McpGatewaySnapshotEntry[],
+): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((entry, index) => {
+    const other = b[index];
+    return (
+      other !== undefined &&
+      entry.name === other.name &&
+      entry.status === other.status &&
+      entry.critical === other.critical &&
+      entry.lastChangedAt === other.lastChangedAt &&
+      entry.error === other.error
+    );
+  });
+}
+
+type McpGatewayChangeListener = (snapshot: McpGatewaySnapshotEntry[]) => void;
+
 function nextConnectEvent(
   status: McpGatewayServerState["status"],
 ): McpGatewayServerEvent | undefined {
@@ -114,6 +136,8 @@ export class McpGateway {
   private readonly oauthStateStore = new McpGatewayOAuthStateStore();
   private oauthRedirectBaseUrl: string | undefined;
   private readonly servers = new Map<string, McpGatewayServerRuntime>();
+  private readonly events = new EventEmitter();
+  private lastEmittedSnapshot: McpGatewaySnapshotEntry[] = [];
 
   constructor(options: McpGatewayOptions) {
     this.config = options.config;
@@ -164,6 +188,30 @@ export class McpGateway {
       }
       return entry;
     });
+  }
+
+  /**
+   * Subscribes to snapshot changes (U4/KTD7's `mcp_status_update` wire surface). Fires only
+   * when the computed snapshot actually differs from the last one emitted — mirrors
+   * `ProviderSnapshotManager`'s "change" event, which dedupes the same way before notifying.
+   */
+  on(event: "change", listener: McpGatewayChangeListener): this {
+    this.events.on(event, listener);
+    return this;
+  }
+
+  off(event: "change", listener: McpGatewayChangeListener): this {
+    this.events.off(event, listener);
+    return this;
+  }
+
+  private notifyStatusChange(): void {
+    const snapshot = this.getSnapshot();
+    if (sameSnapshot(this.lastEmittedSnapshot, snapshot)) return;
+    this.lastEmittedSnapshot = snapshot;
+    for (const listener of this.events.listeners("change")) {
+      (listener as McpGatewayChangeListener)(snapshot);
+    }
   }
 
   /** Returns the connected upstream client for a server, or undefined if it isn't connected. */
@@ -263,13 +311,19 @@ export class McpGateway {
         });
   }
 
+  /** Applies a state transition and notifies "change" subscribers (deduped in notifyStatusChange). */
+  private transitionRuntime(runtime: McpGatewayServerRuntime, event: McpGatewayServerEvent): void {
+    runtime.state = applyServerEvent(runtime.state, event);
+    this.notifyStatusChange();
+  }
+
   private async connectServer(name: string): Promise<void> {
     const runtime = this.servers.get(name);
     if (!runtime) return;
 
     const event = nextConnectEvent(runtime.state.status);
     if (!event) return;
-    runtime.state = applyServerEvent(runtime.state, event);
+    this.transitionRuntime(runtime, event);
 
     try {
       let headers: Record<string, string> | undefined;
@@ -278,7 +332,7 @@ export class McpGateway {
       if (runtime.config.auth === "static") {
         headers = this.tokenStore.getStaticHeaders(name);
         if (!headers) {
-          runtime.state = applyServerEvent(runtime.state, { type: "needsAuth" });
+          this.transitionRuntime(runtime, { type: "needsAuth" });
           return;
         }
       } else {
@@ -286,7 +340,7 @@ export class McpGateway {
         // Connecting without a stored token would only ever produce an UnauthorizedError, so
         // skip the network round trip and land directly in needs-auth.
         if (!this.tokenStore.getOAuthTokens(name)) {
-          runtime.state = applyServerEvent(runtime.state, { type: "needsAuth" });
+          this.transitionRuntime(runtime, { type: "needsAuth" });
           return;
         }
         authProvider = this.buildOAuthProvider(name);
@@ -302,10 +356,10 @@ export class McpGateway {
       await client.connect(transport);
 
       runtime.client = client;
-      runtime.state = applyServerEvent(runtime.state, { type: "connected" });
+      this.transitionRuntime(runtime, { type: "connected" });
     } catch (error) {
-      runtime.state = applyServerEvent(
-        runtime.state,
+      this.transitionRuntime(
+        runtime,
         isAuthFailure(error)
           ? { type: "needsAuth" }
           : { type: "connectionFailed", error: errorMessage(error) },

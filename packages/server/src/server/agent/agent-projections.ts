@@ -153,6 +153,10 @@ export function toAgentPayload(
     payload.lastActivitySummary = agent.lastActivitySummary;
   }
 
+  if (agent.mcpServerStatuses !== undefined) {
+    payload.mcpServerStatuses = agent.mcpServerStatuses;
+  }
+
   const recentTokenRate = computeTokenRate(agent.tokenRateBuckets, Date.now());
   if (recentTokenRate !== undefined) {
     payload.recentTokenRate = recentTokenRate;

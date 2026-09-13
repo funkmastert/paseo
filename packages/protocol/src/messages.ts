@@ -954,6 +954,15 @@ const AgentActiveTurnPayloadSchema = z.object({
   startedAt: z.string().nullable(),
 });
 
+// Per-agent init-reported MCP server statuses (KTD8): the SDK's own init
+// message reports `{name, status}[]` verbatim (status is a provider-defined
+// string, not a closed enum), captured live-only, no COMPAT tag needed —
+// a permanently-optional additive field like lastActivitySummary.
+const AgentMcpServerStatusSchema = z.object({
+  name: z.string(),
+  status: z.string(),
+});
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,
@@ -977,6 +986,7 @@ export const AgentSnapshotPayloadSchema = z.object({
   lastUsage: AgentUsageSchema.optional(),
   lastError: z.string().optional(),
   lastActivitySummary: z.string().optional(),
+  mcpServerStatuses: z.array(AgentMcpServerStatusSchema).optional(),
   recentTokenRate: AgentTokenRateSchema.optional(),
   totalTokens: z.number().optional(),
   title: z.string().nullable(),
@@ -990,6 +1000,7 @@ export const AgentSnapshotPayloadSchema = z.object({
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
+export type AgentMcpServerStatus = z.infer<typeof AgentMcpServerStatusSchema>;
 
 export const AgentListItemPayloadSchema = z.object({
   id: z.string(),
@@ -3164,6 +3175,8 @@ export const SessionEventSubscriptionSchema = z.enum([
   "agent_attention_required",
   "agent_permission_request",
   "agent_permission_resolved",
+  // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+  "mcp_status_update",
 ]);
 export type SessionEventSubscription = z.infer<typeof SessionEventSubscriptionSchema>;
 export const SessionEventsSetSubscriptionRequestSchema = z.object({
@@ -3700,6 +3713,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
+        mcpStatus: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6070,6 +6085,30 @@ export const RefreshProvidersSnapshotResponseMessageSchema = z.object({
   }),
 });
 
+// Per-server connection status for the MCP auth gateway (KTD9's state machine in
+// packages/server/src/server/mcp-gateway/state.ts). `status` mirrors
+// `McpGatewayServerStatus` there — duplicated rather than imported because the
+// protocol package can't depend on the server package.
+export const McpGatewayStatusEntrySchema = z.object({
+  name: z.string(),
+  status: z.enum(["disabled", "connecting", "connected", "needs-auth", "error"]),
+  critical: z.boolean(),
+  lastChangedAt: z.number(),
+  error: z.string().optional(),
+});
+
+// COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+// Copies the providers_snapshot_update pattern exactly (KTD7): new session message,
+// SessionEventSubscriptionSchema entry, feature flag, permission mapping to
+// daemon.read, feature-gated emission so old clients never receive it.
+export const McpStatusUpdateMessageSchema = z.object({
+  type: z.literal("mcp_status_update"),
+  payload: z.object({
+    servers: z.array(McpGatewayStatusEntrySchema),
+    generatedAt: z.string(),
+  }),
+});
+
 // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
 export const ProviderDiagnosticResponseMessageSchema = z.object({
   type: z.literal("provider_diagnostic_response"),
@@ -6759,6 +6798,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   GetProvidersSnapshotResponseMessageSchema,
   ProvidersSnapshotUpdateMessageSchema,
   RefreshProvidersSnapshotResponseMessageSchema,
+  McpStatusUpdateMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   ListCommandsResponseSchema,
@@ -6935,6 +6975,8 @@ export type ProvidersSnapshotUpdateMessage = z.infer<typeof ProvidersSnapshotUpd
 export type RefreshProvidersSnapshotResponseMessage = z.infer<
   typeof RefreshProvidersSnapshotResponseMessageSchema
 >;
+export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
+export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
 export type ProviderDiagnosticResponseMessage = z.infer<
   typeof ProviderDiagnosticResponseMessageSchema
 >;

@@ -4,6 +4,7 @@ import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   AGENT_LIFECYCLE_STATUSES,
   type AgentLifecycleStatus,
@@ -29,6 +30,7 @@ import {
   type AgentResumeSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentSlashCommand,
   type AgentMode,
   type AgentPermissionRequest,
@@ -85,7 +87,7 @@ import {
   withRuntimeMcpGatewayServers,
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
-import type { McpGateway } from "../mcp-gateway/gateway.js";
+import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -336,7 +338,7 @@ export interface AgentManagerOptions {
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
   /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
-  mcpGateway?: Pick<McpGateway, "enabled" | "getServerNames">;
+  mcpGateway?: Pick<McpGateway, "enabled" | "getServerNames" | "getSnapshot" | "on" | "off">;
   /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
   mcpGatewayAuthToken?: string;
   paseoToolsEnabled?: boolean;
@@ -452,6 +454,15 @@ interface ManagedAgentBase {
    * again after a daemon restart until the next timeline item arrives.
    */
   lastActivitySummary?: string;
+  /**
+   * Provider-reported MCP server statuses from the SDK's init message (KTD8), captured
+   * verbatim each turn. Live-only like `lastActivitySummary`: not persisted, not in
+   * `toStoredAgentRecord`, cleared on rewind. There is no SDK push event for later
+   * changes, so this is only as fresh as the most recent turn's init message — it
+   * covers stdio/pass-through servers; the gateway's own state is authoritative for
+   * brokered ones (see mcp-gateway/gateway.ts's `getSnapshot`/"change" event).
+   */
+  mcpServerStatuses?: AgentMcpServerStatus[];
   /**
    * Trailing-window token-burn ring buffer, fed by provider-local `turnTokenDelta` on
    * `turn_completed` (Claude only in phase 1). Live-only like `lastActivitySummary`: not
@@ -788,7 +799,10 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
-  private mcpGateway: Pick<McpGateway, "enabled" | "getServerNames"> | null = null;
+  private mcpGateway: Pick<
+    McpGateway,
+    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off"
+  > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
   private paseoToolsEnabled = true;
@@ -932,7 +946,7 @@ export class AgentManager {
    * deferred-wiring pattern rather than a constructor-order dependency).
    */
   setMcpGateway(
-    gateway: Pick<McpGateway, "enabled" | "getServerNames"> | null,
+    gateway: Pick<McpGateway, "enabled" | "getServerNames" | "getSnapshot" | "on" | "off"> | null,
     authToken: string | null,
   ): void {
     this.mcpGateway = gateway;
@@ -942,6 +956,19 @@ export class AgentManager {
   /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
   setMcpGatewayBaseUrl(url: string | null): void {
     this.mcpGatewayBaseUrl = url;
+  }
+
+  /** Current per-server gateway status snapshot (U4/KTD7's `mcp_status_update` wire surface). */
+  getMcpGatewaySnapshot(): McpGatewaySnapshotEntry[] {
+    return this.mcpGateway?.getSnapshot() ?? [];
+  }
+
+  /** Subscribes to gateway status changes; returns an unsubscribe function. No-ops when disabled. */
+  onMcpGatewayStatusChange(listener: (snapshot: McpGatewaySnapshotEntry[]) => void): () => void {
+    const gateway = this.mcpGateway;
+    if (!gateway) return () => {};
+    gateway.on("change", listener);
+    return () => gateway.off("change", listener);
   }
 
   prepareForShutdown(): void {
@@ -3413,6 +3440,9 @@ export class AgentManager {
         // The replaced timeline may no longer contain the item the summary
         // was derived from; drop it rather than show a summary of deleted content.
         delete agent.lastActivitySummary;
+        // Stale until the next turn's init message re-reports it (KTD8) — drop rather
+        // than show statuses captured before the rewind.
+        delete agent.mcpServerStatuses;
         // The rewound-away turns' token burn no longer reflects what's ahead; start the
         // trailing-window tracker fresh rather than report a rate computed from erased history.
         delete agent.tokenRateBuckets;
@@ -4573,9 +4603,23 @@ export class AgentManager {
       case "permission_resolved":
         this.onStreamPermissionResolved({ agent, event, options, flags });
         return undefined;
+      case "mcp_server_statuses":
+        this.onStreamMcpServerStatuses(agent, event);
+        return undefined;
       default:
         return undefined;
     }
+  }
+
+  private onStreamMcpServerStatuses(
+    agent: ActiveManagedAgent,
+    event: Extract<AgentStreamEvent, { type: "mcp_server_statuses" }>,
+  ): void {
+    // Avoid an emitState storm on every turn: only broadcast (and skip persisting,
+    // live-only like lastActivitySummary) when the reported statuses actually changed.
+    if (isDeepStrictEqual(agent.mcpServerStatuses, event.statuses)) return;
+    agent.mcpServerStatuses = event.statuses;
+    this.emitState(agent, { persist: false });
   }
 
   private onStreamThreadStarted(agent: ActiveManagedAgent): void {

@@ -495,7 +495,23 @@ export type AgentStreamEvent =
       type: "provider_subagent";
       provider: AgentProvider;
       event: import("./provider-subagents/store.js").ProviderSubagentInputEvent;
+    }
+  | {
+      type: "mcp_server_statuses";
+      provider: AgentProvider;
+      statuses: AgentMcpServerStatus[];
     };
+
+/**
+ * A single provider-reported MCP server status from the SDK's init message (KTD8).
+ * `status` is whatever string the provider reports (not a closed enum) — captured
+ * verbatim, live-only, no COMPAT tag needed (a permanently-optional additive field,
+ * like `lastActivitySummary`).
+ */
+export interface AgentMcpServerStatus {
+  name: string;
+  status: string;
+}
 
 export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
   return "turnId" in event ? event.turnId : undefined;

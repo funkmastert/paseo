@@ -707,6 +707,7 @@ export class Session {
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
+  private unsubscribeMcpGatewayStatus: (() => void) | null = null;
   private registryMutationQueue: Promise<void> = Promise.resolve();
   private projectUpdateQueue: Promise<void> = Promise.resolve();
   private isCleanedUp = false;
@@ -1537,6 +1538,15 @@ export class Session {
         });
     }
     this.providerCatalogSession.start();
+    // COMPAT(mcpStatus): copies providers_snapshot_update's push pattern (KTD7) —
+    // gated by the same explicit-subscription mechanism, so old clients never receive it.
+    this.unsubscribeMcpGatewayStatus = this.agentManager.onMcpGatewayStatusChange((snapshot) => {
+      if (!this.wantsEvent("mcp_status_update")) return;
+      this.emit({
+        type: "mcp_status_update",
+        payload: { servers: snapshot, generatedAt: new Date().toISOString() },
+      });
+    });
   }
 
   private subscribeToRegistryMutations(): void {
@@ -7822,6 +7832,7 @@ export class Session {
     if (
       msg.type === "project.update" ||
       msg.type === "providers_snapshot_update" ||
+      msg.type === "mcp_status_update" ||
       msg.type === "agent_attention_required" ||
       msg.type === "agent_permission_request" ||
       msg.type === "agent_permission_resolved"
@@ -7927,6 +7938,8 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
+    this.unsubscribeMcpGatewayStatus?.();
+    this.unsubscribeMcpGatewayStatus = null;
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

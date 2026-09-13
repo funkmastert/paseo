@@ -100,6 +100,7 @@ function createHarness(input: {
     paseoHome: mkdtempSync(path.join(tmpdir(), "paseo-invariant-test-")),
     agentManager: createStub<SessionOptions["agentManager"]>({
       subscribe: () => () => {},
+      onMcpGatewayStatusChange: () => () => {},
       listAgents: () => [],
       getAgent: () => null,
       archiveAgent: async () => ({ archivedAt: new Date().toISOString() }),

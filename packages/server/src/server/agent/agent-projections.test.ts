@@ -490,6 +490,24 @@ describe("toAgentPayload", () => {
     expect(payload).not.toHaveProperty("lastActivitySummary");
   });
 
+  it("includes mcpServerStatuses when set (KTD8)", () => {
+    const agent = createManagedAgent({
+      mcpServerStatuses: [{ name: "zeeq", status: "needs-auth" }],
+    });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.mcpServerStatuses).toEqual([{ name: "zeeq", status: "needs-auth" }]);
+  });
+
+  it("omits mcpServerStatuses when not set", () => {
+    const agent = createManagedAgent({ mcpServerStatuses: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("mcpServerStatuses");
+  });
+
   it("includes recentTokenRate and totalTokens when the buckets have current activity", () => {
     const agent = createManagedAgent({
       tokenRateBuckets: recordTokenDelta([], 40, Date.now()),

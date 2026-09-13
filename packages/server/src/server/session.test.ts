@@ -382,6 +382,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       listAgents: vi.fn(() => []),
       listProviderSubagentActivity: vi.fn(() => []),
       subscribe: vi.fn(() => () => {}),
+      onMcpGatewayStatusChange: vi.fn(() => () => {}),
       ...options.agentManager,
     }),
     agentStorage: asAgentStorage({
@@ -5394,6 +5395,57 @@ test("sends project updates only to capable sockets in a retained session", asyn
       }),
     },
   ]);
+});
+
+test("mcp_status_update is feature-gated: delivered only to sockets that subscribed to it", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  let gatewayListener: ((snapshot: unknown[]) => void) | undefined;
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      onMcpGatewayStatusChange: (listener: (snapshot: unknown[]) => void) => {
+        gatewayListener = listener;
+        return () => {};
+      },
+    },
+  });
+
+  const unsubscribedSocket = {};
+  const subscribedSocket = {};
+  session.updateClientCapabilities(
+    { [CLIENT_CAPS.explicitEventSubscriptions]: true },
+    unsubscribedSocket,
+  );
+  session.updateClientCapabilities(
+    { [CLIENT_CAPS.explicitEventSubscriptions]: true },
+    subscribedSocket,
+  );
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-1",
+    },
+    subscribedSocket,
+  );
+  targetedMessages.length = 0;
+
+  if (!gatewayListener) throw new Error("Gateway status listener was not installed");
+  const snapshot = [{ name: "zeeq", status: "needs-auth", critical: true, lastChangedAt: 1 }];
+  gatewayListener(snapshot);
+
+  expect(targetedMessages).toEqual([
+    {
+      source: subscribedSocket,
+      message: expect.objectContaining({
+        type: "mcp_status_update",
+        payload: expect.objectContaining({ servers: snapshot }),
+      }),
+    },
+  ]);
+  expect(messages).toEqual([]);
 });
 
 test("project.list returns every active project descriptor", async () => {

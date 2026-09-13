@@ -945,6 +945,116 @@ test("rewind clears the stale activity summary from the emitted state", async ()
   }
 });
 
+test("emits agent state for mcp_server_statuses only when the statuses actually change (KTD8)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-mcp-server-statuses-dedup-"));
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const emittedStatuses: unknown[] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedStatuses.push(event.agent.mcpServerStatuses);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const first = [{ name: "zeeq", status: "connected" }];
+
+    // Same statuses reported twice in a row (every turn's init message re-reports
+    // them, KTD8) must not double-emit; a real change must.
+    session.pushEvent({ type: "mcp_server_statuses", provider: "codex", statuses: first });
+    await drain();
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "codex",
+      statuses: [{ name: "zeeq", status: "connected" }],
+    });
+    await drain();
+    const second = [{ name: "zeeq", status: "needs-auth" }];
+    session.pushEvent({ type: "mcp_server_statuses", provider: "codex", statuses: second });
+    await drain();
+
+    unsubscribe();
+
+    expect(emittedStatuses).toEqual([first, second]);
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual(second);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the stale mcp_server_statuses from the emitted state (KTD8)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-mcp-server-statuses-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "codex",
+      statuses: [{ name: "zeeq", status: "needs-auth" }],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual([
+      { name: "zeeq", status: "needs-auth" },
+    ]);
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 async function createLiveEventAgent(workdir: string): Promise<{
   manager: AgentManager;
   agentId: string;

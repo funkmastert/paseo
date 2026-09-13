@@ -96,6 +96,7 @@ import {
   type AgentCreateSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentMetadata,
   type AgentMode,
   type AgentModelDefinition,
@@ -4312,6 +4313,14 @@ class ClaudeAgentSession implements AgentSession {
           sessionId: sessionUpdate.threadStartedSessionId,
         });
       }
+      // Every init message re-reports MCP server statuses (KTD8): there is no SDK push
+      // event for later changes, so re-capturing each turn is how stdio/pass-through
+      // servers' statuses stay current. AgentManager dedupes before broadcasting.
+      events.push({
+        type: "mcp_server_statuses",
+        provider: "claude",
+        statuses: sessionUpdate.mcpServerStatuses,
+      });
       return;
     }
     if (message.subtype === "status") {
@@ -4593,9 +4602,10 @@ class ClaudeAgentSession implements AgentSession {
   private handleSystemMessage(message: SDKSystemMessage): {
     threadStartedSessionId: string | null;
     notice: AgentTimelineItem | null;
+    mcpServerStatuses: AgentMcpServerStatus[];
   } {
     if (message.subtype !== "init") {
-      return { threadStartedSessionId: null, notice: null };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses: [] };
     }
 
     const msgRecord = toObjectRecord(message) ?? {};
@@ -4605,7 +4615,11 @@ class ClaudeAgentSession implements AgentSession {
       session: isObjectRecord(msgRecord.session) ? { id: msgRecord.session.id } : null,
     }).trim();
     if (!newSessionId) {
-      return { threadStartedSessionId: null, notice: null };
+      return {
+        threadStartedSessionId: null,
+        notice: null,
+        mcpServerStatuses: Array.isArray(message.mcp_servers) ? message.mcp_servers : [],
+      };
     }
     const existingSessionId = this.claudeSessionId;
     let threadStartedSessionId: string | null = null;
@@ -4651,7 +4665,10 @@ class ClaudeAgentSession implements AgentSession {
       this.lastRuntimeModel = message.model;
       this.cachedRuntimeInfo = null;
     }
-    return { threadStartedSessionId, notice };
+    // Defensive: some fixtures/older CLIs omit mcp_servers even though the current
+    // SDK type declares it required. Never crash the init handshake over it.
+    const mcpServerStatuses = Array.isArray(message.mcp_servers) ? message.mcp_servers : [];
+    return { threadStartedSessionId, notice, mcpServerStatuses };
   }
 
   private readMissingResumedConversationError(message: SDKMessage): string | null {

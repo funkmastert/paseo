@@ -119,6 +119,10 @@ class InMemoryAgentManager {
   subscribe() {
     return () => {};
   }
+
+  onMcpGatewayStatusChange() {
+    return () => {};
+  }
 }
 
 class EmptyAgentStorage {
