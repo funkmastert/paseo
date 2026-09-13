@@ -20,7 +20,11 @@ import {
   type McpGatewayServerEvent,
   type McpGatewayServerState,
 } from "./state.js";
-import { createGatewayOAuthClientProvider, McpGatewayOAuthStateStore } from "./oauth.js";
+import {
+  createGatewayOAuthClientProvider,
+  exchangeMcpGatewayAuthorizationCode,
+  McpGatewayOAuthStateStore,
+} from "./oauth.js";
 import { McpGatewayTokenStore } from "./token-store.js";
 
 interface LoggerLike {
@@ -108,7 +112,7 @@ export class McpGateway {
   private readonly logger: LoggerLike | undefined;
   private readonly tokenStore: McpGatewayTokenStore;
   private readonly oauthStateStore = new McpGatewayOAuthStateStore();
-  private readonly oauthRedirectBaseUrl: string | undefined;
+  private oauthRedirectBaseUrl: string | undefined;
   private readonly servers = new Map<string, McpGatewayServerRuntime>();
 
   constructor(options: McpGatewayOptions) {
@@ -177,6 +181,56 @@ export class McpGateway {
   /** Re-attempts a connection, e.g. after a re-auth completes at the daemon (R4). */
   async reconnect(name: string): Promise<void> {
     await this.connectServer(name);
+  }
+
+  /** Closes every connected upstream client. Best-effort — called at daemon shutdown. */
+  async stop(): Promise<void> {
+    await Promise.all(
+      Array.from(this.servers.values()).map(async (runtime) => {
+        try {
+          await runtime.client?.close();
+        } catch (error) {
+          this.logger?.warn({ err: error }, "Failed to close MCP gateway upstream client");
+        }
+      }),
+    );
+  }
+
+  /**
+   * The daemon's own stable reachable base URL (KTD3), resolved once the daemon is actually
+   * listening. Set lazily rather than at construction because the bound address (e.g. an
+   * OS-assigned port, or a wildcard host resolved to loopback) isn't known until the HTTP
+   * server starts.
+   */
+  setOAuthRedirectBaseUrl(baseUrl: string): void {
+    this.oauthRedirectBaseUrl = baseUrl;
+  }
+
+  /**
+   * Consumes a single-use OAuth `state` value (KTD3), returning the server name it was minted
+   * for, or `undefined` if the state is unknown, expired, or already used. The callback route
+   * (U2) calls this before doing anything else with a callback request.
+   */
+  consumeOAuthState(state: string): string | undefined {
+    return this.oauthStateStore.consume(state);
+  }
+
+  /**
+   * Completes the PKCE exchange for a callback's `code` against the server the (already
+   * consumed) `state` value named. On success, tokens are persisted via the SDK's provider
+   * callback and the server immediately attempts to reconnect (R4).
+   */
+  async completeOAuthCallback(name: string, code: string): Promise<void> {
+    const runtime = this.servers.get(name);
+    if (!runtime) {
+      throw new Error(`Unknown MCP gateway server "${name}"`);
+    }
+    await exchangeMcpGatewayAuthorizationCode({
+      serverUrl: runtime.config.url,
+      provider: this.buildOAuthProvider(name),
+      code,
+    });
+    await this.reconnect(name);
   }
 
   buildOAuthProvider(name: string): OAuthClientProvider {

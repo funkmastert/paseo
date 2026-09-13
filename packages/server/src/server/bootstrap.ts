@@ -133,6 +133,8 @@ import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
+import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
@@ -262,6 +264,34 @@ function createAgentMcpBaseUrl(listenTarget: ListenTarget | null): string | null
     "/mcp/agents",
     `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`,
   ).toString();
+}
+
+// KTD3: the MCP gateway's OAuth redirect_uri must be the daemon's own stable reachable base
+// URL, never a literal loopback, when reachable from elsewhere (e.g. a phone's browser). This
+// loopback form is the fallback when no such public base URL is configured — the strip's auth
+// action is responsible for saying so when that's the case (U7).
+function createMcpGatewayLoopbackBaseUrl(listenTarget: ListenTarget | null): string | null {
+  if (!listenTarget || listenTarget.type !== "tcp") {
+    return null;
+  }
+  const host = resolveAgentMcpClientHost(listenTarget.host);
+  return `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`;
+}
+
+function resolveMcpGatewayConfig(config: MutableDaemonConfig["mcpGateway"]): McpGatewayConfig {
+  return config ?? { enabled: false };
+}
+
+/** Broken out so its branches don't add to createPaseoDaemon's/logAndResolve's own complexity. */
+function applyMcpGatewayOAuthRedirectBaseUrl(
+  gateway: McpGateway,
+  serviceProxyPublicBaseUrl: string | null,
+  boundListenTarget: ListenTarget | null,
+): void {
+  const baseUrl = serviceProxyPublicBaseUrl ?? createMcpGatewayLoopbackBaseUrl(boundListenTarget);
+  if (baseUrl) {
+    gateway.setOAuthRedirectBaseUrl(baseUrl);
+  }
 }
 
 function createTerminalActivityUrl(listenTarget: ListenTarget | null): string | null {
@@ -398,6 +428,7 @@ export interface PaseoDaemonConfig {
   trustedProxies?: true | string[];
   mcpEnabled?: boolean;
   mcpInjectIntoAgents?: boolean;
+  mcpGateway?: MutableDaemonConfig["mcpGateway"];
   browserToolsEnabled?: boolean;
   git?: {
     maxProcessesPerSecond: number;
@@ -486,6 +517,8 @@ export interface PaseoDaemon {
   serviceProxy: ServiceProxySubsystem;
   scriptRuntimeStore: WorkspaceScriptRuntimeStore;
   browserToolsBroker: BrowserToolsBroker;
+  mcpGateway: McpGateway;
+  getMcpGatewayAuthToken(): string;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -555,6 +588,12 @@ function withDiskSweeperConfig(
   return config.diskSweeper !== undefined ? { diskSweeper: config.diskSweeper } : {};
 }
 
+function withMcpGatewayConfig(
+  config: Pick<PaseoDaemonConfig, "mcpGateway">,
+): Pick<MutableDaemonConfig, "mcpGateway"> {
+  return config.mcpGateway !== undefined ? { mcpGateway: config.mcpGateway } : {};
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -579,6 +618,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     },
     ...withTokenBurnMonitorConfig(config),
     ...withDiskSweeperConfig(config),
+    ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -670,6 +710,12 @@ export async function createPaseoDaemon(
   // no plaintext available). Mirrors the /api/files/download capability-token
   // pattern.
   const agentMcpAuthToken = randomUUID();
+
+  // Distinct capability token authenticating sessions to the MCP gateway's brokered-server
+  // proxy (/mcp/gateway/*, KTD1). Deliberately never the same value as agentMcpAuthToken above:
+  // the two surfaces protect different things (the daemon's own agent-control MCP vs. brokered
+  // external accounts), so leaking one must never grant the other.
+  const mcpGatewayAuthToken = randomUUID();
 
   const listenTarget = parseListenString(config.listen);
 
@@ -1499,6 +1545,24 @@ export async function createPaseoDaemon(
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
   setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
 
+  // MCP gateway (U1/U2): daemon-side client + auth authority for brokered external MCP
+  // servers, and the /mcp/gateway/* routes agent sessions relay through. Constructed with
+  // whatever `mcpGateway` config the daemon started with — live reconfiguration is out of
+  // scope here (see McpGateway's class doc) — and started below once the daemon's own
+  // reachable base URL is known (needed for the OAuth redirect_uri, KTD3).
+  const mcpGateway = new McpGateway({
+    paseoHome: config.paseoHome,
+    config: resolveMcpGatewayConfig(daemonConfigStore.get().mcpGateway),
+    logger,
+  });
+  installMcpGatewayRoutes(app, {
+    gateway: mcpGateway,
+    capabilityToken: mcpGatewayAuthToken,
+    password: config.auth?.password,
+    mcpDebug: config.mcpDebug,
+    logger,
+  });
+
   let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;
   {
@@ -1665,6 +1729,15 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
+            // KTD3: prefer the daemon's configured public base URL (the service-proxy
+            // precedent) over the loopback fallback, so a reachable-from-elsewhere daemon
+            // gets a redirect_uri a remote browser can actually complete OAuth against.
+            applyMcpGatewayOAuthRedirectBaseUrl(
+              mcpGateway,
+              serviceProxyPublicBaseUrl,
+              boundListenTarget,
+            );
+            await mcpGateway.start();
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
@@ -1882,6 +1955,7 @@ export async function createPaseoDaemon(
     agentManager.stopProviderSubagentSweep();
     agentTokenBurnMonitor?.stop();
     worktreeDiskMonitor?.stop();
+    await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
@@ -1913,6 +1987,10 @@ export async function createPaseoDaemon(
     serviceProxy,
     scriptRuntimeStore,
     browserToolsBroker,
+    // The gateway instance and its distinct capability token (KTD1) — the accessor session
+    // injection (U3) will need to build brokered `mcpServers` entries.
+    mcpGateway,
+    getMcpGatewayAuthToken: () => mcpGatewayAuthToken,
     start,
     stop,
     getListenTarget: () => boundListenTarget,
