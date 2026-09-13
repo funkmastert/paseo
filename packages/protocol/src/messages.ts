@@ -3168,6 +3168,16 @@ export const HubExecutionControlRequestSchema = z.object({
 
 export type HubExecutionControlRequest = z.infer<typeof HubExecutionControlRequestSchema>;
 
+// Starts interactive OAuth for one brokered MCP gateway server (U6/KTD3). Returns the
+// authorization URL for the client to open via the existing external-URL opener; completion
+// arrives later via the callback route + `mcp_status_update`, so there is no long-poll RPC.
+export const McpGatewayAuthStartRequestSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.request"),
+  requestId: z.string(),
+  name: z.string(),
+});
+export type McpGatewayAuthStartRequest = z.infer<typeof McpGatewayAuthStartRequestSchema>;
+
 // These connection event streams have no directory bootstrap or timeline membership.
 export const SessionEventSubscriptionSchema = z.enum([
   "project.update",
@@ -3194,6 +3204,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   HubExecutionAgentCreateRequestSchema,
   HubExecutionAgentValidateRequestSchema,
   HubExecutionControlRequestSchema,
+  McpGatewayAuthStartRequestSchema,
   BrowserAutomationExecuteResponseSchema,
   VoiceAudioChunkMessageSchema,
   AbortRequestMessageSchema,
@@ -6109,6 +6120,19 @@ export const McpStatusUpdateMessageSchema = z.object({
   }),
 });
 
+// Response to McpGatewayAuthStartRequestSchema (U6/KTD3). `authorizationUrl` is null only
+// when `error` is set — unknown server, a static-auth server with nothing to authorize
+// interactively, or a discovery/PKCE failure surfaced as a friendly message. Never carries
+// tokens or the PKCE verifier — the authorization URL itself is public (challenge only).
+export const McpGatewayAuthStartResponseMessageSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.response"),
+  payload: z.object({
+    requestId: z.string(),
+    authorizationUrl: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
 export const ProviderDiagnosticResponseMessageSchema = z.object({
   type: z.literal("provider_diagnostic_response"),
@@ -6799,6 +6823,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProvidersSnapshotUpdateMessageSchema,
   RefreshProvidersSnapshotResponseMessageSchema,
   McpStatusUpdateMessageSchema,
+  McpGatewayAuthStartResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   ListCommandsResponseSchema,
@@ -6977,6 +7002,9 @@ export type RefreshProvidersSnapshotResponseMessage = z.infer<
 >;
 export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
+export type McpGatewayAuthStartResponseMessage = z.infer<
+  typeof McpGatewayAuthStartResponseMessageSchema
+>;
 export type ProviderDiagnosticResponseMessage = z.infer<
   typeof ProviderDiagnosticResponseMessageSchema
 >;

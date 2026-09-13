@@ -338,7 +338,10 @@ export interface AgentManagerOptions {
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
   /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
-  mcpGateway?: Pick<McpGateway, "enabled" | "getServerNames" | "getSnapshot" | "on" | "off">;
+  mcpGateway?: Pick<
+    McpGateway,
+    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+  >;
   /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
   mcpGatewayAuthToken?: string;
   paseoToolsEnabled?: boolean;
@@ -801,7 +804,7 @@ export class AgentManager {
   private readonly mcpAuthToken: string | null;
   private mcpGateway: Pick<
     McpGateway,
-    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off"
+    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
   > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
@@ -946,7 +949,10 @@ export class AgentManager {
    * deferred-wiring pattern rather than a constructor-order dependency).
    */
   setMcpGateway(
-    gateway: Pick<McpGateway, "enabled" | "getServerNames" | "getSnapshot" | "on" | "off"> | null,
+    gateway: Pick<
+      McpGateway,
+      "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+    > | null,
     authToken: string | null,
   ): void {
     this.mcpGateway = gateway;
@@ -969,6 +975,18 @@ export class AgentManager {
     if (!gateway) return () => {};
     gateway.on("change", listener);
     return () => gateway.off("change", listener);
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered server (U6/KTD3's auth RPC), delegating to the
+   * gateway's own validation (unknown server, static-auth server) — this just adds the
+   * "no gateway configured at all" case the wire handler can't see otherwise.
+   */
+  async startMcpGatewayAuthorization(name: string): Promise<{ authorizationUrl: string }> {
+    if (!this.mcpGateway) {
+      throw new Error("MCP gateway is not enabled");
+    }
+    return this.mcpGateway.startAuthorization(name);
   }
 
   prepareForShutdown(): void {

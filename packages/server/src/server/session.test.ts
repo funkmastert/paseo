@@ -5448,6 +5448,95 @@ test("mcp_status_update is feature-gated: delivered only to sockets that subscri
   expect(messages).toEqual([]);
 });
 
+test("mcp_gateway.auth.start.request against an unknown server returns an error response (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      startMcpGatewayAuthorization: vi
+        .fn()
+        .mockRejectedValue(new Error('Unknown MCP gateway server "never-configured"')),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-1",
+    name: "never-configured",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-1",
+        authorizationUrl: null,
+        error: 'Unknown MCP gateway server "never-configured"',
+      },
+    },
+  ]);
+});
+
+test("mcp_gateway.auth.start.request against a static-auth server returns an error response (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const session = createSessionForTest({
+    messages,
+    agentManager: {
+      startMcpGatewayAuthorization: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('MCP gateway server "slack" uses static auth; nothing to authorize'),
+        ),
+    },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-2",
+    name: "slack",
+  });
+
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-2",
+        authorizationUrl: null,
+        error: 'MCP gateway server "slack" uses static auth; nothing to authorize',
+      },
+    },
+  ]);
+});
+
+test("mcp_gateway.auth.start.request happy path returns the authorization URL (U6)", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const startMcpGatewayAuthorization = vi.fn().mockResolvedValue({
+    authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+  });
+  const session = createSessionForTest({
+    messages,
+    agentManager: { startMcpGatewayAuthorization },
+  });
+
+  await session.handleMessage({
+    type: "mcp_gateway.auth.start.request",
+    requestId: "auth-3",
+    name: "github",
+  });
+
+  expect(startMcpGatewayAuthorization).toHaveBeenCalledWith("github");
+  expect(messages).toEqual([
+    {
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-3",
+        authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+        error: null,
+      },
+    },
+  ]);
+});
+
 test("project.list returns every active project descriptor", async () => {
   const messages: SessionOutboundMessage[] = [];
   const active = createPersistedProjectRecord({

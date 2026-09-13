@@ -6097,6 +6097,89 @@ test("sends provider.usage.list.request and resolves provider.usage.list.respons
   });
 });
 
+test("sends mcp_gateway.auth.start.request and resolves the authorization URL (U6)", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("github", { requestId: "auth-1" });
+
+  expect(JSON.parse(assertStr(mock.sent[0]))).toEqual({
+    type: "session",
+    message: {
+      type: "mcp_gateway.auth.start.request",
+      requestId: "auth-1",
+      name: "github",
+    },
+  });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-1",
+        authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+        error: null,
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-1",
+    authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
+    error: null,
+  });
+});
+
+test("resolves mcp_gateway.auth.start.response with an error for an unknown server", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger,
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  const authPromise = client.startMcpGatewayAuth("never-configured", { requestId: "auth-2" });
+
+  mock.triggerMessage(
+    wrapSessionMessage({
+      type: "mcp_gateway.auth.start.response",
+      payload: {
+        requestId: "auth-2",
+        authorizationUrl: null,
+        error: 'Unknown MCP gateway server "never-configured"',
+      },
+    }),
+  );
+
+  await expect(authPromise).resolves.toEqual({
+    requestId: "auth-2",
+    authorizationUrl: null,
+    error: 'Unknown MCP gateway server "never-configured"',
+  });
+});
+
 test("sends close_items_request and resolves close_items_response", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();

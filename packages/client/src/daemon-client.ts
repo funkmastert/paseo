@@ -715,6 +715,10 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type McpGatewayAuthStartPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.auth.start.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -4978,6 +4982,25 @@ export class DaemonClient {
       },
       responseType: "provider_diagnostic_response",
       timeout: 180000,
+    });
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server) — the caller opens `authorizationUrl` via the
+   * existing external-URL opener; completion arrives later via `mcp_status_update`.
+   */
+  async startMcpGatewayAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayAuthStartPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.auth.start.request",
+        name,
+      },
     });
   }
 

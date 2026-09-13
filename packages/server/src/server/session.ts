@@ -19,6 +19,7 @@ import {
   type WorkspaceScriptListRequest,
   type WorkspaceScriptStartRequest,
   type WorkspaceScriptStopRequest,
+  type McpGatewayAuthStartRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
@@ -2762,6 +2763,9 @@ export class Session {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
         return;
+      case "mcp_gateway.auth.start.request":
+        await this.handleMcpGatewayAuthStartRequest(msg);
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
         return;
@@ -4354,6 +4358,37 @@ export class Session {
   /**
    * Handle list commands request for an agent
    */
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Never throws to the caller — `AgentManager.startMcpGatewayAuthorization` rejects
+   * for an unknown server, a static-auth server (nothing to authorize interactively), or a
+   * disabled/unconfigured gateway, and all three land in the response's `error` field rather
+   * than an `rpc_error`, matching the workspace-script RPCs' error-in-payload convention.
+   */
+  private async handleMcpGatewayAuthStartRequest(
+    request: McpGatewayAuthStartRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.startMcpGatewayAuthorization(
+        request.name,
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: { requestId: request.requestId, authorizationUrl, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error:
+            error instanceof Error ? error.message : "Failed to start MCP gateway authorization",
+        },
+      });
+    }
+  }
+
   private async handleListCommandsRequest(
     msg: Extract<SessionInboundMessage, { type: "list_commands_request" }>,
   ): Promise<void> {

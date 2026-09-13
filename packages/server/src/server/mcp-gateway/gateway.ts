@@ -30,6 +30,8 @@ import {
   createGatewayOAuthClientProvider,
   exchangeMcpGatewayAuthorizationCode,
   McpGatewayOAuthStateStore,
+  startMcpGatewayAuthorization,
+  type StartMcpGatewayAuthResult,
 } from "./oauth.js";
 import { McpGatewayTokenStore } from "./token-store.js";
 import type { PushNotificationSender } from "../push/index.js";
@@ -350,6 +352,27 @@ export class McpGateway {
       code,
     });
     await this.reconnect(name);
+  }
+
+  /**
+   * Begins interactive OAuth for one server (U6/KTD3, R6's "one-click auth" action): drives
+   * discovery + dynamic registration + the PKCE challenge via U1's oauth module, returning the
+   * authorization URL for a wire RPC to hand back to the client. Static-auth servers have
+   * nothing to authorize interactively (their credential is a stored header, set out of band),
+   * so they're rejected here rather than producing a URL that would never complete anything.
+   */
+  async startAuthorization(name: string): Promise<StartMcpGatewayAuthResult> {
+    const runtime = this.servers.get(name);
+    if (!runtime) {
+      throw new Error(`Unknown MCP gateway server "${name}"`);
+    }
+    if (runtime.config.auth === "static") {
+      throw new Error(`MCP gateway server "${name}" uses static auth; nothing to authorize`);
+    }
+    return startMcpGatewayAuthorization({
+      serverUrl: runtime.config.url,
+      provider: this.buildOAuthProvider(name),
+    });
   }
 
   buildOAuthProvider(name: string): OAuthClientProvider {

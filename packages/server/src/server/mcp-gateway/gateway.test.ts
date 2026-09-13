@@ -6,8 +6,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
+import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { DemoInMemoryAuthProvider } from "@modelcontextprotocol/sdk/examples/server/demoInMemoryOAuthProvider.js";
 
 import { evaluateTransitionNotification, McpGateway } from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
@@ -106,6 +109,43 @@ async function startFixtureMcpServer(options: {
   fixtureServers.push(() => new Promise<void>((resolve) => httpServer.close(() => resolve())));
 
   return { url: `http://127.0.0.1:${port}/mcp` };
+}
+
+/**
+ * A minimal, real OAuth authorization server (the SDK's own `DemoInMemoryAuthProvider` +
+ * `mcpAuthRouter`, matching `routes.local.e2e.test.ts`'s fixture) for exercising
+ * `startAuthorization()`'s discovery + dynamic-registration + PKCE-challenge path without
+ * mocks. No protected resource endpoint is mounted — `startAuthorization()` never calls it,
+ * only the authorization server's own discovery and registration endpoints.
+ */
+async function startOAuthAuthorizationServer(): Promise<{ url: string }> {
+  // Bind an ephemeral port first (port 0) so `issuerUrl` can be constructed before the
+  // auth router — which signs URLs from it — is mounted.
+  const probe = http.createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const { port } = probe.address() as AddressInfo;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  const baseUrl = new URL(`http://127.0.0.1:${port}`);
+
+  const app = express();
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
+  app.use(
+    mcpAuthRouter({
+      provider: new DemoInMemoryAuthProvider(),
+      issuerUrl: baseUrl,
+      resourceServerUrl: baseUrl,
+      scopesSupported: ["mcp:tools"],
+    }),
+  );
+
+  const httpServer = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const server = app.listen(port, "127.0.0.1", () => resolve(server));
+  });
+
+  fixtureServers.push(() => new Promise<void>((resolve) => httpServer.close(() => resolve())));
+
+  return { url: baseUrl.toString() };
 }
 
 describe("McpGateway", () => {
@@ -359,6 +399,54 @@ describe("McpGateway", () => {
     await gateway.reconnect("slack");
 
     expect(gateway.getServerState("slack")?.status).toBe("connected");
+  });
+
+  describe("startAuthorization (U6)", () => {
+    test("an unknown server name rejects instead of starting a flow for nothing", async () => {
+      const gateway = new McpGateway({
+        paseoHome: createTempHome(),
+        config: { enabled: true, servers: {} },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+
+      await expect(gateway.startAuthorization("never-configured")).rejects.toThrow(
+        /Unknown MCP gateway server/,
+      );
+    });
+
+    test("a static-auth server rejects: its credential is a stored header, not an interactive flow", async () => {
+      const gateway = new McpGateway({
+        paseoHome: createTempHome(),
+        config: {
+          enabled: true,
+          servers: { slack: { url: "http://127.0.0.1:1/mcp", transport: "http", auth: "static" } },
+        },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+
+      await expect(gateway.startAuthorization("slack")).rejects.toThrow(/static auth/);
+    });
+
+    test("an oauth-class server returns an authorization URL carrying a PKCE challenge (R6, happy path)", async () => {
+      const authServer = await startOAuthAuthorizationServer();
+      const gateway = new McpGateway({
+        paseoHome: createTempHome(),
+        config: {
+          enabled: true,
+          servers: { fixture: { url: authServer.url, transport: "http", auth: "oauth" } },
+        },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+
+      const result = await gateway.startAuthorization("fixture");
+
+      const authorizationUrl = new URL(result.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("code_challenge")).toBeTruthy();
+      expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(authorizationUrl.searchParams.get("redirect_uri")).toBe(
+        "https://daemon.example.test/mcp/gateway/oauth/callback",
+      );
+    });
   });
 });
 

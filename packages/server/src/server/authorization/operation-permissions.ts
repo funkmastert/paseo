@@ -114,6 +114,7 @@ const INBOUND_PERMISSION = {
   "loop/logs": "automation.manage",
   "loop/run": "automation.manage",
   "loop/stop": "automation.manage",
+  "mcp_gateway.auth.start.request": "daemon.manage",
   open_in_editor_request: "workspace.write",
   open_project_request: "workspace.manage",
   paseo_worktree_archive_request: "workspace.manage",
@@ -330,6 +331,10 @@ const OUTBOUND_PERMISSION = {
   // COMPAT(mcpStatus): added in v0.8.1. Copies providers_snapshot_update's
   // permission mapping (KTD7).
   mcp_status_update: "daemon.read",
+  // U6: same daemon.manage tier as the other daemon-mutating auth/config RPCs (set_daemon_config,
+  // plugin management, restart) rather than a workspace-scoped permission — the gateway itself
+  // is a daemon-global resource, not tied to any one workspace.
+  "mcp_gateway.auth.start.response": "daemon.manage",
   open_in_editor_response: "workspace.read",
   open_project_response: "workspace.manage",
   paseo_worktree_archive_response: "workspace.manage",

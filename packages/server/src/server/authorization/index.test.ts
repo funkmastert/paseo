@@ -89,6 +89,31 @@ describe("SessionAuthorization", () => {
     ).toBe(true);
   });
 
+  // U6: same daemon.manage tier as set_daemon_config/plugin management — a Hub with only
+  // hub.execute (or daemon.read) can't start interactive auth for a brokered server.
+  test("mcp_gateway.auth.start requires daemon.manage; daemon.read and hub.execute alone don't grant it", () => {
+    expect(
+      new SessionAuthorization(["hub.execute"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(false);
+    expect(
+      new SessionAuthorization(["daemon.read"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(false);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsInbound(
+        inboundMessage("mcp_gateway.auth.start.request"),
+      ),
+    ).toBe(true);
+    expect(
+      new SessionAuthorization(["daemon.manage"]).allowsOutbound(
+        outboundMessage("mcp_gateway.auth.start.response"),
+      ),
+    ).toBe(true);
+  });
+
   test("Hub can operate ordinary agents and recover workspaces without daemon administration", () => {
     const authorization = new SessionAuthorization(["hub.execute"]);
     for (const type of [
