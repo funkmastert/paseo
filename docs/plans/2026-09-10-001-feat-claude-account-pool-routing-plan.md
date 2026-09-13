@@ -127,7 +127,7 @@ flowchart TB
 - Routing schedule- and heartbeat-created agents: the schedule service creates agents with no caller identity and pins the provider chosen at schedule-creation time, so they classify as human-created and pass through untouched. Configure schedules on a pool provider directly if their spend should land there.
 - Non-Claude providers and non-macOS platforms.
 
-*(Per-account usage rows in the Host Usage screen — previously deferred — are now substantially delivered by patch (d): the app renders one row per providerId the daemon returns, so per-entry fetchers surface there and in the context-window tooltip without app changes.)*
+_(Per-account usage rows in the Host Usage screen — previously deferred — are now substantially delivered by patch (d): the app renders one row per providerId the daemon returns, so per-entry fetchers surface there and in the context-window tooltip without app changes.)_
 
 ### Dependencies / Assumptions
 
@@ -286,15 +286,15 @@ flowchart TB
 
 ## Verification Contract
 
-| Gate | Command | Applies to |
-|---|---|---|
-| Types (fork) | `npm run typecheck` (after `npm run build:client` when client/protocol changed) | U1-U3, U5, U8 |
-| Lint/format (fork) | `npm run lint` / `npm run format` | U1-U3, U5, U8 |
-| Unit tests (fork) | `npx vitest run <changed test file> --bail=1` | U1-U3, U5 |
-| Plugin types/tests | `npm run typecheck` and `npx vitest run` in `<plugin>/` | U4, U6-U7 |
-| E2E | `npx vitest run packages/server/src/server/plugins/account-pool-routing.e2e.test.ts --bail=1 > /tmp/test-output.txt 2>&1` | U8 |
-| Full suite | fork CI on push (never locally) | all |
-| Live proof | dev-daemon smoke: leader spawn lands on worker account; simulated cap on the single worker proves pool-dry fallback (F3) with one notification; Host Usage shows both accounts | U5, U8 |
+| Gate               | Command                                                                                                                                                                        | Applies to    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------- |
+| Types (fork)       | `npm run typecheck` (after `npm run build:client` when client/protocol changed)                                                                                                | U1-U3, U5, U8 |
+| Lint/format (fork) | `npm run lint` / `npm run format`                                                                                                                                              | U1-U3, U5, U8 |
+| Unit tests (fork)  | `npx vitest run <changed test file> --bail=1`                                                                                                                                  | U1-U3, U5     |
+| Plugin types/tests | `npm run typecheck` and `npx vitest run` in `<plugin>/`                                                                                                                        | U4, U6-U7     |
+| E2E                | `npx vitest run packages/server/src/server/plugins/account-pool-routing.e2e.test.ts --bail=1 > /tmp/test-output.txt 2>&1`                                                      | U8            |
+| Full suite         | fork CI on push (never locally)                                                                                                                                                | all           |
+| Live proof         | dev-daemon smoke: leader spawn lands on worker account; simulated cap on the single worker proves pool-dry fallback (F3) with one notification; Host Usage shows both accounts | U5, U8        |
 
 ## Definition of Done
 
