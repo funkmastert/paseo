@@ -2371,6 +2371,22 @@ export class Session {
           },
           source,
         );
+        // COMPAT(mcpStatus): the gateway only pushes on state changes, so a client that
+        // connects after the gateway has settled would see an empty strip until the next
+        // real transition. Hand the newly-subscribing source the current snapshot eagerly;
+        // skipped when empty so gateway-less daemons emit nothing (R10).
+        if (msg.events.includes("mcp_status_update")) {
+          const snapshot = this.agentManager.getMcpGatewaySnapshot();
+          if (snapshot.length > 0) {
+            this.emitForSource(
+              {
+                type: "mcp_status_update",
+                payload: { servers: snapshot, generatedAt: new Date().toISOString() },
+              },
+              source,
+            );
+          }
+        }
         return undefined;
       }
       case "agent.timeline.set_subscription.request": {

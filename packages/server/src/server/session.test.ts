@@ -383,6 +383,7 @@ function createSessionForTest(options: SessionForTestOptions = {}): Session {
       listProviderSubagentActivity: vi.fn(() => []),
       subscribe: vi.fn(() => () => {}),
       onMcpGatewayStatusChange: vi.fn(() => () => {}),
+      getMcpGatewaySnapshot: vi.fn(() => []),
       ...options.agentManager,
     }),
     agentStorage: asAgentStorage({
@@ -5446,6 +5447,63 @@ test("mcp_status_update is feature-gated: delivered only to sockets that subscri
     },
   ]);
   expect(messages).toEqual([]);
+});
+
+test("subscribing to mcp_status_update eagerly delivers the current gateway snapshot", async () => {
+  const messages: SessionOutboundMessage[] = [];
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const snapshot = [{ name: "zeeq", status: "connected", critical: true, lastChangedAt: 7 }];
+  const session = createSessionForTest({
+    messages,
+    targetedMessages,
+    agentManager: {
+      onMcpGatewayStatusChange: vi.fn(() => () => {}),
+      getMcpGatewaySnapshot: vi.fn(() => snapshot),
+    },
+  });
+
+  const socket = {};
+  session.updateClientCapabilities({ [CLIENT_CAPS.explicitEventSubscriptions]: true }, socket);
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-eager",
+    },
+    socket,
+  );
+
+  const eager = targetedMessages.filter(({ message }) => message.type === "mcp_status_update");
+  expect(eager).toEqual([
+    {
+      source: socket,
+      message: expect.objectContaining({
+        type: "mcp_status_update",
+        payload: expect.objectContaining({ servers: snapshot }),
+      }),
+    },
+  ]);
+  expect(messages).toEqual([]);
+});
+
+test("subscribing to mcp_status_update with an empty gateway snapshot emits nothing eagerly", async () => {
+  const targetedMessages: Array<{ source: object; message: SessionOutboundMessage }> = [];
+  const session = createSessionForTest({ targetedMessages });
+
+  const socket = {};
+  session.updateClientCapabilities({ [CLIENT_CAPS.explicitEventSubscriptions]: true }, socket);
+  await session.handleMessage(
+    {
+      type: "session.events.set_subscription.request",
+      events: ["mcp_status_update"],
+      requestId: "sub-empty",
+    },
+    socket,
+  );
+
+  expect(targetedMessages.filter(({ message }) => message.type === "mcp_status_update")).toEqual(
+    [],
+  );
 });
 
 test("mcp_gateway.auth.start.request against an unknown server returns an error response (U6)", async () => {
