@@ -3400,6 +3400,132 @@ test("createAgent injects paseo MCP server only into provider launch config", as
   });
 });
 
+test("createAgent injects brokered MCP gateway servers only into provider launch config (U3)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class CaptureClient extends TestAgentClient {
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: { enabled: true, getServerNames: () => ["github", "zeeq"] },
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000110",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(snapshot.config.mcpServers).toBeUndefined();
+  expect(client.lastConfig?.mcpGatewayEnabled).toBe(true);
+  expect(client.lastConfig?.mcpServers).toEqual({
+    github: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/github",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+    zeeq: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/zeeq",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+  });
+
+  const stored = await storage.get(snapshot.id);
+  expect(stored?.config?.mcpServers).toBeUndefined();
+});
+
+test("createAgent never injects brokered MCP gateway servers for a non-Claude provider (U3 scope)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpGateway: { enabled: true, getServerNames: () => ["github"] },
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000111",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewayEnabled).toBeUndefined();
+  expect(client.lastConfig?.mcpServers).toBeUndefined();
+});
+
+test("createAgent launch config is byte-identical to the pre-gateway shape when the gateway is disabled (R10)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const disabledGatewayManager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: { enabled: false, getServerNames: () => ["github"] },
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000112",
+  });
+  disabledGatewayManager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await disabledGatewayManager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const withDisabledGateway = client.lastConfig;
+
+  const noGatewayAtAllManager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000113",
+  });
+
+  await noGatewayAtAllManager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const withNoGatewayConfigured = client.lastConfig;
+
+  expect(withDisabledGateway).toEqual(withNoGatewayConfigured);
+  expect(withDisabledGateway?.mcpGatewayEnabled).toBeUndefined();
+  expect(withDisabledGateway?.mcpServers).toBeUndefined();
+});
+
 test("createAgent closes and rejects a provider session that cannot honor MCP servers", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);

@@ -42,6 +42,7 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
+import { readPerDirStdioMcpServers } from "../../../mcp-gateway/per-dir-stdio.js";
 import { parsePartialJsonObject } from "./partial-json.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { ClaudeTaskState } from "./task-state.js";
@@ -3339,6 +3340,8 @@ class ClaudeAgentSession implements AgentSession {
       base.mcpServers = this.normalizeMcpServers(this.config.mcpServers);
     }
 
+    this.applyMcpGatewayOptions(base);
+
     if (this.config.model) {
       base.model = this.config.model;
     }
@@ -3353,6 +3356,36 @@ class ClaudeAgentSession implements AgentSession {
       ];
     }
     return base;
+  }
+
+  /**
+   * U3/KTD5: the MCP gateway replaces per-dir remote server definitions for sessions it
+   * covers. `strictMcpConfig` is the only SDK switch that stops per-dir servers from loading
+   * via `settingSources`, but it drops locally-defined stdio entries too — so re-inject those
+   * verbatim ourselves, sourced from the same config dir + project `.mcp.json` the CLI would
+   * otherwise have read them from. `this.config.mcpGatewayEnabled` is a per-launch signal set
+   * by `withRuntimeMcpGatewayServers` (agent-manager); it's absent when the gateway is
+   * disabled, so this no-ops byte-identically then (R10).
+   */
+  private applyMcpGatewayOptions(base: ClaudeOptions): void {
+    if (!this.config.mcpGatewayEnabled) {
+      return;
+    }
+    base.strictMcpConfig = true;
+    const stdioServers = readPerDirStdioMcpServers({
+      configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
+      projectDir: this.config.cwd,
+      logger: this.logger,
+    });
+    if (Object.keys(stdioServers).length === 0) {
+      return;
+    }
+    base.mcpServers = {
+      ...this.normalizeMcpServers(stdioServers),
+      // Anything already present (brokered gateway entries, or the session's own stored
+      // config) wins over an auto-discovered stdio entry of the same name.
+      ...base.mcpServers,
+    };
   }
 
   private buildSettingsOptions(

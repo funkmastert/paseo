@@ -778,6 +778,152 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  describe("MCP gateway session injection (U3)", () => {
+    async function createFixtureDirs(): Promise<{ configDir: string; projectDir: string }> {
+      const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-config-"));
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-project-"));
+      return { configDir, projectDir };
+    }
+
+    test("sets strictMcpConfig and merges brokered + re-injected stdio entries", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(configDir, ".claude.json"),
+          JSON.stringify({
+            mcpServers: {
+              "global-tool": { type: "stdio", command: "global-tool-bin" },
+              // A remote per-dir entry: must NOT survive strictMcpConfig suppression.
+              notion: { type: "http", url: "https://mcp.notion.com/mcp" },
+            },
+          }),
+        );
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({
+            mcpServers: { "project-tool": { type: "stdio", command: "./scripts/tool.sh" } },
+          }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBe(true);
+        expect(options.mcpServers).toMatchObject({
+          github: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/gateway/github",
+            headers: { Authorization: "Bearer gw-token" },
+          },
+          "global-tool": { type: "stdio", command: "global-tool-bin" },
+          "project-tool": { type: "stdio", command: "./scripts/tool.sh" },
+        });
+        expect(options.mcpServers.notion).toBeUndefined();
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("a brokered/stored entry wins over a same-named re-injected stdio entry", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { github: { type: "stdio", command: "local-shim" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.mcpServers.github).toMatchObject({
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/gateway/github",
+        });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("no-ops byte-identically when the gateway is disabled (R10)", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        // Even with stdio entries on disk, nothing should be read when the per-launch
+        // `mcpGatewayEnabled` signal is absent — proving R10/AE4's "no cost when unused".
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-tool": { type: "stdio", command: "tool" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpServers: { hub: { type: "http", url: "http://127.0.0.1/hub" } },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBeUndefined();
+        expect(options.mcpServers).toEqual({ hub: { type: "http", url: "http://127.0.0.1/hub" } });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("lists fast mode only for supported Opus models", async () => {
     const client = new ClaudeAgentClient({ logger, resolveBinary: async () => "/test/claude/bin" });
 

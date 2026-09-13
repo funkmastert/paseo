@@ -80,7 +80,12 @@ import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
 import { summarizeLatestActivityItem } from "./activity-curator.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  stripInternalPaseoMcpServer,
+  withRuntimeMcpGatewayServers,
+  withRuntimePaseoMcpServer,
+} from "./runtime-mcp-config.js";
+import type { McpGateway } from "../mcp-gateway/gateway.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -330,6 +335,10 @@ export interface AgentManagerOptions {
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
+  /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
+  mcpGateway?: Pick<McpGateway, "enabled" | "getServerNames">;
+  /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
+  mcpGatewayAuthToken?: string;
   paseoToolsEnabled?: boolean;
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
@@ -779,6 +788,9 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
+  private mcpGateway: Pick<McpGateway, "enabled" | "getServerNames"> | null = null;
+  private mcpGatewayAuthToken: string | null = null;
+  private mcpGatewayBaseUrl: string | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -808,6 +820,7 @@ export class AgentManager {
     this.onAgentTurnFinished = options.onAgentTurnFinished;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.configureMcpGateway(options);
     this.configurePaseoTools(options);
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
@@ -852,6 +865,11 @@ export class AgentManager {
   private configurePaseoTools(options: AgentManagerOptions): void {
     this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
     this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
+  }
+
+  private configureMcpGateway(options: AgentManagerOptions): void {
+    this.mcpGateway = options?.mcpGateway ?? null;
+    this.mcpGatewayAuthToken = options?.mcpGatewayAuthToken ?? null;
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
@@ -906,6 +924,24 @@ export class AgentManager {
 
   setMcpBaseUrl(url: string | null): void {
     this.mcpBaseUrl = url;
+  }
+
+  /**
+   * Wires the gateway instance + its distinct capability token in after both are constructed
+   * (bootstrap builds the gateway after the agent manager, mirroring `setPaseoToolCatalogFactory`'s
+   * deferred-wiring pattern rather than a constructor-order dependency).
+   */
+  setMcpGateway(
+    gateway: Pick<McpGateway, "enabled" | "getServerNames"> | null,
+    authToken: string | null,
+  ): void {
+    this.mcpGateway = gateway;
+    this.mcpGatewayAuthToken = authToken;
+  }
+
+  /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
+  setMcpGatewayBaseUrl(url: string | null): void {
+    this.mcpGatewayBaseUrl = url;
   }
 
   prepareForShutdown(): void {
@@ -5371,14 +5407,22 @@ export class AgentManager {
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
     const launchConfig = this.applyDaemonAppendSystemPrompt(
-      withRuntimePaseoMcpServer({
-        config: storedConfig,
-        agentId,
-        mcpBaseUrl:
-          this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-            ? this.mcpBaseUrl
-            : null,
-        mcpAuthToken: this.mcpAuthToken,
+      withRuntimeMcpGatewayServers({
+        config: withRuntimePaseoMcpServer({
+          config: storedConfig,
+          agentId,
+          mcpBaseUrl:
+            this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
+              ? this.mcpBaseUrl
+              : null,
+          mcpAuthToken: this.mcpAuthToken,
+        }),
+        // v1 targets the Claude adapter only (Scope Boundaries) — strictMcpConfig's stdio
+        // drop only has a re-injection counterpart there today.
+        enabled: storedConfig.provider === "claude" && (this.mcpGateway?.enabled ?? false),
+        gatewayBaseUrl: this.mcpGatewayBaseUrl,
+        serverNames: this.mcpGateway?.getServerNames() ?? [],
+        gatewayAuthToken: this.mcpGatewayAuthToken,
       }),
     );
     return { storedConfig, launchConfig, paseoToolPolicy };

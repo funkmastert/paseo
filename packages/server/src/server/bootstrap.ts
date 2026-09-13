@@ -1562,6 +1562,10 @@ export async function createPaseoDaemon(
     mcpDebug: config.mcpDebug,
     logger,
   });
+  // U3: wires the gateway + its distinct capability token into session injection
+  // (`prepareSessionConfig`'s `withRuntimeMcpGatewayServers`). Deferred to a setter rather than
+  // a constructor option because the gateway is built after the agent manager.
+  agentManager.setMcpGateway(mcpGateway, mcpGatewayAuthToken);
 
   let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;
@@ -1742,6 +1746,10 @@ export async function createPaseoDaemon(
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
+            // U3: the same loopback-normalized base the /mcp/agents entry uses (agent
+            // subprocesses run on this machine, same as the daemon) — distinct from the
+            // OAuth redirect base URL (KTD3), which prefers a publicly reachable address.
+            agentManager.setMcpGatewayBaseUrl(createMcpGatewayLoopbackBaseUrl(boundListenTarget));
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;

@@ -642,6 +642,13 @@ export interface AgentSessionConfig {
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
+   * Runtime-only per-launch signal (KTD5/KTD6): the MCP gateway is enabled for this launch, so
+   * the Claude adapter should set `strictMcpConfig` and re-inject per-dir stdio entries itself.
+   * Never persisted — stripped from storage the same way the brokered `mcpServers` entries are
+   * (`stripMcpGatewayServers` in `runtime-mcp-config.ts`).
+   */
+  mcpGatewayEnabled?: boolean;
+  /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.
    */
