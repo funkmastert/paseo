@@ -167,6 +167,22 @@ const MutableTokenBurnMonitorConfigSchema = z
 
 const MutableTokenBurnMonitorPatchSchema = MutableTokenBurnMonitorConfigSchema;
 
+// Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
+// `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
+// reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const MutableDiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDiskSweeperPatchSchema = MutableDiskSweeperConfigSchema;
+
 export const TerminalProfileSchema = z
   .object({
     id: z.string(),
@@ -272,6 +288,7 @@ export const MutableDaemonConfigSchema = z
     providers: z.record(z.string(), MutableDaemonProviderConfigSchema).default({}),
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
+    diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
@@ -294,6 +311,7 @@ export const MutableDaemonConfigPatchSchema = z
     removeProviders: z.array(z.string().min(1)).optional(),
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
+    diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -3912,6 +3930,17 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
   .optional()
   .nullable();
 
+// Sampled by the daemon-side WorktreeDiskMonitor via `du -sk`, never computed client-side.
+// `bytes` is the last successful sample; `sampledAt` lets the client show its age and decide
+// whether it's worth trusting. Absent entirely until the workspace has been sampled at least
+// once — see docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+export const WorkspaceDiskUsageSchema = z.object({
+  bytes: z.number(),
+  sampledAt: z.string(),
+});
+
+export type WorkspaceDiskUsage = z.infer<typeof WorkspaceDiskUsageSchema>;
+
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
     id: z.string(),
@@ -3976,6 +4005,7 @@ export const WorkspaceDescriptorPayloadSchema = z
     project: ProjectPlacementPayloadSchema.optional(),
     // COMPAT(directorySync): sequence of this latest directory projection.
     syncSeq: z.number().int().positive().optional(),
+    diskUsage: WorkspaceDiskUsageSchema.nullable().optional(),
   })
   .transform((workspace) => ({
     ...workspace,

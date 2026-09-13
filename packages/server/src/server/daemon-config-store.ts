@@ -24,6 +24,7 @@ interface SupportedMutableConfigPatch {
   removeProviders?: string[];
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
+  diskSweeper?: MutableDaemonConfig["diskSweeper"];
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
@@ -194,6 +195,7 @@ const RELOADABLE_PATHS = [
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
   "agents.skills.selection",
+  "worktrees.diskSweeper",
   "pluginsEnabled",
 ] as const;
 
@@ -218,6 +220,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.skills.selection", "skills.selection"],
+  ["worktrees.diskSweeper", "diskSweeper"],
   ["pluginsEnabled", "pluginsEnabled"],
 ]);
 
@@ -283,6 +286,12 @@ function pickTokenBurnMonitorPatch(
   return tokenBurnMonitor === undefined ? {} : { tokenBurnMonitor };
 }
 
+function pickDiskSweeperPatch(
+  diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
+): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
+  return diskSweeper === undefined ? {} : { diskSweeper };
+}
+
 function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMutableConfigPatch {
   return {
     ...(patch.relay?.enabled !== undefined ? { relay: { enabled: patch.relay.enabled } } : {}),
@@ -296,6 +305,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...(patch.removeProviders !== undefined ? { removeProviders: patch.removeProviders } : {}),
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
+    ...pickDiskSweeperPatch(patch.diskSweeper),
     ...(patch.autoArchiveAfterMerge !== undefined
       ? { autoArchiveAfterMerge: patch.autoArchiveAfterMerge }
       : {}),
@@ -651,6 +661,7 @@ function mergeMutablePatchIntoPersistedConfig(params: {
   const { persisted, patch, removeProviders, persistRelayEnabled } = params;
   const daemon = mergeMutableDaemonPatch(persisted.daemon, patch, persistRelayEnabled);
   const agents = mergeMutableAgentPatch(persisted.agents, patch, removeProviders);
+  const worktrees = mergeMutableWorktreesPatch(persisted.worktrees, patch);
   return {
     ...persisted,
     ...(patch.pluginsEnabled !== undefined ? { pluginsEnabled: patch.pluginsEnabled } : {}),
@@ -658,6 +669,7 @@ function mergeMutablePatchIntoPersistedConfig(params: {
     ...(patch.agentModelPolicy !== undefined ? { agentModelPolicy: patch.agentModelPolicy } : {}),
     ...(daemon ? { daemon } : { daemon: undefined }),
     ...(agents ? { agents } : { agents: undefined }),
+    ...(worktrees ? { worktrees } : { worktrees: undefined }),
   } as PersistedConfig;
 }
 
@@ -697,6 +709,35 @@ function mergeTokenBurnMonitorForPersist(
     return persisted;
   }
   return { ...persisted, ...patch };
+}
+
+type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
+
+function mergeDiskSweeperForPersist(
+  persisted: PersistedDiskSweeper,
+  patch: SupportedMutableConfigPatch["diskSweeper"],
+): PersistedDiskSweeper {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
+function mergeMutableWorktreesPatch(
+  persistedWorktrees: PersistedConfig["worktrees"],
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+): PersistedConfig["worktrees"] {
+  if (patch.diskSweeper === undefined) {
+    return persistedWorktrees;
+  }
+
+  const next = { ...persistedWorktrees } as NonNullable<PersistedConfig["worktrees"]>;
+  const diskSweeper = mergeDiskSweeperForPersist(
+    persistedWorktrees?.diskSweeper,
+    patch.diskSweeper,
+  );
+  if (diskSweeper !== undefined) next.diskSweeper = diskSweeper;
+  return Object.keys(next).length > 0 ? next : undefined;
 }
 
 function mergeMutableAgentPatch(

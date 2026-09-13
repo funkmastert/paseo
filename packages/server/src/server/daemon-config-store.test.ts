@@ -1024,6 +1024,92 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-toggles worktrees.diskSweeper.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          worktrees: {
+            diskSweeper: { retentionDays: 3, maxDeletionsPerTick: 2 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        diskSweeper: { retentionDays: 3, maxDeletionsPerTick: 2 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ diskSweeper: { enabled: false } });
+
+    expect(next.diskSweeper).toEqual({
+      retentionDays: 3,
+      maxDeletionsPerTick: 2,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.worktrees?.diskSweeper).toEqual({
+      retentionDays: 3,
+      maxDeletionsPerTick: 2,
+      enabled: false,
+    });
+  });
+
+  test("patch persists diskSweeper without disturbing an existing worktrees.root", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          worktrees: { root: "/custom/worktrees" },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+
+    store.patch({ diskSweeper: { enabled: false } });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.worktrees?.root).toBe("/custom/worktrees");
+    expect(persisted.worktrees?.diskSweeper).toEqual({ enabled: false });
+  });
+
   test("patch persists metadata generation providers without disturbing tokenBurnMonitor", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

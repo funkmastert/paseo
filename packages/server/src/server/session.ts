@@ -24,6 +24,7 @@ import {
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import type {
   TerminalManager,
@@ -480,6 +481,10 @@ export interface SessionOptions {
   workspaceGitService: WorkspaceGitService;
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
+  /** Reads the daemon-wide WorktreeDiskMonitor's last sample for a workspace, if any. */
+  getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  /** Fire-and-forget: asks the monitor to sample a workspace outside its normal rotation. */
+  requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   pluginRuntime?: {
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
@@ -693,6 +698,8 @@ export class Session {
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly workspaceRecovery: WorkspaceRecoveryService;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
@@ -789,6 +796,8 @@ export class Session {
       workspaceGitService,
       workspaceAutoName,
       daemonConfigStore,
+      getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample,
       pluginRuntime,
       orchestrationSkills,
       stt,
@@ -996,6 +1005,8 @@ export class Session {
         })
       : null;
     this.daemonConfigStore = daemonConfigStore;
+    this.getWorktreeDiskUsage = getWorktreeDiskUsage;
+    this.requestWorktreeDiskUsageSample = requestWorktreeDiskUsageSample;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1088,6 +1099,9 @@ export class Session {
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
+      getDiskUsage: (workspaceId) => this.getWorktreeDiskUsage?.(workspaceId),
+      requestDiskUsageSample: (workspaceId, cwd) =>
+        this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
     });
 
     this.voiceSession = new VoiceSession({
@@ -4527,6 +4541,8 @@ export class Session {
         markWorkspaceArchiving: (workspaceIds, archivingAt) =>
           this.markWorkspaceArchiving(workspaceIds, archivingAt),
         clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+        requestDiskUsageSample: (workspaceId, cwd) =>
+          this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
         killTerminalsForWorkspace: (workspaceId) =>
           this.terminalController.killTerminalsForWorkspace(workspaceId),
         sessionLogger: this.sessionLogger,
@@ -6852,6 +6868,8 @@ export class Session {
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>
             this.markWorkspaceArchiving(workspaceIds, archivingAt),
           clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+          requestDiskUsageSample: (workspaceId, cwd) =>
+            this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
           assertWorkspaceAutomationAllowed: (workspaceId) =>
             assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
           killTerminalsForWorkspace: (workspaceId) =>

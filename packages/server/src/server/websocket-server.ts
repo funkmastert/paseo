@@ -26,6 +26,7 @@ import {
   type ServerCapabilities,
   type WSOutboundMessage,
   wrapSessionMessage,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import { asUint8Array, decodeBinaryFrame } from "@getpaseo/protocol/binary-frames/index";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
@@ -561,6 +562,8 @@ export class VoiceAssistantWebSocketServer {
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly mcpBaseUrl: string | null;
@@ -651,6 +654,10 @@ export class VoiceAssistantWebSocketServer {
     pluginRuntime?: SessionOptions["pluginRuntime"],
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
+    worktreeDiskUsage: {
+      get?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+      requestSample?: (workspaceId: string, cwd: string) => void;
+    } = {},
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -673,6 +680,8 @@ export class VoiceAssistantWebSocketServer {
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
+    this.getWorktreeDiskUsage = worktreeDiskUsage.get;
+    this.requestWorktreeDiskUsageSample = worktreeDiskUsage.requestSample;
     const requiredServices = requireWebSocketServices({
       scheduleService,
       checkoutDiffManager,
@@ -1432,6 +1441,8 @@ export class VoiceAssistantWebSocketServer {
       workspaceGitService: this.workspaceGitService,
       workspaceAutoName: this.workspaceAutoName,
       daemonConfigStore: this.daemonConfigStore,
+      getWorktreeDiskUsage: this.getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample: this.requestWorktreeDiskUsageSample,
       pluginRuntime: this.pluginRuntime,
       orchestrationSkills: this.orchestrationSkills,
       mcpBaseUrl: this.mcpBaseUrl,

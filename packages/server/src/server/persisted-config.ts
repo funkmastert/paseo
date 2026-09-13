@@ -81,10 +81,25 @@ const ProvidersSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.tokenBurnMonitor (66f76986a) — same mutable/patch split for the
+// same reason: `.partial()` on the config schema would make an absent field indistinguishable
+// from an explicit reset. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const DiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .strict();
+
 const WorktreesConfigSchema = z
   .object({
     root: z.string().min(1).optional(),
     servicePorts: PaseoServicePortAllocationSchema.optional(),
+    diskSweeper: DiskSweeperConfigSchema.optional(),
   })
   .strict();
 

@@ -640,6 +640,7 @@ export function resolveConfigFromPersisted(
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
     tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
+    diskSweeper: persisted.worktrees?.diskSweeper,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
     configReload: {

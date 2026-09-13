@@ -6,6 +6,7 @@ import {
   ServerInfoStatusPayloadSchema,
   SessionOutboundMessageSchema,
   WSHelloMessageSchema,
+  WorkspaceDescriptorPayloadSchema,
   WorkspaceSetupSnapshotSchema,
   WorkspaceSetupProgressMessageSchema,
   AgentTimelineEntryPayloadSchema,
@@ -335,6 +336,51 @@ describe("wire schema compatibility", () => {
 
     const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
     expect(newParsed.tokenBurnAlert).toEqual(payloadFromNewDaemon.tokenBurnAlert);
+  });
+
+  test("old clients strip an unknown diskUsage field from new daemon workspace descriptors", () => {
+    // Models an old client's schema, generated before diskUsage existed. WorkspaceDescriptorPayloadSchema
+    // ends in a `.transform()` (`workspaceDirectory` defaulting), so it has no `.omit()` — this
+    // reconstructs a pre-diskUsage replica by hand, same shape as the minimal fixtures elsewhere in
+    // this file, to prove the additive-optional, nullable field is wire-safe: an old schema with no
+    // notion of diskUsage silently strips the extra key instead of failing to parse. See
+    // docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+    const LegacyWorkspaceDescriptorSchema = z.object({
+      id: z.string(),
+      projectId: z.string(),
+      projectDisplayName: z.string(),
+      projectRootPath: z.string(),
+      workspaceDirectory: z.string().optional(),
+      projectKind: z.enum(["git", "non_git", "directory"]),
+      workspaceKind: z.enum(["directory", "local_checkout", "checkout", "worktree"]),
+      name: z.string(),
+      status: z.string(),
+      activityAt: z.string().nullable(),
+      scripts: z.array(z.unknown()),
+    });
+    const payloadFromNewDaemon = {
+      id: "ws-disk-usage",
+      projectId: "proj",
+      projectDisplayName: "repo",
+      projectRootPath: "/repo",
+      workspaceDirectory: "/repo",
+      projectKind: "git",
+      workspaceKind: "worktree",
+      name: "feature",
+      status: "done",
+      activityAt: null,
+      scripts: [],
+      diskUsage: {
+        bytes: 2_576_980_378,
+        sampledAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacyWorkspaceDescriptorSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("diskUsage");
+
+    const newParsed = WorkspaceDescriptorPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.diskUsage).toEqual(payloadFromNewDaemon.diskUsage);
   });
 
   test("notification timeline items parse their level and message", () => {

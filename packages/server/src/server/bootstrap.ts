@@ -209,6 +209,7 @@ import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
+import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -455,6 +456,14 @@ export interface PaseoDaemonConfig {
     scope?: "all" | "topLevelOnly";
     breachBatchThreshold?: number;
   };
+  diskSweeper?: {
+    enabled?: boolean;
+    sweepIntervalMs?: number;
+    retentionDays?: number;
+    maxDeletionsPerTick?: number;
+    minFreeGB?: number;
+    sampleTimeoutMs?: number;
+  };
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
@@ -540,6 +549,12 @@ function withTokenBurnMonitorConfig(
   return config.tokenBurnMonitor !== undefined ? { tokenBurnMonitor: config.tokenBurnMonitor } : {};
 }
 
+function withDiskSweeperConfig(
+  config: Pick<PaseoDaemonConfig, "diskSweeper">,
+): Pick<MutableDaemonConfig, "diskSweeper"> {
+  return config.diskSweeper !== undefined ? { diskSweeper: config.diskSweeper } : {};
+}
+
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
@@ -563,6 +578,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
       providers: config.metadataGeneration?.providers ?? [],
     },
     ...withTokenBurnMonitorConfig(config),
+    ...withDiskSweeperConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -688,6 +704,11 @@ export async function createPaseoDaemon(
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
+  // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
+  // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
+  // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
+  // wsServer doesn't exist yet at that point either.
+  let worktreeDiskMonitor: WorktreeDiskMonitor | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
   const scriptHealthMonitor = new ScriptHealthMonitor({
     serviceProxy,
@@ -883,6 +904,16 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  worktreeDiskMonitor = new WorktreeDiskMonitor({
+    projectRegistry,
+    workspaceRegistry,
+    paseoHome: config.paseoHome,
+    worktreesBaseRoot: config.worktreesRoot,
+    serverId,
+    getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
+    readDaemonConfig: () => ({ diskSweeper: daemonConfigStore.get().diskSweeper }),
+    logger,
+  });
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
@@ -1752,10 +1783,18 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              worktreeDiskMonitor
+                ? {
+                    get: (workspaceId) => worktreeDiskMonitor!.getDiskUsage(workspaceId),
+                    requestSample: (workspaceId, cwd) =>
+                      worktreeDiskMonitor!.requestSample(workspaceId, cwd),
+                  }
+                : undefined,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
+            worktreeDiskMonitor?.start();
             // Wired here (rather than beside AgentTitleTracker, above) because it needs the
             // push sender wsServer resolved (injected override, or its own
             // createPushNotifications) — not available until wsServer exists.
@@ -1842,6 +1881,7 @@ export async function createPaseoDaemon(
     await speechService.stop();
     agentManager.stopProviderSubagentSweep();
     agentTokenBurnMonitor?.stop();
+    worktreeDiskMonitor?.stop();
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
