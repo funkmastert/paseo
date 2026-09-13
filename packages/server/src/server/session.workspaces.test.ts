@@ -6410,6 +6410,7 @@ test("listWorkspaceDescriptorsSnapshot keeps git workspaces on the baseline desc
     statusEnteredAt: workspace.createdAt,
     activityAt: null,
     diffStat: null,
+    diskUsage: null,
   } as const;
   const gitDescriptor = {
     ...baselineDescriptor,
