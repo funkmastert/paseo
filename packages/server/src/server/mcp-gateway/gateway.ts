@@ -12,6 +12,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
+  McpGatewaySessionMode,
   MutableMcpGatewayConfig,
   MutableMcpGatewayServerConfig,
 } from "@getpaseo/protocol/messages";
@@ -203,6 +204,11 @@ export class McpGateway {
 
   get enabled(): boolean {
     return this.config.enabled === true;
+  }
+
+  /** How brokered entries meet the CLI's own MCP loading (docs/mcp-gateway.md "Session injection"). */
+  get sessionMode(): McpGatewaySessionMode {
+    return this.config.sessionMode ?? "overlay";
   }
 
   /** Lazy-set like `setOAuthRedirectBaseUrl`: bootstrap constructs the gateway before the

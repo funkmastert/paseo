@@ -1909,6 +1909,7 @@ export const ar: TranslationResources = {
     reauthAction: "إعادة المصادقة",
     authError: "فشلت المصادقة: {{error}}",
     reportedBy: "أُبلغ عنها من {{agent}}",
+    reportedByCount: "أُبلغ عنها من {{count}} وكلاء",
     expand: "توسيع حالة MCP",
     collapse: "طي حالة MCP",
   },

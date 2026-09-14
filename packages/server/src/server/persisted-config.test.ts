@@ -182,6 +182,19 @@ describe("PersistedConfigSchema mcpGateway config", () => {
     ).toThrow();
   });
 
+  test("accepts either session injection mode", () => {
+    for (const sessionMode of ["overlay", "strict"] as const) {
+      const parsed = PersistedConfigSchema.parse({ mcpGateway: { enabled: true, sessionMode } });
+      expect(parsed.mcpGateway?.sessionMode).toBe(sessionMode);
+    }
+  });
+
+  test("rejects an unknown session injection mode", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ mcpGateway: { enabled: true, sessionMode: "loose" } }),
+    ).toThrow();
+  });
+
   test("rejects an unknown field, e.g. a stray token value", () => {
     expect(() =>
       PersistedConfigSchema.parse({

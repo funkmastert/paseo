@@ -201,9 +201,16 @@ export const MutableMcpGatewayServerConfigSchema = z
   })
   .passthrough();
 
+// How brokered servers reach Claude sessions (docs/mcp-gateway.md "Session injection").
+// `overlay` adds the brokered entries next to whatever the CLI loads itself; `strict` also sets
+// strictMcpConfig, suppressing every per-dir definition — including claude.ai connectors, which
+// is why overlay is the default. Additive optional field on an existing section.
+export const McpGatewaySessionModeSchema = z.enum(["overlay", "strict"]);
+
 export const MutableMcpGatewayConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
+    sessionMode: McpGatewaySessionModeSchema.optional(),
     servers: z.record(z.string(), MutableMcpGatewayServerConfigSchema).optional(),
   })
   .passthrough();
@@ -216,6 +223,7 @@ const MutableMcpGatewayServerPatchSchema = MutableMcpGatewayServerConfigSchema.p
 const MutableMcpGatewayPatchSchema = z
   .object({
     enabled: z.boolean().optional(),
+    sessionMode: McpGatewaySessionModeSchema.optional(),
     servers: z.record(z.string(), MutableMcpGatewayServerPatchSchema).optional(),
   })
   .passthrough();
@@ -366,6 +374,7 @@ export type MutableDaemonConfig = z.infer<typeof MutableDaemonConfigSchema>;
 export type MutableDaemonConfigPatch = z.infer<typeof MutableDaemonConfigPatchSchema>;
 export type MutableMcpGatewayConfig = z.infer<typeof MutableMcpGatewayConfigSchema>;
 export type MutableMcpGatewayServerConfig = z.infer<typeof MutableMcpGatewayServerConfigSchema>;
+export type McpGatewaySessionMode = z.infer<typeof McpGatewaySessionModeSchema>;
 import type {
   AgentCapabilityFlags,
   AgentModelDefinition,

@@ -1941,6 +1941,7 @@ export const ptBR: TranslationResources = {
     reauthAction: "Reautenticar",
     authError: "Falha na autenticação: {{error}}",
     reportedBy: "Reportado por {{agent}}",
+    reportedByCount: "Reportado por {{count}} agentes",
     expand: "Expandir status do MCP",
     collapse: "Recolher status do MCP",
   },

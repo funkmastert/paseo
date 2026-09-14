@@ -1960,6 +1960,7 @@ export const fr: TranslationResources = {
     reauthAction: "Se réauthentifier",
     authError: "Échec de l'authentification : {{error}}",
     reportedBy: "Signalé par {{agent}}",
+    reportedByCount: "Signalé par {{count}} agents",
     expand: "Développer l'état MCP",
     collapse: "Réduire l'état MCP",
   },

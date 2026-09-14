@@ -816,6 +816,7 @@ describe("ClaudeAgentSession features", () => {
           provider: "claude",
           cwd: projectDir,
           mcpGatewayEnabled: true,
+          mcpGatewaySessionMode: "strict",
           mcpServers: {
             github: {
               type: "http",
@@ -865,6 +866,7 @@ describe("ClaudeAgentSession features", () => {
           provider: "claude",
           cwd: projectDir,
           mcpGatewayEnabled: true,
+          mcpGatewaySessionMode: "strict",
           mcpServers: {
             github: {
               type: "http",
@@ -881,6 +883,56 @@ describe("ClaudeAgentSession features", () => {
           type: "http",
           url: "http://127.0.0.1:6767/mcp/gateway/github",
         });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("overlay mode (the default) injects brokered entries without strictMcpConfig", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        // Both entries would be re-injected under strict; under overlay the CLI loads them
+        // itself, so the launch options must not touch them. Strict is opt-in because it also
+        // drops claude.ai connectors, which no re-injection can restore (docs/mcp-gateway.md).
+        await fs.writeFile(
+          path.join(configDir, ".claude.json"),
+          JSON.stringify({
+            mcpServers: { "global-tool": { type: "stdio", command: "global-tool-bin" } },
+          }),
+        );
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-tool": { type: "stdio", command: "tool" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const brokered = {
+          github: {
+            type: "http" as const,
+            url: "http://127.0.0.1:6767/mcp/gateway/github",
+            headers: { Authorization: "Bearer gw-token" },
+          },
+        };
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: brokered,
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBeUndefined();
+        expect(options.mcpServers).toEqual(brokered);
         await session.close();
       } finally {
         await fs.rm(configDir, { recursive: true, force: true });

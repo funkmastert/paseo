@@ -1888,6 +1888,7 @@ export const zhCN: TranslationResources = {
     reauthAction: "重新授权",
     authError: "身份验证失败：{{error}}",
     reportedBy: "由 {{agent}} 报告",
+    reportedByCount: "由 {{count}} 个代理报告",
     expand: "展开 MCP 状态",
     collapse: "收起 MCP 状态",
   },

@@ -641,6 +641,9 @@ export function resolveConfigFromPersisted(
     metadataGeneration: persisted.agents?.metadataGeneration,
     tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
     diskSweeper: persisted.worktrees?.diskSweeper,
+    // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
+    // which is why its absence here went unnoticed until a real daemon booted with the section.
+    mcpGateway: persisted.mcpGateway,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
     configReload: {

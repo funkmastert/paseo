@@ -1,3 +1,4 @@
+import type { McpGatewaySessionMode } from "@getpaseo/protocol/messages";
 import type { AgentSessionConfig, McpServerConfig } from "./agent-sdk-types.js";
 
 const PASEO_MCP_SERVER_NAME = "paseo";
@@ -72,14 +73,16 @@ function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
 const MCP_GATEWAY_PATH_PREFIX = "/mcp/gateway/";
 
 /**
- * Strips brokered MCP gateway entries (KTD1) and the runtime-only `mcpGatewayEnabled` flag
- * (KTD6) from a config before it's persisted — mirrors `stripInternalPaseoMcpServer`. Entries
- * are identified by URL pathname prefix rather than by name, since brokered server names come
- * from the operator's `mcpGateway.servers` config (KTD9), not a fixed identifier.
+ * Strips brokered MCP gateway entries (KTD1) and the runtime-only `mcpGatewayEnabled` /
+ * `mcpGatewaySessionMode` signals (KTD6) from a config before it's persisted — mirrors
+ * `stripInternalPaseoMcpServer`. Entries are identified by URL pathname prefix rather than by
+ * name, since brokered server names come from the operator's `mcpGateway.servers` config
+ * (KTD9), not a fixed identifier.
  */
 export function stripMcpGatewayServers(config: AgentSessionConfig): AgentSessionConfig {
   const next = { ...config };
   delete next.mcpGatewayEnabled;
+  delete next.mcpGatewaySessionMode;
 
   const mcpServers = next.mcpServers;
   if (!mcpServers) {
@@ -122,6 +125,8 @@ export function withRuntimeMcpGatewayServers(params: {
   serverNames: readonly string[];
   /** The distinct gateway capability token (KTD1). */
   gatewayAuthToken: string | null;
+  /** `McpGateway.sessionMode`; defaults to overlay (docs/mcp-gateway.md "Session injection"). */
+  sessionMode?: McpGatewaySessionMode;
 }): AgentSessionConfig {
   const storedConfig = stripMcpGatewayServers(params.config);
   if (!params.enabled || !params.gatewayBaseUrl) {
@@ -143,6 +148,7 @@ export function withRuntimeMcpGatewayServers(params: {
   return {
     ...storedConfig,
     mcpGatewayEnabled: true,
+    mcpGatewaySessionMode: params.sessionMode ?? "overlay",
     ...(Object.keys(mergedMcpServers).length > 0 ? { mcpServers: mergedMcpServers } : {}),
   };
 }

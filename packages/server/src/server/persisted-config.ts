@@ -124,6 +124,8 @@ const McpGatewayServerConfigSchema = z
 const McpGatewayConfigSchema = z
   .object({
     enabled: z.boolean().optional(),
+    // docs/mcp-gateway.md "Session injection": overlay (default) or strict.
+    sessionMode: z.enum(["overlay", "strict"]).optional(),
     servers: z.record(z.string(), McpGatewayServerConfigSchema).optional(),
   })
   .strict();

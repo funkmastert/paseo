@@ -1,12 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import { ChevronDown, ChevronUp, KeyRound, Server } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
 import type { Theme } from "@/styles/theme";
 import { useMcpStatus } from "./use-mcp-status";
-import type { McpStatusRow, McpStatusRowStatusKey } from "./mcp-status-strip-model";
+import type {
+  McpStatusRow,
+  McpStatusRowAnnotation,
+  McpStatusRowStatusKey,
+} from "./mcp-status-strip-model";
 
 const ThemedServer = withUnistyles(Server);
 const ThemedChevronUp = withUnistyles(ChevronUp);
@@ -44,6 +49,12 @@ function statusLabelKeyFor(statusKey: McpStatusRowStatusKey): string {
   }
 }
 
+function reportedByText(t: TFunction, annotation: McpStatusRowAnnotation): string {
+  return annotation.reporterCount > 1
+    ? t("mcpStatus.reportedByCount", { count: annotation.reporterCount })
+    : t("mcpStatus.reportedBy", { agent: annotation.agentLabel });
+}
+
 function StatusDot({ tone, testID }: { tone: ProviderUsageTone; testID?: string }) {
   return <View testID={testID} style={[styles.dot, toneDotStyle(tone)]} />;
 }
@@ -74,9 +85,7 @@ function McpStatusRowView({
           </Text>
           <Text style={styles.rowStatus} numberOfLines={1}>
             {t(statusLabelKeyFor(row.statusKey))}
-            {row.annotation
-              ? ` · ${t("mcpStatus.reportedBy", { agent: row.annotation.agentLabel })}`
-              : ""}
+            {row.annotation ? ` · ${reportedByText(t, row.annotation)}` : ""}
           </Text>
         </View>
         {row.canAuth ? (
@@ -185,11 +194,11 @@ export function McpStatusStrip() {
     return null;
   }
 
+  // issueNames falls back from unhealthy critical servers to every unhealthy row, so the
+  // collapsed text never claims "connected" above rows that aren't.
   const summaryText =
-    model.collapsed.unhealthyCriticalNames.length > 0
-      ? t("mcpStatus.collapsedSummary.issues", {
-          names: model.collapsed.unhealthyCriticalNames.join(", "),
-        })
+    model.collapsed.issueNames.length > 0
+      ? t("mcpStatus.collapsedSummary.issues", { names: model.collapsed.issueNames.join(", ") })
       : t("mcpStatus.collapsedSummary.healthy");
 
   return (

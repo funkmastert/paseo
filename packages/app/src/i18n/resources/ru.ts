@@ -1940,6 +1940,7 @@ export const ru: TranslationResources = {
     reauthAction: "Повторная авторизация",
     authError: "Ошибка аутентификации: {{error}}",
     reportedBy: "Сообщено агентом {{agent}}",
+    reportedByCount: "Сообщено {{count}} агентами",
     expand: "Развернуть статус MCP",
     collapse: "Свернуть статус MCP",
   },

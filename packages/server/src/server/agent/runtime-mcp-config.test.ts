@@ -65,6 +65,8 @@ describe("withRuntimeMcpGatewayServers", () => {
     });
 
     expect(result.mcpGatewayEnabled).toBe(true);
+    // Overlay is the default mode — see docs/mcp-gateway.md "Session injection".
+    expect(result.mcpGatewaySessionMode).toBe("overlay");
     expect(result.mcpServers).toEqual({
       github: {
         type: "http",
@@ -77,6 +79,19 @@ describe("withRuntimeMcpGatewayServers", () => {
         headers: { Authorization: "Bearer gw-token" },
       },
     });
+  });
+
+  test("passes an explicit strict session mode through to the launch config", () => {
+    const result = withRuntimeMcpGatewayServers({
+      config: BASE_CONFIG,
+      enabled: true,
+      gatewayBaseUrl: "http://127.0.0.1:6767",
+      serverNames: ["github"],
+      gatewayAuthToken: "gw-token",
+      sessionMode: "strict",
+    });
+
+    expect(result.mcpGatewaySessionMode).toBe("strict");
   });
 
   test("omits the header when no gateway token is available", () => {
@@ -170,6 +185,7 @@ describe("stripMcpGatewayServers", () => {
     const config: AgentSessionConfig = {
       ...BASE_CONFIG,
       mcpGatewayEnabled: true,
+      mcpGatewaySessionMode: "strict",
       mcpServers: {
         github: {
           type: "http",
@@ -183,6 +199,7 @@ describe("stripMcpGatewayServers", () => {
     const result = stripMcpGatewayServers(config);
 
     expect(result.mcpGatewayEnabled).toBeUndefined();
+    expect(result.mcpGatewaySessionMode).toBeUndefined();
     expect(result.mcpServers).toEqual({ keep: { type: "stdio", command: "local-tool" } });
   });
 

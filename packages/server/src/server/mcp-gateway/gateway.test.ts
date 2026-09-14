@@ -172,6 +172,17 @@ describe("McpGateway", () => {
     expect(gateway.getSnapshot()).toEqual([]);
   });
 
+  test("session injection defaults to overlay and honours an explicit strict", () => {
+    const home = createTempHome();
+    expect(new McpGateway({ paseoHome: home, config: { enabled: true } }).sessionMode).toBe(
+      "overlay",
+    );
+    expect(
+      new McpGateway({ paseoHome: home, config: { enabled: true, sessionMode: "strict" } })
+        .sessionMode,
+    ).toBe("strict");
+  });
+
   test("an enabled gateway with no servers configured constructs no per-server runtime state", () => {
     const gateway = new McpGateway({
       paseoHome: createTempHome(),

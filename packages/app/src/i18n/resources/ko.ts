@@ -1919,6 +1919,7 @@ export const ko: TranslationResources = {
     reauthAction: "재인증",
     authError: "인증 실패: {{error}}",
     reportedBy: "{{agent}}가 보고함",
+    reportedByCount: "에이전트 {{count}}개가 보고함",
     expand: "MCP 상태 펼치기",
     collapse: "MCP 상태 접기",
   },

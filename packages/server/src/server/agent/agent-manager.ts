@@ -340,7 +340,13 @@ export interface AgentManagerOptions {
   /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
   mcpGateway?: Pick<
     McpGateway,
-    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+    | "enabled"
+    | "sessionMode"
+    | "getServerNames"
+    | "getSnapshot"
+    | "on"
+    | "off"
+    | "startAuthorization"
   >;
   /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
   mcpGatewayAuthToken?: string;
@@ -804,7 +810,13 @@ export class AgentManager {
   private readonly mcpAuthToken: string | null;
   private mcpGateway: Pick<
     McpGateway,
-    "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+    | "enabled"
+    | "sessionMode"
+    | "getServerNames"
+    | "getSnapshot"
+    | "on"
+    | "off"
+    | "startAuthorization"
   > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
@@ -951,7 +963,13 @@ export class AgentManager {
   setMcpGateway(
     gateway: Pick<
       McpGateway,
-      "enabled" | "getServerNames" | "getSnapshot" | "on" | "off" | "startAuthorization"
+      | "enabled"
+      | "sessionMode"
+      | "getServerNames"
+      | "getSnapshot"
+      | "on"
+      | "off"
+      | "startAuthorization"
     > | null,
     authToken: string | null,
   ): void {
@@ -5485,6 +5503,7 @@ export class AgentManager {
         gatewayBaseUrl: this.mcpGatewayBaseUrl,
         serverNames: this.mcpGateway?.getServerNames() ?? [],
         gatewayAuthToken: this.mcpGatewayAuthToken,
+        sessionMode: this.mcpGateway?.sessionMode,
       }),
     );
     return { storedConfig, launchConfig, paseoToolPolicy };

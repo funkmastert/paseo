@@ -5,7 +5,7 @@ import type {
   ProviderOptions,
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
-import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { AgentAttachment, McpGatewaySessionMode } from "@getpaseo/protocol/messages";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
 export type { AgentProviderNotice, AgentTaskItem };
@@ -658,12 +658,19 @@ export interface AgentSessionConfig {
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
-   * Runtime-only per-launch signal (KTD5/KTD6): the MCP gateway is enabled for this launch, so
-   * the Claude adapter should set `strictMcpConfig` and re-inject per-dir stdio entries itself.
-   * Never persisted — stripped from storage the same way the brokered `mcpServers` entries are
-   * (`stripMcpGatewayServers` in `runtime-mcp-config.ts`).
+   * Runtime-only per-launch signal (KTD5/KTD6): the MCP gateway is enabled for this launch and
+   * brokered entries are present in `mcpServers`. Never persisted — stripped from storage the
+   * same way the brokered `mcpServers` entries are (`stripMcpGatewayServers` in
+   * `runtime-mcp-config.ts`).
    */
   mcpGatewayEnabled?: boolean;
+  /**
+   * Runtime-only companion to `mcpGatewayEnabled`: `strict` makes the Claude adapter set
+   * `strictMcpConfig` and re-inject per-dir stdio entries itself; `overlay` (the default when
+   * absent) leaves the CLI's own MCP loading alone. Why overlay is the default lives in
+   * docs/mcp-gateway.md "Session injection". Stripped from storage alongside `mcpGatewayEnabled`.
+   */
+  mcpGatewaySessionMode?: McpGatewaySessionMode;
   /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.

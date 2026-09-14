@@ -34,7 +34,10 @@ export type McpStatusRowStatusKey =
   | "sessionReported";
 
 export interface McpStatusRowAnnotation {
+  /** Label of the first agent that reported this server unhealthy. */
   agentLabel: string;
+  /** Distinct agents reporting it — the strip says "reported by N agents" above one. */
+  reporterCount: number;
 }
 
 /** One rendered row — a brokered server (`sessionOnly: false`) or a session-only report with
@@ -59,6 +62,14 @@ export interface McpStatusCollapsedSummary {
   /** Critical servers currently unhealthy (needs-auth/error) — named per the collapsed-row
    * spec in KTD10 ("aggregate dot + names of unhealthy critical servers"). */
   unhealthyCriticalNames: string[];
+  /**
+   * Names for the collapsed "MCP issues: …" text: the unhealthy critical servers when there are
+   * any, else every unhealthy row (non-critical gateway servers, session-reported servers).
+   * Empty only when nothing is unhealthy, so the collapsed row never reads "connected" while a
+   * row underneath it isn't — which is exactly what happened when the gateway had no servers
+   * and only session reports existed.
+   */
+  issueNames: string[];
   hasIssues: boolean;
 }
 
@@ -133,23 +144,52 @@ function deriveCollapsedTone(
   return "ok";
 }
 
+function groupUnhealthyReportsByServer(
+  reports: McpStatusSessionReport[],
+): Map<string, McpStatusSessionReport[]> {
+  const byServer = new Map<string, McpStatusSessionReport[]>();
+  for (const report of reports) {
+    if (report.status === "connected") continue;
+    const bucket = byServer.get(report.serverName);
+    if (bucket) {
+      bucket.push(report);
+    } else {
+      byServer.set(report.serverName, [report]);
+    }
+  }
+  return byServer;
+}
+
+function annotationFor(reports: McpStatusSessionReport[]): McpStatusRowAnnotation | undefined {
+  const first = reports[0];
+  if (!first) return undefined;
+  return {
+    agentLabel: first.agentLabel,
+    reporterCount: new Set(reports.map((report) => report.agentId)).size,
+  };
+}
+
+function isUnhealthyRow(row: McpStatusRow): boolean {
+  return row.tone === "warning" || row.tone === "danger";
+}
+
 /**
  * Pure derivation of the strip's rows and collapsed summary from the daemon's server snapshot
  * plus any per-agent init-reported statuses (KTD10). Never drops a session-reported failure
- * (AE3): a report for a known server becomes an annotation on that row; a report for an
- * unknown (non-brokered, stdio) server becomes its own row with no auth action.
+ * (AE3): a report for a known server becomes an annotation on that row; reports for an
+ * unknown (non-brokered) server collapse into one row per server name with a reporter count —
+ * never one row per agent, which with a dozen workers all loading the same broken user-scope
+ * server read as a wall of duplicate notifications — and carry no auth action.
  */
 export function buildMcpStatusStripModel(input: {
   servers: McpStatusServerEntry[];
   sessionReports: McpStatusSessionReport[];
 }): McpStatusStripModel {
   const serverNames = new Set(input.servers.map((server) => server.name));
-  const unhealthySessionReports = input.sessionReports.filter(
-    (report) => report.status !== "connected",
-  );
+  const unhealthyReportsByServer = groupUnhealthyReportsByServer(input.sessionReports);
 
   const serverRows: McpStatusRow[] = input.servers.map((server) => {
-    const annotation = unhealthySessionReports.find((report) => report.serverName === server.name);
+    const annotation = annotationFor(unhealthyReportsByServer.get(server.name) ?? []);
     return {
       key: `server:${server.name}`,
       name: server.name,
@@ -158,35 +198,44 @@ export function buildMcpStatusStripModel(input: {
       critical: server.critical,
       canAuth: isUnhealthy(server.status),
       ...(server.error !== undefined ? { error: server.error } : {}),
-      ...(annotation ? { annotation: { agentLabel: annotation.agentLabel } } : {}),
+      ...(annotation ? { annotation } : {}),
       sessionOnly: false,
     };
   });
 
-  const sessionOnlyRows: McpStatusRow[] = unhealthySessionReports
-    .filter((report) => !serverNames.has(report.serverName))
-    .map((report) => ({
-      key: `session:${report.agentId}:${report.serverName}`,
-      name: report.serverName,
-      tone: "warning" as const,
-      statusKey: "sessionReported" as const,
+  const sessionOnlyRows: McpStatusRow[] = [];
+  for (const [serverName, reports] of unhealthyReportsByServer) {
+    if (serverNames.has(serverName)) continue;
+    const annotation = annotationFor(reports);
+    if (!annotation) continue;
+    sessionOnlyRows.push({
+      key: `session:${serverName}`,
+      name: serverName,
+      tone: "warning",
+      statusKey: "sessionReported",
       critical: false,
       canAuth: false,
-      annotation: { agentLabel: report.agentLabel },
+      annotation,
       sessionOnly: true,
-    }));
+    });
+  }
 
   const rows = sortRows([...serverRows, ...sessionOnlyRows]);
   const unhealthyCriticalNames = input.servers
     .filter((server) => server.critical && isUnhealthy(server.status))
     .map((server) => server.name);
+  const issueNames =
+    unhealthyCriticalNames.length > 0
+      ? unhealthyCriticalNames
+      : rows.filter(isUnhealthyRow).map((row) => row.name);
 
   return {
     hasData: rows.length > 0,
     collapsed: {
       tone: deriveCollapsedTone(input.servers, sessionOnlyRows.length > 0),
       unhealthyCriticalNames,
-      hasIssues: rows.some((row) => row.tone === "warning" || row.tone === "danger"),
+      issueNames,
+      hasIssues: rows.some(isUnhealthyRow),
     },
     rows,
   };

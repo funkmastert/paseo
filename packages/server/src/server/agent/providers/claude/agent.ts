@@ -3360,16 +3360,19 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   /**
-   * U3/KTD5: the MCP gateway replaces per-dir remote server definitions for sessions it
-   * covers. `strictMcpConfig` is the only SDK switch that stops per-dir servers from loading
-   * via `settingSources`, but it drops locally-defined stdio entries too — so re-inject those
-   * verbatim ourselves, sourced from the same config dir + project `.mcp.json` the CLI would
-   * otherwise have read them from. `this.config.mcpGatewayEnabled` is a per-launch signal set
-   * by `withRuntimeMcpGatewayServers` (agent-manager); it's absent when the gateway is
-   * disabled, so this no-ops byte-identically then (R10).
+   * U3/KTD5: how brokered gateway entries meet the CLI's own MCP loading. In `overlay` mode
+   * (default) the entries already sit in `base.mcpServers` and nothing else is needed: a
+   * launch-time entry wins a name collision with a per-dir one, and everything the CLI loads on
+   * its own — user/project/local scopes, claude.ai connectors — keeps loading. In `strict` mode
+   * `strictMcpConfig` stops per-dir servers from loading via `settingSources`, but it drops
+   * locally-defined stdio entries (and claude.ai connectors, which can't be re-injected) too —
+   * so re-inject the stdio ones verbatim, sourced from the same config dir + project
+   * `.mcp.json` the CLI would otherwise have read them from. Both signals are per-launch, set by
+   * `withRuntimeMcpGatewayServers` (agent-manager); they're absent when the gateway is disabled,
+   * so this no-ops byte-identically then (R10). See docs/mcp-gateway.md "Session injection".
    */
   private applyMcpGatewayOptions(base: ClaudeOptions): void {
-    if (!this.config.mcpGatewayEnabled) {
+    if (!this.config.mcpGatewayEnabled || this.config.mcpGatewaySessionMode !== "strict") {
       return;
     }
     base.strictMcpConfig = true;

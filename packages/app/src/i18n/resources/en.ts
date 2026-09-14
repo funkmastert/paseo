@@ -1919,6 +1919,7 @@ export const en = {
     reauthAction: "Re-authenticate",
     authError: "Authentication failed: {{error}}",
     reportedBy: "Reported by {{agent}}",
+    reportedByCount: "Reported by {{count}} agents",
     expand: "Expand MCP status",
     collapse: "Collapse MCP status",
   },

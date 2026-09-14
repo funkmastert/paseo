@@ -1955,6 +1955,7 @@ export const es: TranslationResources = {
     reauthAction: "Reautenticar",
     authError: "Fallo en la autenticación: {{error}}",
     reportedBy: "Reportado por {{agent}}",
+    reportedByCount: "Reportado por {{count}} agentes",
     expand: "Expandir estado de MCP",
     collapse: "Contraer estado de MCP",
   },
