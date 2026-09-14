@@ -3510,6 +3510,30 @@ test("createAgent injects paseo MCP server only into provider launch config", as
   });
 });
 
+type FakeMcpGateway = NonNullable<ConstructorParameters<typeof AgentManager>[0]["mcpGateway"]>;
+
+/**
+ * Structurally complete stand-in for the `Pick<McpGateway, …>` the manager accepts. Test files
+ * are outside `npm run typecheck`, so a partial literal here compiles and runs while silently
+ * drifting from the real handle; building every fake through this helper keeps the shape in one
+ * place. `on`/`off` return the fake itself, standing in for the class's chainable `this`.
+ */
+function createFakeMcpGateway(overrides: Partial<FakeMcpGateway> = {}): FakeMcpGateway {
+  const fake = {
+    enabled: true,
+    sessionMode: "overlay" as const,
+    getServerNames: (): string[] => [],
+    getSnapshot: () => [],
+    startAuthorization: async (): Promise<never> => {
+      throw new Error("startAuthorization is not exercised by this test");
+    },
+    on: () => fake,
+    off: () => fake,
+    ...overrides,
+  };
+  return fake as unknown as FakeMcpGateway;
+}
+
 test("createAgent injects brokered MCP gateway servers only into provider launch config (U3)", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storagePath = join(workdir, "agents");
@@ -3529,7 +3553,7 @@ test("createAgent injects brokered MCP gateway servers only into provider launch
     clients: { claude: client },
     registry: storage,
     logger,
-    mcpGateway: { enabled: true, getServerNames: () => ["github", "zeeq"] },
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["github", "zeeq"] }),
     mcpGatewayAuthToken: "gw-token",
     idFactory: () => "00000000-0000-4000-8000-000000000110",
   });
@@ -3541,6 +3565,8 @@ test("createAgent injects brokered MCP gateway servers only into provider launch
 
   expect(snapshot.config.mcpServers).toBeUndefined();
   expect(client.lastConfig?.mcpGatewayEnabled).toBe(true);
+  // The gateway's mode rides the launch config only (docs/mcp-gateway.md "Session injection").
+  expect(client.lastConfig?.mcpGatewaySessionMode).toBe("overlay");
   expect(client.lastConfig?.mcpServers).toEqual({
     github: {
       type: "http",
@@ -3556,6 +3582,44 @@ test("createAgent injects brokered MCP gateway servers only into provider launch
 
   const stored = await storage.get(snapshot.id);
   expect(stored?.config?.mcpServers).toBeUndefined();
+  expect(stored?.config?.mcpGatewayEnabled).toBeUndefined();
+  expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
+});
+
+test("createAgent forwards the gateway's strict session mode to the launch config only", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({
+      sessionMode: "strict",
+      getServerNames: () => ["github"],
+    }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000114",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewaySessionMode).toBe("strict");
+  const stored = await storage.get(snapshot.id);
+  expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
 });
 
 test("createAgent never injects brokered MCP gateway servers for a non-Claude provider (U3 scope)", async () => {
@@ -3576,7 +3640,7 @@ test("createAgent never injects brokered MCP gateway servers for a non-Claude pr
     clients: { codex: client },
     registry: storage,
     logger,
-    mcpGateway: { enabled: true, getServerNames: () => ["github"] },
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["github"] }),
     mcpGatewayAuthToken: "gw-token",
     idFactory: () => "00000000-0000-4000-8000-000000000111",
   });
@@ -3608,7 +3672,7 @@ test("createAgent launch config is byte-identical to the pre-gateway shape when 
     clients: { claude: client },
     registry: storage,
     logger,
-    mcpGateway: { enabled: false, getServerNames: () => ["github"] },
+    mcpGateway: createFakeMcpGateway({ enabled: false, getServerNames: () => ["github"] }),
     mcpGatewayAuthToken: "gw-token",
     idFactory: () => "00000000-0000-4000-8000-000000000112",
   });
