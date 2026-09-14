@@ -403,6 +403,7 @@ export type AgentStreamEvent =
       turnId?: string;
       turnTokenDelta?: number;
     }
+  | { type: "token_burn_delta"; provider: AgentProvider; tokens: number }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

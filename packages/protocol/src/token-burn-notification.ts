@@ -56,11 +56,14 @@ export function buildTokenBurnNotificationPayload(
   input: BuildTokenBurnNotificationPayloadInput,
 ): TokenBurnNotificationPayload {
   const label = resolveAgentLabel(input.agentTitle);
-  const title = "Agent is burning tokens fast";
+  // Pace and cumulative spend are different complaints and get different titles. Both counts
+  // are cost-weighted tokens (server token-rate-tracker.ts), never raw traffic.
+  const title =
+    input.trigger === "rate" ? "Agent is burning tokens fast" : "Agent has used a lot of tokens";
   const body =
     input.trigger === "rate"
-      ? `${label} is using ${formatTokenCount(input.ratePerMinute ?? 0)} tokens/min.`
-      : `${label} has used ${formatTokenCount(input.totalTokens ?? 0)} tokens this session.`;
+      ? `${label} is burning ${formatTokenCount(input.ratePerMinute ?? 0)} weighted tokens/min.`
+      : `${label} has used ${formatTokenCount(input.totalTokens ?? 0)} weighted tokens this session.`;
 
   return {
     title,

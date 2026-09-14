@@ -277,6 +277,8 @@ export interface TokenBurnMonitorAgentSummary {
   workspaceId: string | undefined;
   internal: boolean;
   isDelegated: boolean;
+  /** Mid-turn right now. The monitor only lets running agents breach the rate leg. */
+  isRunning: boolean;
   tokenRate: number | undefined;
   totalTokens: number | undefined;
 }
@@ -1155,6 +1157,7 @@ export class AgentManager {
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       isDelegated: isDelegatedAgent(agent),
+      isRunning: agent.lifecycle === "running",
       tokenRate: computeTokenRate(agent.tokenRateBuckets, nowMs)?.tokensPerMinute,
       totalTokens: agent.totalTokens,
     }));
@@ -4561,13 +4564,6 @@ export class AgentManager {
     const { agent, event, options, isForegroundEvent, eventTurnId, terminalDisposition, flags } =
       params;
     switch (event.type) {
-      case "thread_started":
-        this.onStreamThreadStarted(agent);
-        return undefined;
-      case "usage_updated":
-        agent.lastUsage = event.usage;
-        this.emitState(agent);
-        return undefined;
       case "mode_changed":
         agent.currentModeId = event.currentModeId;
         agent.availableModes = event.availableModes;
@@ -4643,7 +4639,36 @@ export class AgentManager {
         this.onStreamMcpServerStatuses(agent, event);
         return undefined;
       default:
+        this.onStreamBookkeepingEvent(agent, event, flags);
         return undefined;
+    }
+  }
+  /**
+   * Events that only touch live agent bookkeeping and never the turn lifecycle. Kept out of
+   * dispatchStreamEventByType's switch so that method stays under the complexity ceiling.
+   */
+  private onStreamBookkeepingEvent(
+    agent: ActiveManagedAgent,
+    event: AgentStreamEvent,
+    flags: StreamEventFlags,
+  ): void {
+    switch (event.type) {
+      case "thread_started":
+        this.onStreamThreadStarted(agent);
+        return;
+      case "usage_updated":
+        agent.lastUsage = event.usage;
+        this.emitState(agent);
+        return;
+      case "token_burn_delta":
+        // Daemon-internal: feeds the burn ring the monitor reads straight off ManagedAgent.
+        // No emitState — the app's badge repaints on the next state emit anyway — and never
+        // forwarded, so no wire consumer has to learn a new stream event type.
+        this.recordTokenBurn(agent, event.tokens);
+        flags.shouldDispatchEvent = false;
+        return;
+      default:
+        return;
     }
   }
 
@@ -4718,6 +4743,15 @@ export class AgentManager {
     flags.shouldNotifyWaiters = true;
   }
 
+  /** Live-only ring + lifetime total (docs/token-burn.md); cleared on rewind, never persisted. */
+  private recordTokenBurn(agent: ActiveManagedAgent, tokens: number): void {
+    if (!Number.isFinite(tokens) || tokens <= 0) {
+      return;
+    }
+    agent.tokenRateBuckets = recordTokenDelta(agent.tokenRateBuckets ?? [], tokens, Date.now());
+    agent.totalTokens = (agent.totalTokens ?? 0) + tokens;
+  }
+
   private onStreamTurnCompleted(params: {
     agent: ActiveManagedAgent;
     event: Extract<AgentStreamEvent, { type: "turn_completed" }>;
@@ -4744,13 +4778,8 @@ export class AgentManager {
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits
     // it from the completion event.
-    if (typeof event.turnTokenDelta === "number" && event.turnTokenDelta > 0) {
-      agent.tokenRateBuckets = recordTokenDelta(
-        agent.tokenRateBuckets ?? [],
-        event.turnTokenDelta,
-        Date.now(),
-      );
-      agent.totalTokens = (agent.totalTokens ?? 0) + event.turnTokenDelta;
+    if (typeof event.turnTokenDelta === "number") {
+      this.recordTokenBurn(agent, event.turnTokenDelta);
     }
     agent.lastError = undefined;
     if (

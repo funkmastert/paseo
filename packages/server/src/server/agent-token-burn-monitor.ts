@@ -150,7 +150,11 @@ export class AgentTokenBurnMonitor {
       }
       const previousState = this.agentManager.getTokenBurnMonitorState(agent.id);
       const result = evaluateTokenBurn({
-        tokenRate: agent.tokenRate,
+        // The trailing-window rate keeps reading high for up to five minutes after an agent's
+        // last request, so only a running agent may breach the rate leg — an idle agent that
+        // just finished a heavy turn is not "burning". The total leg is cumulative and applies
+        // regardless of lifecycle.
+        tokenRate: agent.isRunning ? agent.tokenRate : undefined,
         totalTokens: agent.totalTokens,
         config,
         previousState,

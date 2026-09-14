@@ -38,6 +38,7 @@ import {
   type ProviderRefreshContext,
   type ResolveAgentDefaultModeInput,
 } from "../agent-sdk-types.js";
+import { weighTokenUsage } from "../token-rate-tracker.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
 import { runProviderRefreshActivity } from "../provider-refresh-deadline.js";
 import type { Logger } from "pino";
@@ -941,11 +942,11 @@ export function buildCodexTurnTokenDelta(usage: AgentUsage | undefined): number 
   if (!usage) {
     return undefined;
   }
-  const inputTokens = typeof usage.inputTokens === "number" ? usage.inputTokens : 0;
-  const outputTokens = typeof usage.outputTokens === "number" ? usage.outputTokens : 0;
-  const cachedInputTokens =
-    typeof usage.cachedInputTokens === "number" ? usage.cachedInputTokens : 0;
-  const total = inputTokens + outputTokens + cachedInputTokens;
+  const total = weighTokenUsage({
+    inputTokens: usage.inputTokens,
+    cacheReadInputTokens: usage.cachedInputTokens,
+    outputTokens: usage.outputTokens,
+  });
   return total > 0 ? total : undefined;
 }
 

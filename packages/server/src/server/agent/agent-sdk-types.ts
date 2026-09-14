@@ -437,11 +437,22 @@ export type AgentStreamEvent =
       usage?: AgentUsage;
       turnId?: string;
       /**
-       * Provider-local per-turn token delta (input + output + cached-read), used to feed
-       * token-rate-tracker.ts. Claude only in phase 1 — other providers omit it rather than
-       * report a fake zero. See docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+       * Provider-local per-turn cost-weighted token delta (token-rate-tracker.ts's
+       * `weighTokenUsage`), feeding the burn ring. Providers that streamed `token_burn_delta`
+       * events during the turn omit it here so the turn isn't counted twice; providers with no
+       * burn signal omit it rather than report a fake zero. See docs/token-burn.md.
        */
       turnTokenDelta?: number;
+    }
+  | {
+      /**
+       * Cost-weighted burn for one completed API request inside a running turn, so the burn
+       * ring moves while a long turn is in flight instead of receiving one lump at turn end.
+       * Daemon-internal: agent-manager records it and never forwards it. See docs/token-burn.md.
+       */
+      type: "token_burn_delta";
+      provider: AgentProvider;
+      tokens: number;
     }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {

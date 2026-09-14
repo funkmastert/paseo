@@ -128,6 +128,7 @@ import {
   type ProviderRefreshContext,
   type ResolveAgentDefaultModeInput,
 } from "../../agent-sdk-types.js";
+import { weighTokenUsage } from "../../token-rate-tracker.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
 import {
@@ -1797,7 +1798,15 @@ function extractContextWindowSize(modelUsage: unknown): number | undefined {
   return maxContextWindow;
 }
 
-function readStreamRequestInputTokens(event: Record<string, unknown>): number | undefined {
+interface StreamRequestInputBreakdown {
+  inputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
+function readStreamRequestInputBreakdown(
+  event: Record<string, unknown>,
+): StreamRequestInputBreakdown | undefined {
   const messageUsage = toObjectRecord(toObjectRecord(event.message)?.usage);
   if (!messageUsage) {
     return undefined;
@@ -1820,7 +1829,7 @@ function readStreamRequestInputTokens(event: Record<string, unknown>): number | 
   if (typeof inputTokens !== "number" || inputTokens < 0) {
     return undefined;
   }
-  return inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+  return { inputTokens, cacheCreationInputTokens, cacheReadInputTokens };
 }
 
 function readStreamRequestOutputTokens(event: Record<string, unknown>): number | undefined {
@@ -1899,6 +1908,16 @@ class ClaudeContextUsageState {
   private streamRequestOutputTokens: number | undefined;
   private compactedContextWindowUsedTokens: number | undefined;
   private completedResultTurns = 0;
+  // Cost-weighted burn (token-rate-tracker.ts) recorded per API request as message_start /
+  // message_delta arrive, so the burn monitor sees a long turn while it runs instead of one
+  // lump at turn end. `streamRequestBurnBreakdown` is the current request's input side;
+  // `streamRequestBurnRecorded` is what has already been handed out for it (message_delta may
+  // repeat with a growing output count, so only the increment goes out); `turnBurnRecorded`
+  // tells the result handler to skip its per-turn fallback.
+  private streamRequestBurnBreakdown: StreamRequestInputBreakdown | undefined;
+  private streamRequestBurnRecorded = 0;
+  private pendingBurnDelta: number | undefined;
+  private turnBurnRecorded = 0;
 
   constructor(initialContextWindowMaxTokens?: number) {
     this.contextWindowMaxTokens = initialContextWindowMaxTokens;
@@ -1908,6 +1927,10 @@ class ClaudeContextUsageState {
     this.streamRequestInputTokens = undefined;
     this.streamRequestOutputTokens = undefined;
     this.compactedContextWindowUsedTokens = undefined;
+    this.streamRequestBurnBreakdown = undefined;
+    this.streamRequestBurnRecorded = 0;
+    this.pendingBurnDelta = undefined;
+    this.turnBurnRecorded = 0;
   }
 
   setInitialContextWindowMaxTokens(contextWindowMaxTokens: number | undefined): void {
@@ -1929,18 +1952,22 @@ class ClaudeContextUsageState {
     }
     const eventType = readTrimmedString(streamEvent.type);
     if (eventType === "message_start") {
-      const inputTokens = readStreamRequestInputTokens(streamEvent);
-      if (typeof inputTokens !== "number") {
+      const breakdown = readStreamRequestInputBreakdown(streamEvent);
+      if (!breakdown) {
         return null;
       }
-      this.streamRequestInputTokens = inputTokens;
+      this.streamRequestInputTokens =
+        breakdown.inputTokens + breakdown.cacheCreationInputTokens + breakdown.cacheReadInputTokens;
       this.streamRequestOutputTokens = 0;
+      this.streamRequestBurnBreakdown = breakdown;
+      this.streamRequestBurnRecorded = 0;
     } else if (eventType === "message_delta") {
       const outputTokens = readStreamRequestOutputTokens(streamEvent);
       if (typeof outputTokens !== "number") {
         return null;
       }
       this.streamRequestOutputTokens = outputTokens;
+      this.recordRequestBurn(outputTokens);
     } else {
       return null;
     }
@@ -1987,24 +2014,25 @@ class ClaudeContextUsageState {
   }
 
   /**
-   * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Claude's
-   * result `usage` is already scoped to this turn (main agent loop only), unlike `modelUsage`
-   * which accumulates across the whole query() call — so no diffing against a prior snapshot is
-   * needed here, just this turn's raw usage numbers.
+   * Per-turn cost-weighted token delta (token-rate-tracker.ts's `weighTokenUsage`) for the
+   * burn tracker. Claude's result `usage` is already scoped to this turn (main agent loop
+   * only), unlike `modelUsage` which accumulates across the whole query() call — so no diffing
+   * against a prior snapshot is needed. Fallback only: a turn that streamed partial messages has
+   * already been recorded request by request (`hasRecordedRequestBurnThisTurn`).
    */
   buildTurnTokenDelta(message: SDKResultMessage): number | undefined {
     if (!message.usage) {
       return undefined;
     }
-    const inputTokens =
-      typeof message.usage.input_tokens === "number" ? message.usage.input_tokens : 0;
-    const outputTokens =
-      typeof message.usage.output_tokens === "number" ? message.usage.output_tokens : 0;
-    const cachedInputTokens =
-      typeof message.usage.cache_read_input_tokens === "number"
-        ? message.usage.cache_read_input_tokens
-        : 0;
-    return inputTokens + outputTokens + cachedInputTokens;
+    const usage = toObjectRecord(message.usage) ?? {};
+    const count = (value: unknown): number | undefined =>
+      typeof value === "number" ? value : undefined;
+    return weighTokenUsage({
+      inputTokens: count(usage.input_tokens),
+      cacheCreationInputTokens: count(usage.cache_creation_input_tokens),
+      cacheReadInputTokens: count(usage.cache_read_input_tokens),
+      outputTokens: count(usage.output_tokens),
+    });
   }
 
   private streamUsedTokens(): number | undefined {
@@ -2016,6 +2044,31 @@ class ClaudeContextUsageState {
     }
     const usedTokens = this.streamRequestInputTokens + this.streamRequestOutputTokens;
     return usedTokens > 0 ? usedTokens : undefined;
+  }
+
+  private recordRequestBurn(outputTokens: number): void {
+    if (!this.streamRequestBurnBreakdown) {
+      return;
+    }
+    const weighted = weighTokenUsage({ ...this.streamRequestBurnBreakdown, outputTokens });
+    const increment = weighted - this.streamRequestBurnRecorded;
+    if (increment <= 0) {
+      return;
+    }
+    this.streamRequestBurnRecorded = weighted;
+    this.turnBurnRecorded += increment;
+    this.pendingBurnDelta = (this.pendingBurnDelta ?? 0) + increment;
+  }
+
+  /** Cost-weighted burn accrued since the last call — one `token_burn_delta` event's worth. */
+  takeStreamBurnDelta(): number | undefined {
+    const delta = this.pendingBurnDelta;
+    this.pendingBurnDelta = undefined;
+    return delta;
+  }
+
+  hasRecordedRequestBurnThisTurn(): boolean {
+    return this.turnBurnRecorded > 0;
   }
 
   private createUsageUpdatedEvent(contextWindowUsedTokens: number): AgentStreamEvent {
@@ -4501,6 +4554,10 @@ class ClaudeAgentSession implements AgentSession {
     if (usageUpdatedEvent) {
       events.push(usageUpdatedEvent);
     }
+    const burnDelta = this.contextUsage.takeStreamBurnDelta();
+    if (burnDelta !== undefined) {
+      events.push({ type: "token_burn_delta", provider: "claude", tokens: burnDelta });
+    }
     const timelineItems = this.mapPartialEvent(message.event, {
       suppressAssistantText: options?.suppressAssistantText ?? false,
       suppressReasoning: options?.suppressReasoning ?? false,
@@ -4535,7 +4592,11 @@ class ClaudeAgentSession implements AgentSession {
           },
         });
       }
-      const turnTokenDelta = this.contextUsage.buildTurnTokenDelta(message);
+      // Per-request `token_burn_delta` events already carried this turn's burn; the per-turn
+      // figure is only the fallback for a CLI run that streamed no partial messages.
+      const turnTokenDelta = this.contextUsage.hasRecordedRequestBurnThisTurn()
+        ? undefined
+        : this.contextUsage.buildTurnTokenDelta(message);
       events.push({
         type: "turn_completed",
         provider: "claude",

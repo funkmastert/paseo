@@ -5,9 +5,10 @@
  *
  * The monitor's sweep cadence is a fixed 60s (agent-token-burn-monitor.ts), so
  * `sustainedMinutes` consecutive breaching sweeps is exactly `sustainedMinutes` minutes of
- * sustained burn — that's what filters a one-off spike (e.g. one big cache-read turn, which
- * reads as an elevated rate for a while as the trailing-window average decays): a single high
- * reading followed by a dip resets the streak before it reaches the requirement.
+ * sustained burn. On its own that filters nothing: the rate is a trailing-window average that
+ * stays flat for up to five sweeps after one heavy request. What keeps a single burst from
+ * firing is upstream — deltas are cost-weighted (cache reads at 0.1x) and only running agents
+ * are evaluated on the rate leg (agent-token-burn-monitor.ts). See docs/token-burn.md.
  */
 
 export interface TokenBurnMonitorConfig {

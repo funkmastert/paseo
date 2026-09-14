@@ -2,10 +2,42 @@ import { expect, test } from "vitest";
 import {
   computeTokenRate,
   recordTokenDelta,
+  TOKEN_BURN_WEIGHTS,
   TOKEN_RATE_TRACKER_WINDOW_MS,
+  weighTokenUsage,
 } from "./token-rate-tracker.js";
 
 const BASE_MS = 1_700_000_000_000;
+
+test("weighTokenUsage prices cache reads at a tenth and output at five times a fresh input token", () => {
+  expect(TOKEN_BURN_WEIGHTS).toEqual({ input: 1, cacheCreation: 1.25, cacheRead: 0.1, output: 5 });
+  expect(
+    weighTokenUsage({
+      inputTokens: 100,
+      cacheCreationInputTokens: 40,
+      cacheReadInputTokens: 1000,
+      outputTokens: 10,
+    }),
+  ).toBe(100 + 50 + 100 + 50);
+});
+
+test("weighTokenUsage treats missing, negative, and non-finite counts as zero", () => {
+  expect(weighTokenUsage({})).toBe(0);
+  expect(
+    weighTokenUsage({ inputTokens: -5, cacheReadInputTokens: Number.NaN, outputTokens: undefined }),
+  ).toBe(0);
+});
+
+test("a 300K-context agent's short turn no longer reads as a burn spike", () => {
+  // The real trace behind the false alarms: 4 fresh input tokens, 1.18M cache-read tokens,
+  // 847 output tokens for one short answer. Raw it was ~1.18M; weighted it is ~123K.
+  const weighted = weighTokenUsage({
+    inputTokens: 4,
+    cacheReadInputTokens: 1_183_978,
+    outputTokens: 847,
+  });
+  expect(Math.round(weighted)).toBe(122_637);
+});
 
 test("recordTokenDelta accumulates within the same 30s bucket", () => {
   const first = recordTokenDelta([], 100, BASE_MS);

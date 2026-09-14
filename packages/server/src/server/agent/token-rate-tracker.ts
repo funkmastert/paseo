@@ -8,6 +8,43 @@ export const TOKEN_RATE_TRACKER_WINDOW_MS = BUCKET_WINDOW_MS * MAX_BUCKETS;
 const MIN_SPAN_MS = BUCKET_WINDOW_MS;
 const MAX_SPAN_MS = TOKEN_RATE_TRACKER_WINDOW_MS;
 
+/**
+ * Cost weights relative to one fresh input token, from Anthropic's list-price ratios (cache
+ * write 1.25x, cache read 0.1x, output 5x). Every provider-local burn delta goes through
+ * `weighTokenUsage`, so `recentTokenRate` and `totalTokens` measure spend-equivalent tokens
+ * rather than raw token traffic. Raw counting was the bug behind the monitor's false alarms: a
+ * Claude agent with a 300K context re-reads that context from cache on every tool-call step, so
+ * one ordinary short turn counted as ~1.2M tokens (237K/min for five straight minutes) and any
+ * long-lived agent crossed 5M "total" every couple of dozen steps. See docs/token-burn.md.
+ */
+export const TOKEN_BURN_WEIGHTS = {
+  input: 1,
+  cacheCreation: 1.25,
+  cacheRead: 0.1,
+  output: 5,
+} as const;
+
+export interface TokenUsageBreakdown {
+  inputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  outputTokens?: number;
+}
+
+function countable(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** Cost-weighted token count for one request or turn; 0 when nothing countable was reported. */
+export function weighTokenUsage(usage: TokenUsageBreakdown): number {
+  return (
+    countable(usage.inputTokens) * TOKEN_BURN_WEIGHTS.input +
+    countable(usage.cacheCreationInputTokens) * TOKEN_BURN_WEIGHTS.cacheCreation +
+    countable(usage.cacheReadInputTokens) * TOKEN_BURN_WEIGHTS.cacheRead +
+    countable(usage.outputTokens) * TOKEN_BURN_WEIGHTS.output
+  );
+}
+
 function pruneBuckets(
   buckets: readonly AgentTokenRateBucket[],
   nowMs: number,

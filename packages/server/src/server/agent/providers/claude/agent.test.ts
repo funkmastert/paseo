@@ -3188,21 +3188,78 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
-  test("turn_completed carries turnTokenDelta summed from input, output, and cached-read usage", async () => {
+  test("turn_completed carries a cost-weighted turnTokenDelta when no partial messages streamed", async () => {
     const session = await createSessionForTurns([[createInitMessage(), createSuccessResult()]]);
 
     try {
       const events = await collectStreamEvents(session);
 
       // createSuccessResult's default usage: input_tokens: 10, cache_read_input_tokens: 5,
-      // output_tokens: 7 — the token-rate tracker's per-turn delta is their sum, 22.
+      // output_tokens: 7 — weighted 10 + 5 × 0.1 + 7 × 5 = 45.5 (token-rate-tracker.ts).
       expect(events).toContainEqual(
         expect.objectContaining({
           type: "turn_completed",
           provider: "claude",
-          turnTokenDelta: 22,
+          turnTokenDelta: 45.5,
         }),
       );
+      expect(events.some((event) => event.type === "token_burn_delta")).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("streamed requests emit cost-weighted token_burn_delta events and suppress the per-turn fallback", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // Request 1: input 100, cache write 20, cache read 30, output 25
+        //   → 100 + 25 + 3 + 125 = 253
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        // Request 2: input 40, cache read 1000 (the context re-read), output 4
+        //   → 40 + 100 + 20 = 160 — the 1000-token cache read counts as 100, not 1000.
+        createMessageStartEvent({ input_tokens: 40, cache_read_input_tokens: 1000 }),
+        createMessageDeltaEvent(4),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([253, 160]);
+
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+      expect(turnCompleted).toBeDefined();
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a repeated message_delta for the same request only emits the output increment", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        createMessageDeltaEvent(40),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      // 253 for the first delta, then (40 − 25) × 5 = 75 for the extra output only.
+      expect(burnDeltas).toEqual([253, 75]);
     } finally {
       await session.close();
     }

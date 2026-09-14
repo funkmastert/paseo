@@ -1983,14 +1983,15 @@ describe("Codex app-server provider", () => {
     });
   });
 
-  test("buildCodexTurnTokenDelta sums input, output, and cached-read tokens", () => {
+  test("buildCodexTurnTokenDelta cost-weights input, cached-read, and output tokens", () => {
+    // 30000 × 1 + 5000 × 0.1 + 15000 × 5 (token-rate-tracker.ts's TOKEN_BURN_WEIGHTS).
     expect(
       buildCodexTurnTokenDelta({
         inputTokens: 30000,
         cachedInputTokens: 5000,
         outputTokens: 15000,
       }),
-    ).toBe(50000);
+    ).toBe(105500);
   });
 
   test("buildCodexTurnTokenDelta returns undefined when usage is absent or all-zero", () => {
@@ -5620,7 +5621,7 @@ describe("Codex app-server provider", () => {
         contextWindowMaxTokens: 200000,
         contextWindowUsedTokens: 50000,
       },
-      turnTokenDelta: 50000,
+      turnTokenDelta: 105500, // cost-weighted: 30000 + 5000 × 0.1 + 15000 × 5
     });
   });
 
@@ -5658,7 +5659,7 @@ describe("Codex app-server provider", () => {
 
     const turnCompletedEvents = events.filter((event) => event.type === "turn_completed");
     expect(turnCompletedEvents).toHaveLength(2);
-    expect(turnCompletedEvents[0]).toHaveProperty("turnTokenDelta", 15000);
+    expect(turnCompletedEvents[0]).toHaveProperty("turnTokenDelta", 35000); // 10000 + 5000 × 5
     expect(turnCompletedEvents[1]).not.toHaveProperty("turnTokenDelta");
   });
 

@@ -50,6 +50,7 @@ function summary(overrides: Partial<TokenBurnMonitorAgentSummary>): TokenBurnMon
     workspaceId: "workspace-1",
     internal: false,
     isDelegated: false,
+    isRunning: true,
     tokenRate: undefined,
     totalTokens: undefined,
     ...overrides,
@@ -119,6 +120,54 @@ describe("AgentTokenBurnMonitor", () => {
     expect(push.sent).toHaveLength(1);
     expect(push.sent[0]?.data?.reason).toBe("token_burn_rate");
     expect(push.sent[0]?.data?.agentId).toBe("agent-1");
+  });
+
+  test("an idle agent's lingering trailing-window rate never breaches the rate leg", async () => {
+    // A heavy turn holds the 5-minute average high long after the agent went idle; that is not
+    // burning. Only running agents are evaluated on the rate leg.
+    const agentManager = createFakeAgentManager([
+      summary({ id: "agent-1", tokenRate: 999_999, isRunning: false }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(agentManager.setTokenBurnAlert).not.toHaveBeenCalled();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("an idle agent can still breach the cumulative total leg", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ id: "agent-1", totalTokens: 6_000, isRunning: false }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      readDaemonConfig: () => ({ tokenBurnMonitor: { totalTokens: 5_000 } }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setTokenBurnAlert).toHaveBeenCalledWith(
+      "agent-1",
+      expect.objectContaining({ trigger: "total" }),
+    );
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.data?.reason).toBe("token_burn_total");
+    expect(push.sent[0]?.title).toBe("Agent has used a lot of tokens");
   });
 
   test("internal agents are never in scope", async () => {
