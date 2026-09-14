@@ -327,6 +327,32 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
     });
   });
 
+  test("accepts a title tracking refresh interval", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        metadataGeneration: {
+          titleTracking: { enabled: true, refreshIntervalMinutes: 15 },
+        },
+      },
+    });
+
+    expect(parsed.agents?.metadataGeneration).toEqual({
+      titleTracking: { enabled: true, refreshIntervalMinutes: 15 },
+    });
+  });
+
+  test("rejects a non-positive title tracking refresh interval", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        metadataGeneration: {
+          titleTracking: { refreshIntervalMinutes: 0 },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   test("accepts a custom provider catalog refresh timeout", () => {
     const parsed = PersistedConfigSchema.parse({
       agents: { catalogRefreshTimeoutMs: 180_000 },

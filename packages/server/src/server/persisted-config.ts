@@ -216,7 +216,13 @@ const StructuredGenerationProviderConfigSchema = z
 const AgentMetadataGenerationSchema = z
   .object({
     providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
-    titleTracking: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    titleTracking: z
+      .object({
+        enabled: z.boolean().optional(),
+        refreshIntervalMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

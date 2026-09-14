@@ -34,14 +34,36 @@ function createFakeAgentManager(input: {
   liveAgentIds?: Set<string>;
   timeline?: AgentTimelineItem[];
   applyGeneratedTitle?: ReturnType<typeof vi.fn>;
+  lastActivitySummary?: string;
+  listAgents?: ReturnType<typeof vi.fn>;
 }) {
   const liveAgentIds = input.liveAgentIds ?? new Set(["agent-1"]);
   const timeline = input.timeline ?? [{ type: "user_message" as const, text: "Fix the bug" }];
   return {
-    getAgent: vi.fn((id: string) => (liveAgentIds.has(id) ? ({ id } as never) : null)),
+    getAgent: vi.fn((id: string) =>
+      liveAgentIds.has(id)
+        ? ({ id, lastActivitySummary: input.lastActivitySummary } as never)
+        : null,
+    ),
     getTimeline: vi.fn(() => timeline),
     applyGeneratedTitle: input.applyGeneratedTitle ?? vi.fn(async () => true),
+    listAgents: input.listAgents ?? vi.fn(() => []),
   } as unknown as AgentManager;
+}
+
+function managedAgentSummary(overrides: {
+  id?: string;
+  cwd?: string;
+  lifecycle?: "initializing" | "idle" | "running" | "error" | "closed";
+  internal?: boolean;
+}) {
+  return {
+    id: "agent-1",
+    cwd: "/tmp/repo",
+    lifecycle: "idle" as const,
+    internal: false,
+    ...overrides,
+  };
 }
 
 function createFakeAgentStorage(record: Partial<StoredAgentRecord> | null) {
@@ -309,6 +331,245 @@ describe("AgentTitleTracker", () => {
 
     expect(applyGeneratedTitle).not.toHaveBeenCalled();
     expect(logger.error).toHaveBeenCalled();
+  });
+
+  test("refreshes only after the interval elapses, and not again while activity is unchanged", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const timeline: AgentTimelineItem[] = [{ type: "user_message", text: "Fix the bug" }];
+    const agentManager = createFakeAgentManager({
+      timeline,
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    // First tick just anchors the interval for a newly-seen agent.
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(0);
+
+    // 5 minutes later — interval hasn't elapsed yet.
+    nowMs += 5 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(0);
+
+    // 10 minutes after the anchor — interval elapsed, and this is the
+    // first-ever generation for this agent, so it counts as "changed".
+    nowMs += 5 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(1);
+
+    // Another 10 minutes pass, but nothing about the agent's activity
+    // changed — no second LLM call.
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(1);
+
+    // Activity changes and the interval has elapsed again — refreshes.
+    timeline.push({ type: "user_message", text: "Now fix the other bug" });
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(2);
+  });
+
+  test("never calls the LLM when nothing about the agent's activity has changed", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const agentManager = createFakeAgentManager({
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(1);
+
+    for (let i = 0; i < 5; i += 1) {
+      nowMs += 10 * 60_000;
+      await tracker.tick();
+    }
+    expect(structured.calls).toHaveLength(1);
+  });
+
+  test("leaves a manually-set title untouched even once the interval elapses", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const agentManager = createFakeAgentManager({
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title", titleManuallySet: true }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+
+    expect(structured.calls).toHaveLength(0);
+  });
+
+  test("skips internal agents and archived agents", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const agentManager = createFakeAgentManager({
+      listAgents: vi.fn(() => [
+        managedAgentSummary({ id: "internal-1", internal: true }),
+        managedAgentSummary({ id: "archived-1" }),
+      ]),
+    });
+    const records: Record<string, Partial<StoredAgentRecord> | null> = {
+      "internal-1": { title: "Internal" },
+      "archived-1": { title: "Archived", archivedAt: "2026-01-01T00:00:00Z" },
+    };
+    const agentStorage = {
+      get: vi.fn(async (id: string) => records[id] as StoredAgentRecord | null),
+    } as Pick<AgentStorage, "get">;
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage,
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+
+    expect(structured.calls).toHaveLength(0);
+  });
+
+  test("skips agents that are neither running nor idle", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const agentManager = createFakeAgentManager({
+      listAgents: vi.fn(() => [managedAgentSummary({ lifecycle: "initializing" })]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+
+    expect(structured.calls).toHaveLength(0);
+  });
+
+  test("includes a recent-activity digest built from the timeline tail and lastActivitySummary in the prompt", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const timeline: AgentTimelineItem[] = [
+      { type: "user_message", text: "Fix the bug" },
+      {
+        type: "tool_call",
+        callId: "call-1",
+        name: "Read",
+        status: "completed",
+        error: null,
+        detail: { type: "unknown", input: { path: "a.ts" } },
+      } as unknown as AgentTimelineItem,
+    ];
+    const agentManager = createFakeAgentManager({
+      timeline,
+      lastActivitySummary: "[Read] a.ts",
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+
+    expect(structured.calls).toHaveLength(1);
+    const prompt = structured.calls[0]?.prompt as string;
+    expect(prompt).toContain("<recent-activity>");
+    expect(prompt).toContain("[Read] a.ts");
+    expect(prompt).toContain("<current-title>");
+    expect(prompt).toContain("<newest-user-instruction>");
+  });
+
+  test("the turn-finished debounce path and the periodic sweep share one fingerprint dedup", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const timeline: AgentTimelineItem[] = [{ type: "user_message", text: "Fix the bug" }];
+    const agentManager = createFakeAgentManager({
+      timeline,
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage: createFakeAgentStorage({ title: "Old title" }),
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    // The turn-finished path generates first.
+    tracker.scheduleRefresh({ agentId: "agent-1", cwd: "/tmp/repo" });
+    await flushDebounce();
+    expect(structured.calls).toHaveLength(1);
+
+    // The sweep sees the same unchanged agent shortly after — no new call,
+    // and its own interval anchor comes from the turn-finished refresh.
+    await tracker.tick();
+    nowMs += 10 * 60_000;
+    await tracker.tick();
+    expect(structured.calls).toHaveLength(1);
   });
 });
 

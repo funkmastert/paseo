@@ -1197,6 +1197,7 @@ export async function createPaseoDaemon(
     logger,
   });
   handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
+  agentTitleTracker.start();
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
@@ -1975,6 +1976,7 @@ export async function createPaseoDaemon(
     terminalManager.killAll();
     await speechService.stop();
     agentManager.stopProviderSubagentSweep();
+    agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);

@@ -13,7 +13,7 @@ export interface StructuredGenerationDaemonConfig {
       model?: string;
       thinkingOptionId?: string;
     }>;
-    titleTracking?: { enabled?: boolean };
+    titleTracking?: { enabled?: boolean; refreshIntervalMinutes?: number };
   };
 }
 

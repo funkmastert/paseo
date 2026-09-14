@@ -133,10 +133,19 @@ const MutableStructuredGenerationProviderSchema = z
   })
   .passthrough();
 
+const MutableTitleTrackingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    // Additive, optional: older daemons/clients ignore it and keep the
+    // hardcoded 10-minute default (see agent-title-tracker.ts).
+    refreshIntervalMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
 const MutableMetadataGenerationConfigSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).default([]),
-    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    titleTracking: MutableTitleTrackingConfigSchema.optional(),
   })
   .passthrough();
 
@@ -147,7 +156,7 @@ const MutableMetadataGenerationConfigSchema = z
 const MutableMetadataGenerationPatchSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).optional(),
-    titleTracking: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    titleTracking: MutableTitleTrackingConfigSchema.optional(),
   })
   .passthrough();
 

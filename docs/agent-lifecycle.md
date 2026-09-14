@@ -152,6 +152,10 @@ A finished workspace can be marked unread after it has been reviewed. The daemon
 `finished` attention on its newest eligible workspace-root agent without sending a new completion
 notification. Opening the workspace clears that attention through the normal focus flow.
 
+## Title tracking
+
+An agent's title refreshes from two triggers: a turn finishing (`running` -> `idle`), and a periodic sweep every 60 seconds over every non-internal, non-archived agent that is `running` or `idle`. Both routes call an LLM through the same fingerprint — a hash of the agent's newest user message and a digest of its recent activity — so an unchanged agent never costs a second call. The sweep additionally waits at least `agents.metadataGeneration.titleTracking.refreshIntervalMinutes` (default 10) since an agent's last refresh before reconsidering it, bounding the cost to one small call per agent per interval. A title the user set explicitly (`titleManuallySet`) is never touched by either trigger. See `agent-title-tracker.ts`.
+
 ## The subagents track
 
 The track is a pill at the foot of an agent's pane (`packages/app/src/subagents/track.tsx`): a count you can read at a glance, and a panel behind it — a popover on wide screens, a sheet on compact ones — holding the rows. It floats over the transcript rather than sitting in a band above the composer, so the timeline scrolls underneath it; `packages/app/src/panels/agent-tracks.tsx` owns that placement, and the pill frame is shared with the task list in `packages/app/src/composer/tracks.tsx`.
