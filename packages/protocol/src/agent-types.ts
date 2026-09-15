@@ -205,6 +205,21 @@ export interface TokenBurnAlert {
   firstBreachedAt: string;
 }
 
+/**
+ * Live breach state set by the daemon-side AgentResourceMonitor when an agent's attributed
+ * process tree trips the configured memory or CPU threshold. Additive-optional on the wire and
+ * deliberately NOT a member of the closed `attentionReason` enum, mirroring TokenBurnAlert
+ * above. `trigger` names which leg fired first (memory takes priority when both cross in the
+ * same sweep); `memoryBytes`/`cpuPercent` are always the current reading for the tree, not just
+ * the one that triggered, so the alert carries the full picture either way.
+ */
+export interface ResourceAlert {
+  trigger: "memory" | "cpu";
+  memoryBytes: number;
+  cpuPercent: number;
+  firstBreachedAt: string;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",

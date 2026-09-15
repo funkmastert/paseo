@@ -17,6 +17,9 @@ export interface AgentStateBucketInput {
    * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
    */
   tokenBurnAlert?: boolean;
+  /** Presence of a live resource (memory/CPU) breach. Same attention treatment as
+   * tokenBurnAlert above, for the same reason — see ResourceAlert's doc comment. */
+  resourceAlert?: boolean;
 }
 
 const WORKSPACE_STATE_BUCKET_PRIORITY = {
@@ -37,7 +40,7 @@ export function deriveAgentStateBucket(input: AgentStateBucketInput): WorkspaceS
   // Checked before the running status below: a token-burn alert fires *while* the agent is
   // still running (that's the case it exists to catch), unlike requiresAttention, which is
   // edge-triggered only at turn completion and never co-occurs with "running" in practice.
-  if (input.tokenBurnAlert) {
+  if (input.tokenBurnAlert || input.resourceAlert) {
     return "attention";
   }
   if (input.status === "running") {

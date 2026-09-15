@@ -401,6 +401,7 @@ export class WorkspaceDirectory {
             requiresAttention: agent.requiresAttention,
             attentionReason: agent.attentionReason ?? null,
             tokenBurnAlert: agent.tokenBurnAlert !== undefined,
+            resourceAlert: agent.resourceAlert !== undefined,
           })
         : "running";
 
@@ -551,6 +552,7 @@ export class WorkspaceDirectory {
           requiresAttention: agent.requiresAttention,
           attentionReason: agent.attentionReason ?? null,
           tokenBurnAlert: agent.tokenBurnAlert !== undefined,
+          resourceAlert: agent.resourceAlert !== undefined,
         });
         return derived === winningBucket;
       })

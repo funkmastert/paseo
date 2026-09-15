@@ -176,6 +176,22 @@ const MutableTokenBurnMonitorConfigSchema = z
 
 const MutableTokenBurnMonitorPatchSchema = MutableTokenBurnMonitorConfigSchema;
 
+// Live-toggleable like tokenBurnMonitor above — same mutable/patch split, same reason.
+// See docs/resource-monitor.md.
+const MutableResourceMonitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    memoryBytesPerAgent: z.number().positive().optional(),
+    cpuPercentPerAgent: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    systemSwapUsedRatio: z.number().positive().optional(),
+    orphanBuildDaemonBytes: z.number().positive().optional(),
+    notifyAgent: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
+
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
 // reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
@@ -342,6 +358,7 @@ export const MutableDaemonConfigSchema = z
     providers: z.record(z.string(), MutableDaemonProviderConfigSchema).default({}),
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
+    resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -366,6 +383,7 @@ export const MutableDaemonConfigPatchSchema = z
     removeProviders: z.array(z.string().min(1)).optional(),
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
+    resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
@@ -401,6 +419,7 @@ import type {
   AgentUsage,
   JsonValue,
   TokenBurnAlert,
+  ResourceAlert,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -552,6 +571,13 @@ const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
   trigger: z.enum(["rate", "total"]),
   ratePerMinute: z.number().optional(),
   totalTokens: z.number().optional(),
+  firstBreachedAt: z.string(),
+});
+
+const ResourceAlertSchema: z.ZodType<ResourceAlert> = z.object({
+  trigger: z.enum(["memory", "cpu"]),
+  memoryBytes: z.number(),
+  cpuPercent: z.number(),
   firstBreachedAt: z.string(),
 });
 
@@ -1015,6 +1041,7 @@ export const AgentSnapshotPayloadSchema = z.object({
   archivedAt: z.string().nullable().optional(),
   providerUnavailable: z.boolean().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
+  resourceAlert: ResourceAlertSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1043,6 +1070,7 @@ export const AgentListItemPayloadSchema = z.object({
   recentTokenRate: AgentTokenRateSchema.optional(),
   totalTokens: z.number().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
+  resourceAlert: ResourceAlertSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

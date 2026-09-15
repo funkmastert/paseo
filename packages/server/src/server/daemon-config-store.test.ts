@@ -1025,6 +1025,55 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-toggles resourceMonitor.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            resourceMonitor: { memoryBytesPerAgent: 4_294_967_296, sustainedMinutes: 5 },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        resourceMonitor: { memoryBytesPerAgent: 4_294_967_296, sustainedMinutes: 5 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ resourceMonitor: { enabled: false } });
+
+    expect(next.resourceMonitor).toEqual({
+      memoryBytesPerAgent: 4_294_967_296,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.resourceMonitor).toEqual({
+      memoryBytesPerAgent: 4_294_967_296,
+      sustainedMinutes: 5,
+      enabled: false,
+    });
+  });
+
   test("patch live-toggles worktrees.diskSweeper.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

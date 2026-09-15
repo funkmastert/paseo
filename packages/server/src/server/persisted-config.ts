@@ -237,6 +237,20 @@ const AgentTokenBurnMonitorSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.tokenBurnMonitor above — same mutable/patch split, same reason.
+// See docs/resource-monitor.md.
+const AgentResourceMonitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    memoryBytesPerAgent: z.number().positive().optional(),
+    cpuPercentPerAgent: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    systemSwapUsedRatio: z.number().positive().optional(),
+    orphanBuildDaemonBytes: z.number().positive().optional(),
+    notifyAgent: z.boolean().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -385,6 +399,7 @@ export const PersistedConfigSchema = z
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
+        resourceMonitor: AgentResourceMonitorSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

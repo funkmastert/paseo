@@ -211,6 +211,9 @@ import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
+import { AgentResourceMonitor } from "./agent-resource-monitor.js";
+import { createSystemProcessSampler } from "./agent/process-sampler.js";
+import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
@@ -487,6 +490,15 @@ export interface PaseoDaemonConfig {
     scope?: "all" | "topLevelOnly";
     breachBatchThreshold?: number;
   };
+  resourceMonitor?: {
+    enabled?: boolean;
+    memoryBytesPerAgent?: number;
+    cpuPercentPerAgent?: number;
+    sustainedMinutes?: number;
+    systemSwapUsedRatio?: number;
+    orphanBuildDaemonBytes?: number;
+    notifyAgent?: boolean;
+  };
   diskSweeper?: {
     enabled?: boolean;
     sweepIntervalMs?: number;
@@ -582,6 +594,12 @@ function withTokenBurnMonitorConfig(
   return config.tokenBurnMonitor !== undefined ? { tokenBurnMonitor: config.tokenBurnMonitor } : {};
 }
 
+function withResourceMonitorConfig(
+  config: Pick<PaseoDaemonConfig, "resourceMonitor">,
+): Pick<MutableDaemonConfig, "resourceMonitor"> {
+  return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
+}
+
 function withDiskSweeperConfig(
   config: Pick<PaseoDaemonConfig, "diskSweeper">,
 ): Pick<MutableDaemonConfig, "diskSweeper"> {
@@ -617,6 +635,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
       providers: config.metadataGeneration?.providers ?? [],
     },
     ...withTokenBurnMonitorConfig(config),
+    ...withResourceMonitorConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
@@ -750,6 +769,7 @@ export async function createPaseoDaemon(
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
+  let agentResourceMonitor: AgentResourceMonitor | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -1911,6 +1931,32 @@ export async function createPaseoDaemon(
               logger,
             });
             agentTokenBurnMonitor.start();
+            // Wired here for the same reason as the token-burn monitor above — needs the push
+            // sender wsServer resolved. sendSystemMessageToAgent reuses the same steer path
+            // chat mentions and notify-on-finish use (agent-prompt.ts's sendPromptToAgent).
+            agentResourceMonitor = new AgentResourceMonitor({
+              agentManager,
+              agentStorage,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              processSampler: createSystemProcessSampler(),
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              readDaemonConfig: () => ({
+                resourceMonitor: daemonConfigStore.get().resourceMonitor,
+              }),
+              logger,
+            });
+            agentResourceMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -1984,6 +2030,7 @@ export async function createPaseoDaemon(
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
+    agentResourceMonitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);

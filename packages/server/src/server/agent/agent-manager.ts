@@ -17,7 +17,12 @@ import {
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
-import type { ProviderOptions, ToolPolicy, TokenBurnAlert } from "@getpaseo/protocol/agent-types";
+import type {
+  ProviderOptions,
+  ToolPolicy,
+  TokenBurnAlert,
+  ResourceAlert,
+} from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
@@ -100,6 +105,7 @@ import {
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
 import type { TokenBurnMonitorState } from "./token-burn-detector.js";
+import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -282,6 +288,18 @@ export interface TokenBurnMonitorAgentSummary {
   isRunning: boolean;
   tokenRate: number | undefined;
   totalTokens: number | undefined;
+}
+
+/**
+ * Lean per-agent view for AgentResourceMonitor's sweep, mirroring TokenBurnMonitorAgentSummary
+ * above. Resource usage is attributed from an OS-level `ps` sample keyed by agent id
+ * (process-attribution.ts), not from anything AgentManager tracks itself — this summary exists
+ * only to tell the monitor which agent ids to attribute against and whether each is in scope.
+ */
+export interface ResourceMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
 }
 
 export interface ProviderAvailability {
@@ -499,6 +517,18 @@ interface ManagedAgentBase {
    * See token-burn-detector.ts.
    */
   tokenBurnMonitorState?: TokenBurnMonitorState;
+  /**
+   * Live-only breach state set by AgentResourceMonitor via setResourceAlert/clearResourceAlert.
+   * Not persisted, cleared on rewind alongside tokenBurnAlert — same reasons. See
+   * ResourceAlert's doc comment and docs/resource-monitor.md.
+   */
+  resourceAlert?: ResourceAlert;
+  /**
+   * Live-only per-agent bookkeeping (consecutive-sweep counters for the memory and CPU legs)
+   * the monitor threads between sweeps. Never projected to the wire, never persisted. See
+   * resource-monitor-detector.ts.
+   */
+  resourceMonitorState?: AgentResourceMonitorState;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -1206,6 +1236,14 @@ export class AgentManager {
     }));
   }
 
+  listAgentsForResourceMonitor(): ResourceMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+    }));
+  }
+
   async listImportableSessions(
     options?: ImportablePersistedAgentQueryOptions,
   ): Promise<ManagedImportableSessionsResult> {
@@ -1404,6 +1442,32 @@ export class AgentManager {
     const agent = this.agents.get(agentId);
     if (!agent?.tokenBurnAlert) return;
     delete agent.tokenBurnAlert;
+    this.emitState(agent, { persist: false });
+  }
+
+  /** Read-modify-write slot for AgentResourceMonitor's per-agent consecutive-sweep bookkeeping. */
+  getResourceMonitorState(agentId: string): AgentResourceMonitorState | undefined {
+    return this.agents.get(agentId)?.resourceMonitorState;
+  }
+
+  setResourceMonitorState(agentId: string, state: AgentResourceMonitorState): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.resourceMonitorState = state;
+  }
+
+  /** Sets the live breach badge and broadcasts the new snapshot. See ResourceAlert's doc comment. */
+  setResourceAlert(agentId: string, alert: ResourceAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.resourceAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearResourceAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.resourceAlert) return;
+    delete agent.resourceAlert;
     this.emitState(agent, { persist: false });
   }
 
@@ -3531,6 +3595,8 @@ export class AgentManager {
         delete agent.totalTokens;
         delete agent.tokenBurnAlert;
         delete agent.tokenBurnMonitorState;
+        delete agent.resourceAlert;
+        delete agent.resourceMonitorState;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);

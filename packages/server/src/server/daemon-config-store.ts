@@ -24,6 +24,7 @@ interface SupportedMutableConfigPatch {
   removeProviders?: string[];
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
+  resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -198,6 +199,7 @@ const RELOADABLE_PATHS = [
   "agents.catalogRefreshTimeoutMs",
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
+  "agents.resourceMonitor",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -230,6 +232,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.catalogRefreshTimeoutMs", "catalogRefreshTimeoutMs"],
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
+  ["agents.resourceMonitor", "resourceMonitor"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -298,6 +301,12 @@ function pickTokenBurnMonitorPatch(
   return tokenBurnMonitor === undefined ? {} : { tokenBurnMonitor };
 }
 
+function pickResourceMonitorPatch(
+  resourceMonitor: MutableDaemonConfigPatch["resourceMonitor"],
+): Pick<SupportedMutableConfigPatch, "resourceMonitor"> {
+  return resourceMonitor === undefined ? {} : { resourceMonitor };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -323,6 +332,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...(patch.removeProviders !== undefined ? { removeProviders: patch.removeProviders } : {}),
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
+    ...pickResourceMonitorPatch(patch.resourceMonitor),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -732,6 +742,18 @@ function mergeTokenBurnMonitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedResourceMonitor = NonNullable<PersistedConfig["agents"]>["resourceMonitor"];
+
+function mergeResourceMonitorForPersist(
+  persisted: PersistedResourceMonitor,
+  patch: SupportedMutableConfigPatch["resourceMonitor"],
+): PersistedResourceMonitor {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -789,6 +811,7 @@ function mergeMutableAgentPatch(
     patch.providers === undefined &&
     patch.metadataGeneration === undefined &&
     patch.tokenBurnMonitor === undefined &&
+    patch.resourceMonitor === undefined &&
     patch.skills === undefined &&
     removeProviders.length === 0
   ) {
@@ -819,6 +842,12 @@ function mergeMutableAgentPatch(
     patch.tokenBurnMonitor,
   );
   if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
+
+  const resourceMonitor = mergeResourceMonitorForPersist(
+    persistedAgents?.resourceMonitor,
+    patch.resourceMonitor,
+  );
+  if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

@@ -111,6 +111,42 @@ describe("deriveAgentStateBucket", () => {
       }),
     ).toBe("done");
   });
+
+  it("treats a resource alert as attention-worthy on its own, independent of attentionReason", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "idle",
+        pendingPermissionCount: 0,
+        requiresAttention: false,
+        attentionReason: null,
+        resourceAlert: true,
+      }),
+    ).toBe("attention");
+  });
+
+  it("surfaces a resource alert as attention even while the agent is still running", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "running",
+        pendingPermissionCount: 0,
+        requiresAttention: false,
+        attentionReason: null,
+        resourceAlert: true,
+      }),
+    ).toBe("attention");
+  });
+
+  it("doesn't let a resource alert override a higher-priority bucket", () => {
+    expect(
+      deriveAgentStateBucket({
+        status: "idle",
+        pendingPermissionCount: 1,
+        requiresAttention: false,
+        attentionReason: null,
+        resourceAlert: true,
+      }),
+    ).toBe("needs_input");
+  });
 });
 
 describe("getWorkspaceStateBucketPriority", () => {

@@ -569,6 +569,28 @@ describe("toAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("tokenBurnAlert");
   });
+
+  it("includes resourceAlert when the monitor has set one", () => {
+    const resourceAlert = {
+      trigger: "memory" as const,
+      memoryBytes: 7_730_941_133,
+      cpuPercent: 410,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    };
+    const agent = createManagedAgent({ resourceAlert });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload.resourceAlert).toEqual(resourceAlert);
+  });
+
+  it("omits resourceAlert when the monitor hasn't set one", () => {
+    const agent = createManagedAgent({ resourceAlert: undefined });
+
+    const payload = toAgentPayload(agent);
+
+    expect(payload).not.toHaveProperty("resourceAlert");
+  });
 });
 
 describe("buildStoredAgentPayload", () => {
@@ -609,6 +631,24 @@ describe("buildStoredAgentPayload", () => {
     const payload = buildStoredAgentPayload(record, ["claude"]);
 
     expect(payload).not.toHaveProperty("tokenBurnAlert");
+  });
+
+  it("omits resourceAlert for persisted records — it's live-only and never stored", () => {
+    const agent = createManagedAgent({
+      resourceAlert: {
+        trigger: "cpu",
+        memoryBytes: 1_073_741_824,
+        cpuPercent: 500,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    expect(record).not.toHaveProperty("resourceAlert");
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload).not.toHaveProperty("resourceAlert");
   });
 });
 
@@ -667,6 +707,31 @@ describe("toAgentListItemPayload", () => {
     const listItem = toAgentListItemPayload(snapshot);
 
     expect(listItem).not.toHaveProperty("tokenBurnAlert");
+  });
+
+  it("carries resourceAlert through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      resourceAlert: {
+        trigger: "memory",
+        memoryBytes: 7_730_941_133,
+        cpuPercent: 410,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.resourceAlert).toEqual(snapshot.resourceAlert);
+  });
+
+  it("omits resourceAlert when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ resourceAlert: undefined });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("resourceAlert");
   });
 
   it("omits lastActivitySummary when the snapshot doesn't have one", () => {

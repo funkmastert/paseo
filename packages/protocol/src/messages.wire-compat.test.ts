@@ -338,6 +338,50 @@ describe("wire schema compatibility", () => {
     expect(newParsed.tokenBurnAlert).toEqual(payloadFromNewDaemon.tokenBurnAlert);
   });
 
+  test("old clients strip an unknown resourceAlert field from new daemon snapshots", () => {
+    // Same wire-safety proof as tokenBurnAlert above, for the resource monitor's alert.
+    const LegacySnapshotSchema = AgentSnapshotPayloadSchema.omit({ resourceAlert: true });
+    const payloadFromNewDaemon = {
+      id: "agent-1",
+      provider: "claude",
+      cwd: "/tmp/project",
+      model: null,
+      thinkingOptionId: null,
+      effectiveThinkingOptionId: null,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "running",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      attentionReason: null,
+      resourceAlert: {
+        trigger: "memory",
+        memoryBytes: 7_730_941_133,
+        cpuPercent: 410,
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    };
+
+    const legacyParsed = LegacySnapshotSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("resourceAlert");
+
+    const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.resourceAlert).toEqual(payloadFromNewDaemon.resourceAlert);
+  });
+
   test("old clients strip an unknown diskUsage field from new daemon workspace descriptors", () => {
     // Models an old client's schema, generated before diskUsage existed. WorkspaceDescriptorPayloadSchema
     // ends in a `.transform()` (`workspaceDirectory` defaulting), so it has no `.omit()` — this
