@@ -806,7 +806,9 @@ export interface AgentClient {
    * "adopt a session-reported server" action (docs/mcp-gateway.md). Only providers that read
    * per-dir MCP config files implement it.
    */
-  resolveMcpConfigScope?(cwd: string): { configDir: string; projectDir: string } | undefined;
+  resolveMcpConfigScope?(
+    cwd: string,
+  ): { configDir: string; projectDir: string; env?: NodeJS.ProcessEnv } | undefined;
   createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,

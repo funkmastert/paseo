@@ -267,6 +267,10 @@ export class AgentTitleTracker {
       if (nowMs - lastRefreshedAt < refreshIntervalMs) {
         continue;
       }
+      // Re-anchor before attempting, not only on success: an agent whose activity hasn't
+      // changed (or whose title is manual) must wait a full interval before it costs another
+      // storage read + digest, instead of being reconsidered on every 60s tick forever.
+      this.lastRefreshedAtByAgentId.set(agent.id, nowMs);
       await this.attemptRefresh({ agentId: agent.id, cwd: agent.cwd, nowMs }).catch((error) => {
         this.logger.error({ err: error, agentId: agent.id }, "Agent title refresh failed");
       });

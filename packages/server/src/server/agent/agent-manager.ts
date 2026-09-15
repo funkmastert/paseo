@@ -4766,8 +4766,14 @@ export class AgentManager {
         this.onStreamThreadStarted(agent);
         return;
       case "usage_updated":
+        // One of these lands per API request per agent (message_start / message_delta). Dedupe
+        // like mcp_server_statuses and skip the snapshot write like lastActivitySummary: the
+        // stored record doesn't carry lastUsage, so the write only rewrote an unchanged file,
+        // and with a dozen streaming agents that was a steady share of daemon I/O and of every
+        // client's store churn (docs/agent-stream-performance.md, "Agent state emits").
+        if (isDeepStrictEqual(agent.lastUsage, event.usage)) return;
         agent.lastUsage = event.usage;
-        this.emitState(agent);
+        this.emitState(agent, { persist: false });
         return;
       case "token_burn_delta":
         // Daemon-internal: feeds the burn ring the monitor reads straight off ManagedAgent.

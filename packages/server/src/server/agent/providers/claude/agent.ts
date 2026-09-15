@@ -1522,10 +1522,17 @@ export class ClaudeAgentClient implements AgentClient {
 
   /** docs/mcp-gateway.md "Adopting a session-reported server": the same dirs strict-mode stdio
    * re-injection reads (`applyMcpGatewayOptions`), resolved for one session's cwd. */
-  resolveMcpConfigScope(cwd: string): { configDir: string; projectDir: string } {
+  resolveMcpConfigScope(cwd: string): {
+    configDir: string;
+    projectDir: string;
+    env: NodeJS.ProcessEnv;
+  } {
     return {
       configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
       projectDir: cwd,
+      // The same env the CLI subprocess gets, so `${VAR}` in a definition expands as the
+      // session itself would expand it — a provider-profile token is not in the daemon's env.
+      env: createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
     };
   }
 
@@ -3460,6 +3467,7 @@ class ClaudeAgentSession implements AgentSession {
     const stdioServers = readPerDirStdioMcpServers({
       configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
       projectDir: this.config.cwd,
+      env: createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
       logger: this.logger,
     });
     if (Object.keys(stdioServers).length === 0) {

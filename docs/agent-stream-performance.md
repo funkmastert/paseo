@@ -59,3 +59,7 @@ Healthy numbers (2026-08, Expo web against a local dev daemon, real Claude Haiku
 Total characters painted is roughly the same either way — the reveal changes when they land, not how many arrive.
 
 Measure the **total** length across every `assistant-message` element, not the last one. A turn emits many assistant messages, so the tail element keeps changing identity and its length is not monotonic; sampling only the tail reads those handovers as resets and reports almost no growth. `sampleStreamFrames` does this correctly.
+
+## Agent state emits
+
+`agent_state` is not coalesced the way assistant text is: every emit becomes a full `agent_update` snapshot on the wire and a store write in every client. The fields that change while an agent streams — `lastUsage`, `lastActivitySummary`, `mcpServerStatuses` — therefore follow two rules in `agent-manager.ts`: emit only when the value actually changed, and emit with `persist: false`, because none of them is part of the stored record and the write only rewrote an unchanged file. On the client, `acceptAgentDirectoryUpdate` keeps the previous object when a same-timestamp update is deep-equal, and the pending-permission map is only rebuilt when an agent's permissions changed, so a redundant tick never fans out to selectors. With a dozen agents streaming, the pre-rule behaviour was one snapshot write and one store-wide notification per API request per agent — enough to keep the desktop renderer busy while idle.

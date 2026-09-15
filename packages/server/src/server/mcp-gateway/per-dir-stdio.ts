@@ -12,6 +12,12 @@ export interface ReadPerDirStdioMcpServersOptions {
   configDir: string;
   /** The session's project directory — read for a project-level `.mcp.json`. */
   projectDir: string;
+  /**
+   * The environment the session's CLI runs with (`createProviderEnv`), used for `${VAR}`
+   * expansion. Defaults to the daemon's own env, which differs from a provider entry's env —
+   * a token that only a provider profile sets would otherwise expand to "".
+   */
+  env?: NodeJS.ProcessEnv;
   logger?: LoggerLike;
 }
 
@@ -30,24 +36,27 @@ const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g;
  * this syntax would diverge from native spawn semantics (an unexpanded literal string instead
  * of the resolved value) — the parity this module exists to preserve.
  */
-function expandEnvVars(value: string): string {
+function expandEnvVars(value: string, env: NodeJS.ProcessEnv): string {
   return value.replace(ENV_VAR_PATTERN, (_match, name: string, _group, fallback?: string) => {
-    const resolved = process.env[name];
+    const resolved = env[name];
     return resolved !== undefined ? resolved : (fallback ?? "");
   });
 }
 
-function expandStdioEntry(entry: McpStdioServerConfig): McpStdioServerConfig {
+function expandStdioEntry(
+  entry: McpStdioServerConfig,
+  env: NodeJS.ProcessEnv,
+): McpStdioServerConfig {
   const expanded: McpStdioServerConfig = {
     type: "stdio",
-    command: expandEnvVars(entry.command),
+    command: expandEnvVars(entry.command, env),
   };
   if (entry.args) {
-    expanded.args = entry.args.map(expandEnvVars);
+    expanded.args = entry.args.map((arg) => expandEnvVars(arg, env));
   }
   if (entry.env) {
     expanded.env = Object.fromEntries(
-      Object.entries(entry.env).map(([key, value]) => [key, expandEnvVars(value)]),
+      Object.entries(entry.env).map(([key, value]) => [key, expandEnvVars(value, env)]),
     );
   }
   if (entry.alwaysLoad !== undefined) {
@@ -68,14 +77,17 @@ function isStdioEntry(value: unknown): value is McpStdioServerConfig {
 }
 
 /** Only `stdio` entries — remote (`http`/`sse`) per-dir entries are the gateway's job (KTD1). */
-function extractStdioServers(mcpServers: unknown): Record<string, McpStdioServerConfig> {
+function extractStdioServers(
+  mcpServers: unknown,
+  env: NodeJS.ProcessEnv,
+): Record<string, McpStdioServerConfig> {
   if (typeof mcpServers !== "object" || mcpServers === null) {
     return {};
   }
   const result: Record<string, McpStdioServerConfig> = {};
   for (const [name, value] of Object.entries(mcpServers as Record<string, unknown>)) {
     if (isStdioEntry(value)) {
-      result[name] = expandStdioEntry(value);
+      result[name] = expandStdioEntry(value, env);
     }
   }
   return result;
@@ -128,7 +140,7 @@ function resolveRemoteTransport(type: unknown): PerDirRemoteMcpServer["transport
   return undefined;
 }
 
-function toRemoteEntry(value: unknown): PerDirRemoteMcpServer | undefined {
+function toRemoteEntry(value: unknown, env: NodeJS.ProcessEnv): PerDirRemoteMcpServer | undefined {
   if (typeof value !== "object" || value === null) {
     return undefined;
   }
@@ -149,10 +161,10 @@ function toRemoteEntry(value: unknown): PerDirRemoteMcpServer | undefined {
   const headers = Object.fromEntries(
     Object.entries(rawHeaders)
       .filter((entry): entry is [string, string] => typeof entry[1] === "string")
-      .map(([key, headerValue]) => [key, expandEnvVars(headerValue)]),
+      .map(([key, headerValue]) => [key, expandEnvVars(headerValue, env)]),
   );
   return {
-    url: expandEnvVars(record.url),
+    url: expandEnvVars(record.url, env),
     transport,
     ...(Object.keys(headers).length > 0 ? { headers } : {}),
   };
@@ -175,10 +187,13 @@ function readLocalScopeMcpServersField(parsed: unknown, projectDir: string): unk
 
 /**
  * Finds one remote (http/sse) MCP definition the way the CLI resolves it for a session in
- * `projectDir`: the project's `.mcp.json`, then the config dir's local scope
- * (`projects[projectDir].mcpServers` in `.claude.json`), then its user scope. Powers the
- * gateway's adopt action (docs/mcp-gateway.md); stdio entries are never adoptable and are
- * skipped. `${VAR}` expansion applies to the url and header values, as for stdio entries.
+ * `projectDir`, in the CLI's own precedence: the config dir's local scope
+ * (`projects[projectDir].mcpServers` in `.claude.json`), then the project's `.mcp.json`, then
+ * user scope. Local must win: it is the user's private override of whatever a repository
+ * checks in, and adopting the checked-in copy instead would broker a definition the session
+ * isn't using. Powers the gateway's adopt action (docs/mcp-gateway.md); stdio entries are never
+ * adoptable and are skipped. `${VAR}` expansion applies to the url and header values against
+ * `options.env`, as for stdio entries.
  */
 export function readPerDirRemoteMcpServer(
   options: ReadPerDirStdioMcpServersOptions & { name: string },
@@ -191,16 +206,17 @@ export function readPerDirRemoteMcpServer(
     path.join(options.projectDir, PROJECT_CONFIG_FILENAME),
     options.logger,
   );
+  const env = options.env ?? process.env;
   const scopes = [
-    readMcpServersField(projectConfig),
     readLocalScopeMcpServersField(globalConfig, options.projectDir),
+    readMcpServersField(projectConfig),
     readMcpServersField(globalConfig),
   ];
   for (const mcpServers of scopes) {
     if (typeof mcpServers !== "object" || mcpServers === null) {
       continue;
     }
-    const entry = toRemoteEntry((mcpServers as Record<string, unknown>)[options.name]);
+    const entry = toRemoteEntry((mcpServers as Record<string, unknown>)[options.name], env);
     if (entry) {
       return entry;
     }
@@ -232,8 +248,9 @@ export function readPerDirStdioMcpServers(
     options.logger,
   );
 
+  const env = options.env ?? process.env;
   return {
-    ...extractStdioServers(readMcpServersField(globalConfig)),
-    ...extractStdioServers(readMcpServersField(projectConfig)),
+    ...extractStdioServers(readMcpServersField(globalConfig), env),
+    ...extractStdioServers(readMcpServersField(projectConfig), env),
   };
 }

@@ -172,7 +172,29 @@ describe("readPerDirRemoteMcpServer", () => {
     }
   });
 
-  test("project .mcp.json beats local scope, which beats user scope, matching the CLI", () => {
+  test("project .mcp.json beats user scope, and a url with no type reads as http", () => {
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    writeFileSync(
+      path.join(configDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { notion: { type: "http", url: "https://user.example/mcp" } },
+      }),
+    );
+    writeFileSync(
+      path.join(projectDir, ".mcp.json"),
+      JSON.stringify({ mcpServers: { notion: { url: "https://project.example/mcp" } } }),
+    );
+
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
+      url: "https://project.example/mcp",
+      transport: "http",
+    });
+  });
+
+  test("local scope beats the checked-in project .mcp.json, matching the CLI's precedence", () => {
+    // The user's private override must win over whatever a repository ships; adopting the
+    // checked-in copy would broker a definition the session isn't actually using.
     const configDir = createTempDir("paseo-claude-config-");
     const projectDir = createTempDir("paseo-project-");
     writeFileSync(
@@ -186,21 +208,45 @@ describe("readPerDirRemoteMcpServer", () => {
         },
       }),
     );
-
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toMatchObject({
-      url: "https://local.example/mcp",
-      transport: "sse",
-    });
-
     writeFileSync(
       path.join(projectDir, ".mcp.json"),
       JSON.stringify({ mcpServers: { notion: { url: "https://project.example/mcp" } } }),
     );
 
-    // A url with no type reads as http, as the CLI treats it.
     expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
-      url: "https://project.example/mcp",
-      transport: "http",
+      url: "https://local.example/mcp",
+      transport: "sse",
+    });
+  });
+
+  test("expands ${VAR} against the env the session runs with, not only the daemon's", () => {
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    writeFileSync(
+      path.join(projectDir, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: {
+          zeeq: {
+            type: "http",
+            url: "https://app.zeeq.ai/mcp",
+            headers: { Authorization: "Bearer ${ZEEQ_TOKEN_FOR_TEST}" },
+          },
+        },
+      }),
+    );
+    delete process.env.ZEEQ_TOKEN_FOR_TEST;
+
+    expect(
+      readPerDirRemoteMcpServer({
+        configDir,
+        projectDir,
+        name: "zeeq",
+        env: { ZEEQ_TOKEN_FOR_TEST: "from-provider-profile" },
+      })?.headers,
+    ).toEqual({ Authorization: "Bearer from-provider-profile" });
+    // Without the session env the daemon's own env is used, where the token is unset.
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "zeeq" })?.headers).toEqual({
+      Authorization: "Bearer ",
     });
   });
 

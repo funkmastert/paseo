@@ -381,6 +381,47 @@ describe("AgentTitleTracker", () => {
     expect(structured.calls).toHaveLength(2);
   });
 
+  test("reconsiders an unchanged agent once per interval, not on every 60s tick", async () => {
+    const structured = createStructuredGenerator({ title: "New title" });
+    let nowMs = 0;
+    const agentStorage = createFakeAgentStorage({ title: "Old title" });
+    const storageReads = agentStorage.get as ReturnType<typeof vi.fn>;
+    const agentManager = createFakeAgentManager({
+      listAgents: vi.fn(() => [managedAgentSummary({})]),
+    });
+    const tracker = new AgentTitleTracker({
+      agentManager,
+      agentStorage,
+      readDaemonConfig: () => ({
+        metadataGeneration: { titleTracking: { refreshIntervalMinutes: 10 } },
+      }),
+      logger: createLogger(),
+      debounceMs: 0,
+      now: () => nowMs,
+      deps: { generateStructuredAgentResponseWithFallback: structured.generateStructured },
+    });
+
+    await tracker.tick(); // anchors the interval
+    nowMs += 10 * 60_000;
+    await tracker.tick(); // first generation
+    expect(structured.calls).toHaveLength(1);
+    const readsAfterFirstGeneration = storageReads.mock.calls.length;
+
+    // Nine more ticks inside the next interval: the agent is idle and unchanged, so it must not
+    // even be read from storage — that used to happen on every tick once the interval had
+    // elapsed once, because only a successful generation re-anchored the clock.
+    for (let tick = 0; tick < 9; tick += 1) {
+      nowMs += 60_000;
+      await tracker.tick();
+    }
+    expect(storageReads.mock.calls.length).toBe(readsAfterFirstGeneration);
+
+    nowMs += 60_000; // the ten-minute mark: reconsidered exactly once, still no LLM call
+    await tracker.tick();
+    expect(storageReads.mock.calls.length).toBe(readsAfterFirstGeneration + 1);
+    expect(structured.calls).toHaveLength(1);
+  });
+
   test("never calls the LLM when nothing about the agent's activity has changed", async () => {
     const structured = createStructuredGenerator({ title: "New title" });
     let nowMs = 0;

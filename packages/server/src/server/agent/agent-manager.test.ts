@@ -1079,6 +1079,46 @@ async function createLiveEventAgent(workdir: string): Promise<{
   return { manager, agentId: snapshot.id, session: capturedSession! };
 }
 
+test("usage_updated emits once per distinct usage and skips the snapshot write", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-usage-updated-"));
+  try {
+    const { manager, agentId, session } = await createLiveEventAgent(workdir);
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const recordBefore = await storage.get(agentId);
+    let emits = 0;
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) emits += 1;
+      },
+      { agentId, replayState: false },
+    );
+
+    const usage = {
+      inputTokens: 10,
+      contextWindowMaxTokens: 200_000,
+      contextWindowUsedTokens: 175,
+    };
+    session.pushEvent({ type: "usage_updated", provider: "codex", usage });
+    session.pushEvent({ type: "usage_updated", provider: "codex", usage: { ...usage } });
+    session.pushEvent({
+      type: "usage_updated",
+      provider: "codex",
+      usage: { ...usage, contextWindowUsedTokens: 260 },
+    });
+    await vi.waitFor(() => {
+      expect(manager.getAgent(agentId)?.lastUsage?.contextWindowUsedTokens).toBe(260);
+    });
+    unsubscribe();
+
+    // Two distinct usages → two emits; the byte-identical repeat is dropped.
+    expect(emits).toBe(2);
+    // Live-only: the stored record is byte-identical to before the ticks.
+    expect(await storage.get(agentId)).toEqual(recordBefore);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("turn_completed with a positive turnTokenDelta updates the token-rate buckets and total, adding no new emitState", async () => {
   async function runScenario(turnTokenDelta: number | undefined) {
     const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-"));
