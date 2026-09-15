@@ -300,6 +300,9 @@ export interface ResourceMonitorAgentSummary {
   id: string;
   workspaceId: string | undefined;
   internal: boolean;
+  /** Mid-turn right now. Only a running agent can be told about its usage — steering a message
+   * into an idle agent would start a new turn on its own (agent-prompt.ts's fallback). */
+  isRunning: boolean;
 }
 
 export interface ProviderAvailability {
@@ -1241,6 +1244,7 @@ export class AgentManager {
       id: agent.id,
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
+      isRunning: agent.lifecycle === "running",
     }));
   }
 

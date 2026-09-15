@@ -36,9 +36,18 @@ export interface AttributeProcessTreesResult {
   orphanBuildDaemons: OrphanBuildDaemonSummary;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The marker must end at a query-string or shell boundary so `callerAgentId=abc` never claims
+ * `callerAgentId=abcd`'s process. Agent ids are UUIDs today, which makes a prefix collision
+ * impossible in practice; the anchor keeps that true if ids ever change shape.
+ */
 function findRootPid(rows: readonly ProcessSampleRow[], agentId: string): number | undefined {
-  const marker = `callerAgentId=${agentId}`;
-  return rows.find((row) => row.command.includes(marker))?.pid;
+  const marker = new RegExp(`callerAgentId=${escapeRegExp(agentId)}(?=[&\\s"'\\]}]|$)`);
+  return rows.find((row) => marker.test(row.command))?.pid;
 }
 
 function buildChildrenByPpid(rows: readonly ProcessSampleRow[]): Map<number, ProcessSampleRow[]> {

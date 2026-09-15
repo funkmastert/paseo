@@ -69,6 +69,26 @@ describe("attributeProcessTrees", () => {
     expect(byId.get("agent-b")?.rssBytes).toBe(3500 * 1024);
   });
 
+  test("the callerAgentId marker must end at a boundary, so one id never claims another's prefix", () => {
+    const rows = [
+      row({
+        pid: 10,
+        command: 'claude --mcp-config {"url":"http://d/mcp/agents?callerAgentId=a1b"}',
+      }),
+      row({
+        pid: 20,
+        command: 'claude --mcp-config {"url":"http://d/mcp/agents?callerAgentId=a1&x=1"}',
+      }),
+    ];
+
+    const result = attributeProcessTrees(rows, ["a1", "a1b"]);
+
+    expect(result.agentTrees.map((tree) => [tree.agentId, tree.pids])).toEqual([
+      ["a1", [20]],
+      ["a1b", [10]],
+    ]);
+  });
+
   test("an agent with no matching process is omitted rather than reported as zero", () => {
     const rows: ProcessSampleRow[] = [row({ pid: 10, command: "unrelated" })];
 

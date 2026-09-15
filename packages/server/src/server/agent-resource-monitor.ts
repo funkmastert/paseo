@@ -15,6 +15,7 @@ import {
   type ResourceMonitorDetectorConfig,
 } from "./agent/resource-monitor-detector.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
+import { withRecentCpuPercent, type CpuRateMemory } from "./agent/process-cpu-rate.js";
 import type { OrphanBuildDaemonSummary } from "./agent/process-attribution.js";
 import type { ProcessSampler, SystemMemorySample } from "./agent/process-sampler.js";
 import type { PushNotificationSender } from "./push/index.js";
@@ -103,7 +104,8 @@ function formatAgentResourceMessage(input: {
   const limitGb = (input.memoryBytesLimit / GIBIBYTE).toFixed(1);
   return (
     `Bozeo resource monitor: your process tree is using ${memoryGb} GB of memory and ` +
-    `${Math.round(input.cpuPercent)}% CPU (limits ${limitGb} GB / ${input.cpuPercentLimit}%). ` +
+    `${Math.round(input.cpuPercent)}% CPU over the last minute ` +
+    `(limits ${limitGb} GB / ${input.cpuPercentLimit}%). ` +
     "Stop or trim heavy child processes before continuing; if you launched Gradle, run " +
     "`./gradlew --stop`. Prefer sequential builds."
   );
@@ -112,6 +114,7 @@ function formatAgentResourceMessage(input: {
 interface AgentBreach {
   agentId: string;
   workspaceId: string | undefined;
+  isRunning: boolean;
   trigger: ResourceAlert["trigger"];
   memoryBytes: number;
   cpuPercent: number;
@@ -141,6 +144,9 @@ export class AgentResourceMonitor {
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
   private machineState: MachineResourceMonitorState | undefined;
+  /** Previous sweep's cumulative CPU per pid, so this sweep can report a rate (process-cpu-rate.ts). */
+  private cpuRateMemory: CpuRateMemory | undefined;
+  private sweepInFlight = false;
 
   constructor(options: AgentResourceMonitorOptions) {
     this.agentManager = options.agentManager;
@@ -176,6 +182,20 @@ export class AgentResourceMonitor {
   }
 
   async tick(): Promise<void> {
+    // On the kind of machine this monitor exists for, a sample can outlive the interval;
+    // overlapping sweeps would stack `ps` processes onto the load being measured.
+    if (this.sweepInFlight) {
+      return;
+    }
+    this.sweepInFlight = true;
+    try {
+      await this.sweep();
+    } finally {
+      this.sweepInFlight = false;
+    }
+  }
+
+  private async sweep(): Promise<void> {
     const rawConfig = this.readDaemonConfig().resourceMonitor;
     if (rawConfig?.enabled === false) {
       return;
@@ -189,12 +209,14 @@ export class AgentResourceMonitor {
     const agents = this.agentManager
       .listAgentsForResourceMonitor()
       .filter((agent) => !agent.internal);
-    const [processRows, systemMemory] = await Promise.all([
+    const [sampledRows, systemMemory] = await Promise.all([
       this.processSampler.sampleProcesses(),
       this.processSampler.sampleSystemMemory(),
     ]);
+    const cpu = withRecentCpuPercent(sampledRows, this.cpuRateMemory, nowMs);
+    this.cpuRateMemory = cpu.memory;
     const attribution = attributeProcessTrees(
-      processRows,
+      cpu.rows,
       agents.map((agent) => agent.id),
     );
 
@@ -246,6 +268,7 @@ export class AgentResourceMonitor {
       breaches.push({
         agentId: agent.id,
         workspaceId: agent.workspaceId,
+        isRunning: agent.isRunning,
         trigger: alert.trigger,
         memoryBytes: alert.memoryBytes,
         cpuPercent: alert.cpuPercent,
@@ -311,6 +334,13 @@ export class AgentResourceMonitor {
       return;
     }
     for (const breach of breaches) {
+      // The steer path only steers into an active turn; for an idle agent it falls back to
+      // starting a new turn (agent-prompt.ts), which would spend tokens on an agent nobody is
+      // driving — the most likely breach shape, too: a heavy child left behind after the agent
+      // stopped. Idle agents get the push and the live alert only.
+      if (!breach.isRunning) {
+        continue;
+      }
       const body = formatAgentResourceMessage({
         memoryBytes: breach.memoryBytes,
         cpuPercent: breach.cpuPercent,

@@ -1939,7 +1939,7 @@ export async function createPaseoDaemon(
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
               serverId,
-              processSampler: createSystemProcessSampler(),
+              processSampler: createSystemProcessSampler({ logger }),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,

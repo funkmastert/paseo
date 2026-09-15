@@ -67,7 +67,13 @@ function createFakeSteer() {
 }
 
 function summary(overrides: Partial<ResourceMonitorAgentSummary>): ResourceMonitorAgentSummary {
-  return { id: "agent-1", workspaceId: "workspace-1", internal: false, ...overrides };
+  return {
+    id: "agent-1",
+    workspaceId: "workspace-1",
+    internal: false,
+    isRunning: true,
+    ...overrides,
+  };
 }
 
 function row(
@@ -95,14 +101,18 @@ function createMonitor(params: {
   systemMemory?: SystemMemorySample;
   config?: ResourceMonitorConfig;
   titles?: Record<string, string>;
+  now?: () => number;
+  sampler?: ReturnType<typeof createFakeSampler>;
 }) {
   const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
   const push = createFakePushSender();
   const steer = createFakeSteer();
-  const sampler = createFakeSampler({
-    processRows: params.processRows,
-    systemMemory: params.systemMemory,
-  });
+  const sampler =
+    params.sampler ??
+    createFakeSampler({
+      processRows: params.processRows,
+      systemMemory: params.systemMemory,
+    });
   const monitor = new AgentResourceMonitor({
     agentManager,
     agentStorage: createFakeAgentStorage(params.titles),
@@ -112,6 +122,7 @@ function createMonitor(params: {
     sendSystemMessageToAgent: steer.fn,
     readDaemonConfig: () => ({ resourceMonitor: { ...SUSTAINED_ONE, ...params.config } }),
     logger: createLogger(),
+    ...(params.now ? { now: params.now } : {}),
   });
   return { monitor, agentManager, push, steer, sampler };
 }
@@ -188,6 +199,85 @@ describe("AgentResourceMonitor", () => {
     expect(steer.calls).toHaveLength(1);
     expect(steer.calls[0]?.agentId).toBe("agent-1");
     expect(steer.calls[0]?.body).toContain("gradlew --stop");
+  });
+
+  test("an idle agent gets the push and the alert but is never steered — that would start a turn", async () => {
+    const { monitor, push, steer, agentManager } = createMonitor({
+      agents: [summary({ isRunning: false })],
+      processRows: [agentProcessRow("agent-1", 7 * 1024 * 1024, 0)],
+      config: { memoryBytesPerAgent: 6 * 1024 ** 3, cpuPercentPerAgent: 10_000 },
+    });
+
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(1);
+    expect(agentManager.setResourceAlert).toHaveBeenCalledTimes(1);
+    expect(steer.calls).toHaveLength(0);
+  });
+
+  test("a sweep still in flight is not overlapped by the next tick", async () => {
+    let release: (() => void) | undefined;
+    const sampler = createFakeSampler();
+    sampler.sampleProcesses.mockImplementation(
+      () =>
+        new Promise<ProcessSampleRow[]>((resolve) => {
+          release = () => resolve([]);
+        }),
+    );
+    const { monitor } = createMonitor({ sampler });
+
+    const first = monitor.tick();
+    await monitor.tick(); // returns immediately: the first sweep still owns the sampler
+    expect(sampler.sampleProcesses).toHaveBeenCalledTimes(1);
+
+    release?.();
+    await first;
+    // Once the first sweep has finished, the next tick samples again.
+    sampler.sampleProcesses.mockImplementation(async () => []);
+    await monitor.tick();
+    expect(sampler.sampleProcesses).toHaveBeenCalledTimes(2);
+  });
+
+  test("the CPU leg measures the rate between sweeps, not ps's lifetime average", async () => {
+    let nowMs = 0;
+    // ps says 1% (a long-lived process that was quiet for hours) while cputime jumps by 300s
+    // per 60s sweep — five cores right now.
+    const samples = [
+      [
+        row({
+          pid: 200,
+          cpuPercent: 1,
+          cpuSeconds: 1000,
+          etime: "5:00:00",
+          command: "claude callerAgentId=agent-1",
+        }),
+      ],
+      [
+        row({
+          pid: 200,
+          cpuPercent: 1,
+          cpuSeconds: 1300,
+          etime: "5:01:00",
+          command: "claude callerAgentId=agent-1",
+        }),
+      ],
+    ];
+    const sampler = createFakeSampler();
+    sampler.sampleProcesses.mockImplementation(async () => samples.shift() ?? []);
+    const { monitor, push } = createMonitor({
+      sampler,
+      config: { memoryBytesPerAgent: 6 * 1024 ** 3, cpuPercentPerAgent: 400 },
+      now: () => nowMs,
+    });
+
+    await monitor.tick();
+    expect(push.sent).toHaveLength(0);
+
+    nowMs += 60_000;
+    await monitor.tick();
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.data?.reason).toBe("resource_cpu");
+    expect(push.sent[0]?.body).toContain("500%");
   });
 
   test("notifyAgent: false sends the push but skips the steer message", async () => {
