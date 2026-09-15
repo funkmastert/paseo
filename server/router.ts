@@ -14,6 +14,8 @@ export interface ProviderIdCacheOptions {
   setIntervalFn?: typeof setInterval;
   /** Injectable for tests; defaults to the global clearInterval. */
   clearIntervalFn?: typeof clearInterval;
+  /** Injectable clock for tests; defaults to Date.now. Drives the refresh-failure log throttle. */
+  now?: () => number;
 }
 
 export interface ProviderIdCache {
@@ -38,6 +40,7 @@ export function createProviderIdCache(
   options: ProviderIdCacheOptions = {},
 ): ProviderIdCache {
   const intervalMs = options.intervalMs ?? DEFAULT_PROVIDER_ID_INTERVAL_MS;
+  const logThrottle = createLogThrottle({ now: options.now });
 
   let current: ReadonlySet<string> | null = null;
 
@@ -50,7 +53,17 @@ export function createProviderIdCache(
         const snapshot = await paseo.providers.snapshot();
         current = new Set(snapshot.entries.map((entry) => entry.provider));
       } catch (error) {
-        console.error("[claude-account-pool] router: failed to refresh provider snapshot", error);
+        // Throttled (not per-tick): a dead daemon connection makes this
+        // throw every interval tick indefinitely (see the pool cache's own
+        // FAIL-OPEN log in pool.ts, which shares this root cause), and an
+        // unthrottled log here is exactly the noise that let a 20-hour
+        // outage go unnoticed rather than the loud signal it needs to be.
+        logThrottle("provider-snapshot-refresh-failed", () => {
+          console.error(
+            "[claude-account-pool] router: FAIL-OPEN RISK — failed to refresh provider snapshot; pool routing may be using a stale/missing snapshot until this clears",
+            error,
+          );
+        });
       }
       return current;
     },

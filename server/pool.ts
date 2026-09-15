@@ -8,6 +8,7 @@ import {
   type ResolvedPool,
 } from "../shared/pool-config";
 import { createIntervalPoller } from "./interval-poller";
+import { createLogThrottle } from "./log-throttle";
 
 /** The subset of PaseoApi this module needs: reading daemon config. */
 export type PaseoConfigApi = PluginHandlerContext["paseo"];
@@ -70,6 +71,15 @@ export interface PoolCacheOptions {
   setIntervalFn?: typeof setInterval;
   /** Injectable for tests; defaults to the global clearInterval. */
   clearIntervalFn?: typeof clearInterval;
+  /**
+   * Minimum ms between two "FAIL-OPEN" daemon-error logs (see below).
+   * Default 5 minutes: loud enough to be caught quickly and to prove an
+   * outage is ongoing, without matching the 60s poll cadence closely enough
+   * to read as routine noise.
+   */
+  failOpenLogThrottleMs?: number;
+  /** Injectable clock for tests; defaults to Date.now. Drives the log throttle above. */
+  now?: () => number;
 }
 
 export interface PoolCache {
@@ -90,6 +100,8 @@ const DEFAULT_INTERVAL_MS = 60_000;
  */
 export function createPoolCache(paseo: PaseoConfigApi, options: PoolCacheOptions = {}): PoolCache {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
+  const failOpenLogThrottleMs = options.failOpenLogThrottleMs ?? 5 * 60_000;
+  const logThrottle = createLogThrottle({ windowMs: failOpenLogThrottleMs, now: options.now });
 
   let current: PoolLoadResult = FAIL_OPEN_RESULT;
 
@@ -99,6 +111,22 @@ export function createPoolCache(paseo: PaseoConfigApi, options: PoolCacheOptions
     clearIntervalFn: options.clearIntervalFn,
     run: async () => {
       const result = await loadPool(paseo);
+      // `error` is only set when loadPool() caught a real failure (e.g. a
+      // dead daemon transport) rather than the benign case of no pool
+      // configured at all (FAIL_OPEN_RESULT / entries.length === 0, neither
+      // of which set it). That distinction is exactly what makes this
+      // greppable as the incident signal rather than routine "pool not set
+      // up on this install" fail-open: a dead daemon connection makes
+      // config.get() throw on every tick, so this would otherwise repeat
+      // silently for as long as the connection stays down — 20 hours, in
+      // the incident that motivated this log.
+      if (result.failOpen && result.error) {
+        logThrottle("pool-fail-open-daemon-error", () => {
+          console.error(
+            `[claude-account-pool] pool: FAIL-OPEN — could not read daemon config (${result.error}). Account-pool routing is disabled and every agent.create is passing through unrouted until this clears.`,
+          );
+        });
+      }
       current = result;
       return result;
     },

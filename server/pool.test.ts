@@ -153,6 +153,41 @@ describe("createPoolCache", () => {
     cache.stop();
   });
 
+  it("logs a throttled FAIL-OPEN error when the daemon config read keeps failing", async () => {
+    const paseo = {
+      config: { get: vi.fn().mockRejectedValue(new Error("Transport not connected")) },
+    } as unknown as PaseoConfigApi;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cache = createPoolCache(paseo, { intervalMs: 1000, failOpenLogThrottleMs: 5000 });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toMatch(/FAIL-OPEN/);
+    expect(errorSpy.mock.calls[0]?.[0]).toMatch(/Transport not connected/);
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+
+    cache.stop();
+    errorSpy.mockRestore();
+  });
+
+  it("does not log FAIL-OPEN when the pool is simply unconfigured (no error)", async () => {
+    const paseo = fakePaseo({ providers: {} });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const cache = createPoolCache(paseo, { intervalMs: 1000 });
+
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(cache.get().failOpen).toBe(true);
+    expect(errorSpy).not.toHaveBeenCalled();
+
+    cache.stop();
+    errorSpy.mockRestore();
+  });
+
   it("stop() clears the interval so no further refreshes happen", async () => {
     const paseo = fakePaseo({ providers: {} });
     const cache = createPoolCache(paseo, { intervalMs: 1000 });

@@ -536,4 +536,25 @@ describe("createProviderIdCache", () => {
     expect(cache.get()).toEqual(new Set(["worker-a"]));
     cache.stop();
   });
+
+  it("throttles the provider-snapshot refresh-failure log across repeated failures", async () => {
+    const paseo = {
+      providers: { snapshot: vi.fn().mockRejectedValue(new Error("Transport not connected")) },
+    } as unknown as Pick<PluginHookContext["paseo"], "providers">;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let nowMs = 0;
+    const cache = createProviderIdCache(paseo, { intervalMs: 1000, now: () => nowMs });
+
+    await cache.forceRefresh();
+    await cache.forceRefresh();
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy.mock.calls[0]?.[0]).toMatch(/FAIL-OPEN/);
+
+    nowMs += 60_000;
+    await cache.forceRefresh();
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+
+    cache.stop();
+    errorSpy.mockRestore();
+  });
 });
