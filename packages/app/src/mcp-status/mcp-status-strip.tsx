@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
-import { ChevronDown, ChevronUp, KeyRound, Server } from "lucide-react-native";
+import { ChevronDown, ChevronUp, ExternalLink, KeyRound, Server } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
 import type { Theme } from "@/styles/theme";
@@ -17,6 +17,7 @@ const ThemedServer = withUnistyles(Server);
 const ThemedChevronUp = withUnistyles(ChevronUp);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedKeyRound = withUnistyles(KeyRound);
+const ThemedExternalLink = withUnistyles(ExternalLink);
 
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const accentColorMapping = (theme: Theme) => ({ color: theme.colors.accent });
@@ -34,8 +35,15 @@ function toneDotStyle(tone: ProviderUsageTone) {
   }
 }
 
-function authActionKeyFor(statusKey: McpStatusRowStatusKey): string {
-  return statusKey === "error" ? "mcpStatus.reauthAction" : "mcpStatus.authAction";
+function actionLabelKeyFor(row: McpStatusRow): string {
+  switch (row.action) {
+    case "adopt":
+      return "mcpStatus.adoptAction";
+    case "openClaudeAi":
+      return "mcpStatus.openClaudeAiAction";
+    default:
+      return row.statusKey === "error" ? "mcpStatus.reauthAction" : "mcpStatus.authAction";
+  }
 }
 
 function statusLabelKeyFor(statusKey: McpStatusRowStatusKey): string {
@@ -61,19 +69,19 @@ function StatusDot({ tone, testID }: { tone: ProviderUsageTone; testID?: string 
 
 function McpStatusRowView({
   row,
-  onAuth,
-  authDisabled,
+  onAction,
+  actionDisabled,
   authError,
 }: {
   row: McpStatusRow;
-  onAuth: (name: string) => void;
-  authDisabled: boolean;
+  onAction: (row: McpStatusRow) => void;
+  actionDisabled: boolean;
   /** Last resolved auth error for this row (U8 slice), already cleared once the row's own
    * status has moved on from the status it was recorded against. */
   authError?: string;
 }) {
   const { t } = useTranslation();
-  const handleAuthPress = useCallback(() => onAuth(row.name), [onAuth, row.name]);
+  const handleActionPress = useCallback(() => onAction(row), [onAction, row]);
 
   return (
     <View testID={`mcp-status-row-${row.name}`}>
@@ -88,17 +96,21 @@ function McpStatusRowView({
             {row.annotation ? ` · ${reportedByText(t, row.annotation)}` : ""}
           </Text>
         </View>
-        {row.canAuth ? (
+        {row.action ? (
           <Pressable
-            onPress={handleAuthPress}
-            disabled={authDisabled}
+            onPress={handleActionPress}
+            disabled={actionDisabled}
             accessibilityRole="button"
-            accessibilityLabel={t(authActionKeyFor(row.statusKey))}
+            accessibilityLabel={t(actionLabelKeyFor(row))}
             style={styles.authButton}
             testID={`mcp-status-auth-${row.name}`}
           >
-            <ThemedKeyRound size={14} uniProps={accentColorMapping} />
-            <Text style={styles.authButtonLabel}>{t(authActionKeyFor(row.statusKey))}</Text>
+            {row.action === "openClaudeAi" ? (
+              <ThemedExternalLink size={14} uniProps={accentColorMapping} />
+            ) : (
+              <ThemedKeyRound size={14} uniProps={accentColorMapping} />
+            )}
+            <Text style={styles.authButtonLabel}>{t(actionLabelKeyFor(row))}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -123,7 +135,14 @@ function McpStatusRowView({
  */
 export function McpStatusStrip() {
   const { t } = useTranslation();
-  const { supportsMcpStatus, model, startAuth, isStartingAuth } = useMcpStatus();
+  const {
+    supportsMcpStatus,
+    model,
+    startAuth,
+    adoptServer,
+    openClaudeAiConnectors,
+    isStartingAuth,
+  } = useMcpStatus();
   // Always starts collapsed — this is UI chrome state, not persisted, per KTD10.
   const [expanded, setExpanded] = useState(false);
   // Per-row "last auth error" (P2 slice of #8): the daemon's `mcp_gateway.auth.start` RPC
@@ -165,8 +184,9 @@ export function McpStatusStrip() {
   }, [model.rows]);
 
   const handleToggle = useCallback(() => setExpanded((prev) => !prev), []);
-  const handleAuth = useCallback(
-    (name: string) => {
+  const handleAction = useCallback(
+    (row: McpStatusRow) => {
+      const name = row.name;
       // Clear any stale error for this row as soon as a new attempt starts.
       setAuthErrors((prev) => {
         if (!(name in prev)) return prev;
@@ -176,7 +196,14 @@ export function McpStatusStrip() {
       });
       void (async () => {
         try {
-          const result = await startAuth(name);
+          if (row.action === "openClaudeAi") {
+            await openClaudeAiConnectors();
+            return;
+          }
+          const result =
+            row.action === "adopt" && row.annotation
+              ? await adoptServer(name, row.annotation.agentId)
+              : await startAuth(name);
           if (result.error && !result.authorizationUrl) {
             const error = result.error;
             setAuthErrors((prev) => ({ ...prev, [name]: error }));
@@ -187,7 +214,7 @@ export function McpStatusStrip() {
         }
       })();
     },
-    [startAuth],
+    [adoptServer, openClaudeAiConnectors, startAuth],
   );
 
   if (!supportsMcpStatus || !model.hasData) {
@@ -227,8 +254,8 @@ export function McpStatusStrip() {
             <McpStatusRowView
               key={row.key}
               row={row}
-              onAuth={handleAuth}
-              authDisabled={isStartingAuth}
+              onAction={handleAction}
+              actionDisabled={isStartingAuth}
               authError={authErrors[row.name]}
             />
           ))}

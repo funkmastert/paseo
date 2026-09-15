@@ -112,6 +112,102 @@ function readMcpServersField(parsed: unknown): unknown {
   return (parsed as Record<string, unknown>).mcpServers;
 }
 
+export interface PerDirRemoteMcpServer {
+  url: string;
+  transport: "http" | "sse";
+  headers?: Record<string, string>;
+}
+
+function resolveRemoteTransport(type: unknown): PerDirRemoteMcpServer["transport"] | undefined {
+  if (type === "sse") {
+    return "sse";
+  }
+  if (type === "http" || type === undefined) {
+    return "http";
+  }
+  return undefined;
+}
+
+function toRemoteEntry(value: unknown): PerDirRemoteMcpServer | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.url !== "string" || record.url.length === 0) {
+    return undefined;
+  }
+  // Claude Code's per-dir remote entries are `type: "http" | "sse"`; a missing type with a url
+  // is treated as http, matching the CLI.
+  const transport = resolveRemoteTransport(record.type);
+  if (!transport) {
+    return undefined;
+  }
+  const rawHeaders =
+    typeof record.headers === "object" && record.headers !== null
+      ? (record.headers as Record<string, unknown>)
+      : {};
+  const headers = Object.fromEntries(
+    Object.entries(rawHeaders)
+      .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+      .map(([key, headerValue]) => [key, expandEnvVars(headerValue)]),
+  );
+  return {
+    url: expandEnvVars(record.url),
+    transport,
+    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+  };
+}
+
+function readLocalScopeMcpServersField(parsed: unknown, projectDir: string): unknown {
+  if (typeof parsed !== "object" || parsed === null) {
+    return undefined;
+  }
+  const projects = (parsed as Record<string, unknown>).projects;
+  if (typeof projects !== "object" || projects === null) {
+    return undefined;
+  }
+  const entry = (projects as Record<string, unknown>)[projectDir];
+  if (typeof entry !== "object" || entry === null) {
+    return undefined;
+  }
+  return (entry as Record<string, unknown>).mcpServers;
+}
+
+/**
+ * Finds one remote (http/sse) MCP definition the way the CLI resolves it for a session in
+ * `projectDir`: the project's `.mcp.json`, then the config dir's local scope
+ * (`projects[projectDir].mcpServers` in `.claude.json`), then its user scope. Powers the
+ * gateway's adopt action (docs/mcp-gateway.md); stdio entries are never adoptable and are
+ * skipped. `${VAR}` expansion applies to the url and header values, as for stdio entries.
+ */
+export function readPerDirRemoteMcpServer(
+  options: ReadPerDirStdioMcpServersOptions & { name: string },
+): PerDirRemoteMcpServer | undefined {
+  const globalConfig = readJsonFile(
+    path.join(options.configDir, GLOBAL_CONFIG_FILENAME),
+    options.logger,
+  );
+  const projectConfig = readJsonFile(
+    path.join(options.projectDir, PROJECT_CONFIG_FILENAME),
+    options.logger,
+  );
+  const scopes = [
+    readMcpServersField(projectConfig),
+    readLocalScopeMcpServersField(globalConfig, options.projectDir),
+    readMcpServersField(globalConfig),
+  ];
+  for (const mcpServers of scopes) {
+    if (typeof mcpServers !== "object" || mcpServers === null) {
+      continue;
+    }
+    const entry = toRemoteEntry((mcpServers as Record<string, unknown>)[options.name]);
+    if (entry) {
+      return entry;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Re-reads the stdio MCP server entries that would otherwise load natively via
  * `settingSources` (KTD5), for re-injection alongside brokered gateway servers once

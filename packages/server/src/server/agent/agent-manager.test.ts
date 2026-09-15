@@ -3527,6 +3527,9 @@ function createFakeMcpGateway(overrides: Partial<FakeMcpGateway> = {}): FakeMcpG
     startAuthorization: async (): Promise<never> => {
       throw new Error("startAuthorization is not exercised by this test");
     },
+    adoptServer: async (): Promise<never> => {
+      throw new Error("adoptServer is not exercised by this test");
+    },
     on: () => fake,
     off: () => fake,
     ...overrides,
@@ -3620,6 +3623,58 @@ test("createAgent forwards the gateway's strict session mode to the launch confi
   expect(client.lastConfig?.mcpGatewaySessionMode).toBe("strict");
   const stored = await storage.get(snapshot.id);
   expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
+});
+
+test("adoptMcpGatewayServer reads the reporting agent's per-dir config, brokers it, and starts auth", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const configDir = mkdtempSync(join(tmpdir(), "agent-manager-claude-config-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  writeFileSync(
+    join(workdir, ".mcp.json"),
+    JSON.stringify({ mcpServers: { linear: { type: "http", url: "https://mcp.linear.app/mcp" } } }),
+  );
+
+  class ScopedClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+    resolveMcpConfigScope(cwd: string) {
+      return { configDir, projectDir: cwd };
+    }
+  }
+
+  const adopted: unknown[] = [];
+  const gateway = createFakeMcpGateway({
+    adoptServer: async (input) => {
+      adopted.push(input);
+      return { status: "needs-auth", auth: "oauth" };
+    },
+    startAuthorization: async () => ({ authorizationUrl: "https://linear.example/authorize" }),
+  });
+  const manager = new AgentManager({
+    clients: { claude: new ScopedClient() },
+    registry: storage,
+    logger,
+    mcpGateway: gateway,
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000115",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await expect(
+    manager.adoptMcpGatewayServer({ name: "linear", agentId: snapshot.id }),
+  ).resolves.toEqual({ authorizationUrl: "https://linear.example/authorize" });
+  expect(adopted).toEqual([
+    { name: "linear", url: "https://mcp.linear.app/mcp", transport: "http" },
+  ]);
+
+  // A name the agent's config doesn't define is an error the strip surfaces inline.
+  await expect(
+    manager.adoptMcpGatewayServer({ name: "biblio", agentId: snapshot.id }),
+  ).rejects.toThrow(/No remote MCP server named "biblio"/);
 });
 
 test("createAgent never injects brokered MCP gateway servers for a non-Claude provider (U3 scope)", async () => {

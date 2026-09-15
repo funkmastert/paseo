@@ -88,6 +88,7 @@ import {
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
 import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
+import { readPerDirRemoteMcpServer } from "../mcp-gateway/per-dir-stdio.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -349,6 +350,7 @@ export interface AgentManagerOptions {
     | "on"
     | "off"
     | "startAuthorization"
+    | "adoptServer"
   >;
   /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
   mcpGatewayAuthToken?: string;
@@ -819,6 +821,7 @@ export class AgentManager {
     | "on"
     | "off"
     | "startAuthorization"
+    | "adoptServer"
   > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
@@ -972,6 +975,7 @@ export class AgentManager {
       | "on"
       | "off"
       | "startAuthorization"
+      | "adoptServer"
     > | null,
     authToken: string | null,
   ): void {
@@ -1007,6 +1011,45 @@ export class AgentManager {
       throw new Error("MCP gateway is not enabled");
     }
     return this.mcpGateway.startAuthorization(name);
+  }
+
+  /**
+   * Brokers a server an agent reported from its own per-dir config and, when it needs OAuth,
+   * starts sign-in in the same call — the strip's adopt action (docs/mcp-gateway.md). The
+   * reporting agent's provider says which config dir and project to read.
+   */
+  async adoptMcpGatewayServer(input: {
+    name: string;
+    agentId: string;
+  }): Promise<{ authorizationUrl: string | null }> {
+    if (!this.mcpGateway) {
+      throw new Error("MCP gateway is not enabled");
+    }
+    const agent = this.getAgent(input.agentId);
+    if (!agent) {
+      throw new Error(`Unknown agent "${input.agentId}"`);
+    }
+    const scope = this.clients.get(agent.provider)?.resolveMcpConfigScope?.(agent.cwd);
+    if (!scope) {
+      throw new Error(
+        `Sessions on provider "${agent.provider}" don't expose an MCP config the gateway can adopt`,
+      );
+    }
+    const definition = readPerDirRemoteMcpServer({
+      ...scope,
+      name: input.name,
+      logger: this.logger,
+    });
+    if (!definition) {
+      throw new Error(
+        `No remote MCP server named "${input.name}" in ${scope.configDir}/.claude.json or ${scope.projectDir}/.mcp.json`,
+      );
+    }
+    const adopted = await this.mcpGateway.adoptServer({ name: input.name, ...definition });
+    if (adopted.auth === "static" || adopted.status === "connected") {
+      return { authorizationUrl: null };
+    }
+    return this.mcpGateway.startAuthorization(input.name);
   }
 
   prepareForShutdown(): void {

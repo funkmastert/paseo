@@ -1984,14 +1984,19 @@ describe("Codex app-server provider", () => {
   });
 
   test("buildCodexTurnTokenDelta cost-weights input, cached-read, and output tokens", () => {
-    // 30000 × 1 + 5000 × 0.1 + 15000 × 5 (token-rate-tracker.ts's TOKEN_BURN_WEIGHTS).
+    // Codex's cached count is part of its input count: (30000 − 5000) × 1 + 5000 × 0.1 +
+    // 15000 × 5 (token-rate-tracker.ts's TOKEN_BURN_WEIGHTS).
     expect(
       buildCodexTurnTokenDelta({
         inputTokens: 30000,
         cachedInputTokens: 5000,
         outputTokens: 15000,
       }),
-    ).toBe(105500);
+    ).toBe(100500);
+  });
+
+  test("buildCodexTurnTokenDelta never counts a cached token twice even if cached exceeds input", () => {
+    expect(buildCodexTurnTokenDelta({ inputTokens: 100, cachedInputTokens: 250 })).toBe(10);
   });
 
   test("buildCodexTurnTokenDelta returns undefined when usage is absent or all-zero", () => {
@@ -5621,7 +5626,7 @@ describe("Codex app-server provider", () => {
         contextWindowMaxTokens: 200000,
         contextWindowUsedTokens: 50000,
       },
-      turnTokenDelta: 105500, // cost-weighted: 30000 + 5000 × 0.1 + 15000 × 5
+      turnTokenDelta: 100500, // cost-weighted: (30000 − 5000) + 5000 × 0.1 + 15000 × 5
     });
   });
 

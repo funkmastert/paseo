@@ -12,7 +12,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { DemoInMemoryAuthProvider } from "@modelcontextprotocol/sdk/examples/server/demoInMemoryOAuthProvider.js";
 
-import { evaluateTransitionNotification, McpGateway } from "./gateway.js";
+import {
+  evaluateTransitionNotification,
+  McpGateway,
+  type McpGatewaySnapshotEntry,
+} from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
 
 interface FakePushPayload {
@@ -727,5 +731,96 @@ describe("evaluateTransitionNotification (U5 pure episode logic)", () => {
         alreadyNotified: false,
       }),
     ).toEqual({ notify: false, nextNotified: false });
+  });
+});
+
+describe("adoptServer (session-reported server → brokered)", () => {
+  test("an OAuth-class definition lands in needs-auth, keeps its extra headers privately, persists, and emits change", async () => {
+    const home = createTempHome();
+    const persisted: Array<{ name: string; config: unknown }> = [];
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: {} },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+      persistServer: (name, config) => void persisted.push({ name, config }),
+    });
+    const snapshots: McpGatewaySnapshotEntry[][] = [];
+    gateway.on("change", (snapshot) => {
+      snapshots.push(snapshot);
+    });
+
+    const result = await gateway.adoptServer({
+      name: "zeeq",
+      url: "http://127.0.0.1:1/mcp",
+      transport: "http",
+      headers: { "x-zeeq-prompts-repo": "wonderly/prompts" },
+    });
+
+    expect(result).toEqual({ status: "needs-auth", auth: "oauth" });
+    expect(gateway.getServerNames()).toEqual(["zeeq"]);
+    expect(persisted).toEqual([
+      {
+        name: "zeeq",
+        config: {
+          url: "http://127.0.0.1:1/mcp",
+          transport: "http",
+          critical: false,
+          auth: "oauth",
+        },
+      },
+    ]);
+    expect(new McpGatewayTokenStore(home).getOAuthExtraHeaders("zeeq")).toEqual({
+      "x-zeeq-prompts-repo": "wonderly/prompts",
+    });
+    expect(snapshots.at(-1)?.map((entry) => entry.name)).toEqual(["zeeq"]);
+    // Adoptable, so the strip's Authenticate button has somewhere to go next.
+    await expect(gateway.startAuthorization("zeeq")).rejects.toThrow();
+  });
+
+  test("an Authorization header makes the adopted server static-auth and connects it outright", async () => {
+    const fixture = await startFixtureMcpServer({
+      expectedAuthorizationHeader: "Bearer from-mcp-json",
+    });
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: { enabled: true, servers: {} },
+    });
+
+    const result = await gateway.adoptServer({
+      name: "internal-tool",
+      url: fixture.url,
+      transport: "http",
+      headers: { Authorization: "Bearer from-mcp-json" },
+    });
+
+    expect(result).toEqual({ status: "connected", auth: "static" });
+    expect(gateway.getClient("internal-tool")).toBeDefined();
+  });
+
+  test("adopting an already-brokered name changes nothing", async () => {
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: { github: { url: "http://127.0.0.1:1/mcp", transport: "http" } },
+      },
+    });
+    await gateway.start();
+
+    const result = await gateway.adoptServer({
+      name: "github",
+      url: "http://somewhere.else/mcp",
+      transport: "sse",
+    });
+
+    expect(result).toEqual({ status: "needs-auth", auth: "oauth" });
+    expect(gateway.getServerNames()).toEqual(["github"]);
+  });
+
+  test("a disabled gateway refuses to adopt", async () => {
+    const gateway = new McpGateway({ paseoHome: createTempHome(), config: { enabled: false } });
+    await expect(
+      gateway.adoptServer({ name: "x", url: "http://127.0.0.1:1/mcp", transport: "http" }),
+    ).rejects.toThrow(/disabled/);
   });
 });

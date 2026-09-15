@@ -16,6 +16,7 @@ import type {
   ProjectListResponseMessage,
   ListProviderModesResponseMessage,
   McpGatewayAuthStartResponseMessage,
+  McpGatewayServerAdoptResponseMessage,
   MutableDaemonConfig,
   MutableDaemonConfigPatch,
   ProviderDiagnosticResponseMessage,
@@ -433,6 +434,7 @@ export interface PaseoProviderActions {
 }
 
 export type PaseoMcpGatewayAuthStartResult = McpGatewayAuthStartResponseMessage["payload"];
+export type PaseoMcpGatewayServerAdoptResult = McpGatewayServerAdoptResponseMessage["payload"];
 
 export interface PaseoMcpGatewayActions {
   /**
@@ -445,6 +447,17 @@ export interface PaseoMcpGatewayActions {
     name: string,
     options?: { requestId?: string },
   ): Promise<PaseoMcpGatewayAuthStartResult>;
+  /**
+   * Brokers a server the given agent reported from its own per-dir MCP config through the
+   * gateway and starts sign-in when it needs OAuth (the strip's "Broker & sign in" action).
+   * Same result shape and non-throwing contract as `startAuth`. Requires
+   * `server_info.features.mcpGatewayAdopt`.
+   */
+  adopt(
+    name: string,
+    agentId: string,
+    options?: { requestId?: string },
+  ): Promise<PaseoMcpGatewayServerAdoptResult>;
 }
 
 export interface PaseoConfigActions {
@@ -595,6 +608,7 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     },
     mcpGateway: {
       startAuth: (name, options) => daemonClient.startMcpGatewayAuth(name, options),
+      adopt: (name, agentId, options) => daemonClient.adoptMcpGatewayServer(name, agentId, options),
     },
   };
 }

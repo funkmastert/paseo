@@ -150,6 +150,25 @@ export interface McpGatewayOptions {
   tokenStore?: McpGatewayTokenStore;
   /** Omit to disable push notifications entirely — mirrors R10's "pay no cost" posture. */
   notifier?: McpGatewayNotifier;
+  /** Persists a server adopted at runtime (`adoptServer`) so the next boot has it too. */
+  persistServer?: McpGatewayServerPersister;
+}
+
+export type McpGatewayServerPersister = (
+  name: string,
+  config: McpGatewayServerConfig,
+) => void | Promise<void>;
+
+export interface AdoptMcpGatewayServerInput {
+  name: string;
+  url: string;
+  transport: McpGatewayServerConfig["transport"];
+  headers?: Record<string, string>;
+}
+
+export interface AdoptMcpGatewayServerResult {
+  status: McpGatewayServerState["status"];
+  auth: "oauth" | "static";
 }
 
 /**
@@ -177,6 +196,7 @@ export class McpGateway {
   private readonly events = new EventEmitter();
   private lastEmittedSnapshot: McpGatewaySnapshotEntry[] = [];
   private notifier: McpGatewayNotifier | undefined;
+  private persistServer: McpGatewayServerPersister | undefined;
   private readonly pendingNotifications: Array<{
     name: string;
     status: McpGatewayNotifiableStatus;
@@ -189,6 +209,7 @@ export class McpGateway {
       options.tokenStore ?? new McpGatewayTokenStore(options.paseoHome, options.logger);
     this.oauthRedirectBaseUrl = options.oauthRedirectBaseUrl;
     this.notifier = options.notifier;
+    this.persistServer = options.persistServer;
 
     if (!this.config.enabled) {
       return;
@@ -215,6 +236,65 @@ export class McpGateway {
    * WebSocket server that owns the push sender exists. */
   setNotifier(notifier: McpGatewayNotifier): void {
     this.notifier = notifier;
+  }
+
+  /** Lazy-set like `setNotifier`: the config store's patch path is wired after construction. */
+  setServerPersister(persistServer: McpGatewayServerPersister): void {
+    this.persistServer = persistServer;
+  }
+
+  /**
+   * Brokers a server discovered in an agent session's own per-dir config (docs/mcp-gateway.md,
+   * "Adopting a session-reported server"). An `Authorization` header in the definition makes it
+   * static-auth with the full header set stored privately; any other headers ride along as
+   * extraHeaders on an OAuth record. Idempotent on name: an already-brokered server is left
+   * exactly as it is. The runtime entry is live immediately — later session launches inject it
+   * and the strip shows it — and `persistServer` writes it to config for the next boot.
+   */
+  async adoptServer(input: AdoptMcpGatewayServerInput): Promise<AdoptMcpGatewayServerResult> {
+    if (!this.enabled) {
+      throw new Error("MCP gateway is disabled");
+    }
+    const existing = this.servers.get(input.name);
+    if (existing) {
+      return {
+        status: existing.state.status,
+        auth: existing.config.auth === "static" ? "static" : "oauth",
+      };
+    }
+    const headers = input.headers ?? {};
+    const hasAuthorizationHeader = Object.keys(headers).some(
+      (key) => key.toLowerCase() === "authorization",
+    );
+    const auth: "oauth" | "static" = hasAuthorizationHeader ? "static" : "oauth";
+    const config: McpGatewayServerConfig = {
+      url: input.url,
+      transport: input.transport,
+      critical: false,
+      auth,
+    };
+    if (auth === "static") {
+      this.tokenStore.saveStaticHeaders(input.name, headers);
+    } else if (Object.keys(headers).length > 0) {
+      this.tokenStore.saveOAuthExtraHeaders(input.name, headers);
+    }
+    this.servers.set(input.name, {
+      config,
+      state: createDisabledServerState(),
+      notified: false,
+    });
+    try {
+      await this.persistServer?.(input.name, config);
+    } catch (error) {
+      this.logger?.warn(
+        { err: error, server: input.name },
+        "Failed to persist adopted MCP gateway server",
+      );
+    }
+    this.notifyStatusChange();
+    await this.connectServer(input.name);
+    await this.flushPendingNotifications();
+    return { status: this.servers.get(input.name)?.state.status ?? "disabled", auth };
   }
 
   getServerNames(): string[] {

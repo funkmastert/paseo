@@ -1520,6 +1520,15 @@ export class ClaudeAgentClient implements AgentClient {
     return resolveConfiguredClaudeModel(model);
   }
 
+  /** docs/mcp-gateway.md "Adopting a session-reported server": the same dirs strict-mode stdio
+   * re-injection reads (`applyMcpGatewayOptions`), resolved for one session's cwd. */
+  resolveMcpConfigScope(cwd: string): { configDir: string; projectDir: string } {
+    return {
+      configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
+      projectDir: cwd,
+    };
+  }
+
   async createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,
@@ -1959,6 +1968,7 @@ class ClaudeContextUsageState {
       this.streamRequestInputTokens =
         breakdown.inputTokens + breakdown.cacheCreationInputTokens + breakdown.cacheReadInputTokens;
       this.streamRequestOutputTokens = 0;
+      this.flushUnrecordedRequestBurn();
       this.streamRequestBurnBreakdown = breakdown;
       this.streamRequestBurnRecorded = 0;
     } else if (eventType === "message_delta") {
@@ -2060,11 +2070,29 @@ class ClaudeContextUsageState {
     this.pendingBurnDelta = (this.pendingBurnDelta ?? 0) + increment;
   }
 
+  /**
+   * A request that streamed message_start but never a message_delta (aborted mid-response, or
+   * a CLI that stops streaming early) still cost its input side. Record that when the next
+   * request starts or the turn ends, so it is never dropped.
+   */
+  private flushUnrecordedRequestBurn(): void {
+    if (!this.streamRequestBurnBreakdown || this.streamRequestBurnRecorded > 0) {
+      return;
+    }
+    this.recordRequestBurn(0);
+  }
+
   /** Cost-weighted burn accrued since the last call — one `token_burn_delta` event's worth. */
   takeStreamBurnDelta(): number | undefined {
     const delta = this.pendingBurnDelta;
     this.pendingBurnDelta = undefined;
     return delta;
+  }
+
+  /** Turn-end variant of `takeStreamBurnDelta` that first settles an unfinished request. */
+  takeTrailingRequestBurn(): number | undefined {
+    this.flushUnrecordedRequestBurn();
+    return this.takeStreamBurnDelta();
   }
 
   hasRecordedRequestBurnThisTurn(): boolean {
@@ -4591,6 +4619,10 @@ class ClaudeAgentSession implements AgentSession {
             messageId: message.uuid,
           },
         });
+      }
+      const trailingBurn = this.contextUsage.takeTrailingRequestBurn();
+      if (trailingBurn !== undefined) {
+        events.push({ type: "token_burn_delta", provider: "claude", tokens: trailingBurn });
       }
       // Per-request `token_burn_delta` events already carried this turn's burn; the per-turn
       // figure is only the fallback for a CLI run that streamed no partial messages.

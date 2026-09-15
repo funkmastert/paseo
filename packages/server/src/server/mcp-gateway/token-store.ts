@@ -150,6 +150,10 @@ export class McpGatewayTokenStore {
     return this.getOAuthRecord(serverName)?.extraHeaders;
   }
 
+  saveOAuthExtraHeaders(serverName: string, extraHeaders: Record<string, string>): void {
+    this.patchOAuthRecord(serverName, { extraHeaders });
+  }
+
   getStaticHeaders(serverName: string): Record<string, string> | undefined {
     const record = this.readAll().servers[serverName];
     return record?.auth === "static" ? record.headers : undefined;

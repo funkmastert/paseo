@@ -1939,6 +1939,8 @@ export const ptBR: TranslationResources = {
     },
     authAction: "Autenticar",
     reauthAction: "Reautenticar",
+    adoptAction: "Intermediar e entrar",
+    openClaudeAiAction: "Abrir claude.ai",
     authError: "Falha na autenticação: {{error}}",
     reportedBy: "Reportado por {{agent}}",
     reportedByCount: "Reportado por {{count}} agentes",

@@ -1569,6 +1569,12 @@ export async function createPaseoDaemon(
   // (`prepareSessionConfig`'s `withRuntimeMcpGatewayServers`). Deferred to a setter rather than
   // a constructor option because the gateway is built after the agent manager.
   agentManager.setMcpGateway(mcpGateway, mcpGatewayAuthToken);
+  // Servers adopted at runtime (docs/mcp-gateway.md) survive a restart by landing in
+  // config.json through the same patch path the app's config editor uses; the live gateway
+  // already holds them, so the store's "restart required" note for mcpGateway is moot here.
+  mcpGateway.setServerPersister((name, serverConfig) => {
+    daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
+  });
 
   let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;

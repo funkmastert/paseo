@@ -719,6 +719,10 @@ export type McpGatewayAuthStartPayload = Extract<
   SessionOutboundMessage,
   { type: "mcp_gateway.auth.start.response" }
 >["payload"];
+export type McpGatewayServerAdoptPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.server.adopt.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -5007,6 +5011,25 @@ export class DaemonClient {
       message: {
         type: "mcp_gateway.auth.start.request",
         name,
+      },
+    });
+  }
+
+  /**
+   * Brokers a server the given agent reported from its own per-dir MCP config and starts
+   * sign-in when it needs OAuth. Gate on `server_info.features.mcpGatewayAdopt`.
+   */
+  async adoptMcpGatewayServer(
+    name: string,
+    agentId: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayServerAdoptPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.server.adopt.request",
+        name,
+        agentId,
       },
     });
   }

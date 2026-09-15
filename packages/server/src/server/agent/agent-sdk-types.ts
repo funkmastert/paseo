@@ -801,6 +801,12 @@ export interface ResolveAgentDefaultModeInput {
 export interface AgentClient {
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
+  /**
+   * Where this client's sessions load per-dir MCP definitions from, for the gateway's
+   * "adopt a session-reported server" action (docs/mcp-gateway.md). Only providers that read
+   * per-dir MCP config files implement it.
+   */
+  resolveMcpConfigScope?(cwd: string): { configDir: string; projectDir: string } | undefined;
   createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,

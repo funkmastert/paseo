@@ -1917,6 +1917,8 @@ export const ko: TranslationResources = {
     },
     authAction: "인증",
     reauthAction: "재인증",
+    adoptAction: "중계 후 로그인",
+    openClaudeAiAction: "claude.ai 열기",
     authError: "인증 실패: {{error}}",
     reportedBy: "{{agent}}가 보고함",
     reportedByCount: "에이전트 {{count}}개가 보고함",

@@ -106,8 +106,12 @@ describe("buildMcpStatusStripModel", () => {
     });
 
     const row = model.rows.find((candidate) => candidate.name === "github");
-    expect(row?.annotation).toEqual({ agentLabel: "Backend worker", reporterCount: 1 });
-    expect(row?.canAuth).toBe(false);
+    expect(row?.annotation).toEqual({
+      agentLabel: "Backend worker",
+      agentId: "agent-1",
+      reporterCount: 1,
+    });
+    expect(row?.action).toBeUndefined();
   });
 
   it("never drops a session-reported stdio failure with no matching global server (AE3)", () => {
@@ -119,8 +123,12 @@ describe("buildMcpStatusStripModel", () => {
     const sessionRow = model.rows.find((candidate) => candidate.name === "local-fs-tool");
     expect(sessionRow).toBeDefined();
     expect(sessionRow?.sessionOnly).toBe(true);
-    expect(sessionRow?.canAuth).toBe(false);
-    expect(sessionRow?.annotation).toEqual({ agentLabel: "Leader agent", reporterCount: 1 });
+    expect(sessionRow?.action).toBeUndefined();
+    expect(sessionRow?.annotation).toEqual({
+      agentLabel: "Leader agent",
+      agentId: "agent-1",
+      reporterCount: 1,
+    });
     expect(model.hasData).toBe(true);
   });
 
@@ -138,8 +146,12 @@ describe("buildMcpStatusStripModel", () => {
     expect(model.rows.map((row) => row.name)).toEqual(["agent-gateway", "biblio"]);
     const biblio = model.rows.find((row) => row.name === "biblio");
     expect(biblio?.key).toBe("session:biblio");
-    expect(biblio?.annotation).toEqual({ agentLabel: "Worker 1", reporterCount: 3 });
-    expect(biblio?.canAuth).toBe(false);
+    expect(biblio?.annotation).toEqual({
+      agentLabel: "Worker 1",
+      agentId: "agent-1",
+      reporterCount: 3,
+    });
+    expect(biblio?.action).toBeUndefined();
   });
 
   it("counts distinct agents, not repeated reports, on a matching global row", () => {
@@ -153,8 +165,12 @@ describe("buildMcpStatusStripModel", () => {
     });
 
     const row = model.rows.find((candidate) => candidate.name === "zeeq");
-    expect(row?.annotation).toEqual({ agentLabel: "Worker 1", reporterCount: 2 });
-    expect(row?.canAuth).toBe(true);
+    expect(row?.annotation).toEqual({
+      agentLabel: "Worker 1",
+      agentId: "agent-1",
+      reporterCount: 2,
+    });
+    expect(row?.action).toBe("authenticate");
     expect(model.rows).toHaveLength(1);
   });
 
@@ -218,5 +234,59 @@ describe("buildMcpStatusStripModel", () => {
 
     expect(model.hasData).toBe(false);
     expect(model.rows).toEqual([]);
+  });
+});
+
+describe("row actions", () => {
+  it("offers Authenticate on unhealthy brokered rows only", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [
+        server({ name: "zeeq", status: "needs-auth", critical: true }),
+        server({ name: "github", status: "error" }),
+        server({ name: "notion", status: "connected" }),
+        server({ name: "linear", status: "connecting" }),
+      ],
+      sessionReports: [],
+    });
+
+    expect(Object.fromEntries(model.rows.map((row) => [row.name, row.action]))).toEqual({
+      zeeq: "authenticate",
+      github: "authenticate",
+      notion: undefined,
+      linear: undefined,
+    });
+  });
+
+  it("offers Broker & sign in on session-reported rows when the daemon can adopt", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [report({ serverName: "agent-gateway", agentId: "agent-9" })],
+      canAdopt: true,
+    });
+
+    const row = model.rows[0];
+    expect(row?.action).toBe("adopt");
+    expect(row?.annotation?.agentId).toBe("agent-9");
+  });
+
+  it("offers nothing on session-reported rows against an old daemon", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [report({ serverName: "agent-gateway" })],
+      canAdopt: false,
+    });
+
+    expect(model.rows[0]?.action).toBeUndefined();
+  });
+
+  it("sends claude.ai connectors to claude.ai regardless of adopt support", () => {
+    for (const canAdopt of [true, false]) {
+      const model = buildMcpStatusStripModel({
+        servers: [],
+        sessionReports: [report({ serverName: "claude.ai Robinhood", status: "needs-auth" })],
+        canAdopt,
+      });
+      expect(model.rows[0]?.action).toBe("openClaudeAi");
+    }
   });
 });

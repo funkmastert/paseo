@@ -48,6 +48,12 @@ The redirect URL is the daemon's own reachable address (the service-proxy public
 
 Static-auth servers have nothing to authorize interactively; store their header values in the token store keyed by server name.
 
+## Adopting a session-reported server
+
+Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows with a reporter count. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the reporting agent's config dir and project for the definition (`per-dir-stdio.ts`'s remote reader), adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
+
+claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
+
 ## Tokens
 
 All upstream credentials — OAuth tokens, dynamic client registrations, PKCE verifiers, static headers — live in `$PASEO_HOME/mcp-gateway/tokens.json`, written 0600 via the daemon's private-file helper. Tokens never appear in config, wire payloads, or logs. Bulk rotation beyond per-server re-auth from the strip is not implemented; delete the file and re-auth to start over.

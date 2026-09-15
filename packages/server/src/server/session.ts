@@ -21,6 +21,7 @@ import {
   type WorkspaceScriptStartRequest,
   type WorkspaceScriptStopRequest,
   type McpGatewayAuthStartRequest,
+  type McpGatewayServerAdoptRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
@@ -2781,6 +2782,9 @@ export class Session {
       case "mcp_gateway.auth.start.request":
         await this.handleMcpGatewayAuthStartRequest(msg);
         return;
+      case "mcp_gateway.server.adopt.request":
+        await this.handleMcpGatewayServerAdoptRequest(msg);
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
         return;
@@ -4395,6 +4399,30 @@ export class Session {
           requestId: request.requestId,
           authorizationUrl: null,
           error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
+        },
+      });
+    }
+  }
+
+  private async handleMcpGatewayServerAdoptRequest(
+    request: McpGatewayServerAdoptRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.adoptMcpGatewayServer({
+        name: request.name,
+        agentId: request.agentId,
+      });
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: { requestId: request.requestId, authorizationUrl, error: null },
+      });
+    } catch (error) {
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to broker the MCP server"),
         },
       });
     }

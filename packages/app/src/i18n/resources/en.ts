@@ -1917,6 +1917,8 @@ export const en = {
     },
     authAction: "Authenticate",
     reauthAction: "Re-authenticate",
+    adoptAction: "Broker & sign in",
+    openClaudeAiAction: "Open claude.ai",
     authError: "Authentication failed: {{error}}",
     reportedBy: "Reported by {{agent}}",
     reportedByCount: "Reported by {{count}} agents",

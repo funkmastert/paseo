@@ -1925,6 +1925,8 @@ export const ja: TranslationResources = {
     },
     authAction: "認証する",
     reauthAction: "再認証する",
+    adoptAction: "中継して認証する",
+    openClaudeAiAction: "claude.ai を開く",
     authError: "認証に失敗しました: {{error}}",
     reportedBy: "{{agent}} が報告",
     reportedByCount: "エージェント {{count}} 件が報告",

@@ -3241,6 +3241,77 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
+  test("a request that never streams message_delta still records its input side", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // Request 1 aborted after message_start: input 100 + cache write 20 × 1.25 + cache
+        // read 30 × 0.1 = 128, settled when request 2 starts.
+        createMessageStartEvent(),
+        createMessageStartEvent({ input_tokens: 40, cache_read_input_tokens: 1000 }),
+        createMessageDeltaEvent(4),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([128, 160]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a trailing request without message_delta is settled at turn end instead of dropped", async () => {
+    const session = await createSessionForTurns([
+      [createInitMessage(), createMessageStartEvent(), createSuccessResult()],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([128]);
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("per-request burn bookkeeping resets between turns so the fallback returns", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        createSuccessResult(),
+      ],
+      [createSuccessResult()],
+    ]);
+
+    try {
+      const firstTurn = await collectStreamEvents(session, "turn-1");
+      expect(firstTurn.find((event) => event.type === "turn_completed")).not.toHaveProperty(
+        "turnTokenDelta",
+      );
+
+      // No partial messages in turn 2: with the per-request state reset, the per-turn figure
+      // (10 + 5 × 0.1 + 7 × 5 = 45.5) is recorded again instead of being suppressed.
+      const secondTurn = await collectStreamEvents(session, "turn-2");
+      expect(secondTurn.some((event) => event.type === "token_burn_delta")).toBe(false);
+      expect(secondTurn.find((event) => event.type === "turn_completed")).toMatchObject({
+        turnTokenDelta: 45.5,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
   test("a repeated message_delta for the same request only emits the output increment", async () => {
     const session = await createSessionForTurns([
       [

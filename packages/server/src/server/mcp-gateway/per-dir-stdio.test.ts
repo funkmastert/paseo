@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { readPerDirStdioMcpServers } from "./per-dir-stdio.js";
+import { readPerDirRemoteMcpServer, readPerDirStdioMcpServers } from "./per-dir-stdio.js";
 
 const tempDirs: string[] = [];
 
@@ -140,5 +140,79 @@ describe("readPerDirStdioMcpServers", () => {
 
     expect(() => readPerDirStdioMcpServers({ configDir, projectDir })).not.toThrow();
     expect(readPerDirStdioMcpServers({ configDir, projectDir })).toEqual({});
+  });
+});
+
+describe("readPerDirRemoteMcpServer", () => {
+  test("finds a user-scope http entry and expands ${VAR} in url and headers", () => {
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    process.env.PASEO_TEST_ZEEQ_REPO = "wonderly/prompts";
+    try {
+      writeFileSync(
+        path.join(configDir, ".claude.json"),
+        JSON.stringify({
+          mcpServers: {
+            zeeq: {
+              type: "http",
+              url: "https://app.zeeq.ai/mcp",
+              headers: { "x-zeeq-prompts-repo": "${PASEO_TEST_ZEEQ_REPO}" },
+            },
+          },
+        }),
+      );
+
+      expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "zeeq" })).toEqual({
+        url: "https://app.zeeq.ai/mcp",
+        transport: "http",
+        headers: { "x-zeeq-prompts-repo": "wonderly/prompts" },
+      });
+    } finally {
+      delete process.env.PASEO_TEST_ZEEQ_REPO;
+    }
+  });
+
+  test("project .mcp.json beats local scope, which beats user scope, matching the CLI", () => {
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    writeFileSync(
+      path.join(configDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { notion: { type: "http", url: "https://user.example/mcp" } },
+        projects: {
+          [projectDir]: {
+            mcpServers: { notion: { type: "sse", url: "https://local.example/mcp" } },
+          },
+        },
+      }),
+    );
+
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toMatchObject({
+      url: "https://local.example/mcp",
+      transport: "sse",
+    });
+
+    writeFileSync(
+      path.join(projectDir, ".mcp.json"),
+      JSON.stringify({ mcpServers: { notion: { url: "https://project.example/mcp" } } }),
+    );
+
+    // A url with no type reads as http, as the CLI treats it.
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
+      url: "https://project.example/mcp",
+      transport: "http",
+    });
+  });
+
+  test("never adopts a stdio entry and returns undefined for an unknown name", () => {
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    writeFileSync(
+      path.join(configDir, ".claude.json"),
+      JSON.stringify({ mcpServers: { "local-fs": { type: "stdio", command: "fs-tool" } } }),
+    );
+
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "local-fs" })).toBeUndefined();
+    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "nope" })).toBeUndefined();
   });
 });

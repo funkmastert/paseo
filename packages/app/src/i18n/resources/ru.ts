@@ -1938,6 +1938,8 @@ export const ru: TranslationResources = {
     },
     authAction: "Авторизоваться",
     reauthAction: "Повторная авторизация",
+    adoptAction: "Проксировать и войти",
+    openClaudeAiAction: "Открыть claude.ai",
     authError: "Ошибка аутентификации: {{error}}",
     reportedBy: "Сообщено агентом {{agent}}",
     reportedByCount: "Сообщено {{count}} агентами",

@@ -3196,6 +3196,19 @@ export const McpGatewayAuthStartRequestSchema = z.object({
 });
 export type McpGatewayAuthStartRequest = z.infer<typeof McpGatewayAuthStartRequestSchema>;
 
+// Brokers a server an agent session reported from its own Claude config (per-dir `.claude.json`
+// or project `.mcp.json`) through the gateway and, for an OAuth-class server, starts sign-in in
+// the same call — the strip's "Broker & sign in" action on a session-reported row. `agentId`
+// names the reporting session so the daemon knows which config dir and project to read.
+// COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gating after 2027-03-14.
+export const McpGatewayServerAdoptRequestSchema = z.object({
+  type: z.literal("mcp_gateway.server.adopt.request"),
+  requestId: z.string(),
+  name: z.string().min(1),
+  agentId: z.string().min(1),
+});
+export type McpGatewayServerAdoptRequest = z.infer<typeof McpGatewayServerAdoptRequestSchema>;
+
 // These connection event streams have no directory bootstrap or timeline membership.
 export const SessionEventSubscriptionSchema = z.enum([
   "project.update",
@@ -3223,6 +3236,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   HubExecutionAgentValidateRequestSchema,
   HubExecutionControlRequestSchema,
   McpGatewayAuthStartRequestSchema,
+  McpGatewayServerAdoptRequestSchema,
   BrowserAutomationExecuteResponseSchema,
   VoiceAudioChunkMessageSchema,
   AbortRequestMessageSchema,
@@ -3744,6 +3758,8 @@ export const ServerInfoStatusPayloadSchema = z
         agentConfigApply: z.boolean().optional(),
         // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
         mcpStatus: z.boolean().optional(),
+        // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
+        mcpGatewayAdopt: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6138,6 +6154,18 @@ export const McpStatusUpdateMessageSchema = z.object({
   }),
 });
 
+// Response to McpGatewayServerAdoptRequestSchema. `authorizationUrl` is set when the adopted
+// server still needs interactive OAuth; null with `error` null means it connected outright (a
+// static header adopted from the agent's config). Same no-secrets rule as auth.start below.
+export const McpGatewayServerAdoptResponseMessageSchema = z.object({
+  type: z.literal("mcp_gateway.server.adopt.response"),
+  payload: z.object({
+    requestId: z.string(),
+    authorizationUrl: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
+});
+
 // Response to McpGatewayAuthStartRequestSchema (U6/KTD3). `authorizationUrl` is null only
 // when `error` is set — unknown server, a static-auth server with nothing to authorize
 // interactively, or a discovery/PKCE failure surfaced as a friendly message. Never carries
@@ -6842,6 +6870,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   RefreshProvidersSnapshotResponseMessageSchema,
   McpStatusUpdateMessageSchema,
   McpGatewayAuthStartResponseMessageSchema,
+  McpGatewayServerAdoptResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   ListCommandsResponseSchema,
@@ -7017,6 +7046,9 @@ export type GetProvidersSnapshotResponseMessage = z.infer<
 export type ProvidersSnapshotUpdateMessage = z.infer<typeof ProvidersSnapshotUpdateMessageSchema>;
 export type RefreshProvidersSnapshotResponseMessage = z.infer<
   typeof RefreshProvidersSnapshotResponseMessageSchema
+>;
+export type McpGatewayServerAdoptResponseMessage = z.infer<
+  typeof McpGatewayServerAdoptResponseMessageSchema
 >;
 export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;

@@ -3,7 +3,10 @@ import { useShallow } from "zustand/shallow";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { QueryKey } from "@tanstack/react-query";
-import type { McpGatewayAuthStartPayload } from "@getpaseo/client/internal/daemon-client";
+import type {
+  McpGatewayAuthStartPayload,
+  McpGatewayServerAdoptPayload,
+} from "@getpaseo/client/internal/daemon-client";
 import { useLocalDaemonServerId } from "@/hooks/use-is-local-daemon";
 import { useHostRuntimeClient, useHostRuntimeIsConnected, useHosts } from "@/runtime/host-runtime";
 import { orderHostsLocalFirst, resolveActiveHostServerId } from "@/types/host-connection";
@@ -21,6 +24,9 @@ export interface McpStatusPayload {
   servers: McpStatusServerEntry[];
   generatedAt: string;
 }
+
+/** Where a claude.ai connector gets authorized — the daemon cannot broker those. */
+export const CLAUDE_AI_CONNECTORS_URL = "https://claude.ai/settings/connectors";
 
 export function mcpStatusQueryKey(serverId: string | null): QueryKey {
   return ["mcpStatus", serverId ?? ""];
@@ -100,6 +106,12 @@ export interface UseMcpStatusResult {
   /** Starts interactive OAuth for one server (U6), then opens the returned URL. Resolves with
    * the RPC's `error` field (not a throw) on a known failure — the caller surfaces it inline. */
   startAuth: (name: string) => Promise<McpGatewayAuthStartPayload>;
+  /** Brokers a session-reported server through the daemon (reading the reporting agent's MCP
+   * config), then opens the sign-in URL if one comes back. Same non-throwing contract. */
+  adoptServer: (name: string, agentId: string) => Promise<McpGatewayServerAdoptPayload>;
+  /** Opens claude.ai's connector settings — the only place claude.ai connectors get authorized. */
+  openClaudeAiConnectors: () => Promise<void>;
+  /** True while either the auth or the adopt mutation is in flight. */
   isStartingAuth: boolean;
 }
 
@@ -110,6 +122,10 @@ export function useMcpStatus(): UseMcpStatusResult {
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const supportsMcpStatus = useSessionStore(
     (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.mcpStatus === true,
+  );
+  // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
+  const supportsAdopt = useSessionStore(
+    (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.mcpGatewayAdopt === true,
   );
 
   const statusQuery = useReplicaQuery<McpStatusPayload>({
@@ -125,8 +141,9 @@ export function useMcpStatus(): UseMcpStatusResult {
       buildMcpStatusStripModel({
         servers: statusQuery.data?.servers ?? [],
         sessionReports,
+        canAdopt: supportsAdopt,
       }),
-    [statusQuery.data, sessionReports],
+    [statusQuery.data, sessionReports, supportsAdopt],
   );
 
   const startAuthMutation = useMutation({
@@ -147,11 +164,35 @@ export function useMcpStatus(): UseMcpStatusResult {
     [startAuthMutation],
   );
 
+  const adoptMutation = useMutation({
+    mutationFn: async (input: { name: string; agentId: string }) => {
+      if (!client) {
+        throw new Error(t("workspace.terminal.hostDisconnected"));
+      }
+      const result = await client.adoptMcpGatewayServer(input.name, input.agentId);
+      if (result.authorizationUrl) {
+        await openExternalUrl(result.authorizationUrl);
+      }
+      return result;
+    },
+  });
+
+  const adoptServer = useCallback(
+    (name: string, agentId: string) => adoptMutation.mutateAsync({ name, agentId }),
+    [adoptMutation],
+  );
+
+  const openClaudeAiConnectors = useCallback(async () => {
+    await openExternalUrl(CLAUDE_AI_CONNECTORS_URL);
+  }, []);
+
   return {
     serverId,
     supportsMcpStatus,
     model,
     startAuth,
-    isStartingAuth: startAuthMutation.isPending,
+    adoptServer,
+    openClaudeAiConnectors,
+    isStartingAuth: startAuthMutation.isPending || adoptMutation.isPending,
   };
 }

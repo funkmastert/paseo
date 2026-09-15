@@ -1907,6 +1907,8 @@ export const ar: TranslationResources = {
     },
     authAction: "المصادقة",
     reauthAction: "إعادة المصادقة",
+    adoptAction: "التوسيط وتسجيل الدخول",
+    openClaudeAiAction: "افتح claude.ai",
     authError: "فشلت المصادقة: {{error}}",
     reportedBy: "أُبلغ عنها من {{agent}}",
     reportedByCount: "أُبلغ عنها من {{count}} وكلاء",

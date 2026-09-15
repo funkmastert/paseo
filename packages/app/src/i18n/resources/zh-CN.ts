@@ -1886,6 +1886,8 @@ export const zhCN: TranslationResources = {
     },
     authAction: "授权",
     reauthAction: "重新授权",
+    adoptAction: "代理并登录",
+    openClaudeAiAction: "打开 claude.ai",
     authError: "身份验证失败：{{error}}",
     reportedBy: "由 {{agent}} 报告",
     reportedByCount: "由 {{count}} 个代理报告",

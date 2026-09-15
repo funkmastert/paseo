@@ -115,6 +115,7 @@ const INBOUND_PERMISSION = {
   "loop/run": "automation.manage",
   "loop/stop": "automation.manage",
   "mcp_gateway.auth.start.request": "daemon.manage",
+  "mcp_gateway.server.adopt.request": "daemon.manage",
   open_in_editor_request: "workspace.write",
   open_project_request: "workspace.manage",
   paseo_worktree_archive_request: "workspace.manage",
@@ -335,6 +336,7 @@ const OUTBOUND_PERMISSION = {
   // plugin management, restart) rather than a workspace-scoped permission — the gateway itself
   // is a daemon-global resource, not tied to any one workspace.
   "mcp_gateway.auth.start.response": "daemon.manage",
+  "mcp_gateway.server.adopt.response": "daemon.manage",
   open_in_editor_response: "workspace.read",
   open_project_response: "workspace.manage",
   paseo_worktree_archive_response: "workspace.manage",

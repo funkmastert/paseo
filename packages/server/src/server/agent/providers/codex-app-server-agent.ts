@@ -942,9 +942,15 @@ export function buildCodexTurnTokenDelta(usage: AgentUsage | undefined): number 
   if (!usage) {
     return undefined;
   }
+  // Codex reports `cachedInputTokens` as a SUBSET of `inputTokens` (codex-rs's
+  // TokenUsage::non_cached_input is input − cached; total_tokens = input + output), unlike
+  // Anthropic, where cache reads sit outside input_tokens. Split before weighting, or every
+  // cached token counts once at full price and again at the cache rate.
+  const inputTokens = usage.inputTokens ?? 0;
+  const cachedInputTokens = Math.min(usage.cachedInputTokens ?? 0, inputTokens);
   const total = weighTokenUsage({
-    inputTokens: usage.inputTokens,
-    cacheReadInputTokens: usage.cachedInputTokens,
+    inputTokens: inputTokens - cachedInputTokens,
+    cacheReadInputTokens: cachedInputTokens,
     outputTokens: usage.outputTokens,
   });
   return total > 0 ? total : undefined;

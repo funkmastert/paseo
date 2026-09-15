@@ -20,11 +20,15 @@ const sessionState = vi.hoisted(() => ({
 }));
 
 const startMcpGatewayAuthMock = vi.hoisted(() => vi.fn());
+const adoptMcpGatewayServerMock = vi.hoisted(() => vi.fn());
 const openExternalUrlMock = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock("@/runtime/host-runtime", () => ({
   useHosts: () => [HOST],
-  useHostRuntimeClient: () => ({ startMcpGatewayAuth: startMcpGatewayAuthMock }),
+  useHostRuntimeClient: () => ({
+    startMcpGatewayAuth: startMcpGatewayAuthMock,
+    adoptMcpGatewayServer: adoptMcpGatewayServerMock,
+  }),
   useHostRuntimeIsConnected: () => true,
 }));
 
@@ -56,7 +60,39 @@ describe("useMcpStatus", () => {
       },
     };
     startMcpGatewayAuthMock.mockReset();
+    adoptMcpGatewayServerMock.mockReset();
     openExternalUrlMock.mockClear();
+  });
+
+  it("brokers a session-reported server through the daemon and opens the returned sign-in URL", async () => {
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true, mcpGatewayAdopt: true } },
+          agents: new Map(),
+        },
+      },
+    };
+    adoptMcpGatewayServerMock.mockResolvedValue({
+      requestId: "req-3",
+      authorizationUrl: "https://linear.example/authorize",
+      error: null,
+    });
+
+    const { result } = renderHook(() => useMcpStatus(), { wrapper });
+
+    await result.current.adoptServer("linear", "agent-9");
+
+    expect(adoptMcpGatewayServerMock).toHaveBeenCalledWith("linear", "agent-9");
+    expect(openExternalUrlMock).toHaveBeenCalledWith("https://linear.example/authorize");
+  });
+
+  it("opens claude.ai's connector settings for claude.ai connectors", async () => {
+    const { result } = renderHook(() => useMcpStatus(), { wrapper });
+
+    await result.current.openClaudeAiConnectors();
+
+    expect(openExternalUrlMock).toHaveBeenCalledWith("https://claude.ai/settings/connectors");
   });
 
   it("gates off when the daemon has no mcpStatus feature flag", () => {

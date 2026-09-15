@@ -1958,6 +1958,8 @@ export const fr: TranslationResources = {
     },
     authAction: "S'authentifier",
     reauthAction: "Se réauthentifier",
+    adoptAction: "Relayer et se connecter",
+    openClaudeAiAction: "Ouvrir claude.ai",
     authError: "Échec de l'authentification : {{error}}",
     reportedBy: "Signalé par {{agent}}",
     reportedByCount: "Signalé par {{count}} agents",

@@ -11,7 +11,7 @@ Raw counting is what made the monitor cry wolf. A Claude agent re-reads its whol
 ## How deltas arrive
 
 - **Claude** records per API request while a turn runs: `message_start` carries the input side, `message_delta` the output count, and the adapter emits a daemon-internal `token_burn_delta` stream event per request. The per-turn `turnTokenDelta` on `turn_completed` is only the fallback for a run without partial messages, so a turn is never counted twice.
-- **Codex** weights its per-turn `last` usage the same way.
+- **Codex** weights its per-turn `last` usage the same way, after splitting cached tokens out of its input count: Codex reports cached input as a subset of input, Anthropic reports cache reads beside it.
 - **OpenCode and ACP** diff cumulative totals and have no cache breakdown, so they stay raw. Their agents do not re-read a cached context per step, so the distortion above does not apply to them.
 - **OMP and Pi** report nothing; the rate leg never fires for them.
 

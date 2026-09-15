@@ -33,9 +33,19 @@ export type McpStatusRowStatusKey =
   | "disabled"
   | "sessionReported";
 
+/**
+ * What pressing a row does. `authenticate` runs the daemon's OAuth flow for a brokered server;
+ * `adopt` asks the daemon to broker a session-reported server first (reading the reporting
+ * agent's own MCP config) and then sign in; `openClaudeAi` opens claude.ai's connector settings,
+ * the only place a claude.ai connector can be authorized. Absent when nothing can be done.
+ */
+export type McpStatusRowAction = "authenticate" | "adopt" | "openClaudeAi";
+
 export interface McpStatusRowAnnotation {
   /** Label of the first agent that reported this server unhealthy. */
   agentLabel: string;
+  /** Id of that agent — the adopt action reads its config dir and project for the definition. */
+  agentId: string;
   /** Distinct agents reporting it — the strip says "reported by N agents" above one. */
   reporterCount: number;
 }
@@ -48,9 +58,7 @@ export interface McpStatusRow {
   tone: ProviderUsageTone;
   statusKey: McpStatusRowStatusKey;
   critical: boolean;
-  /** Whether the auth/re-auth action applies. Always false for session-only rows — stdio/
-   * pass-through servers have no daemon-side auth flow (KTD10). */
-  canAuth: boolean;
+  action?: McpStatusRowAction;
   error?: string;
   /** Set when a session reported trouble with this server too — "reported by <agent>". */
   annotation?: McpStatusRowAnnotation;
@@ -165,8 +173,21 @@ function annotationFor(reports: McpStatusSessionReport[]): McpStatusRowAnnotatio
   if (!first) return undefined;
   return {
     agentLabel: first.agentLabel,
+    agentId: first.agentId,
     reporterCount: new Set(reports.map((report) => report.agentId)).size,
   };
+}
+
+const CLAUDE_AI_CONNECTOR_PREFIX = "claude.ai ";
+
+/** claude.ai connectors live on the Claude account, so the daemon can never broker them. */
+export function isClaudeAiConnectorName(name: string): boolean {
+  return name.startsWith(CLAUDE_AI_CONNECTOR_PREFIX);
+}
+
+function sessionOnlyActionFor(name: string, canAdopt: boolean): McpStatusRowAction | undefined {
+  if (isClaudeAiConnectorName(name)) return "openClaudeAi";
+  return canAdopt ? "adopt" : undefined;
 }
 
 function isUnhealthyRow(row: McpStatusRow): boolean {
@@ -179,11 +200,13 @@ function isUnhealthyRow(row: McpStatusRow): boolean {
  * (AE3): a report for a known server becomes an annotation on that row; reports for an
  * unknown (non-brokered) server collapse into one row per server name with a reporter count —
  * never one row per agent, which with a dozen workers all loading the same broken user-scope
- * server read as a wall of duplicate notifications — and carry no auth action.
+ * server read as a wall of duplicate notifications. Every row that can lead somewhere carries an
+ * `action`; `canAdopt` is the daemon's `mcpGatewayAdopt` feature flag.
  */
 export function buildMcpStatusStripModel(input: {
   servers: McpStatusServerEntry[];
   sessionReports: McpStatusSessionReport[];
+  canAdopt?: boolean;
 }): McpStatusStripModel {
   const serverNames = new Set(input.servers.map((server) => server.name));
   const unhealthyReportsByServer = groupUnhealthyReportsByServer(input.sessionReports);
@@ -196,7 +219,7 @@ export function buildMcpStatusStripModel(input: {
       tone: deriveMcpStatusTone(server.status),
       statusKey: statusKeyFor(server.status),
       critical: server.critical,
-      canAuth: isUnhealthy(server.status),
+      ...(isUnhealthy(server.status) ? { action: "authenticate" as const } : {}),
       ...(server.error !== undefined ? { error: server.error } : {}),
       ...(annotation ? { annotation } : {}),
       sessionOnly: false,
@@ -208,13 +231,14 @@ export function buildMcpStatusStripModel(input: {
     if (serverNames.has(serverName)) continue;
     const annotation = annotationFor(reports);
     if (!annotation) continue;
+    const action = sessionOnlyActionFor(serverName, input.canAdopt ?? false);
     sessionOnlyRows.push({
       key: `session:${serverName}`,
       name: serverName,
       tone: "warning",
       statusKey: "sessionReported",
       critical: false,
-      canAuth: false,
+      ...(action ? { action } : {}),
       annotation,
       sessionOnly: true,
     });
