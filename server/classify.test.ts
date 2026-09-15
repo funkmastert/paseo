@@ -10,6 +10,25 @@ describe("classify", () => {
     expect(classify("Out of credits").isLimit).toBe(true);
   });
 
+  it("flags the real monthly spend-limit message and attributes it to the five_hour window via the session-limit reset text", () => {
+    const message =
+      "You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message · your session limit resets 3:10pm (America/Los_Angeles)";
+    const now = new Date(2026, 8, 15, 10, 0, 0);
+    const result = classify(message, now);
+    expect(result.isLimit).toBe(true);
+    expect(result.window).toBe(WINDOW_FIVE_HOUR);
+    expect(result.resetsAt).toEqual(new Date(2026, 8, 15, 15, 10, 0));
+  });
+
+  it("flags weekly and session spend-limit wording", () => {
+    expect(classify("You've hit your weekly spend limit").isLimit).toBe(true);
+    expect(classify("You've hit your session spend limit").isLimit).toBe(true);
+  });
+
+  it("flags usage-limit wording", () => {
+    expect(classify("You've hit your usage limit for this account").isLimit).toBe(true);
+  });
+
   it("does not flag unrelated failure text as a limit", () => {
     expect(classify("Network timeout, please retry").isLimit).toBe(false);
     expect(classify("Invalid API key").isLimit).toBe(false);

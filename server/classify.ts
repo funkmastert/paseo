@@ -10,8 +10,14 @@ export interface ClassifyResult {
  * The one pattern recognizing limit-shaped failure text across this
  * plugin. Every reactive classification decision flows through here so
  * there's a single place to tune it.
+ *
+ * "spend limit" / "usage limit" cover the real CLI cap message ("You've
+ * hit your monthly spend limit ... your session limit resets 3:10pm"),
+ * which does not contain the literal phrase "hit your limit" — the word
+ * "limit" there is qualified by "spend"/"usage" and a monthly/weekly/
+ * session scope word, not preceded directly by "hit your".
  */
-const LIMIT_PATTERN = /hit your limit|rate limit|quota|credits/i;
+const LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend limit|usage limit/i;
 
 const ISO_TIMESTAMP_PATTERN =
   /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b/;
