@@ -39,6 +39,7 @@ interface PluginRuntimePort {
   stopPluginById(pluginId: string): Promise<boolean>;
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
+  subscribeSessionDrop?(listener: (pluginId: string) => void): () => void;
   bindPaseoSessionHost(sessionHost: Parameters<PluginRuntime["bindPaseoSessionHost"]>[0]): void;
 }
 
@@ -91,6 +92,9 @@ export class PluginService {
       this.removeProviderRegistrations(pluginId);
       if (error) this.errors.set(pluginId, error);
       this.notify(pluginId);
+    });
+    this.runtime.subscribeSessionDrop?.((pluginId) => {
+      void this.recoverFromSessionDrop(pluginId);
     });
   }
 
@@ -309,6 +313,36 @@ export class PluginService {
       await this.startExplicit(pluginId, source.path);
       this.notify(pluginId);
       return this.requireItem(pluginId);
+    });
+  }
+
+  // The runtime reports this when a plugin's own daemon session dies while its
+  // process stays alive (e.g. an expired application lease closed the session's
+  // socket during a relay stall). That session never resumes, so recover the same
+  // way a manual `reloadPlugin` would: stop the zombie process, start fresh, and
+  // republish provider registrations. Runs through the same lifecycle queue as
+  // user-triggered operations so it can't race a concurrent reload/disable/remove.
+  private async recoverFromSessionDrop(pluginId: string): Promise<void> {
+    await this.enqueue(async () => {
+      const source = this.configStore.get().plugins?.[pluginId];
+      if (!source || source.enabled === false || this.configStore.get().pluginsEnabled !== true) {
+        return;
+      }
+      this.logger.warn(
+        { pluginId },
+        "Restarting plugin after its daemon session dropped unexpectedly",
+      );
+      await this.stopPlugin(pluginId);
+      this.errors.delete(pluginId);
+      await this.startExplicit(pluginId, source.path).catch((error) => {
+        this.logger.error(
+          { err: error, pluginId },
+          "Plugin failed to restart after daemon session loss",
+        );
+      });
+      this.notify(pluginId);
+    }).catch((error) => {
+      this.logger.error({ err: error, pluginId }, "Failed to recover plugin from session drop");
     });
   }
 
