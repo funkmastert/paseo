@@ -597,6 +597,33 @@ export default function contribute(plugin: unknown) {
     await service.stopAllPlugins();
   }, 20_000);
 
+  it("reports connectivity for every plugin that should be running", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
+    roots.push(home);
+    const healthy = await createPlugin(
+      "healthy",
+      `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+    );
+    const broken = await createPlugin(
+      "broken",
+      `export default function contribute(plugin: unknown) { void plugin; throw new Error("boom"); }`,
+    );
+    const service = createService(home);
+    await service.start();
+    await service.installDirectory({ path: healthy });
+    await expect(service.installDirectory({ path: broken })).rejects.toThrow("boom");
+
+    expect(service.listSessionConnectivity()).toEqual([
+      { pluginId: "healthy", connected: true },
+      { pluginId: "broken", connected: false },
+    ]);
+
+    await service.disablePlugin("broken");
+    expect(service.listSessionConnectivity()).toEqual([{ pluginId: "healthy", connected: true }]);
+    await service.stopAllPlugins();
+    expect(service.listSessionConnectivity()).toEqual([]);
+  }, 20_000);
+
   it("detaches every plugin synchronously when the global switch turns off and recovers", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "paseo-plugin-home-"));
     roots.push(home);

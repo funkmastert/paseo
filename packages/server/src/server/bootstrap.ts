@@ -212,6 +212,7 @@ import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
+import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
@@ -770,6 +771,7 @@ export async function createPaseoDaemon(
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
   let agentResourceMonitor: AgentResourceMonitor | null = null;
+  let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -1957,6 +1959,13 @@ export async function createPaseoDaemon(
               logger,
             });
             agentResourceMonitor.start();
+            pluginConnectionMonitor = new PluginConnectionMonitor({
+              listConnectivity: () => pluginRuntime.listSessionConnectivity(),
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              logger,
+            });
+            pluginConnectionMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2031,6 +2040,7 @@ export async function createPaseoDaemon(
     agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
     agentResourceMonitor?.stop();
+    pluginConnectionMonitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
