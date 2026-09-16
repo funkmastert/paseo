@@ -31,6 +31,7 @@ function agent(
     lifecycle: "error",
     lastError: undefined,
     timelineSeq: 7,
+    lastTimelineAt: null,
     labels: {},
     sessionId: `session-${overrides.id}`,
     model: "claude-opus-5",
@@ -251,6 +252,41 @@ describe("planAccountFailoverSweep", () => {
       usage: [usage("claude", [100])],
     });
     expect(ids(corroborated.candidates)).toEqual(["stale"]);
+  });
+
+  it("dates a new sighting by the agent's last timeline row, clamped to now", () => {
+    const nowMs = Date.parse("2026-09-16T12:00:00.000Z");
+    const failedEarlier = agent({
+      id: "earlier",
+      lastError: REAL_LIMIT_MESSAGE,
+      lastTimelineAt: "2026-09-16T11:30:00.000Z",
+    });
+    const clockSkewed = agent({
+      id: "skewed",
+      lastError: REAL_LIMIT_MESSAGE,
+      lastTimelineAt: "2026-09-16T13:00:00.000Z",
+    });
+    const undated = agent({ id: "undated", lastError: REAL_LIMIT_MESSAGE, lastTimelineAt: "junk" });
+
+    const result = plan({ agents: [failedEarlier, clockSkewed, undated], nowMs });
+
+    expect(result.sightings.get("earlier")?.firstSeenMs).toBe(nowMs - 30 * 60 * 1000);
+    expect(result.sightings.get("skewed")?.firstSeenMs).toBe(nowMs);
+    expect(result.sightings.get("undated")?.firstSeenMs).toBe(nowMs);
+  });
+
+  it("ignores an old failure seen for the first time, e.g. after a daemon restart", () => {
+    const nowMs = Date.parse("2026-09-16T12:00:00.000Z");
+    const abandoned = agent({
+      id: "abandoned",
+      lastError: REAL_LIMIT_MESSAGE,
+      lastTimelineAt: "2026-09-10T08:00:00.000Z",
+    });
+
+    const result = plan({ agents: [abandoned], nowMs });
+
+    expect(result.deadProviderIds.size).toBe(0);
+    expect(result.candidates).toEqual([]);
   });
 
   it("keeps first-seen time for an unchanged error and resets it when the text changes", () => {

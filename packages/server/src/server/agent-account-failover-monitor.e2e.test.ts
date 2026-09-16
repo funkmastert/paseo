@@ -34,6 +34,7 @@ interface Harness {
   prompts: Record<PoolProvider, string[]>;
   setUsage(providers: ProviderUsage[]): void;
   advanceClock(ms: number): void;
+  setClock(ms: number): void;
   sweep(): Promise<void>;
   close(): Promise<void>;
 }
@@ -79,7 +80,10 @@ async function createHarness(): Promise<Harness> {
     "claude-backup": [],
   };
   let usage: ProviderUsage[] = [];
-  let clockMs = Date.parse("2026-09-16T00:00:00.000Z");
+  // Sightings are dated by the failure's timeline row, clamped to the monitor clock. Starting the
+  // monitor clock before any real timestamp keeps that clamp in effect, so ages depend only on
+  // advanceClock and never on the wall clock the test happens to run at.
+  let clockMs = Date.parse("2000-01-01T00:00:00.000Z");
 
   const daemon = await createPaseoDaemon(
     {
@@ -171,6 +175,9 @@ async function createHarness(): Promise<Harness> {
     },
     advanceClock: (ms) => {
       clockMs += ms;
+    },
+    setClock: (ms) => {
+      clockMs = ms;
     },
     sweep: async () => {
       const monitor = daemon.getAccountFailoverMonitor();
@@ -462,6 +469,21 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(successorOf(harness, first)).toBe("");
     expect(agentCount(harness)).toBe(agentsBeforeReturn);
+  }, 60_000);
+
+  test("treats an old failure as history unless usage confirms the cap", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    // Seen from far in the future, the failure row is older than the reactive window: the same
+    // situation as a long-dead agent loaded after a daemon restart.
+    harness.setClock(Date.parse("2100-01-01T00:00:00.000Z"));
+
+    await harness.sweep();
+    expect(successorOf(harness, leader)).toBeUndefined();
+
+    harness.setUsage([usageRow("claude", [100])]);
+    await harness.sweep();
+    expect(managed(harness, successorOf(harness, leader)!).provider).toBe("claude-personal");
   }, 60_000);
 
   test("does nothing while disabled in config, and resumes when re-enabled live", async () => {

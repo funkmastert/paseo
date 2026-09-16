@@ -285,7 +285,7 @@ async function sendResumePrompt(input: {
  *   ("Provider session is already imported"). If that fires because another import won a race,
  *   the successor it created is adopted. If the target instead holds this conversation's retired
  *   handle (the conversation is returning to an account it left), that handle is reused.
- *   Targets holding a non-retired handle for this session are skipped — that agent is someone
+ *   Targets holding a non-retired or running handle for this session are skipped — that agent is someone
  *   else's live copy, not ours to take over.
  *
  * Throws when the import itself fails; restoration and the resume prompt are best-effort.
@@ -315,7 +315,10 @@ export async function migrateStuckAgent(
   );
   const unavailable = new Set(input.deadProviderIds);
   for (const record of sameSession) {
-    if (record.persistence && !getMigratedToFromLabels(record.labels)) {
+    const live =
+      !getMigratedToFromLabels(record.labels) ||
+      agentManager.getAgent(record.id)?.lifecycle === "running";
+    if (record.persistence && live) {
       unavailable.add(record.persistence.provider);
     }
   }

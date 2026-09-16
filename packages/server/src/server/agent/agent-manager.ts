@@ -325,6 +325,9 @@ export interface AccountFailoverAgentSummary {
   /** Timeline generation: moves on every appended row, so a repeat failure with identical text
    * is still distinguishable from the old one. Null before the timeline is initialized. */
   timelineSeq: number | null;
+  /** Timestamp of the newest timeline row. For an agent whose turn just failed, that is the
+   * failure's own system-error row. Null when the timeline is empty or not initialized. */
+  lastTimelineAt: string | null;
   labels: Record<string, string>;
   sessionId: string | undefined;
   model: string | undefined;
@@ -1294,6 +1297,9 @@ export class AgentManager {
       lifecycle: agent.lifecycle,
       lastError: agent.lastError,
       timelineSeq: this.timelineStore.getNextSeq(agent.id),
+      lastTimelineAt: this.timelineStore.has(agent.id)
+        ? this.timelineStore.getLastRowTimestamp(agent.id)
+        : null,
       labels: agent.labels,
       sessionId: agent.persistence?.sessionId,
       model: agent.config.model,

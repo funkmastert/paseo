@@ -67,7 +67,17 @@ const NON_CANDIDATE_LIFECYCLES: ReadonlySet<AgentLifecycleStatus> = new Set([
   "initializing",
 ]);
 
-/** One limit-shaped failure, identified by its text and the timeline generation it left. */
+/** One limit-shaped failure, identified by its text and the timeline generation it left, and
+ * dated by when it happened as far as the timeline shows (see failureTimeMs). */
+// A new sighting is dated by the agent's newest timeline row — the failure's own error row —
+// not by when this process first noticed it. Otherwise a restart would present every old,
+// abandoned failure as brand new: its account would read dead for five more hours, and the
+// agent would be migrated and told to resume work nobody wants anymore.
+function failureTimeMs(lastTimelineAt: string | null, nowMs: number): number {
+  const parsed = lastTimelineAt === null ? Number.NaN : Date.parse(lastTimelineAt);
+  return Number.isFinite(parsed) ? Math.min(parsed, nowMs) : nowMs;
+}
+
 export interface LimitErrorSighting {
   error: string;
   timelineSeq: number | null;
@@ -130,7 +140,11 @@ export function planAccountFailoverSweep(
     const sighting =
       previous && previous.error === agent.lastError && previous.timelineSeq === agent.timelineSeq
         ? previous
-        : { error: agent.lastError, timelineSeq: agent.timelineSeq, firstSeenMs: input.nowMs };
+        : {
+            error: agent.lastError,
+            timelineSeq: agent.timelineSeq,
+            firstSeenMs: failureTimeMs(agent.lastTimelineAt, input.nowMs),
+          };
     sightings.set(agent.id, sighting);
     if (input.nowMs - sighting.firstSeenMs < input.reactiveSignalTtlMs) {
       deadProviderIds.add(agent.provider);

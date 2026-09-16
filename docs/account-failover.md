@@ -14,14 +14,16 @@ A migration target is the enabled worker with the lowest `priority` number that 
 
 Two independent signals, either one sufficient (`account-failover-detector.ts`):
 
-- **Reactive.** An agent on the account has a limit-shaped `lastError`. One failure condemns the whole account, since every agent on it shares the cap. The match is loose on purpose and includes `spend limit` and `session limit`, because the real CLI message ("You've hit your monthly spend limit · … · your session limit resets 3:10pm") contains neither "hit your limit" nor "usage limit". The evidence expires 5 hours after the monitor first sees it, the Claude session window, so one stale error can't keep a recovered account out of rotation forever.
+- **Reactive.** An agent on the account has a limit-shaped `lastError`. One failure condemns the whole account, since every agent on it shares the cap. The match is loose on purpose and includes `spend limit` and `session limit`, because the real CLI message ("You've hit your monthly spend limit · … · your session limit resets 3:10pm") contains neither "hit your limit" nor "usage limit". The evidence expires 5 hours after the failure, the Claude session window, so one stale error can't keep a recovered account out of rotation forever.
 - **Proactive.** A usage window at or above 100%, read from the daemon's cached `ProviderUsageService` (the same rows the Host Usage screen shows). An account reporting `unavailable` with no windows is never dead on that basis: an account can serve traffic fine while its usage is unreadable.
 
 A healthy usage reading does not clear a reactive signal. A monthly spend cap does not appear in the utilization windows at all.
 
 A retired predecessor's error still counts as evidence until it expires. If it stopped counting at migration time, the account would look healthy on the next sweep and the next stuck agent would be sent straight back onto it.
 
-Evidence is identified by the error text and the agent's timeline generation. A retry that fails with identical text appends timeline rows first, so it counts as a fresh failure rather than the old one. Evidence lives in memory and is rebuilt after a restart.
+Evidence is identified by the error text and the agent's timeline generation. A retry that fails with identical text appends timeline rows first, so it counts as a fresh failure rather than the old one.
+
+A failure is dated by the agent's newest timeline row (its own error row), not by when the monitor first noticed it. Evidence lives in memory, so after a restart every loaded agent is seen for the first time; dating by the row keeps a days-old failure from reading as a fresh cap. Without that, the account would look dead for five more hours, and an abandoned agent would be migrated and told to resume the moment someone opened it. An old failure still moves its agent if usage shows the account at its cap.
 
 ## Which agents move
 
