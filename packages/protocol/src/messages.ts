@@ -192,6 +192,19 @@ const MutableResourceMonitorConfigSchema = z
 
 const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
 
+// Live-toggleable like tokenBurnMonitor/resourceMonitor above — same mutable/patch split, same
+// reason. See docs/account-failover.md.
+const MutableAccountFailoverConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    migrateSubagents: z.boolean().optional(),
+    migrationConcurrency: z.number().int().positive().optional(),
+    notifyParent: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableAccountFailoverPatchSchema = MutableAccountFailoverConfigSchema;
+
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
 // reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
@@ -359,6 +372,7 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    accountFailover: MutableAccountFailoverConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -384,6 +398,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    accountFailover: MutableAccountFailoverPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),

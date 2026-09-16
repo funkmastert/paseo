@@ -69,9 +69,9 @@ export function createProviderUsageFetchers(
   options: ProviderUsageFetcherFactoryOptions,
   claudeDerivedEntries: readonly ClaudeDerivedProviderEntry[] = [],
 ): ProviderUsageFetcher[] {
-  const baseFetchers = PROVIDER_USAGE_FETCHERS.map((entry) => entry.create(options));
-  const derivedFetchers = claudeDerivedEntries.map(
-    (entry) =>
+  const derivedFetchers = new Map<string, ProviderUsageFetcher>(
+    claudeDerivedEntries.map((entry) => [
+      entry.providerId,
       new ClaudeQuotaProvider({
         logger: options.logger,
         fetch: options.fetch,
@@ -80,8 +80,18 @@ export function createProviderUsageFetchers(
         claudeHome: entry.claudeHome,
         keychainService: entry.keychainService ?? claudeConfigDirKeychainService(entry.claudeHome),
       }),
+    ]),
   );
-  return [...baseFetchers, ...derivedFetchers];
+  // A derived entry for a base id (the bare `claude` entry with its own CLAUDE_CONFIG_DIR)
+  // replaces the base fetcher in place: one row per provider id, reading that entry's account.
+  const baseFetchers = PROVIDER_USAGE_FETCHERS.map(
+    (entry) => derivedFetchers.get(entry.providerId) ?? entry.create(options),
+  );
+  const baseIds = new Set(PROVIDER_USAGE_FETCHERS.map((entry) => entry.providerId));
+  const additionalFetchers = [...derivedFetchers.values()].filter(
+    (fetcher) => !baseIds.has(fetcher.providerId),
+  );
+  return [...baseFetchers, ...additionalFetchers];
 }
 
 // ProviderOverrideSchema owns the persisted `agents.providers.<id>` shape (it is what the
@@ -99,10 +109,12 @@ const AccountPoolParamsSchema = z
   .passthrough();
 
 /**
- * Derive one entry per claude-derived custom provider (`extends: "claude"` with its own
- * `env.CLAUDE_CONFIG_DIR`) from the daemon's provider config, for use with
- * `createProviderUsageFetchers`. An entry missing `CLAUDE_CONFIG_DIR` is skipped — it has
- * no distinct account to fetch usage for.
+ * Derive one entry per Claude account entry with its own `env.CLAUDE_CONFIG_DIR` — custom
+ * entries with `extends: "claude"`, and the bare `claude` entry itself when it overrides its
+ * config dir (an account-pool leader slot does) — for use with `createProviderUsageFetchers`.
+ * Without the latter, the `claude` row would keep reading the default `~/.claude` account while
+ * `claude` agents run on another one. An entry missing `CLAUDE_CONFIG_DIR` is skipped — the
+ * base fetcher already covers the default account.
  */
 export function deriveClaudeProviderEntries(
   providers: Record<string, unknown> | undefined,
@@ -112,7 +124,8 @@ export function deriveClaudeProviderEntries(
   const entries: ClaudeDerivedProviderEntry[] = [];
   for (const [providerId, rawConfig] of Object.entries(providers)) {
     const result = ProviderOverrideSchema.safeParse(rawConfig);
-    if (!result.success || result.data.extends !== "claude") continue;
+    const isClaudeAccount = providerId === "claude" || result.data?.extends === "claude";
+    if (!result.success || !isClaudeAccount) continue;
 
     const claudeHome = result.data.env?.["CLAUDE_CONFIG_DIR"];
     if (!claudeHome) continue;
@@ -120,7 +133,7 @@ export function deriveClaudeProviderEntries(
     const params = AccountPoolParamsSchema.safeParse(result.data.params ?? {});
     entries.push({
       providerId,
-      displayName: result.data.label ?? providerId,
+      displayName: result.data.label ?? (providerId === "claude" ? "Claude" : providerId),
       claudeHome,
       keychainService: params.success ? params.data.accountPool?.keychainService : undefined,
     });

@@ -52,6 +52,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/agent-stream-performance.md](docs/agent-stream-performance.md) | Assistant text pipeline — coalescing window, paced reveal, why arrival lumps are smoothed at render                            |
 | [docs/token-burn.md](docs/token-burn.md)                             | Token burn — cost-weighted unit, per-request deltas, why the monitor only rates running agents                                 |
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — process-tree attribution by callerAgentId, orphan build daemons, thresholds                                 |
+| [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                 |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                     |
 | [docs/testing.md](docs/testing.md)                                   | TDD workflow, determinism, real dependencies over mocks, test organization                                                     |
 | [docs/qa.md](docs/qa.md)                                             | QA evidence bar for pull requests — platform matrix, version drift, performance, UI proof                                      |

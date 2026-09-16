@@ -1074,6 +1074,55 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          agents: {
+            accountFailover: { migrationConcurrency: 2, notifyParent: false },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        accountFailover: { migrationConcurrency: 2, notifyParent: false },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ accountFailover: { enabled: false } });
+
+    expect(next.accountFailover).toEqual({
+      migrationConcurrency: 2,
+      notifyParent: false,
+      enabled: false,
+    });
+
+    const persisted = loadPersistedConfig(paseoHome);
+    expect(persisted.agents?.accountFailover).toEqual({
+      migrationConcurrency: 2,
+      notifyParent: false,
+      enabled: false,
+    });
+  });
+
   test("patch live-toggles worktrees.diskSweeper.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

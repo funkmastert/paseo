@@ -83,6 +83,24 @@ describe("deriveClaudeProviderEntries", () => {
     );
   });
 
+  it("derives the bare claude entry when it overrides its own CLAUDE_CONFIG_DIR", () => {
+    const entries = deriveClaudeProviderEntries({
+      claude: {
+        env: { CLAUDE_CONFIG_DIR: "/tmp/claude-leader" },
+        params: { accountPool: { role: "leader", priority: 1 } },
+      },
+    });
+
+    expect(entries).toEqual([
+      {
+        providerId: "claude",
+        displayName: "Claude",
+        claudeHome: "/tmp/claude-leader",
+        keychainService: undefined,
+      },
+    ]);
+  });
+
   it("falls back to the provider id as displayName when no label is set", () => {
     const entries = deriveClaudeProviderEntries({
       "claude-work": { extends: "claude", env: { CLAUDE_CONFIG_DIR: "/tmp/claude-work" } },
@@ -142,6 +160,27 @@ describe("createProviderUsageFetchers", () => {
     const fetchers = createProviderUsageFetchers({ logger: createLogger() }, derivedEntries());
 
     expect(providerIds(fetchers)).toEqual([...baseProviderIds, "claude-work", "claude-personal"]);
+  });
+
+  it("replaces the base claude fetcher in place when the claude entry has its own config dir", async () => {
+    writeFileSync(
+      join(workHome, ".credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: "at_leader", subscriptionType: "max" } }),
+    );
+    const fetchApi = vi.fn(async () =>
+      jsonResponse({ seven_day: { utilization: 5, resets_at: null } }),
+    ) as unknown as typeof fetch;
+
+    const fetchers = createProviderUsageFetchers({ logger: createLogger(), fetch: fetchApi }, [
+      { providerId: "claude", displayName: "Claude", claudeHome: workHome },
+    ]);
+
+    expect(providerIds(fetchers)).toEqual(baseProviderIds);
+    expect(await findFetcher(fetchers, "claude").fetchUsage()).toMatchObject({
+      providerId: "claude",
+      status: "available",
+      planLabel: "Max",
+    });
   });
 
   it("produces two independent ProviderUsage rows keyed by their own provider ids", async () => {

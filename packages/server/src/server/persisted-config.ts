@@ -251,6 +251,17 @@ const AgentResourceMonitorSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.tokenBurnMonitor/resourceMonitor above — same mutable/patch
+// split, same reason. See docs/account-failover.md.
+const AgentAccountFailoverSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    migrateSubagents: z.boolean().optional(),
+    migrationConcurrency: z.number().int().positive().optional(),
+    notifyParent: z.boolean().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -400,6 +411,7 @@ export const PersistedConfigSchema = z
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
+        accountFailover: AgentAccountFailoverSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
@@ -20,8 +20,12 @@ import type {
   AgentSlashCommand,
   AgentUsage,
   FetchCatalogOptions,
+  ImportedProviderSession,
+  ImportProviderSessionContext,
+  ImportProviderSessionInput,
 } from "../agent/agent-sdk-types.js";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
+import { importSessionFromPersistence } from "../agent/provider-session-import.js";
 import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
 
 const TEST_CAPABILITIES: AgentCapabilityFlags = {
@@ -65,6 +69,40 @@ export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
   onStartTurn?: (prompt: AgentPromptInput) => void;
   supportsMcpServers?: boolean;
+}
+
+const FAKE_HISTORY_ROOT = path.join(tmpdir(), "paseo-fake-provider-history");
+
+function fakeHistoryPath(provider: string, sessionId: string): string {
+  return path.join(FAKE_HISTORY_ROOT, provider, `${sessionId}.jsonl`);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Every real Claude account slot symlinks projects/ to ~/.claude/projects, so any account can
+// resume any other's transcript. Model that by copying the session's history from whichever fake
+// provider wrote it into the importing provider's folder.
+async function copyFakeSessionHistory(provider: string, sessionId: string): Promise<void> {
+  const target = fakeHistoryPath(provider, sessionId);
+  if (await pathExists(target)) {
+    return;
+  }
+  const providers = await readdir(FAKE_HISTORY_ROOT).catch(() => [] as string[]);
+  for (const source of providers) {
+    const candidate = fakeHistoryPath(source, sessionId);
+    if (await pathExists(candidate)) {
+      await mkdir(path.dirname(target), { recursive: true });
+      await copyFile(candidate, target);
+      return;
+    }
+  }
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -349,12 +387,7 @@ class FakeAgentSession implements AgentSession {
     this.memoryMarker = options.memoryMarker ?? null;
     this.closeSession = options.closeSession;
     this.onStartTurn = options.onStartTurn;
-    this.historyPath = path.join(
-      tmpdir(),
-      "paseo-fake-provider-history",
-      this.providerName,
-      `${this.id}.jsonl`,
-    );
+    this.historyPath = fakeHistoryPath(this.providerName, this.id);
   }
 
   get provider() {
@@ -1234,6 +1267,19 @@ class FakeAgentClient implements AgentClient {
       memoryMarker: typeof marker === "string" ? marker : null,
       closeSession: this.options.closeSession,
       onStartTurn: this.options.onStartTurn,
+    });
+  }
+
+  async importSession(
+    input: ImportProviderSessionInput,
+    context: ImportProviderSessionContext,
+  ): Promise<ImportedProviderSession> {
+    await copyFakeSessionHistory(this.provider, input.providerHandleId);
+    return importSessionFromPersistence({
+      provider: this.provider,
+      request: input,
+      context,
+      resumeSession: this.resumeSession.bind(this),
     });
   }
 
