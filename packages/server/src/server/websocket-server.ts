@@ -2243,7 +2243,12 @@ export class VoiceAssistantWebSocketServer {
       this.recordInboundMessageType(message.type);
 
       if (message.type === "ping") {
-        this.applicationSocketLease.claim(ws);
+        // The lease finds half-open remote sockets. A plugin session rides its
+        // subprocess's IPC channel, whose exit already tears the session down, and
+        // it can never reconnect — a lease closure only strands a live plugin.
+        if (!this.pluginSocketIds.has(ws)) {
+          this.applicationSocketLease.claim(ws);
+        }
         this.sendToClient(ws, { type: "pong" });
         return;
       }
