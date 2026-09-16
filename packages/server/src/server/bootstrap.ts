@@ -121,8 +121,12 @@ import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
+import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
-import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import {
+  createWorkspaceProvisioningService,
+  type WorkspaceProvisioningService,
+} from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -212,6 +216,7 @@ import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
+import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
@@ -499,6 +504,22 @@ export interface PaseoDaemonConfig {
     orphanBuildDaemonBytes?: number;
     notifyAgent?: boolean;
   };
+  accountFailover?: {
+    enabled?: boolean;
+    migrateSubagents?: boolean;
+    migrationConcurrency?: number;
+    notifyParent?: boolean;
+  };
+  /**
+   * Test seams for AccountFailoverMonitor; production leaves this unset. Tests inject a fake usage
+   * source (no real usage API call), push the timer past their own runtime and drive sweeps with
+   * `getAccountFailoverMonitor().tick()`, and advance `now` to expire reactive evidence.
+   */
+  accountFailoverOverrides?: {
+    providerUsage?: Pick<ProviderUsageService, "listUsage">;
+    sweepIntervalMs?: number;
+    now?: () => number;
+  };
   diskSweeper?: {
     enabled?: boolean;
     sweepIntervalMs?: number;
@@ -534,6 +555,8 @@ export interface PaseoDaemon {
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
+  /** Null until start() has constructed it (it needs the WebSocket server's push sender). */
+  getAccountFailoverMonitor(): AccountFailoverMonitor | null;
 }
 
 export interface PaseoDaemonDependencies {
@@ -600,6 +623,44 @@ function withResourceMonitorConfig(
   return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
 }
 
+function withAccountFailoverConfig(
+  config: Pick<PaseoDaemonConfig, "accountFailover">,
+): Pick<MutableDaemonConfig, "accountFailover"> {
+  return config.accountFailover !== undefined ? { accountFailover: config.accountFailover } : {};
+}
+
+// Wired once the WebSocket server exists: it owns the push sender and the provider-usage cache.
+function createAccountFailoverMonitor(input: {
+  config: Pick<PaseoDaemonConfig, "accountFailoverOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  serverId: string;
+  logger: Logger;
+}): AccountFailoverMonitor {
+  const overrides = input.config.accountFailoverOverrides;
+  return new AccountFailoverMonitor({
+    agentManager: input.agentManager,
+    agentStorage: input.agentStorage,
+    workspaceProvisioning: input.workspaceProvisioning,
+    providerUsage: overrides?.providerUsage ?? input.wsServer.getProviderUsageService(),
+    pushNotificationSender: input.wsServer.getPushNotificationSender(),
+    serverId: input.serverId,
+    readDaemonConfig: () => ({
+      accountFailover: input.daemonConfigStore.get().accountFailover,
+      providers: input.daemonConfigStore.get().providers,
+    }),
+    logger: input.logger,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    now: overrides?.now,
+  });
+}
+
 function withDiskSweeperConfig(
   config: Pick<PaseoDaemonConfig, "diskSweeper">,
 ): Pick<MutableDaemonConfig, "diskSweeper"> {
@@ -636,6 +697,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     },
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
+    ...withAccountFailoverConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
@@ -770,6 +832,7 @@ export async function createPaseoDaemon(
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
   let agentResourceMonitor: AgentResourceMonitor | null = null;
+  let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -1957,6 +2020,17 @@ export async function createPaseoDaemon(
               logger,
             });
             agentResourceMonitor.start();
+            accountFailoverMonitor = createAccountFailoverMonitor({
+              config,
+              agentManager,
+              agentStorage,
+              workspaceProvisioning,
+              wsServer,
+              daemonConfigStore,
+              serverId,
+              logger,
+            });
+            accountFailoverMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2031,6 +2105,7 @@ export async function createPaseoDaemon(
     agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
     agentResourceMonitor?.stop();
+    accountFailoverMonitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
@@ -2071,6 +2146,7 @@ export async function createPaseoDaemon(
     start,
     stop,
     getListenTarget: () => boundListenTarget,
+    getAccountFailoverMonitor: () => accountFailoverMonitor,
   };
 }
 

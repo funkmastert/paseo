@@ -950,6 +950,13 @@ export class VoiceAssistantWebSocketServer {
     return this.pushNotificationSender;
   }
 
+  /** The provider-usage service this instance owns, so AccountFailoverMonitor reads the same
+   * cached per-account usage (and shares its cache/API load) rather than standing up a second
+   * instance that would double-hit the Claude usage API. */
+  public getProviderUsageService(): ProviderUsageService {
+    return this.providerUsageService;
+  }
+
   public listSessions(): Session[] {
     return Array.from(
       new Set(
