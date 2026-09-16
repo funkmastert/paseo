@@ -371,6 +371,13 @@ export class PluginRuntime {
       .sort((left, right) => left.id.localeCompare(right.id));
   }
 
+  // A client-only plugin has no session to lose, so it counts as connected while loaded.
+  isSessionConnected(pluginId: string): boolean {
+    const loaded = this.plugins.get(pluginId);
+    if (!loaded) return false;
+    return loaded.sessionSocket === null || loaded.sessionSocket.readyState === 1;
+  }
+
   getProviderRegistrations(pluginId: string): readonly PluginProviderMetadata[] {
     return this.plugins.get(pluginId)?.providers ?? [];
   }

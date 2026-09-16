@@ -40,6 +40,7 @@ interface PluginRuntimePort {
   stopAll(): Promise<void>;
   subscribe(listener: (pluginId: string, error?: string) => void): () => void;
   subscribeSessionDrop?(listener: (pluginId: string) => void): () => void;
+  isSessionConnected?(pluginId: string): boolean;
   bindPaseoSessionHost(sessionHost: Parameters<PluginRuntime["bindPaseoSessionHost"]>[0]): void;
 }
 
@@ -178,6 +179,19 @@ export class PluginService {
         return item;
       })
       .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  // Every plugin that should be running, and whether it can currently reach its daemon
+  // session. A failed or stopped plugin is offline too: its hooks are skipped either way.
+  listSessionConnectivity(): Array<{ pluginId: string; connected: boolean }> {
+    const config = this.configStore.get();
+    if (config.pluginsEnabled !== true || this.globalStartsBlocked) return [];
+    return Object.entries(config.plugins ?? {})
+      .filter(([, source]) => source.enabled !== false)
+      .map(([pluginId]) => ({
+        pluginId,
+        connected: this.runtime.isSessionConnected?.(pluginId) ?? true,
+      }));
   }
 
   getLogs(pluginId: string): PluginLogEntry[] {
