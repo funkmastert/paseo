@@ -284,6 +284,11 @@ export class InMemoryAgentTimelineStore {
     return state.rows[state.rows.length - 1]?.item ?? null;
   }
 
+  /** Monotonic per agent: changes whenever anything is appended, never otherwise. */
+  getNextSeq(agentId: string): number | null {
+    return this.states.get(agentId)?.nextSeq ?? null;
+  }
+
   getLastRowTimestamp(agentId: string): string | null {
     const state = this.requireState(agentId);
     return state.rows[state.rows.length - 1]?.timestamp ?? null;

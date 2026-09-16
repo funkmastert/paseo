@@ -305,6 +305,33 @@ export interface ResourceMonitorAgentSummary {
   isRunning: boolean;
 }
 
+/**
+ * Lean per-agent view for AgentAccountFailoverMonitor's sweep, mirroring
+ * TokenBurnMonitorAgentSummary/ResourceMonitorAgentSummary above. Unlike those two, this
+ * carries enough for the monitor to decide candidacy without a second round-trip per agent:
+ * `provider` (which account it's stuck on), `lifecycle` (never migrate a running agent),
+ * `lastError` (the reactive cap-text signal), `labels` (parent lookup and the
+ * already-migrated marker), and the session/model/mode fields the migration action restores
+ * on the successor.
+ */
+export interface AccountFailoverAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  cwd: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  lastError: string | undefined;
+  /** Timeline generation: moves on every appended row, so a repeat failure with identical text
+   * is still distinguishable from the old one. Null before the timeline is initialized. */
+  timelineSeq: number | null;
+  labels: Record<string, string>;
+  sessionId: string | undefined;
+  model: string | undefined;
+  modeId: string | undefined;
+  thinkingOptionId: string | undefined;
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -1246,6 +1273,33 @@ export class AgentManager {
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
     }));
+  }
+
+  listAgentsForAccountFailover(): AccountFailoverAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => this.toAccountFailoverSummary(agent));
+  }
+
+  getAccountFailoverSummary(agentId: string): AccountFailoverAgentSummary | null {
+    const agent = this.agents.get(agentId);
+    return agent ? this.toAccountFailoverSummary(agent) : null;
+  }
+
+  private toAccountFailoverSummary(agent: ManagedAgent): AccountFailoverAgentSummary {
+    return {
+      id: agent.id,
+      provider: agent.provider,
+      cwd: agent.cwd,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      lastError: agent.lastError,
+      timelineSeq: this.timelineStore.getNextSeq(agent.id),
+      labels: agent.labels,
+      sessionId: agent.persistence?.sessionId,
+      model: agent.config.model,
+      modeId: agent.config.modeId,
+      thinkingOptionId: agent.config.thinkingOptionId,
+    };
   }
 
   async listImportableSessions(
