@@ -259,6 +259,29 @@ grace. During daemon startup, plugin sessions may connect while application WebS
 paused; the daemon accepts clients only after configured plugins have settled and the initial
 catalog is complete.
 
+### Session resilience
+
+A plugin session never reconnects, so anything that closes it while the subprocess lives leaves
+the plugin running with a dead `PaseoApi`. Its hooks then fail open with nothing in the UI to show
+it.
+
+- Plugin sessions are exempt from the application-socket lease
+  (`packages/server/src/server/websocket-server.ts:2249`). The lease detects half-open remote
+  sockets. The subprocess's IPC channel already reports exit.
+- The lease does not expire sockets after a late sweep
+  (`packages/server/src/server/websocket/physical-socket.ts:13`). macOS suspends the daemon, and
+  when it resumes, the sweep timer runs before the peers' queued pings are read. Before this
+  rule, every suspension longer than the lease closed every socket.
+- If a session still closes under a live subprocess, the runtime reports it
+  (`packages/server/src/server/plugins/runtime.ts:332`). `PluginService` then restarts the plugin
+  through its lifecycle queue, exactly like `paseo plugin reload`
+  (`packages/server/src/server/plugins/index.ts:339`).
+- `PluginConnectionMonitor` (`packages/server/src/server/plugin-connection-monitor.ts`) logs an
+  error and sends a push when an enabled plugin stays offline for more than a minute. Offline
+  means its session is closed, or it is not running at all. The threshold is fixed. The monitor
+  follows the [resource monitor](resource-monitor.md) pattern: one alert per episode, re-armed
+  after the same run of healthy sweeps.
+
 When the same plugin contribution exists on multiple hosts, Paseo shows it once in the sidebar and
 adds a host picker to the screen header. The selected host supplies the bundle, RPC transport, and
 query cache. Plugin code cannot address another host.
