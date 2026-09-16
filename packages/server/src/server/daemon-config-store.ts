@@ -25,6 +25,7 @@ interface SupportedMutableConfigPatch {
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
+  accountFailover?: MutableDaemonConfig["accountFailover"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -200,6 +201,7 @@ const RELOADABLE_PATHS = [
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
   "agents.resourceMonitor",
+  "agents.accountFailover",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -233,6 +235,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.resourceMonitor", "resourceMonitor"],
+  ["agents.accountFailover", "accountFailover"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -307,6 +310,12 @@ function pickResourceMonitorPatch(
   return resourceMonitor === undefined ? {} : { resourceMonitor };
 }
 
+function pickAccountFailoverPatch(
+  accountFailover: MutableDaemonConfigPatch["accountFailover"],
+): Pick<SupportedMutableConfigPatch, "accountFailover"> {
+  return accountFailover === undefined ? {} : { accountFailover };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -333,6 +342,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickResourceMonitorPatch(patch.resourceMonitor),
+    ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -754,6 +764,18 @@ function mergeResourceMonitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedAccountFailover = NonNullable<PersistedConfig["agents"]>["accountFailover"];
+
+function mergeAccountFailoverForPersist(
+  persisted: PersistedAccountFailover,
+  patch: SupportedMutableConfigPatch["accountFailover"],
+): PersistedAccountFailover {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -802,19 +824,27 @@ function mergeMutableWorktreesPatch(
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
+function touchesAgentConfig(
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+  removeProviders: readonly string[],
+): boolean {
+  return (
+    patch.providers !== undefined ||
+    patch.metadataGeneration !== undefined ||
+    patch.tokenBurnMonitor !== undefined ||
+    patch.resourceMonitor !== undefined ||
+    patch.accountFailover !== undefined ||
+    patch.skills !== undefined ||
+    removeProviders.length > 0
+  );
+}
+
 function mergeMutableAgentPatch(
   persistedAgents: PersistedConfig["agents"],
   patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
   removeProviders: readonly string[],
 ): PersistedConfig["agents"] {
-  if (
-    patch.providers === undefined &&
-    patch.metadataGeneration === undefined &&
-    patch.tokenBurnMonitor === undefined &&
-    patch.resourceMonitor === undefined &&
-    patch.skills === undefined &&
-    removeProviders.length === 0
-  ) {
+  if (!touchesAgentConfig(patch, removeProviders)) {
     return persistedAgents;
   }
 
@@ -848,6 +878,12 @@ function mergeMutableAgentPatch(
     patch.resourceMonitor,
   );
   if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
+
+  const accountFailover = mergeAccountFailoverForPersist(
+    persistedAgents?.accountFailover,
+    patch.accountFailover,
+  );
+  if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };
