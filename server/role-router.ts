@@ -9,7 +9,10 @@ import type { RecentAgentTypes } from "./recent-agent-types";
 import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
 import { selectModel } from "./role-availability";
-import { resolveRole } from "./role-resolve";
+import { resolveLeaderRole, resolveRole } from "./role-resolve";
+
+/** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
+const ROOT_AGENT_CALLER = "(root agent)";
 
 export interface DeclaredRoleUnknownEpisode {
   callerAgentId: string;
@@ -126,13 +129,14 @@ function familyOfProvider(pool: FamilyResolvablePool, providerId: string): strin
  * labels/title/initialPrompt, selects that role's top eligible model against
  * the live catalog + pool health, and rewrites `config.model` (and
  * `config.provider` only when the selection crosses provider families).
- * Must be registered BEFORE the account-pool's own router — this hook only
- * ever changes *which model*; the account router (unmodified) still decides
- * *which account* runs it.
+ * and merges the role's tool profile into `config.providerOptions`.
+ * Must be registered BEFORE the account-pool's own router — this hook never
+ * changes *which account*; the account router (unmodified) still decides that.
  *
- * Same gate as the account router: only requests carrying `callerAgentId`
- * (agent-spawned creates) are resolved. Human-created leaders, and every
- * failure mode, are passthrough — this must never block agent creation.
+ * Unlike the account router, this one resolves EVERY create: an agent-spawned
+ * child through the usual tier 1-4 resolution, and a root agent (no
+ * `callerAgentId`) to the `leader` role. Every failure mode is a passthrough —
+ * this must never block agent creation.
  */
 export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredUnknownSeen = new Set<string>();
@@ -175,38 +179,47 @@ function routeRoleForCreateUnguarded(
   // callerAgentId note.
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const callerAgentId = extended.callerAgentId;
-  if (!callerAgentId) {
-    return; // Human-created leaders, and schedule/heartbeat creates: untouched.
-  }
-
-  const agentTypeKey = extended.labels?.[AGENT_TYPE_LABEL] ?? request.config.title ?? undefined;
-  if (agentTypeKey) {
-    options.recentAgentTypes.record(agentTypeKey);
-  }
-
   const policy = options.policyCache.get();
-  const resolution = resolveRole(policy, {
-    labels: extended.labels,
-    title: request.config.title,
-    initialPrompt: extended.initialPrompt,
-  });
 
-  if (resolution.unknownDeclaredValue !== undefined) {
-    const dedupeKey = `${callerAgentId} ${resolution.unknownDeclaredValue}`;
-    if (!declaredUnknownSeen.has(dedupeKey)) {
-      declaredUnknownSeen.add(dedupeKey);
-      options.onDeclaredRoleUnknown?.({ callerAgentId, value: resolution.unknownDeclaredValue });
+  // A create with no callerAgentId is a ROOT agent — human-, CLI-, app-,
+  // schedule- or heartbeat-started. Those used to pass through untouched,
+  // which left the one agent that spawns everything else as the only
+  // unconstrained one. It now resolves to the `leader` role, which ships
+  // unconfigured so this stays a pass-through until it's set up.
+  let role: RoleRecord;
+  if (callerAgentId) {
+    const agentTypeKey = extended.labels?.[AGENT_TYPE_LABEL] ?? request.config.title ?? undefined;
+    if (agentTypeKey) {
+      options.recentAgentTypes.record(agentTypeKey);
     }
+
+    const resolution = resolveRole(policy, {
+      labels: extended.labels,
+      title: request.config.title,
+      initialPrompt: extended.initialPrompt,
+    });
+
+    if (resolution.unknownDeclaredValue !== undefined) {
+      const dedupeKey = `${callerAgentId} ${resolution.unknownDeclaredValue}`;
+      if (!declaredUnknownSeen.has(dedupeKey)) {
+        declaredUnknownSeen.add(dedupeKey);
+        options.onDeclaredRoleUnknown?.({ callerAgentId, value: resolution.unknownDeclaredValue });
+      }
+    }
+    role = resolution.role;
+  } else {
+    role = resolveLeaderRole(policy);
   }
+  const episodeCaller = callerAgentId ?? ROOT_AGENT_CALLER;
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
   // to pure delegation.
-  const enforcedProviderOptions = enforceToolProfile(request, resolution.role);
+  const enforcedProviderOptions = enforceToolProfile(request, role);
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
-  const outcome = selectModel(resolution.role, catalog, pool, options.health);
+  const outcome = selectModel(role, catalog, pool, options.health);
 
   if (outcome.outcome === "unconfigured") {
     return withToolProfile(request, enforcedProviderOptions);
@@ -230,11 +243,11 @@ function routeRoleForCreateUnguarded(
     const pinnedProvider = outcome.provider as string; // crossesFamily implies a pinned (non-null) provider.
     const registeredProviderIds = options.providerIds?.get();
     if (registeredProviderIds && !registeredProviderIds.has(pinnedProvider)) {
-      if (!unavailableRoleIds.has(resolution.role.id)) {
-        unavailableRoleIds.add(resolution.role.id);
+      if (!unavailableRoleIds.has(role.id)) {
+        unavailableRoleIds.add(role.id);
         options.onRoleUnavailable?.({
-          callerAgentId,
-          roleId: resolution.role.id,
+          callerAgentId: episodeCaller,
+          roleId: role.id,
           requestedModel: formatModelRef(outcome),
           reason: "provider-not-registered",
         });
@@ -247,17 +260,17 @@ function routeRoleForCreateUnguarded(
   }
 
   if (outcome.outcome === "unavailable") {
-    if (!unavailableRoleIds.has(resolution.role.id)) {
-      unavailableRoleIds.add(resolution.role.id);
+    if (!unavailableRoleIds.has(role.id)) {
+      unavailableRoleIds.add(role.id);
       options.onRoleUnavailable?.({
-        callerAgentId,
-        roleId: resolution.role.id,
+        callerAgentId: episodeCaller,
+        roleId: role.id,
         requestedModel: formatModelRef(outcome),
         reason: "no-eligible-model",
       });
     }
   } else {
-    unavailableRoleIds.delete(resolution.role.id); // Re-arm: the role recovered.
+    unavailableRoleIds.delete(role.id); // Re-arm: the role recovered.
   }
 
   const nextConfig: AgentCreateConfig = { ...request.config, model: outcome.model };

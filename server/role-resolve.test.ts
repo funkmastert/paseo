@@ -6,6 +6,24 @@ function withRoles(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
   return { ...DEFAULT_POLICY, ...overrides };
 }
 
+describe("resolveRole — the leader role", () => {
+  it("is not reachable by tier-3 text classification", () => {
+    const result = resolveRole(DEFAULT_POLICY, { initialPrompt: "act as the leader for this workstream" });
+    expect(result.role.id).toBe("worker");
+  });
+
+  it("is still selectable explicitly by the tier-2 role label", () => {
+    const result = resolveRole(DEFAULT_POLICY, { labels: { [AGENT_ROLE_LABEL]: "leader" } });
+    expect(result).toMatchObject({ tier: 2, role: { id: "leader" } });
+  });
+
+  it("is still selectable explicitly by a tier-1 agent-type mapping", () => {
+    const policy = withRoles({ agentTypeMappings: { ...DEFAULT_POLICY.agentTypeMappings, "sub-leader": "leader" } });
+    const result = resolveRole(policy, { labels: { [AGENT_TYPE_LABEL]: "sub-leader" } });
+    expect(result).toMatchObject({ tier: 1, role: { id: "leader" } });
+  });
+});
+
 describe("resolveRole", () => {
   it("tier 1: resolves via labels[paseo.agent-type] exact-matching agentTypeMappings", () => {
     const result = resolveRole(DEFAULT_POLICY, { labels: { [AGENT_TYPE_LABEL]: "scout" } });

@@ -8,11 +8,12 @@ import { createRecentAgentTypes } from "./recent-agent-types";
 import { createRoleModelPolicyRpcHandlers, type RoleModelPolicyRpcDeps } from "./role-policy-rpc-handlers";
 
 const VALID_POLICY: RoleModelPolicy = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   roles: [
     { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude/opus"], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
@@ -108,7 +109,7 @@ describe("role-model-policy RPC handlers", () => {
 
     it("reports malformed and falls back to the cache's last-good policy", async () => {
       const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(VALID_POLICY) }));
-      const paseo = fakePaseo({ config: { agentModelPolicy: { schemaVersion: 2, roles: "not-an-array" } } });
+      const paseo = fakePaseo({ config: { agentModelPolicy: { schemaVersion: 3, roles: "not-an-array" } } });
 
       const result = await handlers.read({}, context(paseo));
 
@@ -229,7 +230,7 @@ describe("role-model-policy RPC handlers", () => {
     it("rejects writes while the stored policy is malformed, without touching storage", async () => {
       const handlers = createRoleModelPolicyRpcHandlers(baseDeps());
       const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
-      const paseo = fakePaseo({ config: { agentModelPolicy: { schemaVersion: 2, roles: "not-an-array" } }, patch });
+      const paseo = fakePaseo({ config: { agentModelPolicy: { schemaVersion: 3, roles: "not-an-array" } }, patch });
 
       const result = await handlers.write(
         { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings } },

@@ -13,11 +13,12 @@ function fakePaseo(config: unknown): PaseoConfigApi {
 }
 
 const VALID_STORED_POLICY: RoleModelPolicy = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   roles: [
     { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude/opus"], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",
@@ -65,14 +66,14 @@ describe("loadRolePolicy", () => {
     const result = await loadRolePolicy(paseo);
 
     expect(result.malformed).toBe(false);
-    expect(result.policy.schemaVersion).toBe(2);
+    expect(result.policy.schemaVersion).toBe(3);
     expect(result.policy.roles[0].models).toEqual(["claude-sonnet-5"]);
     expect(result.policy.roles[2].models).toEqual(["claude-opus-5", "codex/gpt-5.1"]);
     expect(result.policy.revision).toBe("fcc9e0ec627c");
   });
 
   it("fails closed and keeps the previous policy when the stored value is malformed", async () => {
-    const paseo = fakePaseo({ agentModelPolicy: { schemaVersion: 2, roles: "not-an-array" } });
+    const paseo = fakePaseo({ agentModelPolicy: { schemaVersion: 3, roles: "not-an-array" } });
 
     const result = await loadRolePolicy(paseo, VALID_STORED_POLICY);
 
@@ -82,7 +83,7 @@ describe("loadRolePolicy", () => {
   });
 
   it("falls back to DEFAULT_POLICY when malformed and there is no previous policy", async () => {
-    const paseo = fakePaseo({ agentModelPolicy: { schemaVersion: 2, roles: "not-an-array" } });
+    const paseo = fakePaseo({ agentModelPolicy: { schemaVersion: 3, roles: "not-an-array" } });
 
     const result = await loadRolePolicy(paseo);
 

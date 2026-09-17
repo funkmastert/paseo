@@ -1,4 +1,11 @@
-import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, type RoleModelPolicy, type RoleRecord } from "../shared/role-policy-schema";
+import {
+  AGENT_ROLE_LABEL,
+  AGENT_TYPE_LABEL,
+  LEADER_ROLE_ID,
+  type RoleModelPolicy,
+  type RoleRecord,
+  type StandardRoleId,
+} from "../shared/role-policy-schema";
 
 export type ResolveRoleTier = 1 | 2 | 3 | 4;
 
@@ -32,15 +39,25 @@ function findRoleById(policy: RoleModelPolicy, id: string): RoleRecord | undefin
   return policy.roles.find((role) => role.id === id);
 }
 
-function requireStandardRole(policy: RoleModelPolicy, id: "worker" | "reviewer" | "advisor"): RoleRecord {
+function requireStandardRole(policy: RoleModelPolicy, id: StandardRoleId): RoleRecord {
   const role = findRoleById(policy, id);
   if (!role) {
     // The schema's superRefine guarantees every valid policy declares the
-    // three standard roles; a policy that reached resolveRole is always
+    // standard roles; a policy that reached resolveRole is always
     // schema-valid (role-policy.ts fails closed on anything else).
     throw new Error(`role policy is missing the standard "${id}" role`);
   }
   return role;
+}
+
+/**
+ * The role for a ROOT agent: one the daemon created with no `callerAgentId`.
+ * Deterministic rather than classified — a root agent is the leader by
+ * definition, and guessing from its prompt would make whether the operator's
+ * orchestrator restriction applies depend on wording.
+ */
+export function resolveLeaderRole(policy: RoleModelPolicy): RoleRecord {
+  return requireStandardRole(policy, LEADER_ROLE_ID);
 }
 
 /** Exact (not substring) case-insensitive match against every role's name + aliases. */
@@ -51,9 +68,18 @@ function findRoleByExactWordCI(policy: RoleModelPolicy, value: string): RoleReco
   );
 }
 
-/** Word-boundary case-insensitive search for any role's name/alias inside free text. */
+/**
+ * Word-boundary case-insensitive search for any role's name/alias inside free
+ * text. The leader role is skipped: it governs root agents, and a child whose
+ * prompt merely mentions leading something must not inherit an orchestrator's
+ * tool restrictions by accident. Naming it explicitly (an agent-type mapping
+ * or the role label) still selects it.
+ */
 function findRoleByWordInText(policy: RoleModelPolicy, text: string): RoleRecord | undefined {
   for (const role of policy.roles) {
+    if (role.id === LEADER_ROLE_ID) {
+      continue;
+    }
     for (const word of [role.name, ...role.aliases]) {
       const pattern = new RegExp(`\\b${escapeRegExp(word.toLowerCase())}\\b`);
       if (pattern.test(text)) {

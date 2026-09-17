@@ -56,12 +56,67 @@ function baseOptions(overrides: Partial<RoleRouterOptions> = {}): RoleRouterOpti
 }
 
 describe("createRoleRouter", () => {
-  it("returns the request untouched when there is no callerAgentId (human-created leaders)", () => {
+  it("returns a root-agent request untouched while the leader role is unconfigured", () => {
     const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policyWithWorkerModels(["codex/gpt-5.1"])) }));
 
     const result = router(request({}), fakeContext);
 
     expect(result).toBeUndefined();
+  });
+
+  describe("leader role (root agents, no callerAgentId)", () => {
+    function policyWithLeader(overrides: Partial<RoleModelPolicy["roles"][number]>): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, ...overrides } : role)),
+      };
+    }
+
+    it("enforces the leader's tool profile on a root agent", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithLeader({ toolProfile: { kind: "orchestrator" } })) }),
+      );
+
+      const result = router(request({}), fakeContext);
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toEqual(expect.arrayContaining(["Read", "Write", "Bash", "Task"]));
+    });
+
+    it("applies the leader's own model pool", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithLeader({ models: ["claude-opus-5"] })),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-5"] })),
+          poolCache: fakePoolCache({ workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "claude" } }),
+        }),
+      );
+
+      const result = router(request({}), fakeContext);
+
+      expect(result?.config.model).toBe("claude-opus-5");
+    });
+
+    it("does not apply the leader profile to a spawned child", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithLeader({ toolProfile: { kind: "orchestrator" } })) }),
+      );
+
+      expect(router(request({ callerAgentId: "c1" }), fakeContext)).toBeUndefined();
+    });
+
+    it("does not apply the leader profile to a child whose prompt merely says 'leader'", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithLeader({ toolProfile: { kind: "orchestrator" } })) }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", initialPrompt: "you are the leader of this effort" }),
+        fakeContext,
+      );
+
+      expect(result).toBeUndefined();
+    });
   });
 
   it("UNCONFIGURED: passes an empty-models role through byte-identical", () => {

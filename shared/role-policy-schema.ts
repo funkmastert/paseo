@@ -8,8 +8,16 @@ import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
 export const AGENT_TYPE_LABEL = "paseo.agent-type";
 export const AGENT_ROLE_LABEL = "paseo.agent-role";
 
+/**
+ * The role governing ROOT agents — creates with no `callerAgentId`, i.e. the
+ * ones a human, the CLI, or the app starts. Nothing constrained those before,
+ * which is exactly the agent that burned a whole weekly budget doing its
+ * subagents' work itself.
+ */
+export const LEADER_ROLE_ID = "leader";
+
 /** Fixed, non-renamable, non-deletable role ids. Aliases and models remain editable. */
-export const STANDARD_ROLE_IDS = ["worker", "reviewer", "advisor"] as const;
+export const STANDARD_ROLE_IDS = ["worker", "reviewer", "advisor", LEADER_ROLE_ID] as const;
 export type StandardRoleId = (typeof STANDARD_ROLE_IDS)[number];
 
 /** One namespace word: a role name or alias. Case-insensitively unique across the whole policy. */
@@ -70,7 +78,7 @@ const AgentTypeMappingsSchema = z
     message: `agentTypeMappings must not exceed ${MAX_MAPPINGS} entries`,
   });
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 export const RoleModelPolicySchema = z
   .object({
@@ -169,6 +177,9 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
     { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    // Unconfigured and unrestricted by default: installing this version must
+    // not silently change how a root agent runs. Tyler opts in from settings.
+    { id: LEADER_ROLE_ID, name: LEADER_ROLE_ID, standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   agentTypeMappings: {
     worker: "worker",
@@ -250,36 +261,102 @@ function unpinLegacyRef(ref: string, options: MigrateRolePolicyOptions): string 
   return ref;
 }
 
+/** v1 -> v2: model refs stop naming the leader account. */
+function migrateV1ToV2(document: Record<string, unknown>, options: MigrateRolePolicyOptions): Record<string, unknown> {
+  const roles = Array.isArray(document.roles)
+    ? document.roles.map((role) => {
+        if (typeof role !== "object" || role === null) {
+          return role;
+        }
+        const record = role as Record<string, unknown>;
+        if (!Array.isArray(record.models)) {
+          return role;
+        }
+        return {
+          ...record,
+          models: record.models.map((ref) => (typeof ref === "string" ? unpinLegacyRef(ref, options) : ref)),
+        };
+      })
+    : document.roles;
+  return { ...document, schemaVersion: 2, roles };
+}
+
+/** Every name/alias word a document already claims, lowercased. */
+function claimedRoleWords(roles: unknown): Set<string> {
+  const words = new Set<string>();
+  if (!Array.isArray(roles)) {
+    return words;
+  }
+  for (const role of roles) {
+    if (typeof role !== "object" || role === null) continue;
+    const record = role as Record<string, unknown>;
+    if (typeof record.name === "string") words.add(record.name.toLowerCase());
+    if (Array.isArray(record.aliases)) {
+      for (const alias of record.aliases) {
+        if (typeof alias === "string") words.add(alias.toLowerCase());
+      }
+    }
+  }
+  return words;
+}
+
+/**
+ * v2 -> v3: seed the `leader` standard role, which governs root agents.
+ *
+ * Seeded unconfigured (no models, unrestricted tools), so adding it changes
+ * nothing until it's configured. Names and aliases share one case-insensitive
+ * namespace, so a document where a custom role already owns "leader" would
+ * otherwise fail validation and take the whole policy down with it — pick the
+ * next free `leaderN` instead. This is seeding a newly-required role, not
+ * repairing malformed input, which stays an error with no automatic fix.
+ */
+function migrateV2ToV3(document: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(document.roles)) {
+    return { ...document, schemaVersion: 3 };
+  }
+  const hasLeader = document.roles.some(
+    (role) => typeof role === "object" && role !== null && (role as Record<string, unknown>).id === LEADER_ROLE_ID,
+  );
+  if (hasLeader) {
+    return { ...document, schemaVersion: 3 };
+  }
+
+  const claimed = claimedRoleWords(document.roles);
+  let name = LEADER_ROLE_ID;
+  for (let suffix = 1; claimed.has(name.toLowerCase()); suffix += 1) {
+    name = `${LEADER_ROLE_ID}${suffix}`;
+  }
+
+  return {
+    ...document,
+    schemaVersion: 3,
+    roles: [
+      ...document.roles,
+      { id: LEADER_ROLE_ID, name, standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    ],
+  };
+}
+
 /**
  * Brings a stored policy document up to CURRENT_SCHEMA_VERSION, in memory
  * only — this never writes settings. Anything that isn't a recognized older
  * version passes through untouched for `RoleModelPolicySchema` to accept or
  * reject on its own.
+ *
+ * `revision` carries through untouched at every step: it's the CAS token the
+ * settings screen round-trips, and migrating in memory must not invalidate it.
  */
 export function migrateRoleModelPolicy(raw: unknown, options: MigrateRolePolicyOptions = {}): unknown {
   if (typeof raw !== "object" || raw === null) {
     return raw;
   }
-  const document = raw as Record<string, unknown>;
-  if (document.schemaVersion !== 1 || !Array.isArray(document.roles)) {
+  let document = raw as Record<string, unknown>;
+  if (document.schemaVersion !== 1 && document.schemaVersion !== 2) {
     return raw;
   }
 
-  const roles = document.roles.map((role) => {
-    if (typeof role !== "object" || role === null) {
-      return role;
-    }
-    const record = role as Record<string, unknown>;
-    if (!Array.isArray(record.models)) {
-      return role;
-    }
-    return {
-      ...record,
-      models: record.models.map((ref) => (typeof ref === "string" ? unpinLegacyRef(ref, options) : ref)),
-    };
-  });
-
-  // `revision` carries through untouched: it's the CAS token the settings
-  // screen round-trips, and migrating in memory must not invalidate it.
-  return { ...document, schemaVersion: CURRENT_SCHEMA_VERSION, roles };
+  if (document.schemaVersion === 1) {
+    document = migrateV1ToV2(document, options);
+  }
+  return migrateV2ToV3(document);
 }

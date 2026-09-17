@@ -20,11 +20,12 @@ function role(overrides: Partial<RoleRecord>): RoleRecord {
 
 function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     roles: [
       role({ id: "worker", name: "worker" }),
       role({ id: "reviewer", name: "reviewer" }),
       role({ id: "advisor", name: "advisor" }),
+      role({ id: "leader", name: "leader" }),
     ],
     agentTypeMappings: {},
     revision: "r1",
@@ -44,6 +45,7 @@ describe("RoleModelPolicySchema", () => {
         role({ id: "worker", name: "worker" }),
         role({ id: "reviewer", name: "reviewer" }),
         role({ id: "advisor", name: "advisor" }),
+        role({ id: "leader", name: "leader" }),
         role({
           id: "11111111-1111-1111-1111-111111111111",
           name: "shipper",
@@ -158,7 +160,7 @@ describe("RoleModelPolicySchema", () => {
   });
 
   it(`enforces the ${MAX_ROLES}-role limit`, () => {
-    const extraRoles: RoleRecord[] = Array.from({ length: MAX_ROLES - 3 }, (_, index) =>
+    const extraRoles: RoleRecord[] = Array.from({ length: MAX_ROLES - 4 }, (_, index) =>
       role({ id: `custom-${index}`, name: `custom${index}`, standard: false }),
     );
     const result = RoleModelPolicySchema.safeParse(
@@ -167,11 +169,12 @@ describe("RoleModelPolicySchema", () => {
           role({ id: "worker", name: "worker" }),
           role({ id: "reviewer", name: "reviewer" }),
           role({ id: "advisor", name: "advisor" }),
+          role({ id: "leader", name: "leader" }),
           ...extraRoles,
         ],
       }),
     );
-    expect(result.success).toBe(true); // exactly at the limit (3 standard + 61 custom = 64)
+    expect(result.success).toBe(true); // exactly at the limit (4 standard + 60 custom = 64)
 
     const overLimit = RoleModelPolicySchema.safeParse(
       policy({
@@ -179,6 +182,7 @@ describe("RoleModelPolicySchema", () => {
           role({ id: "worker", name: "worker" }),
           role({ id: "reviewer", name: "reviewer" }),
           role({ id: "advisor", name: "advisor" }),
+          role({ id: "leader", name: "leader" }),
           ...extraRoles,
           role({ id: "one-too-many", name: "onetoomany", standard: false }),
         ],
@@ -236,6 +240,7 @@ describe("model ref schema", () => {
           role({ id: "worker", name: "worker", models: ["claude-sonnet-5"] }),
           role({ id: "reviewer", name: "reviewer" }),
           role({ id: "advisor", name: "advisor" }),
+          role({ id: "leader", name: "leader" }),
         ],
       }),
     );
@@ -257,7 +262,7 @@ describe("migrateRoleModelPolicy", () => {
 
   it("unpins leader-account refs and leaves cross-family pins intact", () => {
     const migrated = migrateRoleModelPolicy(v1, { poolLeaderProviderId: "claude" }) as typeof v1;
-    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.schemaVersion).toBe(3);
     expect(migrated.roles[0].models).toEqual(["claude-sonnet-5", "codex/gpt-5.1"]);
     expect(migrated.roles[1].models).toEqual(["claude-opus-5"]);
   });
@@ -283,8 +288,48 @@ describe("migrateRoleModelPolicy", () => {
   });
 
   it("passes a current-version document through untouched", () => {
-    const current = { ...v1, schemaVersion: 2 };
+    const current = { ...v1, schemaVersion: 3 };
     expect(migrateRoleModelPolicy(current, { poolLeaderProviderId: "claude" })).toBe(current);
+  });
+
+  it("seeds the leader role, unconfigured and unrestricted, when migrating from v2", () => {
+    const v2 = { ...v1, schemaVersion: 2 };
+    const migrated = migrateRoleModelPolicy(v2) as { schemaVersion: number; roles: { id: string; name: string; models: string[]; toolProfile: unknown }[] };
+
+    expect(migrated.schemaVersion).toBe(3);
+    const leader = migrated.roles.find((role) => role.id === "leader");
+    expect(leader).toMatchObject({ name: "leader", models: [], toolProfile: { kind: "unrestricted" } });
+  });
+
+  it("keeps a v2 document's model refs untouched (the unpin is a v1-only step)", () => {
+    const v2 = { ...v1, schemaVersion: 2 };
+    const migrated = migrateRoleModelPolicy(v2, { poolLeaderProviderId: "claude" }) as typeof v1;
+
+    expect(migrated.roles[0].models).toEqual(["claude/claude-sonnet-5", "codex/gpt-5.1"]);
+  });
+
+  it("picks a free name when a custom role already owns the word 'leader'", () => {
+    const conflicting = {
+      ...v1,
+      schemaVersion: 2,
+      roles: [...v1.roles, { id: "custom-1", name: "Leader", standard: false, aliases: [], models: [] }],
+    };
+    const migrated = migrateRoleModelPolicy(conflicting) as { roles: { id: string; name: string }[] };
+
+    expect(migrated.roles.find((role) => role.id === "leader")?.name).toBe("leader1");
+    expect(RoleModelPolicySchema.safeParse(migrated).success).toBe(true);
+  });
+
+  it("does not add a second leader role to a document that already has one", () => {
+    const v2 = {
+      ...v1,
+      schemaVersion: 2,
+      roles: [...v1.roles, { id: "leader", name: "leader", standard: true, aliases: [], models: ["claude-opus-5"] }],
+    };
+    const migrated = migrateRoleModelPolicy(v2) as { roles: { id: string; models: string[] }[] };
+
+    expect(migrated.roles.filter((role) => role.id === "leader")).toHaveLength(1);
+    expect(migrated.roles.find((role) => role.id === "leader")?.models).toEqual(["claude-opus-5"]);
   });
 });
 
