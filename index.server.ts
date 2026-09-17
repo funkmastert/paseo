@@ -116,6 +116,15 @@ export default function contribute(server: PluginServerContext) {
       };
     };
     usagePoller = createUsagePoller(health, { fetchUsage });
+
+    // Same blind-start problem as the caches above: the poller's own
+    // interval is 5 minutes, so without this the health tracker has no
+    // usage readings at all — every account looks healthy — for up to 5
+    // minutes after every plugin start or reload.
+    const startedUsagePoller = usagePoller;
+    queueMicrotask(() => {
+      void startedUsagePoller.pollOnce();
+    });
   }
 
   // Two separate registrations, not one handler calling both: `before`

@@ -50,7 +50,7 @@ describe("contribute (index.server)", () => {
   it("immediately refreshes both the pool cache and provider-id cache on the first paseo capture, without waiting for the 60s interval", async () => {
     const { server, onHandlers } = fakeServer();
     const cleanup = contribute(server);
-    const { paseo, configGet, providersSnapshot } = fakePaseo();
+    const { paseo, configGet, providersSnapshot, listUsage } = fakePaseo();
 
     // agent.turn_ended captures paseo without going through the router (which has
     // its own, separately-tested, failOpen-triggered refresh) — isolating this
@@ -76,6 +76,11 @@ describe("contribute (index.server)", () => {
     // config independently (mirrors pool.ts's own config.get() call).
     expect(configGet).toHaveBeenCalledTimes(2);
     expect(providersSnapshot).toHaveBeenCalledTimes(1);
+
+    // The usage poller must not wait for its own 5-minute interval either —
+    // otherwise every account looks healthy (no usage reading at all) for up
+    // to 5 minutes after every plugin start or reload.
+    expect(listUsage).toHaveBeenCalledTimes(1);
 
     cleanup();
   });
