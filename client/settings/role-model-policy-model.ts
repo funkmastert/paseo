@@ -11,7 +11,7 @@ import {
   type RoleRecord,
 } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
-import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
+import { DEFAULT_TOOL_PROFILE, ToolProfileSchema, type ToolProfile } from "../../shared/tool-profiles";
 
 /**
  * Follows docs/forms.md's plain-TS form model: zero React imports, commands
@@ -88,6 +88,8 @@ export interface RoleModelPolicyModel {
   removeMapping(agentType: string): Promise<boolean>;
   /** Sets the percent at/above which a budget-gated model family stops being selectable. */
   setModelBudgetThreshold(thresholdPct: number): Promise<boolean>;
+  /** Replaces a role's tool profile. Commits immediately, like the model/mapping mutations. */
+  setToolProfile(roleId: string, profile: ToolProfile): Promise<boolean>;
 }
 
 function defaultGenerateRoleId(): string {
@@ -485,6 +487,19 @@ export function openRoleModelPolicyModel(
       const nextMappings = { ...policy.agentTypeMappings };
       delete nextMappings[agentType];
       return commit(policy.roles, nextMappings);
+    },
+
+    async setToolProfile(roleId, profile) {
+      if (!guardEditable()) return false;
+      if (!roleById(roleId)) return false;
+      const parsed = ToolProfileSchema.safeParse(profile);
+      if (!parsed.success) {
+        saveError = "tool names must be plain identifiers, e.g. Bash or mcp__paseo__create_agent";
+        publish();
+        return false;
+      }
+      const nextRoles = policy.roles.map((r) => (r.id === roleId ? { ...r, toolProfile: parsed.data } : r));
+      return commit(nextRoles, policy.agentTypeMappings);
     },
 
     async setModelBudgetThreshold(thresholdPct) {

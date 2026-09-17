@@ -365,3 +365,63 @@ describe("openRoleModelPolicyModel — subscribe", () => {
     expect(listener).toHaveBeenCalledTimes(1); // no further calls after unsubscribe
   });
 });
+
+describe("openRoleModelPolicyModel — tool profiles", () => {
+  it("setToolProfile commits immediately and stores the new profile", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.setToolProfile("leader", { kind: "orchestrator" })).toBe(true);
+    expect(model.getState().policy.roles.find((r) => r.id === "leader")?.toolProfile).toEqual({ kind: "orchestrator" });
+  });
+
+  it("stores a custom profile's deny and allow lists", async () => {
+    const model = openModel(policyWith());
+
+    await model.setToolProfile("worker", { kind: "custom", deny: ["Bash"], allow: ["Read"] });
+
+    expect(model.getState().policy.roles.find((r) => r.id === "worker")?.toolProfile).toEqual({
+      kind: "custom",
+      deny: ["Bash"],
+      allow: ["Read"],
+    });
+  });
+
+  it("rejects a malformed tool name locally, without calling write", async () => {
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: policyWith(), malformed: false }, { write });
+
+    expect(await model.setToolProfile("worker", { kind: "custom", deny: ["Bash(rm -rf /)"] })).toBe(false);
+    expect(model.getState().saveError).toMatch(/plain identifiers/);
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe("openRoleModelPolicyModel — model budget threshold", () => {
+  it("setModelBudgetThreshold commits the new percent", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.setModelBudgetThreshold(60)).toBe(true);
+    expect(model.getState().policy.modelBudgetThresholdPct).toBe(60);
+  });
+
+  it("rejects an out-of-range percent locally, without calling write", async () => {
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: policyWith(), malformed: false }, { write });
+
+    expect(await model.setModelBudgetThreshold(0)).toBe(false);
+    expect(await model.setModelBudgetThreshold(101)).toBe(false);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("an unrelated mutation echoes the configured threshold back, instead of resetting it to the default", async () => {
+    const configured = { ...policyWith(), modelBudgetThresholdPct: 55 };
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: configured, malformed: false }, { write });
+
+    await model.addModel("worker", "claude-sonnet-5");
+
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { patch: { modelBudgetThresholdPct: number } }).patch.modelBudgetThresholdPct).toBe(55);
+    expect(model.getState().policy.modelBudgetThresholdPct).toBe(55);
+  });
+});

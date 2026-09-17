@@ -11,6 +11,7 @@ import { loadRolePolicy, type PolicyCache } from "./role-policy";
 import { selectModel } from "./role-availability";
 import { resolveRole } from "./role-resolve";
 import { AGENT_TYPE_LABEL } from "../shared/role-policy-schema";
+import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
   policyCache: PolicyCache;
@@ -220,6 +221,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         roleName: resolution.role.name,
         tier: resolution.tier,
         outcome: outcome.outcome,
+        deniedTools: profileDeniedTools(resolution.role.toolProfile),
         ...(outcome.outcome !== "unconfigured" ? { model: outcome.model } : {}),
         // Omitted for a bare ref: no provider was chosen, so the account
         // router is still free to pick any healthy pooled account.

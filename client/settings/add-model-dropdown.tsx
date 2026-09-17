@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { SettingsAction, SettingsRow, SettingsSelect } from "@getpaseo/plugin/client/ui";
+import { POOL_FAMILY } from "../../shared/role-policy-schema";
 import type { ModelCatalogState } from "./use-model-catalog";
 
 export interface AddModelDropdownProps {
@@ -12,7 +13,20 @@ export interface AddModelDropdownProps {
   onAdd(modelRef: string): void;
 }
 
-/** Two-stage picker (provider family, then one of its models) feeding a single "provider/model" ref into `onAdd`. */
+/**
+ * The ref an operator's picks should produce.
+ *
+ * For the pooled family this is the BARE model id, not `claude/model`: the
+ * account router owns account selection for that family, so writing the
+ * provider segment would only re-create the ambiguity that pinned every role
+ * to one account. Other families keep `provider/model`, which is what
+ * actually moves a request to a different provider.
+ */
+function composeModelRef(family: string, model: string): string {
+  return family === POOL_FAMILY ? model : `${family}/${model}`;
+}
+
+/** Two-stage picker (provider family, then one of its models) feeding one ref into `onAdd`. */
 export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disabled, disabledReason, onAdd }: AddModelDropdownProps) {
   const [family, setFamily] = useState<string>(families[0] ?? "");
   const [model, setModel] = useState<string>("");
@@ -54,11 +68,16 @@ export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disa
       />
       <SettingsAction
         label="Add to this role"
+        hint={
+          family === POOL_FAMILY
+            ? "Added account-agnostic: the pool picks which account runs it."
+            : `Added as ${family}/…, pinned to that provider.`
+        }
         actionLabel="Add"
         disabled={disabled || !family || !model}
         error={disabled ? disabledReason : null}
         onPress={() => {
-          onAdd(`${family}/${model}`);
+          onAdd(composeModelRef(family, model));
           setModel("");
         }}
         testID={`add-model-action-${roleId}`}

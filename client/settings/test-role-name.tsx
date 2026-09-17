@@ -8,15 +8,27 @@ export interface TestRoleNameProps {
   theme: PluginSurfaceProps["theme"];
 }
 
+/** A bare ref has no provider: say which one, rather than printing "undefined/model". */
+function describeTarget(result: RoleModelPolicyExplainResult): string {
+  return result.provider === undefined
+    ? `${result.model} on whichever pooled account is healthy`
+    : `${result.provider}/${result.model}`;
+}
+
+function describeTools(result: RoleModelPolicyExplainResult): string {
+  return result.deniedTools.length === 0 ? "" : ` Tools denied: ${result.deniedTools.join(", ")}.`;
+}
+
 function describeOutcome(result: RoleModelPolicyExplainResult): string {
   const tierLabel = { 1: "exact mapping", 2: "declared role label", 3: "automatic classification", 4: "default" }[result.tier];
+  const tools = describeTools(result);
   switch (result.outcome) {
     case "unconfigured":
-      return `→ ${result.roleName} (via ${tierLabel}), unconfigured: the request passes through untouched.`;
+      return `→ ${result.roleName} (via ${tierLabel}), no model configured: the model is left as requested.${tools}`;
     case "selected":
-      return `→ ${result.roleName} (via ${tierLabel}): would route to ${result.provider}/${result.model}.`;
+      return `→ ${result.roleName} (via ${tierLabel}): would route to ${describeTarget(result)}.${tools}`;
     case "unavailable":
-      return `→ ${result.roleName} (via ${tierLabel}): no eligible model right now; falls back to ${result.provider}/${result.model}.`;
+      return `→ ${result.roleName} (via ${tierLabel}): no eligible model right now; falls back to ${describeTarget(result)}.${tools}`;
   }
 }
 

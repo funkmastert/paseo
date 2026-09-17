@@ -291,7 +291,7 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "scout" }, context(fakePaseo({})));
 
-      expect(result).toEqual({ roleId: "worker", roleName: "worker", tier: 1, outcome: "unconfigured" });
+      expect(result).toEqual({ roleId: "worker", roleName: "worker", tier: 1, outcome: "unconfigured", deniedTools: [] });
     });
 
     it("reports SELECTED with the chosen provider/model when the role is configured and catalog-eligible", async () => {
@@ -306,7 +306,15 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
 
-      expect(result).toEqual({ roleId: "worker", roleName: "worker", tier: 1, outcome: "selected", provider: "codex", model: "gpt-5.1" });
+      expect(result).toEqual({
+        roleId: "worker",
+        roleName: "worker",
+        tier: 1,
+        outcome: "selected",
+        provider: "codex",
+        model: "gpt-5.1",
+        deniedTools: [],
+      });
     });
 
     it("falls through to tier-3 classification on an unmapped agentType, using title text", async () => {
@@ -317,5 +325,39 @@ describe("role-model-policy RPC handlers", () => {
       expect(result.roleId).toBe("reviewer");
       expect(result.tier).toBe(3);
     });
+  });
+});
+
+describe("explain — account-agnostic refs and tool profiles", () => {
+  it("omits `provider` for a bare ref, so the UI can say the pool picks the account", async () => {
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, models: ["claude-sonnet-5"] } : r)),
+    };
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(policy),
+        catalogCache: { get: () => new Map([["claude", new Set(["claude-sonnet-5"])]]), forceRefresh: vi.fn(), stop: vi.fn() },
+        poolCache: { get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }), forceRefresh: vi.fn(), stop: vi.fn() },
+      }),
+    );
+
+    const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
+
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" });
+    expect(result.provider).toBeUndefined();
+  });
+
+  it("reports the role's denied tools even when no model is configured", async () => {
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, toolProfile: { kind: "read-only" as const } } : r)),
+    };
+    const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(policy) }));
+
+    const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
+
+    expect(result.outcome).toBe("unconfigured");
+    expect(result.deniedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit", "NotebookEdit"]));
   });
 });

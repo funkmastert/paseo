@@ -37,10 +37,22 @@ function IconButton({
   );
 }
 
+/**
+ * Whether this ref lets the account router choose the account. A bare ref
+ * does; a `provider/model` ref names a provider. The distinction is the whole
+ * point of the ref grammar, and it is invisible from the ref text alone
+ * unless the row says so.
+ */
+function bindingHint(modelRef: string): string {
+  return modelRef.includes("/")
+    ? "Pinned to this provider."
+    : "Any pooled account — survives one account being capped.";
+}
+
 /** One entry in a role's ordered model list — most-preferred first. */
 export function ModelRow({ modelRef, isFirst, isLast, disabled, theme, onMoveUp, onMoveDown, onRemove }: ModelRowProps) {
   return (
-    <SettingsRow label={modelRef} testID={`model-row-${modelRef}`}>
+    <SettingsRow label={modelRef} hint={bindingHint(modelRef)} testID={`model-row-${modelRef}`}>
       <View style={{ flexDirection: "row", alignItems: "center" }}>
         <IconButton name="ChevronUp" disabled={disabled || isFirst} color={theme.colors.foreground} onPress={onMoveUp} />
         <IconButton name="ChevronDown" disabled={disabled || isLast} color={theme.colors.foreground} onPress={onMoveDown} />

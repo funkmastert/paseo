@@ -49,8 +49,11 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   roleName: z.string(),
   tier: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
   outcome: z.union([z.literal("unconfigured"), z.literal("selected"), z.literal("unavailable")]),
+  /** Absent for an account-agnostic model ref: the account router still picks the account. */
   provider: z.string().optional(),
   model: z.string().optional(),
+  /** The tools this role removes. Applies even when `outcome` is "unconfigured". */
+  deniedTools: z.array(z.string()),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 

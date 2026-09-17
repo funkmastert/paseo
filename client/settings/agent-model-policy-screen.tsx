@@ -5,6 +5,7 @@ import { rolePolicyFamilies } from "../../shared/role-policy-schema";
 import { AddRoleButton } from "./add-role-button";
 import { AgentRoleMappingsSection } from "./agent-role-mappings-section";
 import { MalformedBanner } from "./limits-banner";
+import { ModelBudgetSection } from "./model-budget-section";
 import { RefreshModelsButton } from "./refresh-models-button";
 import { RoleCard } from "./role-card";
 import { TestRoleName } from "./test-role-name";
@@ -37,7 +38,16 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
     <>
       {state.malformed ? <MalformedBanner error={state.malformedError} onReload={load.reload} theme={theme} /> : null}
 
-      <SettingsSection title="Roles" info={<Text style={{ color: theme.colors.foregroundMuted }}>Standard roles first, then custom roles in creation order.</Text>}>
+      <SettingsSection
+        title="Roles"
+        info={
+          <Text style={{ color: theme.colors.foregroundMuted }}>
+            Standard roles first, then custom roles in creation order. Each role picks a model and a set of tools; the
+            account pool still decides which account runs it, so a model listed without a provider survives one account
+            being capped.
+          </Text>
+        }
+      >
         <RefreshModelsButton catalog={catalog} />
         {state.policy.roles.map((role) => (
           <RoleCard key={role.id} roleId={role.id} model={model} state={state} catalog={catalog} theme={theme} />
@@ -49,6 +59,8 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
           onAdd={(name) => void model.addRole(name)}
         />
       </SettingsSection>
+
+      <ModelBudgetSection model={model} state={state} theme={theme} />
 
       <AgentRoleMappingsSection model={model} state={state} recentAgentTypes={recentAgentTypes} theme={theme} />
 
