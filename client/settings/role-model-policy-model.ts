@@ -31,7 +31,7 @@ import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 export interface RoleModelPolicyModelDeps {
   write(input: {
     revision: string;
-    patch: { roles: RoleRecord[]; agentTypeMappings: Record<string, string> };
+    patch: { roles: RoleRecord[]; agentTypeMappings: Record<string, string>; modelBudgetThresholdPct: number };
   }): Promise<RoleModelPolicyWriteResult>;
   /** Injectable for tests; defaults to a timestamp+random id (uniqueness, not cryptographic strength, is all a role id needs). */
   generateRoleId?: () => string;
@@ -86,6 +86,8 @@ export interface RoleModelPolicyModel {
   moveModel(roleId: string, modelRef: string, direction: "up" | "down"): Promise<boolean>;
   addMapping(agentType: string, roleId: string): Promise<boolean>;
   removeMapping(agentType: string): Promise<boolean>;
+  /** Sets the percent at/above which a budget-gated model family stops being selectable. */
+  setModelBudgetThreshold(thresholdPct: number): Promise<boolean>;
 }
 
 function defaultGenerateRoleId(): string {
@@ -201,13 +203,25 @@ export function openRoleModelPolicyModel(
     };
   }
 
-  /** Shared commit path for every mutation (immediate or drafted). */
-  async function commit(nextRoles: RoleRecord[], nextMappings: Record<string, string>): Promise<boolean> {
+  /**
+   * Shared commit path for every mutation (immediate or drafted). Always
+   * sends the whole editable document — the write RPC defaults an omitted
+   * `modelBudgetThresholdPct`, so leaving it out of an unrelated save would
+   * silently reset a configured threshold back to the default.
+   */
+  async function commit(
+    nextRoles: RoleRecord[],
+    nextMappings: Record<string, string>,
+    nextThresholdPct: number = policy.modelBudgetThresholdPct,
+  ): Promise<boolean> {
     saving = true;
     saveError = null;
     publish();
 
-    const result = await deps.write({ revision: policy.revision, patch: { roles: nextRoles, agentTypeMappings: nextMappings } });
+    const result = await deps.write({
+      revision: policy.revision,
+      patch: { roles: nextRoles, agentTypeMappings: nextMappings, modelBudgetThresholdPct: nextThresholdPct },
+    });
 
     saving = false;
     if (result.status === "saved") {
@@ -471,6 +485,16 @@ export function openRoleModelPolicyModel(
       const nextMappings = { ...policy.agentTypeMappings };
       delete nextMappings[agentType];
       return commit(policy.roles, nextMappings);
+    },
+
+    async setModelBudgetThreshold(thresholdPct) {
+      if (!guardEditable()) return false;
+      if (!Number.isInteger(thresholdPct) || thresholdPct < 1 || thresholdPct > 100) {
+        saveError = "the budget threshold must be a whole percent between 1 and 100";
+        publish();
+        return false;
+      }
+      return commit(policy.roles, policy.agentTypeMappings, thresholdPct);
     },
   };
 }

@@ -38,7 +38,7 @@ export interface RoleRouterOptions {
   policyCache: PolicyCache;
   catalogCache: ModelCatalogCache;
   poolCache: PoolCache;
-  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible">;
+  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible" | "windowUtilization">;
   recentAgentTypes: RecentAgentTypes;
   /**
    * Same provider-registry snapshot the account router (router.ts) uses to
@@ -219,7 +219,9 @@ function routeRoleForCreateUnguarded(
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
-  const outcome = selectModel(role, catalog, pool, options.health);
+  const outcome = selectModel(role, catalog, pool, options.health, {
+    modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+  });
 
   if (outcome.outcome === "unconfigured") {
     return withToolProfile(request, enforcedProviderOptions);

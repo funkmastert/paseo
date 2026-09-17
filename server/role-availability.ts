@@ -1,4 +1,11 @@
-import { POOL_FAMILY, modelRefFamily, splitModelRef, type RoleRecord } from "../shared/role-policy-schema";
+import {
+  DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+  POOL_FAMILY,
+  modelRefFamily,
+  splitModelRef,
+  type RoleRecord,
+} from "../shared/role-policy-schema";
+import { detectModelFamily, weeklyModelWindow, type ModelFamily } from "./windows";
 
 export type ModelCatalog = ReadonlyMap<string, ReadonlySet<string>>;
 
@@ -14,7 +21,21 @@ export interface AvailabilityPool {
 export interface AvailabilityHealth {
   isHealthyFor(providerId: string, modelId: string): boolean;
   isLastResortEligible(providerId: string): boolean;
+  windowUtilization(providerId: string, window: string): number | undefined;
 }
+
+/**
+ * Model families whose weekly per-model window gates model SELECTION, not
+ * just availability.
+ *
+ * Only Fable. It is the expensive escalation model, and a leader that keeps
+ * reaching for it is exactly how a weekly window ends up at 94% with the rest
+ * of the week still to run — by which point the cap lands mid-task rather than
+ * at a model boundary. The everyday families (sonnet/haiku/opus) are the pool's
+ * normal traffic; gating those at a soft threshold would churn the common path
+ * for no benefit, since the hard cap already evacuates them.
+ */
+export const BUDGET_GATED_FAMILIES: readonly ModelFamily[] = ["fable"];
 
 /**
  * `provider` is null for an account-agnostic (bare) ref: the role chose only
@@ -40,21 +61,58 @@ function poolHasViableMember(pool: AvailabilityPool, health: AvailabilityHealth,
 }
 
 /**
+ * Budget gate: is any pooled account still under `thresholdPct` on this
+ * model's weekly per-model window?
+ *
+ * Only gated families are checked; everything else is always within budget.
+ * An account with no reading yet is treated as within budget — a missing
+ * usage poll must not silently downgrade every role's top model.
+ */
+function poolHasMemberWithinModelBudget(
+  pool: AvailabilityPool,
+  health: AvailabilityHealth,
+  modelId: string,
+  thresholdPct: number,
+): boolean {
+  const family = detectModelFamily(modelId);
+  if (!family || !BUDGET_GATED_FAMILIES.includes(family)) {
+    return true;
+  }
+  const window = weeklyModelWindow(family);
+  const members: readonly AvailabilityPoolMember[] = pool.leader ? [...pool.workers, pool.leader] : pool.workers;
+  return members.some((member) => {
+    const usedPct = health.windowUtilization(member.providerId, window);
+    return usedPct === undefined || usedPct < thresholdPct;
+  });
+}
+
+export interface SelectModelOptions {
+  /** Percent at/above which a budget-gated family stops being selectable. */
+  modelBudgetThresholdPct?: number;
+}
+
+/**
  * Pure model selection: ordered intersection of role.models with the live
  * catalog. `role.models` empty -> UNCONFIGURED (byte-identical pass-through,
  * caller must not touch the request at all). Nothing eligible -> UNAVAILABLE
  * using role.models[0] anyway — routing problems get recovered, never used
  * to skip a requested subagent.
+ *
+ * Exhaustion stays inside the role: a role whose every entry is gated out
+ * falls back to its own models[0], never to another role's pool or to
+ * whatever model the parent happened to be running.
  */
 export function selectModel(
   role: RoleRecord,
   catalog: ModelCatalog,
   pool: AvailabilityPool,
   health: AvailabilityHealth,
+  options: SelectModelOptions = {},
 ): SelectModelResult {
   if (role.models.length === 0) {
     return { outcome: "unconfigured" };
   }
+  const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
 
   for (const ref of role.models) {
     const parsed = splitModelRef(ref);
@@ -67,6 +125,9 @@ export function selectModel(
       continue;
     }
     if (family === POOL_FAMILY && !poolHasViableMember(pool, health, model)) {
+      continue;
+    }
+    if (family === POOL_FAMILY && !poolHasMemberWithinModelBudget(pool, health, model, thresholdPct)) {
       continue;
     }
     return { outcome: "selected", provider: parsed.provider, model };

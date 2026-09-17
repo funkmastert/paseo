@@ -134,6 +134,103 @@ describe("selectModel", () => {
     expect(result).toEqual({ outcome: "unavailable", provider: "codex", model: "gpt-ghost" });
   });
 
+  describe("Fable budget gate", () => {
+    const FABLE = "claude-fable-5-1";
+    const FABLE_WINDOW = "weekly_model_fable";
+    const POOL: AvailabilityPool = {
+      workers: [{ providerId: "worker-a" }],
+      leader: { providerId: "leader" },
+    };
+
+    function poolAtFableUsage(usage: Record<string, number>) {
+      const health = createHealthTracker();
+      for (const [providerId, usedPct] of Object.entries(usage)) {
+        health.reportUsage(providerId, [{ window: FABLE_WINDOW, usedPct }]);
+      }
+      return health;
+    }
+
+    it("selects Fable while an account is under the threshold", () => {
+      const result = selectModel(
+        role({ models: [FABLE, "claude-sonnet-5"] }),
+        catalog({ claude: [FABLE, "claude-sonnet-5"] }),
+        POOL,
+        poolAtFableUsage({ leader: 94, "worker-a": 19 }),
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: FABLE });
+    });
+
+    it("falls to the next model in the role's own pool once every account is at/over the threshold", () => {
+      // The measured state on 2026-09-17: leader 94%, workers 19% and 18% —
+      // but with the workers pushed over too, nothing is left under budget.
+      const result = selectModel(
+        role({ models: [FABLE, "claude-sonnet-5"] }),
+        catalog({ claude: [FABLE, "claude-sonnet-5"] }),
+        POOL,
+        poolAtFableUsage({ leader: 94, "worker-a": 88 }),
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+    });
+
+    it("gates at exactly the threshold, not just above it", () => {
+      const result = selectModel(
+        role({ models: [FABLE, "claude-sonnet-5"] }),
+        catalog({ claude: [FABLE, "claude-sonnet-5"] }),
+        POOL,
+        poolAtFableUsage({ leader: 80, "worker-a": 80 }),
+      );
+      expect(result.outcome === "selected" && result.model).toBe("claude-sonnet-5");
+    });
+
+    it("honours a configured threshold", () => {
+      const health = poolAtFableUsage({ leader: 50, "worker-a": 50 });
+      const models = { models: [FABLE, "claude-sonnet-5"] };
+
+      expect(selectModel(role(models), catalog({ claude: [FABLE, "claude-sonnet-5"] }), POOL, health)).toMatchObject({
+        model: FABLE,
+      });
+      expect(
+        selectModel(role(models), catalog({ claude: [FABLE, "claude-sonnet-5"] }), POOL, health, {
+          modelBudgetThresholdPct: 40,
+        }),
+      ).toMatchObject({ model: "claude-sonnet-5" });
+    });
+
+    it("does not gate a non-Fable model at the same utilization", () => {
+      const health = createHealthTracker();
+      health.reportUsage("worker-a", [{ window: "weekly_model_sonnet", usedPct: 95 }]);
+      health.reportUsage("leader", [{ window: "weekly_model_sonnet", usedPct: 95 }]);
+
+      const result = selectModel(
+        role({ models: ["claude-sonnet-5", "claude-haiku-4-5"] }),
+        catalog({ claude: ["claude-sonnet-5", "claude-haiku-4-5"] }),
+        POOL,
+        health,
+      );
+      expect(result).toMatchObject({ model: "claude-sonnet-5" });
+    });
+
+    it("does not gate when no usage reading has arrived yet", () => {
+      const result = selectModel(
+        role({ models: [FABLE, "claude-sonnet-5"] }),
+        catalog({ claude: [FABLE, "claude-sonnet-5"] }),
+        POOL,
+        createHealthTracker(),
+      );
+      expect(result).toMatchObject({ model: FABLE });
+    });
+
+    it("an exhausted pool falls back to the role's own models[0], never borrowing", () => {
+      const result = selectModel(
+        role({ models: [FABLE] }),
+        catalog({ claude: [FABLE] }),
+        POOL,
+        poolAtFableUsage({ leader: 94, "worker-a": 88 }),
+      );
+      expect(result).toEqual({ outcome: "unavailable", provider: null, model: FABLE });
+    });
+  });
+
   describe("account-agnostic (bare) refs", () => {
     it("resolves against the pool family's catalog and reports a null provider", () => {
       const result = selectModel(

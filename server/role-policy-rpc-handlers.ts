@@ -16,7 +16,7 @@ export interface RoleModelPolicyRpcDeps {
   policyCache: PolicyCache;
   catalogCache: ModelCatalogCache;
   poolCache: PoolCache;
-  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible">;
+  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible" | "windowUtilization">;
   recentAgentTypes: RecentAgentTypes;
 }
 
@@ -43,14 +43,14 @@ export interface RoleModelPolicyRpcHandlers {
   ): Promise<RpcOutput<typeof roleModelPolicyRpc.explain>>;
 }
 
+type EditableDocument = Pick<RoleModelPolicy, "roles" | "agentTypeMappings" | "modelBudgetThresholdPct">;
+
 /** Two documents are semantically equal when their editable fields serialize identically (order-sensitive: array order is meaningful). */
-function sameDocument(
-  a: { roles: RoleModelPolicy["roles"]; agentTypeMappings: RoleModelPolicy["agentTypeMappings"] },
-  b: { roles: RoleModelPolicy["roles"]; agentTypeMappings: RoleModelPolicy["agentTypeMappings"] },
-): boolean {
+function sameDocument(a: EditableDocument, b: EditableDocument): boolean {
   return (
     JSON.stringify(a.roles) === JSON.stringify(b.roles) &&
-    JSON.stringify(a.agentTypeMappings) === JSON.stringify(b.agentTypeMappings)
+    JSON.stringify(a.agentTypeMappings) === JSON.stringify(b.agentTypeMappings) &&
+    a.modelBudgetThresholdPct === b.modelBudgetThresholdPct
   );
 }
 
@@ -100,7 +100,11 @@ async function performWrite(
     return { status: "conflict", error: "the policy changed since you loaded it", policy: current.policy };
   }
 
-  const candidateDoc = { roles: input.patch.roles, agentTypeMappings: input.patch.agentTypeMappings };
+  const candidateDoc: EditableDocument = {
+    roles: input.patch.roles,
+    agentTypeMappings: input.patch.agentTypeMappings,
+    modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
+  };
   if (sameDocument(candidateDoc, current.policy)) {
     // Semantic no-op: nothing to persist, revision stays put.
     return { status: "saved", policy: current.policy };
@@ -108,8 +112,7 @@ async function performWrite(
 
   const candidate: RoleModelPolicy = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
-    roles: input.patch.roles,
-    agentTypeMappings: input.patch.agentTypeMappings,
+    ...candidateDoc,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -208,7 +211,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       });
       const catalog = deps.catalogCache.get();
       const { pool } = deps.poolCache.get();
-      const outcome = selectModel(resolution.role, catalog, pool, deps.health);
+      const outcome = selectModel(resolution.role, catalog, pool, deps.health, {
+        modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+      });
 
       return {
         roleId: resolution.role.id,

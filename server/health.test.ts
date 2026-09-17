@@ -244,3 +244,23 @@ describe("createHealthTracker", () => {
     expect(tracker.isHealthyForAllWindows(other)).toBe(false);
   });
 });
+
+describe("windowUtilization (drives the per-model budget gate)", () => {
+  it("returns undefined until a usage reading covers the window", () => {
+    const tracker = createHealthTracker();
+    expect(tracker.windowUtilization(PROVIDER, weeklyModelWindow("fable"))).toBeUndefined();
+  });
+
+  it("reports the last observed percent for a weekly per-model window", () => {
+    const tracker = createHealthTracker();
+    tracker.reportUsage(PROVIDER, [{ window: weeklyModelWindow("fable"), usedPct: 94, resetsAt: null }]);
+    expect(tracker.windowUtilization(PROVIDER, weeklyModelWindow("fable"))).toBe(94);
+  });
+
+  it("tracks fable as a real model family, so a Fable cap disqualifies a Fable spawn", () => {
+    const tracker = createHealthTracker();
+    tracker.reportUsage(PROVIDER, [{ window: weeklyModelWindow("fable"), usedPct: 100, resetsAt: null }]);
+    expect(tracker.isHealthyFor(PROVIDER, "claude-fable-5-1")).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+  });
+});

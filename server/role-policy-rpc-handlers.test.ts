@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
+import { DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } from "../shared/role-policy-schema";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
@@ -15,6 +16,7 @@ const VALID_POLICY: RoleModelPolicy = {
     { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
+  modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };
@@ -128,7 +130,7 @@ describe("role-model-policy RPC handlers", () => {
       const result = await handlers.write(
         {
           revision: VALID_POLICY.revision,
-          patch: { roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "worker" } : r)), agentTypeMappings: { worker: "worker", scout: "worker" } },
+          patch: { roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "worker" } : r)), agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT },
         },
         context(paseo),
       );
@@ -146,7 +148,7 @@ describe("role-model-policy RPC handlers", () => {
       const paseo = fakePaseo({ patch });
 
       const result = await handlers.write(
-        { revision: "stale-revision", patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings } },
+        { revision: "stale-revision", patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } },
         context(paseo),
       );
 
@@ -162,7 +164,7 @@ describe("role-model-policy RPC handlers", () => {
       const badRoles = VALID_POLICY.roles.map((r) => (r.id === "reviewer" ? { ...r, aliases: ["worker"] } : r)); // "worker" collides with the worker role's own name
 
       const result = await handlers.write(
-        { revision: VALID_POLICY.revision, patch: { roles: badRoles, agentTypeMappings: VALID_POLICY.agentTypeMappings } },
+        { revision: VALID_POLICY.revision, patch: { roles: badRoles, agentTypeMappings: VALID_POLICY.agentTypeMappings, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } },
         context(paseo),
       );
 
@@ -176,7 +178,7 @@ describe("role-model-policy RPC handlers", () => {
       const paseo = fakePaseo({ patch });
 
       const result = await handlers.write(
-        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings } },
+        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } },
         context(paseo),
       );
 
@@ -190,7 +192,7 @@ describe("role-model-policy RPC handlers", () => {
       const paseo = fakePaseo({});
 
       const result = await handlers.write(
-        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: { worker: "worker", scout: "worker" } } },
+        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } },
         context(paseo),
       );
 
@@ -207,10 +209,12 @@ describe("role-model-policy RPC handlers", () => {
       const patchA = {
         roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "workerA" } : r)),
         agentTypeMappings: VALID_POLICY.agentTypeMappings,
+        modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
       };
       const patchB = {
         roles: VALID_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, name: "workerB" } : r)),
         agentTypeMappings: VALID_POLICY.agentTypeMappings,
+        modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
       };
 
       const [resultA, resultB] = await Promise.all([
@@ -233,7 +237,7 @@ describe("role-model-policy RPC handlers", () => {
       const paseo = fakePaseo({ config: { agentModelPolicy: { schemaVersion: 3, roles: "not-an-array" } }, patch });
 
       const result = await handlers.write(
-        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings } },
+        { revision: VALID_POLICY.revision, patch: { roles: VALID_POLICY.roles, agentTypeMappings: VALID_POLICY.agentTypeMappings, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } },
         context(paseo),
       );
 

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { MAX_ROLES, RoleModelPolicySchema, RoleRecordSchema } from "./role-policy-schema";
+import {
+  DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+  MAX_ROLES,
+  RoleModelPolicySchema,
+  RoleRecordSchema,
+} from "./role-policy-schema";
 import { defineRpc } from "@getpaseo/plugin";
 
 /**
@@ -13,6 +18,7 @@ import { defineRpc } from "@getpaseo/plugin";
 export const RoleModelPolicyDraftSchema = z.object({
   roles: z.array(RoleRecordSchema).max(MAX_ROLES),
   agentTypeMappings: z.record(z.string(), z.string()),
+  modelBudgetThresholdPct: z.number().int().min(1).max(100).default(DEFAULT_MODEL_BUDGET_THRESHOLD_PCT),
 });
 export type RoleModelPolicyDraft = z.infer<typeof RoleModelPolicyDraftSchema>;
 

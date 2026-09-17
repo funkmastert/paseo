@@ -6,6 +6,7 @@ import {
   MAX_MAPPINGS,
   MAX_MODELS_PER_ROLE,
   MAX_ROLES,
+  DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   RoleModelPolicySchema,
   migrateRoleModelPolicy,
   rolePolicyFamilies,
@@ -28,6 +29,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
       role({ id: "leader", name: "leader" }),
     ],
     agentTypeMappings: {},
+    modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
     revision: "r1",
     ...overrides,
   };

@@ -23,8 +23,12 @@ export const WINDOW_SEVEN_DAY = "weekly";
  */
 export const WINDOW_ACCOUNT = "account";
 
-/** Model families recognized in reactive failure text and usage window ids. */
-const MODEL_FAMILIES = ["opus", "sonnet", "haiku"] as const;
+/**
+ * Model families recognized in reactive failure text and usage window ids.
+ * `fable` is here because the daemon really does report a `weekly_model_fable`
+ * window; without it a Fable-scoped cap was invisible to every window lookup.
+ */
+const MODEL_FAMILIES = ["opus", "sonnet", "haiku", "fable"] as const;
 export type ModelFamily = (typeof MODEL_FAMILIES)[number];
 
 /**

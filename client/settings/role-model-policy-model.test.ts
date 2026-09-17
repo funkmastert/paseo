@@ -22,7 +22,13 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
     counter += 1;
     return {
       status: "saved",
-      policy: { schemaVersion: 3, roles: input.patch.roles, agentTypeMappings: input.patch.agentTypeMappings, revision: `rev-${counter}` },
+      policy: {
+        schemaVersion: 3,
+        roles: input.patch.roles,
+        agentTypeMappings: input.patch.agentTypeMappings,
+        modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
+        revision: `rev-${counter}`,
+      },
     };
   };
   return { write, calls };

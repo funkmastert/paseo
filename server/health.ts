@@ -61,6 +61,13 @@ export interface HealthTracker {
    * picked so any known cap — including a per-model weekly one — disqualifies.
    */
   isHealthyForAllWindows(providerId: string): boolean;
+  /**
+   * Last observed utilization percent (0-100) for one (provider, window), or
+   * undefined when no usage reading has ever covered it. Drives the per-model
+   * budget gate, which needs "how full is this window" rather than the
+   * coarser healthy/drained/capped status.
+   */
+  windowUtilization(providerId: string, window: string): number | undefined;
   /** Debug/notification snapshot of every tracked (providerId, window) pair. */
   snapshot(): HealthSnapshot;
   /** Subscribes to cap/recovery transitions. Returns an unsubscribe function. */
@@ -253,6 +260,10 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     return true;
   }
 
+  function windowUtilization(providerId: string, window: string): number | undefined {
+    return windowsByProvider.get(providerId)?.get(window)?.utilizationPct;
+  }
+
   function snapshot(): HealthSnapshot {
     const result: HealthSnapshot = {};
     for (const [providerId, providerWindows] of windowsByProvider) {
@@ -282,6 +293,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     isHealthyFor,
     isLastResortEligible,
     isHealthyForAllWindows,
+    windowUtilization,
     snapshot,
     onChange,
   };

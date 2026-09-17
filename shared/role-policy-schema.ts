@@ -49,6 +49,14 @@ const MODEL_REF_SEGMENT = "[^\\s,*?/\\x00-\\x1F\\x7F]+";
 export const BARE_MODEL_REF_RE = new RegExp(`^${MODEL_REF_SEGMENT}$`);
 export const MODEL_REF_RE = new RegExp(`^${MODEL_REF_SEGMENT}(?:/${MODEL_REF_SEGMENT})?$`);
 
+/**
+ * Percent at/above which a budget-gated model family stops being selectable
+ * and a role falls to the next model in its own pool. 80 leaves a fifth of
+ * the weekly window in hand, so the cap lands at a model boundary rather than
+ * mid-task.
+ */
+export const DEFAULT_MODEL_BUDGET_THRESHOLD_PCT = 80;
+
 export const MAX_ROLES = 64;
 export const MAX_ALIASES_PER_ROLE = 8;
 export const MAX_MODELS_PER_ROLE = 32;
@@ -86,6 +94,17 @@ export const RoleModelPolicySchema = z
     roles: z.array(RoleRecordSchema).max(MAX_ROLES),
     /** Caller agent-type/title -> role id. Tier 1 of role resolution. */
     agentTypeMappings: AgentTypeMappingsSchema,
+    /**
+     * Percent at/above which a budget-gated model family (Fable) stops being
+     * selectable and a role falls to the next model in its own pool. See
+     * BUDGET_GATED_FAMILIES in server/role-availability.ts.
+     */
+    modelBudgetThresholdPct: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .default(DEFAULT_MODEL_BUDGET_THRESHOLD_PCT),
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -181,6 +200,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
     // not silently change how a root agent runs. Tyler opts in from settings.
     { id: LEADER_ROLE_ID, name: LEADER_ROLE_ID, standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
+  modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",

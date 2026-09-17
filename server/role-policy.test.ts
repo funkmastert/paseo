@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
+import { DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } from "../shared/role-policy-schema";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { createPolicyCache, loadRolePolicy } from "./role-policy";
@@ -20,6 +21,7 @@ const VALID_STORED_POLICY: RoleModelPolicy = {
     { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
     { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
+  modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",
 };
