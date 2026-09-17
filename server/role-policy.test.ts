@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { createPolicyCache, loadRolePolicy } from "./role-policy";
@@ -14,9 +15,9 @@ function fakePaseo(config: unknown): PaseoConfigApi {
 const VALID_STORED_POLICY: RoleModelPolicy = {
   schemaVersion: 2,
   roles: [
-    { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude/opus"] },
-    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [] },
-    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [] },
+    { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude/opus"], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",

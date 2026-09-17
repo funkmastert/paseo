@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 import { DEFAULT_POLICY, MAX_ALIASES_PER_ROLE, MAX_MAPPINGS, MAX_MODELS_PER_ROLE, MAX_ROLES, type RoleModelPolicy } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
 import {
@@ -82,7 +83,7 @@ describe("openRoleModelPolicyModel — metadata draft (rename/setAliases/save/ca
   it("a custom role can be renamed via the same save() path", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [] }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
 
@@ -227,7 +228,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
     const model = openModel(policyWith());
     expect(await model.addRole("helper")).toBe(true);
     const created = model.getState().policy.roles.find((r) => r.id === "role-fixed-id");
-    expect(created).toEqual({ id: "role-fixed-id", name: "helper", standard: false, aliases: [], models: [] });
+    expect(created).toEqual({ id: "role-fixed-id", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE });
   });
 
   it("rejects addRole at the role limit before calling write", async () => {
@@ -241,6 +242,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
           standard: false,
           aliases: [],
           models: [],
+          toolProfile: DEFAULT_TOOL_PROFILE,
         })),
       ],
     };
@@ -255,7 +257,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
   it("deleteRole is blocked (locally) for standard roles and for a custom role referenced by a mapping", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [] }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
       agentTypeMappings: { ...policyWith().agentTypeMappings, "ce-helper": "custom-1" },
     };
     const { write, calls } = fakeSavingWrite();
@@ -271,7 +273,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
   it("deleteRole succeeds for an unreferenced custom role", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [] }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
     expect(await model.deleteRole("custom-1")).toBe(true);
@@ -332,7 +334,7 @@ describe("openRoleModelPolicyModel — conflict, malformed lock, and applyPolicy
   it("applyPolicySnapshot closes the editor if the role being edited no longer exists", () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [] }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
     model.beginEditRole("custom-1");

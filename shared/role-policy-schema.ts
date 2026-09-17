@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
 
 /**
  * Label keys the role hook reads off `agent.create` requests. Mirrors the
@@ -54,6 +55,12 @@ export const RoleRecordSchema = z.object({
   aliases: z.array(z.string().regex(ROLE_WORD_RE)).max(MAX_ALIASES_PER_ROLE),
   /** Ordered, most-preferred first. Empty = unconfigured (never routed). */
   models: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE),
+  /**
+   * Which tools agents resolved to this role may use. Defaults to
+   * `unrestricted`, so a policy written before tool profiles existed keeps
+   * behaving exactly as it did.
+   */
+  toolProfile: ToolProfileSchema.default(DEFAULT_TOOL_PROFILE),
 });
 export type RoleRecord = z.infer<typeof RoleRecordSchema>;
 
@@ -159,9 +166,9 @@ export type RoleModelPolicy = z.infer<typeof RoleModelPolicySchema>;
 export const DEFAULT_POLICY: RoleModelPolicy = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
   roles: [
-    { id: "worker", name: "worker", standard: true, aliases: [], models: [] },
-    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [] },
-    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [] },
+    { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   agentTypeMappings: {
     worker: "worker",

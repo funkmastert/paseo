@@ -170,6 +170,102 @@ describe("createRoleRouter", () => {
     });
   });
 
+  describe("tool profile enforcement", () => {
+    function policyWithWorkerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === "worker" ? { ...role, toolProfile: profile } : role)),
+      };
+    }
+
+    it("enforces the profile even when the role has NO configured models", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+      expect(result?.config.model).toBe("claude-sonnet"); // untouched: no models configured
+    });
+
+    it("still passes through byte-identical for the default unrestricted profile", () => {
+      const router = createRoleRouter(baseOptions());
+
+      expect(router(request({ callerAgentId: "c1" }), fakeContext)).toBeUndefined();
+    });
+
+    it("applies both the model rewrite and the tool profile together", () => {
+      const policy = {
+        ...policyWithWorkerProfile({ kind: "read-only" }),
+        roles: policyWithWorkerProfile({ kind: "read-only" }).roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["codex/gpt-5.1"] } : role,
+        ),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.model).toBe("gpt-5.1");
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Write");
+      expect(options.disallowedTools).not.toContain("Read");
+    });
+
+    it("never weakens a restriction the caller already set", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "custom", deny: ["Write"] })) }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude", cwd: "/tmp", providerOptions: { disallowedTools: ["Bash"] } },
+        }),
+        fakeContext,
+      );
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write"]));
+    });
+
+    it("keeps enforcing when a pinned provider vanished from the registry", () => {
+      const policy = {
+        ...policyWithWorkerProfile({ kind: "orchestrator" }),
+        roles: policyWithWorkerProfile({ kind: "orchestrator" }).roles.map((role) =>
+          role.id === "worker" ? { ...role, models: ["codex/gpt-5.1"] } : role,
+        ),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+          providerIds: { get: () => new Set(["claude"]), forceRefresh: vi.fn(), stop: vi.fn() },
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(result?.config.model).toBe("claude-sonnet"); // no model rewrite: target is gone
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+    });
+
+    it("leaves root agents (no callerAgentId) alone", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
+      );
+
+      expect(router(request({}), fakeContext)).toBeUndefined();
+    });
+  });
+
   it("preserves other config fields (modeId, providerOptions, cwd) across the rewrite", () => {
     const router = createRoleRouter(
       baseOptions({

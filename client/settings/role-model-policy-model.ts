@@ -11,6 +11,7 @@ import {
   type RoleRecord,
 } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
+import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 
 /**
  * Follows docs/forms.md's plain-TS form model: zero React imports, commands
@@ -367,7 +368,14 @@ export function openRoleModelPolicyModel(
         publish();
         return false;
       }
-      const newRole: RoleRecord = { id: generateRoleId(), name: trimmed, standard: false, aliases: [], models: [] };
+      const newRole: RoleRecord = {
+        id: generateRoleId(),
+        name: trimmed,
+        standard: false,
+        aliases: [],
+        models: [],
+        toolProfile: DEFAULT_TOOL_PROFILE,
+      };
       return commit([...policy.roles, newRole], policy.agentTypeMappings);
     },
 

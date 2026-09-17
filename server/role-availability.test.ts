@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
 import type { RoleRecord } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
 import { selectModel, type AvailabilityPool, type ModelCatalog } from "./role-availability";
 
 function role(overrides: Partial<RoleRecord>): RoleRecord {
-  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], ...overrides };
+  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE, ...overrides };
 }
 
 function catalog(entries: Record<string, string[]>): ModelCatalog {

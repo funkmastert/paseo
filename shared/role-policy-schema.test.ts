@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_TOOL_PROFILE } from "./tool-profiles";
 import {
   DEFAULT_POLICY,
   MAX_ALIASES_PER_ROLE,
@@ -14,7 +15,7 @@ import {
 } from "./role-policy-schema";
 
 function role(overrides: Partial<RoleRecord>): RoleRecord {
-  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], ...overrides };
+  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE, ...overrides };
 }
 
 function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {

@@ -1,5 +1,6 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
-import { AGENT_TYPE_LABEL } from "../shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, type RoleRecord } from "../shared/role-policy-schema";
+import { applyToolProfile } from "../shared/tool-profiles";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -70,6 +71,38 @@ interface RequestWithRoleFields {
 interface FamilyResolvablePool {
   workers: ReadonlyArray<{ providerId: string }>;
   leader: { providerId: string } | null;
+}
+
+type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
+type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
+
+/**
+ * The `providerOptions` a request should carry once the role's tool profile
+ * is merged in, or undefined when the profile restricts nothing (so the
+ * request can stay byte-identical).
+ *
+ * The cast is the same structural read the rest of this file uses: the wire
+ * schema for `providerOptions` is free-form JSON, and the profile merge only
+ * ever produces string arrays and nested objects.
+ */
+function enforceToolProfile(
+  request: PluginBeforeRequests["agent.create"],
+  role: RoleRecord,
+): ProviderOptionsValue | undefined {
+  return applyToolProfile(request.config.providerOptions, role.toolProfile) as
+    | ProviderOptionsValue
+    | undefined;
+}
+
+/** Applies tool enforcement alone, on the paths that skip the model rewrite. */
+function withToolProfile(
+  request: PluginBeforeRequests["agent.create"],
+  providerOptions: ProviderOptionsValue | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  if (!providerOptions) {
+    return;
+  }
+  return { ...request, config: { ...request.config, providerOptions } };
 }
 
 /** Renders a selection back into the ref spelling the operator configured, for notifications. */
@@ -166,12 +199,17 @@ function routeRoleForCreateUnguarded(
     }
   }
 
+  // Tool enforcement is independent of model selection: a role can have no
+  // configured models (so no rewrite) and still be restricted to reading, or
+  // to pure delegation.
+  const enforcedProviderOptions = enforceToolProfile(request, resolution.role);
+
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
   const outcome = selectModel(resolution.role, catalog, pool, options.health);
 
   if (outcome.outcome === "unconfigured") {
-    return; // Byte-identical pass-through: the role has no configured models.
+    return withToolProfile(request, enforcedProviderOptions);
   }
 
   // A bare (account-agnostic) ref chose only a model: leave `config.provider`
@@ -201,7 +239,10 @@ function routeRoleForCreateUnguarded(
           reason: "provider-not-registered",
         });
       }
-      return; // Pass-through, byte-identical: recovered, not blocked.
+      // Recovered, not blocked: skip the model rewrite but keep enforcing the
+      // role's tools — a vanished model target is no reason to hand an
+      // orchestrator a shell.
+      return withToolProfile(request, enforcedProviderOptions);
     }
   }
 
@@ -219,9 +260,12 @@ function routeRoleForCreateUnguarded(
     unavailableRoleIds.delete(resolution.role.id); // Re-arm: the role recovered.
   }
 
-  const nextConfig = { ...request.config, model: outcome.model };
+  const nextConfig: AgentCreateConfig = { ...request.config, model: outcome.model };
   if (crossesFamily && outcome.provider !== null) {
-    nextConfig.provider = outcome.provider;
+    nextConfig.provider = outcome.provider as AgentCreateConfig["provider"];
+  }
+  if (enforcedProviderOptions) {
+    nextConfig.providerOptions = enforcedProviderOptions;
   }
 
   return { ...request, config: nextConfig };
