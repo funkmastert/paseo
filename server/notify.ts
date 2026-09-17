@@ -192,6 +192,31 @@ function formatPoolDryMessage(episode: PoolDryEpisode): string {
   );
 }
 
+/**
+ * Identifies one (leader, cap episode) pair, or null when the event carries
+ * no `resetsAt` to key on. `health.ts` always sets `resetsAt` for a
+ * "capped" `CapEvent` (falling back to its internal cap-expiry estimate
+ * when the source gave no reset time), so null is defensive rather than a
+ * path this notifier expects to hit; when it does, skip suppression
+ * entirely rather than risk keying two unrelated caps together and
+ * silently dropping a real one.
+ */
+function cappedEpisodeKey(leaderId: string, event: CapEvent): string | null {
+  if (!event.resetsAt) {
+    return null;
+  }
+  return `${event.providerId}::${event.window}::${event.resetsAt.toISOString()}::${leaderId}`;
+}
+
+function forgetCappedEpisodes(notified: Set<string>, providerId: string, window: string): void {
+  const prefix = `${providerId}::${window}::`;
+  for (const key of notified) {
+    if (key.startsWith(prefix)) {
+      notified.delete(key);
+    }
+  }
+}
+
 function formatFailOpenMessage(episode: FailOpenEpisode): string {
   const target = episode.targetProviderId ? ` (target "${episode.targetProviderId}")` : "";
   return (
@@ -207,6 +232,32 @@ export function createNotifier(options: NotifierOptions): Notifier {
 
   const poolDryNotifiedLeaders = new Set<string>();
   const failOpenNotifiedLeaders = new Set<string>();
+  /**
+   * (leaderId, cap episode) pairs already notified. A cap episode is
+   * provider + window + that window's `resetsAt`: the daemon rediscovers a
+   * still-open cap from the next usage poll after every plugin restart
+   * (health tracker state is in-memory too), which would otherwise re-emit
+   * a "capped" transition and re-send the identical notification. Keying on
+   * `resetsAt` rather than just (provider, window) still lets a genuinely
+   * new cap — one with a different reset time — notify again once the old
+   * episode has actually ended.
+   *
+   * This state is in-memory only and does NOT survive a plugin restart: the
+   * plugin SDK gives a plugin no durable store it can write to on its own.
+   * The one persistence primitive it exposes (`registerSettings`, backed by
+   * `PluginSettingsStore`) only answers read/write/reset RPCs that a
+   * client — e.g. a settings screen — initiates with its own revision
+   * token; plugin backend code never gets a handle back to call it
+   * directly. And `paseo.config` (`~/.paseo/config.json`) is off-limits
+   * here regardless. So a restart still re-arms this Set: it can still
+   * produce one fresh notification per cap episode that's still open when
+   * the plugin comes back up. That's an accepted limit of this fix, not
+   * eliminated by it. What this Set does eliminate is the case reachable
+   * without a restart: the same episode (same resetsAt) re-emitting a
+   * "capped" transition on its own, e.g. cap -> probation -> capped-again
+   * flapping while the daemon has no fresher reset time to report.
+   */
+  const cappedEpisodesNotified = new Set<string>();
   const pendingPermissionCounts = new Map<string, number>();
   const heldSends = new Map<string, QueuedSend[]>();
   // Leaders for which this notifier instance has seen a turn boundary
@@ -318,11 +369,18 @@ export function createNotifier(options: NotifierOptions): Notifier {
     // no live affected agents anywhere yields an empty `groups` and steers
     // nobody, rather than surfacing a stale-looking alert into every leader.
     const groups = groupAffectedChildrenByLeader(buildAgentDirectoryIndex(rows), event.providerId);
-    await Promise.allSettled(
-      Array.from(groups.values()).map(({ leader, children }) =>
-        deliver(leader.id, formatCapMessage(event, children), event.resetsAt),
-      ),
-    );
+    const deliveries: Promise<void>[] = [];
+    for (const { leader, children } of groups.values()) {
+      const key = cappedEpisodeKey(leader.id, event);
+      if (key) {
+        if (cappedEpisodesNotified.has(key)) {
+          continue; // Already notified this leader for this exact cap episode.
+        }
+        cappedEpisodesNotified.add(key);
+      }
+      deliveries.push(deliver(leader.id, formatCapMessage(event, children), event.resetsAt));
+    }
+    await Promise.allSettled(deliveries);
   }
 
   const unsubscribeHealth = health.onChange((event: CapEvent) => {
@@ -331,6 +389,7 @@ export function createNotifier(options: NotifierOptions): Notifier {
     } else {
       // A pool account transitioning back to healthy re-arms the pool-dry episode.
       poolDryNotifiedLeaders.clear();
+      forgetCappedEpisodes(cappedEpisodesNotified, event.providerId, event.window);
     }
   });
 
@@ -372,6 +431,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
       pendingPermissionCounts.delete(agentId);
       heldSends.delete(agentId);
       boundaryObservedLeaders.delete(agentId);
+      const leaderSuffix = `::${agentId}`;
+      for (const key of cappedEpisodesNotified) {
+        if (key.endsWith(leaderSuffix)) {
+          cappedEpisodesNotified.delete(key);
+        }
+      }
     },
     stop() {
       unsubscribeHealth();

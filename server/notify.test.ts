@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createHealthTracker } from "./health";
+import { createHealthTracker, type CapEvent } from "./health";
 import { createNotifier, type NotifierPaseoApi } from "./notify";
 
 interface FakeAgentRow {
@@ -472,6 +472,54 @@ describe("createNotifier", () => {
     expect(sendCalls[0].id).toBe("leader-1");
     expect(sendCalls[0].text).toContain("Live Child");
     expect(sendCalls[0].text).not.toContain("Dead Child");
+
+    notifier.stop();
+  });
+
+  it("suppresses a re-announced cap episode (same provider+window+resetsAt) but still announces a genuinely new one", async () => {
+    // Models what a plugin restart does in practice: a fresh health tracker
+    // rediscovers the same still-open cap from the next usage poll and
+    // re-emits a "capped" CapEvent with the same resetsAt. Driving the
+    // listener directly (rather than through a real HealthTracker) isolates
+    // the notifier's own episode dedup from HealthTracker's separate
+    // within-process capped-transition guard.
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const { schedule, flush } = fakeScheduler();
+    let capListener: ((event: CapEvent) => void) | undefined;
+    const health = {
+      onChange: (listener: (event: CapEvent) => void) => {
+        capListener = listener;
+        return () => {};
+      },
+    };
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+    notifier.onTurnEnded("leader-1");
+
+    const firstReset = new Date("2026-01-01T03:00:00.000Z");
+    capListener?.({ providerId: "worker-a", window: "weekly", kind: "capped", resetsAt: firstReset });
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    // Same episode rediscovered: must not re-notify.
+    capListener?.({ providerId: "worker-a", window: "weekly", kind: "capped", resetsAt: firstReset });
+    await flush();
+    expect(sendCalls).toHaveLength(1);
+
+    // A genuinely new cap after the window actually reset carries a
+    // different resetsAt, and must notify again.
+    const secondReset = new Date("2026-01-08T03:00:00.000Z");
+    capListener?.({ providerId: "worker-a", window: "weekly", kind: "capped", resetsAt: secondReset });
+    await flush();
+    expect(sendCalls).toHaveLength(2);
 
     notifier.stop();
   });
