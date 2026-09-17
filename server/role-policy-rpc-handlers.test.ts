@@ -355,7 +355,7 @@ describe("role-model-policy RPC handlers", () => {
         });
       });
 
-      it("reports honored=false with the effective ref when the requested model is not in the role's pool", async () => {
+      it("reports honored=false, reason not-approved, when the requested model is not in the role's pool at all", async () => {
         const policy: RoleModelPolicy = {
           ...DEFAULT_POLICY,
           roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, models: ["claude-sonnet-5"] } : r)),
@@ -374,6 +374,69 @@ describe("role-model-policy RPC handlers", () => {
           requestedRef: "claude-backup/claude-opus-5",
           honored: false,
           effectiveRef: "claude-sonnet-5",
+          reason: "not-approved",
+        });
+      });
+
+      it("reports honored=false, reason not-currently-selectable, when the requested model is approved but catalog-missing", async () => {
+        const policy: RoleModelPolicy = {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((r) =>
+            r.id === "worker" ? { ...r, models: ["claude-opus-5", "claude-sonnet-5"] } : r,
+          ),
+        };
+        // "claude-opus-5" is approved for the role but absent from the live catalog.
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "claude-backup", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog), poolCache }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5", requestedProvider: "claude-backup" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.requestedModelOverride).toEqual({
+          requestedRef: "claude-backup/claude-opus-5",
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+          reason: "not-currently-selectable",
+        });
+      });
+
+      it("real shape from today: reason not-currently-selectable when the requested Fable model is over the weekly budget threshold", async () => {
+        const FABLE = "claude-fable-5-1";
+        const policy: RoleModelPolicy = {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, models: [FABLE, "claude-sonnet-5"] } : r)),
+        };
+        const catalog: ModelCatalog = new Map([["claude", new Set([FABLE, "claude-sonnet-5"])]]);
+        const health = createHealthTracker();
+        health.reportUsage("claude-backup", [{ window: "weekly_model_fable", usedPct: 100 }]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "claude-backup", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog), poolCache, health }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", requestedModel: FABLE, requestedProvider: "claude-backup" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.requestedModelOverride).toEqual({
+          requestedRef: `claude-backup/${FABLE}`,
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+          reason: "not-currently-selectable",
         });
       });
 

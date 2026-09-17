@@ -87,7 +87,9 @@ export default function contribute(server: PluginServerContext) {
         ),
       onExplicitModelOverridden: (episode) =>
         console.error(
-          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in role "${episode.roleId}"'s pool; policy overrode it to "${episode.effectiveRef}"`,
+          episode.reason === "not-approved"
+            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in role "${episode.roleId}"'s pool; policy overrode it to "${episode.effectiveRef}"`
+            : `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which role "${episode.roleId}" approves but isn't currently selectable (catalog-missing, no viable pool member, or budget-gated); policy overrode it to "${episode.effectiveRef}"`,
         ),
     });
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({

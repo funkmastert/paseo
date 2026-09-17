@@ -57,8 +57,10 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   /**
    * Present only when the query named `requestedModel`: what the role
    * router would actually do with that explicit request — honored because
-   * it's a member of the resolved role's own pool, or overridden by policy
-   * (mirrors the `before("agent.create")` precedence in role-router.ts).
+   * it's a member of the resolved role's own pool AND currently selectable,
+   * or overridden by policy (mirrors the `before("agent.create")`
+   * precedence in role-router.ts, including its `evaluateRequestedModel`
+   * eligibility check, not just configured-list membership).
    */
   requestedModelOverride: z
     .object({
@@ -66,6 +68,12 @@ export const RoleModelPolicyExplainResultSchema = z.object({
       honored: z.boolean(),
       /** The ref policy would run instead. Omitted when `honored` is true. */
       effectiveRef: z.string().optional(),
+      /**
+       * Omitted when `honored` is true. "not-approved": never one of the
+       * role's configured entries. "not-currently-selectable": configured,
+       * but catalog-missing, no viable pool member, or budget-gated.
+       */
+      reason: z.union([z.literal("not-approved"), z.literal("not-currently-selectable")]).optional(),
     })
     .optional(),
 });

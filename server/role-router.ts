@@ -8,7 +8,7 @@ import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
-import { familyOfProvider, formatModelRef, isRequestedModelApproved, selectModel } from "./role-availability";
+import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
 import { resolveLeaderRole, resolveRole } from "./role-resolve";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
@@ -41,6 +41,15 @@ export interface ExplicitModelOverriddenEpisode {
   requestedRef: string;
   /** What policy ran instead, spelled the same way. */
   effectiveRef: string;
+  /**
+   * "not-approved": the requested ref was never one of the role's configured
+   * entries — the role forbids it outright.
+   * "not-currently-selectable": the requested ref IS one of the role's
+   * configured entries, but isn't selectable right now (catalog-missing, no
+   * viable pool member, or gated by the Fable budget threshold) — the
+   * caller asked for something approved that just isn't available.
+   */
+  reason: "not-approved" | "not-currently-selectable";
 }
 
 export interface RoleRouterOptions {
@@ -219,21 +228,27 @@ function routeRoleForCreateUnguarded(
   const requestedFamily = familyOfProvider(pool, request.config.provider);
 
   // Precedence: an explicitly requested model wins when it's a member of the
-  // resolved role's own pool — the caller is choosing among models the
-  // operator already approved for this role, which policy should allow.
-  // Anything else (including "nothing requested") falls through to normal
-  // selection below; when that means overriding a real request, the override
-  // must be visible rather than silent (onExplicitModelOverridden + a label
-  // on the created agent), never just a silent model swap.
+  // resolved role's own pool AND currently selectable — the same bar ordered
+  // selection holds every other candidate to (catalog presence, a viable
+  // pool member, the Fable budget gate). Honoring a configured-but-capped
+  // model would spawn the agent onto an account with no budget left, which
+  // is the exact failure this exists to prevent. Anything else (including
+  // "nothing requested") falls through to normal selection below; when that
+  // means overriding a real request, the override must be visible rather
+  // than silent (onExplicitModelOverridden + a label on the created agent),
+  // never just a silent model swap.
 
   const requestedModel = request.config.model;
   const requestedRef = requestedModel ? `${request.config.provider}/${requestedModel}` : undefined;
-  let explicitOverride = false;
+  let explicitOverrideReason: ExplicitModelOverriddenEpisode["reason"] | undefined;
   if (requestedModel && role.models.length > 0) {
-    if (isRequestedModelApproved(role, requestedFamily, requestedModel)) {
+    const evaluation = evaluateRequestedModel(role, requestedFamily, requestedModel, catalog, pool, options.health, {
+      modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+    });
+    if (evaluation.eligible) {
       return withToolProfile(request, enforcedProviderOptions);
     }
-    explicitOverride = true;
+    explicitOverrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
   }
 
   const outcome = selectModel(role, catalog, pool, options.health, {
@@ -296,12 +311,13 @@ function routeRoleForCreateUnguarded(
     nextConfig.providerOptions = enforcedProviderOptions;
   }
 
-  if (!explicitOverride) {
+  if (!explicitOverrideReason) {
     return { ...request, config: nextConfig };
   }
 
-  // The caller asked for something outside this role's approved pool and
-  // policy won instead — visible, not silent: logged once per
+  // The caller's explicit request didn't win — either it was never approved
+  // for this role, or it was approved but isn't selectable right now — and
+  // policy ran instead. Visible, not silent: logged once per
   // (caller, role, requested ref), and recorded on the agent itself so the
   // UI can show "model chosen by policy" instead of a quiet swap.
   const overriddenDedupeKey = `${episodeCaller} ${role.id} ${requestedRef}`;
@@ -312,6 +328,7 @@ function routeRoleForCreateUnguarded(
       roleId: role.id,
       requestedRef: requestedRef as string,
       effectiveRef: formatModelRef(outcome),
+      reason: explicitOverrideReason,
     });
   }
   return {

@@ -616,7 +616,7 @@ describe("createRoleRouter", () => {
       expect(result).toBeUndefined(); // byte-identical pass-through: nothing needed rewriting
     });
 
-    it("overrides an explicit request that is NOT a member of the role's pool, and makes the override visible", () => {
+    it("overrides an explicit request that is NOT a member of the role's pool at all (reason: not-approved)", () => {
       const onExplicitModelOverridden = vi.fn();
       const router = createRoleRouter(
         baseOptions({
@@ -641,6 +641,97 @@ describe("createRoleRouter", () => {
         roleId: "worker",
         requestedRef: "claude-backup/claude-opus-5",
         effectiveRef: "claude-sonnet-5",
+        reason: "not-approved",
+      });
+    });
+
+    it("overrides an explicit request whose model is approved but catalog-missing (reason: not-currently-selectable)", () => {
+      const onExplicitModelOverridden = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-5", "claude-sonnet-5"])),
+          // "claude-opus-5" is approved for the role but absent from the live catalog.
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+          poolCache: fakePoolCache(pool),
+          onExplicitModelOverridden,
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-sonnet-5");
+      expect(onExplicitModelOverridden).toHaveBeenCalledWith({
+        callerAgentId: "c1",
+        roleId: "worker",
+        requestedRef: "claude-backup/claude-opus-5",
+        effectiveRef: "claude-sonnet-5",
+        reason: "not-currently-selectable",
+      });
+    });
+
+    it("overrides an explicit request whose model is approved but capped everywhere in the pool (reason: not-currently-selectable)", () => {
+      const onExplicitModelOverridden = vi.fn();
+      const health = createHealthTracker();
+      health.reportTurnFailure("claude-backup", "hit your limit"); // caps the only worker
+      health.reportTurnFailure("leader", "hit your limit"); // and the leader
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-5", "claude-sonnet-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-5", "claude-sonnet-5"] })),
+          poolCache: fakePoolCache(pool),
+          health,
+          onExplicitModelOverridden,
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      // No pool member is viable for EITHER entry, so ordered selection also
+      // falls back to models[0] (UNAVAILABLE) — the override still fires and
+      // is still correctly attributed to "approved but not selectable".
+      expect(result?.config.model).toBe("claude-opus-5");
+      expect(onExplicitModelOverridden).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedRef: "claude-backup/claude-opus-5", reason: "not-currently-selectable" }),
+      );
+    });
+
+    it("real shape from today: overrides an explicit Fable request once the pool is over the weekly Fable budget threshold (reason: not-currently-selectable)", () => {
+      const FABLE = "claude-fable-5-1";
+      const onExplicitModelOverridden = vi.fn();
+      const health = createHealthTracker();
+      // The account the request would land on ("claude-backup") is pinned at
+      // 100% of its weekly Fable window; the role's own selection already
+      // steps off Fable for the same reason (the Fable budget gate).
+      health.reportUsage("claude-backup", [{ window: "weekly_model_fable", usedPct: 100 }]);
+      health.reportUsage("leader", [{ window: "weekly_model_fable", usedPct: 100 }]);
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels([FABLE, "claude-sonnet-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: [FABLE, "claude-sonnet-5"] })),
+          poolCache: fakePoolCache(pool),
+          health,
+          onExplicitModelOverridden,
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: FABLE, cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-sonnet-5"); // stepped off Fable, same as ordered selection
+      expect(onExplicitModelOverridden).toHaveBeenCalledWith({
+        callerAgentId: "c1",
+        roleId: "worker",
+        requestedRef: `claude-backup/${FABLE}`,
+        effectiveRef: "claude-sonnet-5",
+        reason: "not-currently-selectable",
       });
     });
 

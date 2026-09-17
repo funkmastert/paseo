@@ -8,7 +8,7 @@ import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
-import { familyOfProvider, formatModelRef, isRequestedModelApproved, selectModel } from "./role-availability";
+import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
 import { resolveRole } from "./role-resolve";
 import { AGENT_TYPE_LABEL, POOL_FAMILY } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
@@ -217,17 +217,28 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       });
 
       // Mirrors role-router.ts's precedence exactly: an explicit request
-      // wins when it's a member of the resolved role's own pool (or the
-      // role has no pool configured at all, so there's nothing to
-      // override); otherwise policy's own selection runs instead.
-      let requestedModelOverride: { requestedRef: string; honored: boolean; effectiveRef?: string } | undefined;
+      // wins when it's a member of the resolved role's own pool AND
+      // currently selectable (or the role has no pool configured at all, so
+      // there's nothing to override); otherwise policy's own selection runs
+      // instead, and the reason distinguishes "never approved" from
+      // "approved but not selectable right now".
+      let requestedModelOverride:
+        | { requestedRef: string; honored: boolean; effectiveRef?: string; reason?: "not-approved" | "not-currently-selectable" }
+        | undefined;
       if (input.requestedModel) {
         const requestedProvider = input.requestedProvider ?? POOL_FAMILY;
         const requestedRef = `${requestedProvider}/${input.requestedModel}`;
         const requestedFamily = familyOfProvider(pool, requestedProvider);
-        const honored =
-          resolution.role.models.length === 0 ||
-          isRequestedModelApproved(resolution.role, requestedFamily, input.requestedModel);
+        const evaluation = evaluateRequestedModel(
+          resolution.role,
+          requestedFamily,
+          input.requestedModel,
+          catalog,
+          pool,
+          deps.health,
+          { modelBudgetThresholdPct: policy.modelBudgetThresholdPct },
+        );
+        const honored = resolution.role.models.length === 0 || evaluation.eligible;
         requestedModelOverride = honored
           ? { requestedRef, honored: true }
           : {
@@ -237,6 +248,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
               // happens when role.models is empty, which already forces
               // honored=true above. requestedRef is a type-safe fallback.
               effectiveRef: outcome.outcome === "unconfigured" ? requestedRef : formatModelRef(outcome),
+              reason: evaluation.configured ? "not-currently-selectable" : "not-approved",
             };
       }
 

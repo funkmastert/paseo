@@ -91,6 +91,34 @@ export interface SelectModelOptions {
   modelBudgetThresholdPct?: number;
 }
 
+/**
+ * Per-ref eligibility check: catalog presence, plus (for pool-family refs)
+ * pool viability and the Fable budget gate. Shared by `selectModel`'s
+ * ordered walk and `evaluateRequestedModel`'s single-ref check, so an
+ * explicit request is held to the exact same bar as ordered selection.
+ */
+function isRefCurrentlySelectable(
+  family: string,
+  model: string,
+  catalog: ModelCatalog,
+  pool: AvailabilityPool,
+  health: AvailabilityHealth,
+  thresholdPct: number,
+): boolean {
+  if (!catalog.get(family)?.has(model)) {
+    return false;
+  }
+  if (family === POOL_FAMILY) {
+    if (!poolHasViableMember(pool, health, model)) {
+      return false;
+    }
+    if (!poolHasMemberWithinModelBudget(pool, health, model, thresholdPct)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
 export function formatModelRef(outcome: { provider: string | null; model: string }): string {
   return outcome.provider === null ? outcome.model : `${outcome.provider}/${outcome.model}`;
@@ -126,6 +154,43 @@ export function isRequestedModelApproved(role: RoleRecord, requestedFamily: stri
   });
 }
 
+export interface RequestedModelEvaluation {
+  /** Whether the (family, model) pair is literally one of the role's configured entries. */
+  configured: boolean;
+  /** Whether it's configured AND currently selectable — catalog present, pool viable, budget gate open. */
+  eligible: boolean;
+}
+
+/**
+ * Evaluates an explicitly requested (family, model) pair against the
+ * resolved role's own pool using the exact same eligibility bar ordered
+ * selection applies — not just "is it in the configured list". A model that
+ * is approved but currently capped everywhere or missing from the catalog
+ * must not be honored as-is: that's the failure this exists to prevent (an
+ * agent spawned onto an account/model with no budget left, dying on its
+ * first turn). `configured` is still reported separately so the caller can
+ * distinguish "not approved for this role at all" from "approved, but not
+ * selectable right now" — two different situations that deserve different
+ * messages.
+ */
+export function evaluateRequestedModel(
+  role: RoleRecord,
+  requestedFamily: string,
+  requestedModel: string,
+  catalog: ModelCatalog,
+  pool: AvailabilityPool,
+  health: AvailabilityHealth,
+  options: SelectModelOptions = {},
+): RequestedModelEvaluation {
+  const configured = isRequestedModelApproved(role, requestedFamily, requestedModel);
+  if (!configured) {
+    return { configured: false, eligible: false };
+  }
+  const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
+  const eligible = isRefCurrentlySelectable(requestedFamily, requestedModel, catalog, pool, health, thresholdPct);
+  return { configured: true, eligible };
+}
+
 /**
  * Pure model selection: ordered intersection of role.models with the live
  * catalog. `role.models` empty -> UNCONFIGURED (byte-identical pass-through,
@@ -156,13 +221,7 @@ export function selectModel(
     }
     const family = modelRefFamily(parsed);
     const { model } = parsed;
-    if (!catalog.get(family)?.has(model)) {
-      continue;
-    }
-    if (family === POOL_FAMILY && !poolHasViableMember(pool, health, model)) {
-      continue;
-    }
-    if (family === POOL_FAMILY && !poolHasMemberWithinModelBudget(pool, health, model, thresholdPct)) {
+    if (!isRefCurrentlySelectable(family, model, catalog, pool, health, thresholdPct)) {
       continue;
     }
     return { outcome: "selected", provider: parsed.provider, model };

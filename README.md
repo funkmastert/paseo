@@ -132,35 +132,47 @@ before the upgrade can still save. The migrated document only lands on disk
 when you make some other change and save — which is also when the leader role
 below is persisted.
 
-### An explicit model request wins, but only within the role's own pool
+### An explicit model request wins, but only when it's currently selectable
 
 A caller can ask for a specific model directly (`mcp__paseo__create_agent`'s
 `provider` field as `provider/model`, or `config.model` on a session create).
 The role router's precedence:
 
 1. **The explicit request wins when it's a member of the resolved role's own
-   pool** — the caller is choosing among models the operator already
-   approved for this role, which policy should allow. The request passes
-   through untouched: model, provider, and account all stay exactly what was
-   asked for.
-2. **Policy wins otherwise.** The role's own ordered selection runs as usual
-   and the request is rewritten to it — but the override is never silent:
-   it's logged (`role-router: caller "…" explicitly requested "…", which is
-   not in role "…"'s pool; policy overrode it to "…"`), the created agent
-   gets a `paseo.model-overridden-by-policy` label carrying the ref that was
-   asked for, and the `role-model-policy.explain` RPC accepts optional
-   `requestedModel`/`requestedProvider` fields so the settings screen can
-   simulate the same decision (`requestedModelOverride: { requestedRef,
-   honored, effectiveRef? }`).
+   pool AND currently selectable** — the same eligibility bar ordered
+   selection holds every other candidate to: present in the live catalog, a
+   viable pool member, and (for Fable) under the budget threshold. The
+   request passes through untouched: model, provider, and account all stay
+   exactly what was asked for.
+2. **Policy wins otherwise**, whether the model was never approved for this
+   role or was approved but isn't selectable right now. The role's own
+   ordered selection runs as usual and the request is rewritten to it — but
+   the override is never silent: it's logged with a reason-specific message,
+   the created agent gets a `paseo.model-overridden-by-policy` label
+   carrying the ref that was asked for, and the `role-model-policy.explain`
+   RPC accepts optional `requestedModel`/`requestedProvider` fields so the
+   settings screen can simulate the same decision
+   (`requestedModelOverride: { requestedRef, honored, effectiveRef?,
+   reason? }`).
+
+The override reason distinguishes two different situations:
+
+- `not-approved` — the requested ref was never one of the role's configured
+  entries; the role forbids it outright.
+- `not-currently-selectable` — the requested ref IS one of the role's
+  configured entries, but isn't selectable right now (catalog-missing, no
+  viable pool member, or gated by the Fable budget threshold). This is
+  deliberately treated as an override rather than honored as-is: the
+  failure this exists to prevent is an agent spawned onto an account/model
+  with no budget left, dying on its first turn. A caller who asked for an
+  approved model that's temporarily unavailable gets policy's live
+  selection instead, with a message that says so — not the same message as
+  a caller who asked for a model the role forbids.
 
 "Member of the pool" means the requested `(provider, model)` matches one of
 the role's own configured entries by family — an account-agnostic entry
 matches any pooled account's provider id, the same way normal selection
-does. It is a literal-membership check, not a live-availability one: an
-approved model that's currently catalog-missing or capped everywhere is
-still honored if explicitly requested, exactly as a caller who set
-`config.model` directly always could before role tool-profile enforcement
-existed. A role with no configured pool at all has nothing to override, so
+does. A role with no configured pool at all has nothing to override, so
 every explicit request passes through untouched, matching the "unconfigured"
 pass-through behaviour above.
 
