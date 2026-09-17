@@ -423,7 +423,7 @@ export class McpGateway {
 
   /**
    * Begins interactive OAuth for one server (U6/KTD3, R6's "one-click auth" action): drives
-   * discovery + dynamic registration + the PKCE challenge via U1's oauth module, returning the
+   * discovery + client registration + the PKCE challenge via U1's oauth module, returning the
    * authorization URL for a wire RPC to hand back to the client. Static-auth servers have
    * nothing to authorize interactively (their credential is a stored header, set out of band),
    * so they're rejected here rather than producing a URL that would never complete anything.
@@ -437,23 +437,29 @@ export class McpGateway {
       throw new Error(`MCP gateway server "${name}" uses static auth; nothing to authorize`);
     }
     return startMcpGatewayAuthorization({
+      serverName: name,
       serverUrl: runtime.config.url,
+      redirectUrl: this.resolveOAuthRedirectUrl(name),
       provider: this.buildOAuthProvider(name),
     });
   }
 
   buildOAuthProvider(name: string): OAuthClientProvider {
+    return createGatewayOAuthClientProvider({
+      serverName: name,
+      tokenStore: this.tokenStore,
+      stateStore: this.oauthStateStore,
+      redirectUrl: this.resolveOAuthRedirectUrl(name),
+    });
+  }
+
+  private resolveOAuthRedirectUrl(name: string): string {
     if (!this.oauthRedirectBaseUrl) {
       throw new Error(
         `MCP gateway server "${name}" needs OAuth but no reachable redirect base URL is configured`,
       );
     }
-    return createGatewayOAuthClientProvider({
-      serverName: name,
-      tokenStore: this.tokenStore,
-      stateStore: this.oauthStateStore,
-      redirectUrl: `${this.oauthRedirectBaseUrl}/mcp/gateway/oauth/callback`,
-    });
+    return `${this.oauthRedirectBaseUrl}/mcp/gateway/oauth/callback`;
   }
 
   private buildTransport(params: {

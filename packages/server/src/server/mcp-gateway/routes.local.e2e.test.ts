@@ -11,7 +11,7 @@
  * isolation (see routes.test.ts for the fast, fixture-free route-level checks).
  */
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -24,6 +24,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { mcpAuthRouter } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { DemoInMemoryAuthProvider } from "@modelcontextprotocol/sdk/examples/server/demoInMemoryOAuthProvider.js";
+import type { OAuthClientInformationFull } from "@modelcontextprotocol/sdk/shared/auth.js";
 import express from "express";
 
 import { hashDaemonPassword } from "../auth.js";
@@ -57,11 +58,23 @@ interface OAuthFixtureMcpServer {
  * SDK's own demo implementation of `OAuthServerProvider` — it always "succeeds" the interactive
  * login step, which is exactly what a test driving the flow without a browser needs.
  */
-async function startOAuthFixtureMcpServer(): Promise<OAuthFixtureMcpServer> {
+async function startOAuthFixtureMcpServer(
+  options: { preregisteredClient?: OAuthClientInformationFull } = {},
+): Promise<OAuthFixtureMcpServer> {
   const port = await getAvailablePort();
   const baseUrl = new URL(`http://127.0.0.1:${port}`);
   const mcpUrl = new URL("/mcp", baseUrl);
   const provider = new DemoInMemoryAuthProvider();
+
+  // Stands in for Slack and every other upstream with a hand-registered OAuth app: dropping
+  // `registerClient` is exactly what makes the SDK's metadata omit `registration_endpoint`,
+  // which is the condition that used to make sign-in impossible.
+  if (options.preregisteredClient) {
+    const client = options.preregisteredClient;
+    provider.clientsStore = {
+      getClient: async (clientId: string) => (clientId === client.client_id ? client : undefined),
+    };
+  }
 
   const app = express();
   app.use(express.json());
@@ -170,14 +183,9 @@ describe("MCP gateway proxy + OAuth callback (local e2e, fixture upstream)", () 
       expect(badStateResponse.status).toBe(400);
 
       // Real discovery + dynamic client registration against the fixture's own AS metadata,
-      // using the exact provider the running gateway would use for this server (U1's oauth
-      // module) — proving the callback route later validates against the SAME state store.
-      const provider = daemon.mcpGateway.buildOAuthProvider("fixture");
-      const { startMcpGatewayAuthorization } = await import("./oauth.js");
-      const { authorizationUrl } = await startMcpGatewayAuthorization({
-        serverUrl: fixture.mcpUrl,
-        provider,
-      });
+      // driven through the running gateway's own auth-start path — proving the callback route
+      // later validates against the SAME state store.
+      const { authorizationUrl } = await daemon.mcpGateway.startAuthorization("fixture");
 
       // Stands in for the phone/desktop browser following the authorization URL: the
       // fixture's demo provider "logs the user in" and redirects straight back with
@@ -248,6 +256,103 @@ describe("MCP gateway proxy + OAuth callback (local e2e, fixture upstream)", () 
       } finally {
         await client.close();
       }
+    } finally {
+      await daemon.stop();
+      await fixture.close();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a server without dynamic client registration signs in with pre-registered credentials", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-mcp-gateway-prereg-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-mcp-gateway-prereg-"));
+    const daemonPort = await getAvailablePort();
+    const redirectUrl = `http://127.0.0.1:${daemonPort}${MCP_GATEWAY_CALLBACK_ROUTE}`;
+    const fixture = await startOAuthFixtureMcpServer({
+      preregisteredClient: {
+        client_id: "slack-app-id",
+        client_secret: "slack-app-secret",
+        redirect_uris: [redirectUrl],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "client_secret_post",
+      },
+    });
+
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${daemonPort}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createTestAgentClients(),
+        agentStoragePath: path.join(paseoHome, "agents"),
+        mcpGateway: {
+          enabled: true,
+          servers: { slack: { url: fixture.mcpUrl, transport: "http", auth: "oauth" } },
+        },
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    try {
+      await vi.waitFor(() => {
+        expect(daemon.mcpGateway.getServerState("slack")?.status).toBe("needs-auth");
+      });
+
+      // Without credentials the strip's sign-in button cannot work at all, and the message it
+      // shows has to be the one that tells the operator what to do about it.
+      await expect(daemon.mcpGateway.startAuthorization("slack")).rejects.toThrow(
+        /does not support dynamic client registration[\s\S]*tokens\.json[\s\S]*clientCredentials/,
+      );
+
+      // What Tyler does by hand: drop the OAuth app's credentials into the private token file.
+      await mkdir(path.join(paseoHome, "mcp-gateway"), { recursive: true });
+      await writeFile(
+        path.join(paseoHome, "mcp-gateway", "tokens.json"),
+        JSON.stringify({
+          version: 1,
+          servers: {
+            slack: {
+              auth: "oauth",
+              clientCredentials: {
+                clientId: "slack-app-id",
+                clientSecret: "slack-app-secret",
+              },
+            },
+          },
+        }),
+        { mode: 0o600 },
+      );
+
+      const { authorizationUrl } = await daemon.mcpGateway.startAuthorization("slack");
+      expect(new URL(authorizationUrl).searchParams.get("client_id")).toBe("slack-app-id");
+
+      const authorizeResponse = await fetch(authorizationUrl, { redirect: "manual" });
+      const redirectLocation = authorizeResponse.headers.get("location");
+      expect(redirectLocation).toBeTruthy();
+
+      const callbackResponse = await fetch(redirectLocation!);
+      expect(callbackResponse.status).toBe(200);
+      expect(daemon.mcpGateway.getServerState("slack")?.status).toBe("connected");
+
+      // The token exchange authenticated with the client secret, and the hand-written record
+      // survived the flow rather than being overwritten by a registration the SDK never ran.
+      const tokenFile = JSON.parse(
+        await readFile(path.join(paseoHome, "mcp-gateway", "tokens.json"), "utf8"),
+      ) as {
+        servers: Record<string, { clientCredentials?: unknown; clientInformation?: unknown }>;
+      };
+      expect(tokenFile.servers.slack?.clientCredentials).toEqual({
+        clientId: "slack-app-id",
+        clientSecret: "slack-app-secret",
+      });
+      expect(tokenFile.servers.slack?.clientInformation).toBeUndefined();
     } finally {
       await daemon.stop();
       await fixture.close();

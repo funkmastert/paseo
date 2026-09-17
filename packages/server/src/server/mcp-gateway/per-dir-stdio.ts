@@ -36,7 +36,7 @@ const ENV_VAR_PATTERN = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g;
  * this syntax would diverge from native spawn semantics (an unexpanded literal string instead
  * of the resolved value) — the parity this module exists to preserve.
  */
-function expandEnvVars(value: string, env: NodeJS.ProcessEnv): string {
+export function expandEnvVars(value: string, env: NodeJS.ProcessEnv): string {
   return value.replace(ENV_VAR_PATTERN, (_match, name: string, _group, fallback?: string) => {
     const resolved = env[name];
     return resolved !== undefined ? resolved : (fallback ?? "");

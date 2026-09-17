@@ -42,7 +42,7 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
-import { readPerDirStdioMcpServers } from "../../../mcp-gateway/per-dir-stdio.js";
+import { expandEnvVars, readPerDirStdioMcpServers } from "../../../mcp-gateway/per-dir-stdio.js";
 import { parsePartialJsonObject } from "./partial-json.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { ClaudeTaskState } from "./task-state.js";
@@ -1492,6 +1492,21 @@ export function readEventIdentifiers(message: SDKMessage): EventIdentifiers {
   };
 }
 
+/**
+ * The `CLAUDE_CONFIG_DIR` a provider's sessions actually run with, `${VAR}`-expanded. A derived
+ * provider (`extends: "claude"` with its own `env`) points at a different account's config dir
+ * than the provider it extends; reading the base provider's — or the `~/.claude` default — would
+ * adopt an MCP definition from the wrong account. Returns undefined when nothing sets it, so
+ * `resolveClaudeConfigDir` keeps its own fallback chain.
+ */
+export function resolveProviderClaudeConfigDir(
+  runtimeSettings: ProviderRuntimeSettings | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const configured = runtimeSettings?.env?.CLAUDE_CONFIG_DIR;
+  return configured === undefined ? undefined : expandEnvVars(configured, env);
+}
+
 export class ClaudeAgentClient implements AgentClient {
   readonly provider = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
@@ -1527,12 +1542,13 @@ export class ClaudeAgentClient implements AgentClient {
     projectDir: string;
     env: NodeJS.ProcessEnv;
   } {
+    // The same env the CLI subprocess gets, so `${VAR}` in a definition expands as the
+    // session itself would expand it — a provider-profile token is not in the daemon's env.
+    const env = createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings });
     return {
-      configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
+      configDir: resolveClaudeConfigDir(resolveProviderClaudeConfigDir(this.runtimeSettings, env)),
       projectDir: cwd,
-      // The same env the CLI subprocess gets, so `${VAR}` in a definition expands as the
-      // session itself would expand it — a provider-profile token is not in the daemon's env.
-      env: createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
+      env,
     };
   }
 
