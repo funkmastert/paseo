@@ -49,12 +49,16 @@ export interface Notifier {
   stop(): void;
 }
 
+/** Mirrors the daemon's AgentLifecycleStatus enum (protocol/agent-lifecycle.ts). */
+type AgentLifecycleStatus = "initializing" | "idle" | "running" | "error" | "closed";
+
 interface AgentDirectoryRow {
   id: string;
   parentAgentId: string | null;
   title: string | null;
   provider: string;
   archived: boolean;
+  status: AgentLifecycleStatus;
 }
 
 interface QueuedSend {
@@ -96,6 +100,7 @@ async function listAgentDirectory(paseo: NotifierPaseoApi): Promise<AgentDirecto
       title: agent.title,
       provider: agent.provider,
       archived: agent.archivedAt != null,
+      status: agent.status,
     };
   });
 }
@@ -127,14 +132,30 @@ function resolveRootLeader(byId: AgentDirectoryIndex, startAgentId: string): Age
   return current;
 }
 
-/** Groups non-archived agents on `providerId` by their resolved root leader. */
+/**
+ * A row counts as "affected" by a cap only if its session is still live on
+ * the daemon at the time we list the directory: not archived, and not
+ * `closed` (the daemon's terminal status once a session has fully exited).
+ * `error`/`idle`/`running`/`initializing` all still count — in particular
+ * the reactive path (a turn failure classified as a cap) fires *because* an
+ * agent's turn just errored, so excluding `error` would drop the very agent
+ * that triggered detection. `closed` is the only status that means the
+ * session itself is gone, which is what made the real incident this fixes
+ * misleading: four long-`closed` agents were named as "running there" for
+ * a cap event the daemon only rediscovered later, on a fresh usage poll.
+ */
+function isAffectedByCapRow(row: AgentDirectoryRow): boolean {
+  return !row.archived && row.status !== "closed";
+}
+
+/** Groups agents live on `providerId` at listing time by their resolved root leader. */
 function groupAffectedChildrenByLeader(
   byId: AgentDirectoryIndex,
   providerId: string,
 ): Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }> {
   const byLeader = new Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }>();
   for (const row of byId.values()) {
-    if (row.archived || row.provider !== providerId) {
+    if (row.provider !== providerId || !isAffectedByCapRow(row)) {
       continue;
     }
     const leader = resolveRootLeader(byId, row.id);
@@ -291,11 +312,16 @@ export function createNotifier(options: NotifierOptions): Notifier {
     if (!rows) {
       return;
     }
+    // A leader whose bucket exists here already has at least one live
+    // affected child (groupAffectedChildrenByLeader only creates a bucket
+    // for rows that pass isAffectedByCapRow) — so a provider-wide cap with
+    // no live affected agents anywhere yields an empty `groups` and steers
+    // nobody, rather than surfacing a stale-looking alert into every leader.
     const groups = groupAffectedChildrenByLeader(buildAgentDirectoryIndex(rows), event.providerId);
     await Promise.allSettled(
-      Array.from(groups.values())
-        .filter(({ children }) => children.length > 0)
-        .map(({ leader, children }) => deliver(leader.id, formatCapMessage(event, children), event.resetsAt)),
+      Array.from(groups.values()).map(({ leader, children }) =>
+        deliver(leader.id, formatCapMessage(event, children), event.resetsAt),
+      ),
     );
   }
 

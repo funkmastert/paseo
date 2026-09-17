@@ -10,6 +10,8 @@ interface FakeAgentRow {
   title: string | null;
   provider: string;
   archivedAt?: string | null;
+  /** Defaults to "running" — a live session — when unset. */
+  status?: "initializing" | "idle" | "running" | "error" | "closed";
 }
 
 interface FakeSendCall {
@@ -33,6 +35,7 @@ function fakePaseo(
         title: row.title,
         provider: row.provider,
         archivedAt: row.archivedAt ?? null,
+        status: row.status ?? "running",
       },
     })),
   });
@@ -437,6 +440,39 @@ describe("createNotifier", () => {
     await flush();
 
     expect(sendCalls).toHaveLength(1);
+    notifier.stop();
+  });
+
+  it("excludes closed agents from an affected-children list, and skips notifying a leader entirely when every affected agent is closed", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Live Child", provider: "worker-a", status: "running" },
+      { id: "child-2", parentLabel: "leader-1", title: "Dead Child", provider: "worker-a", status: "closed" },
+      { id: "leader-2", parentLabel: null, title: "Leader Two", provider: "human-claude" },
+      { id: "child-3", parentLabel: "leader-2", title: "Only Closed Child", provider: "worker-a", status: "closed" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker({ now: () => new Date("2026-01-01T00:00:00.000Z") });
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    notifier.onTurnEnded("leader-1");
+    notifier.onTurnEnded("leader-2");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T03:00:00.000Z");
+    await flush();
+
+    // Only leader-1 gets steered: leader-2's only affected child is closed,
+    // so it has no live affected children and is skipped entirely.
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].id).toBe("leader-1");
+    expect(sendCalls[0].text).toContain("Live Child");
+    expect(sendCalls[0].text).not.toContain("Dead Child");
+
     notifier.stop();
   });
 });
