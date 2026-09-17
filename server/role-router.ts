@@ -1,5 +1,5 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
-import { AGENT_TYPE_LABEL, type RoleRecord } from "../shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, MODEL_OVERRIDDEN_LABEL, type RoleRecord } from "../shared/role-policy-schema";
 import { applyToolProfile } from "../shared/tool-profiles";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
@@ -8,7 +8,7 @@ import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
-import { selectModel } from "./role-availability";
+import { familyOfProvider, formatModelRef, isRequestedModelApproved, selectModel } from "./role-availability";
 import { resolveLeaderRole, resolveRole } from "./role-resolve";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
@@ -34,6 +34,15 @@ export interface RoleUnavailableEpisode {
   reason: "no-eligible-model" | "provider-not-registered";
 }
 
+export interface ExplicitModelOverriddenEpisode {
+  callerAgentId: string;
+  roleId: string;
+  /** The `provider/model` the caller explicitly asked for. */
+  requestedRef: string;
+  /** What policy ran instead, spelled the same way. */
+  effectiveRef: string;
+}
+
 export interface RoleRouterOptions {
   policyCache: PolicyCache;
   catalogCache: ModelCatalogCache;
@@ -52,6 +61,8 @@ export interface RoleRouterOptions {
   onDeclaredRoleUnknown?: (episode: DeclaredRoleUnknownEpisode) => void;
   /** Called (deduplicated per role, re-armed on recovery) when a role has no eligible model and falls back to models[0]. */
   onRoleUnavailable?: (episode: RoleUnavailableEpisode) => void;
+  /** Called (deduplicated per caller+role+requestedRef) when an explicitly requested model wasn't in the resolved role's pool and policy overrode it. */
+  onExplicitModelOverridden?: (episode: ExplicitModelOverriddenEpisode) => void;
   /**
    * Injectable clock for tests; defaults to Date.now. Drives the throttle on
    * the "unexpected error resolving role" fail-open log, so a role that
@@ -69,11 +80,6 @@ interface RequestWithRoleFields {
   labels?: Record<string, string>;
   initialPrompt?: string;
   callerAgentId?: string;
-}
-
-interface FamilyResolvablePool {
-  workers: ReadonlyArray<{ providerId: string }>;
-  leader: { providerId: string } | null;
 }
 
 type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
@@ -108,22 +114,6 @@ function withToolProfile(
   return { ...request, config: { ...request.config, providerOptions } };
 }
 
-/** Renders a selection back into the ref spelling the operator configured, for notifications. */
-function formatModelRef(outcome: { provider: string | null; model: string }): string {
-  return outcome.provider === null ? outcome.model : `${outcome.provider}/${outcome.model}`;
-}
-
-/** Model refs use provider-family ids; a request's current provider may instead be a literal pool-worker/leader entry id. */
-function familyOfProvider(pool: FamilyResolvablePool, providerId: string): string {
-  if (providerId === "claude") {
-    return "claude";
-  }
-  if (pool.workers.some((worker) => worker.providerId === providerId) || pool.leader?.providerId === providerId) {
-    return "claude";
-  }
-  return providerId;
-}
-
 /**
  * `before("agent.create")` handler: resolves the caller's role from
  * labels/title/initialPrompt, selects that role's top eligible model against
@@ -141,11 +131,12 @@ function familyOfProvider(pool: FamilyResolvablePool, providerId: string): strin
 export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredUnknownSeen = new Set<string>();
   const unavailableRoleIds = new Set<string>();
+  const overriddenSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
 
   return function routeRoleForCreate(input) {
     try {
-      return routeRoleForCreateUnguarded(input, options, declaredUnknownSeen, unavailableRoleIds);
+      return routeRoleForCreateUnguarded(input, options, declaredUnknownSeen, unavailableRoleIds, overriddenSeen);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in resolve/select
@@ -169,6 +160,7 @@ function routeRoleForCreateUnguarded(
   options: RoleRouterOptions,
   declaredUnknownSeen: Set<string>,
   unavailableRoleIds: Set<string>,
+  overriddenSeen: Set<string>,
 ): PluginBeforeRequests["agent.create"] | void {
   const { request } = input;
 
@@ -219,6 +211,31 @@ function routeRoleForCreateUnguarded(
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
+
+  // Model refs use provider-family ids; a request's current provider may
+  // instead be a literal pool-worker/leader entry id. Used below both for a
+  // pinned selection's crossesFamily check and for the caller's own
+  // explicit request, if any.
+  const requestedFamily = familyOfProvider(pool, request.config.provider);
+
+  // Precedence: an explicitly requested model wins when it's a member of the
+  // resolved role's own pool — the caller is choosing among models the
+  // operator already approved for this role, which policy should allow.
+  // Anything else (including "nothing requested") falls through to normal
+  // selection below; when that means overriding a real request, the override
+  // must be visible rather than silent (onExplicitModelOverridden + a label
+  // on the created agent), never just a silent model swap.
+
+  const requestedModel = request.config.model;
+  const requestedRef = requestedModel ? `${request.config.provider}/${requestedModel}` : undefined;
+  let explicitOverride = false;
+  if (requestedModel && role.models.length > 0) {
+    if (isRequestedModelApproved(role, requestedFamily, requestedModel)) {
+      return withToolProfile(request, enforcedProviderOptions);
+    }
+    explicitOverride = true;
+  }
+
   const outcome = selectModel(role, catalog, pool, options.health, {
     modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
   });
@@ -227,10 +244,6 @@ function routeRoleForCreateUnguarded(
     return withToolProfile(request, enforcedProviderOptions);
   }
 
-  // A bare (account-agnostic) ref chose only a model: leave `config.provider`
-  // alone so the account router downstream still picks the account. Only a
-  // pinned `provider/model` ref can move the request to another family.
-  const requestedFamily = familyOfProvider(pool, request.config.provider);
   const crossesFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
 
   // Cross-family rewrites point `config.provider` at a family the account
@@ -283,5 +296,27 @@ function routeRoleForCreateUnguarded(
     nextConfig.providerOptions = enforcedProviderOptions;
   }
 
-  return { ...request, config: nextConfig };
+  if (!explicitOverride) {
+    return { ...request, config: nextConfig };
+  }
+
+  // The caller asked for something outside this role's approved pool and
+  // policy won instead — visible, not silent: logged once per
+  // (caller, role, requested ref), and recorded on the agent itself so the
+  // UI can show "model chosen by policy" instead of a quiet swap.
+  const overriddenDedupeKey = `${episodeCaller} ${role.id} ${requestedRef}`;
+  if (!overriddenSeen.has(overriddenDedupeKey)) {
+    overriddenSeen.add(overriddenDedupeKey);
+    options.onExplicitModelOverridden?.({
+      callerAgentId: episodeCaller,
+      roleId: role.id,
+      requestedRef: requestedRef as string,
+      effectiveRef: formatModelRef(outcome),
+    });
+  }
+  return {
+    ...request,
+    config: nextConfig,
+    labels: { ...extended.labels, [MODEL_OVERRIDDEN_LABEL]: requestedRef as string },
+  };
 }

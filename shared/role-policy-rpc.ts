@@ -54,6 +54,20 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   model: z.string().optional(),
   /** The tools this role removes. Applies even when `outcome` is "unconfigured". */
   deniedTools: z.array(z.string()),
+  /**
+   * Present only when the query named `requestedModel`: what the role
+   * router would actually do with that explicit request — honored because
+   * it's a member of the resolved role's own pool, or overridden by policy
+   * (mirrors the `before("agent.create")` precedence in role-router.ts).
+   */
+  requestedModelOverride: z
+    .object({
+      requestedRef: z.string(),
+      honored: z.boolean(),
+      /** The ref policy would run instead. Omitted when `honored` is true. */
+      effectiveRef: z.string().optional(),
+    })
+    .optional(),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 
@@ -85,7 +99,18 @@ export const roleModelPolicyRpc = {
   }),
   explain: defineRpc({
     name: "role-model-policy.explain",
-    input: z.object({ agentType: z.string().optional(), title: z.string().optional() }),
+    input: z.object({
+      agentType: z.string().optional(),
+      title: z.string().optional(),
+      /**
+       * Simulates an explicit `config.model` request against the resolved
+       * role, alongside `requestedProvider` (defaults to the pool family).
+       * When set, the result's `requestedModelOverride` reports whether the
+       * role router would honor it or override it.
+       */
+      requestedModel: z.string().optional(),
+      requestedProvider: z.string().optional(),
+    }),
     output: RoleModelPolicyExplainResultSchema,
   }),
 };

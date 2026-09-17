@@ -325,6 +325,80 @@ describe("role-model-policy RPC handlers", () => {
       expect(result.roleId).toBe("reviewer");
       expect(result.tier).toBe(3);
     });
+
+    describe("requestedModel — mirrors the role router's explicit-request precedence", () => {
+      it("reports honored=true when the requested model is a member of the role's pool", async () => {
+        const policy: RoleModelPolicy = {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((r) =>
+            r.id === "worker" ? { ...r, models: ["claude-sonnet-5", "claude-opus-5"] } : r,
+          ),
+        };
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5", "claude-opus-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "claude-backup", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog), poolCache }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5", requestedProvider: "claude-backup" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.requestedModelOverride).toEqual({
+          requestedRef: "claude-backup/claude-opus-5",
+          honored: true,
+        });
+      });
+
+      it("reports honored=false with the effective ref when the requested model is not in the role's pool", async () => {
+        const policy: RoleModelPolicy = {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((r) => (r.id === "worker" ? { ...r, models: ["claude-sonnet-5"] } : r)),
+        };
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5"])]]);
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog) }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5", requestedProvider: "claude-backup" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.requestedModelOverride).toEqual({
+          requestedRef: "claude-backup/claude-opus-5",
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+        });
+      });
+
+      it("reports honored=true when the role has no configured pool at all — nothing to override", async () => {
+        const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(DEFAULT_POLICY) }));
+
+        const result = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.requestedModelOverride).toEqual({
+          requestedRef: "claude/claude-opus-5",
+          honored: true,
+        });
+      });
+
+      it("omits requestedModelOverride entirely when no requestedModel was asked about", async () => {
+        const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(DEFAULT_POLICY) }));
+
+        const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
+
+        expect(result.requestedModelOverride).toBeUndefined();
+      });
+    });
   });
 });
 

@@ -132,6 +132,45 @@ before the upgrade can still save. The migrated document only lands on disk
 when you make some other change and save — which is also when the leader role
 below is persisted.
 
+### An explicit model request wins, but only within the role's own pool
+
+A caller can ask for a specific model directly (`mcp__paseo__create_agent`'s
+`provider` field as `provider/model`, or `config.model` on a session create).
+The role router's precedence:
+
+1. **The explicit request wins when it's a member of the resolved role's own
+   pool** — the caller is choosing among models the operator already
+   approved for this role, which policy should allow. The request passes
+   through untouched: model, provider, and account all stay exactly what was
+   asked for.
+2. **Policy wins otherwise.** The role's own ordered selection runs as usual
+   and the request is rewritten to it — but the override is never silent:
+   it's logged (`role-router: caller "…" explicitly requested "…", which is
+   not in role "…"'s pool; policy overrode it to "…"`), the created agent
+   gets a `paseo.model-overridden-by-policy` label carrying the ref that was
+   asked for, and the `role-model-policy.explain` RPC accepts optional
+   `requestedModel`/`requestedProvider` fields so the settings screen can
+   simulate the same decision (`requestedModelOverride: { requestedRef,
+   honored, effectiveRef? }`).
+
+"Member of the pool" means the requested `(provider, model)` matches one of
+the role's own configured entries by family — an account-agnostic entry
+matches any pooled account's provider id, the same way normal selection
+does. It is a literal-membership check, not a live-availability one: an
+approved model that's currently catalog-missing or capped everywhere is
+still honored if explicitly requested, exactly as a caller who set
+`config.model` directly always could before role tool-profile enforcement
+existed. A role with no configured pool at all has nothing to override, so
+every explicit request passes through untouched, matching the "unconfigured"
+pass-through behaviour above.
+
+This only applies when the daemon can actually tell a real request apart
+from "nothing was asked for": `config.model` arrives at this hook as
+`undefined` unless the caller set it (directly, or via `provider/model`
+syntax), so its presence is the explicit-request signal — the same one the
+account router already uses to decide whether a create asked for a specific
+model.
+
 ### Tool profiles
 
 pi-roles is explicit that role resolution is "guidance, not launch

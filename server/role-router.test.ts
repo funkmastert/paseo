@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import type { ResolvedPool } from "../shared/pool-config";
-import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
+import {
+  AGENT_ROLE_LABEL,
+  AGENT_TYPE_LABEL,
+  DEFAULT_POLICY,
+  MODEL_OVERRIDDEN_LABEL,
+  type RoleModelPolicy,
+} from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
 import type { ModelCatalog } from "./model-catalog";
 import { createRouter } from "./router";
@@ -584,6 +590,91 @@ describe("createRoleRouter", () => {
       const router = createRoleRouter(options);
       expect(() => router(request({ callerAgentId: "c1" }), fakeContext)).not.toThrow();
     }
+  });
+
+  describe("explicit model request precedence", () => {
+    // worker's pool: "claude-sonnet-5" is the top (only) pick.
+    const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };
+
+    it("honors an explicit request that IS a member of the role's pool, leaving it untouched", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5", "claude-opus-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] })),
+          poolCache: fakePoolCache(pool),
+        }),
+      );
+
+      // The caller asked for a specific pool account AND a specific model
+      // that isn't the role's top pick — but it's still one of the role's
+      // approved entries, so the request must survive untouched.
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result).toBeUndefined(); // byte-identical pass-through: nothing needed rewriting
+    });
+
+    it("overrides an explicit request that is NOT a member of the role's pool, and makes the override visible", () => {
+      const onExplicitModelOverridden = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+          poolCache: fakePoolCache(pool),
+          onExplicitModelOverridden,
+        }),
+      );
+
+      // Mirrors the observed bug: caller asks for claude-backup/claude-opus-5,
+      // but the worker role's pool only approves claude-sonnet-5.
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-sonnet-5");
+      expect(result?.labels).toMatchObject({ [MODEL_OVERRIDDEN_LABEL]: "claude-backup/claude-opus-5" });
+      expect(onExplicitModelOverridden).toHaveBeenCalledWith({
+        callerAgentId: "c1",
+        roleId: "worker",
+        requestedRef: "claude-backup/claude-opus-5",
+        effectiveRef: "claude-sonnet-5",
+      });
+    });
+
+    it("dedupes the override notification per (caller, role, requested ref)", () => {
+      const onExplicitModelOverridden = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+          poolCache: fakePoolCache(pool),
+          onExplicitModelOverridden,
+        }),
+      );
+      const req = () =>
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } });
+
+      router(req(), fakeContext);
+      router(req(), fakeContext);
+
+      expect(onExplicitModelOverridden).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not treat an unconfigured role's pass-through as an override", () => {
+      const onExplicitModelOverridden = vi.fn();
+      const router = createRoleRouter(baseOptions({ onExplicitModelOverridden })); // worker has no configured models
+
+      const result = router(
+        request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result).toBeUndefined();
+      expect(onExplicitModelOverridden).not.toHaveBeenCalled();
+    });
   });
 });
 

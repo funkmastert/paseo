@@ -9,6 +9,14 @@ export const AGENT_TYPE_LABEL = "paseo.agent-type";
 export const AGENT_ROLE_LABEL = "paseo.agent-role";
 
 /**
+ * Set by the role router (never read by it) when an explicitly requested
+ * model wasn't a member of the resolved role's pool and policy overrode it.
+ * Value is the ref the caller asked for, so the UI can show "model chosen by
+ * policy (you asked for X)" instead of silently swapping the model.
+ */
+export const MODEL_OVERRIDDEN_LABEL = "paseo.model-overridden-by-policy";
+
+/**
  * The role governing ROOT agents — creates with no `callerAgentId`, i.e. the
  * ones a human, the CLI, or the app starts. Nothing constrained those before,
  * which is exactly the agent that burned a whole weekly budget doing its

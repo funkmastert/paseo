@@ -91,6 +91,41 @@ export interface SelectModelOptions {
   modelBudgetThresholdPct?: number;
 }
 
+/** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
+export function formatModelRef(outcome: { provider: string | null; model: string }): string {
+  return outcome.provider === null ? outcome.model : `${outcome.provider}/${outcome.model}`;
+}
+
+/** Same shape as `AvailabilityPool`, kept separate so callers that only need family resolution don't have to construct a full pool. */
+export interface FamilyResolvablePool {
+  workers: ReadonlyArray<{ providerId: string }>;
+  leader: { providerId: string } | null;
+}
+
+/** Model refs use provider-family ids; a request's current provider may instead be a literal pool-worker/leader entry id. */
+export function familyOfProvider(pool: FamilyResolvablePool, providerId: string): string {
+  if (providerId === POOL_FAMILY) {
+    return POOL_FAMILY;
+  }
+  if (pool.workers.some((worker) => worker.providerId === providerId) || pool.leader?.providerId === providerId) {
+    return POOL_FAMILY;
+  }
+  return providerId;
+}
+
+/**
+ * Whether an explicitly requested (family, model) pair is literally one of
+ * the role's own configured entries — the caller choosing among models the
+ * operator already approved for this role, as opposed to asking for
+ * something the role was never configured to run.
+ */
+export function isRequestedModelApproved(role: RoleRecord, requestedFamily: string, requestedModel: string): boolean {
+  return role.models.some((ref) => {
+    const parsed = splitModelRef(ref);
+    return parsed !== null && parsed.model === requestedModel && modelRefFamily(parsed) === requestedFamily;
+  });
+}
+
 /**
  * Pure model selection: ordered intersection of role.models with the live
  * catalog. `role.models` empty -> UNCONFIGURED (byte-identical pass-through,

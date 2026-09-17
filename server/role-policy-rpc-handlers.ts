@@ -8,9 +8,9 @@ import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
-import { selectModel } from "./role-availability";
+import { familyOfProvider, formatModelRef, isRequestedModelApproved, selectModel } from "./role-availability";
 import { resolveRole } from "./role-resolve";
-import { AGENT_TYPE_LABEL } from "../shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, POOL_FAMILY } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
@@ -216,6 +216,30 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
       });
 
+      // Mirrors role-router.ts's precedence exactly: an explicit request
+      // wins when it's a member of the resolved role's own pool (or the
+      // role has no pool configured at all, so there's nothing to
+      // override); otherwise policy's own selection runs instead.
+      let requestedModelOverride: { requestedRef: string; honored: boolean; effectiveRef?: string } | undefined;
+      if (input.requestedModel) {
+        const requestedProvider = input.requestedProvider ?? POOL_FAMILY;
+        const requestedRef = `${requestedProvider}/${input.requestedModel}`;
+        const requestedFamily = familyOfProvider(pool, requestedProvider);
+        const honored =
+          resolution.role.models.length === 0 ||
+          isRequestedModelApproved(resolution.role, requestedFamily, input.requestedModel);
+        requestedModelOverride = honored
+          ? { requestedRef, honored: true }
+          : {
+              requestedRef,
+              honored: false,
+              // outcome can't actually be "unconfigured" here: that only
+              // happens when role.models is empty, which already forces
+              // honored=true above. requestedRef is a type-safe fallback.
+              effectiveRef: outcome.outcome === "unconfigured" ? requestedRef : formatModelRef(outcome),
+            };
+      }
+
       return {
         roleId: resolution.role.id,
         roleName: resolution.role.name,
@@ -228,6 +252,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         ...(outcome.outcome !== "unconfigured" && outcome.provider !== null
           ? { provider: outcome.provider }
           : {}),
+        ...(requestedModelOverride ? { requestedModelOverride } : {}),
       };
     },
   };

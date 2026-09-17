@@ -85,6 +85,10 @@ export default function contribute(server: PluginServerContext) {
             ? `[claude-account-pool] role-router: role "${episode.roleId}"'s resolved provider is not registered with the daemon for caller "${episode.callerAgentId}" (wanted "${episode.requestedModel}"); passing the request through untouched`
             : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
         ),
+      onExplicitModelOverridden: (episode) =>
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in role "${episode.roleId}"'s pool; policy overrode it to "${episode.effectiveRef}"`,
+        ),
     });
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({
       policyCache,
