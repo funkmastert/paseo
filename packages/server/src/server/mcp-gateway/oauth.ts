@@ -116,6 +116,19 @@ export function createGatewayOAuthClientProvider(
       return stateStore.create(serverName);
     },
     clientInformation(): OAuthClientInformationMixed | undefined {
+      // Returning anything here makes the SDK skip dynamic client registration entirely, so
+      // hand-supplied credentials are what let the gateway sign in to servers that never
+      // offered DCR. They outrank a stored registration: an operator who wrote a client id
+      // into the token store means that app, not whatever a past DCR sweep produced.
+      const preregistered = tokenStore.getClientCredentials(serverName);
+      if (preregistered) {
+        return {
+          client_id: preregistered.clientId,
+          ...(preregistered.clientSecret === undefined
+            ? {}
+            : { client_secret: preregistered.clientSecret }),
+        };
+      }
       return tokenStore.getClientInformation(serverName);
     },
     saveClientInformation(clientInformation: OAuthClientInformationFull): void {
@@ -150,16 +163,22 @@ export interface StartMcpGatewayAuthResult {
 /**
  * Begins the PKCE authorization-code flow for one server (F1/F3's "click
  * auth" action). Drives the SDK's `auth()` orchestrator end to end
- * (discovery, dynamic registration, PKCE challenge), capturing the URL it
+ * (discovery, client registration, PKCE challenge), capturing the URL it
  * would otherwise hand a browser — the daemon is headless, so the caller (a
  * wire RPC, added in U6) returns the URL to the client to open instead.
+ *
+ * Registration is dynamic only when the token store holds no pre-registered client for the
+ * server; when it does, the SDK uses that one and never asks the upstream to register.
  *
  * Live network coverage of this path (real discovery/DCR against a fixture
  * upstream) belongs to U2's local e2e suite alongside the callback route;
  * this unit's tests cover the state store and provider plumbing that feed it.
  */
 export async function startMcpGatewayAuthorization(params: {
+  serverName: string;
   serverUrl: string;
+  /** Named in the pre-registration error: the URI the operator's own OAuth app must allow. */
+  redirectUrl: string;
   provider: OAuthClientProvider;
 }): Promise<StartMcpGatewayAuthResult> {
   let capturedUrl: URL | undefined;
@@ -170,13 +189,52 @@ export async function startMcpGatewayAuthorization(params: {
     },
   };
 
-  const result = await runOAuthOrchestration(provider, { serverUrl: params.serverUrl });
+  let result: Awaited<ReturnType<typeof runOAuthOrchestration>>;
+  try {
+    result = await runOAuthOrchestration(provider, { serverUrl: params.serverUrl });
+  } catch (error) {
+    if (isDynamicClientRegistrationUnsupported(error)) {
+      throw new MissingOAuthClientError(params.serverName, params.redirectUrl);
+    }
+    throw error;
+  }
   if (result !== "REDIRECT" || !capturedUrl) {
     throw new Error(
       `Expected MCP gateway auth start to produce a redirect for "${params.serverUrl}"`,
     );
   }
   return { authorizationUrl: capturedUrl.toString() };
+}
+
+// The SDK raises this from `registerClient()` when the authorization server's metadata has no
+// `registration_endpoint`. It reads as a defect in the server; it is really a request for a
+// credential only the operator can supply, so it gets rewritten rather than surfaced.
+const DCR_UNSUPPORTED_SDK_MESSAGE = "does not support dynamic client registration";
+
+function isDynamicClientRegistrationUnsupported(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(DCR_UNSUPPORTED_SDK_MESSAGE);
+}
+
+/**
+ * Raised instead of the SDK's DCR complaint when a server needs an OAuth app registered by hand.
+ * The message is what the MCP status strip shows, so it names the file to edit, the shape to
+ * write, and the redirect URI the upstream app has to be registered with — none of which the
+ * user can derive from "incompatible auth server".
+ */
+export class MissingOAuthClientError extends Error {
+  constructor(
+    readonly serverName: string,
+    readonly redirectUrl: string,
+  ) {
+    super(
+      `MCP server "${serverName}" does not support dynamic client registration, so it needs an ` +
+        `OAuth app you register yourself. Register one with redirect URI ${redirectUrl}, then add ` +
+        `its credentials to $PASEO_HOME/mcp-gateway/tokens.json as servers."${serverName}" = ` +
+        `{"auth":"oauth","clientCredentials":{"clientId":"…","clientSecret":"…"}} ` +
+        `(omit clientSecret if the server issues none) and sign in again.`,
+    );
+    this.name = "MissingOAuthClientError";
+  }
 }
 
 /**

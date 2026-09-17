@@ -16,6 +16,11 @@ interface LoggerLike {
   warn(...args: unknown[]): void;
 }
 
+const PreregisteredOAuthClientSchema = z.object({
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1).optional(),
+});
+
 // KTD4: OAuth token records carry the SDK's own token/registration shapes verbatim (no
 // reshaping) plus the PKCE verifier saved between authorization-start and callback-exchange.
 // Static-auth records store header VALUES here — never in persisted-config.ts — because
@@ -24,6 +29,14 @@ const OAuthTokenRecordSchema = z.object({
   auth: z.literal("oauth"),
   tokens: OAuthTokensSchema.optional(),
   clientInformation: OAuthClientInformationFullSchema.optional(),
+  /** Credentials of an OAuth app registered with the upstream by hand, for servers whose
+   * authorization server has no dynamic-registration endpoint (Slack and friends). Kept here
+   * rather than config because `clientSecret` is a secret and config is broadcast to every
+   * client; config references the server by name and this file holds the credential, exactly as
+   * for static-auth headers. Deliberately not the SDK's `OAuthClientInformationFull` shape —
+   * that one requires `redirect_uris`, so a hand-written `{client_id, client_secret}` would fail
+   * validation and take the whole token file down with it (readAll fails closed to empty). */
+  clientCredentials: PreregisteredOAuthClientSchema.optional(),
   codeVerifier: z.string().optional(),
   /** Non-auth headers an OAuth upstream additionally requires (e.g. zeeq's
    * `x-zeeq-prompts-repo` selector). Kept here rather than config for the same
@@ -46,6 +59,7 @@ const McpGatewayTokenFileSchema = z.object({
   servers: z.record(z.string(), McpGatewayTokenRecordSchema),
 });
 
+export type PreregisteredOAuthClient = z.infer<typeof PreregisteredOAuthClientSchema>;
 export type McpGatewayOAuthTokenRecord = z.infer<typeof OAuthTokenRecordSchema>;
 export type McpGatewayStaticTokenRecord = z.infer<typeof StaticTokenRecordSchema>;
 export type McpGatewayTokenRecord = z.infer<typeof McpGatewayTokenRecordSchema>;
@@ -136,6 +150,10 @@ export class McpGatewayTokenStore {
 
   saveClientInformation(serverName: string, clientInformation: OAuthClientInformationFull): void {
     this.patchOAuthRecord(serverName, { clientInformation });
+  }
+
+  getClientCredentials(serverName: string): PreregisteredOAuthClient | undefined {
+    return this.getOAuthRecord(serverName)?.clientCredentials;
   }
 
   getCodeVerifier(serverName: string): string | undefined {

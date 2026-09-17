@@ -165,6 +165,53 @@ describe("McpGatewayTokenStore", () => {
     expect(store.getOAuthTokens("github")).toBeUndefined();
   });
 
+  test("a hand-written pre-registered client record is readable and keeps the rest of the file", () => {
+    const paseoHome = createTempHome();
+    const filePath = path.join(paseoHome, TOKENS_RELATIVE_PATH);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        servers: {
+          slack: {
+            auth: "oauth",
+            clientCredentials: { clientId: "slack-app-id", clientSecret: "slack-app-secret" },
+          },
+          zeeq: { auth: "oauth", tokens: { access_token: "at-1", token_type: "Bearer" } },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const store = new McpGatewayTokenStore(paseoHome);
+    expect(store.getClientCredentials("slack")).toEqual({
+      clientId: "slack-app-id",
+      clientSecret: "slack-app-secret",
+    });
+    // A typo in one server's record must not take the whole file down with it, so prove the
+    // neighbouring record still reads after a hand edit.
+    expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "at-1", token_type: "Bearer" });
+  });
+
+  test("a pre-registered client without a secret is accepted — public clients have none", () => {
+    const paseoHome = createTempHome();
+    const filePath = path.join(paseoHome, TOKENS_RELATIVE_PATH);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        servers: { slack: { auth: "oauth", clientCredentials: { clientId: "public-app" } } },
+      }),
+      { mode: 0o600 },
+    );
+
+    expect(new McpGatewayTokenStore(paseoHome).getClientCredentials("slack")).toEqual({
+      clientId: "public-app",
+    });
+  });
+
   test("writing after a malformed read still succeeds", () => {
     const paseoHome = createTempHome();
     const filePath = path.join(paseoHome, TOKENS_RELATIVE_PATH);

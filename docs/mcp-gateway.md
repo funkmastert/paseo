@@ -48,15 +48,39 @@ The redirect URL is the daemon's own reachable address (the service-proxy public
 
 Static-auth servers have nothing to authorize interactively; store their header values in the token store keyed by server name.
 
+### Servers with a pre-registered OAuth app
+
+Step 2 registers a client with the upstream on the fly (RFC 7591 dynamic client registration). Plenty of servers — Slack among them — never offer that: their authorization-server metadata has no `registration_endpoint`, and you are expected to create an OAuth app in their own console. Sign-in on those fails until you give the daemon that app's credentials.
+
+Put them in the token store, not config — a client secret is a secret, and config is broadcast to every connected client. The server name in `mcpGateway.servers` is the reference; the record under the same name holds the credential, exactly as for static-auth headers:
+
+```json
+{
+  "version": 1,
+  "servers": {
+    "slack": {
+      "auth": "oauth",
+      "clientCredentials": { "clientId": "…", "clientSecret": "…" }
+    }
+  }
+}
+```
+
+Omit `clientSecret` for a public client. Register the app's redirect URI as the daemon's `/mcp/gateway/oauth/callback` URL — the error the strip shows when credentials are missing names the exact URL to use. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
+
+Stored credentials outrank anything a past dynamic registration saved, and the SDK never registers when they are present, so the hand-written record is never overwritten.
+
 ## Adopting a session-reported server
 
 Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows with a reporter count. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the definition the way the CLI would for that session — local scope first, then the project `.mcp.json`, then user scope, with `${VAR}` expanded against the session's provider env (`per-dir-stdio.ts`'s remote reader) — adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
+
+Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are.
 
 claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
 
 ## Tokens
 
-All upstream credentials — OAuth tokens, dynamic client registrations, PKCE verifiers, static headers — live in `$PASEO_HOME/mcp-gateway/tokens.json`, written 0600 via the daemon's private-file helper. Tokens never appear in config, wire payloads, or logs. Bulk rotation beyond per-server re-auth from the strip is not implemented; delete the file and re-auth to start over.
+All upstream credentials — OAuth tokens, client registrations (dynamic or pre-registered), PKCE verifiers, static headers — live in `$PASEO_HOME/mcp-gateway/tokens.json`, written 0600 via the daemon's private-file helper. Tokens never appear in config, wire payloads, or logs. Bulk rotation beyond per-server re-auth from the strip is not implemented; delete the file and re-auth to start over.
 
 ## Session injection
 

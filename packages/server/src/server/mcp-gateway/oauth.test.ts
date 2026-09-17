@@ -1,10 +1,20 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { McpGatewayTokenStore } from "./token-store.js";
-import { McpGatewayOAuthStateStore, createGatewayOAuthClientProvider } from "./oauth.js";
+import {
+  McpGatewayOAuthStateStore,
+  MissingOAuthClientError,
+  createGatewayOAuthClientProvider,
+} from "./oauth.js";
+
+function writeTokenFile(paseoHome: string, servers: Record<string, unknown>): void {
+  const filePath = path.join(paseoHome, "mcp-gateway", "tokens.json");
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileSync(filePath, JSON.stringify({ version: 1, servers }), { mode: 0o600 });
+}
 
 const tempDirs: string[] = [];
 
@@ -127,6 +137,49 @@ describe("createGatewayOAuthClientProvider", () => {
     });
   });
 
+  test("a pre-registered client is returned to the SDK, which is what skips dynamic registration", async () => {
+    const paseoHome = createTempHome();
+    writeTokenFile(paseoHome, {
+      slack: {
+        auth: "oauth",
+        clientCredentials: { clientId: "slack-app-id", clientSecret: "slack-app-secret" },
+      },
+    });
+    const provider = createGatewayOAuthClientProvider({
+      serverName: "slack",
+      tokenStore: new McpGatewayTokenStore(paseoHome),
+      stateStore: new McpGatewayOAuthStateStore(),
+      redirectUrl: "https://daemon.example.test/mcp/gateway/oauth/callback",
+    });
+
+    expect(await provider.clientInformation()).toEqual({
+      client_id: "slack-app-id",
+      client_secret: "slack-app-secret",
+    });
+  });
+
+  test("a pre-registered client outranks a client the daemon registered dynamically", async () => {
+    const paseoHome = createTempHome();
+    writeTokenFile(paseoHome, {
+      slack: {
+        auth: "oauth",
+        clientCredentials: { clientId: "slack-app-id" },
+        clientInformation: {
+          client_id: "stale-dcr-client",
+          redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+        },
+      },
+    });
+    const provider = createGatewayOAuthClientProvider({
+      serverName: "slack",
+      tokenStore: new McpGatewayTokenStore(paseoHome),
+      stateStore: new McpGatewayOAuthStateStore(),
+      redirectUrl: "https://daemon.example.test/mcp/gateway/oauth/callback",
+    });
+
+    expect(await provider.clientInformation()).toEqual({ client_id: "slack-app-id" });
+  });
+
   test("saveCodeVerifier()/codeVerifier() round-trip through the token store", async () => {
     const { provider } = buildProvider("github");
     await provider.saveCodeVerifier("verifier-1");
@@ -184,5 +237,21 @@ describe("createGatewayOAuthClientProvider", () => {
     const url = new URL("https://github.com/login/oauth/authorize?client_id=x");
     provider.redirectToAuthorization(url);
     expect(onRedirect).toHaveBeenCalledWith(url);
+  });
+});
+
+describe("MissingOAuthClientError", () => {
+  test("tells the operator what to supply and where, not what the SDK could not do", () => {
+    const error = new MissingOAuthClientError(
+      "slack",
+      "https://daemon.example.test/mcp/gateway/oauth/callback",
+    );
+
+    expect(error.message).toContain('"slack"');
+    expect(error.message).toContain("https://daemon.example.test/mcp/gateway/oauth/callback");
+    expect(error.message).toContain("$PASEO_HOME/mcp-gateway/tokens.json");
+    expect(error.message).toContain("clientCredentials");
+    // The SDK's own phrasing ("Incompatible auth server") names a limitation with no next step.
+    expect(error.message).not.toContain("Incompatible auth server");
   });
 });
