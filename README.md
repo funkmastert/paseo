@@ -200,8 +200,8 @@ and user settings files.
 | Profile | Denies |
 | --- | --- |
 | `unrestricted` | Nothing. The default, so upgrading changes no behaviour. |
-| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, `Task`, `Agent` |
-| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash` |
+| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `Task`, `Agent` |
+| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below |
 | `write` | Nothing — file and shell tools are the point of this profile. |
 | `custom` | Whatever you list. |
 
@@ -213,6 +213,65 @@ already removed it.
 Restrictions only accumulate. Whatever the caller already denied stays denied
 — a plugin that can silently widen a caller's own sandbox would be a worse bug
 than an unenforced role.
+
+#### A denial only holds if every tool with the same reach is denied
+
+`Bash` is not the only way to get a shell. Paseo's own MCP tools can open a
+terminal and run anything in it without ever calling a tool named `Bash`: an
+agent restricted to `read-only` was observed doing exactly this in
+production, using `mcp__paseo__create_terminal` /
+`send_terminal_keys` / `capture_terminal` to run `git`, `python3`, and
+arbitrary commands after finding its native `Bash` denied. Both enforcement
+layers (`disallowedTools` and `settings.permissions.deny`) only ever act on
+the exact tool name given to them, so a profile that denies `Bash` without
+also denying its MCP equivalents is not actually denying shell access — it
+just changes which tool name reaches it.
+
+`orchestrator` and `read-only` therefore also deny:
+
+- The terminal family: `mcp__paseo__create_terminal`, `send_terminal_keys`,
+  `kill_terminal`, `capture_terminal`.
+- The workspace-script family: `mcp__paseo__start_workspace_script`,
+  `stop_workspace_script` — starting a configured `paseo.json` script runs
+  whatever that script does, the same reach as a shell.
+
+`mcp__paseo__list_terminals` and `mcp__paseo__list_workspace_scripts` stay
+available under `read-only`: they report state (terminal ids, script status)
+and can't execute or mutate anything on their own.
+
+`orchestrator` keeps `mcp__paseo__create_agent` and the rest of the
+agent-management tools deliberately — delegating to a new, independently
+role-resolved, separately-accounted agent is the *entire point* of that
+profile (see the leader section below). This does mean a `read-only` or
+`reviewer` agent that still has `create_agent` can spawn an unrestricted
+child and ask it to make the edit it wants. That is not treated as a hole
+here: the spawned child resolves its own role and runs on its own account
+through the same `agent.create` hook, which is exactly the sanctioned
+"delegate, don't do it yourself" path the whole leader/orchestrator design
+depends on — closing it would mean denying delegation itself, not closing an
+accidental escape. The same reasoning applies to `mcp__paseo__send_agent_prompt`:
+an agent that already knows another agent's id can ask it to do something,
+but that is asking a (separately authorized) peer, not executing anything
+itself.
+
+**This is not, and cannot be made, airtight.** Two things are explicitly out
+of scope and left open:
+
+- **Browser automation** (`mcp__paseo__browser_*`) is not denied by any
+  built-in profile. `browser_click`/`browser_fill`/`browser_type`/
+  `browser_upload`/`browser_evaluate` can submit forms, upload files, and run
+  arbitrary JavaScript in a page — real-world mutation, just not to the local
+  filesystem or shell. If you need a profile that can investigate without
+  being able to act on the open web, build a `custom` profile that also
+  denies the `browser_*` tools you don't want.
+- **MCP servers outside this plugin's registry** (anything configured in the
+  agent's own `~/.claude` config, not Paseo's) are invisible to this code
+  entirely. `disallowedTools`/`settings.permissions.deny` can only deny tools
+  by name; if an operator's own MCP setup exposes a shell or file-mutation
+  tool under some other server's name, no profile here knows to deny it. A
+  `read-only` or `orchestrator` role is a guarantee about Paseo's own tools
+  and Claude's native ones — not a sandbox over everything an agent's MCP
+  configuration can reach.
 
 ### The leader role, and why restricting it forces real delegation
 
@@ -242,6 +301,54 @@ what makes delegation the only option left.
 
 The leader role ships unconfigured and unrestricted: installing this changes
 nothing until you set it up.
+
+### A guessed role may pick a model. It may not take tools away.
+
+`resolveRole` resolves every non-root create in one of four tiers, most to
+least direct:
+
+1. An explicit `paseo.agent-type` label mapped in `agentTypeMappings`.
+2. An explicit `paseo.agent-role` label naming a role by name/alias.
+3. Automatic classification: the title + initial prompt matched against
+   configured role names/aliases, then against the built-in `reviewer`/
+   `advisor` seed vocabulary (words like "review", "verify", "check",
+   "research", "investigate").
+4. The bare default (`worker`), when there's no title/prompt text to
+   classify at all.
+
+Tiers 1 and 2 are the caller stating its role outright — real evidence. Tiers
+3 and 4 are guesses from free text, and an ordinary implementation brief
+routinely contains words like "check" or "verify" ("check types and verify
+tests pass before committing") without being a review task at all. The
+`leader` role for root agents sits outside this ladder entirely: a root agent
+(no `callerAgentId`) genuinely *is* the leader by definition, so its
+resolution is deterministic, not classified (see the leader section above).
+
+**Model selection uses all four tiers; tool enforcement only trusts tiers 1,
+2, and the deterministic leader tier.** The two decisions don't carry the
+same risk: a wrong model guess costs a little quality, while a wrong tool
+guess can silently take `Write`/`Edit`/`Bash` away from an agent that has
+already started a task, discovered only when it tries to use them and can't
+— the exact failure that motivated this rule. So a role resolved by tier 3 or
+tier 4 still picks its configured model as normal, but its `toolProfile` is
+withheld in favor of `unrestricted`, and the substitution is logged (once per
+caller+role) so it's discoverable rather than a silent, unexplained
+capability loss.
+
+**Practical consequence: if you want a restricted role, label it.** Don't
+rely on the classifier inferring `reviewer` or `advisor` from wording alone —
+set `paseo.agent-type` (or `paseo.agent-role`) explicitly on any agent you
+spawn that should actually be tool-restricted. An agent-type mapped to a
+restricted role, or a role named directly via the label, is enforced exactly
+as configured; anything classified from free text is not.
+
+There is an escape hatch for operators confident enough in their own
+classification vocabulary to want the old (riskier) behaviour anyway:
+`enforceToolsOnClassifiedRoles`, a policy-level boolean, default **off**.
+When on, tiers 3 and 4 enforce their resolved role's tool profile too, with
+no distinction from an explicit label. It isn't exposed on the settings
+screen yet — set it directly on the stored `agentModelPolicy` document if you
+need it.
 
 ### Fable budget gate
 

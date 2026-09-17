@@ -12,7 +12,7 @@ import { createHealthTracker } from "./health";
 import type { ModelCatalog } from "./model-catalog";
 import { createRouter } from "./router";
 import { createRecentAgentTypes } from "./recent-agent-types";
-import { createRoleRouter, type RoleRouterOptions } from "./role-router";
+import { createRoleRouter, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
 
 type CreateAgentRequest = PluginBeforeRequests["agent.create"];
 
@@ -239,12 +239,22 @@ describe("createRoleRouter", () => {
       };
     }
 
+    // These tests exercise the profile-MERGE mechanics (union with a caller's
+    // existing deny list, model rewrite + tool rewrite together, etc.), not
+    // tier gating — so every request here declares the role explicitly via
+    // labels[AGENT_ROLE_LABEL] (tier 2 = evidence), keeping the resolved role
+    // "worker" without depending on the tier-3/4 default. Tier gating itself
+    // is covered in the "tool profile gating by resolution tier" block below.
+    function declaredWorker(overrides: Record<string, unknown> = {}) {
+      return request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" }, ...overrides });
+    }
+
     it("enforces the profile even when the role has NO configured models", () => {
       const router = createRoleRouter(
         baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
       );
 
-      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+      const result = router(declaredWorker(), fakeContext);
 
       const options = result?.config.providerOptions as { disallowedTools: string[] };
       expect(options.disallowedTools).toContain("Bash");
@@ -254,7 +264,7 @@ describe("createRoleRouter", () => {
     it("still passes through byte-identical for the default unrestricted profile", () => {
       const router = createRoleRouter(baseOptions());
 
-      expect(router(request({ callerAgentId: "c1" }), fakeContext)).toBeUndefined();
+      expect(router(declaredWorker(), fakeContext)).toBeUndefined();
     });
 
     it("applies both the model rewrite and the tool profile together", () => {
@@ -271,7 +281,7 @@ describe("createRoleRouter", () => {
         }),
       );
 
-      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+      const result = router(declaredWorker(), fakeContext);
 
       expect(result?.config.model).toBe("gpt-5.1");
       const options = result?.config.providerOptions as { disallowedTools: string[] };
@@ -285,8 +295,7 @@ describe("createRoleRouter", () => {
       );
 
       const result = router(
-        request({
-          callerAgentId: "c1",
+        declaredWorker({
           config: { provider: "claude", cwd: "/tmp", providerOptions: { disallowedTools: ["Bash"] } },
         }),
         fakeContext,
@@ -311,7 +320,7 @@ describe("createRoleRouter", () => {
         }),
       );
 
-      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+      const result = router(declaredWorker(), fakeContext);
 
       expect(result?.config.model).toBe("claude-sonnet"); // no model rewrite: target is gone
       const options = result?.config.providerOptions as { disallowedTools: string[] };
@@ -324,6 +333,157 @@ describe("createRoleRouter", () => {
       );
 
       expect(router(request({}), fakeContext)).toBeUndefined();
+    });
+  });
+
+  describe("tool profile gating by resolution tier", () => {
+    function policyWithWorkerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === "worker" ? { ...role, toolProfile: profile } : role)),
+      };
+    }
+
+    function policyWithReviewerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === "reviewer" ? { ...role, toolProfile: profile } : role)),
+      };
+    }
+
+    function noTools(result: ReturnType<RoleCreateRouter>): boolean {
+      const options = result?.config.providerOptions as { disallowedTools?: string[] } | undefined;
+      return options?.disallowedTools === undefined;
+    }
+
+    it("REGRESSION: a realistic implementation prompt containing 'check'/'verify' does NOT lose its tools", () => {
+      // Exactly the shape of the bug that shipped: an implementation brief
+      // routinely tells the agent to check types or verify tests, which
+      // matches REVIEWER_SEED_RE and classifies as tier-3 "reviewer" even
+      // though the agent is meant to write code.
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithReviewerProfile({ kind: "read-only" })) }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          initialPrompt:
+            "Implement the new caching layer, add a test file, then check types and verify all tests pass before committing.",
+        }),
+        fakeContext,
+      );
+
+      expect(noTools(result)).toBe(true); // no disallowedTools at all: Write/Edit/Bash stay available
+    });
+
+    it("tier 4 (bare default, no title/prompt at all) also withholds the profile", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
+      );
+
+      const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(noTools(result)).toBe(true);
+    });
+
+    it("tier 1 (explicit paseo.agent-type mapping) still enforces the profile", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", labels: { [AGENT_TYPE_LABEL]: "worker" } }),
+        fakeContext,
+      );
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+    });
+
+    it("tier 2 (explicit paseo.agent-role label) still enforces the profile", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithReviewerProfile({ kind: "read-only" })) }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "reviewer" } }),
+        fakeContext,
+      );
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+    });
+
+    it("the deterministic leader tier (root agent) still enforces the profile", () => {
+      const policy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "leader" ? { ...role, toolProfile: { kind: "orchestrator" as const } } : role,
+        ),
+      };
+      const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }));
+
+      const result = router(request({}), fakeContext); // no callerAgentId: root agent
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+    });
+
+    it("model selection still applies to a tier-3 classified role even though its tool profile is withheld", () => {
+      const policy = {
+        ...policyWithReviewerProfile({ kind: "read-only" }),
+        roles: policyWithReviewerProfile({ kind: "read-only" }).roles.map((role) =>
+          role.id === "reviewer" ? { ...role, models: ["codex/gpt-5.1"] } : role,
+        ),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "c1", initialPrompt: "please review and verify this" }), fakeContext);
+
+      expect(result?.config.model).toBe("gpt-5.1"); // model still routed to reviewer's pool
+      expect(noTools(result)).toBe(true); // but the tool restriction is withheld
+    });
+
+    it("escape hatch: enforceToolsOnClassifiedRoles=true enforces the profile even for a tier-3 classified role", () => {
+      const policy = { ...policyWithReviewerProfile({ kind: "read-only" }), enforceToolsOnClassifiedRoles: true };
+      const router = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }));
+
+      const result = router(request({ callerAgentId: "c1", initialPrompt: "please review and verify this" }), fakeContext);
+
+      const options = result?.config.providerOptions as { disallowedTools: string[] };
+      expect(options.disallowedTools).toContain("Bash");
+    });
+
+    it("does not fire onToolProfileWithheld when the classified role's own profile is already unrestricted", () => {
+      const onToolProfileWithheld = vi.fn();
+      const router = createRoleRouter(baseOptions({ onToolProfileWithheld })); // DEFAULT_POLICY: every profile unrestricted
+
+      router(request({ callerAgentId: "c1", initialPrompt: "please review and verify this" }), fakeContext);
+
+      expect(onToolProfileWithheld).not.toHaveBeenCalled();
+    });
+
+    it("fires onToolProfileWithheld exactly once per (caller, role), not once per create", () => {
+      const onToolProfileWithheld = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithReviewerProfile({ kind: "read-only" })),
+          onToolProfileWithheld,
+        }),
+      );
+      const req = () => request({ callerAgentId: "c1", initialPrompt: "please review and verify this" });
+
+      router(req(), fakeContext);
+      router(req(), fakeContext);
+
+      expect(onToolProfileWithheld).toHaveBeenCalledTimes(1);
+      expect(onToolProfileWithheld).toHaveBeenCalledWith({ callerAgentId: "c1", roleId: "reviewer", tier: 3 });
     });
   });
 

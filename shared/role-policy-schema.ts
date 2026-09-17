@@ -113,6 +113,17 @@ export const RoleModelPolicySchema = z
       .min(1)
       .max(100)
       .default(DEFAULT_MODEL_BUDGET_THRESHOLD_PCT),
+    /**
+     * Escape hatch, default OFF: when true, a role resolved by tier-3 seed
+     * classification or the tier-4 default also has its tool profile
+     * enforced, not just its model. Off by default because a classified role
+     * is a guess about what the agent's prompt LOOKS like it's doing, and a
+     * wrong guess here doesn't cost quality (a model pick) — it silently
+     * removes Write/Edit/Bash from an agent already mid-task. See
+     * `resolveRole`'s tier semantics in server/role-resolve.ts and the role
+     * router's tool-profile gating in server/role-router.ts.
+     */
+    enforceToolsOnClassifiedRoles: z.boolean().default(false),
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -209,6 +220,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
     { id: LEADER_ROLE_ID, name: LEADER_ROLE_ID, standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+  enforceToolsOnClassifiedRoles: false,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",

@@ -44,6 +44,28 @@ describe("profileDeniedTools", () => {
     expect(denied({ kind: "read-only" })).toContain("Bash");
   });
 
+  it("read-only and orchestrator deny the Paseo MCP terminal and workspace-script tools, not just Bash", () => {
+    for (const kind of ["read-only", "orchestrator"] as const) {
+      const tools = denied({ kind });
+      for (const tool of [
+        "mcp__paseo__create_terminal",
+        "mcp__paseo__send_terminal_keys",
+        "mcp__paseo__kill_terminal",
+        "mcp__paseo__capture_terminal",
+        "mcp__paseo__start_workspace_script",
+        "mcp__paseo__stop_workspace_script",
+      ]) {
+        expect(tools, `${kind} must deny ${tool}`).toContain(tool);
+      }
+    }
+  });
+
+  it("read-only keeps the read-only members of the terminal/workspace-script families", () => {
+    const tools = denied({ kind: "read-only" });
+    expect(tools).not.toContain("mcp__paseo__list_terminals");
+    expect(tools).not.toContain("mcp__paseo__list_workspace_scripts");
+  });
+
   it("write denies nothing: file and shell tools are the point of the profile", () => {
     expect(denied({ kind: "write" })).toEqual([]);
   });

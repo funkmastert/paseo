@@ -114,6 +114,10 @@ async function performWrite(
   const candidate: RoleModelPolicy = {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     ...candidateDoc,
+    // Not part of the settings screen's editable surface yet — carry the
+    // stored value through untouched so saving any other field can't
+    // silently reset this escape hatch back to its default.
+    enforceToolsOnClassifiedRoles: current.policy.enforceToolsOnClassifiedRoles,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);

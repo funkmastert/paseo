@@ -17,6 +17,7 @@ const VALID_POLICY: RoleModelPolicy = {
     { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+  enforceToolsOnClassifiedRoles: false,
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };

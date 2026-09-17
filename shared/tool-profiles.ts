@@ -18,6 +18,16 @@ import { z } from "zod";
  *   project and user settings files. Defence in depth for anything that
  *   reaches the permission layer anyway (notably sidechain subagents, which
  *   run inside the parent session).
+ *
+ * A denial is only real if every tool with the same reach is denied.
+ * `Bash` is one tool name among several with shell-equivalent reach: Paseo's
+ * own MCP tools can open a terminal or run a workspace's configured script
+ * just as well (see `MCP_SHELL_TOOLS` below), and neither enforcement layer
+ * closes that path unless it's named explicitly — `disallowedTools` and
+ * `settings.permissions.deny` only ever act on the exact tool name given
+ * them. This does not (and cannot) cover mutation reachable through MCP
+ * servers outside Paseo's own registry — see the README's "Tool profiles"
+ * section for what's out of scope and why.
  */
 
 /**
@@ -40,6 +50,33 @@ const SHELL_TOOLS = ["Bash"] as const;
  * another account.
  */
 const NATIVE_SUBAGENT_TOOLS = ["Task", "Agent"] as const;
+
+/**
+ * Paseo's own MCP tools that reach a shell or run arbitrary configured
+ * commands — the same capability `Bash` grants, through a completely
+ * different tool name. Denying `Bash` without denying these is not a denial:
+ * a session can `mcp__paseo__create_terminal` a terminal, `send_terminal_keys`
+ * to run anything in it, and `capture_terminal` to read the result, or
+ * `start_workspace_script` an operator-configured script — all without ever
+ * calling the tool named `Bash`. Verified against the fork's tool
+ * registrations in `packages/server/src/server/agent/tools/paseo-tools.ts`
+ * (`registerTool("create_terminal", ...)` etc.); MCP tool names reach
+ * `disallowedTools`/`settings.permissions.deny` as `mcp__paseo__<name>`, the
+ * same mechanism `NATIVE_SUBAGENT_TOOLS` already relies on for `Task`/`Agent`.
+ *
+ * Deliberately excludes `mcp__paseo__list_terminals` and
+ * `mcp__paseo__list_workspace_scripts`: they report state (terminal ids,
+ * script status) and can't execute or mutate anything themselves, so they
+ * stay available to `read-only`.
+ */
+const MCP_SHELL_TOOLS = [
+  "mcp__paseo__create_terminal",
+  "mcp__paseo__send_terminal_keys",
+  "mcp__paseo__kill_terminal",
+  "mcp__paseo__capture_terminal",
+  "mcp__paseo__start_workspace_script",
+  "mcp__paseo__stop_workspace_script",
+] as const;
 
 export const TOOL_PROFILE_IDS = ["unrestricted", "orchestrator", "read-only", "write", "custom"] as const;
 export type ToolProfileId = (typeof TOOL_PROFILE_IDS)[number];
@@ -69,10 +106,12 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
   unrestricted: [],
   // Delegation and coordination only — cannot read, write, or run anything,
   // and cannot fan out natively onto its own account either.
-  orchestrator: [...READ_TOOLS, ...EDIT_TOOLS, ...SHELL_TOOLS, ...NATIVE_SUBAGENT_TOOLS],
+  orchestrator: [...READ_TOOLS, ...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS, ...NATIVE_SUBAGENT_TOOLS],
   // Can investigate, cannot change anything. Bash is denied because a shell
-  // redirect writes files just as well as Write does.
-  "read-only": [...EDIT_TOOLS, ...SHELL_TOOLS],
+  // redirect writes files just as well as Write does; MCP_SHELL_TOOLS is
+  // denied for the same reason one level up the stack — a terminal opened
+  // through Paseo's own MCP tools is still a shell.
+  "read-only": [...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS],
   // The implementer kit: file and shell tools are exactly what this role is
   // for, so it denies nothing. It differs from `unrestricted` in intent only.
   write: [],

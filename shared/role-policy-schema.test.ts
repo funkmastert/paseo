@@ -30,6 +30,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
     ],
     agentTypeMappings: {},
     modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+    enforceToolsOnClassifiedRoles: false,
     revision: "r1",
     ...overrides,
   };

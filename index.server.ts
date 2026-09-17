@@ -79,6 +79,10 @@ export default function contribute(server: PluginServerContext) {
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
         ),
+      onToolProfileWithheld: (episode) =>
+        console.error(
+          `[claude-account-pool] role-router: role "${episode.roleId}" was resolved by tier-${episode.tier} classification for caller "${episode.callerAgentId}", not an explicit label/mapping; its tool profile was withheld (model selection still applies) — label the agent with paseo.agent-type or paseo.agent-role to enforce it`,
+        ),
       onRoleUnavailable: (episode) =>
         console.error(
           episode.reason === "provider-not-registered"

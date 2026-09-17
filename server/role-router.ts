@@ -1,6 +1,6 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
-import { AGENT_TYPE_LABEL, MODEL_OVERRIDDEN_LABEL, type RoleRecord } from "../shared/role-policy-schema";
-import { applyToolProfile } from "../shared/tool-profiles";
+import { AGENT_TYPE_LABEL, MODEL_OVERRIDDEN_LABEL, type RoleModelPolicy, type RoleRecord } from "../shared/role-policy-schema";
+import { applyToolProfile, DEFAULT_TOOL_PROFILE, type ToolProfile } from "../shared/tool-profiles";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -9,7 +9,7 @@ import type { RecentAgentTypes } from "./recent-agent-types";
 import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
 import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
-import { resolveLeaderRole, resolveRole } from "./role-resolve";
+import { resolveLeaderRole, resolveRole, type ResolveRoleTier } from "./role-resolve";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
 const ROOT_AGENT_CALLER = "(root agent)";
@@ -32,6 +32,13 @@ export interface RoleUnavailableEpisode {
    * entirely rather than pointing the request at a dead provider.
    */
   reason: "no-eligible-model" | "provider-not-registered";
+}
+
+export interface ToolProfileWithheldEpisode {
+  callerAgentId: string;
+  roleId: string;
+  /** The tier the role was resolved at — always 3 or 4 when this fires. */
+  tier: ResolveRoleTier;
 }
 
 export interface ExplicitModelOverriddenEpisode {
@@ -68,6 +75,15 @@ export interface RoleRouterOptions {
   providerIds?: ProviderIdCache;
   /** Called (deduplicated per caller+value) when a caller declared an unrecognized labels[AGENT_ROLE_LABEL] value. */
   onDeclaredRoleUnknown?: (episode: DeclaredRoleUnknownEpisode) => void;
+  /**
+   * Called (deduplicated per caller+role) when a role's tool profile was
+   * withheld because the role came from tier-3/4 classification rather than
+   * explicit evidence (a label, a mapping, or the deterministic leader tier),
+   * and `enforceToolsOnClassifiedRoles` is off. Only fires when the withheld
+   * profile would actually have restricted something — an already-unrestricted
+   * role has nothing to withhold.
+   */
+  onToolProfileWithheld?: (episode: ToolProfileWithheldEpisode) => void;
   /** Called (deduplicated per role, re-armed on recovery) when a role has no eligible model and falls back to models[0]. */
   onRoleUnavailable?: (episode: RoleUnavailableEpisode) => void;
   /** Called (deduplicated per caller+role+requestedRef) when an explicitly requested model wasn't in the resolved role's pool and policy overrode it. */
@@ -95,9 +111,12 @@ type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
 type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 
 /**
- * The `providerOptions` a request should carry once the role's tool profile
- * is merged in, or undefined when the profile restricts nothing (so the
- * request can stay byte-identical).
+ * The `providerOptions` a request should carry once a tool profile is merged
+ * in, or undefined when the profile restricts nothing (so the request can
+ * stay byte-identical). Takes the profile directly rather than a role, since
+ * the caller may need to substitute `DEFAULT_TOOL_PROFILE` for a role whose
+ * own profile isn't backed by enough evidence to enforce — see
+ * `toolProfileIsEvidenceBased` below.
  *
  * The cast is the same structural read the rest of this file uses: the wire
  * schema for `providerOptions` is free-form JSON, and the profile merge only
@@ -105,11 +124,37 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
  */
 function enforceToolProfile(
   request: PluginBeforeRequests["agent.create"],
-  role: RoleRecord,
+  toolProfile: ToolProfile,
 ): ProviderOptionsValue | undefined {
-  return applyToolProfile(request.config.providerOptions, role.toolProfile) as
-    | ProviderOptionsValue
-    | undefined;
+  return applyToolProfile(request.config.providerOptions, toolProfile) as ProviderOptionsValue | undefined;
+}
+
+/**
+ * Whether a role's own tool profile may be enforced, or must be withheld in
+ * favor of `DEFAULT_TOOL_PROFILE` (unrestricted).
+ *
+ * A guessed role may still choose a model — a wrong guess there costs a
+ * little quality. Tool restriction from a wrong guess is worse: it can
+ * silently strip Write/Edit/Bash from an agent mid-task, discovered only when
+ * it tries to use them. So tool enforcement demands a higher standard of
+ * evidence than model selection does:
+ *   - tier 1 (explicit `paseo.agent-type` mapping) and tier 2 (explicit
+ *     `paseo.agent-role` label) are the caller stating its role outright.
+ *   - `tier === undefined` is the deterministic leader tier: a root agent
+ *     (no `callerAgentId`) genuinely IS the leader, no classification
+ *     involved (see `resolveLeaderRole`'s own doc comment).
+ *   - tier 3 (seed/vocabulary text classification) and tier 4 (the bare
+ *     default) are both guesses from free text — an implementation prompt
+ *     that happens to contain "check" or "verify" classifies as `reviewer`
+ *     by tier 3 exactly as readily as a real review task does. Those tiers
+ *     may still pick a model; they may not take tools away, unless the
+ *     operator has explicitly opted in via `enforceToolsOnClassifiedRoles`.
+ */
+function toolProfileIsEvidenceBased(tier: ResolveRoleTier | undefined, policy: RoleModelPolicy): boolean {
+  if (tier === undefined || tier === 1 || tier === 2) {
+    return true;
+  }
+  return policy.enforceToolsOnClassifiedRoles === true;
 }
 
 /** Applies tool enforcement alone, on the paths that skip the model rewrite. */
@@ -136,16 +181,32 @@ function withToolProfile(
  * child through the usual tier 1-4 resolution, and a root agent (no
  * `callerAgentId`) to the `leader` role. Every failure mode is a passthrough —
  * this must never block agent creation.
+ *
+ * Model selection and tool enforcement are gated on different evidence
+ * standards. Every tier gets to influence which model runs — a wrong guess
+ * there just costs some quality. Only tier 1/2 (an explicit label or mapping)
+ * and the deterministic leader tier get to influence which TOOLS run — a
+ * wrong guess there can silently strip Write/Edit/Bash from an agent already
+ * mid-task, exactly what shipped and broke in production. See
+ * `toolProfileIsEvidenceBased` below.
  */
 export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredUnknownSeen = new Set<string>();
   const unavailableRoleIds = new Set<string>();
   const overriddenSeen = new Set<string>();
+  const toolProfileWithheldSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
 
   return function routeRoleForCreate(input) {
     try {
-      return routeRoleForCreateUnguarded(input, options, declaredUnknownSeen, unavailableRoleIds, overriddenSeen);
+      return routeRoleForCreateUnguarded(
+        input,
+        options,
+        declaredUnknownSeen,
+        unavailableRoleIds,
+        overriddenSeen,
+        toolProfileWithheldSeen,
+      );
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in resolve/select
@@ -170,6 +231,7 @@ function routeRoleForCreateUnguarded(
   declaredUnknownSeen: Set<string>,
   unavailableRoleIds: Set<string>,
   overriddenSeen: Set<string>,
+  toolProfileWithheldSeen: Set<string>,
 ): PluginBeforeRequests["agent.create"] | void {
   const { request } = input;
 
@@ -188,6 +250,7 @@ function routeRoleForCreateUnguarded(
   // unconstrained one. It now resolves to the `leader` role, which ships
   // unconfigured so this stays a pass-through until it's set up.
   let role: RoleRecord;
+  let tier: ResolveRoleTier | undefined;
   if (callerAgentId) {
     const agentTypeKey = extended.labels?.[AGENT_TYPE_LABEL] ?? request.config.title ?? undefined;
     if (agentTypeKey) {
@@ -208,15 +271,32 @@ function routeRoleForCreateUnguarded(
       }
     }
     role = resolution.role;
+    tier = resolution.tier;
   } else {
+    // Deterministic, not classified: `tier` stays undefined, which
+    // `toolProfileIsEvidenceBased` treats as evidence on its own.
     role = resolveLeaderRole(policy);
   }
   const episodeCaller = callerAgentId ?? ROOT_AGENT_CALLER;
 
+  // A guessed role (tier 3/4) may still pick a model below; it may not take
+  // tools away unless the operator opted in. Withholding only matters — and
+  // only gets logged — when the role's own profile would actually have
+  // restricted something.
+  let toolProfile: ToolProfile = role.toolProfile;
+  if (!toolProfileIsEvidenceBased(tier, policy) && role.toolProfile.kind !== "unrestricted") {
+    const dedupeKey = `${episodeCaller} ${role.id}`;
+    if (!toolProfileWithheldSeen.has(dedupeKey)) {
+      toolProfileWithheldSeen.add(dedupeKey);
+      options.onToolProfileWithheld?.({ callerAgentId: episodeCaller, roleId: role.id, tier: tier as ResolveRoleTier });
+    }
+    toolProfile = DEFAULT_TOOL_PROFILE;
+  }
+
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
   // to pure delegation.
-  const enforcedProviderOptions = enforceToolProfile(request, role);
+  const enforcedProviderOptions = enforceToolProfile(request, toolProfile);
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
