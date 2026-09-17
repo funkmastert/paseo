@@ -1,4 +1,4 @@
-import { splitModelRef, type RoleRecord } from "../shared/role-policy-schema";
+import { POOL_FAMILY, modelRefFamily, splitModelRef, type RoleRecord } from "../shared/role-policy-schema";
 
 export type ModelCatalog = ReadonlyMap<string, ReadonlySet<string>>;
 
@@ -16,16 +16,15 @@ export interface AvailabilityHealth {
   isLastResortEligible(providerId: string): boolean;
 }
 
+/**
+ * `provider` is null for an account-agnostic (bare) ref: the role chose only
+ * the model, and the account router still picks which pooled account runs it.
+ * A non-null provider came from a pinned `provider/model` ref.
+ */
 export type SelectModelResult =
   | { outcome: "unconfigured" }
-  | { outcome: "selected"; provider: string; model: string }
-  | { outcome: "unavailable"; provider: string; model: string };
-
-/**
- * Model refs use provider-family ids (never pool-worker entry ids), so the
- * one family the pool ever routes is the literal "claude" family id.
- */
-const CLAUDE_FAMILY = "claude";
+  | { outcome: "selected"; provider: string | null; model: string }
+  | { outcome: "unavailable"; provider: string | null; model: string };
 
 /**
  * Viable-anywhere check: looser than the account router's own selection
@@ -62,19 +61,20 @@ export function selectModel(
     if (!parsed) {
       continue; // Defensive: schema validation already prevents malformed refs from being stored.
     }
-    const { family, model } = parsed;
+    const family = modelRefFamily(parsed);
+    const { model } = parsed;
     if (!catalog.get(family)?.has(model)) {
       continue;
     }
-    if (family === CLAUDE_FAMILY && !poolHasViableMember(pool, health, model)) {
+    if (family === POOL_FAMILY && !poolHasViableMember(pool, health, model)) {
       continue;
     }
-    return { outcome: "selected", provider: family, model };
+    return { outcome: "selected", provider: parsed.provider, model };
   }
 
   const fallback = splitModelRef(role.models[0]);
   if (!fallback) {
     return { outcome: "unconfigured" }; // Defensive: same guarantee as above.
   }
-  return { outcome: "unavailable", provider: fallback.family, model: fallback.model };
+  return { outcome: "unavailable", provider: fallback.provider, model: fallback.model };
 }

@@ -72,6 +72,11 @@ interface FamilyResolvablePool {
   leader: { providerId: string } | null;
 }
 
+/** Renders a selection back into the ref spelling the operator configured, for notifications. */
+function formatModelRef(outcome: { provider: string | null; model: string }): string {
+  return outcome.provider === null ? outcome.model : `${outcome.provider}/${outcome.model}`;
+}
+
 /** Model refs use provider-family ids; a request's current provider may instead be a literal pool-worker/leader entry id. */
 function familyOfProvider(pool: FamilyResolvablePool, providerId: string): string {
   if (providerId === "claude") {
@@ -169,8 +174,11 @@ function routeRoleForCreateUnguarded(
     return; // Byte-identical pass-through: the role has no configured models.
   }
 
+  // A bare (account-agnostic) ref chose only a model: leave `config.provider`
+  // alone so the account router downstream still picks the account. Only a
+  // pinned `provider/model` ref can move the request to another family.
   const requestedFamily = familyOfProvider(pool, request.config.provider);
-  const crossesFamily = outcome.provider !== requestedFamily;
+  const crossesFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
 
   // Cross-family rewrites point `config.provider` at a family the account
   // router (router.ts) never gets a chance to validate — it only checks
@@ -181,14 +189,15 @@ function routeRoleForCreateUnguarded(
   // selections (the common case) skip this, since that family is already
   // the one in active use.
   if (crossesFamily) {
+    const pinnedProvider = outcome.provider as string; // crossesFamily implies a pinned (non-null) provider.
     const registeredProviderIds = options.providerIds?.get();
-    if (registeredProviderIds && !registeredProviderIds.has(outcome.provider)) {
+    if (registeredProviderIds && !registeredProviderIds.has(pinnedProvider)) {
       if (!unavailableRoleIds.has(resolution.role.id)) {
         unavailableRoleIds.add(resolution.role.id);
         options.onRoleUnavailable?.({
           callerAgentId,
           roleId: resolution.role.id,
-          requestedModel: `${outcome.provider}/${outcome.model}`,
+          requestedModel: formatModelRef(outcome),
           reason: "provider-not-registered",
         });
       }
@@ -202,7 +211,7 @@ function routeRoleForCreateUnguarded(
       options.onRoleUnavailable?.({
         callerAgentId,
         roleId: resolution.role.id,
-        requestedModel: `${outcome.provider}/${outcome.model}`,
+        requestedModel: formatModelRef(outcome),
         reason: "no-eligible-model",
       });
     }
@@ -211,7 +220,7 @@ function routeRoleForCreateUnguarded(
   }
 
   const nextConfig = { ...request.config, model: outcome.model };
-  if (crossesFamily) {
+  if (crossesFamily && outcome.provider !== null) {
     nextConfig.provider = outcome.provider;
   }
 

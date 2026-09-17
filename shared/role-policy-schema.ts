@@ -18,11 +18,27 @@ export const ROLE_WORD_RE = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
 export const EXACT_AGENT_NAME_RE = /^[A-Za-z0-9_.\-]{1,128}$/;
 
 /**
- * A `provider/model` reference. No whitespace, control characters, commas,
- * or wildcards in either segment; exactly one `/` separator.
+ * The provider family whose accounts this plugin pools. An account-agnostic
+ * (bare) model ref resolves its catalog entry and its pool health against
+ * this family.
  */
-const MODEL_REF_SEGMENT = "[^\\s,*?\\x00-\\x1F\\x7F]+";
-export const MODEL_REF_RE = new RegExp(`^${MODEL_REF_SEGMENT}/${MODEL_REF_SEGMENT}$`);
+export const POOL_FAMILY = "claude";
+
+/**
+ * A model reference in one of two forms. No whitespace, control characters,
+ * commas, wildcards, or `/` inside a segment.
+ *
+ * - `model` (bare) — ACCOUNT-AGNOSTIC. The role picks the model; the account
+ *   router (server/router.ts) still picks which pooled account runs it. This
+ *   is the form that survives one account dying.
+ * - `provider/model` — PINNED to that provider id. Use it to cross provider
+ *   families (`codex/gpt-5`). Note that pinning to a *claude-family* id only
+ *   pins the family: the account router runs after the role router and still
+ *   has the final say on which pooled account serves a claude-family request.
+ */
+const MODEL_REF_SEGMENT = "[^\\s,*?/\\x00-\\x1F\\x7F]+";
+export const BARE_MODEL_REF_RE = new RegExp(`^${MODEL_REF_SEGMENT}$`);
+export const MODEL_REF_RE = new RegExp(`^${MODEL_REF_SEGMENT}(?:/${MODEL_REF_SEGMENT})?$`);
 
 export const MAX_ROLES = 64;
 export const MAX_ALIASES_PER_ROLE = 8;
@@ -47,9 +63,11 @@ const AgentTypeMappingsSchema = z
     message: `agentTypeMappings must not exceed ${MAX_MAPPINGS} entries`,
   });
 
+export const CURRENT_SCHEMA_VERSION = 2;
+
 export const RoleModelPolicySchema = z
   .object({
-    schemaVersion: z.literal(1),
+    schemaVersion: z.literal(CURRENT_SCHEMA_VERSION),
     roles: z.array(RoleRecordSchema).max(MAX_ROLES),
     /** Caller agent-type/title -> role id. Tier 1 of role resolution. */
     agentTypeMappings: AgentTypeMappingsSchema,
@@ -139,7 +157,7 @@ export type RoleModelPolicy = z.infer<typeof RoleModelPolicySchema>;
  * a starter vocabulary for tier-1 exact-name resolution.
  */
 export const DEFAULT_POLICY: RoleModelPolicy = {
-  schemaVersion: 1,
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   roles: [
     { id: "worker", name: "worker", standard: true, aliases: [], models: [] },
     { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [] },
@@ -157,13 +175,27 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   revision: "default",
 };
 
-/** Splits a validated `provider/model` reference. Null on malformed input (defensive; schema should prevent this). */
-export function splitModelRef(ref: string): { family: string; model: string } | null {
-  const slashIndex = ref.indexOf("/");
-  if (slashIndex <= 0 || slashIndex === ref.length - 1) {
+export interface ParsedModelRef {
+  /** Null for a bare, account-agnostic ref: the account router picks the provider. */
+  provider: string | null;
+  model: string;
+}
+
+/** Parses a model reference. Null on malformed input (defensive; schema should prevent this). */
+export function splitModelRef(ref: string): ParsedModelRef | null {
+  if (!MODEL_REF_RE.test(ref)) {
     return null;
   }
-  return { family: ref.slice(0, slashIndex), model: ref.slice(slashIndex + 1) };
+  const slashIndex = ref.indexOf("/");
+  if (slashIndex === -1) {
+    return { provider: null, model: ref };
+  }
+  return { provider: ref.slice(0, slashIndex), model: ref.slice(slashIndex + 1) };
+}
+
+/** The provider family a ref's catalog entry lives under — POOL_FAMILY for bare refs. */
+export function modelRefFamily(parsed: ParsedModelRef): string {
+  return parsed.provider ?? POOL_FAMILY;
 }
 
 /** Distinct provider-family ids referenced anywhere across the policy's roles, for catalog refresh scoping. */
@@ -173,9 +205,74 @@ export function rolePolicyFamilies(policy: RoleModelPolicy): string[] {
     for (const ref of role.models) {
       const parsed = splitModelRef(ref);
       if (parsed) {
-        families.add(parsed.family);
+        families.add(modelRefFamily(parsed));
       }
     }
   }
   return [...families];
+}
+
+export interface MigrateRolePolicyOptions {
+  /**
+   * The pool leader's provider entry id, read from the same daemon-config
+   * snapshot. On a typical install this is the literal `"claude"`, which is
+   * also the provider *family* id — the ambiguity this migration resolves.
+   */
+  poolLeaderProviderId?: string;
+}
+
+/**
+ * v1 wrote every ref as `provider/model`, and the only provider id it could
+ * name for a pooled account was the claude family id. Under v2 a pinned ref
+ * means what it says, so carrying those refs forward verbatim would newly pin
+ * every role at the leader account — the failure that stranded every role
+ * when that account died. Drop the provider segment when it names the pool
+ * leader, or the pool family itself (the second clause keeps the migration
+ * correct when the pool config can't be read at all, where defaulting to
+ * "still pinned" would be the bug).
+ */
+function unpinLegacyRef(ref: string, options: MigrateRolePolicyOptions): string {
+  const slashIndex = ref.indexOf("/");
+  if (slashIndex <= 0) {
+    return ref;
+  }
+  const provider = ref.slice(0, slashIndex);
+  if (provider === POOL_FAMILY || provider === options.poolLeaderProviderId) {
+    return ref.slice(slashIndex + 1);
+  }
+  return ref;
+}
+
+/**
+ * Brings a stored policy document up to CURRENT_SCHEMA_VERSION, in memory
+ * only — this never writes settings. Anything that isn't a recognized older
+ * version passes through untouched for `RoleModelPolicySchema` to accept or
+ * reject on its own.
+ */
+export function migrateRoleModelPolicy(raw: unknown, options: MigrateRolePolicyOptions = {}): unknown {
+  if (typeof raw !== "object" || raw === null) {
+    return raw;
+  }
+  const document = raw as Record<string, unknown>;
+  if (document.schemaVersion !== 1 || !Array.isArray(document.roles)) {
+    return raw;
+  }
+
+  const roles = document.roles.map((role) => {
+    if (typeof role !== "object" || role === null) {
+      return role;
+    }
+    const record = role as Record<string, unknown>;
+    if (!Array.isArray(record.models)) {
+      return role;
+    }
+    return {
+      ...record,
+      models: record.models.map((ref) => (typeof ref === "string" ? unpinLegacyRef(ref, options) : ref)),
+    };
+  });
+
+  // `revision` carries through untouched: it's the CAS token the settings
+  // screen round-trips, and migrating in memory must not invalidate it.
+  return { ...document, schemaVersion: CURRENT_SCHEMA_VERSION, roles };
 }

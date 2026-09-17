@@ -6,6 +6,7 @@ import {
   MAX_MODELS_PER_ROLE,
   MAX_ROLES,
   RoleModelPolicySchema,
+  migrateRoleModelPolicy,
   rolePolicyFamilies,
   splitModelRef,
   type RoleModelPolicy,
@@ -18,7 +19,7 @@ function role(overrides: Partial<RoleRecord>): RoleRecord {
 
 function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     roles: [
       role({ id: "worker", name: "worker" }),
       role({ id: "reviewer", name: "reviewer" }),
@@ -128,8 +129,8 @@ describe("RoleModelPolicySchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects malformed model ids (missing slash, whitespace, wildcard, comma)", () => {
-    for (const bad of ["claude-opus", "claude/ opus", "claude/op*s", "claude/op,us", "claude /opus"]) {
+  it("rejects malformed model ids (whitespace, wildcard, comma, extra separator)", () => {
+    for (const bad of ["claude/ opus", "claude/op*s", "claude/op,us", "claude /opus", "a/b/c", "opu s"]) {
       const result = RoleModelPolicySchema.safeParse(
         policy({
           roles: [
@@ -208,17 +209,81 @@ describe("RoleModelPolicySchema", () => {
 });
 
 describe("splitModelRef", () => {
-  it("splits a valid ref into family and model", () => {
-    expect(splitModelRef("claude/claude-opus-4")).toEqual({ family: "claude", model: "claude-opus-4" });
+  it("splits a pinned ref into provider and model", () => {
+    expect(splitModelRef("codex/gpt-5.1")).toEqual({ provider: "codex", model: "gpt-5.1" });
   });
 
-  it("returns null for a ref with no slash", () => {
-    expect(splitModelRef("claude-opus-4")).toBeNull();
+  it("reads a bare ref as account-agnostic", () => {
+    expect(splitModelRef("claude-opus-4")).toEqual({ provider: null, model: "claude-opus-4" });
   });
 
-  it("returns null for a ref with an empty family or model segment", () => {
+  it("returns null for a ref with an empty provider or model segment", () => {
     expect(splitModelRef("/model")).toBeNull();
-    expect(splitModelRef("family/")).toBeNull();
+    expect(splitModelRef("provider/")).toBeNull();
+  });
+
+  it("returns null for a ref with more than one separator", () => {
+    expect(splitModelRef("a/b/c")).toBeNull();
+  });
+});
+
+describe("model ref schema", () => {
+  it("accepts a bare model id as a role model", () => {
+    const result = RoleModelPolicySchema.safeParse(
+      policy({
+        roles: [
+          role({ id: "worker", name: "worker", models: ["claude-sonnet-5"] }),
+          role({ id: "reviewer", name: "reviewer" }),
+          role({ id: "advisor", name: "advisor" }),
+        ],
+      }),
+    );
+    expect(result.success).toBe(true);
+  });
+});
+
+describe("migrateRoleModelPolicy", () => {
+  const v1 = {
+    schemaVersion: 1,
+    roles: [
+      { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude/claude-sonnet-5", "codex/gpt-5.1"] },
+      { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: ["claude/claude-opus-5"] },
+      { id: "advisor", name: "advisor", standard: true, aliases: [], models: [] },
+    ],
+    agentTypeMappings: { worker: "worker" },
+    revision: "fcc9e0ec627c",
+  };
+
+  it("unpins leader-account refs and leaves cross-family pins intact", () => {
+    const migrated = migrateRoleModelPolicy(v1, { poolLeaderProviderId: "claude" }) as typeof v1;
+    expect(migrated.schemaVersion).toBe(2);
+    expect(migrated.roles[0].models).toEqual(["claude-sonnet-5", "codex/gpt-5.1"]);
+    expect(migrated.roles[1].models).toEqual(["claude-opus-5"]);
+  });
+
+  it("unpins pool-family refs even when the pool config can't be read", () => {
+    const migrated = migrateRoleModelPolicy(v1, {}) as typeof v1;
+    expect(migrated.roles[0].models).toEqual(["claude-sonnet-5", "codex/gpt-5.1"]);
+  });
+
+  it("unpins refs naming a non-default leader entry id", () => {
+    const custom = { ...v1, roles: [{ ...v1.roles[0], models: ["claude-leader/claude-sonnet-5"] }, v1.roles[1], v1.roles[2]] };
+    const migrated = migrateRoleModelPolicy(custom, { poolLeaderProviderId: "claude-leader" }) as typeof v1;
+    expect(migrated.roles[0].models).toEqual(["claude-sonnet-5"]);
+  });
+
+  it("preserves the CAS revision so an open settings screen can still save", () => {
+    const migrated = migrateRoleModelPolicy(v1, { poolLeaderProviderId: "claude" }) as typeof v1;
+    expect(migrated.revision).toBe("fcc9e0ec627c");
+  });
+
+  it("produces a document the current schema accepts", () => {
+    expect(RoleModelPolicySchema.safeParse(migrateRoleModelPolicy(v1, { poolLeaderProviderId: "claude" })).success).toBe(true);
+  });
+
+  it("passes a current-version document through untouched", () => {
+    const current = { ...v1, schemaVersion: 2 };
+    expect(migrateRoleModelPolicy(current, { poolLeaderProviderId: "claude" })).toBe(current);
   });
 });
 

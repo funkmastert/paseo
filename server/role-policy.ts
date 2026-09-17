@@ -1,6 +1,12 @@
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
-import { DEFAULT_POLICY, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
+import {
+  DEFAULT_POLICY,
+  RoleModelPolicySchema,
+  migrateRoleModelPolicy,
+  type RoleModelPolicy,
+} from "../shared/role-policy-schema";
 import { createIntervalPoller } from "./interval-poller";
+import { poolLeaderProviderIdFromConfig, type DaemonConfig } from "./pool";
 
 /** The subset of PaseoApi this module needs: reading daemon config. */
 export type PaseoConfigApi = PluginHandlerContext["paseo"];
@@ -18,6 +24,10 @@ export interface PolicyLoadResult {
  * failure). Present-but-malformed, or the config RPC itself rejecting ->
  * fail closed: keep serving `previous` (the last good in-memory policy) so
  * routing stays a pass-through and the hook never crashes or wipes state.
+ *
+ * An older stored document is migrated in memory on every read and never
+ * written back here; only an intentional save through the settings RPC
+ * persists the current schema version.
  */
 export async function loadRolePolicy(
   paseo: PaseoConfigApi,
@@ -30,7 +40,10 @@ export async function loadRolePolicy(
       return { policy: DEFAULT_POLICY, malformed: false };
     }
 
-    const parsed = RoleModelPolicySchema.safeParse(raw);
+    const migrated = migrateRoleModelPolicy(raw, {
+      poolLeaderProviderId: poolLeaderProviderIdFromConfig(config as DaemonConfig),
+    });
+    const parsed = RoleModelPolicySchema.safeParse(migrated);
     if (!parsed.success) {
       return { policy: previous, malformed: true, error: parsed.error.message };
     }

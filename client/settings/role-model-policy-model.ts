@@ -395,7 +395,7 @@ export function openRoleModelPolicyModel(
       }
       const trimmed = modelRef.trim();
       if (trimmed.length > MAX_MODEL_REF_LENGTH || !MODEL_REF_RE.test(trimmed)) {
-        saveError = `"${modelRef}" isn't a valid provider/model reference`;
+        saveError = `"${modelRef}" isn't a valid model reference (use "model", or "provider/model" to pin a provider)`;
         publish();
         return false;
       }

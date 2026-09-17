@@ -23,6 +23,51 @@ export interface PoolLoadResult {
 
 const FAIL_OPEN_RESULT: PoolLoadResult = { pool: EMPTY_POOL, failOpen: true };
 
+/** A daemon-config snapshot, as returned by `paseo.config.get()`. */
+export type DaemonConfig = Record<string, unknown>;
+
+/**
+ * Pulls the provider entries carrying `params.accountPool` out of a config
+ * snapshot. Throws only through the schema error it returns to the caller —
+ * a malformed entry surfaces as a thrown PoolConfigError so both callers
+ * below fail open the same way.
+ */
+function poolEntriesFromConfig(config: DaemonConfig): PoolProviderEntry[] {
+  const providers = (config.providers ?? {}) as Record<string, Record<string, unknown>>;
+
+  const entries: PoolProviderEntry[] = [];
+  for (const [providerId, providerConfig] of Object.entries(providers)) {
+    const params = providerConfig?.params;
+    if (params === undefined || params === null || typeof params !== "object") {
+      continue;
+    }
+    if (!("accountPool" in params)) {
+      continue;
+    }
+
+    const parsed = ProviderAccountPoolParamsSchema.safeParse(params);
+    if (!parsed.success) {
+      throw new PoolConfigError(parsed.error.message);
+    }
+    entries.push({ providerId, accountPool: parsed.data.accountPool });
+  }
+  return entries;
+}
+
+/**
+ * The pool leader's provider entry id from an already-read config snapshot,
+ * or undefined when the pool is absent or unreadable. Lets the role-policy
+ * loader migrate legacy model refs off the leader account without a second
+ * `config.get()` round trip. Never throws.
+ */
+export function poolLeaderProviderIdFromConfig(config: DaemonConfig): string | undefined {
+  try {
+    return resolvePool(poolEntriesFromConfig(config)).leader?.providerId;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Reads daemon config, extracts provider entries carrying
  * `params.accountPool`, and resolves them into an ordered pool. Never
@@ -32,24 +77,7 @@ const FAIL_OPEN_RESULT: PoolLoadResult = { pool: EMPTY_POOL, failOpen: true };
 export async function loadPool(paseo: PaseoConfigApi): Promise<PoolLoadResult> {
   try {
     const { config } = await paseo.config.get();
-    const providers = (config.providers ?? {}) as Record<string, Record<string, unknown>>;
-
-    const entries: PoolProviderEntry[] = [];
-    for (const [providerId, providerConfig] of Object.entries(providers)) {
-      const params = providerConfig?.params;
-      if (params === undefined || params === null || typeof params !== "object") {
-        continue;
-      }
-      if (!("accountPool" in params)) {
-        continue;
-      }
-
-      const parsed = ProviderAccountPoolParamsSchema.safeParse(params);
-      if (!parsed.success) {
-        return { pool: EMPTY_POOL, failOpen: true, error: parsed.error.message };
-      }
-      entries.push({ providerId, accountPool: parsed.data.accountPool });
-    }
+    const entries = poolEntriesFromConfig(config as DaemonConfig);
 
     if (entries.length === 0) {
       return FAIL_OPEN_RESULT;

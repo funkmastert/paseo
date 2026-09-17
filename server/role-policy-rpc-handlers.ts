@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
-import { RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
+import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -107,7 +107,7 @@ async function performWrite(
   }
 
   const candidate: RoleModelPolicy = {
-    schemaVersion: 1,
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     roles: input.patch.roles,
     agentTypeMappings: input.patch.agentTypeMappings,
     revision: randomUUID(),
@@ -215,7 +215,12 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         roleName: resolution.role.name,
         tier: resolution.tier,
         outcome: outcome.outcome,
-        ...(outcome.outcome !== "unconfigured" ? { provider: outcome.provider, model: outcome.model } : {}),
+        ...(outcome.outcome !== "unconfigured" ? { model: outcome.model } : {}),
+        // Omitted for a bare ref: no provider was chosen, so the account
+        // router is still free to pick any healthy pooled account.
+        ...(outcome.outcome !== "unconfigured" && outcome.provider !== null
+          ? { provider: outcome.provider }
+          : {}),
       };
     },
   };

@@ -118,6 +118,58 @@ describe("createRoleRouter", () => {
     expect(result?.config.model).toBe("claude-opus-4");
   });
 
+  describe("account-agnostic (bare) model refs", () => {
+    const pool: ResolvedPool = { workers: [{ providerId: "worker-a", priority: 1 }], leader: { providerId: "claude" } };
+
+    function bareRouter() {
+      return createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-4"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-opus-4"] })),
+          poolCache: fakePoolCache(pool),
+        }),
+      );
+    }
+
+    it("rewrites only config.model, never config.provider", () => {
+      const result = bareRouter()(
+        request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-opus-4");
+      expect(result?.config.provider).toBe("claude");
+    });
+
+    it("leaves a worker the account router already chose in place", () => {
+      const result = bareRouter()(
+        request({ callerAgentId: "c1", config: { provider: "worker-a", model: "claude-sonnet", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.provider).toBe("worker-a");
+      expect(result?.config.model).toBe("claude-opus-4");
+    });
+
+    it("reports an unavailable bare ref without a bogus provider prefix", () => {
+      const onRoleUnavailable = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policyWithWorkerModels(["claude-ghost"])),
+          catalogCache: fakeCatalogCache(catalog({ claude: [] })),
+          poolCache: fakePoolCache(pool),
+          onRoleUnavailable,
+        }),
+      );
+
+      router(request({ callerAgentId: "c1" }), fakeContext);
+
+      expect(onRoleUnavailable).toHaveBeenCalledWith(
+        expect.objectContaining({ requestedModel: "claude-ghost", reason: "no-eligible-model" }),
+      );
+    });
+  });
+
   it("preserves other config fields (modeId, providerOptions, cwd) across the rewrite", () => {
     const router = createRoleRouter(
       baseOptions({

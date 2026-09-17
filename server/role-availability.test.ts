@@ -132,4 +132,41 @@ describe("selectModel", () => {
     );
     expect(result).toEqual({ outcome: "unavailable", provider: "codex", model: "gpt-ghost" });
   });
+
+  describe("account-agnostic (bare) refs", () => {
+    it("resolves against the pool family's catalog and reports a null provider", () => {
+      const result = selectModel(
+        role({ models: ["claude-opus-4"] }),
+        catalog({ claude: ["claude-opus-4"] }),
+        ONE_WORKER_POOL,
+        createHealthTracker(),
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-opus-4" });
+    });
+
+    it("stays eligible while ANY pooled account is viable, not just the leader", () => {
+      const health = createHealthTracker();
+      health.reportTurnFailure("leader", "hit your limit"); // the account that died on 2026-09-15
+      const result = selectModel(
+        role({ models: ["claude-opus-4"] }),
+        catalog({ claude: ["claude-opus-4"] }),
+        ONE_WORKER_POOL,
+        health,
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-opus-4" });
+    });
+
+    it("still skips to the next entry when no pooled account is viable", () => {
+      const health = createHealthTracker();
+      health.reportTurnFailure("worker-a", "hit your limit");
+      health.reportTurnFailure("leader", "hit your limit");
+      const result = selectModel(
+        role({ models: ["claude-opus-4", "codex/gpt-4"] }),
+        catalog({ claude: ["claude-opus-4"], codex: ["gpt-4"] }),
+        ONE_WORKER_POOL,
+        health,
+      );
+      expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
+    });
+  });
 });
