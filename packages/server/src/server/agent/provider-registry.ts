@@ -541,6 +541,10 @@ function wrapClientProvider(
       : undefined,
     resolveCreateConfig: inner.resolveCreateConfig?.bind(inner),
     resolveConfiguredModel: inner.resolveConfiguredModel?.bind(inner),
+    // Bound, not re-derived: a derived provider's base client already carries that account's
+    // own runtime settings, so its scope is the derived account's config dir. Dropping this
+    // here left every `extends`-based provider unable to adopt a session-reported MCP server.
+    resolveMcpConfigScope: inner.resolveMcpConfigScope?.bind(inner),
     isCreateConfigUnattended: inner.isCreateConfigUnattended?.bind(inner),
     listFeatures: listFeatures
       ? async (config) => await listFeatures({ ...config, provider: inner.provider })

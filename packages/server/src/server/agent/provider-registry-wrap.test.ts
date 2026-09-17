@@ -1,4 +1,7 @@
-import { describe, expect, test } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, test } from "vitest";
 
 import type {
   AgentCapabilityFlags,
@@ -7,7 +10,9 @@ import type {
   AgentStreamEvent,
   AgentRuntimeInfo,
 } from "./agent-sdk-types.js";
-import { wrapSessionProvider } from "./provider-registry.js";
+import { createTestLogger } from "../../test-utils/test-logger.js";
+import { readPerDirRemoteMcpServer } from "../mcp-gateway/per-dir-stdio.js";
+import { createAllClients, wrapSessionProvider } from "./provider-registry.js";
 
 type OptionalAgentSessionMethodName = {
   [K in keyof AgentSession]-?: undefined extends AgentSession[K]
@@ -193,5 +198,96 @@ describe("wrapSessionProvider", () => {
       "tryHandleOutOfBand",
       "tryHandleOutOfBand.run",
     ]);
+  });
+});
+
+describe("wrapClientProvider", () => {
+  const originalConfigDirVar = process.env.PASEO_TEST_ACCOUNTS_HOME;
+  const tempDirs: string[] = [];
+
+  function createAccountDir(name: string, servers: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), `paseo-claude-account-${name}-`));
+    tempDirs.push(dir);
+    writeFileSync(join(dir, ".claude.json"), JSON.stringify({ mcpServers: servers }));
+    return dir;
+  }
+
+  afterEach(() => {
+    if (originalConfigDirVar === undefined) {
+      delete process.env.PASEO_TEST_ACCOUNTS_HOME;
+    } else {
+      process.env.PASEO_TEST_ACCOUNTS_HOME = originalConfigDirVar;
+    }
+    while (tempDirs.length > 0) {
+      const dir = tempDirs.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a derived claude provider adopts from its own account's config dir, not the base provider's", () => {
+    const leaderDir = createAccountDir("leader", {
+      amplitude: { type: "http", url: "https://amplitude.example/leader" },
+    });
+    const backupDir = createAccountDir("backup", {
+      amplitude: { type: "http", url: "https://amplitude.example/backup" },
+    });
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        claude: { env: { CLAUDE_CONFIG_DIR: leaderDir } },
+        "claude-backup": {
+          extends: "claude",
+          label: "Claude Backup",
+          env: { CLAUDE_CONFIG_DIR: backupDir },
+        },
+      },
+    });
+
+    const scope = clients["claude-backup"]?.resolveMcpConfigScope?.("/workspace");
+    expect(scope?.configDir).toBe(backupDir);
+    expect(clients.claude?.resolveMcpConfigScope?.("/workspace")?.configDir).toBe(leaderDir);
+
+    // What adopt actually reads: the definition must come from the backup account's file.
+    expect(
+      readPerDirRemoteMcpServer({
+        configDir: scope?.configDir ?? "",
+        projectDir: "/workspace",
+        name: "amplitude",
+      }),
+    ).toEqual({ url: "https://amplitude.example/backup", transport: "http" });
+  });
+
+  test("a derived provider's config dir expands ${VAR} against the env its sessions run with", () => {
+    const accountsHome = mkdtempSync(join(tmpdir(), "paseo-claude-accounts-"));
+    tempDirs.push(accountsHome);
+    const personalDir = join(accountsHome, ".claude-personal");
+    mkdirSync(personalDir);
+    writeFileSync(
+      join(personalDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { aspire: { type: "sse", url: "https://aspire.example/mcp" } },
+      }),
+    );
+    process.env.PASEO_TEST_ACCOUNTS_HOME = accountsHome;
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        "claude-personal": {
+          extends: "claude",
+          label: "Claude Personal",
+          env: { CLAUDE_CONFIG_DIR: "${PASEO_TEST_ACCOUNTS_HOME}/.claude-personal" },
+        },
+      },
+    });
+
+    const scope = clients["claude-personal"]?.resolveMcpConfigScope?.("/workspace");
+    expect(scope?.configDir).toBe(personalDir);
+    expect(
+      readPerDirRemoteMcpServer({
+        configDir: scope?.configDir ?? "",
+        projectDir: "/workspace",
+        name: "aspire",
+      }),
+    ).toEqual({ url: "https://aspire.example/mcp", transport: "sse" });
   });
 });
