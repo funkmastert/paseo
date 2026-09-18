@@ -3,7 +3,9 @@ import {
   DEFAULT_TOOL_PROFILE,
   ToolProfileSchema,
   applyToolProfile,
+  parseDeniedTools,
   profileDeniedTools,
+  serializeDeniedTools,
   type ToolProfile,
 } from "./tool-profiles";
 
@@ -64,6 +66,12 @@ describe("profileDeniedTools", () => {
     const tools = denied({ kind: "read-only" });
     expect(tools).not.toContain("mcp__paseo__list_terminals");
     expect(tools).not.toContain("mcp__paseo__list_workspace_scripts");
+  });
+
+  it("read-only and orchestrator deny update_agent, which could rewrite the label a child inherits from", () => {
+    for (const kind of ["read-only", "orchestrator"] as const) {
+      expect(denied({ kind })).toContain("mcp__paseo__update_agent");
+    }
   });
 
   it("write denies nothing: file and shell tools are the point of the profile", () => {
@@ -144,6 +152,14 @@ describe("applyToolProfile", () => {
     expect(result?.disallowedTools).toEqual(["Bash"]);
   });
 
+  it("unions inherited denials in exactly like the profile's own", () => {
+    const result = applyToolProfile(undefined, { kind: "unrestricted" }, ["Bash", "Write"]);
+
+    expect(result?.disallowedTools).toEqual(["Bash", "Write"]);
+    const permissions = (result?.settings as { permissions: { deny: string[] } }).permissions;
+    expect(permissions.deny).toEqual(["Bash(*)", "Write(*)"]);
+  });
+
   it("tolerates a malformed providerOptions value rather than throwing", () => {
     expect(() => applyToolProfile("nonsense", { kind: "read-only" })).not.toThrow();
     expect(applyToolProfile("nonsense", { kind: "read-only" })?.disallowedTools).toContain("Bash");
@@ -161,5 +177,22 @@ describe("ToolProfileSchema", () => {
 
   it("accepts an MCP tool name", () => {
     expect(ToolProfileSchema.safeParse({ kind: "custom", deny: ["mcp__paseo__create_agent"] }).success).toBe(true);
+  });
+});
+
+describe("denied-tool label round trip", () => {
+  it("round trips a deny list through a label value", () => {
+    const denied = profileDeniedTools({ kind: "read-only" });
+
+    expect(parseDeniedTools(serializeDeniedTools(denied))).toEqual(denied);
+  });
+
+  it("reads an absent or empty label as no restrictions at all", () => {
+    expect(parseDeniedTools(undefined)).toEqual([]);
+    expect(parseDeniedTools("")).toEqual([]);
+  });
+
+  it("drops entries that are not well-formed tool names", () => {
+    expect(parseDeniedTools("Bash, ,Write(*),Edit")).toEqual(["Bash", "Edit"]);
   });
 });

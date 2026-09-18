@@ -6,6 +6,7 @@ import {
   AGENT_TYPE_LABEL,
   DEFAULT_POLICY,
   MODEL_OVERRIDDEN_LABEL,
+  TOOLS_DENIED_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
@@ -446,6 +447,224 @@ describe("createRoleRouter", () => {
 
       // No role label: tier-3/4 classification, whose tool profile is withheld.
       expect(router(request({ callerAgentId: "c1", initialPrompt: "Implement the parser." }), fakeContext)).toBeUndefined();
+    });
+  });
+
+  // A read-only agent keeps `mcp__paseo__create_agent` on purpose — delegating
+  // is the sanctioned path. Inheritance is what stops that being an escape
+  // hatch: spawn an unrestricted worker, have it do the writing you can't.
+  describe("tool profile inheritance from the spawning agent", () => {
+    function policyWithProfile(roleId: string, profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === roleId ? { ...role, toolProfile: profile } : role)),
+      };
+    }
+
+    /** A policy that restricts SOME role, which is what arms inheritance at all. */
+    const restrictivePolicy = policyWithProfile("reviewer", { kind: "read-only" });
+
+    function parents(map: Record<string, readonly string[]>, fallback: "cold" | "unknown" = "unknown") {
+      return {
+        note: vi.fn(),
+        warm: vi.fn(async () => {}),
+        stop: vi.fn(),
+        lookup: (agentId: string) =>
+          agentId in map ? ({ status: "known", denied: map[agentId] } as const) : ({ status: fallback } as const),
+      };
+    }
+
+    function denials(result: ReturnType<RoleCreateRouter>): string[] {
+      return ((result?.config.providerOptions as { disallowedTools?: string[] })?.disallowedTools ?? []).slice();
+    }
+
+    it("a read-only parent cannot spawn an unrestricted child", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ reviewer1: ["Edit", "Write", "Bash"] }),
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "reviewer1", labels: { [AGENT_ROLE_LABEL]: "worker" }, initialPrompt: "Apply the fix." }),
+        fakeContext,
+      );
+
+      expect(denials(result)).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
+    });
+
+    it("unions rather than replaces: the child keeps its own role's denials too", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache({
+            ...restrictivePolicy,
+            roles: restrictivePolicy.roles.map((role) =>
+              role.id === "worker" ? { ...role, toolProfile: { kind: "custom" as const, deny: ["WebFetch"] } } : role,
+            ),
+          }),
+          parentProfiles: parents({ p1: ["Bash"] }),
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker" } }),
+        fakeContext,
+      );
+
+      expect(denials(result)).toEqual(expect.arrayContaining(["WebFetch", "Bash"]));
+    });
+
+    it("never subtracts: an unrestricted parent leaves an unrestricted child alone", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ p1: [] }),
+        }),
+      );
+
+      expect(
+        router(request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext),
+      ).toBeUndefined();
+    });
+
+    it("records what was denied on the child's own labels, so its children inherit in turn", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ p1: ["Bash"] }),
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext);
+
+      expect(result?.labels?.[TOOLS_DENIED_LABEL]).toBe("Bash");
+    });
+
+    it("strips a caller-forged denial label when nothing was actually denied", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ p1: [] }),
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker", [TOOLS_DENIED_LABEL]: "Read" } }),
+        fakeContext,
+      );
+
+      expect(result?.labels?.[TOOLS_DENIED_LABEL]).toBeUndefined();
+    });
+
+    it("tells the child the restriction was inherited, not configured for it", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ p1: ["Bash"] }),
+        }),
+      );
+
+      const result = router(
+        request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker" }, initialPrompt: "Apply the fix." }),
+        fakeContext,
+      );
+
+      expect((result as { initialPrompt?: string }).initialPrompt).toMatch(/came from the agent that spawned you/);
+    });
+
+    it("fails SAFE for a parent the directory does not know, rather than granting a clean child", () => {
+      const onParentProfileUnresolved = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({}, "unknown"),
+          onParentProfileUnresolved,
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "ghost", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext);
+
+      expect(denials(result)).toEqual(expect.arrayContaining(["Edit", "Write", "Bash"]));
+      expect(denials(result)).not.toContain("Read");
+      expect(onParentProfileUnresolved).toHaveBeenCalledWith(
+        expect.objectContaining({ callerAgentId: "ghost", reason: "not-in-directory", failedSafe: true }),
+      );
+    });
+
+    it("fails OPEN while the directory has not loaded yet, so a restart cannot cripple every spawn", () => {
+      const onParentProfileUnresolved = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({}, "cold"),
+          onParentProfileUnresolved,
+        }),
+      );
+
+      const result = router(request({ callerAgentId: "p1", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext);
+
+      expect(result).toBeUndefined();
+      expect(onParentProfileUnresolved).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "directory-cold", failedSafe: false }),
+      );
+    });
+
+    it("notifies once per caller, not once per spawn", () => {
+      const onParentProfileUnresolved = vi.fn();
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({}, "unknown"),
+          onParentProfileUnresolved,
+        }),
+      );
+
+      router(request({ callerAgentId: "ghost", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext);
+      router(request({ callerAgentId: "ghost", labels: { [AGENT_ROLE_LABEL]: "worker" } }), fakeContext);
+
+      expect(onParentProfileUnresolved).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not consult the parent at all when no role restricts anything", () => {
+      const parentProfiles = parents({}, "unknown");
+      const lookup = vi.spyOn(parentProfiles, "lookup");
+      const router = createRoleRouter(baseOptions({ parentProfiles }));
+
+      const result = router(
+        request({ callerAgentId: "ghost", labels: { [AGENT_ROLE_LABEL]: "worker" } }),
+        fakeContext,
+      );
+
+      expect(result).toBeUndefined(); // byte-identical: the common path is untouched
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it("leaves root agents alone: a root agent has no parent to inherit from", () => {
+      const parentProfiles = parents({}, "unknown");
+      const lookup = vi.spyOn(parentProfiles, "lookup");
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(restrictivePolicy), parentProfiles }),
+      );
+
+      router(request({}), fakeContext);
+
+      expect(lookup).not.toHaveBeenCalled();
+    });
+
+    it("applies inheritance even to a role whose own profile was withheld as a tier-3 guess", () => {
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(restrictivePolicy),
+          parentProfiles: parents({ p1: ["Bash"] }),
+        }),
+      );
+
+      // No role label: tier-3 classification, so the role's OWN profile is
+      // withheld. The parent's is not a guess, so it still applies.
+      const result = router(request({ callerAgentId: "p1", initialPrompt: "Implement the parser." }), fakeContext);
+
+      expect(denials(result)).toEqual(["Bash"]);
     });
   });
 

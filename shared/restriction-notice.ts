@@ -1,5 +1,6 @@
 import { profileDeniedTools, type ToolProfileId } from "./tool-profiles";
 
+
 /**
  * The prompt-side half of tool enforcement.
  *
@@ -36,11 +37,12 @@ import { profileDeniedTools, type ToolProfileId } from "./tool-profiles";
 export const MAX_ENUMERATED_TOOLS = 12;
 
 /**
- * Hand-written notices for the built-in restrictive profiles. Used only when
- * the effective deny list is exactly that profile's own — a profile whose
- * denials were widened (by a caller's own `disallowedTools`, or later by
- * parent inheritance) falls through to the generated form, which describes
- * what was actually applied rather than what the profile nominally denies.
+ * Hand-written notices for the built-in restrictive profiles. Matched on the
+ * EFFECTIVE deny list rather than on the role's configured profile kind, so a
+ * worker that inherited `read-only` from the agent that spawned it gets the
+ * accurate `read-only` copy. A deny list that matches no built-in — a custom
+ * profile, or a built-in widened by inheritance — falls through to the
+ * generated form, which describes what was actually applied.
  */
 const BUILT_IN_NOTICE: Partial<Record<ToolProfileId, string>> = {
   "read-only": [
@@ -53,37 +55,63 @@ const BUILT_IN_NOTICE: Partial<Record<ToolProfileId, string>> = {
   ].join("\n"),
 };
 
-function sameTools(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) {
-    return false;
-  }
-  const other = new Set(b);
-  return a.every((tool) => other.has(tool));
+function covers(subset: readonly string[], superset: readonly string[]): boolean {
+  const all = new Set(superset);
+  return subset.every((tool) => all.has(tool));
+}
+
+function toolList(tools: readonly string[]): string {
+  const shown = tools.slice(0, MAX_ENUMERATED_TOOLS);
+  const remaining = tools.length - shown.length;
+  return remaining > 0 ? `${shown.join(", ")} and ${remaining} more` : shown.join(", ");
 }
 
 function generatedNotice(denied: readonly string[]): string {
-  const shown = denied.slice(0, MAX_ENUMERATED_TOOLS);
-  const remaining = denied.length - shown.length;
-  const list = remaining > 0 ? `${shown.join(", ")} and ${remaining} more` : shown.join(", ");
+  const list = toolList(denied);
   return [
     "[tool profile: custom]",
     `Removed from your context at launch — not gated, not requestable: ${list}. If the task genuinely needs one, say so and stop rather than routing around it.`,
   ].join("\n");
 }
 
+export interface RestrictionNoticeOptions {
+  /**
+   * True when some of `denied` came from the agent that spawned this one
+   * rather than from its own role. Worth one extra sentence: an agent whose
+   * role is nominally unrestricted, told only that `Edit` is gone, will
+   * reasonably suspect a misconfiguration and go looking.
+   */
+  inherited?: boolean;
+}
+
 /**
- * The block to prepend for a profile, or undefined when nothing was denied
- * and the prompt must stay byte-identical.
+ * The block to prepend for an effective deny list, or undefined when nothing
+ * was denied and the prompt must stay byte-identical.
  */
-export function restrictionNotice(kind: ToolProfileId, denied: readonly string[]): string | undefined {
+export function restrictionNotice(
+  denied: readonly string[],
+  options: RestrictionNoticeOptions = {},
+): string | undefined {
   if (denied.length === 0) {
     return undefined;
   }
-  const builtIn = BUILT_IN_NOTICE[kind];
-  if (builtIn !== undefined && kind !== "custom" && sameTools(denied, profileDeniedTools({ kind }))) {
-    return builtIn;
+  const inheritedSuffix = options.inherited
+    ? "\nThis came from the agent that spawned you, which is restricted too; report back to it."
+    : "";
+  // Widest first: `orchestrator` denies everything `read-only` does and more.
+  // A built-in whose denials are a SUBSET of what was applied still gets its
+  // hand-written copy, with the extras appended — cheaper and clearer than
+  // regenerating a bare list of nineteen names because one tool was added.
+  for (const kind of ["orchestrator", "read-only"] as const) {
+    const base = profileDeniedTools({ kind });
+    if (!covers(base, denied)) {
+      continue;
+    }
+    const extras = denied.filter((tool) => !base.includes(tool));
+    const also = extras.length > 0 ? `\nAlso removed: ${toolList(extras)}.` : "";
+    return `${BUILT_IN_NOTICE[kind] as string}${also}${inheritedSuffix}`;
   }
-  return generatedNotice(denied);
+  return `${generatedNotice(denied)}${inheritedSuffix}`;
 }
 
 /**
@@ -99,13 +127,13 @@ export function restrictionNotice(kind: ToolProfileId, denied: readonly string[]
  */
 export function initialPromptWithNotice(
   initialPrompt: string | undefined,
-  kind: ToolProfileId,
   denied: readonly string[],
+  options: RestrictionNoticeOptions = {},
 ): string | undefined {
   if (typeof initialPrompt !== "string" || initialPrompt.trim().length === 0) {
     return undefined;
   }
-  const notice = restrictionNotice(kind, denied);
+  const notice = restrictionNotice(denied, options);
   if (notice === undefined) {
     return undefined;
   }

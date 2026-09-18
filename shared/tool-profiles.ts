@@ -78,6 +78,17 @@ const MCP_SHELL_TOOLS = [
   "mcp__paseo__stop_workspace_script",
 ] as const;
 
+/**
+ * `mcp__paseo__update_agent` rewrites an agent's name, LABELS and runtime
+ * settings. Labels are where a restriction is recorded so a child can inherit
+ * it (`TOOLS_DENIED_LABEL`), so an agent that can rewrite its own labels can
+ * erase the evidence of its own restriction and spawn a clean child — which
+ * would make inheritance, and therefore `read-only` itself, a suggestion
+ * again. Its `settings` argument also sets another agent's model. Verified
+ * against the fork's `registerTool("update_agent", ...)`.
+ */
+const MCP_AGENT_MUTATION_TOOLS = ["mcp__paseo__update_agent"] as const;
+
 export const TOOL_PROFILE_IDS = ["unrestricted", "orchestrator", "read-only", "write", "custom"] as const;
 export type ToolProfileId = (typeof TOOL_PROFILE_IDS)[number];
 
@@ -106,12 +117,19 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
   unrestricted: [],
   // Delegation and coordination only — cannot read, write, or run anything,
   // and cannot fan out natively onto its own account either.
-  orchestrator: [...READ_TOOLS, ...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS, ...NATIVE_SUBAGENT_TOOLS],
+  orchestrator: [
+    ...READ_TOOLS,
+    ...EDIT_TOOLS,
+    ...SHELL_TOOLS,
+    ...MCP_SHELL_TOOLS,
+    ...MCP_AGENT_MUTATION_TOOLS,
+    ...NATIVE_SUBAGENT_TOOLS,
+  ],
   // Can investigate, cannot change anything. Bash is denied because a shell
   // redirect writes files just as well as Write does; MCP_SHELL_TOOLS is
   // denied for the same reason one level up the stack — a terminal opened
   // through Paseo's own MCP tools is still a shell.
-  "read-only": [...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS],
+  "read-only": [...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS, ...MCP_AGENT_MUTATION_TOOLS],
   // The implementer kit: file and shell tools are exactly what this role is
   // for, so it denies nothing. It differs from `unrestricted` in intent only.
   write: [],
@@ -121,6 +139,26 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
 export function profileDeniedTools(profile: ToolProfile): string[] {
   const denied = profile.kind === "custom" ? (profile.deny ?? []) : BUILT_IN_DENY[profile.kind];
   return [...new Set(denied)];
+}
+
+/**
+ * How an applied deny list travels on the created agent's own labels, so a
+ * child spawned later can inherit it. A label is the only per-agent field
+ * that is both writable by an `agent.create` hook and readable back from the
+ * daemon afterwards — `providerOptions` appears nowhere in
+ * `AgentSnapshotPayload` — and, unlike anything the plugin holds in memory,
+ * it survives a plugin reload and a daemon restart. See server/parent-profiles.ts.
+ */
+export function serializeDeniedTools(denied: readonly string[]): string {
+  return [...new Set(denied)].join(",");
+}
+
+/** The inverse. Silently drops anything that isn't a well-formed tool name. */
+export function parseDeniedTools(value: string | undefined): string[] {
+  if (typeof value !== "string" || value.length === 0) {
+    return [];
+  }
+  return [...new Set(value.split(",").map((tool) => tool.trim()).filter((tool) => TOOL_NAME_RE.test(tool)))];
 }
 
 /** The tool names a profile pre-approves. Only a custom profile names any. */
@@ -153,7 +191,11 @@ function union(existing: readonly string[], added: readonly string[]): string[] 
 /**
  * Merges a role's tool profile into a request's `providerOptions`.
  *
- * Returns undefined when the profile has nothing to say, so the caller can
+ * `additionalDenied` carries restrictions that came from somewhere other than
+ * the profile itself — today, the ones inherited from the agent that spawned
+ * this one. It unions in exactly like the profile's own denials.
+ *
+ * Returns undefined when there is nothing to say, so the caller can
  * pass the request through byte-identical. Restrictions only ever accumulate:
  * whatever the caller already denied stays denied, because a plugin that can
  * silently widen a caller's own sandbox is a worse bug than an unenforced
@@ -162,8 +204,9 @@ function union(existing: readonly string[], added: readonly string[]): string[] 
 export function applyToolProfile(
   providerOptions: unknown,
   profile: ToolProfile,
+  additionalDenied: readonly string[] = [],
 ): Record<string, unknown> | undefined {
-  const deniedTools = profileDeniedTools(profile);
+  const deniedTools = [...new Set([...profileDeniedTools(profile), ...additionalDenied])];
   const allowedTools = profileAllowedTools(profile);
   if (deniedTools.length === 0 && allowedTools.length === 0) {
     return undefined;

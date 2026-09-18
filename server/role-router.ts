@@ -1,7 +1,19 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
-import { AGENT_TYPE_LABEL, MODEL_OVERRIDDEN_LABEL, type RoleModelPolicy, type RoleRecord } from "../shared/role-policy-schema";
+import {
+  AGENT_TYPE_LABEL,
+  MODEL_OVERRIDDEN_LABEL,
+  TOOLS_DENIED_LABEL,
+  type RoleModelPolicy,
+  type RoleRecord,
+} from "../shared/role-policy-schema";
 import { initialPromptWithNotice } from "../shared/restriction-notice";
-import { applyToolProfile, DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
+import {
+  applyToolProfile,
+  DEFAULT_TOOL_PROFILE,
+  profileDeniedTools,
+  serializeDeniedTools,
+  type ToolProfile,
+} from "../shared/tool-profiles";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -10,6 +22,7 @@ import type { RecentAgentTypes } from "./recent-agent-types";
 import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
 import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
+import type { ParentToolProfiles } from "./parent-profiles";
 import { resolveLeaderRole, resolveRole, type ResolveRoleTier } from "./role-resolve";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
@@ -40,6 +53,23 @@ export interface ToolProfileWithheldEpisode {
   roleId: string;
   /** The tier the role was resolved at — always 3 or 4 when this fires. */
   tier: ResolveRoleTier;
+}
+
+export interface ParentProfileUnresolvedEpisode {
+  callerAgentId: string;
+  roleId: string;
+  /**
+   * "directory-cold": no agent-directory sweep has succeeded yet (plugin just
+   * started). Fails OPEN — there is no directory for the parent to be absent
+   * from, and this is the same posture every other cache here takes before
+   * its first refresh.
+   * "not-in-directory": a sweep DID succeed and the caller wasn't in it, even
+   * though a live agent is by definition making this create. That is a
+   * genuinely unknowable parent, so it fails SAFE.
+   */
+  reason: "directory-cold" | "not-in-directory";
+  /** Whether the child was given the read-only floor as a result. */
+  failedSafe: boolean;
 }
 
 export interface ExplicitModelOverriddenEpisode {
@@ -90,6 +120,16 @@ export interface RoleRouterOptions {
   /** Called (deduplicated per caller+role+requestedRef) when an explicitly requested model wasn't in the resolved role's pool and policy overrode it. */
   onExplicitModelOverridden?: (episode: ExplicitModelOverriddenEpisode) => void;
   /**
+   * The parent-restriction map that makes profile inheritance possible.
+   * Optional: without it the router behaves exactly as it did before
+   * inheritance existed, which keeps this file testable without a daemon and
+   * keeps a wiring mistake from silently changing routing. index.server.ts
+   * always supplies it.
+   */
+  parentProfiles?: ParentToolProfiles;
+  /** Called (deduplicated per caller) when a caller's own restrictions could not be determined. */
+  onParentProfileUnresolved?: (episode: ParentProfileUnresolvedEpisode) => void;
+  /**
    * Injectable clock for tests; defaults to Date.now. Drives the throttle on
    * the "unexpected error resolving role" fail-open log, so a role that
    * keeps failing to resolve logs once per minute instead of once per create.
@@ -125,6 +165,12 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 interface ToolEnforcement {
   providerOptions: ProviderOptionsValue | undefined;
   initialPrompt: string | undefined;
+  /**
+   * The request's labels rewritten to record what was denied, or undefined
+   * when they already say the right thing (the overwhelmingly common case:
+   * nothing denied, no label present).
+   */
+  labels: Record<string, string> | undefined;
 }
 
 /**
@@ -141,16 +187,59 @@ interface ToolEnforcement {
 function enforceToolProfile(
   request: PluginBeforeRequests["agent.create"],
   toolProfile: ToolProfile,
+  inherited: readonly string[],
 ): ToolEnforcement {
-  const denied = profileDeniedTools(toolProfile);
+  const own = profileDeniedTools(toolProfile);
+  const inheritedExtras = inherited.filter((tool) => !own.includes(tool));
+  const effective = [...own, ...inheritedExtras];
+  const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   return {
-    providerOptions: applyToolProfile(request.config.providerOptions, toolProfile) as ProviderOptionsValue | undefined,
-    initialPrompt: initialPromptWithNotice(
-      (request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt,
-      toolProfile.kind,
-      denied,
-    ),
+    providerOptions: applyToolProfile(request.config.providerOptions, toolProfile, inheritedExtras) as
+      | ProviderOptionsValue
+      | undefined,
+    initialPrompt: initialPromptWithNotice(extended.initialPrompt, effective, {
+      inherited: inheritedExtras.length > 0,
+    }),
+    labels: toolDenialLabels(extended.labels, effective),
   };
+}
+
+/**
+ * The labels a request should carry so the agent it creates records what was
+ * denied to it, or undefined when they already do.
+ *
+ * Writes the label when something was denied and STRIPS a caller-supplied one
+ * when nothing was — a caller that pre-set it would otherwise leave a child
+ * claiming restrictions the hook never applied, and the record has to mean
+ * exactly what the hook did. Returns undefined when neither applies, so an
+ * ordinary unrestricted create stays byte-identical.
+ */
+function toolDenialLabels(
+  labels: Record<string, string> | undefined,
+  denied: readonly string[],
+): Record<string, string> | undefined {
+  const current = labels?.[TOOLS_DENIED_LABEL];
+  const next = denied.length > 0 ? serializeDeniedTools(denied) : undefined;
+  if (current === next) {
+    return undefined;
+  }
+  const result = { ...labels };
+  if (next === undefined) {
+    delete result[TOOLS_DENIED_LABEL];
+  } else {
+    result[TOOLS_DENIED_LABEL] = next;
+  }
+  return result;
+}
+
+/**
+ * Whether any configured role restricts anything at all. Gates the parent
+ * lookup: with every role unrestricted (the shipped default, and Tyler's
+ * live config) no agent can ever have been restricted, so there is nothing
+ * to inherit and the common path does no work and issues no RPC.
+ */
+function policyRestrictsAnything(policy: RoleModelPolicy): boolean {
+  return policy.roles.some((role) => profileDeniedTools(role.toolProfile).length > 0);
 }
 
 /**
@@ -183,7 +272,11 @@ function toolProfileIsEvidenceBased(tier: ResolveRoleTier | undefined, policy: R
 
 /** True when enforcement has nothing to write and the request can pass through byte-identical. */
 function isNoOp(enforcement: ToolEnforcement): boolean {
-  return enforcement.providerOptions === undefined && enforcement.initialPrompt === undefined;
+  return (
+    enforcement.providerOptions === undefined &&
+    enforcement.initialPrompt === undefined &&
+    enforcement.labels === undefined
+  );
 }
 
 /** Applies tool enforcement alone, on the paths that skip the model rewrite. */
@@ -198,8 +291,12 @@ function withToolProfile(
   if (enforcement.providerOptions) {
     next.config = { ...request.config, providerOptions: enforcement.providerOptions };
   }
+  const extended = next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   if (enforcement.initialPrompt !== undefined) {
-    (next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt = enforcement.initialPrompt;
+    extended.initialPrompt = enforcement.initialPrompt;
+  }
+  if (enforcement.labels !== undefined) {
+    extended.labels = enforcement.labels;
   }
   return next;
 }
@@ -239,6 +336,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const unavailableRoleIds = new Set<string>();
   const overriddenSeen = new Set<string>();
   const toolProfileWithheldSeen = new Set<string>();
+  const parentUnresolvedSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
 
   return function routeRoleForCreate(input) {
@@ -250,6 +348,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         unavailableRoleIds,
         overriddenSeen,
         toolProfileWithheldSeen,
+        parentUnresolvedSeen,
       );
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
@@ -276,6 +375,7 @@ function routeRoleForCreateUnguarded(
   unavailableRoleIds: Set<string>,
   overriddenSeen: Set<string>,
   toolProfileWithheldSeen: Set<string>,
+  parentUnresolvedSeen: Set<string>,
 ): PluginBeforeRequests["agent.create"] | void {
   const { request } = input;
 
@@ -337,10 +437,44 @@ function routeRoleForCreateUnguarded(
     toolProfile = DEFAULT_TOOL_PROFILE;
   }
 
+  // A child is never less restricted than its parent. Without this, the
+  // `create_agent` that `orchestrator` and `read-only` keep on purpose is an
+  // escape hatch: spawn an unrestricted worker, have it do the writing.
+  // Gated on the policy restricting SOMETHING, so an all-unrestricted config
+  // (the default, and today's live one) does no lookup and issues no RPC.
+  let inherited: readonly string[] = [];
+  if (callerAgentId && options.parentProfiles && policyRestrictsAnything(policy)) {
+    const lookup = options.parentProfiles.lookup(callerAgentId);
+    if (lookup.status === "known") {
+      inherited = lookup.denied;
+    } else {
+      // "cold" fails open, "unknown" fails safe. The asymmetry is deliberate:
+      // a cold cache says nothing about this parent, while a parent missing
+      // from a directory that DID load is a contradiction (a live agent is
+      // making this create), and granting a clean child on a contradiction is
+      // exactly the silent escalation inheritance exists to stop. The floor
+      // is `read-only`, not `orchestrator`, so a wrongly-restricted child can
+      // still investigate and say so — and the restriction notice tells it to.
+      const failedSafe = lookup.status === "unknown";
+      if (failedSafe) {
+        inherited = profileDeniedTools({ kind: "read-only" });
+      }
+      if (!parentUnresolvedSeen.has(callerAgentId)) {
+        parentUnresolvedSeen.add(callerAgentId);
+        options.onParentProfileUnresolved?.({
+          callerAgentId,
+          roleId: role.id,
+          reason: failedSafe ? "not-in-directory" : "directory-cold",
+          failedSafe,
+        });
+      }
+    }
+  }
+
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
   // to pure delegation.
-  const enforcement = enforceToolProfile(request, toolProfile);
+  const enforcement = enforceToolProfile(request, toolProfile, inherited);
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
@@ -436,8 +570,12 @@ function routeRoleForCreateUnguarded(
   }
 
   const routed: PluginBeforeRequests["agent.create"] = { ...request, config: nextConfig };
+  const routedExtended = routed as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   if (enforcement.initialPrompt !== undefined) {
-    (routed as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt = enforcement.initialPrompt;
+    routedExtended.initialPrompt = enforcement.initialPrompt;
+  }
+  if (enforcement.labels !== undefined) {
+    routedExtended.labels = enforcement.labels;
   }
 
   if (!explicitOverrideReason) {
@@ -462,6 +600,6 @@ function routeRoleForCreateUnguarded(
   }
   return {
     ...routed,
-    labels: { ...extended.labels, [MODEL_OVERRIDDEN_LABEL]: requestedRef as string },
+    labels: { ...(enforcement.labels ?? extended.labels), [MODEL_OVERRIDDEN_LABEL]: requestedRef as string },
   };
 }

@@ -17,6 +17,34 @@ export const AGENT_ROLE_LABEL = "paseo.agent-role";
 export const MODEL_OVERRIDDEN_LABEL = "paseo.model-overridden-by-policy";
 
 /**
+ * Set by the role router on every agent it restricts: the comma-separated
+ * tool names that were actually denied at launch.
+ *
+ * This is how a restriction survives to the NEXT create. A child must be at
+ * least as restricted as its parent, or `read-only` means nothing (a
+ * read-only agent could just spawn an unrestricted one and have it do the
+ * writing). Working that out needs the parent's applied profile, and a label
+ * is the only place to keep it: `providerOptions` is accepted on
+ * `agent.create` but appears in no agent snapshot the daemon will hand back,
+ * so the thing that actually carries the enforcement is unreadable
+ * afterwards. A label is writable by the hook, readable from
+ * `AgentSnapshotPayload.labels`, and — unlike anything the plugin holds in
+ * memory — survives a plugin reload and a daemon restart. That last property
+ * is the deciding one: activating a plugin change reloads the plugin, so an
+ * in-memory map would forget every live restricted agent at exactly the
+ * moment the operator turned the feature on.
+ *
+ * Absence means unrestricted, and that is a fact rather than a guess: the
+ * only thing that can restrict an agent here is this hook, and this hook
+ * always writes the label when it restricts. An agent created while the
+ * plugin was uninstalled carries no denials either.
+ *
+ * `mcp__paseo__update_agent` (which can rewrite labels) is denied by every
+ * restrictive built-in profile, so an agent cannot erase its own record.
+ */
+export const TOOLS_DENIED_LABEL = "paseo.tools-denied";
+
+/**
  * The role governing ROOT agents — creates with no `callerAgentId`, i.e. the
  * ones a human, the CLI, or the app starts. Nothing constrained those before,
  * which is exactly the agent that burned a whole weekly budget doing its

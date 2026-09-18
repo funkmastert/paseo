@@ -200,8 +200,8 @@ and user settings files.
 | Profile | Denies |
 | --- | --- |
 | `unrestricted` | Nothing. The default, so upgrading changes no behaviour. |
-| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `Task`, `Agent` |
-| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below |
+| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, `Task`, `Agent` |
+| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent` |
 | `write` | Nothing — file and shell tools are the point of this profile. |
 | `custom` | Whatever you list. |
 
@@ -278,20 +278,20 @@ just changes which tool name reaches it.
 available under `read-only`: they report state (terminal ids, script status)
 and can't execute or mutate anything on their own.
 
-`orchestrator` keeps `mcp__paseo__create_agent` and the rest of the
+`orchestrator` keeps `mcp__paseo__create_agent` and most of the
 agent-management tools deliberately — delegating to a new, independently
 role-resolved, separately-accounted agent is the *entire point* of that
-profile (see the leader section below). This does mean a `read-only` or
-`reviewer` agent that still has `create_agent` can spawn an unrestricted
-child and ask it to make the edit it wants. That is not treated as a hole
-here: the spawned child resolves its own role and runs on its own account
-through the same `agent.create` hook, which is exactly the sanctioned
-"delegate, don't do it yourself" path the whole leader/orchestrator design
-depends on — closing it would mean denying delegation itself, not closing an
-accidental escape. The same reasoning applies to `mcp__paseo__send_agent_prompt`:
-an agent that already knows another agent's id can ask it to do something,
-but that is asking a (separately authorized) peer, not executing anything
-itself.
+profile (see the leader section below). What stops that being an escape
+hatch is inheritance: a child spawned by a restricted agent is at least as
+restricted as its parent (see below). `mcp__paseo__update_agent` is the
+exception in that family and is denied, because it can rewrite the labels
+inheritance reads.
+
+`mcp__paseo__send_agent_prompt` stays: an agent that already knows another
+agent's id can ask it to do something, but that is asking a separately
+authorized peer, not executing anything itself. It does mean a restricted
+agent can ask an unrestricted peer that already exists to act for it, and to
+rewrite its label; that one is a real, open limit, listed below.
 
 **This is not, and cannot be made, airtight.** Two things are explicitly out
 of scope and left open:
@@ -311,6 +311,68 @@ of scope and left open:
   `read-only` or `orchestrator` role is a guarantee about Paseo's own tools
   and Claude's native ones — not a sandbox over everything an agent's MCP
   configuration can reach.
+
+#### A child is never less restricted than its parent
+
+`read-only` and `orchestrator` both keep `mcp__paseo__create_agent`, because
+delegating to a separately-accounted agent is the point of the whole design.
+On its own that makes `read-only` a suggestion: spawn an unrestricted worker,
+ask it to make the edit. The earlier argument for keeping `create_agent` —
+that a child resolves its own role independently — is only *true* with
+inheritance; without it, it is merely hopeful.
+
+So the effective deny list of a child is the union of its own role's profile
+and whatever its parent had denied. It only ever accumulates; nothing is ever
+subtracted. The parent is the `callerAgentId` on the create request.
+
+**Where the parent's profile is kept, and why there.** On a label
+(`paseo.tools-denied`) written onto each restricted agent at its own create,
+holding the exact tool names that were denied. The obvious alternative —
+reading the parent's persisted `providerOptions` back through `paseo.agents`
+— does not exist: `providerOptions` is accepted on `agent.create` and appears
+in **no** agent snapshot the daemon will return (`AgentSnapshotPayload` has
+no such field), so the thing that actually carries the enforcement is
+write-only. Labels are readable, and the plugin was already writing one
+(`paseo.model-overridden-by-policy`). The deciding property is durability: a
+label survives a plugin reload and a daemon restart, and **activating a plugin
+change reloads the plugin** — an in-memory map would forget every live
+restricted agent at exactly the moment the operator turned the feature on.
+
+Absence of the label means unrestricted, and that is a fact rather than a
+guess: the only thing that can restrict an agent here is this hook, and the
+hook always writes the label when it restricts. An agent created while the
+plugin was uninstalled carries no denials either. A caller-supplied value of
+that label is overwritten, or stripped when nothing was denied, so it always
+means exactly what the hook did.
+
+`mcp__paseo__update_agent` is denied by both restrictive profiles for this
+reason: it rewrites labels, and an agent that can rewrite its own labels can
+erase the record of its own restriction and spawn a clean child.
+
+**Lookups never block a create.** The hook's standing contract is that it
+never blocks agent creation, so the parent lookup is synchronous against a
+map fed from two places: the `agent.created` lifecycle event (free, covers
+everything created since plugin start) and one paginated `paseo.agents.list()`
+sweep at plugin start (covers agents that predate it). A miss schedules a
+rate-limited background re-sweep and answers from what is known now.
+
+**The two failure modes are deliberately asymmetric.**
+
+- *Directory not loaded yet* (no sweep has succeeded): fail **open**, inherit
+  nothing, log. There is no directory for the parent to be absent from, and
+  this is the same posture every other cache here takes before its first
+  refresh. The window is one RPC round trip after a plugin start.
+- *Directory loaded, parent not in it*: fail **safe**. A live agent is making
+  this create, so its absence is a contradiction, and granting a clean child
+  on a contradiction is the exact silent escalation inheritance exists to
+  stop. The child gets the `read-only` floor — not `orchestrator`, so it can
+  still investigate and say so — and the restriction notice tells it what
+  happened.
+
+**None of this runs unless some role is actually restricted.** The lookup is
+gated on the policy having at least one role that denies something. With
+every role `unrestricted` (the shipped default) there is nothing to inherit,
+so no lookup happens, no RPC is issued, and the request is byte-identical.
 
 ### The leader role, and why restricting it forces real delegation
 

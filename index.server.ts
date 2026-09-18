@@ -2,6 +2,7 @@ import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/se
 import { createHealthTracker } from "./server/health";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
 import { createNotifier, type Notifier } from "./server/notify";
+import { createParentToolProfiles, type ParentToolProfiles } from "./server/parent-profiles";
 import { createPoolCache, type PoolCache } from "./server/pool";
 import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-agent-types";
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
@@ -27,6 +28,7 @@ export default function contribute(server: PluginServerContext) {
   let providerIds: ProviderIdCache | null = null;
   let usagePoller: UsagePoller | null = null;
   let notifier: Notifier | null = null;
+  let parentProfiles: ParentToolProfiles | null = null;
   let router: AgentCreateRouter | null = null;
   let policyCache: PolicyCache | null = null;
   let catalogCache: ModelCatalogCache | null = null;
@@ -50,6 +52,7 @@ export default function contribute(server: PluginServerContext) {
     const startedPolicyCache = policyCache;
     catalogCache = createModelCatalogCache(paseo, () => rolePolicyFamilies(startedPolicyCache.get()));
     recentAgentTypes = createRecentAgentTypes();
+    parentProfiles = createParentToolProfiles(paseo);
 
     // Both caches start empty/fail-open and otherwise wait for their 60s
     // interval tick. Without this, every create in the window after a
@@ -60,9 +63,15 @@ export default function contribute(server: PluginServerContext) {
     const startedPoolCache = poolCache;
     const startedProviderIds = providerIds;
     const startedCatalogCache = catalogCache;
+    const startedParentProfiles = parentProfiles;
     queueMicrotask(() => {
       void startedPoolCache.forceRefresh();
       void startedProviderIds.forceRefresh();
+      // Warmed unconditionally, before any role is known to be restricted:
+      // the agents whose restrictions matter most are the ones already
+      // running when the operator activates a policy change, and a plugin
+      // reload is exactly what activating one does.
+      void startedParentProfiles.warm();
       // The catalog's families depend on the policy, so warm the policy
       // first — otherwise the very first catalog refresh sees no families
       // and every role starts UNAVAILABLE until the next 60s tick.
@@ -75,6 +84,7 @@ export default function contribute(server: PluginServerContext) {
       health,
       recentAgentTypes,
       providerIds,
+      parentProfiles,
       onDeclaredRoleUnknown: (episode) =>
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
@@ -82,6 +92,12 @@ export default function contribute(server: PluginServerContext) {
       onToolProfileWithheld: (episode) =>
         console.error(
           `[claude-account-pool] role-router: role "${episode.roleId}" was resolved by tier-${episode.tier} classification for caller "${episode.callerAgentId}", not an explicit label/mapping; its tool profile was withheld (model selection still applies) — label the agent with paseo.agent-type or paseo.agent-role to enforce it`,
+        ),
+      onParentProfileUnresolved: (episode) =>
+        console.error(
+          episode.failedSafe
+            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" is not in the agent directory, so what it was restricted to is unknowable; role "${episode.roleId}"'s child was given the read-only floor rather than a clean profile`
+            : `[claude-account-pool] role-router: the agent directory has not loaded yet, so caller "${episode.callerAgentId}"'s restrictions are unknown; role "${episode.roleId}"'s child inherits nothing this time`,
         ),
       onRoleUnavailable: (episode) =>
         console.error(
@@ -168,6 +184,10 @@ export default function contribute(server: PluginServerContext) {
   const unregisterCreated = server.on("agent.created", (event, context) => {
     ensureStarted(context.paseo);
     notifier?.onAgentCreated(event.agent.id);
+    // The free half of the parent-restriction map: every agent created while
+    // this plugin is running records what the create hook denied it, straight
+    // off the labels the hook wrote. See server/parent-profiles.ts.
+    parentProfiles?.note(event.agent.id, event.agent.labels);
     // Also feeds recentAgentTypes for human-created leaders, which never
     // pass through the role router (no callerAgentId) but should still show
     // up in the settings UI's mapping-name autocomplete. Idempotent against
@@ -230,5 +250,6 @@ export default function contribute(server: PluginServerContext) {
     notifier?.stop();
     policyCache?.stop();
     catalogCache?.stop();
+    parentProfiles?.stop();
   };
 }
