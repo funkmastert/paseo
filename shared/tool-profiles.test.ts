@@ -122,6 +122,41 @@ describe("profileDeniedTools", () => {
     expect(denied({ kind: "orchestrator" })).not.toContain("mcp__paseo__create_agent");
   });
 
+  it("read-only keeps create_agent: inheritance keeps whatever it spawns at least as restricted", () => {
+    expect(denied({ kind: "read-only" })).not.toContain("mcp__paseo__create_agent");
+  });
+
+  it("read-only denies the destructive and escalation-shaped agent-lifecycle tools", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__cancel_agent",
+      "mcp__paseo__archive_agent",
+      "mcp__paseo__kill_agent",
+      "mcp__paseo__set_agent_mode",
+      "mcp__paseo__respond_to_permission",
+    ]) {
+      expect(tools, `read-only must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("read-only denies send_agent_prompt: it can reach an unrestricted peer inheritance doesn't cover", () => {
+    expect(denied({ kind: "read-only" })).toContain("mcp__paseo__send_agent_prompt");
+  });
+
+  it("orchestrator keeps the agent-lifecycle and prompt tools: coordinating agents is its job", () => {
+    const tools = denied({ kind: "orchestrator" });
+    for (const tool of [
+      "mcp__paseo__cancel_agent",
+      "mcp__paseo__archive_agent",
+      "mcp__paseo__kill_agent",
+      "mcp__paseo__set_agent_mode",
+      "mcp__paseo__respond_to_permission",
+      "mcp__paseo__send_agent_prompt",
+    ]) {
+      expect(tools, `orchestrator must keep ${tool}`).not.toContain(tool);
+    }
+  });
+
   it("write denies nothing: file and shell tools are the point of the profile", () => {
     expect(denied({ kind: "write" })).toEqual([]);
   });

@@ -91,6 +91,56 @@ const MCP_SHELL_TOOLS = [
 const MCP_AGENT_MUTATION_TOOLS = ["mcp__paseo__update_agent"] as const;
 
 /**
+ * Agent-lifecycle tools that act destructively on ANOTHER agent: abort its
+ * run, soft-delete it, or terminate it permanently. None of these touch this
+ * agent's own sandbox, so `read-only`'s file/shell denials don't cover them —
+ * they act outward, on agents this one may have had no part in creating.
+ * Verified against the fork's `registerTool("cancel_agent", ...)`,
+ * `registerTool("archive_agent", ...)`, and `registerTool("kill_agent", ...)`.
+ */
+const AGENT_DESTRUCTIVE_TOOLS = [
+  "mcp__paseo__cancel_agent",
+  "mcp__paseo__archive_agent",
+  "mcp__paseo__kill_agent",
+] as const;
+
+/**
+ * Agent-lifecycle tools that escalate a PEER's privilege rather than this
+ * agent's own: `set_agent_mode` can flip another agent into a more permissive
+ * mode (including `bypassPermissions`), and `respond_to_permission` can
+ * approve another agent's pending permission request on its behalf. Both are
+ * privilege escalation performed by proxy — the exact thing a `read-only`
+ * role exists to prevent, just aimed at a peer instead of at this agent's own
+ * tool list. Verified against the fork's `registerTool("set_agent_mode", ...)`
+ * and `registerTool("respond_to_permission", ...)`.
+ */
+const AGENT_ESCALATION_TOOLS = [
+  "mcp__paseo__set_agent_mode",
+  "mcp__paseo__respond_to_permission",
+] as const;
+
+/**
+ * `send_agent_prompt` sends a task to ANY running agent by id, not only one
+ * this agent created, so the inheritance guarantee below does not cover it:
+ * the recipient is a peer that resolved its own role independently, and if
+ * that peer is unrestricted, prompting it is a proxy for doing the thing
+ * directly. That peer could also rewrite this agent's own
+ * `paseo.tools-denied` label through its own `update_agent`, breaking
+ * inheritance for any child this agent spawns later. Both enforcement layers
+ * act only on exact tool names, and there is no parameter-level distinction
+ * between "prompt a child I created" and "prompt an arbitrary peer" available
+ * at authorization time — it is one tool name allowed or denied, not a
+ * per-target decision. Denied for `read-only` because the requirement for
+ * that role is that it cannot do anything harmful, full stop; a `read-only`
+ * agent that needs help still has `mcp__paseo__create_agent`, and inheritance
+ * guarantees whatever it spawns is at least as restricted as itself.
+ * `orchestrator` keeps this tool deliberately: coordinating agents, including
+ * ones it didn't create, is that profile's entire job. Verified against the
+ * fork's `registerTool("send_agent_prompt", ...)`.
+ */
+const AGENT_PROMPT_TOOLS = ["mcp__paseo__send_agent_prompt"] as const;
+
+/**
  * Browser automation that ACTS on a page. A `read-only` agent holding these
  * is not read-only in any sense an operator would recognise: `browser_click`
  * and `browser_fill`/`browser_type`/`browser_select`/`browser_keypress`
@@ -176,7 +226,11 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
   // Nothing at all: byte-identical pass-through.
   unrestricted: [],
   // Delegation and coordination only — cannot read, write, or run anything,
-  // and cannot fan out natively onto its own account either.
+  // and cannot fan out natively onto its own account either. Deliberately
+  // keeps AGENT_DESTRUCTIVE_TOOLS, AGENT_ESCALATION_TOOLS, and
+  // AGENT_PROMPT_TOOLS (unlike `read-only`, below): coordinating agents —
+  // cancelling a stalled one, archiving a finished one, prompting an existing
+  // peer — IS this profile's job, not a hole in it.
   orchestrator: [
     ...READ_TOOLS,
     ...EDIT_TOOLS,
@@ -187,15 +241,25 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
     ...BROWSER_VIEW_TOOLS,
     ...NATIVE_SUBAGENT_TOOLS,
   ],
-  // Can investigate, cannot change anything. Bash is denied because a shell
-  // redirect writes files just as well as Write does; MCP_SHELL_TOOLS is
-  // denied for the same reason one level up the stack — a terminal opened
-  // through Paseo's own MCP tools is still a shell.
+  // Can investigate, cannot change anything — including anything belonging
+  // to another agent. Bash is denied because a shell redirect writes files
+  // just as well as Write does; MCP_SHELL_TOOLS is denied for the same reason
+  // one level up the stack — a terminal opened through Paseo's own MCP tools
+  // is still a shell. AGENT_DESTRUCTIVE_TOOLS and AGENT_ESCALATION_TOOLS are
+  // denied because killing, archiving, or mode-flipping a peer is action, not
+  // investigation, regardless of whose sandbox it happens in.
+  // AGENT_PROMPT_TOOLS is denied because it is the one hole inheritance can't
+  // close: it targets an arbitrary existing peer, not a child this agent
+  // spawned. `create_agent` stays — inheritance keeps whatever it spawns at
+  // least as restricted as this agent itself.
   "read-only": [
     ...EDIT_TOOLS,
     ...SHELL_TOOLS,
     ...MCP_SHELL_TOOLS,
     ...MCP_AGENT_MUTATION_TOOLS,
+    ...AGENT_DESTRUCTIVE_TOOLS,
+    ...AGENT_ESCALATION_TOOLS,
+    ...AGENT_PROMPT_TOOLS,
     ...BROWSER_INPUT_TOOLS,
   ],
   // The implementer kit: file and shell tools are exactly what this role is

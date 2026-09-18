@@ -201,7 +201,7 @@ and user settings files.
 | --- | --- |
 | `unrestricted` | Nothing. The default, so upgrading changes no behaviour. |
 | `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, **every** `mcp__paseo__browser_*` tool, `Task`, `Agent` |
-| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, the page-interaction `mcp__paseo__browser_*` tools below |
+| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, the whole agent-lifecycle family (`mcp__paseo__update_agent`, `cancel_agent`, `archive_agent`, `kill_agent`, `set_agent_mode`, `respond_to_permission`, `send_agent_prompt` — `create_agent` stays), the page-interaction `mcp__paseo__browser_*` tools below |
 | `write` | Nothing — file and shell tools are the point of this profile. |
 | `custom` | Whatever you list. |
 
@@ -307,20 +307,44 @@ The split is deliberate, and different for the two profiles:
 The honest cost of keeping navigation is stated in the limits below: it is a
 real hole, not a claim that navigation is harmless.
 
-`orchestrator` keeps `mcp__paseo__create_agent` and most of the
-agent-management tools deliberately — delegating to a new, independently
+`orchestrator` keeps `mcp__paseo__create_agent` and the rest of the
+agent-management surface deliberately — delegating to a new, independently
 role-resolved, separately-accounted agent is the *entire point* of that
-profile (see the leader section below). What stops that being an escape
-hatch is inheritance: a child spawned by a restricted agent is at least as
-restricted as its parent (see below). `mcp__paseo__update_agent` is the
-exception in that family and is denied, because it can rewrite the labels
-inheritance reads.
+profile (see the leader section below), and coordinating agents, including
+ones it didn't create, is what an orchestrator is *for*: cancelling a stalled
+run, archiving a finished one, raising a stuck peer's mode, approving a
+peer's permission prompt, prompting an existing worker. `read-only` is a
+different case, because that role is sold as "cannot do anything harmful" —
+so it keeps only `create_agent`, and denies everything else in the family:
 
-`mcp__paseo__send_agent_prompt` stays: an agent that already knows another
-agent's id can ask it to do something, but that is asking a separately
-authorized peer, not executing anything itself. It does mean a restricted
-agent can ask an unrestricted peer that already exists to act for it, and to
-rewrite its label; that one is a real, open limit, listed below.
+- `mcp__paseo__update_agent` is denied by both restrictive profiles, because
+  it can rewrite the labels inheritance reads.
+- `mcp__paseo__cancel_agent`, `archive_agent`, and `kill_agent` are denied
+  under `read-only` because they are purely destructive, aimed at another
+  agent's run rather than this agent's own sandbox — "investigate, don't
+  change anything" has to include not ending someone else's session.
+- `mcp__paseo__set_agent_mode` and `respond_to_permission` are denied under
+  `read-only` because both escalate a *peer's* privilege — flipping another
+  agent into `bypassPermissions`, or approving its pending permission request
+  — which is privilege escalation performed by proxy, exactly what this role
+  exists to rule out.
+- `mcp__paseo__send_agent_prompt` is denied under `read-only` too. It sends a
+  task to *any* running agent by id, not only a child this agent created, so
+  the inheritance guarantee below doesn't cover it: the recipient is a peer
+  that resolved its own role independently, and if that peer is
+  unrestricted, prompting it is a proxy for doing the harmful thing directly
+  — that peer could even rewrite this agent's own `paseo.tools-denied` label
+  through its own `update_agent`. Both enforcement layers act on exact tool
+  names only; there is no way to allow "prompt a child I created" while
+  denying "prompt an arbitrary peer" short of denying the tool outright. The
+  cost: a `read-only` agent can no longer ask an *already-running* peer to
+  act for it. It can still delegate — `create_agent` stays, and inheritance
+  guarantees whatever it spawns is at least as restricted as itself — it just
+  has to spawn the helper rather than message one that already exists.
+
+`create_agent` itself is not an escalation for either profile: inheritance
+(below) forces any child it spawns to be at least as restricted as its
+parent, so it cannot be used to launder a restriction away.
 
 #### A child is never less restricted than its parent
 
@@ -399,7 +423,17 @@ ships natively, a denial is real and the agent cannot lift it —
 spawned agent cannot rewrite its own `providerOptions`. A child cannot come
 out less restricted than its parent. The applied deny list is recorded on the
 agent's own `paseo.tools-denied` label, so what was enforced is auditable
-after the fact.
+after the fact. `read-only` denies the whole agent-lifecycle family —
+`update_agent`, `cancel_agent`, `archive_agent`, `kill_agent`,
+`set_agent_mode`, `respond_to_permission`, `send_agent_prompt` — keeping only
+`create_agent`, which inheritance keeps from being an escape hatch. A
+`read-only` agent cannot kill, archive, or mode-flip another agent, approve
+another agent's pending permission, or prompt any already-running agent,
+including one it spawned itself; see the per-tool breakdown above (just
+before "A child is never less restricted than its parent") for the reasoning
+and the cost that closure carries. `orchestrator` keeps the whole family on
+purpose — coordinating agents is its job — so this guarantee is specific to
+`read-only`.
 
 **What it does not guarantee.**
 
@@ -419,23 +453,6 @@ after the fact.
   profile that also denies them if that trade is wrong for you.
 - **`WebFetch` and `WebSearch` are denied by no profile.** A `read-only`
   agent can reach the network directly.
-- **The agent-lifecycle MCP tools are denied by no profile except
-  `update_agent`.** A `read-only` agent still has `mcp__paseo__kill_agent`,
-  `archive_agent`, `cancel_agent`, `set_agent_mode` and
-  `respond_to_permission`. It can therefore kill or archive other agents,
-  flip another agent into a more permissive mode, and approve another agent's
-  pending permission request. Those are destructive and escalation-shaped,
-  and they are open on purpose only in the sense that nobody has decided
-  where the line goes — treat it as unfinished, not as a considered "safe".
-  A `custom` profile can deny them today.
-- **`mcp__paseo__send_agent_prompt` stays.** A restricted agent that knows
-  another agent's id can ask it to do the thing it cannot. The peer is
-  separately authorized, so this is closer to "asking a colleague" than to
-  executing — but if that peer is unrestricted, the restriction is advisory
-  in practice. The same peer could also rewrite the restricted agent's
-  `paseo.tools-denied` label (the restricted agent itself cannot: it has no
-  `update_agent`), which would break inheritance for that agent's future
-  children.
 - **There is a fail-open window at plugin start.** Until the first agent
   directory sweep succeeds — one RPC round trip after the plugin starts — a
   parent's restrictions are unknown and nothing is inherited. Creates in that
