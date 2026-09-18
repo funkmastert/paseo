@@ -105,6 +105,7 @@ import {
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
 import type { TokenBurnMonitorState } from "./token-burn-detector.js";
+import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
@@ -288,6 +289,10 @@ export interface TokenBurnMonitorAgentSummary {
   isRunning: boolean;
   tokenRate: number | undefined;
   totalTokens: number | undefined;
+  /** Carries the caller's declared per-task budget (spend-governor.ts's SPEND_BUDGET_LABEL). */
+  labels: Record<string, string>;
+  /** So the governor's downgrade stage can skip an agent already on the target model. */
+  model: string | undefined;
 }
 
 /**
@@ -550,6 +555,13 @@ interface ManagedAgentBase {
    * See token-burn-detector.ts.
    */
   tokenBurnMonitorState?: TokenBurnMonitorState;
+  /**
+   * Live-only per-agent spend-governor bookkeeping (which ladder stages have fired against
+   * which budget). Never projected to the wire, never persisted, cleared on rewind alongside
+   * totalTokens — a rewind erases the spend the stages were fired against, so keeping them
+   * would leave an agent blocked for tokens it no longer shows. See spend-governor.ts.
+   */
+  spendGovernorState?: SpendGovernorState;
   /**
    * Live-only breach state set by AgentResourceMonitor via setResourceAlert/clearResourceAlert.
    * Not persisted, cleared on rewind alongside tokenBurnAlert — same reasons. See
@@ -1266,6 +1278,8 @@ export class AgentManager {
       isRunning: agent.lifecycle === "running",
       tokenRate: computeTokenRate(agent.tokenRateBuckets, nowMs)?.tokensPerMinute,
       totalTokens: agent.totalTokens,
+      labels: agent.labels,
+      model: agent.config.model,
     }));
   }
 
@@ -1507,6 +1521,36 @@ export class AgentManager {
     if (!agent?.tokenBurnAlert) return;
     delete agent.tokenBurnAlert;
     this.emitState(agent, { persist: false });
+  }
+
+  /** Read-modify-write slot for the spend governor's per-agent fired-stage bookkeeping. */
+  getSpendGovernorState(agentId: string): SpendGovernorState | undefined {
+    return this.agents.get(agentId)?.spendGovernorState;
+  }
+
+  setSpendGovernorState(agentId: string, state: SpendGovernorState | undefined): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (state === undefined) {
+      delete agent.spendGovernorState;
+      return;
+    }
+    agent.spendGovernorState = state;
+  }
+
+  /**
+   * What `create_agent` needs to refuse a caller the governor has cut off, or null when it may
+   * fan out. Read by the Paseo tool catalog at call time rather than pushed to it: the gate has
+   * to hold between the governor's 60s sweeps, and the moment the agent asks is the only moment
+   * it matters. Mirrors getPaseoToolPolicy's shape. See spend-governor.ts.
+   */
+  getSpendFanOutDenial(agentId: string): { budgetTokens: number; spentTokens: number } | null {
+    const agent = this.agents.get(agentId);
+    if (!agent || !isFanOutBlocked(agent.spendGovernorState)) return null;
+    return {
+      budgetTokens: agent.spendGovernorState!.budgetTokens,
+      spentTokens: agent.totalTokens ?? 0,
+    };
   }
 
   /** Read-modify-write slot for AgentResourceMonitor's per-agent consecutive-sweep bookkeeping. */
@@ -3659,6 +3703,7 @@ export class AgentManager {
         delete agent.totalTokens;
         delete agent.tokenBurnAlert;
         delete agent.tokenBurnMonitorState;
+        delete agent.spendGovernorState;
         delete agent.resourceAlert;
         delete agent.resourceMonitorState;
       }
