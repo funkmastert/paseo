@@ -19,6 +19,8 @@ Two independent signals, either one sufficient (`account-failover-detector.ts`):
 
 A healthy usage reading does not clear a reactive signal. A monthly spend cap does not appear in the utilization windows at all.
 
+This monitor is the only thing that acts on a usage window. The token-burn monitor's account-pressure leg reads the same rows and warns at 90%, deliberately without acting, so the two never race for the same account — see [docs/token-burn.md](token-burn.md#account-pressure).
+
 A retired predecessor's error still counts as evidence until it expires. If it stopped counting at migration time, the account would look healthy on the next sweep and the next stuck agent would be sent straight back onto it.
 
 Evidence is identified by the error text and the agent's timeline generation. A retry that fails with identical text appends timeline rows first, so it counts as a fresh failure rather than the old one.

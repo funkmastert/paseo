@@ -1,6 +1,6 @@
 # Token burn
 
-The daemon tracks how fast each agent spends tokens and warns when one runs away. Two consumers read the same signal: the relative badge in agent lists (`packages/app/src/utils/token-burn-tone-model.ts`) and the absolute-threshold monitor that pushes notifications (`packages/server/src/server/agent-token-burn-monitor.ts`).
+The daemon tracks how much each agent spends and what it spends it against. Three consumers read the same signal: the relative badge in agent lists (`packages/app/src/utils/token-burn-tone-model.ts`), the absolute-threshold monitor that pushes notifications, and the opt-in spend governor that acts on a task budget — both in `packages/server/src/server/agent-token-burn-monitor.ts`. It's the provider-accounting counterpart to [docs/resource-monitor.md](resource-monitor.md), which watches the same agents through `ps`.
 
 ## The unit is cost-weighted tokens
 
@@ -19,9 +19,81 @@ Raw counting is what made the monitor cry wolf. A Claude agent re-reads its whol
 
 ## Monitor legs
 
-Config lives under `agents.tokenBurnMonitor` (`persisted-config.ts`); defaults are 50K weighted tokens/min sustained for 3 sweeps, and 5M weighted tokens per session, ratcheting to the next multiple.
+Config lives under `agents.tokenBurnMonitor` (`persisted-config.ts`); defaults are 400K weighted tokens/min sustained for 3 sweeps, and 5M weighted tokens per session, ratcheting to the next multiple.
 
 - **Rate** is evaluated only for agents that are mid-turn. The trailing-window average stays flat for up to five minutes after the last request, so an idle agent can never be "burning"; `sustainedMinutes` alone filters nothing.
 - **Total** applies regardless of lifecycle.
 
-Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a breach; the push log's `Sending push notification` lines at the tick phase (`:42` when the daemon started at `:42`) are its footprint.
+Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a threshold breach; the push log's `Sending push notification` lines at the tick phase (`:42` when the daemon started at `:42`) are its footprint.
+
+### Why the rate leg is a smoke alarm and not a signal
+
+The rate default was 50,000, and it fired on ordinary agents, continuously. Measured on one machine: an Opus agent reading source files read 205K, then 181K, then 106K weighted tokens/min, and tripped the alert on its third sweep. Two finished implementation agents averaged 98K and 97K across their whole runs.
+
+That is structural, not an outlier. A Claude agent re-reads its context from cache on every request, so the weighted rate tracks context size times request frequency. It climbs as any task progresses, and a 1M-context agent doing identical work reads roughly nine times the cache per request. **The rate is a readout of how large a context is, not of whether the work is worth doing.** 400K is about twice the measured healthy peak — quiet enough to be worth reading, still not a basis for action. The spend governor never acts on it.
+
+## The spend governor
+
+Off by default. Turn it on under `agents.tokenBurnMonitor.governor`, and turn on `dryRun` first: it runs the whole ladder and reports exactly what it would do, without doing any of it — not even the message to the agent, which would spend tokens on a hypothetical.
+
+### Budgets are per task, because nothing else separates the cases
+
+Three agents measured on one machine: two healthy implementation agents that finished their work at 1.08M and 1.48M weighted tokens, and one that spent 1.1M discovering it had no Edit tool and then spawned helpers that also could not edit. No rate tells those apart. No single global total tells those apart either — the healthy pair straddle the runaway. What separates them is what the task was worth, and only the caller knows that.
+
+So a caller declares it: the **`paseo.budget` label**, in weighted tokens, accepting `300000`, `300k` or `1.5M`. A label rather than a create field because labels are already on `create_agent`'s input schema, an `agent.create` plugin hook can impose or override one, `update_agent` can raise one on a live agent, and none of it costs a protocol change. Anything that isn't unambiguously a token count is read as no budget at all rather than guessed at.
+
+An agent whose task declared no budget is **not governed**, unless `defaultBudgetTokens` is set. That is the shipped default, so turning the governor on cannot act on agents nobody has sized. Set it once dry-run has shown what your agents actually cost.
+
+### The ladder
+
+Four stages, each switching independently at its own multiple of the budget. Enabling the governor enables `notify` alone: turning it on starts telling you things, never starts changing things.
+
+| Stage        | Fires at | On by default | What it does                                                                 |
+| ------------ | -------- | ------------- | ---------------------------------------------------------------------------- |
+| `notify`     | 0.75×    | yes           | Push, live `tokenBurnAlert`, and a message into the agent's own conversation |
+| `downgrade`  | 1.0×     | no            | `setAgentModel` to `downgradeToModel` for the rest of the task               |
+| `stopFanOut` | 1.0×     | no            | `create_agent` refuses this caller, so a runaway cannot multiply             |
+| `pause`      | 1.5×     | no            | Ends the turn and leaves the agent flagged for a human                       |
+
+A stage fires once per episode, not once per sweep. A **changed budget starts a fresh episode** — that is how a human releases a paused or cut-off agent: raise the label. Turning the governor off drops the carried state entirely, which releases a blocked agent too.
+
+`downgrade` and `pause` need a running agent. When the agent is idle they defer rather than mark themselves done, so an agent that blew its budget and went briefly quiet is still caught when it resumes. `downgrade` marks itself done without acting when there is no `downgradeToModel` or the agent is already on it.
+
+An agent that jumps several thresholds between two sweeps — 60 seconds at the measured healthy rate is ~200K weighted tokens, so a small budget can go in one — gets every crossed stage in ladder order in that sweep. It is always told before it is paused.
+
+### The agent is always told, and told enough
+
+Silently changing an agent's model or refusing its tool calls produces exactly the confused, expensive flailing the governor exists to prevent. Every stage names the spend, the budget, and what to do differently.
+
+Three of the four arrive as one steered `<paseo-system>` message, the same path chat mentions, notify-on-finish and the resource monitor use (`agent-prompt.ts`, `activeTurnBehavior: "steer"`). **Not** `providerOptions.appendSystemPrompt`: that is folded into the SDK options when the query is built, so using it mid-session would mean restarting the session and losing the turn being governed. It stays the right channel for a create-time restriction ([docs/plugins.md](plugins.md)), which is a different problem.
+
+The fourth, `stopFanOut`, also arrives as the `create_agent` error itself — the most direct channel there is, delivered at the moment the agent tries. That message names the budget, the spend, that no agent was created, that this is a cap rather than a transient failure so retrying will keep failing, and the label a human would raise. An agent told only "create_agent failed" retries in a loop.
+
+Two ordering rules carry weight:
+
+- **Downgrade tells the agent after the model moved**, so the notice is true when read, and says it did nothing wrong so it does not go hunting for a bug. `setAgentModel` mid-turn is safe: it reaches the SDK's `query.setModel()`, which applies from the next API request in the same turn. The request in flight finishes on the old model, the conversation is untouched, nothing restarts.
+- **Pause steers first and cancels second.** The other order leaves an idle agent, and steering an idle agent starts a fresh turn (`agent-prompt.ts`'s fallback) — spending tokens to say it is out of tokens. This way the reason lands in the transcript for whoever resumes it.
+
+Pausing works inside the closed `attentionReason` enum without adding to it: the turn ends and the live `tokenBurnAlert` stays set, which `agent-state-bucket.ts` already treats as attention-worthy on its own.
+
+### Config
+
+| Key                                      | Default         | What it does                                                  |
+| ---------------------------------------- | --------------- | ------------------------------------------------------------- |
+| `enabled`                                | `false`         | Nothing is governed while this is off                         |
+| `dryRun`                                 | `false`         | Plan and report the whole ladder, perform none of it          |
+| `defaultBudgetTokens`                    | `null`          | Budget for a task that declared none; null means not governed |
+| `downgradeToModel`                       | `null`          | Where `downgrade` moves an agent; null leaves it inert        |
+| `<stage>.enabled` / `<stage>.atFraction` | see table above | Per-stage switch and threshold                                |
+
+### What it costs
+
+A budget set too low is worse than no budget: it stops work that was going fine, and the restart costs more than the overrun would have. Dry-run for a day and read what it would have done before enabling anything past `notify`. `pause` at 1.5× is deliberately far out — it is for the runaway, not the task that took longer than expected.
+
+## Account pressure
+
+Off by default (`agents.tokenBurnMonitor.accountPressure`), and **report-only on purpose**. At 90% of a provider usage window it pushes once and does nothing else.
+
+Acting here would fight two things that already own the decision. The account pool plugin routes new agents away from a hot account, so refusing a caller's `create_agent` on account pressure would block a child the plugin would have placed somewhere healthy anyway. And `AccountFailoverMonitor` already migrates agents off an account at 100% ([docs/account-failover.md](account-failover.md)). Warning before the wall is the gap neither fills.
+
+It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt`, so a window that resets warns afresh and one sitting at 94% all week does not warn every 60 seconds.
