@@ -918,6 +918,17 @@ class DaemonProtocolError extends Error {
   }
 }
 
+/** A daemon refusal of a provider move. `code` is the daemon's vocabulary; see messages.ts. */
+export class AgentProviderMoveRejection extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentProviderMoveRejection";
+  }
+}
+
 class PingTimeoutError extends Error {
   constructor(readonly timeoutMs: number) {
     super(`Ping timed out (${timeoutMs}ms)`);
@@ -2672,6 +2683,27 @@ export class DaemonClient {
     });
     if (!payload.accepted) {
       throw new Error(payload.error ?? "detachAgent rejected");
+    }
+  }
+
+  /**
+   * Re-open a live agent under another provider, keeping its id and conversation. Rejects with
+   * `AgentProviderMoveRejection` so a caller can branch on `code` instead of matching prose.
+   */
+  async moveAgentToProvider(agentId: string, providerId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.provider.move.response">({
+        message: {
+          type: "agent.provider.move.request",
+          agentId,
+          providerId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new AgentProviderMoveRejection(
+        payload.code ?? "move_failed",
+        payload.error ?? `Could not move agent ${agentId} to provider '${providerId}'`,
+      );
     }
   }
 

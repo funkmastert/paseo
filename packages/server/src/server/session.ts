@@ -47,6 +47,7 @@ import {
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
+import { AgentProviderMoveError } from "./agent/provider-move.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -2345,6 +2346,8 @@ export class Session {
     switch (msg.type) {
       case "agent.detach.request":
         return this.handleDetachAgentRequest(msg.agentId, msg.requestId);
+      case "agent.provider.move.request":
+        return this.handleAgentProviderMoveRequest(msg);
       default:
         return undefined;
     }
@@ -3005,6 +3008,52 @@ export class Session {
           agentId,
           accepted: false,
           error: message,
+        },
+      });
+    }
+  }
+
+  private async handleAgentProviderMoveRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider.move.request" }>,
+  ): Promise<void> {
+    const { agentId, providerId, requestId } = msg;
+    this.sessionLogger.info({ agentId, providerId, requestId }, "Moving agent to another provider");
+    try {
+      await ensureUnarchivedAgentLoaded(agentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const moved = await this.agentManager.moveAgentToProvider(agentId, providerId);
+      if (moved.workspaceId) {
+        await this.emitWorkspaceUpdatesForWorkspaceIds(new Set([moved.workspaceId]));
+      }
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: true,
+          providerId: moved.provider,
+          code: null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const refusal = error instanceof AgentProviderMoveError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, agentId, providerId, requestId, code: refusal?.code },
+        "Failed to move agent to another provider",
+      );
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: false,
+          providerId: this.agentManager.getAgent(agentId)?.provider ?? providerId,
+          code: refusal?.code ?? "move_failed",
+          error: getErrorMessageOr(error, "Failed to move agent to another provider"),
         },
       });
     }

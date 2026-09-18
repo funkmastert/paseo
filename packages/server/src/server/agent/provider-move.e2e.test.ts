@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { createPaseoDaemon, type PaseoDaemon } from "../bootstrap.js";
 import { DaemonClient } from "../test-utils/daemon-client.js";
 import { createTestAgentClient } from "../test-utils/fake-agent-client.js";
+import { AgentProviderMoveRejection } from "@getpaseo/client/internal/daemon-client";
 import { AgentProviderMoveError } from "./provider-move.js";
 
 const PROVIDERS = ["claude", "claude-personal", "claude-backup", "codex"] as const;
@@ -218,6 +219,31 @@ describe("AgentManager.moveAgentToProvider (e2e)", () => {
     );
 
     expect(refusal.code).toBe("agent_busy");
+    expect(managed(harness, agentId).provider).toBe("claude-personal");
+  }, 60_000);
+
+  test("advertises the capability and moves over the daemon RPC", async () => {
+    expect(harness.client.getLastServerInfoMessage()?.features?.agentProviderMove).toBe(true);
+    const agentId = await createAgent(harness, "claude-personal", "Remote control");
+    await converse(harness, agentId, "RPC-MARKER");
+
+    await harness.client.moveAgentToProvider(agentId, "claude-backup");
+
+    expect(managed(harness, agentId).provider).toBe("claude-backup");
+    expect(await harness.daemon.agentManager.getLastAssistantMessage(agentId)).toBe("RPC-MARKER");
+  }, 60_000);
+
+  test("reports a refusal over the RPC with a code the caller can branch on", async () => {
+    const agentId = await createAgent(harness, "claude-personal", "Claude work");
+    await converse(harness, agentId, "READY");
+
+    const rejection = await harness.client.moveAgentToProvider(agentId, "codex").then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    expect(rejection).toBeInstanceOf(AgentProviderMoveRejection);
+    expect((rejection as AgentProviderMoveRejection).code).toBe("incompatible_provider");
     expect(managed(harness, agentId).provider).toBe("claude-personal");
   }, 60_000);
 
