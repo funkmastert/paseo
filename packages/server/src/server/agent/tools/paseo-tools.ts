@@ -32,6 +32,7 @@ import {
   type ArchiveDependencies,
 } from "../../workspace-archive-service.js";
 import { createAgentCommand, type CreateAgentFromMcpInput } from "../create-agent/create.js";
+import { SPEND_BUDGET_LABEL } from "../spend-governor.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
@@ -988,7 +989,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     provider: ProviderModelInputSchema.describe(
       "Required provider/model pair, for example codex/gpt-5.4.",
     ),
-    labels: z.record(z.string(), z.string()).optional().describe("Labels to set on the agent"),
+    labels: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        `Labels to set on the agent. Set "${SPEND_BUDGET_LABEL}" to what this task ought to cost in weighted tokens (e.g. "300k", "1.5M") so the spend governor can stop it running away; a small edit is ~200k, a feature with tests ~1.5M.`,
+      ),
     settings: CreateAgentSettingsInputSchema.optional().describe(
       "Initial runtime settings for the new agent.",
     ),
@@ -1424,6 +1430,22 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       },
     },
     async (args: unknown) => {
+      // Checked before anything is parsed or provisioned: a caller the spend governor has cut
+      // off must not create a workspace or a worktree on the way to being refused. The message
+      // is the agent's only notice — it names the budget, the spend, and the fact that this is
+      // a cap rather than a broken tool, because an agent that retries a refusal blindly burns
+      // exactly the budget this is protecting. See agent/spend-governor.ts.
+      const fanOutDenial = callerAgentId ? agentManager.getSpendFanOutDenial(callerAgentId) : null;
+      if (fanOutDenial) {
+        throw new Error(
+          `create_agent refused: the Bozeo spend governor has cut off this task's fan-out. ` +
+            `You have used ${Math.round(fanOutDenial.spentTokens)} of this task's ` +
+            `${fanOutDenial.budgetTokens} weighted-token budget. This is a budget cap, not a ` +
+            `transient failure — retrying will keep failing, and no agent was created. Finish ` +
+            `the remaining work yourself, or stop and report what is left so a human can raise ` +
+            `the ${SPEND_BUDGET_LABEL} label or split the task.`,
+        );
+      }
       const resolvedArgs = await resolveCreateAgentToolArgs(args);
       const { parsedArgs, worktree } = resolvedArgs;
       let requestedBackground: boolean;
