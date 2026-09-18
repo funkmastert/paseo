@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 /**
- * One row of `ps -axo pid,ppid,rss,pcpu,etime,cputime,command` output. `command` is the full
+ * One row of `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` output. `command` is the full
  * command line (used by process-attribution.ts to find the `callerAgentId=<id>` marker and to
  * recognize known build daemons), so it's read greedily as everything past the fixed columns —
  * it's the one field that legitimately contains spaces.
@@ -15,6 +15,9 @@ import { promisify } from "node:util";
 export interface ProcessSampleRow {
   pid: number;
   ppid: number;
+  /** Owning user id. Carried so build-daemon-reaper.ts can refuse to signal another user's
+   * process; nothing in the reporting-only legs reads it. */
+  uid: number;
   rssKb: number;
   cpuPercent: number;
   etime: string;
@@ -23,7 +26,7 @@ export interface ProcessSampleRow {
   command: string;
 }
 
-const PS_ROW_FIELD_COUNT = 7;
+const PS_ROW_FIELD_COUNT = 8;
 
 /**
  * Parses `ps` clock columns — `etime` and `cputime` — into seconds. Shapes seen on macOS and
@@ -48,18 +51,20 @@ function parsePsLine(line: string): ProcessSampleRow | undefined {
   if (parts.length < PS_ROW_FIELD_COUNT) {
     return undefined;
   }
-  const [pidText, ppidText, rssText, cpuText, etime, cputime, ...commandParts] = parts;
+  const [pidText, ppidText, uidText, rssText, cpuText, etime, cputime, ...commandParts] = parts;
   const pid = Number.parseInt(pidText, 10);
   const ppid = Number.parseInt(ppidText, 10);
+  const uid = Number.parseInt(uidText, 10);
   const rssKb = Number.parseInt(rssText, 10);
   const cpuPercent = Number.parseFloat(cpuText);
-  if (![pid, ppid, rssKb, cpuPercent].every(Number.isFinite)) {
+  if (![pid, ppid, uid, rssKb, cpuPercent].every(Number.isFinite)) {
     return undefined;
   }
   const cpuSeconds = parseClockSeconds(cputime);
   return {
     pid,
     ppid,
+    uid,
     rssKb,
     cpuPercent,
     etime,
@@ -69,9 +74,9 @@ function parsePsLine(line: string): ProcessSampleRow | undefined {
 }
 
 /**
- * Parses `ps -axo pid,ppid,rss,pcpu,etime,cputime,command` output. The first line is `ps`'s
- * own header (`PID PPID RSS %CPU ELAPSED TIME COMMAND` on both macOS and Linux for this column
- * spec) and is always skipped; any other line that doesn't parse to the numeric leading fields
+ * Parses `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` output. The first line is `ps`'s
+ * own header (`PID PPID UID RSS %CPU ELAPSED TIME COMMAND` on both macOS and Linux for this
+ * column spec) and is always skipped; any other line that doesn't parse to the numeric leading fields
  * is dropped rather than throwing — a `ps` snapshot racing process exit routinely has partial
  * or empty lines.
  */
@@ -150,7 +155,7 @@ export interface ProcessSampler {
 }
 
 const execFileAsync = promisify(execFile);
-const PS_ARGS = ["-axo", "pid,ppid,rss,pcpu,etime,cputime,command"];
+const PS_ARGS = ["-axo", "pid,ppid,uid,rss,pcpu,etime,cputime,command"];
 const PS_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
 // The monitor exists for overloaded machines, where `ps` itself can stall; a stalled sample must
 // not outlive the sweep interval or pile up child processes on top of the load being measured.

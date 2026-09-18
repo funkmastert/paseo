@@ -10,9 +10,9 @@ import {
 describe("parsePsOutput", () => {
   test("parses a macOS-shaped snapshot, including a command containing spaces", () => {
     const output = [
-      "  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND",
-      "  501     1   2048   0.0     01:23:45     0:00.05 /usr/bin/login -pfl tyler /bin/zsh -c exec /bin/zsh -il",
-      " 1200   501  51200  45.2       00:01     0:00.45 git push origin main",
+      "  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND",
+      "  501     1   501   2048   0.0     01:23:45     0:00.05 /usr/bin/login -pfl tyler /bin/zsh -c exec /bin/zsh -il",
+      " 1200   501   501  51200  45.2       00:01     0:00.45 git push origin main",
       "",
     ].join("\n");
 
@@ -22,6 +22,7 @@ describe("parsePsOutput", () => {
     expect(rows[0]).toEqual({
       pid: 501,
       ppid: 1,
+      uid: 501,
       rssKb: 2048,
       cpuPercent: 0,
       etime: "01:23:45",
@@ -31,6 +32,7 @@ describe("parsePsOutput", () => {
     expect(rows[1]).toEqual({
       pid: 1200,
       ppid: 501,
+      uid: 501,
       rssKb: 51200,
       cpuPercent: 45.2,
       etime: "00:01",
@@ -41,8 +43,8 @@ describe("parsePsOutput", () => {
 
   test("recognizes a detached Gradle daemon by ppid 1 and its command marker", () => {
     const output = [
-      "  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND",
-      " 2001     1 445000   0.1    2:14:00    12:34.56 java -Xmx2g -cp gradle-launcher.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon",
+      "  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND",
+      " 2001     1   501 445000   0.1    2:14:00    12:34.56 java -Xmx2g -cp gradle-launcher.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon",
     ].join("\n");
 
     const rows = parsePsOutput(output);
@@ -54,7 +56,7 @@ describe("parsePsOutput", () => {
 
   test("drops malformed lines instead of throwing", () => {
     const output = [
-      "  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND",
+      "  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND",
       "not a process line",
       "",
     ].join("\n");
@@ -63,18 +65,21 @@ describe("parsePsOutput", () => {
   });
 
   test("an empty snapshot (header only) parses to no rows", () => {
-    expect(parsePsOutput("  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND\n")).toEqual([]);
+    expect(
+      parsePsOutput("  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND\n"),
+    ).toEqual([]);
   });
 
   test("a row whose TIME column doesn't parse still counts, just without cpuSeconds", () => {
     const output = [
-      "  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND",
-      "   77     1   1000   1.0       00:10          ?? some-tool",
+      "  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND",
+      "   77     1     0   1000   1.0       00:10          ?? some-tool",
     ].join("\n");
 
     expect(parsePsOutput(output)[0]).toEqual({
       pid: 77,
       ppid: 1,
+      uid: 0,
       rssKb: 1000,
       cpuPercent: 1,
       etime: "00:10",
@@ -117,8 +122,8 @@ describe("createSystemProcessSampler", () => {
     const sampler = createSystemProcessSampler({
       runPs: async () =>
         [
-          "  PID  PPID    RSS %CPU     ELAPSED        TIME COMMAND",
-          "    9     1    512   0.0       00:05     0:00.01 sleep 60",
+          "  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND",
+          "    9     1   501    512   0.0       00:05     0:00.01 sleep 60",
         ].join("\n"),
     });
 
@@ -126,6 +131,7 @@ describe("createSystemProcessSampler", () => {
       {
         pid: 9,
         ppid: 1,
+        uid: 501,
         rssKb: 512,
         cpuPercent: 0,
         etime: "00:05",

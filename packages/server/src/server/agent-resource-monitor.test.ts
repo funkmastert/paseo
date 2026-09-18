@@ -81,6 +81,7 @@ function row(
 ): ProcessSampleRow {
   return {
     ppid: 1,
+    uid: 501,
     rssKb: 1000,
     cpuPercent: 0,
     etime: "00:01",
