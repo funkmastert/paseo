@@ -599,6 +599,11 @@ const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
   ratePerMinute: z.number().optional(),
   totalTokens: z.number().optional(),
   firstBreachedAt: z.string(),
+  // Additive-optional spend-governor fields; `trigger` deliberately keeps its two values.
+  // See TokenBurnAlert's doc comment in agent-types.ts.
+  budgetTokens: z.number().optional(),
+  spentTokens: z.number().optional(),
+  governorStage: z.string().optional(),
 });
 
 const ResourceAlertSchema: z.ZodType<ResourceAlert> = z.object({

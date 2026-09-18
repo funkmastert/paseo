@@ -203,6 +203,18 @@ export interface TokenBurnAlert {
   ratePerMinute?: number;
   totalTokens?: number;
   firstBreachedAt: string;
+  /**
+   * Spend-governor fields, set when the breach is a per-task budget breach rather than a bare
+   * cumulative-total one (agent/spend-governor.ts). A budget breach still reports
+   * `trigger: "total"` — it *is* a cumulative-total breach — because `trigger` is a closed
+   * `z.enum(["rate","total"])` on the wire and a third value would fail to parse on every
+   * shipped client. These three are additive-optional instead: an old app renders the usual
+   * total copy, a new one can render the budget. `governorStage` is a free string, not an
+   * enum, so a later stage is safe to add for the same reason.
+   */
+  budgetTokens?: number;
+  spentTokens?: number;
+  governorStage?: string;
 }
 
 /**
