@@ -31,8 +31,27 @@ describe("classify", () => {
 
   it("does not flag unrelated failure text as a limit", () => {
     expect(classify("Network timeout, please retry").isLimit).toBe(false);
-    expect(classify("Invalid API key").isLimit).toBe(false);
     expect(classify("Internal server error").isLimit).toBe(false);
+  });
+
+  // Exact strings verified with `strings` against the compiled
+  // @anthropic-ai/claude-agent-sdk-darwin-arm64/claude binary — the real CLI
+  // output for a logged-out/bad-credential account, not guessed text.
+  it("flags auth/credential failure text as a limit, distinctly from a usage cap", () => {
+    const notLoggedIn = classify("Not logged in · Please run /login");
+    expect(notLoggedIn.isLimit).toBe(true);
+    expect(notLoggedIn.isAuthFailure).toBe(true);
+    expect(notLoggedIn.window).toBeUndefined();
+    expect(notLoggedIn.resetsAt).toBeUndefined();
+
+    expect(classify("Invalid API key · Fix external API key").isAuthFailure).toBe(true);
+    expect(classify("Invalid auth token · Fix external auth token").isAuthFailure).toBe(true);
+    expect(classify("OAuth login failed: invalid_grant").isAuthFailure).toBe(true);
+    expect(classify("Cloud authentication failed").isAuthFailure).toBe(true);
+  });
+
+  it("does not flag ordinary limit-shaped text as an auth failure", () => {
+    expect(classify("You've hit your limit").isAuthFailure).toBeFalsy();
   });
 
   it("parses an ISO resetsAt timestamp from the message", () => {

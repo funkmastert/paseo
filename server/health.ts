@@ -42,6 +42,15 @@ export interface HealthTrackerOptions {
   defaultCapTtlMs?: number;
   /** How long a window stays in probation before auto-healing if no turn completes. Default 30min. */
   probationTtlMs?: number;
+  /**
+   * Cooldown before an auth-failure cap (see classify.ts's AUTH_FAILURE_PATTERN)
+   * is retried. Unlike a usage cap, a logged-out account has no reset time and
+   * no guarantee it will ever heal on its own, so this is deliberately much
+   * shorter than defaultCapTtlMs — it only throttles retries, matching the
+   * usage poller's own 5-minute cadence (usage-poll.ts's DEFAULT_INTERVAL_MS)
+   * rather than assuming a fixed downtime. Default 5min.
+   */
+  authFailureCapTtlMs?: number;
 }
 
 export interface HealthTracker {
@@ -78,6 +87,7 @@ const DEFAULT_DRAIN_THRESHOLD_PCT = 90;
 const DEFAULT_CAP_THRESHOLD_PCT = 100;
 const DEFAULT_CAP_TTL_MS = 5 * 60 * 60 * 1000;
 const DEFAULT_PROBATION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_AUTH_FAILURE_CAP_TTL_MS = 5 * 60 * 1000;
 
 interface InternalWindowState {
   status: WindowStatus;
@@ -87,6 +97,13 @@ interface InternalWindowState {
   /** probation -> healthy deadline, set when entering probation. */
   probationExpiry?: Date;
   utilizationPct?: number;
+  /**
+   * True when the current/last cap was an auth failure (see classify.ts).
+   * Drives settle(): an auth-failure cap's probation stage has no
+   * probationExpiry, so it never auto-heals on trust — only a completed
+   * turn (noteTurnCompleted) proves the account is usable again.
+   */
+  authFailure?: boolean;
 }
 
 function relevantWindows(modelId: string): string[] {
@@ -104,6 +121,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   const capThresholdPct = options.capThresholdPct ?? DEFAULT_CAP_THRESHOLD_PCT;
   const defaultCapTtlMs = options.defaultCapTtlMs ?? DEFAULT_CAP_TTL_MS;
   const probationTtlMs = options.probationTtlMs ?? DEFAULT_PROBATION_TTL_MS;
+  const authFailureCapTtlMs = options.authFailureCapTtlMs ?? DEFAULT_AUTH_FAILURE_CAP_TTL_MS;
 
   const windowsByProvider = new Map<string, Map<string, InternalWindowState>>();
   const listeners = new Set<(event: CapEvent) => void>();
@@ -131,7 +149,10 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       const expiry = state.capExpiry?.getTime();
       if (expiry !== undefined && currentTime >= expiry) {
         state.status = "probation";
-        state.probationExpiry = new Date(currentTime + probationTtlMs);
+        // An auth failure has no reset time to trust — it stays in
+        // probation (routable, so the next turn can prove it either way)
+        // with no probationExpiry, so the block below never auto-heals it.
+        state.probationExpiry = state.authFailure ? undefined : new Date(currentTime + probationTtlMs);
       }
     }
 
@@ -149,16 +170,24 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     state.resetsAt = undefined;
     state.capExpiry = undefined;
     state.probationExpiry = undefined;
+    state.authFailure = false;
     if (wasCappedLineage) {
       emit({ providerId, window, kind: "recovered" });
     }
   }
 
-  function toCapped(providerId: string, window: string, state: InternalWindowState, resetsAt?: Date): void {
+  function toCapped(
+    providerId: string,
+    window: string,
+    state: InternalWindowState,
+    resetsAt?: Date,
+    authFailure = false,
+  ): void {
     const currentTime = now().getTime();
     state.status = "capped";
     state.resetsAt = resetsAt;
-    state.capExpiry = resetsAt ?? new Date(currentTime + defaultCapTtlMs);
+    state.authFailure = authFailure;
+    state.capExpiry = resetsAt ?? new Date(currentTime + (authFailure ? authFailureCapTtlMs : defaultCapTtlMs));
     state.probationExpiry = undefined;
     emit({ providerId, window, kind: "capped", resetsAt: state.resetsAt ?? state.capExpiry });
   }
@@ -184,7 +213,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     if (state.status === "capped") {
       return;
     }
-    toCapped(providerId, window, state, classification.resetsAt);
+    toCapped(providerId, window, state, classification.resetsAt, classification.isAuthFailure);
   }
 
   function reportUsage(providerId: string, readings: UsageWindowReading[]): void {

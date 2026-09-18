@@ -4,6 +4,8 @@ export interface ClassifyResult {
   isLimit: boolean;
   resetsAt?: Date;
   window?: string;
+  /** True when this is an auth/credential failure rather than a usage cap — see AUTH_FAILURE_PATTERN. */
+  isAuthFailure?: boolean;
 }
 
 /**
@@ -18,6 +20,29 @@ export interface ClassifyResult {
  * session scope word, not preceded directly by "hit your".
  */
 const LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend limit|usage limit/i;
+
+/**
+ * Auth/credential failure text — an account in this state cannot serve ANY
+ * request (not just one window), so it must be treated at least as
+ * severely as a usage cap, but classified separately since it carries no
+ * reset time and must not auto-heal on trust alone (see health.ts).
+ *
+ * These are the exact strings the Claude CLI binary emits for each case,
+ * verified with `strings` against the compiled
+ * `@anthropic-ai/claude-agent-sdk-darwin-arm64/claude` (the binary Paseo's
+ * daemon actually spawns for a claude-family agent) rather than assumed:
+ *   - "Not logged in · Please run /login"   (no OAuth session / logged out)
+ *   - "Invalid API key · Fix external API key"
+ *   - "Invalid auth token · Fix external auth token"
+ *   - "OAuth login failed: "
+ *   - "Cloud authentication failed"
+ * Deliberately NOT matching bare "401"/"403": those codes only showed up
+ * internally (admin-API tool errors), never in the CLI's user-facing
+ * turn-failure text, and matching them bare would risk false-positiving on
+ * unrelated numbers in an error message.
+ */
+const AUTH_FAILURE_PATTERN =
+  /not logged in|please run\s*\/login|invalid api key|invalid auth token|oauth login failed|cloud authentication failed/i;
 
 const ISO_TIMESTAMP_PATTERN =
   /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?\b/;
@@ -74,6 +99,13 @@ function detectWindow(message: string): string | undefined {
  * deterministic under fake timers.
  */
 export function classify(message: string, now: Date = new Date()): ClassifyResult {
+  // Checked first and returned early: an auth failure carries no reset time
+  // and no per-window attribution — it takes down the whole account, not one
+  // window — so window/resetsAt detection (tuned for cap text) doesn't apply.
+  if (AUTH_FAILURE_PATTERN.test(message)) {
+    return { isLimit: true, isAuthFailure: true };
+  }
+
   const isLimit = LIMIT_PATTERN.test(message);
   if (!isLimit) {
     return { isLimit };

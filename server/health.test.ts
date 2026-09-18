@@ -245,6 +245,95 @@ describe("createHealthTracker", () => {
   });
 });
 
+describe("auth failure (logged-out / bad-credential account)", () => {
+  // "Not logged in · Please run /login" is the real string the Claude CLI
+  // binary emits (verified with `strings` against
+  // @anthropic-ai/claude-agent-sdk-darwin-arm64/claude) — not a guessed message.
+  const NOT_LOGGED_IN = "Not logged in · Please run /login";
+
+  it("caps the whole account on the real 'Not logged in' failure text, disqualifying every model and last-resort use", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+    expect(tracker.isHealthyForAllWindows(PROVIDER)).toBe(false);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(false);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("capped");
+  });
+
+  it("a healthy account is never marked dead by a single unrelated failure", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportTurnFailure(PROVIDER, "Network timeout, please retry");
+    tracker.reportTurnFailure(PROVIDER, "Internal server error");
+    tracker.reportTurnFailure(PROVIDER, "ENOTFOUND api.anthropic.com");
+
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.isHealthyForAllWindows(PROVIDER)).toBe(true);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(true);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("healthy");
+  });
+
+  it("does NOT auto-heal an auth-failure cap on a fixed TTL alone — only a completed turn heals it", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { authFailureCapTtlMs: 5 * 60 * 1000 });
+
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+
+    // Past the short auth cooldown, it becomes routable again (probation) so
+    // the next turn can prove the login status either way — but with no
+    // completed turn, it must stay in probation indefinitely, not silently
+    // flip to healthy the way a real cap's probation grace period would.
+    advance(5 * 60 * 1000 + 1);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("probation");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+
+    advance(24 * 60 * 60 * 1000);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("probation");
+  });
+
+  it("recovers to healthy on a completed turn once past the auth cooldown — logging back in heals it without a restart", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { authFailureCapTtlMs: 5 * 60 * 1000 });
+
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+    advance(5 * 60 * 1000 + 1);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true); // probation: routable, retried
+
+    tracker.noteTurnCompleted(PROVIDER);
+
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("healthy");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(true);
+  });
+
+  it("re-caps on a repeat auth failure during probation, so a still-logged-out account keeps getting throttled instead of flapping healthy", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { authFailureCapTtlMs: 5 * 60 * 1000 });
+
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+    advance(5 * 60 * 1000 + 1);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("probation");
+
+    // The retried turn is routed here and fails again — still logged out.
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+    expect(tracker.snapshot()[PROVIDER]?.["account"]?.status).toBe("capped");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("emits capped/recovered events for an auth failure exactly like a usage cap", () => {
+    const { tracker, advance } = trackerAt("2026-09-10T10:00:00Z", { authFailureCapTtlMs: 5 * 60 * 1000 });
+    const events: Array<{ kind: string }> = [];
+    tracker.onChange((event) => events.push(event));
+
+    tracker.reportTurnFailure(PROVIDER, NOT_LOGGED_IN);
+    advance(5 * 60 * 1000 + 1);
+    tracker.noteTurnCompleted(PROVIDER);
+
+    expect(events.map((e) => e.kind)).toEqual(["capped", "recovered"]);
+  });
+});
+
 describe("windowUtilization (drives the per-model budget gate)", () => {
   it("returns undefined until a usage reading covers the window", () => {
     const tracker = createHealthTracker();
