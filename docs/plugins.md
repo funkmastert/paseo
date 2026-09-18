@@ -317,6 +317,23 @@ Emit from the operation owner, not a client subscription. Provider history repla
 live hooks. Observers must not be awaited inside agent mutations: a callback can send a prompt or
 answer a permission through its own daemon session. Awaiting it there deadlocks that command.
 
+An `agent.create` hook that narrows what an agent may do must be able to say so, because the
+agent cannot see `providerOptions` and otherwise discovers a withheld tool by calling it and
+reading the failure — which costs far more tokens than the restriction saves. The Claude
+channel is `providerOptions.appendSystemPrompt`
+(`packages/server/src/server/agent/providers/claude/options.ts`), folded into the SDK's single
+`systemPrompt.append` string by `buildOptions()` after the agent's `systemPrompt` and the
+daemon-wide `daemon.appendSystemPrompt`. Order matters and is asserted in
+`providers/claude/agent.system-prompt.test.ts`: the per-agent note is the most specific of the
+three, so it goes last and never displaces the other two. Other providers have no equivalent
+field yet; add one the same way rather than reaching for the initial prompt.
+
+`initialPrompt` is read-only context on that hook. The caller resolved it before create and
+sends it separately afterwards, so the daemon drops a hook's mutation of it
+(`agent-manager.ts`, in `createAgentInternal`). That is deliberate: a hook cannot reach the
+first message, and a system-level note is the better channel anyway because it survives every
+turn.
+
 ## Contribute a provider
 
 Register a provider from `index.server.ts`. The provider connection is callback-based and owns all

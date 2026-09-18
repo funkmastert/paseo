@@ -493,6 +493,41 @@ type PluginTurnOutcome =
 | `cwd`                                         | Cannot change                                                              |
 | `internal`                                    | Daemon-owned; cannot change through this hook                              |
 
+A hook that restricts an agent has to tell it. Nothing in `providerOptions` is visible to
+the agent it applies to: withhold `Write` and the agent finds out by calling `Write` and
+reading the failure, then spends a turn hunting for the tool. For Claude, put a short
+plain-language note in `providerOptions.appendSystemPrompt`. Paseo appends it to that
+agent's system prompt, so it holds for every turn instead of only the first message, and
+it composes after the agent's own `systemPrompt` and the host's daemon-wide append text
+rather than replacing either.
+
+```ts
+server.before("agent.create", ({ request }) => {
+  if (request.config.provider !== "claude") {
+    return request;
+  }
+
+  return {
+    ...request,
+    config: {
+      ...request.config,
+      providerOptions: {
+        ...request.config.providerOptions,
+        disallowedTools: ["Write", "Edit", "Bash"],
+        appendSystemPrompt:
+          "Write, Edit, and Bash are withheld from you by policy. Do not search for them; " +
+          "report the change you want instead of making it.",
+      },
+    },
+  };
+});
+```
+
+`initialPrompt` is read-only context. The caller resolved the prompt before creation and
+sends it separately afterwards, so a change a hook makes to it is dropped. Use
+`appendSystemPrompt` for anything the agent has to know, and the `paseo` SDK in
+`agent.created` to say anything that belongs in the conversation.
+
 **`agent.session_open` request example:**
 
 ```json

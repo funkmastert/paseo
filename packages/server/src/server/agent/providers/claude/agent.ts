@@ -3359,9 +3359,22 @@ class ClaudeAgentSession implements AgentSession {
     return { thinking: undefined, effort: undefined, ultracode: false };
   }
 
-  private buildAppendedSystemPrompt(): string {
+  /**
+   * The SDK takes one `append` string, so every source of system-level text shares it.
+   * Order is agent, then daemon, then provider options, and it is load-bearing: the
+   * provider-options note comes from whoever configured this specific agent's
+   * restrictions (an `agent.create` plugin hook, typically) and is the most specific
+   * of the three, so it goes last and is never dropped in favour of the daemon-wide
+   * text. Appending rather than reordering also keeps an unset note byte-identical to
+   * the previous two-part composition.
+   */
+  private buildAppendedSystemPrompt(providerOptionsAppend: string | undefined): string {
     return (
-      composeSystemPromptParts(this.config.systemPrompt, this.config.daemonAppendSystemPrompt) ?? ""
+      composeSystemPromptParts(
+        this.config.systemPrompt,
+        this.config.daemonAppendSystemPrompt,
+        providerOptionsAppend,
+      ) ?? ""
     );
   }
 
@@ -3375,11 +3388,14 @@ class ClaudeAgentSession implements AgentSession {
 
   private async buildOptions(): Promise<ClaudeOptions> {
     const { thinking, effort, ultracode } = this.resolveThinkingConfig();
-    const appendedSystemPrompt = this.buildAppendedSystemPrompt();
-    const providerOptions = applyClaudeToolPolicy(
+    // `appendSystemPrompt` is Paseo's, not the SDK's (see providers/claude/options.ts).
+    // Destructure it away before the `...providerOptions` spread below so it can never
+    // reach the SDK as an unrecognized option.
+    const { appendSystemPrompt, ...providerOptions } = applyClaudeToolPolicy(
       this.config.providerOptions,
       this.config.toolPolicy,
     );
+    const appendedSystemPrompt = this.buildAppendedSystemPrompt(appendSystemPrompt);
     const settingsOptions = this.buildSettingsOptions(providerOptions, { ultracode });
     const sdkEnv = this.buildSdkEnv();
     assertClaudeModeCanRun(this.currentMode, sdkEnv);

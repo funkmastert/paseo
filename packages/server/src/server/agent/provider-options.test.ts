@@ -66,6 +66,15 @@ describe("provider-owned option schemas", () => {
     ).toMatchObject({ sandbox: { enabled: true, failIfUnavailable: true } });
   });
 
+  test("accepts the Claude appendSystemPrompt note a restricting caller attaches", () => {
+    expect(
+      validateProviderOptions("claude", ClaudeProviderOptionsSchema, {
+        disallowedTools: ["Write"],
+        appendSystemPrompt: "Write is withheld from you.",
+      }),
+    ).toMatchObject({ appendSystemPrompt: "Write is withheld from you." });
+  });
+
   test("reports the exact invalid Claude option path", () => {
     expect(() =>
       validateProviderOptions("claude", ClaudeProviderOptionsSchema, {
