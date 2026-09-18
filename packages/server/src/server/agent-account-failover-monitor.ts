@@ -10,6 +10,7 @@ import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
   planAccountFailoverSweep,
   type LimitErrorSighting,
+  type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
 import {
   resolveAccountPoolEntries,
@@ -84,6 +85,7 @@ export class AccountFailoverMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
+  private providerSightings = new Map<string, ProviderLimitSighting>();
 
   constructor(options: AccountFailoverMonitorOptions) {
     this.options = options;
@@ -134,6 +136,7 @@ export class AccountFailoverMonitor {
     const poolEntries = resolveAccountPoolEntries(daemonConfig.providers);
     if (poolEntries.length === 0) {
       this.sightings.clear();
+      this.providerSightings.clear();
       return;
     }
 
@@ -142,11 +145,13 @@ export class AccountFailoverMonitor {
       agents: this.options.agentManager.listAgentsForAccountFailover(),
       usage: await this.readUsage(),
       previousSightings: this.sightings,
+      previousProviderSightings: this.providerSightings,
       nowMs: this.now(),
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
     });
     this.sightings = plan.sightings;
+    this.providerSightings = plan.providerSightings;
     if (plan.candidates.length === 0) {
       return;
     }
@@ -154,7 +159,15 @@ export class AccountFailoverMonitor {
     const limit = pLimit({ concurrency: config.migrationConcurrency });
     await Promise.all(
       plan.candidates.map((agent) =>
-        limit(() => this.migrateOne(agent, poolEntries, plan.deadProviderIds, config)),
+        limit(() =>
+          this.migrateOne({
+            agent,
+            poolEntries,
+            deadProviderIds: plan.deadProviderIds,
+            sighting: plan.sightings.get(agent.id),
+            config,
+          }),
+        ),
       ),
     );
   }
@@ -171,12 +184,14 @@ export class AccountFailoverMonitor {
     }
   }
 
-  private async migrateOne(
-    agent: AccountFailoverAgentSummary,
-    poolEntries: readonly AccountPoolProviderEntry[],
-    deadProviderIds: ReadonlySet<string>,
-    config: ResolvedAccountFailoverConfig,
-  ): Promise<void> {
+  private async migrateOne(input: {
+    agent: AccountFailoverAgentSummary;
+    poolEntries: readonly AccountPoolProviderEntry[];
+    deadProviderIds: ReadonlySet<string>;
+    sighting: LimitErrorSighting | undefined;
+    config: ResolvedAccountFailoverConfig;
+  }): Promise<void> {
+    const { agent, poolEntries, deadProviderIds, config } = input;
     const { logger } = this.options;
     let outcome: AccountFailoverOutcome;
     try {
@@ -198,6 +213,32 @@ export class AccountFailoverMonitor {
     }
 
     switch (outcome.kind) {
+      case "moved":
+        logger.info(
+          {
+            agentId: outcome.agentId,
+            from: outcome.oldProviderId,
+            to: outcome.targetProviderId,
+          },
+          "Account failover: moved the agent's session to a healthy account in place",
+        );
+        // The agent took its failure with it when it left, so nothing on the old account still
+        // reports the cap. Keep the evidence on the provider, dated by the original failure, or
+        // the next sweep would read it as healthy and send the next stuck agent back onto it.
+        this.providerSightings.set(outcome.oldProviderId, {
+          error: agent.lastError ?? "",
+          firstSeenMs: input.sighting?.firstSeenMs ?? this.now(),
+        });
+        await this.notifyPush({
+          workspaceId: outcome.workspaceId,
+          oldAgentId: outcome.agentId,
+          oldTitle: outcome.title,
+          newAgentId: outcome.agentId,
+          targetProviderId: outcome.targetProviderId,
+        });
+        // No parent message: the subagent kept its id, so the parent's finish notification and
+        // every existing handle to it still work.
+        return;
       case "no-target":
         logger.warn(
           { agentId: agent.id, provider: agent.provider, deadProviderIds: [...deadProviderIds] },
@@ -227,7 +268,13 @@ export class AccountFailoverMonitor {
             firstSeenMs: Number.NEGATIVE_INFINITY,
           });
         }
-        await this.notifyPush(outcome);
+        await this.notifyPush({
+          workspaceId: outcome.workspaceId,
+          oldAgentId: outcome.oldAgentId,
+          oldTitle: outcome.oldTitle,
+          newAgentId: outcome.newAgentId,
+          targetProviderId: outcome.targetProviderId,
+        });
         if (config.notifyParent) {
           await this.notifyParent(outcome);
         }
@@ -235,16 +282,22 @@ export class AccountFailoverMonitor {
     }
   }
 
-  private async notifyPush(outcome: MigratedOutcome): Promise<void> {
+  private async notifyPush(input: {
+    workspaceId: string | undefined;
+    oldAgentId: string;
+    oldTitle: string | null;
+    newAgentId: string;
+    targetProviderId: string;
+  }): Promise<void> {
     try {
       await this.options.pushNotificationSender.send(
         buildAccountFailoverNotificationPayload({
           serverId: this.options.serverId,
-          workspaceId: outcome.workspaceId,
-          oldAgentId: outcome.oldAgentId,
-          oldAgentTitle: outcome.oldTitle,
-          newAgentId: outcome.newAgentId,
-          targetProviderId: outcome.targetProviderId,
+          workspaceId: input.workspaceId,
+          oldAgentId: input.oldAgentId,
+          oldAgentTitle: input.oldTitle,
+          newAgentId: input.newAgentId,
+          targetProviderId: input.targetProviderId,
         }),
       );
     } catch (error) {

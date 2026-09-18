@@ -15,6 +15,7 @@ import {
   parseResetTimeHint,
 } from "./account-failover-detector.js";
 import { pickFailoverTarget, type AccountPoolProviderEntry } from "./account-pool-providers.js";
+import { AgentProviderMoveError } from "./provider-move.js";
 
 /**
  * `agentManager`/`agentStorage` are the full types, unlike the sibling monitors' narrow
@@ -33,6 +34,20 @@ export interface MigrateStuckAgentInput {
 }
 
 export type AccountFailoverOutcome =
+  /**
+   * The conversation changed account without changing agent: same id, same timeline, same
+   * parent/child links. Nothing is retired and nothing is imported, so there is no successor to
+   * tell a parent about and no orphaned subagents to relaunch.
+   */
+  | {
+      kind: "moved";
+      agentId: string;
+      title: string | null;
+      oldProviderId: string;
+      targetProviderId: string;
+      model: string | undefined;
+      workspaceId: string | undefined;
+    }
   | {
       kind: "migrated";
       oldAgentId: string;
@@ -232,6 +247,96 @@ export function buildResumePrompt(input: {
   ].join("\n");
 }
 
+export function buildMoveResumePrompt(input: {
+  agentId: string;
+  oldProviderId: string;
+  targetProviderId: string;
+  model: string | undefined;
+  resetHint: string | null;
+}): string {
+  const providerRef = `${input.targetProviderId}/${input.model ?? "<model>"}`;
+  const resetClause = input.resetHint ? ` (it reports a reset at ${input.resetHint})` : "";
+  return [
+    `Account handoff: provider "${input.oldProviderId}" hit that account's usage ` +
+      `limit${resetClause}. You are the same agent (${input.agentId}) with the same conversation ` +
+      `and the same subagents, now running on provider "${input.targetProviderId}".`,
+    "",
+    "1. Pick up where you left off: answer the latest message(s) that failed on the limit. If " +
+      "the work was already done or is waiting on a person, orient, verify, report, and stop.",
+    `2. Create every new subagent with provider "${providerRef}" explicitly. ` +
+      `"${input.oldProviderId}" is out of budget, and the default provider or a role/model ` +
+      "policy can still place an unqualified spawn there, where it dies immediately.",
+  ].join("\n");
+}
+
+/**
+ * The preferred path: change the account under the agent instead of handing the conversation to a
+ * new one. Returns null when the move cannot be used and the import path has to take over — a
+ * target that still holds this conversation's retired handle is the routine case, since that
+ * handle is the account's live record of the session and reviving it is what belongs there.
+ */
+async function moveStuckAgentInPlace(input: {
+  agent: AccountFailoverAgentSummary;
+  title: string | null;
+  targetProviderId: string;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  logger: Logger;
+}): Promise<AccountFailoverOutcome | null> {
+  const { agent, targetProviderId, agentManager, agentStorage, logger } = input;
+  try {
+    await agentManager.moveAgentToProvider(agent.id, targetProviderId);
+  } catch (error) {
+    const refusal = error instanceof AgentProviderMoveError ? error : null;
+    logger.info(
+      {
+        err: refusal ? undefined : error,
+        agentId: agent.id,
+        targetProviderId,
+        code: refusal?.code,
+      },
+      "Account failover: cannot move the agent in place; importing the session instead",
+    );
+    return null;
+  }
+
+  // No settings to restore: a move keeps the agent's config, unlike an import.
+  const model = agentManager.getAgent(agent.id)?.config.model;
+  const prompt = buildMoveResumePrompt({
+    agentId: agent.id,
+    oldProviderId: agent.provider,
+    targetProviderId,
+    model,
+    resetHint: parseResetTimeHint(agent.lastError),
+  });
+  try {
+    await sendPromptToAgent({
+      agentManager,
+      agentStorage,
+      agentId: agent.id,
+      prompt,
+      messageId: randomUUID(),
+      unarchive: false,
+      logger,
+    });
+  } catch (error) {
+    logger.warn(
+      { err: error, agentId: agent.id },
+      "Account failover: failed to send the resume prompt after moving the agent",
+    );
+  }
+
+  return {
+    kind: "moved",
+    agentId: agent.id,
+    title: input.title,
+    oldProviderId: agent.provider,
+    targetProviderId,
+    model,
+    workspaceId: agent.workspaceId,
+  };
+}
+
 async function sendResumePrompt(input: {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -328,6 +433,18 @@ export async function migrateStuckAgent(
   });
   if (!targetProviderId) {
     return { kind: "no-target", oldAgentId: agent.id };
+  }
+
+  const moved = await moveStuckAgentInPlace({
+    agent,
+    title: predecessor.title ?? null,
+    targetProviderId,
+    agentManager,
+    agentStorage,
+    logger,
+  });
+  if (moved) {
+    return moved;
   }
 
   const retiredHandle = sameSession.find(

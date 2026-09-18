@@ -84,6 +84,18 @@ export interface LimitErrorSighting {
   firstSeenMs: number;
 }
 
+/**
+ * Limit evidence that outlived the agent that produced it. An in-place provider move takes the
+ * failure off the account it happened on — the agent is elsewhere now and its error is cleared —
+ * so without this the account would read healthy on the next sweep and the next stuck agent would
+ * be sent straight onto it. The import path gets the same effect for free from the retired
+ * predecessor it leaves behind on the old account.
+ */
+export interface ProviderLimitSighting {
+  error: string;
+  firstSeenMs: number;
+}
+
 export interface PlanAccountFailoverSweepInput {
   /** Every claude-family provider id in the account pool, leader included. */
   poolProviderIds: ReadonlySet<string>;
@@ -92,6 +104,8 @@ export interface PlanAccountFailoverSweepInput {
   usage: readonly ProviderUsage[] | null;
   /** The previous plan's `sightings`. Empty on the first sweep and after a daemon restart. */
   previousSightings: ReadonlyMap<string, LimitErrorSighting>;
+  /** The previous plan's `providerSightings`, plus whatever a move recorded since. */
+  previousProviderSightings: ReadonlyMap<string, ProviderLimitSighting>;
   nowMs: number;
   reactiveSignalTtlMs: number;
   migrateSubagents: boolean;
@@ -102,6 +116,8 @@ export interface AccountFailoverSweepPlan {
   candidates: AccountFailoverAgentSummary[];
   /** Carry into the next sweep's `previousSightings`. */
   sightings: Map<string, LimitErrorSighting>;
+  /** Carry into the next sweep's `previousProviderSightings`; entries past the TTL are dropped. */
+  providerSightings: Map<string, ProviderLimitSighting>;
 }
 
 /**
@@ -119,7 +135,8 @@ export interface AccountFailoverSweepPlan {
  * A sighting keeps its first-seen time only while both the error text and the timeline
  * generation are unchanged, so a new attempt that fails with identical text (a resume prompt
  * appends a row first) is fresh evidence rather than the old sighting. Seeing the agent running
- * also drops its sighting.
+ * also drops its sighting. A provider sighting is the same evidence without an agent to hang it
+ * on, left behind by a move, and it expires on the same TTL.
  *
  * A candidate is a non-retired agent that failed on the cap itself (its own limit-shaped error)
  * and is still on a dead account. An idle agent that merely lives on a dead account is not
@@ -151,6 +168,13 @@ export function planAccountFailoverSweep(
     }
   }
 
+  const providerSightings = new Map<string, ProviderLimitSighting>();
+  for (const [providerId, sighting] of input.previousProviderSightings) {
+    if (input.nowMs - sighting.firstSeenMs >= input.reactiveSignalTtlMs) continue;
+    providerSightings.set(providerId, sighting);
+    if (input.poolProviderIds.has(providerId)) deadProviderIds.add(providerId);
+  }
+
   for (const provider of input.usage ?? []) {
     if (!input.poolProviderIds.has(provider.providerId)) continue;
     const atCap = provider.windows.some(
@@ -170,5 +194,5 @@ export function planAccountFailoverSweep(
       (input.migrateSubagents || getParentAgentIdFromLabels(agent.labels) === null),
   );
 
-  return { deadProviderIds, candidates, sightings };
+  return { deadProviderIds, candidates, sightings, providerSightings };
 }

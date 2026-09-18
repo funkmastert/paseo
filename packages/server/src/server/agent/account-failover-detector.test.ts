@@ -66,6 +66,7 @@ function plan(overrides: Partial<PlanAccountFailoverSweepInput>) {
     agents: [],
     usage: [],
     previousSightings: new Map(),
+    previousProviderSightings: new Map(),
     nowMs: 1_000_000,
     reactiveSignalTtlMs: TTL_MS,
     migrateSubagents: true,
@@ -130,6 +131,31 @@ describe("planAccountFailoverSweep", () => {
 
     expect([...result.deadProviderIds]).toEqual(["claude"]);
     expect(ids(result.candidates)).toEqual(["leader"]);
+  });
+
+  it("keeps an account dead on evidence a move left behind, until the TTL runs out", () => {
+    const left = new Map([
+      ["claude-personal", { error: REAL_LIMIT_MESSAGE, firstSeenMs: 900_000 }],
+    ]);
+
+    const fresh = plan({ previousProviderSightings: left, nowMs: 1_000_000 });
+    expect([...fresh.deadProviderIds]).toEqual(["claude-personal"]);
+    expect(fresh.providerSightings.get("claude-personal")?.firstSeenMs).toBe(900_000);
+
+    const expired = plan({ previousProviderSightings: left, nowMs: 900_000 + TTL_MS });
+    expect(expired.deadProviderIds.size).toBe(0);
+    expect(expired.providerSightings.size).toBe(0);
+  });
+
+  it("ignores evidence left on a provider that is no longer in the pool", () => {
+    const left = new Map([
+      ["retired-account", { error: REAL_LIMIT_MESSAGE, firstSeenMs: 999_000 }],
+    ]);
+
+    const result = plan({ previousProviderSightings: left });
+
+    expect(result.deadProviderIds.size).toBe(0);
+    expect(result.providerSightings.has("retired-account")).toBe(true);
   });
 
   it("does not treat an unavailable provider with no windows as dead", () => {

@@ -36,7 +36,8 @@ interface BuildAccountFailoverNotificationPayloadInput {
 
 /**
  * Single-migration notification: old id -> new id -> target account, so Tyler can find both
- * ends without opening the daemon. `title`/`body` are hardcoded English, matching
+ * ends without opening the daemon. When the ids match, the agent changed account in place and
+ * there is only one end to find. `title`/`body` are hardcoded English, matching
  * resource-monitor-notification.ts/token-burn-notification.ts's precedent — this payload never
  * crosses the app i18n pipeline, it's built server-side and sent verbatim to the push provider.
  */
@@ -44,11 +45,14 @@ export function buildAccountFailoverNotificationPayload(
   input: BuildAccountFailoverNotificationPayloadInput,
 ): AccountFailoverNotificationPayload {
   const label = resolveAgentLabel(input.oldAgentTitle);
+  const movedInPlace = input.newAgentId === input.oldAgentId;
   return {
     title: "Agent moved to a new account",
-    body:
-      `${label} hit its account's usage limit and moved from ${input.oldAgentId} to ` +
-      `${input.newAgentId} on ${input.targetProviderId}.`,
+    body: movedInPlace
+      ? `${label} hit its account's usage limit and now runs on ${input.targetProviderId}, ` +
+        `still as ${input.newAgentId}.`
+      : `${label} hit its account's usage limit and moved from ${input.oldAgentId} to ` +
+        `${input.newAgentId} on ${input.targetProviderId}.`,
     data: {
       serverId: input.serverId,
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),

@@ -5,6 +5,7 @@ import {
   HANDOFF_FROM_LABEL,
 } from "./account-failover-detector.js";
 import {
+  buildMoveResumePrompt,
   buildResumePrompt,
   findExistingSuccessor,
   formatMovedTitle,
@@ -174,5 +175,30 @@ describe("buildResumePrompt", () => {
     expect(bare).toContain('provider "claude-backup/<model>"');
     expect(bare).not.toContain(" with model");
     expect(bare).not.toContain("reset");
+  });
+});
+
+describe("buildMoveResumePrompt", () => {
+  const prompt = buildMoveResumePrompt({
+    agentId: "agent-1",
+    oldProviderId: "claude-personal",
+    targetProviderId: "claude-backup",
+    model: "sonnet",
+    resetHint: "3:10pm (America/Los_Angeles)",
+  });
+
+  it("tells the agent it is the same agent, not a successor", () => {
+    expect(prompt).toContain("You are the same agent (agent-1)");
+    expect(prompt).toContain("the same subagents");
+  });
+
+  it("still pins the provider for new subagents, since the old account is out of budget", () => {
+    expect(prompt).toContain('provider "claude-backup/sonnet"');
+    expect(prompt).toContain("3:10pm (America/Los_Angeles)");
+  });
+
+  it("says nothing about relaunching subagents, because none were orphaned", () => {
+    expect(prompt).not.toContain("relaunch");
+    expect(prompt).not.toContain("list_agents");
   });
 });
