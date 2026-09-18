@@ -332,7 +332,11 @@ field yet; add one the same way rather than reaching for the initial prompt.
 sends it separately afterwards, so the daemon drops a hook's mutation of it
 (`agent-manager.ts`, in `createAgentInternal`). That is deliberate: a hook cannot reach the
 first message, and a system-level note is the better channel anyway because it survives every
-turn.
+turn. Both halves — the hook still sees the prompt, the hook still cannot rewrite it — are
+pinned in `plugins/agent-create-restrictions.e2e.test.ts`, alongside the end-to-end proof that
+a hook's `disallowedTools` actually reaches the launched Claude session. Tighten
+`beforeSchemas["agent.create"]`, narrow `ProviderOptions`, or reroute `providerOptions` and
+that suite is what tells you an installed plugin's guard rails just stopped applying.
 
 ## Contribute a provider
 
