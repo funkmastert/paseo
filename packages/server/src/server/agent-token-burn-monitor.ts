@@ -20,7 +20,15 @@ import {
 import type { PushNotificationSender } from "./push/index.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
-const DEFAULT_RATE_PER_MINUTE = 50_000;
+// Measured, not chosen: a healthy Opus agent doing ordinary tool work on this machine sustains
+// 100-200K weighted tokens/min, because the weighted rate is mostly a readout of context size
+// times request frequency. Three samples of one agent reading source files: 205K, 181K, 106K
+// per minute, 448K cumulative over its first four minutes — and it tripped the old 50,000
+// default on its third sweep, doing nothing wrong. 400,000 sits at roughly twice the measured
+// healthy peak. The rate leg is a coarse smoke alarm and nothing more: the spend governor
+// below never acts on it, because an agent's rate says how big its context is, not whether
+// the work is worth doing. See docs/token-burn.md.
+const DEFAULT_RATE_PER_MINUTE = 400_000;
 const DEFAULT_SUSTAINED_MINUTES = 3;
 const DEFAULT_TOTAL_TOKENS = 5_000_000;
 const DEFAULT_BREACH_BATCH_THRESHOLD = 3;
