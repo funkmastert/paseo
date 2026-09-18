@@ -452,6 +452,24 @@ describe("AgentTokenBurnMonitor spend governor", () => {
     expect(push.sent.map((p) => p.data?.stage)).toContain("pause");
   });
 
+  test("an idle agent is never steered, because steering one starts a fresh turn", async () => {
+    // The trap the resource monitor already documents: `notify` and `stopFanOut` can fire on
+    // an idle agent, and the steer path falls back to starting a turn for one — spending
+    // tokens to tell an agent it is out of tokens. It still gets the push and the block.
+    const { agentManager, push, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000, isRunning: false })],
+    });
+
+    await monitor.tick();
+
+    expect(steer.calls).toEqual([]);
+    expect(agentManager.__governorStates.get("agent-1")?.fanOutBlocked).toBe(true);
+    expect(push.sent.map((p) => p.data?.stage)).toEqual(["notify", "stopFanOut"]);
+    // Downgrade and pause wait for it to resume rather than being written off as handled.
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+  });
+
   test("a dry run reports the whole ladder and performs none of it", async () => {
     const { agentManager, push, steer, monitor } = createGovernedMonitor({
       agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000 })],

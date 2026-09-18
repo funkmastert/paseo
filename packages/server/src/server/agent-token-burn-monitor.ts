@@ -459,7 +459,7 @@ export class AgentTokenBurnMonitor {
         );
       } else {
         try {
-          await this.applyGovernorAction(action);
+          await this.applyGovernorAction(action, agent.isRunning);
         } catch (error) {
           this.logger.warn(
             { err: error, agentId: action.agentId, stage: action.stage },
@@ -496,7 +496,10 @@ export class AgentTokenBurnMonitor {
     }
   }
 
-  private async applyGovernorAction(action: SpendGovernorAction): Promise<void> {
+  private async applyGovernorAction(
+    action: SpendGovernorAction,
+    isRunning: boolean,
+  ): Promise<void> {
     const body = formatGovernorMessage(action);
     switch (action.stage) {
       case "notify":
@@ -504,9 +507,18 @@ export class AgentTokenBurnMonitor {
         // stopFanOut needs no daemon-side act beyond the state the planner already wrote —
         // `create_agent` reads it (agent-manager.ts's getSpendFanOutDenial). Telling the agent
         // up front is what stops it from burning a retry loop discovering the refusal.
-        await this.tellAgent(action.agentId, body);
+        //
+        // Only while it is mid-turn, though. These two stages can fire on an idle agent, and
+        // the steer path starts a fresh turn for one (agent-prompt.ts's fallback) — spending
+        // tokens to tell an agent it is out of tokens, on the exact agent already over budget.
+        // An idle agent gets the push and the live alert, and for stopFanOut the `create_agent`
+        // refusal itself, which arrives at the only moment it changes anything.
+        if (isRunning) {
+          await this.tellAgent(action.agentId, body);
+        }
         return;
       case "downgrade":
+        // Only reached for a running agent: spend-governor.ts defers this stage otherwise.
         // `setAgentModel` on a live session calls the SDK's `query.setModel()`, which applies
         // from the next API request in the same turn: the request already in flight finishes
         // on the old model, the conversation is untouched, and no session restart happens. The

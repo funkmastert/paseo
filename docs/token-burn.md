@@ -28,7 +28,7 @@ Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of
 
 ### Why the rate leg is a smoke alarm and not a signal
 
-The rate default was 50,000, and it fired on ordinary agents, continuously. Measured on one machine: an Opus agent reading source files read 205K, then 181K, then 106K weighted tokens/min, and tripped the alert on its third sweep. Two finished implementation agents averaged 98K and 97K across their whole runs.
+The rate default was 50,000, and it fired on ordinary agents, continuously. Measured on one machine: an Opus agent reading source files read 205K, then 181K, then 106K weighted tokens/min, and tripped the alert on its third sweep. Two finished implementation agents averaged 98K and 97K across their whole runs, and the agent that implemented this feature averaged 110K/min over 20 minutes for 2.14M total. Every one of those was healthy.
 
 That is structural, not an outlier. A Claude agent re-reads its context from cache on every request, so the weighted rate tracks context size times request frequency. It climbs as any task progresses, and a 1M-context agent doing identical work reads roughly nine times the cache per request. **The rate is a readout of how large a context is, not of whether the work is worth doing.** 400K is about twice the measured healthy peak — quiet enough to be worth reading, still not a basis for action. The spend governor never acts on it.
 
@@ -65,7 +65,7 @@ An agent that jumps several thresholds between two sweeps — 60 seconds at the 
 
 Silently changing an agent's model or refusing its tool calls produces exactly the confused, expensive flailing the governor exists to prevent. Every stage names the spend, the budget, and what to do differently.
 
-Three of the four arrive as one steered `<paseo-system>` message, the same path chat mentions, notify-on-finish and the resource monitor use (`agent-prompt.ts`, `activeTurnBehavior: "steer"`). **Not** `providerOptions.appendSystemPrompt`: that is folded into the SDK options when the query is built, so using it mid-session would mean restarting the session and losing the turn being governed. It stays the right channel for a create-time restriction ([docs/plugins.md](plugins.md)), which is a different problem.
+Three of the four arrive as one steered `<paseo-system>` message, the same path chat mentions, notify-on-finish and the resource monitor use (`agent-prompt.ts`, `activeTurnBehavior: "steer"`), and only while the agent is mid-turn. `notify` and `stopFanOut` can fire on an idle agent, and steering an idle agent starts a fresh turn — spending tokens to tell an agent it is out of tokens, on the agent already over budget. An idle agent gets the push and the live alert, and for `stopFanOut` the `create_agent` refusal itself, which lands at the only moment it changes anything. **Not** `providerOptions.appendSystemPrompt`: that is folded into the SDK options when the query is built, so using it mid-session would mean restarting the session and losing the turn being governed. It stays the right channel for a create-time restriction ([docs/plugins.md](plugins.md)), which is a different problem.
 
 The fourth, `stopFanOut`, also arrives as the `create_agent` error itself — the most direct channel there is, delivered at the moment the agent tries. That message names the budget, the spend, that no agent was created, that this is a cap rather than a transient failure so retrying will keep failing, and the label a human would raise. An agent told only "create_agent failed" retries in a loop.
 
