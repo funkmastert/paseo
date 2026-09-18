@@ -18,6 +18,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { Logger } from "pino";
+import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import {
   mapClaudeCanceledToolCall,
   mapClaudeCompletedToolCall,
@@ -356,6 +357,14 @@ const DEFAULT_MODES: AgentMode[] = [
 
 const VALID_CLAUDE_MODES = new Set(DEFAULT_MODES.map((mode) => mode.id));
 
+/**
+ * The device gate's own hook timeout. It answers from a cached `ps` sample, and takes a fresh
+ * one only when that is older than a few seconds, so this is a ceiling for a wedged `ps` rather
+ * than a normal wait. On timeout the SDK proceeds, which is the same fail-open the gate itself
+ * takes — the process scan still counts whatever booted.
+ */
+const DEVICE_GATE_TIMEOUT_SECONDS = 20;
+
 const REWIND_COMMAND_NAME = "rewind";
 const REWIND_COMMAND: AgentSlashCommand = {
   name: REWIND_COMMAND_NAME,
@@ -412,6 +421,7 @@ interface ClaudeAgentClientOptions {
   resolveBinary?: () => Promise<string>;
   resolveVersion?: (signal?: AbortSignal) => Promise<string>;
   configDir?: string;
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 interface ClaudeAgentSessionOptions {
@@ -424,6 +434,7 @@ interface ClaudeAgentSessionOptions {
   logger: Logger;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary: () => Promise<string>;
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -1522,6 +1533,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly resolveBinary: () => Promise<string>;
   private readonly resolveVersion: (signal?: AbortSignal) => Promise<string>;
   private readonly configDir?: string;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1533,6 +1545,7 @@ export class ClaudeAgentClient implements AgentClient {
       options.resolveVersion ??
       ((signal) => resolveClaudeCodeVersion(this.runtimeSettings, signal));
     this.configDir = options.configDir;
+    this.deviceLaunchGate = options.deviceLaunchGate;
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
@@ -1571,6 +1584,7 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      deviceLaunchGate: this.deviceLaunchGate,
     });
   }
 
@@ -1599,6 +1613,7 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      deviceLaunchGate: this.deviceLaunchGate,
     });
   }
 
@@ -2259,6 +2274,8 @@ class ClaudeAgentSession implements AgentSession {
   private recentStderr = "";
   private closed = false;
 
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
+
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
     assertClaudeThinkingOptionSupported(config.model, config.thinkingOptionId);
@@ -2270,6 +2287,7 @@ class ClaudeAgentSession implements AgentSession {
     this.logger = options.logger.child({ agentId: this.agentId });
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.contextUsage = new ClaudeContextUsageState(
       findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
@@ -3475,7 +3493,7 @@ class ClaudeAgentSession implements AgentSession {
       ...settingsOptions,
       // Provider subagent panes render the child's nested transcript.
       forwardSubagentText: true,
-      hooks: this.buildSubagentEffortHooks(),
+      hooks: this.buildHooks(),
       ...(this.persistSession === undefined ? {} : { persistSession: this.persistSession }),
       env: sdkEnv,
     };
@@ -5008,6 +5026,60 @@ class ClaudeAgentSession implements AgentSession {
    * These are observation-only: they record what they see and always return an empty result, so
    * they can never alter tool execution or turn control.
    */
+  /**
+   * Every hook this session registers. PreToolUse carries two independent matchers: the
+   * observation one below, and the device gate, which is the only place a tool call can be
+   * refused deterministically — `canUseTool` is not consulted at all under
+   * `bypassPermissions` ("To gate every tool call, use a PreToolUse hook instead", per the SDK),
+   * and most of Tyler's agents run in exactly that mode.
+   */
+  private buildHooks(): NonNullable<ClaudeOptions["hooks"]> {
+    const hooks = this.buildSubagentEffortHooks();
+    if (!this.deviceLaunchGate || !this.agentId) {
+      return hooks;
+    }
+    return {
+      ...hooks,
+      PreToolUse: [
+        ...(hooks.PreToolUse ?? []),
+        // `matcher` is the SDK's tool-name filter; the callback re-checks the name because a
+        // gate that fires on the wrong tool would refuse work that boots nothing.
+        { matcher: "Bash", hooks: [this.gateDeviceLaunch], timeout: DEVICE_GATE_TIMEOUT_SECONDS },
+      ],
+    };
+  }
+
+  /**
+   * Refuses a shell command that would boot a simulator or emulator when the machine has no
+   * device slot left (docs/device-leases.md). Fails open on every uncertainty — an unreadable
+   * input, a gate that throws, a cap the daemon could not evaluate — because a device cap that
+   * breaks tool calls is worse than one that misses a device the process scan catches anyway.
+   */
+  private gateDeviceLaunch = async (input: unknown): Promise<Record<string, unknown>> => {
+    const allow: Record<string, unknown> = {};
+    const gate = this.deviceLaunchGate;
+    const agentId = this.agentId;
+    if (!gate || !agentId) return allow;
+    const hookInput = input as { tool_name?: unknown; tool_input?: { command?: unknown } };
+    if (hookInput.tool_name !== "Bash" || typeof hookInput.tool_input?.command !== "string") {
+      return allow;
+    }
+    try {
+      const decision = await gate.gateLaunch({ agentId, command: hookInput.tool_input.command });
+      if (decision.decision === "allow") return allow;
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: decision.message,
+        },
+      };
+    } catch (error) {
+      this.logger.warn({ err: error }, "Device launch gate failed; allowing the command");
+      return allow;
+    }
+  };
+
   private buildSubagentEffortHooks(): NonNullable<ClaudeOptions["hooks"]> {
     const observe = async (input: unknown): Promise<Record<string, never>> => {
       try {

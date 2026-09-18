@@ -204,6 +204,25 @@ const MutableResourceMonitorConfigSchema = z
 
 const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
 
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason.
+// See docs/device-leases.md.
+const MutableDeviceLeasesConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    totalSlots: z.number().int().positive().optional(),
+    slotsPerPlatform: z.number().int().positive().optional(),
+    requireHeadroom: z.boolean().optional(),
+    minAvailableBytes: z.number().positive().optional(),
+    maxSwapUsedRatio: z.number().positive().optional(),
+    pendingTtlMinutes: z.number().positive().optional(),
+    maxLeaseHours: z.number().nonnegative().optional(),
+    queueTimeoutMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDeviceLeasesPatchSchema = MutableDeviceLeasesConfigSchema;
+
 // Live-toggleable like tokenBurnMonitor/resourceMonitor above — same mutable/patch split, same
 // reason. See docs/account-failover.md.
 const MutableAccountFailoverConfigSchema = z
@@ -384,6 +403,8 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
+    deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
@@ -410,6 +431,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),

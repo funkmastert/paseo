@@ -25,6 +25,7 @@ interface SupportedMutableConfigPatch {
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
+  deviceLeases?: MutableDaemonConfig["deviceLeases"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
@@ -201,6 +202,7 @@ const RELOADABLE_PATHS = [
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
   "agents.resourceMonitor",
+  "agents.deviceLeases",
   "agents.accountFailover",
   "agents.skills.selection",
   "worktrees.diskSweeper",
@@ -235,6 +237,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.resourceMonitor", "resourceMonitor"],
+  ["agents.deviceLeases", "deviceLeases"],
   ["agents.accountFailover", "accountFailover"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
@@ -310,6 +313,12 @@ function pickResourceMonitorPatch(
   return resourceMonitor === undefined ? {} : { resourceMonitor };
 }
 
+function pickDeviceLeasesPatch(
+  deviceLeases: MutableDaemonConfigPatch["deviceLeases"],
+): Pick<SupportedMutableConfigPatch, "deviceLeases"> {
+  return deviceLeases === undefined ? {} : { deviceLeases };
+}
+
 function pickAccountFailoverPatch(
   accountFailover: MutableDaemonConfigPatch["accountFailover"],
 ): Pick<SupportedMutableConfigPatch, "accountFailover"> {
@@ -342,6 +351,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickResourceMonitorPatch(patch.resourceMonitor),
+    ...pickDeviceLeasesPatch(patch.deviceLeases),
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
@@ -770,6 +780,20 @@ function mergeResourceMonitorForPersist(
   ) as PersistedResourceMonitor;
 }
 
+type PersistedDeviceLeases = NonNullable<PersistedConfig["agents"]>["deviceLeases"];
+
+// Flat, unlike resourceMonitor above: every key is a scalar, so a shallow merge keeps the rest
+// of the block on disk.
+function mergeDeviceLeasesForPersist(
+  persisted: PersistedDeviceLeases,
+  patch: SupportedMutableConfigPatch["deviceLeases"],
+): PersistedDeviceLeases {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 type PersistedAccountFailover = NonNullable<PersistedConfig["agents"]>["accountFailover"];
 
 function mergeAccountFailoverForPersist(
@@ -839,6 +863,7 @@ function touchesAgentConfig(
     patch.metadataGeneration !== undefined ||
     patch.tokenBurnMonitor !== undefined ||
     patch.resourceMonitor !== undefined ||
+    patch.deviceLeases !== undefined ||
     patch.accountFailover !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
@@ -884,6 +909,12 @@ function mergeMutableAgentPatch(
     patch.resourceMonitor,
   );
   if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
+
+  const deviceLeases = mergeDeviceLeasesForPersist(
+    persistedAgents?.deviceLeases,
+    patch.deviceLeases,
+  );
+  if (deviceLeases !== undefined) next["deviceLeases"] = deviceLeases;
 
   const accountFailover = mergeAccountFailoverForPersist(
     persistedAgents?.accountFailover,

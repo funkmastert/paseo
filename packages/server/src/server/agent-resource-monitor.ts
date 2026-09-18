@@ -26,6 +26,7 @@ import {
   type ProcessSignaller,
 } from "./agent/build-daemon-reaper.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
+import { detectRunningDevices, type RunningDevice } from "./agent/device-detection.js";
 import { withRecentCpuPercent, type CpuRateMemory } from "./agent/process-cpu-rate.js";
 import type { OrphanBuildDaemonSummary } from "./agent/process-attribution.js";
 import type {
@@ -112,6 +113,15 @@ export interface AgentResourceMonitorOptions {
   ownerUid?: number | undefined;
   /** The SIGTERM grace wait, injectable so tests don't spend it. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Hands the device cap (docs/device-leases.md) the simulators and emulators found in this
+   * sweep's `ps` sample. It is a sibling of this monitor, not a leg of it: the cap decides
+   * nothing here, it just gets the scan for free rather than running a second `ps` a minute.
+   */
+  reportDeviceSample?: (sample: {
+    devices: RunningDevice[];
+    systemMemory: SystemMemorySample | undefined;
+  }) => Promise<void>;
 }
 
 interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
@@ -222,6 +232,7 @@ export class AgentResourceMonitor {
   private readonly processSignaller: ProcessSignaller;
   private readonly ownerUid: number | undefined;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly reportDeviceSample: AgentResourceMonitorOptions["reportDeviceSample"];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -246,6 +257,7 @@ export class AgentResourceMonitor {
     this.processSignaller = options.processSignaller ?? createSystemProcessSignaller();
     this.ownerUid = "ownerUid" in options ? options.ownerUid : process.getuid?.();
     this.sleep = options.sleep ?? defaultSleep;
+    this.reportDeviceSample = options.reportDeviceSample;
   }
 
   start(): void {
@@ -314,11 +326,30 @@ export class AgentResourceMonitor {
       config,
     );
 
+    await this.reportDevices(cpu.rows, attribution.agentTrees, systemMemory);
+
     await this.sendAgentBreaches(agentBreaches, config);
     await this.sendMachineBreaches(machineTriggers, systemMemory, attribution.orphanBuildDaemons);
     // Runs on its own criteria, not off the orphan alert's threshold: an abandoned daemon sitting
     // on 800 MB is worth reclaiming even though the machine-level leg only fires at 2 GiB.
     await this.reapAbandonedBuildDaemons(cpu.rows, attribution.agentTrees, config.reaper, nowMs);
+  }
+
+  /** Never lets the cap's bookkeeping break a sweep: this monitor's own legs come first. */
+  private async reportDevices(
+    rows: readonly ProcessSampleRow[],
+    agentTrees: readonly AgentProcessTree[],
+    systemMemory: SystemMemorySample | undefined,
+  ): Promise<void> {
+    if (!this.reportDeviceSample) return;
+    try {
+      await this.reportDeviceSample({
+        devices: detectRunningDevices({ rows, agentTrees }),
+        systemMemory,
+      });
+    } catch (error) {
+      this.logger.warn({ err: error }, "Failed to report running devices to the device cap");
+    }
   }
 
   private evaluateAgentBreaches(

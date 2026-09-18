@@ -219,6 +219,7 @@ import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
+import { DeviceLeaseManager } from "./agent/device-lease-manager.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
@@ -1082,6 +1083,18 @@ export async function createPaseoDaemon(
     workspaceGitService,
     logger,
   });
+  // The device cap (docs/device-leases.md). Built before the provider runtime because the
+  // providers take its launch gate, and handed the agent list below once AgentManager exists —
+  // it only ever reads ids, so a late binding costs nothing.
+  const processSampler = createSystemProcessSampler({ logger });
+  let listDeviceLeaseAgentIds: () => string[] = () => [];
+  const deviceLeaseManager = new DeviceLeaseManager({
+    processSampler,
+    readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
+    listAgentIds: () => listDeviceLeaseAgentIds(),
+    logger: logger.child({ module: "device-leases" }),
+  });
+
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
     logger,
@@ -1091,6 +1104,7 @@ export async function createPaseoDaemon(
       providerOverrides: config.providerOverrides,
       workspaceGitService,
       managedProcesses,
+      deviceLaunchGate: deviceLeaseManager,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -1128,6 +1142,10 @@ export async function createPaseoDaemon(
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
+  // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
+  // before AgentManager because the providers need its gate, and it only reads agent ids.
+  listDeviceLeaseAgentIds = () =>
+    agentManager.listAgentsForResourceMonitor().map((agent) => agent.id);
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
       providerSnapshotManager.replacePluginProviders(pluginRuntime.getProviderRegistrations()),
@@ -1619,6 +1637,7 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
+    deviceLeaseManager,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -2030,7 +2049,10 @@ export async function createPaseoDaemon(
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
               serverId,
-              processSampler: createSystemProcessSampler({ logger }),
+              processSampler,
+              // The cap counts devices from this same sweep sample rather than taking its own
+              // `ps` — one scan a minute on a machine that is already struggling.
+              reportDeviceSample: (sample) => deviceLeaseManager.reconcileFromSample(sample),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,
@@ -2140,6 +2162,7 @@ export async function createPaseoDaemon(
     agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
     agentResourceMonitor?.stop();
+    deviceLeaseManager.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     worktreeDiskMonitor?.stop();

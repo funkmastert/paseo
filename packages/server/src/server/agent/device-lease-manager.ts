@@ -120,6 +120,15 @@ export type DeviceLaunchGateDecision =
   | { decision: "allow" }
   | { decision: "deny"; message: string };
 
+/**
+ * What a provider needs from the cap to enforce it: one call, before a shell command runs.
+ * `DeviceLeaseManager` satisfies it; providers take the interface so the gate can be absent
+ * (the cap is unwired in tests and in a daemon that never built one) without them knowing.
+ */
+export interface DeviceLaunchGate {
+  gateLaunch(input: { agentId: string; command: string }): Promise<DeviceLaunchGateDecision>;
+}
+
 interface DeviceLeaseManagerLogger {
   info: (obj: object, msg?: string) => void;
   warn: (obj: object, msg?: string) => void;

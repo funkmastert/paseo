@@ -85,7 +85,9 @@ import {
   createPaseoWorktreeCommand,
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
+import { registerDeviceLeaseTools } from "./device-lease-tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
+import type { DeviceLeaseManager } from "../device-lease-manager.js";
 import type {
   PaseoToolCatalog,
   PaseoToolConfig,
@@ -131,6 +133,8 @@ export interface PaseoToolHostDependencies {
   ) => Promise<string>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
+  /** The device cap (docs/device-leases.md). Absent means no checkout tools are offered. */
+  deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1217,6 +1221,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       broker: options.browserToolsBroker,
       callerAgentId,
       resolveCallerAgent,
+    });
+  }
+
+  if (options.deviceLeaseManager) {
+    registerDeviceLeaseTools({
+      registerTool,
+      manager: options.deviceLeaseManager,
+      callerAgentId,
     });
   }
 
