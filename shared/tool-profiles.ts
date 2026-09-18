@@ -25,9 +25,10 @@ import { z } from "zod";
  * just as well (see `MCP_SHELL_TOOLS` below), and neither enforcement layer
  * closes that path unless it's named explicitly — `disallowedTools` and
  * `settings.permissions.deny` only ever act on the exact tool name given
- * them. This does not (and cannot) cover mutation reachable through MCP
- * servers outside Paseo's own registry — see the README's "Tool profiles"
- * section for what's out of scope and why.
+ * them. What this does not and cannot cover — MCP servers outside Paseo's own
+ * registry, `browser_navigate`, the network tools, the agent-lifecycle tools
+ * — is set out in full in the README's "What a tool profile does and does not
+ * guarantee".
  */
 
 /**
@@ -89,6 +90,65 @@ const MCP_SHELL_TOOLS = [
  */
 const MCP_AGENT_MUTATION_TOOLS = ["mcp__paseo__update_agent"] as const;
 
+/**
+ * Browser automation that ACTS on a page. A `read-only` agent holding these
+ * is not read-only in any sense an operator would recognise: `browser_click`
+ * and `browser_fill`/`browser_type`/`browser_select`/`browser_keypress`
+ * submit forms, `browser_upload` sends local files to a remote site, and
+ * `browser_evaluate` runs arbitrary JavaScript in a page that is already
+ * logged in as the operator. That is real-world mutation — it just doesn't
+ * touch the local filesystem, which is why it went unnoticed when the
+ * filesystem tools were closed. `browser_drag` and `browser_hover` are here
+ * because they are input events too, and neither is useful to an agent that
+ * cannot click.
+ *
+ * Verified against the fork's `packages/server/src/server/browser-tools/tools.ts`.
+ */
+const BROWSER_INPUT_TOOLS = [
+  "mcp__paseo__browser_click",
+  "mcp__paseo__browser_fill",
+  "mcp__paseo__browser_type",
+  "mcp__paseo__browser_keypress",
+  "mcp__paseo__browser_select",
+  "mcp__paseo__browser_drag",
+  "mcp__paseo__browser_hover",
+  "mcp__paseo__browser_upload",
+  "mcp__paseo__browser_evaluate",
+] as const;
+
+/**
+ * The rest of the browser surface: navigation and observation.
+ *
+ * `read-only` KEEPS these, deliberately. A reviewer asked to look at a web UI
+ * needs to open a page and see it; a browser it cannot point anywhere is not
+ * an investigation tool, and a guard rail that makes the job impossible gets
+ * turned off. The honest cost is that `browser_navigate` and
+ * `browser_new_tab` take a URL, and a GET to a crafted URL from a session
+ * that is already authenticated can change server state. That is a real,
+ * documented hole rather than an oversight — see the README's limits section,
+ * and use a `custom` profile that also denies these if your threat model
+ * needs it.
+ *
+ * `orchestrator` denies the whole family, including this half: a profile that
+ * cannot `Read` a local file has no business reading a rendered page either,
+ * and its job is to delegate, not to look.
+ */
+const BROWSER_VIEW_TOOLS = [
+  "mcp__paseo__browser_navigate",
+  "mcp__paseo__browser_new_tab",
+  "mcp__paseo__browser_close_tab",
+  "mcp__paseo__browser_back",
+  "mcp__paseo__browser_forward",
+  "mcp__paseo__browser_reload",
+  "mcp__paseo__browser_list_tabs",
+  "mcp__paseo__browser_snapshot",
+  "mcp__paseo__browser_screenshot",
+  "mcp__paseo__browser_logs",
+  "mcp__paseo__browser_scroll",
+  "mcp__paseo__browser_resize",
+  "mcp__paseo__browser_wait",
+] as const;
+
 export const TOOL_PROFILE_IDS = ["unrestricted", "orchestrator", "read-only", "write", "custom"] as const;
 export type ToolProfileId = (typeof TOOL_PROFILE_IDS)[number];
 
@@ -123,13 +183,21 @@ const BUILT_IN_DENY: Record<Exclude<ToolProfileId, "custom">, readonly string[]>
     ...SHELL_TOOLS,
     ...MCP_SHELL_TOOLS,
     ...MCP_AGENT_MUTATION_TOOLS,
+    ...BROWSER_INPUT_TOOLS,
+    ...BROWSER_VIEW_TOOLS,
     ...NATIVE_SUBAGENT_TOOLS,
   ],
   // Can investigate, cannot change anything. Bash is denied because a shell
   // redirect writes files just as well as Write does; MCP_SHELL_TOOLS is
   // denied for the same reason one level up the stack — a terminal opened
   // through Paseo's own MCP tools is still a shell.
-  "read-only": [...EDIT_TOOLS, ...SHELL_TOOLS, ...MCP_SHELL_TOOLS, ...MCP_AGENT_MUTATION_TOOLS],
+  "read-only": [
+    ...EDIT_TOOLS,
+    ...SHELL_TOOLS,
+    ...MCP_SHELL_TOOLS,
+    ...MCP_AGENT_MUTATION_TOOLS,
+    ...BROWSER_INPUT_TOOLS,
+  ],
   // The implementer kit: file and shell tools are exactly what this role is
   // for, so it denies nothing. It differs from `unrestricted` in intent only.
   write: [],

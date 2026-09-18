@@ -44,7 +44,7 @@ describe("restrictionNotice", () => {
   it("says the denial is not a permission prompt away, so the agent does not retry", () => {
     for (const kind of ["read-only", "orchestrator"] as const) {
       const notice = restrictionNotice(profileDeniedTools({ kind })) as string;
-      expect(notice).toMatch(/not gated, not requestable/);
+      expect(notice).toMatch(/removed at launch, not gated/);
     }
   });
 

@@ -200,8 +200,8 @@ and user settings files.
 | Profile | Denies |
 | --- | --- |
 | `unrestricted` | Nothing. The default, so upgrading changes no behaviour. |
-| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, `Task`, `Agent` |
-| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent` |
+| `orchestrator` | `Read`, `Glob`, `Grep`, `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, **every** `mcp__paseo__browser_*` tool, `Task`, `Agent` |
+| `read-only` | `Edit`, `MultiEdit`, `Write`, `NotebookEdit`, `Bash`, the Paseo terminal/workspace-script MCP tools below, `mcp__paseo__update_agent`, the page-interaction `mcp__paseo__browser_*` tools below |
 | `write` | Nothing — file and shell tools are the point of this profile. |
 | `custom` | Whatever you list. |
 
@@ -273,10 +273,39 @@ just changes which tool name reaches it.
 - The workspace-script family: `mcp__paseo__start_workspace_script`,
   `stop_workspace_script` — starting a configured `paseo.json` script runs
   whatever that script does, the same reach as a shell.
+- The page-interaction browser tools: `mcp__paseo__browser_click`, `_fill`,
+  `_type`, `_keypress`, `_select`, `_drag`, `_hover`, `_upload`, `_evaluate`.
 
 `mcp__paseo__list_terminals` and `mcp__paseo__list_workspace_scripts` stay
 available under `read-only`: they report state (terminal ids, script status)
 and can't execute or mutate anything on their own.
+
+#### The browser is mutation too
+
+An agent holding `mcp__paseo__browser_*` can submit forms, upload local files
+to a remote site, and run arbitrary JavaScript in a page that is already
+logged in as you. A `read-only` agent with that is not read-only in any sense
+an operator would recognise. It went unnoticed for the same reason the MCP
+terminal tools did: it is real-world mutation that never touches the local
+filesystem, so closing the file and shell tools looked like closing the
+question.
+
+The split is deliberate, and different for the two profiles:
+
+- **`read-only` denies the nine input tools** above and **keeps navigation
+  and observation** — `browser_navigate`, `_new_tab`, `_close_tab`, `_back`,
+  `_forward`, `_reload`, `_list_tabs`, `_snapshot`, `_screenshot`, `_logs`,
+  `_scroll`, `_resize`, `_wait`. A reviewer asked to look at a web UI has to
+  be able to open a page and see it; a browser it cannot point anywhere is
+  not an investigation tool, and a guard rail that makes the job impossible
+  gets switched off — which is the failure mode this whole feature is
+  recovering from.
+- **`orchestrator` denies the whole family, observation included.** A profile
+  that cannot `Read` a local file has no business reading a rendered page
+  either. Its job is to delegate, not to look.
+
+The honest cost of keeping navigation is stated in the limits below: it is a
+real hole, not a claim that navigation is harmless.
 
 `orchestrator` keeps `mcp__paseo__create_agent` and most of the
 agent-management tools deliberately — delegating to a new, independently
@@ -292,25 +321,6 @@ agent's id can ask it to do something, but that is asking a separately
 authorized peer, not executing anything itself. It does mean a restricted
 agent can ask an unrestricted peer that already exists to act for it, and to
 rewrite its label; that one is a real, open limit, listed below.
-
-**This is not, and cannot be made, airtight.** Two things are explicitly out
-of scope and left open:
-
-- **Browser automation** (`mcp__paseo__browser_*`) is not denied by any
-  built-in profile. `browser_click`/`browser_fill`/`browser_type`/
-  `browser_upload`/`browser_evaluate` can submit forms, upload files, and run
-  arbitrary JavaScript in a page — real-world mutation, just not to the local
-  filesystem or shell. If you need a profile that can investigate without
-  being able to act on the open web, build a `custom` profile that also
-  denies the `browser_*` tools you don't want.
-- **MCP servers outside this plugin's registry** (anything configured in the
-  agent's own `~/.claude` config, not Paseo's) are invisible to this code
-  entirely. `disallowedTools`/`settings.permissions.deny` can only deny tools
-  by name; if an operator's own MCP setup exposes a shell or file-mutation
-  tool under some other server's name, no profile here knows to deny it. A
-  `read-only` or `orchestrator` role is a guarantee about Paseo's own tools
-  and Claude's native ones — not a sandbox over everything an agent's MCP
-  configuration can reach.
 
 #### A child is never less restricted than its parent
 
@@ -373,6 +383,74 @@ rate-limited background re-sweep and answers from what is known now.
 gated on the policy having at least one role that denies something. With
 every role `unrestricted` (the shipped default) there is nothing to inherit,
 so no lookup happens, no RPC is issued, and the request is byte-identical.
+
+### What a tool profile does and does not guarantee
+
+**It is not a sandbox, and it cannot be made into one.** A profile is a
+launch-time edit to the tool surface the Claude Agent SDK offers one session:
+`disallowedTools` removes named tools from the model's context, and
+`settings.permissions.deny` refuses named tools at the permission layer. Both
+act only on exact tool names this code knows to write down. Everything below
+follows from that, and every item is open today.
+
+**What it does guarantee.** For the tools Paseo registers and the ones Claude
+ships natively, a denial is real and the agent cannot lift it —
+`update_agent_request` accepts only name, labels and runtime settings, so a
+spawned agent cannot rewrite its own `providerOptions`. A child cannot come
+out less restricted than its parent. The applied deny list is recorded on the
+agent's own `paseo.tools-denied` label, so what was enforced is auditable
+after the fact.
+
+**What it does not guarantee.**
+
+- **MCP servers outside Paseo's registry are invisible to this code.**
+  Anything configured in the agent's own `~/.claude` setup — a filesystem
+  server, a database server, a shell server, a deploy tool — is a set of tool
+  names this plugin has never seen and therefore never denies. If your MCP
+  configuration exposes file writes or command execution under some other
+  server's name, a `read-only` role does not stop it. This is the single
+  biggest gap, and no amount of work inside this plugin closes it: the deny
+  lists here are a finite list of names, not a capability model.
+- **`browser_navigate` and `browser_new_tab` remain under `read-only`.** They
+  take a URL, and a GET issued from a browser session that is already
+  authenticated as you can change server state (`…/admin/delete?id=5` is
+  still a GET on plenty of systems). Kept because the alternative is a
+  reviewer that cannot look at the thing it is reviewing. Use a `custom`
+  profile that also denies them if that trade is wrong for you.
+- **`WebFetch` and `WebSearch` are denied by no profile.** A `read-only`
+  agent can reach the network directly.
+- **The agent-lifecycle MCP tools are denied by no profile except
+  `update_agent`.** A `read-only` agent still has `mcp__paseo__kill_agent`,
+  `archive_agent`, `cancel_agent`, `set_agent_mode` and
+  `respond_to_permission`. It can therefore kill or archive other agents,
+  flip another agent into a more permissive mode, and approve another agent's
+  pending permission request. Those are destructive and escalation-shaped,
+  and they are open on purpose only in the sense that nobody has decided
+  where the line goes — treat it as unfinished, not as a considered "safe".
+  A `custom` profile can deny them today.
+- **`mcp__paseo__send_agent_prompt` stays.** A restricted agent that knows
+  another agent's id can ask it to do the thing it cannot. The peer is
+  separately authorized, so this is closer to "asking a colleague" than to
+  executing — but if that peer is unrestricted, the restriction is advisory
+  in practice. The same peer could also rewrite the restricted agent's
+  `paseo.tools-denied` label (the restricted agent itself cannot: it has no
+  `update_agent`), which would break inheritance for that agent's future
+  children.
+- **There is a fail-open window at plugin start.** Until the first agent
+  directory sweep succeeds — one RPC round trip after the plugin starts — a
+  parent's restrictions are unknown and nothing is inherited. Creates in that
+  window get their own role's profile and no more.
+- **A guessed role never restricts tools at all.** Tier-3/4 classification
+  picks a model but not a profile (see below). If you want a role restricted,
+  label the agent.
+- **Nothing here constrains the process.** A profile shapes one session's
+  tool list. It does not stop hooks configured in the operator's own Claude
+  settings, processes started before the restriction applied, or anything the
+  provider CLI does outside the tool layer.
+
+An operator who trusts a guarantee this feature does not make is worse off
+than one who knows exactly where the boundary is. It is guard rails: it stops
+an agent wandering off the road. It is not a fence, and it is not a cage.
 
 ### The leader role, and why restricting it forces real delegation
 

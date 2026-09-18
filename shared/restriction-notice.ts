@@ -47,11 +47,11 @@ export const MAX_ENUMERATED_TOOLS = 12;
 const BUILT_IN_NOTICE: Partial<Record<ToolProfileId, string>> = {
   "read-only": [
     "[tool profile: read-only]",
-    "Edit, MultiEdit, Write, NotebookEdit and Bash were removed from your context at launch — not gated, not requestable. So were Paseo's terminal and workspace-script MCP tools. Report the change you'd make (exact paths, a diff) rather than making it, and don't route around this.",
+    "Edit, MultiEdit, Write, NotebookEdit and Bash are gone from your context — removed at launch, not gated. So are Paseo's terminal, workspace-script and page-interaction browser MCP tools. Report the change you'd make (exact paths, a diff) instead of making it; don't route around this.",
   ].join("\n"),
   orchestrator: [
     "[tool profile: orchestrator]",
-    "Read, Glob, Grep, Edit, MultiEdit, Write, NotebookEdit, Bash, Task and Agent were removed from your context at launch — not gated, not requestable. So were Paseo's terminal and workspace-script MCP tools. You can't do anything yourself: delegate each step with mcp__paseo__create_agent.",
+    "Read, Glob, Grep, Edit, MultiEdit, Write, NotebookEdit, Bash, Task and Agent are gone from your context — removed at launch, not gated. So are Paseo's terminal, workspace-script and browser MCP tools. You can't do anything yourself: delegate each step with mcp__paseo__create_agent.",
   ].join("\n"),
 };
 
@@ -70,7 +70,7 @@ function generatedNotice(denied: readonly string[]): string {
   const list = toolList(denied);
   return [
     "[tool profile: custom]",
-    `Removed from your context at launch — not gated, not requestable: ${list}. If the task genuinely needs one, say so and stop rather than routing around it.`,
+    `Gone from your context — removed at launch, not gated: ${list}. If the task genuinely needs one, say so and stop rather than routing around it.`,
   ].join("\n");
 }
 

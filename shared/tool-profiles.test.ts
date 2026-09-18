@@ -74,6 +74,54 @@ describe("profileDeniedTools", () => {
     }
   });
 
+  it("read-only denies every browser tool that acts on a page", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__browser_click",
+      "mcp__paseo__browser_fill",
+      "mcp__paseo__browser_type",
+      "mcp__paseo__browser_keypress",
+      "mcp__paseo__browser_select",
+      "mcp__paseo__browser_drag",
+      "mcp__paseo__browser_hover",
+      "mcp__paseo__browser_upload",
+      "mcp__paseo__browser_evaluate",
+    ]) {
+      expect(tools, `read-only must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("read-only keeps the observation half of the browser: a reviewer still has to be able to look", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__browser_snapshot",
+      "mcp__paseo__browser_screenshot",
+      "mcp__paseo__browser_list_tabs",
+      "mcp__paseo__browser_logs",
+      "mcp__paseo__browser_navigate",
+    ]) {
+      expect(tools, `read-only must keep ${tool}`).not.toContain(tool);
+    }
+  });
+
+  it("orchestrator denies the whole browser family: it cannot Read a file either", () => {
+    const tools = denied({ kind: "orchestrator" });
+    for (const tool of [
+      "mcp__paseo__browser_click",
+      "mcp__paseo__browser_evaluate",
+      "mcp__paseo__browser_navigate",
+      "mcp__paseo__browser_snapshot",
+      "mcp__paseo__browser_screenshot",
+      "mcp__paseo__browser_list_tabs",
+    ]) {
+      expect(tools, `orchestrator must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("still keeps create_agent for orchestrator: delegation is the whole point of the profile", () => {
+    expect(denied({ kind: "orchestrator" })).not.toContain("mcp__paseo__create_agent");
+  });
+
   it("write denies nothing: file and shell tools are the point of the profile", () => {
     expect(denied({ kind: "write" })).toEqual([]);
   });
