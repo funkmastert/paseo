@@ -260,6 +260,14 @@ const AgentTokenBurnMonitorSchema = z
       })
       .strict()
       .optional(),
+    // Opt-in, report-only provider usage-window leg.
+    accountPressure: z
+      .object({
+        enabled: z.boolean().optional(),
+        usedPct: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

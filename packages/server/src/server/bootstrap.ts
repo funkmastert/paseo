@@ -1994,6 +1994,9 @@ export async function createPaseoDaemon(
             // Wired here (rather than beside AgentTitleTracker, above) because it needs the
             // push sender wsServer resolved (injected override, or its own
             // createPushNotifications) — not available until wsServer exists.
+            // Captured before the closure: `wsServer` is a mutable binding at this scope, so
+            // reaching through it from inside readProviderUsage loses its non-null narrowing.
+            const providerUsageService = wsServer.getProviderUsageService();
             agentTokenBurnMonitor = new AgentTokenBurnMonitor({
               agentManager,
               agentStorage,
@@ -2012,6 +2015,7 @@ export async function createPaseoDaemon(
                   logger,
                 });
               },
+              readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
               readDaemonConfig: () => ({
                 tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
               }),

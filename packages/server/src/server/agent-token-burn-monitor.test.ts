@@ -501,3 +501,75 @@ describe("AgentTokenBurnMonitor spend governor", () => {
     expect(push.sent.map((p) => p.data?.stage)).toEqual(["notify", "stopFanOut", "pause"]);
   });
 });
+
+describe("AgentTokenBurnMonitor account pressure", () => {
+  function usage(usedPct: number, resetsAt: string | null = "2026-09-24T00:00:00.000Z") {
+    return [
+      {
+        providerId: "claude",
+        displayName: "Claude (leader)",
+        status: "available" as const,
+        planLabel: "Max",
+        windows: [{ id: "weekly", label: "weekly limit", usedPct, resetsAt }],
+      },
+    ];
+  }
+
+  function createUsageMonitor(input: {
+    usage: ReturnType<typeof usage> | null;
+    enabled?: boolean;
+  }) {
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager: createFakeAgentManager([]),
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readProviderUsage: async () => input.usage,
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: { accountPressure: { enabled: input.enabled ?? true } },
+      }),
+      logger: createLogger(),
+    });
+    return { push, monitor };
+  }
+
+  test("warns once per cycle when a usage window is nearly exhausted", async () => {
+    const { push, monitor } = createUsageMonitor({ usage: usage(94) });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.data?.reason).toBe("token_burn_account_pressure");
+    expect(push.sent[0]?.body).toBe(
+      "Claude (leader) is at 94% of weekly limit. Resets 2026-09-24T00:00:00.000Z.",
+    );
+  });
+
+  test("a healthy window says nothing", async () => {
+    const { push, monitor } = createUsageMonitor({ usage: usage(60) });
+    await monitor.tick();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("the leg is off until it is turned on", async () => {
+    const { push, monitor } = createUsageMonitor({ usage: usage(99), enabled: false });
+    await monitor.tick();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("unreadable usage is not an error and not a warning", async () => {
+    const { push, monitor } = createUsageMonitor({ usage: null });
+    await monitor.tick();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("account pressure is reported with zero live agents", async () => {
+    // The per-agent legs return early on an empty agent list; this one must not.
+    const { push, monitor } = createUsageMonitor({ usage: usage(96) });
+    await monitor.tick();
+    expect(push.sent).toHaveLength(1);
+  });
+});

@@ -1,5 +1,7 @@
 import type { TokenBurnAlert } from "@getpaseo/protocol/agent-types";
+import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import {
+  buildAccountUsagePressureNotificationPayload,
   buildBatchedTokenBurnNotificationPayload,
   buildSpendGovernorNotificationPayload,
   buildTokenBurnNotificationPayload,
@@ -29,6 +31,7 @@ const DEFAULT_NOTIFY_AT_FRACTION = 0.75;
 const DEFAULT_DOWNGRADE_AT_FRACTION = 1;
 const DEFAULT_STOP_FAN_OUT_AT_FRACTION = 1;
 const DEFAULT_PAUSE_AT_FRACTION = 1.5;
+const DEFAULT_ACCOUNT_PRESSURE_USED_PCT = 90;
 
 export interface SpendGovernorStageSettings {
   enabled?: boolean;
@@ -46,6 +49,11 @@ export interface SpendGovernorSettings {
   pause?: SpendGovernorStageSettings;
 }
 
+export interface AccountPressureSettings {
+  enabled?: boolean;
+  usedPct?: number;
+}
+
 export interface TokenBurnMonitorConfig {
   enabled?: boolean;
   ratePerMinute?: number;
@@ -55,6 +63,8 @@ export interface TokenBurnMonitorConfig {
   breachBatchThreshold?: number;
   /** Opt-in enforcement ladder (agent/spend-governor.ts). Off unless this says otherwise. */
   governor?: SpendGovernorSettings;
+  /** Opt-in report-only account usage leg. Off unless this says otherwise. */
+  accountPressure?: AccountPressureSettings;
 }
 
 interface AgentTokenBurnMonitorLogger {
@@ -88,16 +98,24 @@ export interface AgentTokenBurnMonitorOptions {
    * losing the very turn being governed.
    */
   sendSystemMessageToAgent: (agentId: string, body: string) => Promise<void>;
+  /** Provider usage windows for the report-only account-pressure leg. Null when unreadable. */
+  readProviderUsage?: () => Promise<readonly ProviderUsage[] | null>;
   readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
   logger: AgentTokenBurnMonitorLogger;
   sweepIntervalMs?: number;
   now?: () => number;
 }
 
+interface ResolvedAccountPressureConfig {
+  enabled: boolean;
+  usedPct: number;
+}
+
 interface ResolvedTokenBurnMonitorConfig extends DetectorConfig {
   scope: "all" | "topLevelOnly";
   breachBatchThreshold: number;
   governor: GovernorDecisionConfig;
+  accountPressure: ResolvedAccountPressureConfig;
 }
 
 function resolveStage(
@@ -147,6 +165,10 @@ function resolveConfig(config: TokenBurnMonitorConfig | undefined): ResolvedToke
     scope: config?.scope ?? "all",
     breachBatchThreshold: config?.breachBatchThreshold ?? DEFAULT_BREACH_BATCH_THRESHOLD,
     governor: resolveGovernorConfig(config?.governor),
+    accountPressure: {
+      enabled: config?.accountPressure?.enabled ?? false,
+      usedPct: config?.accountPressure?.usedPct ?? DEFAULT_ACCOUNT_PRESSURE_USED_PCT,
+    },
   };
 }
 
@@ -224,11 +246,18 @@ export class AgentTokenBurnMonitor {
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly serverId: string;
   private readonly sendSystemMessageToAgent: AgentTokenBurnMonitorOptions["sendSystemMessageToAgent"];
+  private readonly readProviderUsage: AgentTokenBurnMonitorOptions["readProviderUsage"];
   private readonly readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
   private readonly logger: AgentTokenBurnMonitorLogger;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Account-pressure legs that have already reported, keyed `providerId:windowId` and valued by
+   * the window's `resetsAt`. A window that resets gets a fresh warning; one that keeps sitting
+   * at 94% does not re-warn every 60 seconds for the rest of the week.
+   */
+  private reportedAccountWindows = new Map<string, string>();
   private sweepInFlight = false;
 
   constructor(options: AgentTokenBurnMonitorOptions) {
@@ -237,6 +266,7 @@ export class AgentTokenBurnMonitor {
     this.pushNotificationSender = options.pushNotificationSender;
     this.serverId = options.serverId;
     this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
+    this.readProviderUsage = options.readProviderUsage;
     this.readDaemonConfig = options.readDaemonConfig;
     this.logger = options.logger;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
@@ -286,6 +316,9 @@ export class AgentTokenBurnMonitor {
     const config = resolveConfig(rawConfig);
     const nowMs = this.now();
     const agents = this.agentManager.listAgentsForTokenBurnMonitor(nowMs);
+    // Account pressure is a machine-level leg: it matters with zero live agents, so it runs
+    // before the per-agent early return, the way AgentResourceMonitor's swap leg does.
+    await this.reportAccountPressure(config.accountPressure);
     if (agents.length === 0) {
       return;
     }
@@ -494,6 +527,60 @@ export class AgentTokenBurnMonitor {
         "Failed to steer spend-governor message into agent",
       );
     }
+  }
+
+  /**
+   * Report-only, by design. The daemon can see a provider's usage windows directly, but acting
+   * on them here would fight two things that already own the decision: the account pool plugin
+   * routes new agents away from a hot account, so refusing a caller's `create_agent` would
+   * block a child that would have been placed on a healthy account anyway; and
+   * AccountFailoverMonitor already migrates agents off an account at 100%. What nothing does
+   * today is say so before the wall — which is the whole value here. See
+   * docs/account-failover.md.
+   */
+  private async reportAccountPressure(config: ResolvedAccountPressureConfig): Promise<void> {
+    if (!config.enabled || !this.readProviderUsage) {
+      // Evidence is dropped when the leg is off, so turning it back on warns afresh rather
+      // than staying silent about a window that crossed while nobody was watching.
+      this.reportedAccountWindows.clear();
+      return;
+    }
+    const usage = await this.readProviderUsage().catch((error: unknown) => {
+      this.logger.warn({ err: error }, "Failed to read provider usage for account pressure");
+      return null;
+    });
+    if (!usage) {
+      return;
+    }
+
+    const stillHot = new Map<string, string>();
+    for (const provider of usage) {
+      for (const window of provider.windows) {
+        const usedPct = window.usedPct;
+        if (typeof usedPct !== "number" || usedPct < config.usedPct) {
+          continue;
+        }
+        const key = `${provider.providerId}:${window.id}`;
+        const cycle = window.resetsAt ?? "";
+        stillHot.set(key, cycle);
+        if (this.reportedAccountWindows.get(key) === cycle) {
+          continue;
+        }
+        await this.sendPush(
+          buildAccountUsagePressureNotificationPayload({
+            serverId: this.serverId,
+            providerId: provider.providerId,
+            displayName: provider.displayName,
+            windowLabel: window.label,
+            usedPct,
+            resetsAt: window.resetsAt,
+          }),
+        );
+      }
+    }
+    // Only windows still over threshold are remembered, so one that drops back under and
+    // climbs again inside the same cycle warns a second time.
+    this.reportedAccountWindows = stillHot;
   }
 
   private async sendPush(payload: {
