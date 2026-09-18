@@ -3,9 +3,12 @@ import {
   createSystemProcessSampler,
   parseClockSeconds,
   parseMacosSwapUsage,
+  parseMacosVmStat,
   parseProcMeminfo,
   parsePsOutput,
 } from "./process-sampler.js";
+
+const GIBIBYTE = 1024 ** 3;
 
 describe("parsePsOutput", () => {
   test("parses a macOS-shaped snapshot, including a command containing spaces", () => {
@@ -177,5 +180,48 @@ describe("parseProcMeminfo", () => {
 
   test("returns undefined when the expected keys are missing", () => {
     expect(parseProcMeminfo("Nothing:matches here\n")).toBeUndefined();
+  });
+
+  test("reads MemAvailable for the device-lease headroom gate", () => {
+    const content = [
+      "MemTotal:       65894400 kB",
+      "MemFree:         1048576 kB",
+      "MemAvailable:    4194304 kB",
+      "SwapTotal:       8388608 kB",
+      "SwapFree:         262144 kB",
+      "",
+    ].join("\n");
+
+    expect(parseProcMeminfo(content)?.availableBytes).toBe(4194304 * 1024);
+  });
+});
+
+describe("parseMacosVmStat", () => {
+  // Real `vm_stat` output from the machine this feature was measured on.
+  const output = [
+    "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
+    "Pages free:                                    16876.",
+    "Pages active:                                1162500.",
+    "Pages inactive:                              1156801.",
+    "Pages speculative:                              4342.",
+    "Pages throttled:                                   0.",
+    "Pages wired down:                             423147.",
+    "Pages purgeable:                               25615.",
+    '"Translation faults":                   159863805915.',
+    "",
+  ].join("\n");
+
+  test("counts free, speculative and purgeable pages", () => {
+    expect(parseMacosVmStat(output)).toBe((16876 + 4342 + 25615) * 16384);
+  });
+
+  test("leaves inactive pages out, so a swapping machine reads as tight as it is", () => {
+    // 1,156,801 inactive pages is 17.7 GiB. Counting it would report the thrashing machine as
+    // having plenty of room, which is the mistake the gate exists to avoid.
+    expect(parseMacosVmStat(output)).toBeLessThan(GIBIBYTE);
+  });
+
+  test("returns undefined when the output is not vm_stat's", () => {
+    expect(parseMacosVmStat("nothing useful")).toBeUndefined();
   });
 });
