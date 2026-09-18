@@ -78,9 +78,15 @@ export interface BuildDaemonReapState {
   /** When the current unbroken run of idle sweeps started; undefined until one has been seen. */
   idleSinceMs: number | undefined;
   idleSweeps: number;
-  /** Set once signalling this pid came back EPERM — retrying every 60s forever helps nobody. */
-  blocked?: boolean;
+  /**
+   * Why later sweeps must leave this pid alone. Set once the reaper has acted on it — a
+   * lingering or un-signallable pid is still in the next `ps` snapshot, and without this it
+   * would be signalled and reported again every 60 seconds.
+   */
+  handled?: BuildDaemonHandledReason;
 }
+
+export type BuildDaemonHandledReason = "signalled" | "reported" | "not-permitted";
 
 export type BuildDaemonReaperMemory = Map<number, BuildDaemonReapState>;
 
@@ -156,7 +162,7 @@ export function evaluateBuildDaemonReapCandidates(
     if (!signature) continue;
 
     const previous = input.previous?.get(row.pid);
-    if (previous?.blocked === true) {
+    if (previous?.handled !== undefined) {
       memory.set(row.pid, previous);
       continue;
     }
@@ -218,10 +224,18 @@ export function evaluateBuildDaemonReapCandidates(
   return { candidates: candidates.slice(0, input.config.maxPerSweep), memory };
 }
 
-/** Records that `pid` may not be signalled by this daemon, so later sweeps stop trying. */
-export function markBuildDaemonUnreapable(memory: BuildDaemonReaperMemory, pid: number): void {
+/**
+ * Records that the reaper is done with `pid`, so later sweeps skip it. One decision per process:
+ * a daemon is signalled once, a dry run reports it once, and a pid that came back EPERM is never
+ * asked again.
+ */
+export function markBuildDaemonHandled(
+  memory: BuildDaemonReaperMemory,
+  pid: number,
+  reason: BuildDaemonHandledReason,
+): void {
   const state = memory.get(pid);
-  if (state) memory.set(pid, { ...state, blocked: true });
+  if (state) memory.set(pid, { ...state, handled: reason });
 }
 
 export type ProcessSignalOutcome = "sent" | "gone" | "not-permitted" | "failed";

@@ -1074,6 +1074,40 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch turns the reaper off without losing the rest of its settings on disk", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const reaper = { enabled: true, dryRun: true, idleMinutes: 30 };
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({ version: 1, agents: { resourceMonitor: { reaper } } }, null, 2)}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        resourceMonitor: { reaper },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ resourceMonitor: { reaper: { dryRun: false } } });
+
+    // The nested object merges per field, in memory and on disk alike — a patch that flips one
+    // reaper setting must not wipe the idleMinutes Tyler tuned.
+    const expected = { enabled: true, dryRun: false, idleMinutes: 30 };
+    expect(next.resourceMonitor).toEqual({ reaper: expected });
+    expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({ reaper: expected });
+  });
+
   test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

@@ -4,7 +4,7 @@ import {
   type BuildDaemonReaperMemory,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
-  markBuildDaemonUnreapable,
+  markBuildDaemonHandled,
 } from "./build-daemon-reaper.js";
 import { parsePsOutput, type ProcessSampleRow } from "./process-sampler.js";
 
@@ -213,7 +213,7 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates.map((candidate) => candidate.pid)).toEqual([102, 103]);
   });
 
-  test("a pid marked unreapable stays skipped on every later sweep", () => {
+  test("a pid the reaper has acted on stays skipped on every later sweep", () => {
     const rows = [row({ pid: 28056 })];
     let memory: BuildDaemonReaperMemory | undefined;
     let nowMs = 1_000_000;
@@ -230,13 +230,13 @@ describe("evaluateBuildDaemonReapCandidates", () => {
       memory = result.memory;
       candidates = result.candidates;
       if (candidates.length > 0 && index < 19) {
-        markBuildDaemonUnreapable(memory, 28056);
+        markBuildDaemonHandled(memory, 28056, "signalled");
       }
       nowMs += 60_000;
     }
 
     expect(candidates).toEqual([]);
-    expect(memory?.get(28056)?.blocked).toBe(true);
+    expect(memory?.get(28056)?.handled).toBe("signalled");
   });
 
   test("a recycled pid starts over instead of inheriting the old process's idleness", () => {

@@ -2,8 +2,10 @@ import type { ResourceAlert } from "@getpaseo/protocol/agent-types";
 import {
   buildBatchedResourceNotificationPayload,
   buildResourceAgentNotificationPayload,
+  buildResourceBuildDaemonReapNotificationPayload,
   buildResourceOrphanBuildDaemonsNotificationPayload,
   buildResourceSystemMemoryNotificationPayload,
+  type ReapedBuildDaemon,
 } from "@getpaseo/protocol/resource-monitor-notification";
 import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
@@ -14,10 +16,23 @@ import {
   type MachineResourceTrigger,
   type ResourceMonitorDetectorConfig,
 } from "./agent/resource-monitor-detector.js";
+import {
+  type BuildDaemonReapCandidate,
+  type BuildDaemonReaperConfig,
+  type BuildDaemonReaperMemory,
+  createSystemProcessSignaller,
+  evaluateBuildDaemonReapCandidates,
+  markBuildDaemonHandled,
+  type ProcessSignaller,
+} from "./agent/build-daemon-reaper.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
 import { withRecentCpuPercent, type CpuRateMemory } from "./agent/process-cpu-rate.js";
 import type { OrphanBuildDaemonSummary } from "./agent/process-attribution.js";
-import type { ProcessSampler, SystemMemorySample } from "./agent/process-sampler.js";
+import type {
+  ProcessSampleRow,
+  ProcessSampler,
+  SystemMemorySample,
+} from "./agent/process-sampler.js";
 import type { PushNotificationSender } from "./push/index.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -28,6 +43,25 @@ const DEFAULT_SUSTAINED_MINUTES = 3;
 const DEFAULT_SYSTEM_SWAP_USED_RATIO = 0.9;
 const DEFAULT_ORPHAN_BUILD_DAEMON_BYTES = 2 * GIBIBYTE;
 const DEFAULT_BREACH_BATCH_THRESHOLD = 3;
+// Reaper defaults. Off unless turned on, and deliberately slow to act once it is: a daemon has
+// to look abandoned for a quarter of an hour across at least three sweeps, and at most two go
+// per sweep. Gradle daemons exit cleanly on SIGTERM, so the grace window only has to cover an
+// orderly shutdown — it blocks the sweep, so it stays well under the 60s interval.
+const DEFAULT_REAPER_IDLE_CPU_PERCENT = 2;
+const DEFAULT_REAPER_IDLE_MINUTES = 15;
+const DEFAULT_REAPER_MIN_IDLE_SWEEPS = 3;
+const DEFAULT_REAPER_MAX_PER_SWEEP = 2;
+const DEFAULT_REAPER_GRACE_MS = 10_000;
+
+export interface ResourceMonitorReaperConfig {
+  enabled?: boolean;
+  dryRun?: boolean;
+  idleCpuPercent?: number;
+  idleMinutes?: number;
+  minIdleSweeps?: number;
+  maxPerSweep?: number;
+  graceMs?: number;
+}
 
 export interface ResourceMonitorConfig {
   enabled?: boolean;
@@ -37,6 +71,7 @@ export interface ResourceMonitorConfig {
   systemSwapUsedRatio?: number;
   orphanBuildDaemonBytes?: number;
   notifyAgent?: boolean;
+  reaper?: ResourceMonitorReaperConfig;
 }
 
 interface AgentResourceMonitorLogger {
@@ -71,10 +106,37 @@ export interface AgentResourceMonitorOptions {
   logger: AgentResourceMonitorLogger;
   sweepIntervalMs?: number;
   now?: () => number;
+  /** Injectable for the same reason as processSampler: tests reap without signalling a real pid. */
+  processSignaller?: ProcessSignaller;
+  /** The uid the daemon runs as. Defaults to this process's; undefined disables reaping. */
+  ownerUid?: number | undefined;
+  /** The SIGTERM grace wait, injectable so tests don't spend it. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
+  enabled: boolean;
+  dryRun: boolean;
+  graceMs: number;
 }
 
 interface ResolvedResourceMonitorConfig extends ResourceMonitorDetectorConfig {
   notifyAgent: boolean;
+  reaper: ResolvedReaperConfig;
+}
+
+function resolveReaperConfig(
+  config: ResourceMonitorReaperConfig | undefined,
+): ResolvedReaperConfig {
+  return {
+    enabled: config?.enabled ?? false,
+    dryRun: config?.dryRun ?? false,
+    idleCpuPercent: config?.idleCpuPercent ?? DEFAULT_REAPER_IDLE_CPU_PERCENT,
+    idleMinutes: config?.idleMinutes ?? DEFAULT_REAPER_IDLE_MINUTES,
+    minIdleSweeps: config?.minIdleSweeps ?? DEFAULT_REAPER_MIN_IDLE_SWEEPS,
+    maxPerSweep: config?.maxPerSweep ?? DEFAULT_REAPER_MAX_PER_SWEEP,
+    graceMs: config?.graceMs ?? DEFAULT_REAPER_GRACE_MS,
+  };
 }
 
 function resolveConfig(config: ResourceMonitorConfig | undefined): ResolvedResourceMonitorConfig {
@@ -85,6 +147,23 @@ function resolveConfig(config: ResourceMonitorConfig | undefined): ResolvedResou
     systemSwapUsedRatio: config?.systemSwapUsedRatio ?? DEFAULT_SYSTEM_SWAP_USED_RATIO,
     orphanBuildDaemonBytes: config?.orphanBuildDaemonBytes ?? DEFAULT_ORPHAN_BUILD_DAEMON_BYTES,
     notifyAgent: config?.notifyAgent ?? true,
+    reaper: resolveReaperConfig(config?.reaper),
+  };
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+}
+
+function toReapedBuildDaemon(candidate: BuildDaemonReapCandidate): ReapedBuildDaemon {
+  return {
+    pid: candidate.pid,
+    label: candidate.label,
+    rssBytes: candidate.rssBytes,
+    idleMs: candidate.idleMs,
   };
 }
 
@@ -140,12 +219,17 @@ export class AgentResourceMonitor {
   private readonly logger: AgentResourceMonitorLogger;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
+  private readonly processSignaller: ProcessSignaller;
+  private readonly ownerUid: number | undefined;
+  private readonly sleep: (ms: number) => Promise<void>;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
   private machineState: MachineResourceMonitorState | undefined;
   /** Previous sweep's cumulative CPU per pid, so this sweep can report a rate (process-cpu-rate.ts). */
   private cpuRateMemory: CpuRateMemory | undefined;
+  /** How long each reap candidate has been idle, accumulated across sweeps (build-daemon-reaper.ts). */
+  private reapMemory: BuildDaemonReaperMemory | undefined;
   private sweepInFlight = false;
 
   constructor(options: AgentResourceMonitorOptions) {
@@ -159,6 +243,9 @@ export class AgentResourceMonitor {
     this.logger = options.logger;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.now = options.now ?? Date.now;
+    this.processSignaller = options.processSignaller ?? createSystemProcessSignaller();
+    this.ownerUid = "ownerUid" in options ? options.ownerUid : process.getuid?.();
+    this.sleep = options.sleep ?? defaultSleep;
   }
 
   start(): void {
@@ -229,6 +316,9 @@ export class AgentResourceMonitor {
 
     await this.sendAgentBreaches(agentBreaches, config);
     await this.sendMachineBreaches(machineTriggers, systemMemory, attribution.orphanBuildDaemons);
+    // Runs on its own criteria, not off the orphan alert's threshold: an abandoned daemon sitting
+    // on 800 MB is worth reclaiming even though the machine-level leg only fires at 2 GiB.
+    await this.reapAbandonedBuildDaemons(cpu.rows, attribution.agentTrees, config.reaper, nowMs);
   }
 
   private evaluateAgentBreaches(
@@ -382,6 +472,126 @@ export class AgentResourceMonitor {
         }),
       );
     }
+  }
+
+  private async reapAbandonedBuildDaemons(
+    rows: readonly ProcessSampleRow[],
+    agentTrees: readonly AgentProcessTree[],
+    reaper: ResolvedReaperConfig,
+    nowMs: number,
+  ): Promise<void> {
+    if (!reaper.enabled) {
+      // Turning the reaper on starts the evidence over. Sweeps observed while it was off were
+      // never checked against the abandonment rules, and acting on them would skip the wait.
+      this.reapMemory = undefined;
+      return;
+    }
+
+    const attributedPids = new Set(agentTrees.flatMap((tree) => tree.pids));
+    const { candidates, memory } = evaluateBuildDaemonReapCandidates({
+      rows,
+      attributedPids,
+      ownerUid: this.ownerUid,
+      config: reaper,
+      previous: this.reapMemory,
+      nowMs,
+    });
+    this.reapMemory = memory;
+    if (candidates.length === 0) {
+      return;
+    }
+
+    if (reaper.dryRun) {
+      this.logger.info(
+        { dryRun: true, daemons: candidates },
+        "Resource monitor would reap orphaned build daemons",
+      );
+      // Reported once, not once a minute for as long as the daemon sits there.
+      for (const candidate of candidates) {
+        markBuildDaemonHandled(memory, candidate.pid, "reported");
+      }
+      await this.sendPush(
+        buildResourceBuildDaemonReapNotificationPayload({
+          serverId: this.serverId,
+          dryRun: true,
+          daemons: candidates.map(toReapedBuildDaemon),
+        }),
+      );
+      return;
+    }
+
+    const reaped = await this.terminateBuildDaemons(candidates, reaper, memory);
+    if (reaped.length === 0) {
+      return;
+    }
+    await this.sendPush(
+      buildResourceBuildDaemonReapNotificationPayload({
+        serverId: this.serverId,
+        dryRun: false,
+        daemons: reaped,
+      }),
+    );
+  }
+
+  /**
+   * SIGTERM everything selected, wait out one shared grace window, then SIGKILL whatever is
+   * still there. Gradle and Kotlin daemons shut down cleanly on SIGTERM, so the escalation is
+   * the exception; one window for the whole batch rather than one each keeps the sweep — which
+   * cannot overlap the next tick — short.
+   */
+  private async terminateBuildDaemons(
+    candidates: readonly BuildDaemonReapCandidate[],
+    reaper: ResolvedReaperConfig,
+    memory: BuildDaemonReaperMemory,
+  ): Promise<ReapedBuildDaemon[]> {
+    const terminated: BuildDaemonReapCandidate[] = [];
+    for (const candidate of candidates) {
+      const outcome = this.processSignaller.signal(candidate.pid, "SIGTERM");
+      if (outcome === "not-permitted") {
+        // Not ours to signal after all. Stop asking every 60 seconds.
+        markBuildDaemonHandled(memory, candidate.pid, "not-permitted");
+        this.logger.warn(
+          { pid: candidate.pid, kind: candidate.kind },
+          "Not permitted to reap orphaned build daemon; skipping it from now on",
+        );
+        continue;
+      }
+      if (outcome !== "sent") {
+        // "gone" means it exited between the sample and the signal — nothing was reclaimed by
+        // us, so it is not reported as a reap.
+        continue;
+      }
+      // One decision per pid: a daemon slow to die is still in the next sample, and re-running
+      // the whole sequence on it every sweep would double-report what was already reclaimed.
+      markBuildDaemonHandled(memory, candidate.pid, "signalled");
+      terminated.push(candidate);
+    }
+    if (terminated.length === 0) {
+      return [];
+    }
+
+    await this.sleep(reaper.graceMs);
+
+    const reaped: ReapedBuildDaemon[] = [];
+    for (const candidate of terminated) {
+      const escalated = this.processSignaller.isRunning(candidate.pid);
+      if (escalated) {
+        this.processSignaller.signal(candidate.pid, "SIGKILL");
+      }
+      this.logger.info(
+        {
+          pid: candidate.pid,
+          kind: candidate.kind,
+          rssBytes: candidate.rssBytes,
+          idleMs: candidate.idleMs,
+          idleSweeps: candidate.idleSweeps,
+          escalated,
+        },
+        "Reaped orphaned build daemon",
+      );
+      reaped.push(toReapedBuildDaemon(candidate));
+    }
+    return reaped;
   }
 
   private async sendPush(payload: {

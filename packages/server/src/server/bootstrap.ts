@@ -504,6 +504,15 @@ export interface PaseoDaemonConfig {
     systemSwapUsedRatio?: number;
     orphanBuildDaemonBytes?: number;
     notifyAgent?: boolean;
+    reaper?: {
+      enabled?: boolean;
+      dryRun?: boolean;
+      idleCpuPercent?: number;
+      idleMinutes?: number;
+      minIdleSweeps?: number;
+      maxPerSweep?: number;
+      graceMs?: number;
+    };
   };
   accountFailover?: {
     enabled?: boolean;

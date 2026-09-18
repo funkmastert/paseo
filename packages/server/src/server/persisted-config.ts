@@ -248,6 +248,19 @@ const AgentResourceMonitorSchema = z
     systemSwapUsedRatio: z.number().positive().optional(),
     orphanBuildDaemonBytes: z.number().positive().optional(),
     notifyAgent: z.boolean().optional(),
+    // Opt-in reaper leg (agent/build-daemon-reaper.ts). Off unless this says otherwise.
+    reaper: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        idleMinutes: z.number().positive().optional(),
+        minIdleSweeps: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+        graceMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -754,6 +754,9 @@ function mergeTokenBurnMonitorForPersist(
 
 type PersistedResourceMonitor = NonNullable<PersistedConfig["agents"]>["resourceMonitor"];
 
+// Deep, unlike its flat siblings, and for the same reason as mergeMcpGatewayForPersist below:
+// `reaper` is a nested object, so a `{ reaper: { dryRun: false } }` patch has to keep the rest
+// of the reaper's settings on disk — exactly what the live `this.current` deepMerge does.
 function mergeResourceMonitorForPersist(
   persisted: PersistedResourceMonitor,
   patch: SupportedMutableConfigPatch["resourceMonitor"],
@@ -761,7 +764,10 @@ function mergeResourceMonitorForPersist(
   if (patch === undefined) {
     return persisted;
   }
-  return { ...persisted, ...patch };
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedResourceMonitor;
 }
 
 type PersistedAccountFailover = NonNullable<PersistedConfig["agents"]>["accountFailover"];

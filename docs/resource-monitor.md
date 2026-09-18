@@ -1,10 +1,10 @@
 # Resource monitor
 
-The daemon tracks OS-level memory and CPU per agent and warns when one runs away, alongside two machine-level checks: swap pressure and orphaned build daemons. It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage — same monitor shape, different signal.
+The daemon tracks OS-level memory and CPU per agent and warns when one runs away, alongside two machine-level checks: swap pressure and orphaned build daemons. An opt-in fourth leg reaps abandoned build daemons instead of only reporting them. It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage — same monitor shape, different signal.
 
 ## What's attributed, and how
 
-Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) shells out to `ps -axo pid,ppid,rss,pcpu,etime,cputime,command` and, on macOS/Linux, samples system swap. Both samples are best-effort with a 15s timeout: a host without `ps` gets one warning and no process legs, never a failing sweep, and a sweep still in flight is not overlapped by the next tick. `process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints — that one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the `ps` value, since for a young process the two agree.
+Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) shells out to `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` and, on macOS/Linux, samples system swap. `uid` exists for the reaper alone — nothing may be signalled without proving it belongs to the user the daemon runs as. Both samples are best-effort with a 15s timeout: a host without `ps` gets one warning and no process legs, never a failing sweep, and a sweep still in flight is not overlapped by the next tick. `process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints — that one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the `ps` value, since for a young process the two agree.
 
 A process that gets reparented to pid 1 — a crashed shell, a build tool that daemonizes on purpose — falls out of every agent's tree. There's no way to attribute it to whoever launched it, so it isn't folded into any agent's usage. Gradle and Kotlin's compile daemons do this by design, and they're common enough (and heavy enough — idle Gradle daemons commonly hold hundreds of MB to low GB each) to warrant their own signal: any ppid-1 process whose command line matches a known build-daemon marker (`GradleDaemon`, `KotlinCompileDaemon`) is counted separately as an orphan build daemon, by count and total RSS, rather than silently dropped.
 
@@ -26,6 +26,38 @@ An agent's memory and CPU legs are independent state machines but share one aler
 - **Push notification** (`@getpaseo/protocol/resource-monitor-notification`, mirrors `token-burn-notification.ts`): per-agent pushes report both current memory and CPU regardless of which leg fired, since a tree heavy enough to trip one is usually pushing the other too. More than 3 agent breaches in one sweep collapse into a single batched push; each agent still gets its own live alert and, if `notifyAgent` is on, its own steered message. The two machine-level legs always push individually — there's no agent to batch them against.
 - **Live `resourceAlert`** on the agent payload (`AgentSnapshotPayloadSchema`/`AgentListItemPayloadSchema`), additive-optional and deliberately not part of the closed `attentionReason` enum — same treatment as `tokenBurnAlert`. Live-only: cleared on rewind, never persisted, and `agent-state-bucket.ts` treats it as attention-worthy alongside `tokenBurnAlert`.
 - **A message into the agent's own conversation**, when `notifyAgent` is on (default true) and the agent is mid-turn: one steered system message per episode, reusing the same `isSystemInjectedEnvelope`/`sendPromptToAgent` path chat mentions and notify-on-finish use (`activeTurnBehavior: "steer"`, `unarchive: false`) — not a new delivery mechanism. An idle agent is never steered: that path falls back to starting a new turn, which would spend tokens on an agent nobody is driving, and an idle agent with a heavy leftover child is the most common breach. It gets the push and the live alert only. The orphan-build-daemon episode is push-only; there's no single agent to steer a message into, so its push body names the fix directly (`./gradlew --stop`).
+
+## Reaping abandoned build daemons
+
+Off by default. Turn it on under `agents.resourceMonitor.reaper`, and turn on `dryRun` first: it runs the whole selection and reports exactly what it would kill, without signalling anything.
+
+A daemon is only reaped once every one of these holds. Each is a separate way for a process to prove somebody still cares about it, so any single one failing spares it:
+
+- **`ppid` is 1.** It was reparented to init, so the shell, Gradle client, or agent that launched it is gone. A daemon serving a build in progress still has its launcher as a parent.
+- **No live agent's tree contains it**, and its command line carries no `callerAgentId=` marker. The second check matters on its own: attribution only covers agents the daemon currently lists, so an archived agent's leftover process would otherwise look unowned.
+- **Its uid matches the daemon's.** Another user's process, or a platform that can't report a uid, is never signalled.
+- **Its command line matches the allowlist** (`agent/build-daemon-reaper.ts`): a JVM main class as a whole argv token, with a `java` token before it. `GradleDaemon` as a substring would also match `grep GradleDaemon`, an editor holding the string in a path, and the reaper's own source. The two entries — Gradle's `org.gradle.launcher.daemon.bootstrap.GradleDaemon` and Kotlin's `org.jetbrains.kotlin.daemon.KotlinCompileDaemon` — were read off a live daemon and out of `kotlin-daemon-embeddable`'s jar. Add an entry only after checking a real command line. Anything not on the list is reported exactly as before and never signalled.
+- **It has been idle for `idleMinutes`, observed across at least `minIdleSweeps` sweeps.** Idle means the CPU rate between sweeps (`process-cpu-rate.ts`), never `ps`'s lifetime average — a daemon that compiled hard an hour ago and has slept since reads as busy there. A pid's first sighting carries no idle evidence at all for that reason, and one busy sweep resets the clock to zero rather than pausing it. Both gates apply: the sweep count is what makes it evidence rather than one sample, and the wall-clock duration is what a stalled or restarted sweep loop can't fake.
+
+Then SIGTERM, one shared grace window (`graceMs`, default 10s — it blocks the sweep, so it stays well under the 60s interval), then SIGKILL for whatever is still running. Gradle and Kotlin daemons exit cleanly on SIGTERM, so escalation is the exception. At most `maxPerSweep` daemons go per sweep, largest first. A pid is acted on once: a daemon slow to die is still in the next `ps` snapshot, and re-running the sequence on it would double-report memory already reclaimed. A pid that comes back EPERM is warned about once and skipped from then on.
+
+Reaping runs on its own criteria, not off `orphanBuildDaemonBytes` — an abandoned daemon sitting on 800 MB is worth reclaiming even though the machine-level alert only fires at 2 GiB. Turning the reaper off discards the idle evidence it had gathered, so turning it back on starts the wait over.
+
+Every reap is reported through the same push path as the alerts (`resource_daemons_reaped`), naming each pid, kind, RSS reclaimed and how long it had been idle, and logged at info to `daemon.log` with the sweep count behind the decision.
+
+| Key              | Default | What it does                                  |
+| ---------------- | ------- | --------------------------------------------- |
+| `enabled`        | `false` | Nothing is ever signalled while this is off   |
+| `dryRun`         | `false` | Select and report, signal nothing             |
+| `idleCpuPercent` | 2       | At or below this rate, a sweep counts as idle |
+| `idleMinutes`    | 15      | Continuous idle time required                 |
+| `minIdleSweeps`  | 3       | Sweeps that must have observed that idleness  |
+| `maxPerSweep`    | 2       | Blast radius per sweep                        |
+| `graceMs`        | 10000   | SIGTERM-to-SIGKILL wait                       |
+
+### What it costs
+
+Killing an idle Gradle daemon means the next build starts cold: a fresh JVM, an empty daemon-side cache, and a noticeably slower first build in that project — tens of seconds on a large Android project. That is the trade. Fifteen minutes of idle is the default because it is long enough that you have probably moved on, but a daemon you come back to after a coffee is one you will pay to restart. Raise `idleMinutes` if you bounce between builds; lower it if memory matters more than the first build after a break.
 
 ## Why this is a separate monitor from token burn
 

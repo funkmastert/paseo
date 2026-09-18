@@ -187,6 +187,18 @@ const MutableResourceMonitorConfigSchema = z
     systemSwapUsedRatio: z.number().positive().optional(),
     orphanBuildDaemonBytes: z.number().positive().optional(),
     notifyAgent: z.boolean().optional(),
+    reaper: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        idleMinutes: z.number().positive().optional(),
+        minIdleSweeps: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+        graceMs: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
