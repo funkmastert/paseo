@@ -336,6 +336,119 @@ describe("createRoleRouter", () => {
     });
   });
 
+  // A restriction the agent has to discover by hitting it costs a whole turn
+  // and then invites it to route around the denial. These cover the other
+  // half of enforcement: saying so up front, in the agent's own prompt.
+  describe("restriction notice in the initial prompt", () => {
+    function policyWithWorkerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
+      return {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) => (role.id === "worker" ? { ...role, toolProfile: profile } : role)),
+      };
+    }
+
+    function declaredWorker(overrides: Record<string, unknown> = {}) {
+      return request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" }, ...overrides });
+    }
+
+    function promptOf(result: ReturnType<RoleCreateRouter>): string | undefined {
+      return (result as { initialPrompt?: string } | undefined)?.initialPrompt;
+    }
+
+    it("prepends the denial and the alternative, keeping the caller's task verbatim", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "read-only" })) }),
+      );
+
+      const result = router(declaredWorker({ initialPrompt: "Audit the auth flow." }), fakeContext);
+
+      const prompt = promptOf(result) as string;
+      expect(prompt).toContain("Edit");
+      expect(prompt).toContain("Bash");
+      expect(prompt).toMatch(/report the change/i);
+      expect(prompt.endsWith("\n\nAudit the auth flow.")).toBe(true);
+    });
+
+    it("points an orchestrator at create_agent as the way to get work done", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
+      );
+
+      const prompt = promptOf(router(declaredWorker({ initialPrompt: "Ship the migration." }), fakeContext));
+
+      expect(prompt).toContain("mcp__paseo__create_agent");
+    });
+
+    it("adds nothing at all for an unrestricted role: byte-identical pass-through", () => {
+      const router = createRoleRouter(baseOptions());
+
+      expect(router(declaredWorker({ initialPrompt: "Ship the migration." }), fakeContext)).toBeUndefined();
+    });
+
+    it("does not invent a prompt for a create that had none", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "read-only" })) }),
+      );
+
+      const result = router(declaredWorker(), fakeContext);
+
+      expect(promptOf(result)).toBeUndefined();
+      expect((result?.config.providerOptions as { disallowedTools: string[] }).disallowedTools).toContain("Write");
+    });
+
+    it("survives the model-rewrite path, not just the tools-only path", () => {
+      const restricted = policyWithWorkerProfile({ kind: "read-only" });
+      const policy = {
+        ...restricted,
+        roles: restricted.roles.map((role) => (role.id === "worker" ? { ...role, models: ["codex/gpt-5.1"] } : role)),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ codex: ["gpt-5.1"] })),
+        }),
+      );
+
+      const result = router(declaredWorker({ initialPrompt: "Audit the auth flow." }), fakeContext);
+
+      expect(result?.config.model).toBe("gpt-5.1");
+      expect(promptOf(result)).toContain("[tool profile: read-only]");
+    });
+
+    it("survives the explicit-model-override path, which also rewrites labels", () => {
+      const restricted = policyWithWorkerProfile({ kind: "read-only" });
+      const policy = {
+        ...restricted,
+        roles: restricted.roles.map((role) => (role.id === "worker" ? { ...role, models: ["claude-haiku"] } : role)),
+      };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-haiku"] })),
+          poolCache: fakePoolCache({ workers: [{ providerId: "worker-a", priority: 1 }], leader: null }),
+        }),
+      );
+
+      const result = router(
+        declaredWorker({ initialPrompt: "Audit the auth flow.", config: { provider: "claude", model: "claude-opus-5", cwd: "/tmp" } }),
+        fakeContext,
+      );
+
+      expect(result?.config.model).toBe("claude-haiku");
+      expect(result?.labels?.[MODEL_OVERRIDDEN_LABEL]).toBe("claude/claude-opus-5");
+      expect(promptOf(result)).toContain("[tool profile: read-only]");
+    });
+
+    it("says nothing when a guessed role's profile was withheld — no restriction, no notice", () => {
+      const router = createRoleRouter(
+        baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "read-only" })) }),
+      );
+
+      // No role label: tier-3/4 classification, whose tool profile is withheld.
+      expect(router(request({ callerAgentId: "c1", initialPrompt: "Implement the parser." }), fakeContext)).toBeUndefined();
+    });
+  });
+
   describe("tool profile gating by resolution tier", () => {
     function policyWithWorkerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
       return {

@@ -214,6 +214,45 @@ Restrictions only accumulate. Whatever the caller already denied stays denied
 — a plugin that can silently widen a caller's own sandbox would be a worse bug
 than an unenforced role.
 
+#### A restriction is never silent
+
+Enforcement alone produces the worst version of this feature: an agent that
+finds out it has no `Edit` by reaching for `Edit`. That discovery burns a
+whole turn, and what it usually does next is look for a way around the
+denial. In the production incident that motivated this rework, one agent
+spent **1.1M tokens** working out it had been disarmed and another **387k**
+spawning helpers that turned out to be disarmed too.
+
+So when a restrictive profile is applied, the hook also prepends a short
+block to the agent's own `initialPrompt` (one of the mutable picked fields on
+`agent.create`) saying what is gone, that it is gone for good rather than one
+permission prompt away, and what to do instead — a `read-only` agent reports
+the change it would make, an `orchestrator` delegates through
+`mcp__paseo__create_agent`. The caller's task is never replaced, only pushed
+down two lines.
+
+Cost and its limits, stated plainly:
+
+- **`unrestricted` adds nothing.** No notice, no `providerOptions`, no label
+  — the request passes through byte-identical. The common path costs zero
+  extra tokens.
+- **A restricted spawn pays ~80 tokens once.** `read-only`'s notice is 302
+  characters, `orchestrator`'s 315 (roughly 76-88 tokens depending on how you
+  count). That is the price of not paying for the discovery.
+- **The notice names the native Claude tools exactly and the Paseo MCP
+  families by group.** Spelling out all nineteen names `read-only` denies —
+  most of them `mcp__paseo__`-prefixed and 6-8 tokens each — would cost about
+  150 tokens on every restricted spawn, which is the same waste in a
+  different pocket. The native tools are the ones an agent reaches for by
+  reflex; an agent that tries an MCP family member anyway gets one cheap tool
+  error rather than a lost turn. A `custom` profile's notice *is* generated
+  from its deny list (the operator chose those names), capped at 12 before it
+  summarizes.
+- **A create with no `initialPrompt` gets no notice.** Setting one would hand
+  the daemon a first turn to run, turning an interactive agent a human is
+  about to type into one that starts talking to itself. Interactive agents
+  learn their limits from the operator who is, by definition, present.
+
 #### A denial only holds if every tool with the same reach is denied
 
 `Bash` is not the only way to get a shell. Paseo's own MCP tools can open a

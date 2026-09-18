@@ -1,6 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import { AGENT_TYPE_LABEL, MODEL_OVERRIDDEN_LABEL, type RoleModelPolicy, type RoleRecord } from "../shared/role-policy-schema";
-import { applyToolProfile, DEFAULT_TOOL_PROFILE, type ToolProfile } from "../shared/tool-profiles";
+import { initialPromptWithNotice } from "../shared/restriction-notice";
+import { applyToolProfile, DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -111,9 +112,24 @@ type AgentCreateConfig = PluginBeforeRequests["agent.create"]["config"];
 type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 
 /**
- * The `providerOptions` a request should carry once a tool profile is merged
- * in, or undefined when the profile restricts nothing (so the request can
- * stay byte-identical). Takes the profile directly rather than a role, since
+ * Everything a tool profile writes into a create request. Both fields are
+ * undefined when the profile restricts nothing, so the request can pass
+ * through byte-identical.
+ *
+ * `providerOptions` is the enforcement half — `disallowedTools` plus the
+ * `--settings` deny tier. `initialPrompt` is the disclosure half: a
+ * restriction the agent only discovers by hitting it costs a whole turn and
+ * then invites it to route around the denial, which is the most expensive
+ * failure mode this feature has (see shared/restriction-notice.ts).
+ */
+interface ToolEnforcement {
+  providerOptions: ProviderOptionsValue | undefined;
+  initialPrompt: string | undefined;
+}
+
+/**
+ * What a tool profile should write into a request, or nothing at all when it
+ * restricts nothing. Takes the profile directly rather than a role, since
  * the caller may need to substitute `DEFAULT_TOOL_PROFILE` for a role whose
  * own profile isn't backed by enough evidence to enforce — see
  * `toolProfileIsEvidenceBased` below.
@@ -125,8 +141,16 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
 function enforceToolProfile(
   request: PluginBeforeRequests["agent.create"],
   toolProfile: ToolProfile,
-): ProviderOptionsValue | undefined {
-  return applyToolProfile(request.config.providerOptions, toolProfile) as ProviderOptionsValue | undefined;
+): ToolEnforcement {
+  const denied = profileDeniedTools(toolProfile);
+  return {
+    providerOptions: applyToolProfile(request.config.providerOptions, toolProfile) as ProviderOptionsValue | undefined,
+    initialPrompt: initialPromptWithNotice(
+      (request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt,
+      toolProfile.kind,
+      denied,
+    ),
+  };
 }
 
 /**
@@ -157,15 +181,27 @@ function toolProfileIsEvidenceBased(tier: ResolveRoleTier | undefined, policy: R
   return policy.enforceToolsOnClassifiedRoles === true;
 }
 
+/** True when enforcement has nothing to write and the request can pass through byte-identical. */
+function isNoOp(enforcement: ToolEnforcement): boolean {
+  return enforcement.providerOptions === undefined && enforcement.initialPrompt === undefined;
+}
+
 /** Applies tool enforcement alone, on the paths that skip the model rewrite. */
 function withToolProfile(
   request: PluginBeforeRequests["agent.create"],
-  providerOptions: ProviderOptionsValue | undefined,
+  enforcement: ToolEnforcement,
 ): PluginBeforeRequests["agent.create"] | void {
-  if (!providerOptions) {
+  if (isNoOp(enforcement)) {
     return;
   }
-  return { ...request, config: { ...request.config, providerOptions } };
+  const next: PluginBeforeRequests["agent.create"] = { ...request };
+  if (enforcement.providerOptions) {
+    next.config = { ...request.config, providerOptions: enforcement.providerOptions };
+  }
+  if (enforcement.initialPrompt !== undefined) {
+    (next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt = enforcement.initialPrompt;
+  }
+  return next;
 }
 
 /**
@@ -174,6 +210,14 @@ function withToolProfile(
  * the live catalog + pool health, and rewrites `config.model` (and
  * `config.provider` only when the selection crosses provider families).
  * and merges the role's tool profile into `config.providerOptions`.
+ *
+ * A restrictive profile also prepends a short notice to `initialPrompt`
+ * naming what was denied and what to do instead. `initialPrompt` is one of
+ * the mutable picked fields on this hook (see the fork's
+ * `plugins/lifecycle/index.ts`), and telling an agent up front is far cheaper
+ * than letting it discover the denial by hitting it — see
+ * shared/restriction-notice.ts. An unrestricted profile writes neither field.
+ *
  * Must be registered BEFORE the account-pool's own router — this hook never
  * changes *which account*; the account router (unmodified) still decides that.
  *
@@ -296,7 +340,7 @@ function routeRoleForCreateUnguarded(
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
   // to pure delegation.
-  const enforcedProviderOptions = enforceToolProfile(request, toolProfile);
+  const enforcement = enforceToolProfile(request, toolProfile);
 
   const catalog = options.catalogCache.get();
   const { pool } = options.poolCache.get();
@@ -326,7 +370,7 @@ function routeRoleForCreateUnguarded(
       modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
     });
     if (evaluation.eligible) {
-      return withToolProfile(request, enforcedProviderOptions);
+      return withToolProfile(request, enforcement);
     }
     explicitOverrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
   }
@@ -336,7 +380,7 @@ function routeRoleForCreateUnguarded(
   });
 
   if (outcome.outcome === "unconfigured") {
-    return withToolProfile(request, enforcedProviderOptions);
+    return withToolProfile(request, enforcement);
   }
 
   const crossesFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
@@ -365,7 +409,7 @@ function routeRoleForCreateUnguarded(
       // Recovered, not blocked: skip the model rewrite but keep enforcing the
       // role's tools — a vanished model target is no reason to hand an
       // orchestrator a shell.
-      return withToolProfile(request, enforcedProviderOptions);
+      return withToolProfile(request, enforcement);
     }
   }
 
@@ -387,12 +431,17 @@ function routeRoleForCreateUnguarded(
   if (crossesFamily && outcome.provider !== null) {
     nextConfig.provider = outcome.provider as AgentCreateConfig["provider"];
   }
-  if (enforcedProviderOptions) {
-    nextConfig.providerOptions = enforcedProviderOptions;
+  if (enforcement.providerOptions) {
+    nextConfig.providerOptions = enforcement.providerOptions;
+  }
+
+  const routed: PluginBeforeRequests["agent.create"] = { ...request, config: nextConfig };
+  if (enforcement.initialPrompt !== undefined) {
+    (routed as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).initialPrompt = enforcement.initialPrompt;
   }
 
   if (!explicitOverrideReason) {
-    return { ...request, config: nextConfig };
+    return routed;
   }
 
   // The caller's explicit request didn't win — either it was never approved
@@ -412,8 +461,7 @@ function routeRoleForCreateUnguarded(
     });
   }
   return {
-    ...request,
-    config: nextConfig,
+    ...routed,
     labels: { ...extended.labels, [MODEL_OVERRIDDEN_LABEL]: requestedRef as string },
   };
 }
