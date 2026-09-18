@@ -88,21 +88,29 @@ async function pathExists(filePath: string): Promise<boolean> {
 
 // Every real Claude account slot symlinks projects/ to ~/.claude/projects, so any account can
 // resume any other's transcript. Model that by copying the session's history from whichever fake
-// provider wrote it into the importing provider's folder.
+// provider wrote it into the adopting provider's folder, on both import and resume.
 async function copyFakeSessionHistory(provider: string, sessionId: string): Promise<void> {
   const target = fakeHistoryPath(provider, sessionId);
   if (await pathExists(target)) {
     return;
   }
+  const source = await findFakeSessionHistory(sessionId);
+  if (!source) {
+    return;
+  }
+  await mkdir(path.dirname(target), { recursive: true });
+  await copyFile(source, target);
+}
+
+async function findFakeSessionHistory(sessionId: string): Promise<string | null> {
   const providers = await readdir(FAKE_HISTORY_ROOT).catch(() => [] as string[]);
-  for (const source of providers) {
-    const candidate = fakeHistoryPath(source, sessionId);
+  for (const provider of providers) {
+    const candidate = fakeHistoryPath(provider, sessionId);
     if (await pathExists(candidate)) {
-      await mkdir(path.dirname(target), { recursive: true });
-      await copyFile(candidate, target);
-      return;
+      return candidate;
     }
   }
+  return null;
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -1250,6 +1258,7 @@ class FakeAgentClient implements AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     _launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
+    await copyFakeSessionHistory(this.provider, handle.sessionId);
     const cfg: AgentSessionConfig = {
       provider: this.provider,
       cwd: overrides?.cwd ?? process.cwd(),
@@ -1268,6 +1277,10 @@ class FakeAgentClient implements AgentClient {
       closeSession: this.options.closeSession,
       onStartTurn: this.options.onStartTurn,
     });
+  }
+
+  async canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean> {
+    return (await findFakeSessionHistory(handle.sessionId)) !== null;
   }
 
   async importSession(

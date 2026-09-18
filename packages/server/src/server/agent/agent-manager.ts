@@ -107,6 +107,12 @@ import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
 import type { TokenBurnMonitorState } from "./token-burn-detector.js";
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
+import {
+  AgentProviderMoveError,
+  checkAgentProviderMove,
+  resolveProviderSessionFamily,
+} from "./provider-move.js";
+import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -695,6 +701,64 @@ interface AgentMetadataPatch {
 }
 
 const SYSTEM_ERROR_PREFIX = "[System Error]";
+
+export interface ReloadAgentSessionOptions {
+  rehydrateFromDisk?: boolean;
+  /**
+   * Re-open the session under this provider instead of the one its handle names — a provider
+   * move. The handle, the session config, and therefore the stored record all follow.
+   */
+  moveToProvider?: AgentProvider;
+}
+
+interface CarriedAgentState {
+  handle: AgentPersistenceHandle | null;
+  provider: AgentProvider;
+  historyPrimed: boolean;
+  lastUsage: AgentUsage | undefined;
+  lastError: string | undefined;
+  attention: AttentionState;
+}
+
+/**
+ * What survives closing and re-opening an agent's session. A provider move differs in two places:
+ * the handle is re-addressed to the target account, and the failure is left behind with the
+ * account that produced it — carried onto the new account it would read as that account's own cap
+ * to the failover monitor.
+ */
+function carryAgentStateAcrossRefresh(
+  existing: ActiveManagedAgent,
+  options: ReloadAgentSessionOptions | undefined,
+): CarriedAgentState {
+  const moveToProvider = options?.moveToProvider ?? null;
+  const handle = retargetPersistenceHandle(existing.persistence, moveToProvider);
+  return {
+    handle,
+    provider: handle?.provider ?? moveToProvider ?? existing.provider,
+    historyPrimed: existing.historyPrimed,
+    lastUsage: existing.lastUsage,
+    lastError: moveToProvider ? undefined : existing.lastError,
+    attention: existing.attention,
+  };
+}
+
+/** The same session, addressed to another account. Metadata carries the provider on reload too. */
+function retargetPersistenceHandle(
+  handle: AgentPersistenceHandle | null | undefined,
+  targetProvider: AgentProvider | null,
+): AgentPersistenceHandle | null {
+  if (!handle) {
+    return null;
+  }
+  if (!targetProvider) {
+    return handle;
+  }
+  return {
+    ...handle,
+    provider: targetProvider,
+    metadata: { ...handle.metadata, provider: targetProvider },
+  };
+}
 
 function attachPersistenceCwd(
   handle: AgentPersistenceHandle | null,
@@ -1887,7 +1951,7 @@ export class AgentManager {
   reloadAgentSession(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
@@ -1899,7 +1963,7 @@ export class AgentManager {
   private async reloadAgentSessionInternal(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
     let existing = this.requireSessionAgent(agentId);
@@ -1908,12 +1972,8 @@ export class AgentManager {
       existing = this.requireSessionAgent(agentId);
     }
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
-    const preservedHistoryPrimed = existing.historyPrimed;
-    const preservedLastUsage = existing.lastUsage;
-    const preservedLastError = existing.lastError;
-    const preservedAttention = existing.attention;
-    const handle = existing.persistence;
-    const provider = handle?.provider ?? existing.provider;
+    const carried = carryAgentStateAcrossRefresh(existing, options);
+    const { handle, provider } = carried;
     const client = this.requireClient(provider);
     const refreshConfig = {
       ...existing.config,
@@ -1979,10 +2039,13 @@ export class AgentManager {
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
         lastUserMessageAt: existing.lastUserMessageAt,
-        historyPrimed: rehydrateFromDisk ? false : preservedHistoryPrimed,
-        lastUsage: preservedLastUsage,
-        lastError: preservedLastError,
-        attention: preservedAttention,
+        historyPrimed: rehydrateFromDisk ? false : carried.historyPrimed,
+        lastUsage: carried.lastUsage,
+        ...(carried.lastError === undefined ? {} : { lastError: carried.lastError }),
+        attention: carried.attention,
+        // The record's provider is what a later load resumes with, and it reads the handle
+        // first (persistence-hooks.ts). A move has to land on both, so it is stated here.
+        ...(handle ? { persistence: handle } : {}),
       });
     } catch (error) {
       if (closedExisting) {
@@ -2005,6 +2068,96 @@ export class AgentManager {
         }
       }
     }
+  }
+
+  /**
+   * Move a live agent onto another provider in place: same id, same conversation, same labels and
+   * parent/child links. The provider picks the account (`CLAUDE_CONFIG_DIR` and friends), so the
+   * session file lives under a different account directory and the move is a close-and-resume of
+   * the same handle against the target's client — a persisted thread has one writer, and the
+   * record's provider alone decides nothing. Throws `AgentProviderMoveError` on every refusal.
+   * See docs/account-failover.md.
+   */
+  async moveAgentToProvider(
+    agentId: string,
+    targetProviderId: AgentProvider,
+  ): Promise<ManagedAgent> {
+    const existing = this.requireSessionAgent(agentId);
+    const refusal = checkAgentProviderMove({
+      agentId,
+      sourceProviderId: existing.provider,
+      targetProviderId,
+      registeredProviderIds: this.getRegisteredProviderIds(),
+      targetEnabled: this.providerEnabled.get(targetProviderId) !== false,
+      sourceFamily: this.resolveProviderSessionFamily(existing.provider),
+      targetFamily: this.resolveProviderSessionFamily(targetProviderId),
+      sessionId: existing.persistence?.sessionId ?? null,
+      lifecycle: existing.lifecycle,
+      hasInFlightRun: this.hasInFlightRun(agentId),
+    });
+    if (refusal) {
+      throw refusal;
+    }
+    const handle = retargetPersistenceHandle(existing.persistence, targetProviderId);
+    if (!handle) {
+      throw new Error(`Agent ${agentId} lost its persistence handle while moving`);
+    }
+    await this.assertProviderCanAdoptSession(agentId, targetProviderId, handle);
+    return this.trackAgentRegistrationOperation(
+      this.runLifecycleMutation(agentId, () =>
+        this.reloadAgentSessionInternal(agentId, undefined, { moveToProvider: targetProviderId }),
+      ),
+    );
+  }
+
+  private async assertProviderCanAdoptSession(
+    agentId: string,
+    targetProviderId: AgentProvider,
+    handle: AgentPersistenceHandle,
+  ): Promise<void> {
+    let client: AgentClient;
+    try {
+      client = await this.requireAvailableClient({ provider: targetProviderId });
+    } catch (error) {
+      throw new AgentProviderMoveError(
+        "provider_unavailable",
+        agentId,
+        targetProviderId,
+        getErrorMessage(error),
+      );
+    }
+
+    const claimed = (
+      await this.requireRegistry().listByProviderSession(targetProviderId, handle.sessionId)
+    ).find((record) => record.id !== agentId && !record.archivedAt);
+    if (claimed) {
+      throw new AgentProviderMoveError(
+        "session_conflict",
+        agentId,
+        targetProviderId,
+        `Provider '${targetProviderId}' already holds agent ${claimed.id} for session ` +
+          `${handle.sessionId}. Archive or move that agent first.`,
+      );
+    }
+
+    // A client that cannot tell says nothing; only an explicit "no" refuses.
+    if ((await client.canResumeHandle?.(handle)) === false) {
+      throw new AgentProviderMoveError(
+        "session_unreachable",
+        agentId,
+        targetProviderId,
+        `Provider '${targetProviderId}' cannot read session ${handle.sessionId}. Its account ` +
+          "directory does not share a transcript store with the account the agent is on.",
+      );
+    }
+  }
+
+  /** The built-in provider whose client owns the transcript format — derived accounts share it. */
+  private resolveProviderSessionFamily(providerId: AgentProvider): AgentProvider {
+    return resolveProviderSessionFamily(
+      providerId,
+      (id) => this.providerDefinitions.get(id)?.derivedFromProviderId,
+    );
   }
 
   private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {

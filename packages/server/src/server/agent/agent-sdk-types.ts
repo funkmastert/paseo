@@ -851,6 +851,12 @@ export interface AgentClient {
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
   /**
+   * Whether this client can re-open `handle`'s conversation — the transcript has to be readable
+   * from this client's own account directory. Only providers that can answer implement it; an
+   * absent method means "cannot tell", not "no". Used before a provider move (docs/account-failover.md).
+   */
+  canResumeHandle?(handle: AgentPersistenceHandle): Promise<boolean>;
+  /**
    * Check availability in the catalogue target when supplied (CLI binary is installed).
    * Returns true if available, false otherwise.
    */

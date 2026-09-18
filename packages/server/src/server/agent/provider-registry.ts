@@ -488,6 +488,7 @@ function wrapClientProvider(
   const listImportableSessions = inner.listImportableSessions?.bind(inner);
   const importSession = inner.importSession?.bind(inner);
   const listFeatures = inner.listFeatures?.bind(inner);
+  const canResumeHandle = inner.canResumeHandle?.bind(inner);
 
   return {
     provider,
@@ -538,6 +539,9 @@ function wrapClientProvider(
             env,
             signal,
           })
+      : undefined,
+    canResumeHandle: canResumeHandle
+      ? async (handle) => await canResumeHandle({ ...handle, provider: inner.provider })
       : undefined,
     resolveCreateConfig: inner.resolveCreateConfig?.bind(inner),
     resolveConfiguredModel: inner.resolveConfiguredModel?.bind(inner),

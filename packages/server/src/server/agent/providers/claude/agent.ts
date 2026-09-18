@@ -79,7 +79,11 @@ import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
 import { realClaudeRewindSdk, revertClaudeConversation, revertClaudeFiles } from "./rewind.js";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
-import { claudeProjectDirSync } from "./project-dir.js";
+import {
+  claudeProjectDirSync,
+  claudeSessionTranscriptPath,
+  findClaudeSessionTranscript,
+} from "./project-dir.js";
 import { THINKING_APPLIES_NEXT_TURN_NOTICE } from "../../provider-notices.js";
 import {
   isProviderImageMarkdown,
@@ -1675,6 +1679,25 @@ export class ClaudeAgentClient implements AgentClient {
       context,
       resumeSession: this.resumeSession.bind(this),
     });
+  }
+
+  /**
+   * A session is reachable from this account only if its transcript is visible under this
+   * client's `CLAUDE_CONFIG_DIR`. Accounts see each other's threads only while their `projects/`
+   * directories point at the same place, which is what makes a provider move possible at all.
+   */
+  async canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean> {
+    const cwd = coerceSessionMetadata(handle.metadata).cwd;
+    if (!cwd) {
+      return false;
+    }
+    const configDir = resolveClaudeConfigDir(
+      resolveProviderClaudeConfigDir(
+        this.runtimeSettings,
+        createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
+      ) ?? this.configDir,
+    );
+    return findClaudeSessionTranscript({ cwd, sessionId: handle.sessionId, configDir }) !== null;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -5231,25 +5254,10 @@ class ClaudeAgentSession implements AgentSession {
     const cwd = this.config.cwd;
     if (!cwd) return null;
     const configDir = resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR);
-    const candidates = [cwd];
-    try {
-      const realCwd = fs.realpathSync(cwd);
-      if (realCwd !== cwd) {
-        candidates.push(realCwd);
-      }
-    } catch {
-      // Fall back to the configured cwd when the path has already disappeared.
-    }
-    for (const candidate of candidates) {
-      const historyPath = path.join(
-        claudeProjectDirSync(candidate, { configDir }),
-        `${sessionId}.jsonl`,
-      );
-      if (fs.existsSync(historyPath)) {
-        return historyPath;
-      }
-    }
-    return path.join(claudeProjectDirSync(cwd, { configDir }), `${sessionId}.jsonl`);
+    return (
+      findClaudeSessionTranscript({ cwd, sessionId, configDir }) ??
+      claudeSessionTranscriptPath(cwd, sessionId, configDir)
+    );
   }
 
   private convertHistoryEntry(entry: ClaudeHistoryEntry): AgentTimelineItem[] {
