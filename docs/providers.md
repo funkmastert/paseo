@@ -465,9 +465,12 @@ interface AgentClient {
     input: ImportProviderSessionInput,
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
+  canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean>;
   getDiagnostic?(): Promise<{ diagnostic: string }>;
 }
 ```
+
+Implement `canResumeHandle` when a provider has more than one account and can tell whether a given account can read a given session — it is what lets Paseo move an agent between two accounts of your provider and refuse when the move would silently open an empty conversation. Leaving it out means "cannot tell", and the move proceeds. See [account-failover.md](account-failover.md#moving-an-agent-to-another-account).
 
 **`AgentSession`** -- a running agent conversation:
 
