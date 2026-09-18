@@ -226,6 +226,15 @@ const AgentMetadataGenerationSchema = z
   })
   .strict();
 
+// Each ladder stage of the spend governor switches independently, with its own multiple of the
+// task's budget. See agent/spend-governor.ts and docs/token-burn.md.
+const SpendGovernorStageSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    atFraction: z.number().positive().optional(),
+  })
+  .strict();
+
 const AgentTokenBurnMonitorSchema = z
   .object({
     enabled: z.boolean().optional(),
@@ -234,6 +243,23 @@ const AgentTokenBurnMonitorSchema = z
     totalTokens: z.number().positive().optional(),
     scope: z.enum(["all", "topLevelOnly"]).optional(),
     breachBatchThreshold: z.number().int().positive().optional(),
+    // Opt-in enforcement ladder. Off unless this says otherwise, and `dryRun` reports the whole
+    // ladder without performing any of it.
+    governor: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        // Nullable on purpose: null (the default) means an agent whose task declared no
+        // `paseo.budget` label is not governed at all.
+        defaultBudgetTokens: z.number().positive().nullable().optional(),
+        downgradeToModel: z.string().min(1).nullable().optional(),
+        notify: SpendGovernorStageSchema.optional(),
+        downgrade: SpendGovernorStageSchema.optional(),
+        stopFanOut: SpendGovernorStageSchema.optional(),
+        pause: SpendGovernorStageSchema.optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -1999,6 +1999,19 @@ export async function createPaseoDaemon(
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
               serverId,
+              // Same steer path AgentResourceMonitor uses below, for the same reason: it is
+              // the only way to put a system-authored message into a live turn.
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
               readDaemonConfig: () => ({
                 tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
               }),

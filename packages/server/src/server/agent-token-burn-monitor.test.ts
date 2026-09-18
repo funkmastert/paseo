@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { TokenBurnMonitorState } from "./agent/token-burn-detector.js";
+import type { SpendGovernorState } from "./agent/spend-governor.js";
 import { AgentTokenBurnMonitor, type TokenBurnMonitorConfig } from "./agent-token-burn-monitor.js";
 import type { PushPayload } from "./push/push-service.js";
 
@@ -12,6 +13,7 @@ function createLogger() {
 function createFakeAgentManager(agents: TokenBurnMonitorAgentSummary[]) {
   const states = new Map<string, TokenBurnMonitorState>();
   const alerts = new Map<string, unknown>();
+  const governorStates = new Map<string, SpendGovernorState>();
   return {
     listAgentsForTokenBurnMonitor: vi.fn(() => agents),
     getTokenBurnMonitorState: vi.fn((id: string) => states.get(id)),
@@ -24,8 +26,27 @@ function createFakeAgentManager(agents: TokenBurnMonitorAgentSummary[]) {
     clearTokenBurnAlert: vi.fn((id: string) => {
       alerts.delete(id);
     }),
+    getSpendGovernorState: vi.fn((id: string) => governorStates.get(id)),
+    setSpendGovernorState: vi.fn((id: string, state: SpendGovernorState | undefined) => {
+      if (state === undefined) governorStates.delete(id);
+      else governorStates.set(id, state);
+    }),
+    setAgentModel: vi.fn(async () => {}),
+    cancelAgentRun: vi.fn(async () => ({ status: "settled" as const })),
     __alerts: alerts,
-  } as unknown as AgentManager & { __alerts: Map<string, unknown> };
+    __governorStates: governorStates,
+  } as unknown as AgentManager & {
+    __alerts: Map<string, unknown>;
+    __governorStates: Map<string, SpendGovernorState>;
+  };
+}
+
+function createFakeSteer() {
+  const calls: Array<{ agentId: string; body: string }> = [];
+  return {
+    fn: vi.fn(async (agentId: string, body: string) => void calls.push({ agentId, body })),
+    calls,
+  };
 }
 
 function createFakeAgentStorage(titles: Record<string, string> = {}) {
@@ -53,6 +74,8 @@ function summary(overrides: Partial<TokenBurnMonitorAgentSummary>): TokenBurnMon
     isRunning: true,
     tokenRate: undefined,
     totalTokens: undefined,
+    labels: {},
+    model: "claude-opus-5",
     ...overrides,
   };
 }
@@ -71,6 +94,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: { enabled: false, ...HIGH_RATE_CONFIG } }),
       logger: createLogger(),
     });
@@ -89,6 +113,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -107,6 +132,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage({ "agent-1": "Refactor the parser" }),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -134,6 +160,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -155,6 +182,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: { totalTokens: 5_000 } }),
       logger: createLogger(),
     });
@@ -180,6 +208,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -199,6 +228,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({
         tokenBurnMonitor: { ...HIGH_RATE_CONFIG, scope: "topLevelOnly" },
       }),
@@ -220,6 +250,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -240,6 +271,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({
         tokenBurnMonitor: { ...HIGH_RATE_CONFIG, breachBatchThreshold: 3 },
       }),
@@ -263,6 +295,7 @@ describe("AgentTokenBurnMonitor", () => {
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
       serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
       readDaemonConfig: () => ({ tokenBurnMonitor: HIGH_RATE_CONFIG }),
       logger: createLogger(),
     });
@@ -277,5 +310,194 @@ describe("AgentTokenBurnMonitor", () => {
     await monitor.tick();
 
     expect(agentManager.clearTokenBurnAlert).toHaveBeenCalledWith("agent-1");
+  });
+});
+
+const GOVERNED: TokenBurnMonitorConfig = {
+  // High enough that the rate/total legs stay silent: these tests are about the governor.
+  ratePerMinute: 10_000_000,
+  totalTokens: 10_000_000_000,
+  governor: {
+    enabled: true,
+    downgradeToModel: "claude-sonnet-5",
+    downgrade: { enabled: true },
+    stopFanOut: { enabled: true },
+    pause: { enabled: true },
+  },
+};
+
+function createGovernedMonitor(input: {
+  agents: TokenBurnMonitorAgentSummary[];
+  config?: TokenBurnMonitorConfig;
+  titles?: Record<string, string>;
+}) {
+  const agentManager = createFakeAgentManager(input.agents);
+  const push = createFakePushSender();
+  const steer = createFakeSteer();
+  const monitor = new AgentTokenBurnMonitor({
+    agentManager,
+    agentStorage: createFakeAgentStorage(input.titles ?? {}),
+    pushNotificationSender: push.sender,
+    serverId: "server-1",
+    sendSystemMessageToAgent: steer.fn,
+    readDaemonConfig: () => ({ tokenBurnMonitor: input.config ?? GOVERNED }),
+    logger: createLogger(),
+  });
+  return { agentManager, push, steer, monitor };
+}
+
+function budgeted(overrides: Partial<TokenBurnMonitorAgentSummary>) {
+  return summary({ labels: { "paseo.budget": "1M" }, ...overrides });
+}
+
+describe("AgentTokenBurnMonitor spend governor", () => {
+  test("a healthy busy agent inside its budget is never throttled", async () => {
+    // The agent this feature must never touch: spending fast (twice the measured healthy peak
+    // rate) and 70% of the way through a budget its caller sized for the task. No model
+    // change, no cancellation, no fan-out block, and nothing steered into its conversation.
+    const { agentManager, push, steer } = await (async () => {
+      const harness = createGovernedMonitor({
+        agents: [budgeted({ id: "agent-1", tokenRate: 400_000, totalTokens: 700_000 })],
+      });
+      await harness.monitor.tick();
+      await harness.monitor.tick();
+      return harness;
+    })();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(steer.calls).toEqual([]);
+    expect(push.sent).toHaveLength(0);
+    expect(agentManager.__governorStates.get("agent-1")?.fanOutBlocked).toBe(false);
+  });
+
+  test("the governor is inert until it is turned on", async () => {
+    const { agentManager, push } = await (async () => {
+      const harness = createGovernedMonitor({
+        agents: [budgeted({ id: "agent-1", totalTokens: 9_000_000 })],
+        config: { ...GOVERNED, governor: undefined },
+      });
+      await harness.monitor.tick();
+      return harness;
+    })();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("crossing the notify threshold warns the human and tells the agent, once", async () => {
+    const { push, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 800_000 })],
+      titles: { "agent-1": "Refactor the parser" },
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.data?.reason).toBe("token_burn_governor");
+    expect(push.sent[0]?.data?.stage).toBe("notify");
+    expect(push.sent[0]?.body).toContain("Refactor the parser");
+    expect(steer.calls).toHaveLength(1);
+    expect(steer.calls[0]?.agentId).toBe("agent-1");
+    // The agent is told the number, the budget and what to do — not just that something is up.
+    expect(steer.calls[0]?.body).toContain("800K of this task's 1.00M weighted-token budget");
+    expect(steer.calls[0]?.body).toContain("wrapping up");
+  });
+
+  test("downgrade moves the model and says so, in that order", async () => {
+    const { agentManager, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 1_100_000 })],
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).toHaveBeenCalledWith("agent-1", "claude-sonnet-5");
+    const downgradeNotice = steer.calls.find((call) =>
+      call.body.includes("model has been changed"),
+    );
+    expect(downgradeNotice?.body).toContain("claude-sonnet-5");
+    // Named as a budget decision, not a fault, so the agent doesn't go looking for a bug.
+    expect(downgradeNotice?.body).toContain("you did nothing wrong");
+  });
+
+  test("stopFanOut records the block the create_agent gate reads, and warns the agent first", async () => {
+    const { agentManager, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 1_100_000 })],
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.__governorStates.get("agent-1")?.fanOutBlocked).toBe(true);
+    const cutOff = steer.calls.find((call) => call.body.includes("create_agent is now refused"));
+    expect(cutOff?.body).toContain("budget cap, not a broken tool");
+  });
+
+  test("pause tells the agent why before ending its turn", async () => {
+    const { agentManager, push, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000 })],
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1");
+    // Steering into an already-cancelled agent would start a fresh turn, so the notice has to
+    // go in while the turn is still alive. Last steer before the cancel is the pause notice.
+    const steerOrder = steer.calls.map((call) => call.body);
+    expect(steerOrder.at(-1)).toContain("This turn is being ended");
+    expect(steer.fn.mock.invocationCallOrder.at(-1)).toBeLessThan(
+      agentManager.cancelAgentRun.mock.invocationCallOrder[0]!,
+    );
+    expect(push.sent.map((p) => p.data?.stage)).toContain("pause");
+  });
+
+  test("a dry run reports the whole ladder and performs none of it", async () => {
+    const { agentManager, push, steer, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000 })],
+      config: { ...GOVERNED, governor: { ...GOVERNED.governor, dryRun: true } },
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    // Not even the agent is disturbed: a hypothetical action must not spend its tokens.
+    expect(steer.calls).toEqual([]);
+    expect(agentManager.__governorStates.get("agent-1")?.fanOutBlocked).toBe(false);
+    expect(push.sent.map((p) => p.data?.stage)).toEqual([
+      "notify",
+      "downgrade",
+      "stopFanOut",
+      "pause",
+    ]);
+    expect(push.sent.every((p) => p.data?.dryRun === true)).toBe(true);
+    expect(push.sent[3]?.title).toBe("Dry run: agent paused: over budget");
+  });
+
+  test("an agent with no declared budget is left alone", async () => {
+    const { agentManager, push, monitor } = createGovernedMonitor({
+      agents: [summary({ id: "agent-1", labels: {}, totalTokens: 50_000_000 })],
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("a failed action is logged and the rest of the ladder still runs", async () => {
+    const { agentManager, push, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000 })],
+    });
+    agentManager.setAgentModel = vi.fn(async () => {
+      throw new Error("provider is wedged");
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1");
+    // The failed stage is not reported as something that happened.
+    expect(push.sent.map((p) => p.data?.stage)).toEqual(["notify", "stopFanOut", "pause"]);
   });
 });
