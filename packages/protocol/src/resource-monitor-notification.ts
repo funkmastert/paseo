@@ -10,6 +10,10 @@ export type ResourceMonitorNotificationReason =
   | "resource_cpu"
   | "resource_system_memory"
   | "resource_orphan_daemons"
+  // Reported by the opt-in reaper leg (server/agent/build-daemon-reaper.ts). Additive: the
+  // union is untyped JSON on the wire, and a client that doesn't know this value falls back to
+  // opening the server — no shim, nothing to remove later.
+  | "resource_daemons_reaped"
   | "resource_multi";
 
 export interface ResourceMonitorNotificationData {
@@ -28,8 +32,25 @@ export interface ResourceMonitorNotificationPayload {
   data: ResourceMonitorNotificationData;
 }
 
+const GIBIBYTE = 1_073_741_824;
+
+// GB for anything daemon-sized, MB below that: a reaped Kotlin daemon holding 450 MB reads as
+// "450 MB", not "0.4 GB". Every other body in this file is already above a gigabyte, so the
+// switch only affects the new per-daemon entries.
 function formatBytes(bytes: number): string {
-  return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+  return bytes >= GIBIBYTE
+    ? `${(bytes / GIBIBYTE).toFixed(1)} GB`
+    : `${Math.round(bytes / 1_048_576)} MB`;
+}
+
+function formatIdleDuration(idleMs: number): string {
+  const totalMinutes = Math.round(idleMs / 60_000);
+  if (totalMinutes < 60) {
+    return `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
 function resolveAgentLabel(agentTitle: string | null | undefined): string {
@@ -159,6 +180,65 @@ export function buildResourceOrphanBuildDaemonsNotificationPayload(
     data: {
       serverId: input.serverId,
       reason: "resource_orphan_daemons",
+    },
+  };
+}
+
+/** One daemon the reaper killed (or, in dry-run, would have killed) this sweep. */
+export interface ReapedBuildDaemon {
+  pid: number;
+  /** Human-readable kind, e.g. "Gradle daemon" — from the reaper's allowlist, never free text. */
+  label: string;
+  rssBytes: number;
+  /** How long it had been continuously idle when the reaper picked it. */
+  idleMs: number;
+}
+
+interface BuildResourceBuildDaemonReapNotificationPayloadInput {
+  serverId: string;
+  dryRun: boolean;
+  daemons: readonly ReapedBuildDaemon[];
+}
+
+const MAX_LISTED_DAEMONS = 3;
+
+/**
+ * What the reaper did, or — in dry-run — what it would have done. Sent through the same push
+ * path as the alert it replaces, because an automatic kill that nobody can see is worse than the
+ * notification it's meant to retire: every reap names the pid, the kind, the memory reclaimed and
+ * how long the daemon sat idle. Push only; like the orphan-daemon alert there's no agent to steer
+ * a message into (that's the definition of an orphan).
+ */
+export function buildResourceBuildDaemonReapNotificationPayload(
+  input: BuildResourceBuildDaemonReapNotificationPayloadInput,
+): ResourceMonitorNotificationPayload {
+  if (input.daemons.length === 0) {
+    throw new Error("buildResourceBuildDaemonReapNotificationPayload requires at least one daemon");
+  }
+  const totalBytes = input.daemons.reduce((sum, daemon) => sum + daemon.rssBytes, 0);
+  const noun = input.daemons.length === 1 ? "daemon" : "daemons";
+  const listed = input.daemons
+    .slice(0, MAX_LISTED_DAEMONS)
+    .map(
+      (daemon) =>
+        `${daemon.label} pid ${daemon.pid} (${formatBytes(daemon.rssBytes)}, idle ${formatIdleDuration(daemon.idleMs)})`,
+    )
+    .join(", ");
+  const overflow = input.daemons.length - MAX_LISTED_DAEMONS;
+  const detail = overflow > 0 ? `${listed}, and ${overflow} more` : listed;
+  const verb = input.dryRun ? "Would reap" : "Reaped";
+  const suffix = input.dryRun ? " Dry run — nothing was killed." : "";
+
+  return {
+    title: input.dryRun
+      ? "Orphaned build daemons would be reaped"
+      : "Reclaimed memory from orphaned build daemons",
+    body: `${verb} ${input.daemons.length} orphaned build ${noun} holding ${formatBytes(totalBytes)}: ${detail}.${suffix}`,
+    data: {
+      serverId: input.serverId,
+      reason: "resource_daemons_reaped",
+      dryRun: input.dryRun,
+      pids: input.daemons.map((daemon) => daemon.pid),
     },
   };
 }

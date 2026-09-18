@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildBatchedResourceNotificationPayload,
   buildResourceAgentNotificationPayload,
+  buildResourceBuildDaemonReapNotificationPayload,
   buildResourceOrphanBuildDaemonsNotificationPayload,
   buildResourceSystemMemoryNotificationPayload,
 } from "./resource-monitor-notification.js";
@@ -108,5 +109,72 @@ describe("buildResourceOrphanBuildDaemonsNotificationPayload", () => {
     });
 
     expect(payload.body).toContain("1 orphaned build daemon is using");
+  });
+});
+
+describe("buildResourceBuildDaemonReapNotificationPayload", () => {
+  it("names every pid, kind, size and idle time it reclaimed", () => {
+    const payload = buildResourceBuildDaemonReapNotificationPayload({
+      serverId: "server-1",
+      dryRun: false,
+      daemons: [
+        { pid: 28056, label: "Gradle daemon", rssBytes: 1_503_238_553, idleMs: 47 * 60_000 },
+        { pid: 30112, label: "Kotlin compile daemon", rssBytes: 471_859_200, idleMs: 92 * 60_000 },
+      ],
+    });
+
+    expect(payload.title).toBe("Reclaimed memory from orphaned build daemons");
+    expect(payload.body).toBe(
+      "Reaped 2 orphaned build daemons holding 1.8 GB: Gradle daemon pid 28056 (1.4 GB, idle 47m), " +
+        "Kotlin compile daemon pid 30112 (450 MB, idle 1h 32m).",
+    );
+    expect(payload.data).toEqual({
+      serverId: "server-1",
+      reason: "resource_daemons_reaped",
+      dryRun: false,
+      pids: [28056, 30112],
+    });
+  });
+
+  it("says plainly that a dry run killed nothing", () => {
+    const payload = buildResourceBuildDaemonReapNotificationPayload({
+      serverId: "server-1",
+      dryRun: true,
+      daemons: [{ pid: 28056, label: "Gradle daemon", rssBytes: 2_791_728_742, idleMs: 3_600_000 }],
+    });
+
+    expect(payload.title).toBe("Orphaned build daemons would be reaped");
+    expect(payload.body).toBe(
+      "Would reap 1 orphaned build daemon holding 2.6 GB: Gradle daemon pid 28056 (2.6 GB, idle 1h). " +
+        "Dry run — nothing was killed.",
+    );
+    expect(payload.data.dryRun).toBe(true);
+  });
+
+  it("truncates a long list rather than shipping a wall of pids", () => {
+    const payload = buildResourceBuildDaemonReapNotificationPayload({
+      serverId: "server-1",
+      dryRun: false,
+      daemons: [1, 2, 3, 4, 5].map((pid) => ({
+        pid,
+        label: "Gradle daemon",
+        rssBytes: 1_073_741_824,
+        idleMs: 60_000,
+      })),
+    });
+
+    expect(payload.body).toContain("Reaped 5 orphaned build daemons holding 5.0 GB");
+    expect(payload.body).toContain("and 2 more.");
+    expect(payload.data.pids).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("refuses to build a payload for an empty sweep", () => {
+    expect(() =>
+      buildResourceBuildDaemonReapNotificationPayload({
+        serverId: "server-1",
+        dryRun: false,
+        daemons: [],
+      }),
+    ).toThrow();
   });
 });
