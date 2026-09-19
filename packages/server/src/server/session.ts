@@ -1628,6 +1628,7 @@ export class Session {
           devices: snapshot.devices,
           waiting: snapshot.waiting,
           blocked: snapshot.blocked,
+          enforcement: snapshot.enforcement,
           generatedAt: snapshot.generatedAt,
         },
       };

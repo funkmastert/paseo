@@ -1959,6 +1959,11 @@ export const es: TranslationResources = {
     waiting_other: "{{count}} agentes esperando un puesto",
     unleasedCount_one: "{{count}} dispositivo sin reserva",
     unleasedCount_other: "{{count}} dispositivos sin reserva",
+    unenforced: "Límite no aplicado a: {{providers}}",
+    enforcement: {
+      asks: "puede no rechazarse",
+      observes: "no puede rechazarse",
+    },
     expand: "Expandir estado de dispositivos",
     collapse: "Contraer estado de dispositivos",
   },

@@ -106,7 +106,13 @@ import { OmpUsagePoller, type OmpUsagePollScheduler } from "./usage-poller.js";
 import {
   buildOmpRpcUiPermissionResponse,
   mapOmpRpcUiPermissionRequest,
+  readOmpToolApprovalCommand,
 } from "./rpc-ui-permission-mapper.js";
+import {
+  evaluateDeviceLaunchApproval,
+  explainDeviceLaunchRefusal,
+} from "../../device-launch-approval.js";
+import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import { DEFAULT_OMP_THINKING_LEVEL, mapOmpModel } from "./map-omp-model.js";
 
 const OMP_PROVIDER = "omp";
@@ -131,6 +137,7 @@ const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
 export interface OmpAgentClientOptions {
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  deviceLaunchGate?: DeviceLaunchGate;
   providerParams?: unknown;
   runtime?: OmpRuntime;
   subagentCardScheduler?: OmpSubagentCardScheduler;
@@ -186,6 +193,10 @@ interface OmpAgentSessionOptions {
   noTurnScheduler?: OmpNoTurnScheduler;
   usagePollScheduler?: OmpUsagePollScheduler;
   paseoTools?: PaseoToolCatalog;
+  /** Which Paseo agent this session is. The device cap counts and steers per agent. */
+  agentId?: string;
+  /** The device cap's launch gate; OMP is gated at its bash tool approval. */
+  deviceLaunchGate?: DeviceLaunchGate;
   /**
    * When false (resumed sessions), replayed session events are dropped until
    * the first prompt or agent_start so history is not re-emitted as live
@@ -885,6 +896,8 @@ export class OmpAgentSession implements AgentSession {
     this.currentModeId = options.currentModeId ?? null;
     this.logger = options.logger;
     this.paseoTools = options.paseoTools;
+    this.agentId = options.agentId;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.live = options.live ?? true;
     this.providerIdleScheduler = options.providerIdleScheduler ?? createOmpProviderIdleScheduler();
     this.noTurnScheduler = options.noTurnScheduler ?? createOmpNoTurnScheduler();
@@ -933,6 +946,8 @@ export class OmpAgentSession implements AgentSession {
   private readonly config: AgentSessionConfig;
   private readonly logger: Logger;
   private readonly paseoTools?: PaseoToolCatalog;
+  private readonly agentId?: string;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
 
   get id(): string | null {
     return this.state.sessionId;
@@ -1553,6 +1568,56 @@ export class OmpAgentSession implements AgentSession {
     }
 
     this.pendingExtensionUiRequests.set(request.id, request);
+    // OMP's bash approval is the device cap's only say here, and it arrives before the command
+    // runs (docs/device-leases.md). Answered before the request is shown, so a device launch
+    // with no slot is declined rather than left waiting on Tyler.
+    if (this.tryRefuseDeviceLaunch(request)) {
+      return;
+    }
+    this.emit({
+      type: "permission_requested",
+      provider: this.provider,
+      request,
+      turnId: this.currentTurnIdForEvent(),
+    });
+  }
+
+  /**
+   * Denies an OMP bash approval the device cap refuses. Returns true when it did, so the
+   * request is never surfaced. Resolves the approval itself rather than waiting for an answer,
+   * because there is nobody to ask: the cap has already decided.
+   */
+  private tryRefuseDeviceLaunch(request: AgentPermissionRequest): boolean {
+    const command = readOmpToolApprovalCommand(request);
+    if (!this.deviceLaunchGate || !command) return false;
+    void (async () => {
+      const refusal = await evaluateDeviceLaunchApproval({
+        gate: this.deviceLaunchGate,
+        agentId: this.agentId,
+        command,
+        logger: this.logger,
+      });
+      if (!refusal) {
+        // Allowed after all: put it back in front of whoever answers approvals.
+        this.emitDeviceGatedPermissionRequest(request);
+        return;
+      }
+      await this.respondToPermission(request.id, { behavior: "deny" }).catch((error: unknown) => {
+        this.logger.warn({ err: error }, "Failed to deny an OMP device launch approval");
+      });
+      // OMP's approval answer is a menu value, so the reason travels separately.
+      explainDeviceLaunchRefusal({
+        gate: this.deviceLaunchGate,
+        agentId: this.agentId,
+        message: refusal,
+        logger: this.logger,
+      });
+    })();
+    return true;
+  }
+
+  private emitDeviceGatedPermissionRequest(request: AgentPermissionRequest): void {
+    if (!this.pendingExtensionUiRequests.has(request.id)) return;
     this.emit({
       type: "permission_requested",
       provider: this.provider,
@@ -2190,6 +2255,7 @@ export class OmpAgentClient implements AgentClient {
   private readonly providerParams: OmpRuntimeProviderParams;
   private readonly modelRoleParams: OmpModelRoleParams;
   private readonly subagentCardScheduler?: OmpSubagentCardScheduler;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly providerIdleScheduler?: OmpProviderIdleScheduler;
   private readonly noTurnScheduler?: OmpNoTurnScheduler;
   private readonly usagePollScheduler?: OmpUsagePollScheduler;
@@ -2213,6 +2279,7 @@ export class OmpAgentClient implements AgentClient {
     this.providerParams = runtimeProviderParams;
     this.modelRoleParams = modelRoleParams;
     this.subagentCardScheduler = options.subagentCardScheduler;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.providerIdleScheduler = options.providerIdleScheduler;
     this.noTurnScheduler = options.noTurnScheduler;
     this.usagePollScheduler = options.usagePollScheduler;
@@ -2259,6 +2326,8 @@ export class OmpAgentClient implements AgentClient {
         noTurnScheduler: this.noTurnScheduler,
         usagePollScheduler: this.usagePollScheduler,
         paseoTools: launchContext?.paseoTools,
+        agentId: launchContext?.agentId,
+        deviceLaunchGate: this.deviceLaunchGate,
       });
     } catch (error) {
       await runtimeSession.close().catch(() => undefined);
@@ -2301,6 +2370,8 @@ export class OmpAgentClient implements AgentClient {
         noTurnScheduler: this.noTurnScheduler,
         usagePollScheduler: this.usagePollScheduler,
         paseoTools: launchContext?.paseoTools,
+        agentId: launchContext?.agentId,
+        deviceLaunchGate: this.deviceLaunchGate,
         live: false,
       });
     } catch (error) {

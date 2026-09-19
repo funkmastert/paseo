@@ -12,17 +12,17 @@ Several agents working on the same mobile repo each boot a device, nobody coordi
 
 None of them is sufficient alone, and the split is the design:
 
-| Layer                                               | What it does                         | What it cannot do                    |
-| --------------------------------------------------- | ------------------------------------ | ------------------------------------ |
-| **Process scan** (`agent/device-detection.ts`)      | Counts what is actually running      | Stop anything                        |
-| **Checkout** (`device_checkout` / `device_checkin`) | Records intent, queues for a slot    | Stop an agent that skips it          |
-| **Launch gate** (PreToolUse hook)                   | Refuses a device launch with no slot | See a device booted outside an agent |
+| Layer                                               | What it does                         | What it cannot do           |
+| --------------------------------------------------- | ------------------------------------ | --------------------------- |
+| **Process scan** (`agent/device-detection.ts`)      | Counts what is actually running      | Stop anything               |
+| **Checkout** (`device_checkout` / `device_checkin`) | Records intent, queues for a slot    | Stop an agent that skips it |
+| **Launch gate** (per provider, see below)           | Refuses a device launch with no slot | Bind every provider equally |
 
 **The process scan is the count.** Never the lease table. A lease is bookkeeping, and bookkeeping that disagrees with reality loses — a simulator Tyler booted by hand fills a slot exactly like an agent's, and a lease whose device died stops filling one. Anything displayed as "how many are running" comes from here.
 
 **Checkout is how an agent claims intent and waits.** The cap is usually right and the work is usually right; it is just early. `device_checkout` blocks until a slot frees rather than refusing, so an agent that asks first never has to handle a failure. It also records _why_ the device is wanted, which is what the status UI shows.
 
-**The gate is what makes checkout worth calling.** A lease an agent can skip is a convention, not a control. The gate refuses the shell command itself.
+**The gate is what makes checkout worth calling.** A lease an agent can skip is a convention, not a control. The gate refuses the shell command itself — as far as the provider lets it, which is not equally far for all of them.
 
 ## Counting
 
@@ -70,20 +70,46 @@ Free memory here means free + speculative + purgeable pages, deliberately not th
 
 ## Enforcement
 
-The gate is a **PreToolUse hook**, not the permission layer, because `canUseTool` is skipped entirely in `bypassPermissions` — the rule and the SDK's own wording are in [gating a tool call](providers.md#gating-a-tool-call).
+Every provider runs on the same machine and takes slots from the same pool. Not every provider can be stopped. `agent/device-launch-enforcement.ts` holds the tier for each one, and it is a value the daemon carries rather than something you learn from source: the UI shows it, the `device_status` tool tells the agent asking, and `device_checkout`'s own description changes to match. A cap that binds some agents and not others, silently, is worse than no cap — the well-behaved ones queue while the unguarded one takes their slots.
 
-`agent/device-launch-commands.ts` decides what counts as a device launch: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*`. Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
+| Tier         | Provider                                      | Where it is refused                                              | What it misses                                                        |
+| ------------ | --------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------- |
+| **refuses**  | Claude                                        | PreToolUse hook on `Bash`                                        | —                                                                     |
+| **refuses**  | OpenCode                                      | Bridge plugin's `tool.execute.before` on the `bash` tool         | —                                                                     |
+| **asks**     | Copilot, Cursor, Kimi, Kiro, Trae, custom ACP | The terminal the daemon spawns, and the permission request first | An agent that runs a shell inside its own process, asking for neither |
+| **asks**     | Codex                                         | `item/commandExecution/requestApproval`                          | **Full Access** sets the approval policy to `never`: it asks nothing  |
+| **asks**     | OMP                                           | The `bash` tool approval from its extension UI                   | An OMP configured not to approve bash                                 |
+| **observes** | Pi                                            | Nowhere                                                          | Everything — Pi reports tool execution, it never asks first           |
+| **observes** | Anything unlisted                             | Nowhere                                                          | The default, so a new provider cannot silently claim to be enforced   |
+
+**refuses** means the command does not run, in every mode the provider has. Claude's hook is the reference case; the rule behind it — never `canUseTool`, which `bypassPermissions` skips — is in [gating a tool call](providers.md#gating-a-tool-call). OpenCode reaches the same bar from a different direction: the Paseo bridge plugin runs inside the OpenCode server, below every OpenCode mode and permission config, and a throw from `tool.execute.before` aborts the tool call.
+
+**asks** means the daemon only gets a say when the agent routes the command through it. When that happens the refusal is real. The ACP providers route two ways, because this daemon is the ACP _client_: it spawns the terminals the agent asks for (refusing there is refusing a process that was about to exist, and the error text reaches the agent in band), and it answers the agent's permission requests. That second gate runs **before** auto-accept — auto-accept is on by default for unattended agents, and behind it the cap would have approved every launch it exists to stop.
+
+Neither Codex's approval response nor ACP's carries a sentence back to the model: one is a bare decision, the other an option id. Since a refusal that only says "no" turns into a retry loop or a workaround, the reason is delivered separately over the same steer path the [resource monitor](resource-monitor.md) uses, after the rejection lands (`agent/device-launch-approval.ts`).
+
+**observes** means nothing intercepts. The device is still counted — see below — and never refused.
+
+`agent/device-launch-commands.ts` decides what counts as a device launch, for every tier: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*`. Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
 
 What happens on a match:
 
 - **The target is already running** (`simctl boot <udid>` for a booted device) → allowed. It costs no slot.
 - **The agent already holds a slot on that platform** → allowed. This is the good path, and the agent never sees the gate. It covers both the lease it checked out and has not booted yet, and the device it already booted: a rebuild loop runs `expo run:ios` over and over, and a runner that names no device reuses the booted one rather than starting a second. A launch that names a device the scan has not seen is a new device and still goes to the cap.
 - **A slot is free** → allowed, and the gate takes a lease on the agent's behalf. A device booted without asking still fills a slot and still shows a holder, so the count is never quietly wrong.
-- **No slot, or no headroom** → denied.
+- **No slot, or no headroom** → denied, with who holds the slots and for how long, how many are running without a lease, and what to do instead — call `device_checkout` and wait.
 
-A denial that only says "no" turns into a retry loop or a workaround, so it says who holds the slots and for how long, how many are running without a lease, and what to do instead — call `device_checkout` and wait. Enforcement is Claude-only today; every other provider gets the checkout tools and the status, but nothing refuses its shell commands.
+The gate fails open on every uncertainty: an unreadable hook input, a cap that throws, a `ps` that times out, a session the bridge cannot resolve to an agent. A device cap that breaks tool calls is worse than one that misses a device, and the process scan catches whatever booted a sweep later.
 
-The gate fails open on every uncertainty: an unreadable hook input, a cap that throws, a `ps` that times out. A device cap that breaks tool calls is worse than one that misses a device, and the process scan catches whatever booted a sweep later.
+### What an unenforced device costs
+
+Nothing about the tier changes the count. Occupancy is the union of running devices and outstanding leases, so a simulator a Pi agent booted fills a slot for everyone — the next Claude agent is refused by it, and the cap holds in aggregate even where it could not hold at the launch.
+
+What the tier changes is who knows. A running device with no lease that sits inside an agent's process tree is **charged** to that agent: the daemon tells it, once per device, over the steer path, that it is holding a slot other agents are queueing for, that nothing has been shut down, and what to call next time. Only a mid-turn agent is told — steering an idle one would start a turn nobody asked for — and dry run tells nobody, because dry run refuses nothing and so has nothing to explain.
+
+That message only reaches Android. `launchd_sim` is reparented to pid 1 the moment CoreSimulator boots it, so an unleased iOS simulator has no owner `ps` can name. It is not guessed at: it stays unattributed, keeps its slot, and appears in the status UI as pressure nobody is accountable for.
+
+**Nothing is ever reaped.** A booted device may have a build running against it. Refusing a new device and killing an existing one are different features with different risks, and only the first one is here.
 
 ## A lease cannot leak
 

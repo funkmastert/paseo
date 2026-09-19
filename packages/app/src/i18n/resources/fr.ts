@@ -1964,6 +1964,11 @@ export const fr: TranslationResources = {
     waiting_other: "{{count}} agents en attente d'une place",
     unleasedCount_one: "{{count}} appareil sans réservation",
     unleasedCount_other: "{{count}} appareils sans réservation",
+    unenforced: "Plafond non appliqué à : {{providers}}",
+    enforcement: {
+      asks: "peut ne pas être refusé",
+      observes: "ne peut pas être refusé",
+    },
     expand: "Développer l'état des appareils",
     collapse: "Réduire l'état des appareils",
   },

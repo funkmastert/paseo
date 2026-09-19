@@ -33,6 +33,8 @@ interface Harness {
   pushes: PushPayload[];
   prompts: Record<PoolProvider, string[]>;
   setUsage(providers: ProviderUsage[]): void;
+  /** Make the next `times` resume prompts on `provider` fail the way a busy provider would. */
+  failResumes(provider: PoolProvider, times: number): void;
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -80,6 +82,11 @@ async function createHarness(): Promise<Harness> {
     "claude-backup": [],
   };
   let usage: ProviderUsage[] = [];
+  const resumeFailures: Record<PoolProvider, number> = {
+    claude: 0,
+    "claude-personal": 0,
+    "claude-backup": 0,
+  };
   // Sightings are dated by the failure's timeline row, clamped to the monitor clock. Starting the
   // monitor clock before any real timestamp keeps that clamp in effect, so ages depend only on
   // advanceClock and never on the wall clock the test happens to run at.
@@ -99,7 +106,14 @@ async function createHarness(): Promise<Harness> {
         POOL_PROVIDERS.map((provider) => [
           provider,
           createTestAgentClient(provider, {
-            onStartTurn: (prompt) => prompts[provider].push(promptText(prompt)),
+            onStartTurn: (prompt) => {
+              const text = promptText(prompt);
+              if (text.includes("Account handoff") && resumeFailures[provider] > 0) {
+                resumeFailures[provider] -= 1;
+                throw new Error("provider is busy");
+              }
+              prompts[provider].push(text);
+            },
           }),
         ]),
       ),
@@ -170,6 +184,9 @@ async function createHarness(): Promise<Harness> {
     cwd,
     pushes,
     prompts,
+    failResumes: (provider, times) => {
+      resumeFailures[provider] = times;
+    },
     setUsage: (providers) => {
       usage = providers;
     },
@@ -323,6 +340,74 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(agentCount(harness)).toBe(agentsBeforeSweep);
     expect(failoverPushes(harness)).toHaveLength(1);
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("retries a resume the target refused, and says nothing extra once it lands", async () => {
+    // The move itself succeeded, so the agent carries no limit error any more and the detector
+    // will never pick it up again: `planAccountFailoverSweep` only considers limit-shaped errors,
+    // and "provider is busy" is not one. Only the retry queue can finish this migration.
+    harness.failResumes("claude-personal", 1);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(harness.prompts["claude-personal"]).toHaveLength(0);
+    expect(managed(harness, leader).lifecycle).toBe("error");
+    // The move is real and worth reporting; only the restart is outstanding.
+    expect(failoverPushes(harness)).toHaveLength(1);
+    expect(failoverPushes(harness)[0]?.title).toBe("Agent moved to a new account");
+
+    await harness.sweep();
+
+    const resumePrompt = harness.prompts["claude-personal"].find((prompt) =>
+      prompt.includes("Account handoff"),
+    );
+    expect(resumePrompt).toContain(`You are the same agent (${leader})`);
+    await expect.poll(() => managed(harness, leader).lifecycle, { timeout: 10_000 }).toBe("idle");
+    // A retry that worked is not news: no second push.
+    expect(failoverPushes(harness)).toHaveLength(1);
+
+    // Nothing left queued, so a later sweep does not prompt it again.
+    await harness.sweep();
+    expect(
+      harness.prompts["claude-personal"].filter((prompt) => prompt.includes("Account handoff")),
+    ).toHaveLength(1);
+  }, 60_000);
+
+  test("gives up after three resume attempts and tells Tyler the agent needs a prompt", async () => {
+    harness.failResumes("claude-personal", 99);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    // The original send, then one retry per sweep.
+    await harness.sweep();
+    await harness.sweep();
+    await harness.sweep();
+
+    expect(failoverPushes(harness)).toHaveLength(2);
+    expect(failoverPushes(harness)[1]).toMatchObject({
+      title: "Agent moved but did not restart",
+      body: expect.stringContaining("could not be restarted"),
+      data: expect.objectContaining({
+        agentId: leader,
+        reason: "account_failover",
+        outcome: "needs_prompt",
+      }),
+    });
+    // It says what to do about it, since the agent is one message away from continuing.
+    expect(failoverPushes(harness)[1]?.body).toContain("send any message to continue");
+
+    // Given up means given up: no fourth attempt, and no second complaint.
+    await harness.sweep();
+    expect(failoverPushes(harness)).toHaveLength(2);
+    // The conversation is intact on the new account — it is stalled, not lost.
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(assistantText(harness, leader)).toContain("CONTEXT-MARKER-42");
+    expect(successorOf(harness, leader)).toBeUndefined();
   }, 60_000);
 
   test("keeps the account it left out of rotation until the evidence expires", async () => {

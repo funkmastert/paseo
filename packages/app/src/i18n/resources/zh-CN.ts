@@ -1892,6 +1892,11 @@ export const zhCN: TranslationResources = {
     waiting_other: "{{count}} 个代理正在等待空位",
     unleasedCount_one: "{{count}} 个设备没有占用登记",
     unleasedCount_other: "{{count}} 个设备没有占用登记",
+    unenforced: "未强制执行上限：{{providers}}",
+    enforcement: {
+      asks: "可能无法拒绝",
+      observes: "无法拒绝",
+    },
     expand: "展开设备状态",
     collapse: "收起设备状态",
   },

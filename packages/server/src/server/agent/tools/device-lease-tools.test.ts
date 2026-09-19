@@ -32,13 +32,15 @@ function snapshot(overrides: Partial<DeviceStatusSnapshot> = {}): DeviceStatusSn
     ],
     waiting: [],
     blocked: [],
+    enforcement: [],
     generatedAt: "2026-09-18T16:00:00.000Z",
     ...overrides,
   };
 }
 
-function registerFor(callerAgentId: string | undefined) {
+function registerFor(callerAgentId: string | undefined, callerProvider?: string) {
   const tools = new Map<string, Handler>();
+  const configs = new Map<string, PaseoToolConfig>();
   const checkout = vi.fn(async (_input: DeviceCheckoutInput) => ({
     status: "granted" as const,
     leaseId: "lease-1",
@@ -48,14 +50,16 @@ function registerFor(callerAgentId: string | undefined) {
   const getSnapshot = vi.fn(async () => snapshot());
 
   registerDeviceLeaseTools({
-    registerTool: (name: string, _config: PaseoToolConfig, handler: Handler) => {
+    registerTool: (name: string, config: PaseoToolConfig, handler: Handler) => {
       tools.set(name, handler);
+      configs.set(name, config);
     },
     manager: { checkout, checkin, getSnapshot },
     ...(callerAgentId ? { callerAgentId } : {}),
+    ...(callerProvider ? { resolveCallerProvider: () => callerProvider } : {}),
   });
 
-  return { tools, checkout, checkin, getSnapshot };
+  return { tools, configs, checkout, checkin, getSnapshot };
 }
 
 async function call(
@@ -165,5 +169,63 @@ describe("registerDeviceLeaseTools", () => {
 
     expect(result.isError).toBe(true);
     expect(checkout).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The cap binds Claude and Pi to very different degrees (device-launch-enforcement.ts). An
+ * agent that learns "booting without checking out is refused" when nothing will refuse it has
+ * been told a half-truth, and will plan around a gate that is not there.
+ */
+describe("device tools and the provider asymmetry", () => {
+  test("an agent the cap refuses is told that checking out avoids the refusal", async () => {
+    const { tools, configs } = registerFor("agent-1", "claude");
+
+    expect(configs.get("device_checkout")?.description).toContain(
+      "Your device launches are refused",
+    );
+    const status = await tools.get("device_status")!(undefined as never, {});
+    expect(status.structuredContent).toMatchObject({
+      yourEnforcement: { tier: "refuses" },
+    });
+  });
+
+  test("an agent nothing refuses is told that checkout is the only thing holding the cap", async () => {
+    const { tools, configs } = registerFor("agent-1", "pi");
+
+    expect(configs.get("device_checkout")?.description).toContain("Nothing refuses");
+    const status = await tools.get("device_status")!(undefined as never, {});
+    expect(status.structuredContent).toMatchObject({
+      yourEnforcement: { tier: "observes", detail: expect.stringContaining("still fills a slot") },
+    });
+  });
+
+  test("an agent whose gate has a hole is told where the hole is", async () => {
+    const { configs } = registerFor("agent-1", "codex");
+    expect(configs.get("device_checkout")?.description).toContain("Full Access");
+  });
+
+  test("a caller the daemon cannot resolve gets the cautious sentence, not a crash", async () => {
+    const tools = new Map<string, Handler>();
+    const configs = new Map<string, PaseoToolConfig>();
+    registerDeviceLeaseTools({
+      registerTool: (name: string, config: PaseoToolConfig, handler: Handler) => {
+        tools.set(name, handler);
+        configs.set(name, config);
+      },
+      manager: {
+        checkout: async () => ({ status: "disabled" }),
+        checkin: async () => 0,
+        getSnapshot: async () => snapshot(),
+      },
+      callerAgentId: "agent-gone",
+      resolveCallerProvider: () => {
+        throw new Error("Parent agent agent-gone not found");
+      },
+    });
+
+    expect(configs.get("device_checkout")?.description).toContain("may be refused");
+    const status = await tools.get("device_status")!(undefined as never, {});
+    expect(status.structuredContent).not.toHaveProperty("yourEnforcement");
   });
 });

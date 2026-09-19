@@ -1913,6 +1913,11 @@ export const ar: TranslationResources = {
     waiting_other: "{{count}} وكلاء ينتظرون خانة",
     unleasedCount_one: "{{count}} جهاز بلا حجز",
     unleasedCount_other: "{{count}} أجهزة بلا حجز",
+    unenforced: "الحد غير مطبق على: {{providers}}",
+    enforcement: {
+      asks: "قد لا يُرفض",
+      observes: "لا يمكن رفضه",
+    },
     expand: "توسيع حالة الأجهزة",
     collapse: "طي حالة الأجهزة",
   },

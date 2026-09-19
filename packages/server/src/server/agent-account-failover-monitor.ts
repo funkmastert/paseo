@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import pLimit from "p-limit";
 import { buildAccountFailoverNotificationPayload } from "@getpaseo/protocol/account-failover-notification";
@@ -8,6 +9,7 @@ import type { WorkspaceProvisioningService } from "./session/workspace-provision
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
+  isLimitShapedError,
   planAccountFailoverSweep,
   type LimitErrorSighting,
   type ProviderLimitSighting,
@@ -25,6 +27,18 @@ import type { PushNotificationSender } from "./push/index.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_MIGRATION_CONCURRENCY = 3;
+/**
+ * Resume sends allowed per migration, the first one included — so two retries, one per sweep.
+ *
+ * Bounded rather than open-ended because nothing else will ever retry: the move clears the limit
+ * error, and `planAccountFailoverSweep` only considers agents that have one, so a migrated agent
+ * that never restarted is invisible to the detector forever. Keeping it eligible by preserving
+ * that error would be worse than the stall it fixes — the error is limit-shaped and the agent now
+ * sits on the target account, so the next sweep would read it as evidence that the *target* is
+ * capped and condemn the account it was just rescued onto. Hence a queue of its own, bounded, and
+ * when it runs out Tyler is told in words.
+ */
+const MAX_RESUME_ATTEMPTS = 3;
 
 export interface AccountFailoverConfig {
   enabled?: boolean;
@@ -67,6 +81,18 @@ function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccou
 
 type MigratedOutcome = Extract<AccountFailoverOutcome, { kind: "migrated" }>;
 
+/** A migration that landed on the target but never restarted. Retried on following sweeps. */
+interface UnresumedAgent {
+  agentId: string;
+  title: string | null;
+  workspaceId: string | undefined;
+  oldAgentId: string;
+  targetProviderId: string;
+  prompt: string;
+  /** Resume sends made so far, the original included. */
+  attempts: number;
+}
+
 /**
  * Moves agents stuck on a Claude account that ran out of budget onto a healthy pool account —
  * the claude-account-handoff procedure, run by the daemon. Same shape as AgentResourceMonitor and
@@ -86,6 +112,7 @@ export class AccountFailoverMonitor {
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
   private providerSightings = new Map<string, ProviderLimitSighting>();
+  private unresumed = new Map<string, UnresumedAgent>();
 
   constructor(options: AccountFailoverMonitorOptions) {
     this.options = options;
@@ -152,6 +179,9 @@ export class AccountFailoverMonitor {
     });
     this.sightings = plan.sightings;
     this.providerSightings = plan.providerSightings;
+    // Before the early return below: a queue of agents waiting to be restarted is work to do
+    // even on a sweep that finds no new candidates, which is the usual case.
+    await this.retryUnresumed();
     if (plan.candidates.length === 0) {
       return;
     }
@@ -182,6 +212,89 @@ export class AccountFailoverMonitor {
       );
       return null;
     }
+  }
+
+  /**
+   * Re-send the resume prompt to agents a migration left stalled on their new account.
+   *
+   * Every migration is queued, not only the ones whose send threw: `sendPromptToAgent` resolves
+   * as soon as the turn starts, and a provider that refuses it reports that asynchronously. So
+   * the only reliable evidence is the agent's state on a later sweep — an agent that resumed is
+   * running or idle, and one that did not is sitting in `error`. One attempt per sweep, which
+   * also gives a provider that was briefly busy a minute to settle.
+   */
+  private async retryUnresumed(): Promise<void> {
+    const { logger } = this.options;
+    // Deleting the current entry mid-iteration is well-defined for a Map, and nothing adds to
+    // this queue during a drain — migrations run after it, in the same serialized sweep.
+    for (const entry of this.unresumed.values()) {
+      const summary = this.options.agentManager.getAccountFailoverSummary(entry.agentId);
+      if (!summary) {
+        // Archived, detached or unloaded while queued — nothing left to restart.
+        this.unresumed.delete(entry.agentId);
+        continue;
+      }
+      if (summary.lifecycle !== "error") {
+        // Running, or idle after a turn it completed. The resume landed.
+        this.unresumed.delete(entry.agentId);
+        continue;
+      }
+      if (isLimitShapedError(summary.lastError)) {
+        // The target account is capped too. That is the detector's job, not this queue's, and
+        // both acting on one agent would race.
+        this.unresumed.delete(entry.agentId);
+        logger.info(
+          { agentId: entry.agentId },
+          "Account failover: the resumed agent hit a cap again; leaving it to the next sweep",
+        );
+        continue;
+      }
+
+      entry.attempts += 1;
+      try {
+        await sendPromptToAgent({
+          agentManager: this.options.agentManager,
+          agentStorage: this.options.agentStorage,
+          agentId: entry.agentId,
+          prompt: entry.prompt,
+          messageId: randomUUID(),
+          unarchive: false,
+          logger,
+        });
+        logger.info(
+          { agentId: entry.agentId, attempts: entry.attempts, lastError: summary.lastError },
+          "Account failover: re-sent the resume prompt to a stalled agent",
+        );
+      } catch (error) {
+        logger.warn(
+          { err: error, agentId: entry.agentId, attempts: entry.attempts },
+          "Account failover: could not re-send the resume prompt",
+        );
+      }
+      if (entry.attempts < MAX_RESUME_ATTEMPTS) {
+        continue;
+      }
+      // Out of attempts. Whether this send is refused like the others is decided after the sweep
+      // that would check it, so stop here and hand it to a person either way.
+      this.unresumed.delete(entry.agentId);
+      logger.error(
+        { agentId: entry.agentId, attempts: entry.attempts, lastError: summary.lastError },
+        "Account failover: gave up restarting the agent on its new account",
+      );
+      await this.notifyPush({
+        workspaceId: entry.workspaceId,
+        oldAgentId: entry.oldAgentId,
+        oldTitle: entry.title,
+        newAgentId: entry.agentId,
+        targetProviderId: entry.targetProviderId,
+        resumed: false,
+      });
+    }
+  }
+
+  /** Watch a fresh migration until its resume prompt demonstrably landed. */
+  private watchForResume(entry: UnresumedAgent): void {
+    this.unresumed.set(entry.agentId, entry);
   }
 
   private async migrateOne(input: {
@@ -229,6 +342,15 @@ export class AccountFailoverMonitor {
           error: agent.lastError ?? "",
           firstSeenMs: input.sighting?.firstSeenMs ?? this.now(),
         });
+        this.watchForResume({
+          agentId: outcome.agentId,
+          title: outcome.title,
+          workspaceId: outcome.workspaceId,
+          oldAgentId: outcome.agentId,
+          targetProviderId: outcome.targetProviderId,
+          prompt: outcome.resume.prompt,
+          attempts: 1,
+        });
         await this.notifyPush({
           workspaceId: outcome.workspaceId,
           oldAgentId: outcome.agentId,
@@ -268,6 +390,15 @@ export class AccountFailoverMonitor {
             firstSeenMs: Number.NEGATIVE_INFINITY,
           });
         }
+        this.watchForResume({
+          agentId: outcome.newAgentId,
+          title: outcome.oldTitle,
+          workspaceId: outcome.workspaceId,
+          oldAgentId: outcome.oldAgentId,
+          targetProviderId: outcome.targetProviderId,
+          prompt: outcome.resume.prompt,
+          attempts: 1,
+        });
         await this.notifyPush({
           workspaceId: outcome.workspaceId,
           oldAgentId: outcome.oldAgentId,
@@ -288,10 +419,12 @@ export class AccountFailoverMonitor {
     oldTitle: string | null;
     newAgentId: string;
     targetProviderId: string;
+    resumed?: boolean;
   }): Promise<void> {
     try {
       await this.options.pushNotificationSender.send(
         buildAccountFailoverNotificationPayload({
+          ...(input.resumed === undefined ? {} : { resumed: input.resumed }),
           serverId: this.options.serverId,
           workspaceId: input.workspaceId,
           oldAgentId: input.oldAgentId,

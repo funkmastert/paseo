@@ -5,6 +5,9 @@
  */
 export type AccountFailoverNotificationReason = "account_failover";
 
+/** Open on purpose: an app must treat an unrecognised hint as "no hint" and read `body`. */
+export type AccountFailoverOutcomeHint = "needs_prompt";
+
 export interface AccountFailoverNotificationData {
   [key: string]: unknown;
   serverId: string;
@@ -12,6 +15,12 @@ export interface AccountFailoverNotificationData {
   /** The successor's id — tapping the push opens the agent that is actually still running. */
   agentId: string;
   reason: AccountFailoverNotificationReason;
+  /**
+   * Present and `"needs_prompt"` only when the move landed but the resume prompt never did, so
+   * the agent is healthy, idle, and waiting for any message. Optional and additive: an app that
+   * does not read it still gets the whole story from `body`, which states it in words.
+   */
+  outcome?: AccountFailoverOutcomeHint;
 }
 
 export interface AccountFailoverNotificationPayload {
@@ -32,6 +41,8 @@ interface BuildAccountFailoverNotificationPayloadInput {
   oldAgentTitle: string | null | undefined;
   newAgentId: string;
   targetProviderId: string;
+  /** False when the resume prompt could not be delivered; defaults to true. */
+  resumed?: boolean;
 }
 
 /**
@@ -46,18 +57,24 @@ export function buildAccountFailoverNotificationPayload(
 ): AccountFailoverNotificationPayload {
   const label = resolveAgentLabel(input.oldAgentTitle);
   const movedInPlace = input.newAgentId === input.oldAgentId;
+  const resumed = input.resumed ?? true;
+  const where = movedInPlace
+    ? `now runs on ${input.targetProviderId}, still as ${input.newAgentId}`
+    : `moved from ${input.oldAgentId} to ${input.newAgentId} on ${input.targetProviderId}`;
   return {
-    title: "Agent moved to a new account",
-    body: movedInPlace
-      ? `${label} hit its account's usage limit and now runs on ${input.targetProviderId}, ` +
-        `still as ${input.newAgentId}.`
-      : `${label} hit its account's usage limit and moved from ${input.oldAgentId} to ` +
-        `${input.newAgentId} on ${input.targetProviderId}.`,
+    // An agent that moved but never restarted is not the same event as one that carried on, and
+    // it is the only one of the two that needs Tyler to do something. Say which, and say what.
+    title: resumed ? "Agent moved to a new account" : "Agent moved but did not restart",
+    body: resumed
+      ? `${label} hit its account's usage limit and ${where}.`
+      : `${label} hit its account's usage limit and ${where}, but could not be restarted. ` +
+        `Open it and send any message to continue.`,
     data: {
       serverId: input.serverId,
       ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
       agentId: input.newAgentId,
       reason: "account_failover",
+      ...(resumed ? {} : { outcome: "needs_prompt" as const }),
     },
   };
 }
