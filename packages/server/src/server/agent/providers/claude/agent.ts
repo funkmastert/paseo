@@ -79,6 +79,7 @@ import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
 import { realClaudeRewindSdk, revertClaudeConversation, revertClaudeFiles } from "./rewind.js";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
+import { readClaudeAccountAuth } from "./account-auth.js";
 import {
   claudeProjectDirSync,
   claudeSessionTranscriptPath,
@@ -114,6 +115,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
   type AgentSession,
+  type AgentAccountAuth,
   type AgentSessionConfig,
   type AgentSlashCommand,
   type SteerActiveTurnOptions,
@@ -1554,6 +1556,16 @@ export class ClaudeAgentClient implements AgentClient {
       projectDir: cwd,
       env,
     };
+  }
+
+  private resolveAccountConfigDir(): string {
+    const env = createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings });
+    return resolveClaudeConfigDir(resolveProviderClaudeConfigDir(this.runtimeSettings, env));
+  }
+
+  /** Reads the account behind this provider's own config dir, the one its sessions run as. */
+  async describeAccountAuth(): Promise<AgentAccountAuth> {
+    return readClaudeAccountAuth(this.resolveAccountConfigDir());
   }
 
   async createSession(

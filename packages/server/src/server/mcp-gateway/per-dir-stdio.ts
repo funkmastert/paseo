@@ -185,19 +185,26 @@ function readLocalScopeMcpServersField(parsed: unknown, projectDir: string): unk
   return (entry as Record<string, unknown>).mcpServers;
 }
 
+/** What the CLI's own scope precedence turns up for one server name. */
+export type PerDirMcpServerLookup =
+  | { kind: "remote"; server: PerDirRemoteMcpServer }
+  /** Defined, but as a local command — the gateway only brokers http and sse. */
+  | { kind: "local" }
+  | { kind: "absent" };
+
 /**
- * Finds one remote (http/sse) MCP definition the way the CLI resolves it for a session in
- * `projectDir`, in the CLI's own precedence: the config dir's local scope
- * (`projects[projectDir].mcpServers` in `.claude.json`), then the project's `.mcp.json`, then
- * user scope. Local must win: it is the user's private override of whatever a repository
- * checks in, and adopting the checked-in copy instead would broker a definition the session
- * isn't using. Powers the gateway's adopt action (docs/mcp-gateway.md); stdio entries are never
- * adoptable and are skipped. `${VAR}` expansion applies to the url and header values against
- * `options.env`, as for stdio entries.
+ * Finds one MCP definition the way the CLI resolves it for a session in `projectDir`, in the
+ * CLI's own precedence: the config dir's local scope (`projects[projectDir].mcpServers` in
+ * `.claude.json`), then the project's `.mcp.json`, then user scope. Local must win: it is the
+ * user's private override of whatever a repository checks in, and adopting the checked-in copy
+ * instead would broker a definition the session isn't using — which is also why the first scope
+ * that names the server decides, even when its entry turns out to be unbrokerable. Powers the
+ * gateway's adopt action (docs/mcp-gateway.md). `${VAR}` expansion applies to the url and header
+ * values against `options.env`, as for stdio entries.
  */
-export function readPerDirRemoteMcpServer(
+export function findPerDirMcpServer(
   options: ReadPerDirStdioMcpServersOptions & { name: string },
-): PerDirRemoteMcpServer | undefined {
+): PerDirMcpServerLookup {
   const globalConfig = readJsonFile(
     path.join(options.configDir, GLOBAL_CONFIG_FILENAME),
     options.logger,
@@ -216,12 +223,14 @@ export function readPerDirRemoteMcpServer(
     if (typeof mcpServers !== "object" || mcpServers === null) {
       continue;
     }
-    const entry = toRemoteEntry((mcpServers as Record<string, unknown>)[options.name], env);
-    if (entry) {
-      return entry;
+    const raw = (mcpServers as Record<string, unknown>)[options.name];
+    if (raw === undefined) {
+      continue;
     }
+    const remote = toRemoteEntry(raw, env);
+    return remote ? { kind: "remote", server: remote } : { kind: "local" };
   }
-  return undefined;
+  return { kind: "absent" };
 }
 
 /**

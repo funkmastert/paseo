@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { readPerDirRemoteMcpServer, readPerDirStdioMcpServers } from "./per-dir-stdio.js";
+import { findPerDirMcpServer, readPerDirStdioMcpServers } from "./per-dir-stdio.js";
 
 const tempDirs: string[] = [];
 
@@ -143,7 +143,7 @@ describe("readPerDirStdioMcpServers", () => {
   });
 });
 
-describe("readPerDirRemoteMcpServer", () => {
+describe("findPerDirMcpServer", () => {
   test("finds a user-scope http entry and expands ${VAR} in url and headers", () => {
     const configDir = createTempDir("paseo-claude-config-");
     const projectDir = createTempDir("paseo-project-");
@@ -162,10 +162,13 @@ describe("readPerDirRemoteMcpServer", () => {
         }),
       );
 
-      expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "zeeq" })).toEqual({
-        url: "https://app.zeeq.ai/mcp",
-        transport: "http",
-        headers: { "x-zeeq-prompts-repo": "wonderly/prompts" },
+      expect(findPerDirMcpServer({ configDir, projectDir, name: "zeeq" })).toEqual({
+        kind: "remote",
+        server: {
+          url: "https://app.zeeq.ai/mcp",
+          transport: "http",
+          headers: { "x-zeeq-prompts-repo": "wonderly/prompts" },
+        },
       });
     } finally {
       delete process.env.PASEO_TEST_ZEEQ_REPO;
@@ -186,9 +189,9 @@ describe("readPerDirRemoteMcpServer", () => {
       JSON.stringify({ mcpServers: { notion: { url: "https://project.example/mcp" } } }),
     );
 
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
-      url: "https://project.example/mcp",
-      transport: "http",
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
+      kind: "remote",
+      server: { url: "https://project.example/mcp", transport: "http" },
     });
   });
 
@@ -213,9 +216,9 @@ describe("readPerDirRemoteMcpServer", () => {
       JSON.stringify({ mcpServers: { notion: { url: "https://project.example/mcp" } } }),
     );
 
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
-      url: "https://local.example/mcp",
-      transport: "sse",
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
+      kind: "remote",
+      server: { url: "https://local.example/mcp", transport: "sse" },
     });
   });
 
@@ -237,20 +240,22 @@ describe("readPerDirRemoteMcpServer", () => {
     delete process.env.ZEEQ_TOKEN_FOR_TEST;
 
     expect(
-      readPerDirRemoteMcpServer({
+      findPerDirMcpServer({
         configDir,
         projectDir,
         name: "zeeq",
         env: { ZEEQ_TOKEN_FOR_TEST: "from-provider-profile" },
-      })?.headers,
-    ).toEqual({ Authorization: "Bearer from-provider-profile" });
+      }),
+    ).toMatchObject({
+      server: { headers: { Authorization: "Bearer from-provider-profile" } },
+    });
     // Without the session env the daemon's own env is used, where the token is unset.
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "zeeq" })?.headers).toEqual({
-      Authorization: "Bearer ",
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "zeeq" })).toMatchObject({
+      server: { headers: { Authorization: "Bearer " } },
     });
   });
 
-  test("never adopts a stdio entry and returns undefined for an unknown name", () => {
+  test("tells a local entry apart from an absent one", () => {
     const configDir = createTempDir("paseo-claude-config-");
     const projectDir = createTempDir("paseo-project-");
     writeFileSync(
@@ -258,7 +263,31 @@ describe("readPerDirRemoteMcpServer", () => {
       JSON.stringify({ mcpServers: { "local-fs": { type: "stdio", command: "fs-tool" } } }),
     );
 
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "local-fs" })).toBeUndefined();
-    expect(readPerDirRemoteMcpServer({ configDir, projectDir, name: "nope" })).toBeUndefined();
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "local-fs" })).toEqual({
+      kind: "local",
+    });
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "nope" })).toEqual({
+      kind: "absent",
+    });
+  });
+
+  test("the first scope that names the server decides, even when its entry is local", () => {
+    // Same precedence rule as a remote override: falling through to user scope would broker a
+    // definition the session is not using.
+    const configDir = createTempDir("paseo-claude-config-");
+    const projectDir = createTempDir("paseo-project-");
+    writeFileSync(
+      path.join(configDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { notion: { type: "http", url: "https://user.example/mcp" } },
+        projects: {
+          [projectDir]: { mcpServers: { notion: { type: "stdio", command: "notion-local" } } },
+        },
+      }),
+    );
+
+    expect(findPerDirMcpServer({ configDir, projectDir, name: "notion" })).toEqual({
+      kind: "local",
+    });
   });
 });

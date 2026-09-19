@@ -20,6 +20,7 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { McpAdoptError } from "../mcp-gateway/adopt-failure.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type { ProviderSubagentStore } from "./provider-subagents/store.js";
@@ -30,6 +31,7 @@ import type {
   AgentTimelineStore,
 } from "./agent-timeline-store-types.js";
 import type {
+  AgentAccountAuth,
   AgentClient,
   AgentCreateSessionOptions,
   AgentFeature,
@@ -3715,6 +3717,108 @@ test("adoptMcpGatewayServer reads the reporting agent's per-dir config, brokers 
   await expect(
     manager.adoptMcpGatewayServer({ name: "biblio", agentId: snapshot.id }),
   ).rejects.toThrow(/No remote MCP server named "biblio"/);
+});
+
+test("adoptMcpGatewayServer names the cause instead of flattening every failure into one string", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const configDir = mkdtempSync(join(tmpdir(), "agent-manager-claude-config-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  writeFileSync(
+    join(configDir, ".claude.json"),
+    JSON.stringify({
+      // Signed in, so a missing name is about the name, not the account.
+      oauthAccount: { emailAddress: "worker@example.com" },
+      mcpServers: {
+        remote: { type: "http", url: "https://remote.example/mcp" },
+        "local-fs": { type: "stdio", command: "fs-tool" },
+      },
+    }),
+  );
+
+  let accountAuth: AgentAccountAuth = { state: "signed-in", accountLabel: "worker@example.com" };
+  class ScopedClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+    resolveMcpConfigScope(cwd: string) {
+      return { configDir, projectDir: cwd };
+    }
+    async describeAccountAuth(): Promise<AgentAccountAuth> {
+      return accountAuth;
+    }
+  }
+  // A provider that cannot expose an MCP config at all — the inherited client has no scope.
+  class ScopelessClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  let adoptResult: () => Promise<{ status: string; auth: string }> = async () => ({
+    status: "needs-auth",
+    auth: "oauth",
+  });
+  let authorize: () => Promise<{ authorizationUrl: string }> = async () => ({
+    authorizationUrl: "https://remote.example/authorize",
+  });
+  const manager = new AgentManager({
+    clients: { claude: new ScopedClient(), codex: new ScopelessClient() },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({
+      adoptServer: async () => adoptResult(),
+      startAuthorization: async () => authorize(),
+    }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => randomUUID(),
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const scopeless = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const reasonOf = async (name: string, agentId: string): Promise<unknown> =>
+    manager.adoptMcpGatewayServer({ name, agentId }).then(
+      () => null,
+      (error: unknown) => (error instanceof McpAdoptError ? error.reason : error),
+    );
+
+  expect(await reasonOf("remote", "no-such-agent")).toBe("unknown_agent");
+  expect(await reasonOf("remote", scopeless.id)).toBe("provider_has_no_config");
+  expect(await reasonOf("local-fs", agent.id)).toBe("server_is_local");
+  expect(await reasonOf("absent", agent.id)).toBe("server_not_in_config");
+
+  // Only the leg after a successful adopt is authentication.
+  adoptResult = async () => {
+    throw new Error("gateway refused the definition");
+  };
+  expect(await reasonOf("remote", agent.id)).toBe("adopt_failed");
+  adoptResult = async () => ({ status: "needs-auth", auth: "oauth" });
+  authorize = async () => {
+    throw new Error("discovery failed");
+  };
+  expect(await reasonOf("remote", agent.id)).toBe("authorization_failed");
+
+  // A signed-out account outranks "not in the config": it is the fact with a fix.
+  accountAuth = {
+    state: "signed-out",
+    signInCommand: `CLAUDE_CONFIG_DIR=${configDir} claude /login`,
+  };
+  const signedOut = await manager.adoptMcpGatewayServer({ name: "absent", agentId: agent.id }).then(
+    () => null,
+    (error: unknown) => (error instanceof McpAdoptError ? error : null),
+  );
+  expect(signedOut?.reason).toBe("account_signed_out");
+  expect(signedOut?.remedyCommand).toBe(`CLAUDE_CONFIG_DIR=${configDir} claude /login`);
+  // A local entry is decided about this server, so it still wins over the account's state.
+  expect(await reasonOf("local-fs", agent.id)).toBe("server_is_local");
+
+  // A provider that cannot say anything about its account never invents a signed-out answer.
+  accountAuth = { state: "unknown" };
+  expect(await reasonOf("absent", agent.id)).toBe("server_not_in_config");
 });
 
 test("createAgent never injects brokered MCP gateway servers for a non-Claude provider (U3 scope)", async () => {

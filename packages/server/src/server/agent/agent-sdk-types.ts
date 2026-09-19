@@ -798,6 +798,16 @@ export interface ResolveAgentDefaultModeInput {
   signal?: AbortSignal;
 }
 
+/**
+ * Whether the account a provider's sessions run as is signed in on this host. `unknown` means the
+ * provider cannot tell; nothing may infer a failure from it. `signed-in` is evidence, not proof —
+ * a provider that reads a config file cannot see a revoked keychain token.
+ */
+export type AgentAccountAuth =
+  | { state: "signed-in"; accountLabel: string | null }
+  | { state: "signed-out"; signInCommand: string | null }
+  | { state: "unknown" };
+
 export interface AgentClient {
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
@@ -850,6 +860,12 @@ export interface AgentClient {
     input: ImportProviderSessionInput,
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
+  /**
+   * Whether this provider's account is signed in on this host, for explaining a failure that
+   * looks like the provider's fault but is the account's. Only providers that can answer
+   * cheaply and structurally implement it. See docs/mcp-gateway.md.
+   */
+  describeAccountAuth?(): Promise<AgentAccountAuth>;
   /**
    * Whether this client can re-open `handle`'s conversation — the transcript has to be readable
    * from this client's own account directory. Only providers that can answer implement it; an

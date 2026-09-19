@@ -6247,12 +6247,22 @@ export const McpStatusUpdateMessageSchema = z.object({
 // Response to McpGatewayServerAdoptRequestSchema. `authorizationUrl` is set when the adopted
 // server still needs interactive OAuth; null with `error` null means it connected outright (a
 // static header adopted from the agent's config). Same no-secrets rule as auth.start below.
+//
+// `reason` is the machine-readable cause a client keys its copy off, and whether it offers the
+// action again; `error` stays the daemon's own sentence, which is all an older client has.
+// Known reasons: gateway_disabled, unknown_agent, provider_has_no_config, account_signed_out,
+// server_not_in_config, server_is_local, adopt_failed, authorization_failed. It is a plain
+// string, not an enum, so the daemon can name a new cause without breaking an older client.
 export const McpGatewayServerAdoptResponseMessageSchema = z.object({
   type: z.literal("mcp_gateway.server.adopt.response"),
   payload: z.object({
     requestId: z.string(),
     authorizationUrl: z.string().nullable(),
     error: z.string().nullable(),
+    // COMPAT(mcpAdoptReason): added in v0.8.0, remove optional parsing after 2027-09-18.
+    reason: z.string().nullable().optional(),
+    /** A command the person runs on the host to clear it. Never something Paseo can do. */
+    remedyCommand: z.string().nullable().optional(),
   }),
 });
 

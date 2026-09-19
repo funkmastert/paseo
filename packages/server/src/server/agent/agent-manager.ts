@@ -93,7 +93,8 @@ import {
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
 import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
-import { readPerDirRemoteMcpServer } from "../mcp-gateway/per-dir-stdio.js";
+import { findPerDirMcpServer, type PerDirMcpServerLookup } from "../mcp-gateway/per-dir-stdio.js";
+import { McpAdoptError } from "../mcp-gateway/adopt-failure.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -1161,34 +1162,73 @@ export class AgentManager {
     name: string;
     agentId: string;
   }): Promise<{ authorizationUrl: string | null }> {
-    if (!this.mcpGateway) {
-      throw new Error("MCP gateway is not enabled");
+    const gateway = this.mcpGateway;
+    if (!gateway) {
+      throw new McpAdoptError("gateway_disabled", "MCP gateway is not enabled");
     }
     const agent = this.getAgent(input.agentId);
     if (!agent) {
-      throw new Error(`Unknown agent "${input.agentId}"`);
+      throw new McpAdoptError("unknown_agent", `Unknown agent "${input.agentId}"`);
     }
-    const scope = this.clients.get(agent.provider)?.resolveMcpConfigScope?.(agent.cwd);
-    if (!scope) {
-      throw new Error(
+    const client = this.clients.get(agent.provider);
+    const scope = client?.resolveMcpConfigScope?.(agent.cwd);
+    if (!client || !scope) {
+      throw new McpAdoptError(
+        "provider_has_no_config",
         `Sessions on provider "${agent.provider}" don't expose an MCP config the gateway can adopt`,
       );
     }
-    const definition = readPerDirRemoteMcpServer({
-      ...scope,
-      name: input.name,
-      logger: this.logger,
-    });
-    if (!definition) {
-      throw new Error(
-        `No remote MCP server named "${input.name}" in ${scope.configDir}/.claude.json or ${scope.projectDir}/.mcp.json`,
-      );
+    const lookup = findPerDirMcpServer({ ...scope, name: input.name, logger: this.logger });
+    if (lookup.kind !== "remote") {
+      throw await this.explainMissingMcpServer({ name: input.name, client, scope, lookup });
     }
-    const adopted = await this.mcpGateway.adoptServer({ name: input.name, ...definition });
+
+    let adopted: Awaited<ReturnType<McpGateway["adoptServer"]>>;
+    try {
+      adopted = await gateway.adoptServer({ name: input.name, ...lookup.server });
+    } catch (error) {
+      throw new McpAdoptError("adopt_failed", getErrorMessage(error));
+    }
     if (adopted.auth === "static" || adopted.status === "connected") {
       return { authorizationUrl: null };
     }
-    return this.mcpGateway.startAuthorization(input.name);
+    try {
+      return await gateway.startAuthorization(input.name);
+    } catch (error) {
+      throw new McpAdoptError("authorization_failed", getErrorMessage(error));
+    }
+  }
+
+  /**
+   * Why the config Paseo reads has no brokerable entry. A local entry is decided about this
+   * server and wins. Otherwise the account may simply not be signed in — which is not provably
+   * why this one name is missing, but is the more upstream fact and the one with a fix, so it
+   * is what the caller hears.
+   */
+  private async explainMissingMcpServer(input: {
+    name: string;
+    client: AgentClient;
+    scope: { configDir: string; projectDir: string };
+    lookup: PerDirMcpServerLookup;
+  }): Promise<McpAdoptError> {
+    if (input.lookup.kind === "local") {
+      return new McpAdoptError(
+        "server_is_local",
+        `MCP server "${input.name}" runs as a local command; only http and sse servers can be brokered`,
+      );
+    }
+    const auth = await input.client.describeAccountAuth?.().catch(() => undefined);
+    if (auth?.state === "signed-out") {
+      return new McpAdoptError(
+        "account_signed_out",
+        `The account in ${input.scope.configDir} is not signed in`,
+        auth.signInCommand,
+      );
+    }
+    return new McpAdoptError(
+      "server_not_in_config",
+      `No remote MCP server named "${input.name}" in ${input.scope.configDir}/.claude.json or ${input.scope.projectDir}/.mcp.json`,
+    );
   }
 
   prepareForShutdown(): void {

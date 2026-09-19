@@ -11,7 +11,7 @@ import type {
   AgentRuntimeInfo,
 } from "./agent-sdk-types.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
-import { readPerDirRemoteMcpServer } from "../mcp-gateway/per-dir-stdio.js";
+import { findPerDirMcpServer } from "../mcp-gateway/per-dir-stdio.js";
 import { createAllClients, wrapSessionProvider } from "./provider-registry.js";
 
 type OptionalAgentSessionMethodName = {
@@ -249,12 +249,15 @@ describe("wrapClientProvider", () => {
 
     // What adopt actually reads: the definition must come from the backup account's file.
     expect(
-      readPerDirRemoteMcpServer({
+      findPerDirMcpServer({
         configDir: scope?.configDir ?? "",
         projectDir: "/workspace",
         name: "amplitude",
       }),
-    ).toEqual({ url: "https://amplitude.example/backup", transport: "http" });
+    ).toEqual({
+      kind: "remote",
+      server: { url: "https://amplitude.example/backup", transport: "http" },
+    });
   });
 
   test("a derived provider's config dir expands ${VAR} against the env its sessions run with", () => {
@@ -283,11 +286,40 @@ describe("wrapClientProvider", () => {
     const scope = clients["claude-personal"]?.resolveMcpConfigScope?.("/workspace");
     expect(scope?.configDir).toBe(personalDir);
     expect(
-      readPerDirRemoteMcpServer({
+      findPerDirMcpServer({
         configDir: scope?.configDir ?? "",
         projectDir: "/workspace",
         name: "aspire",
       }),
-    ).toEqual({ url: "https://aspire.example/mcp", transport: "sse" });
+    ).toEqual({ kind: "remote", server: { url: "https://aspire.example/mcp", transport: "sse" } });
+  });
+
+  test("a derived claude provider answers for its own account's sign-in state", async () => {
+    const signedIn = createAccountDir("signed-in", {});
+    writeFileSync(
+      join(signedIn, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "worker@example.com" } }),
+    );
+    const signedOut = createAccountDir("signed-out", {});
+
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        claude: { env: { CLAUDE_CONFIG_DIR: signedIn } },
+        "claude-personal": {
+          extends: "claude",
+          label: "Claude Personal",
+          env: { CLAUDE_CONFIG_DIR: signedOut },
+        },
+      },
+    });
+
+    expect(await clients.claude?.describeAccountAuth?.()).toEqual({
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+    });
+    expect(await clients["claude-personal"]?.describeAccountAuth?.()).toEqual({
+      state: "signed-out",
+      signInCommand: `CLAUDE_CONFIG_DIR=${signedOut} claude /login`,
+    });
   });
 });

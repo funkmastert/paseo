@@ -48,6 +48,7 @@ import {
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
 import { AgentProviderMoveError } from "./agent/provider-move.js";
+import { McpAdoptError } from "./mcp-gateway/adopt-failure.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -4463,15 +4464,28 @@ export class Session {
       });
       this.emit({
         type: "mcp_gateway.server.adopt.response",
-        payload: { requestId: request.requestId, authorizationUrl, error: null },
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          remedyCommand: null,
+        },
       });
     } catch (error) {
+      const failure = error instanceof McpAdoptError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, agentId: request.agentId, reason: failure?.reason },
+        "Failed to broker the MCP server",
+      );
       this.emit({
         type: "mcp_gateway.server.adopt.response",
         payload: {
           requestId: request.requestId,
           authorizationUrl: null,
           error: getErrorMessageOr(error, "Failed to broker the MCP server"),
+          reason: failure?.reason ?? null,
+          remedyCommand: failure?.remedyCommand ?? null,
         },
       });
     }
