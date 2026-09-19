@@ -1941,8 +1941,25 @@ export const ru: TranslationResources = {
     adoptAction: "Проксировать и войти",
     openClaudeAiAction: "Открыть claude.ai",
     authError: "Ошибка аутентификации: {{error}}",
+    failure: {
+      gatewayDisabled: "Шлюз MCP отключён на этом хосте.",
+      unknownAgent:
+        "Агент, сообщивший об этом, больше не открыт. Откройте того, кто его использует.",
+      providerHasNoConfig:
+        "Paseo не может прочитать конфигурацию MCP для {{provider}}, поэтому не может его проксировать.",
+      accountSignedOut: "{{provider}} не выполнен вход. Выполните это на хосте и попробуйте снова:",
+      serverNotInConfig:
+        "{{name}} нет в конфигурации MCP, которую Paseo читает для {{provider}}. Агент загружает его откуда-то ещё, и Paseo не может определить откуда.",
+      serverIsLocal:
+        "{{name}} запускается как локальная команда. Проксировать можно только серверы http и sse.",
+      adoptFailed: "Не удалось проксировать {{name}}: {{error}}",
+      authorizationFailed: "Не удалось войти: {{error}}",
+      unknown: "Не удалось проксировать {{name}}: {{error}}",
+    },
     reportedBy: "Сообщено агентом {{agent}}",
+    reportedByOn: "{{agent}} на {{provider}}",
     reportedByCount: "Сообщено {{count}} агентами",
+    reportedOn: "На {{provider}}",
     expand: "Развернуть статус MCP",
     collapse: "Свернуть статус MCP",
   },

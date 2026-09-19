@@ -1,17 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { ChevronDown, ChevronUp, ExternalLink, KeyRound, Server } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
 import type { Theme } from "@/styles/theme";
 import { useMcpStatus } from "./use-mcp-status";
-import type {
-  McpStatusRow,
-  McpStatusRowAnnotation,
-  McpStatusRowStatusKey,
-} from "./mcp-status-strip-model";
+import { failureText, reportedByText } from "./mcp-status-copy";
+import type { McpStatusRow, McpStatusRowStatusKey } from "./mcp-status-strip-model";
 
 const ThemedServer = withUnistyles(Server);
 const ThemedChevronUp = withUnistyles(ChevronUp);
@@ -57,12 +53,6 @@ function statusLabelKeyFor(statusKey: McpStatusRowStatusKey): string {
   }
 }
 
-function reportedByText(t: TFunction, annotation: McpStatusRowAnnotation): string {
-  return annotation.reporterCount > 1
-    ? t("mcpStatus.reportedByCount", { count: annotation.reporterCount })
-    : t("mcpStatus.reportedBy", { agent: annotation.agentLabel });
-}
-
 function StatusDot({ tone, testID }: { tone: ProviderUsageTone; testID?: string }) {
   return <View testID={testID} style={[styles.dot, toneDotStyle(tone)]} />;
 }
@@ -71,14 +61,10 @@ function McpStatusRowView({
   row,
   onAction,
   actionDisabled,
-  authError,
 }: {
   row: McpStatusRow;
   onAction: (row: McpStatusRow) => void;
   actionDisabled: boolean;
-  /** Last resolved auth error for this row (U8 slice), already cleared once the row's own
-   * status has moved on from the status it was recorded against. */
-  authError?: string;
 }) {
   const { t } = useTranslation();
   const handleActionPress = useCallback(() => onAction(row), [onAction, row]);
@@ -114,13 +100,23 @@ function McpStatusRowView({
           </Pressable>
         ) : null}
       </View>
-      {authError ? (
+      {row.failure ? (
         <Text
           style={styles.authErrorText}
-          numberOfLines={2}
+          numberOfLines={3}
           testID={`mcp-status-auth-error-${row.name}`}
         >
-          {t("mcpStatus.authError", { error: authError })}
+          {failureText(t, row, row.failure)}
+        </Text>
+      ) : null}
+      {row.failure?.remedyCommand ? (
+        <Text
+          style={styles.remedyCommandText}
+          numberOfLines={2}
+          selectable
+          testID={`mcp-status-remedy-${row.name}`}
+        >
+          {row.failure.remedyCommand}
         </Text>
       ) : null}
     </View>
@@ -145,69 +141,22 @@ export function McpStatusStrip() {
   } = useMcpStatus();
   // Always starts collapsed — this is UI chrome state, not persisted, per KTD10.
   const [expanded, setExpanded] = useState(false);
-  // Per-row "last auth error" (P2 slice of #8): the daemon's `mcp_gateway.auth.start` RPC
-  // resolves rather than throws for known failures (static-auth server, unknown server,
-  // gateway error), so the strip has to surface `result.error` itself — the mutation's own
-  // rejection path never fires for those cases.
-  const [authErrors, setAuthErrors] = useState<Record<string, string>>({});
-  const rowStatusByNameRef = useRef<Record<string, McpStatusRowStatusKey>>({});
-
-  // Clear a row's stored error once that row's own status has moved on — a fresh
-  // mcp_status_update push means the daemon's view of the server changed independently of
-  // whether the user retried, so a stale error should not linger under a new status.
-  useEffect(() => {
-    const previousStatusByName = rowStatusByNameRef.current;
-    const nextStatusByName: Record<string, McpStatusRowStatusKey> = {};
-    const namesWithChangedStatus: string[] = [];
-    for (const row of model.rows) {
-      nextStatusByName[row.name] = row.statusKey;
-      if (
-        previousStatusByName[row.name] !== undefined &&
-        previousStatusByName[row.name] !== row.statusKey
-      ) {
-        namesWithChangedStatus.push(row.name);
-      }
-    }
-    rowStatusByNameRef.current = nextStatusByName;
-
-    if (namesWithChangedStatus.length === 0) return;
-    setAuthErrors((prev) => {
-      let next: Record<string, string> | undefined;
-      for (const name of namesWithChangedStatus) {
-        if (name in prev) {
-          next ??= { ...prev };
-          delete next[name];
-        }
-      }
-      return next ?? prev;
-    });
-  }, [model.rows]);
 
   const handleToggle = useCallback(() => setExpanded((prev) => !prev), []);
   const handleAction = useCallback(
     (row: McpStatusRow) => {
-      const name = row.name;
-      // Clear any stale error for this row as soon as a new attempt starts.
-      setAuthErrors((prev) => {
-        if (!(name in prev)) return prev;
-        const next = { ...prev };
-        delete next[name];
-        return next;
-      });
       void (async () => {
         try {
           if (row.action === "openClaudeAi") {
             await openClaudeAiConnectors();
             return;
           }
-          const result =
-            row.action === "adopt" && row.annotation
-              ? await adoptServer(name, row.annotation.agentId)
-              : await startAuth(name);
-          if (result.error && !result.authorizationUrl) {
-            const error = result.error;
-            setAuthErrors((prev) => ({ ...prev, [name]: error }));
+          // Both resolve with the daemon's answer and record it onto the row themselves.
+          if (row.action === "adopt" && row.annotation) {
+            await adoptServer(row.name, row.annotation.agentId);
+            return;
           }
+          await startAuth(row.name);
         } catch {
           // The mutation's error/`isPending` state already reflects the failure; the strip
           // stays interactive and the next mcp_status_update push repaints the real state.
@@ -256,7 +205,6 @@ export function McpStatusStrip() {
               row={row}
               onAction={handleAction}
               actionDisabled={isStartingAuth}
-              authError={authErrors[row.name]}
             />
           ))}
         </View>
@@ -309,6 +257,13 @@ const styles = StyleSheet.create((theme) => ({
   authErrorText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.statusDanger,
+    paddingHorizontal: theme.spacing[3],
+    paddingBottom: theme.spacing[1],
+  },
+  remedyCommandText: {
+    fontSize: theme.fontSize.sm,
+    fontFamily: theme.fontFamily.mono,
+    color: theme.colors.foregroundMuted,
     paddingHorizontal: theme.spacing[3],
     paddingBottom: theme.spacing[1],
   },

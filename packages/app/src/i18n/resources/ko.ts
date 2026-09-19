@@ -1920,8 +1920,25 @@ export const ko: TranslationResources = {
     adoptAction: "중계 후 로그인",
     openClaudeAiAction: "claude.ai 열기",
     authError: "인증 실패: {{error}}",
+    failure: {
+      gatewayDisabled: "이 호스트에서 MCP 게이트웨이가 꺼져 있습니다.",
+      unknownAgent:
+        "이를 보고한 에이전트가 더 이상 열려 있지 않습니다. 사용 중인 에이전트를 여세요.",
+      providerHasNoConfig: "Paseo가 {{provider}}의 MCP 설정을 읽을 수 없어 중계할 수 없습니다.",
+      accountSignedOut:
+        "{{provider}}에 로그인되어 있지 않습니다. 호스트에서 다음을 실행한 뒤 다시 시도하세요:",
+      serverNotInConfig:
+        "{{name}}은(는) Paseo가 {{provider}}용으로 읽는 MCP 설정에 없습니다. 에이전트가 다른 곳에서 불러오며, Paseo는 그곳을 알 수 없습니다.",
+      serverIsLocal:
+        "{{name}}은(는) 로컬 명령으로 실행됩니다. http와 sse 서버만 중계할 수 있습니다.",
+      adoptFailed: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
+      authorizationFailed: "로그인 실패: {{error}}",
+      unknown: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
+    },
     reportedBy: "{{agent}}가 보고함",
+    reportedByOn: "{{provider}}의 {{agent}}",
     reportedByCount: "에이전트 {{count}}개가 보고함",
+    reportedOn: "{{provider}}에서",
     expand: "MCP 상태 펼치기",
     collapse: "MCP 상태 접기",
   },

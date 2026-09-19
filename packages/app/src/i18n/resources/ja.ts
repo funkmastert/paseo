@@ -1928,8 +1928,25 @@ export const ja: TranslationResources = {
     adoptAction: "中継して認証する",
     openClaudeAiAction: "claude.ai を開く",
     authError: "認証に失敗しました: {{error}}",
+    failure: {
+      gatewayDisabled: "このホストでは MCP ゲートウェイが無効です。",
+      unknownAgent:
+        "報告したエージェントは開かれていません。使用中のエージェントを開いてください。",
+      providerHasNoConfig: "Paseo は {{provider}} の MCP 設定を読めないため、中継できません。",
+      accountSignedOut:
+        "{{provider}} はログインしていません。ホストで次を実行してから再試行してください:",
+      serverNotInConfig:
+        "{{name}} は Paseo が {{provider}} 用に読む MCP 設定にありません。エージェントは別の場所から読み込んでおり、Paseo にはその場所が分かりません。",
+      serverIsLocal:
+        "{{name}} はローカルコマンドとして動作します。中継できるのは http と sse のサーバーだけです。",
+      adoptFailed: "{{name}} を中継できませんでした: {{error}}",
+      authorizationFailed: "ログインに失敗しました: {{error}}",
+      unknown: "{{name}} を中継できませんでした: {{error}}",
+    },
     reportedBy: "{{agent}} が報告",
+    reportedByOn: "{{provider}} の {{agent}}",
     reportedByCount: "エージェント {{count}} 件が報告",
+    reportedOn: "{{provider}} 上",
     expand: "MCPステータスを展開",
     collapse: "MCPステータスを折りたたむ",
   },

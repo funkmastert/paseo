@@ -1961,8 +1961,25 @@ export const fr: TranslationResources = {
     adoptAction: "Relayer et se connecter",
     openClaudeAiAction: "Ouvrir claude.ai",
     authError: "Échec de l'authentification : {{error}}",
+    failure: {
+      gatewayDisabled: "La passerelle MCP est désactivée sur cet hôte.",
+      unknownAgent: "L'agent qui l'a signalé n'est plus ouvert. Ouvrez-en un qui l'utilise.",
+      providerHasNoConfig:
+        "Paseo ne peut pas lire la configuration MCP de {{provider}}, il ne peut donc pas la relayer.",
+      accountSignedOut:
+        "{{provider}} n'est pas connecté. Exécutez ceci sur l'hôte, puis réessayez :",
+      serverNotInConfig:
+        "{{name}} ne figure pas dans la configuration MCP que Paseo lit pour {{provider}}. L'agent le charge depuis un autre endroit, que Paseo ne peut pas identifier.",
+      serverIsLocal:
+        "{{name}} s'exécute comme une commande locale. Seuls les serveurs http et sse peuvent être relayés.",
+      adoptFailed: "Impossible de relayer {{name}} : {{error}}",
+      authorizationFailed: "Échec de la connexion : {{error}}",
+      unknown: "Impossible de relayer {{name}} : {{error}}",
+    },
     reportedBy: "Signalé par {{agent}}",
+    reportedByOn: "{{agent}} sur {{provider}}",
     reportedByCount: "Signalé par {{count}} agents",
+    reportedOn: "Sur {{provider}}",
     expand: "Développer l'état MCP",
     collapse: "Réduire l'état MCP",
   },

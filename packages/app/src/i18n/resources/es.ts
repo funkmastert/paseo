@@ -1956,8 +1956,25 @@ export const es: TranslationResources = {
     adoptAction: "Intermediar e iniciar sesión",
     openClaudeAiAction: "Abrir claude.ai",
     authError: "Fallo en la autenticación: {{error}}",
+    failure: {
+      gatewayDisabled: "La pasarela MCP está desactivada en este host.",
+      unknownAgent: "El agente que lo reportó ya no está abierto. Abre uno que lo use.",
+      providerHasNoConfig:
+        "Paseo no puede leer la configuración MCP de {{provider}}, así que no puede intermediarlo.",
+      accountSignedOut:
+        "{{provider}} no tiene la sesión iniciada. Ejecuta esto en el host y vuelve a intentarlo:",
+      serverNotInConfig:
+        "{{name}} no está en la configuración MCP que Paseo lee para {{provider}}. El agente lo carga desde otro sitio y Paseo no puede saber cuál.",
+      serverIsLocal:
+        "{{name}} se ejecuta como un comando local. Solo se pueden intermediar servidores http y sse.",
+      adoptFailed: "No se pudo intermediar {{name}}: {{error}}",
+      authorizationFailed: "Fallo al iniciar sesión: {{error}}",
+      unknown: "No se pudo intermediar {{name}}: {{error}}",
+    },
     reportedBy: "Reportado por {{agent}}",
+    reportedByOn: "{{agent}} en {{provider}}",
     reportedByCount: "Reportado por {{count}} agentes",
+    reportedOn: "En {{provider}}",
     expand: "Expandir estado de MCP",
     collapse: "Contraer estado de MCP",
   },

@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useShallow } from "zustand/shallow";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -15,6 +15,8 @@ import { useReplicaQuery } from "@/data/query";
 import { openExternalUrl } from "@/utils/open-external-url";
 import {
   buildMcpStatusStripModel,
+  type McpStatusActionFailure,
+  type McpStatusRowStatusKey,
   type McpStatusSessionReport,
   type McpStatusServerEntry,
   type McpStatusStripModel,
@@ -89,6 +91,7 @@ function useMcpStatusSessionReports(
         reports.push({
           agentId: agent.id,
           agentLabel,
+          provider: agent.provider,
           serverName: status.name,
           status: status.status,
         });
@@ -103,8 +106,8 @@ export interface UseMcpStatusResult {
   /** False on an old daemon (no `server_info.features.mcpStatus`) — the strip renders nothing. */
   supportsMcpStatus: boolean;
   model: McpStatusStripModel;
-  /** Starts interactive OAuth for one server (U6), then opens the returned URL. Resolves with
-   * the RPC's `error` field (not a throw) on a known failure — the caller surfaces it inline. */
+  /** Starts interactive OAuth for one server (U6), then opens the returned URL. The RPC resolves
+   * with an `error` field rather than throwing, so the failure is recorded onto the row here. */
   startAuth: (name: string) => Promise<McpGatewayAuthStartPayload>;
   /** Brokers a session-reported server through the daemon (reading the reporting agent's MCP
    * config), then opens the sign-in URL if one comes back. Same non-throwing contract. */
@@ -136,15 +139,58 @@ export function useMcpStatus(): UseMcpStatusResult {
 
   const sessionReports = useMcpStatusSessionReports(serverId, t("agentList.fallbackTitle"));
 
+  // Per-row record of the last failed action. The auth and adopt RPCs resolve with an `error`
+  // field for known failures rather than rejecting, so the mutations' own error state never
+  // fires for them and the row has to keep the answer itself.
+  const [failures, setFailures] = useState<Record<string, McpStatusActionFailure>>({});
+  const clearFailure = useCallback((name: string) => {
+    setFailures((prev) => {
+      if (!(name in prev)) return prev;
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  }, []);
+
   const model = useMemo(
     () =>
       buildMcpStatusStripModel({
         servers: statusQuery.data?.servers ?? [],
         sessionReports,
         canAdopt: supportsAdopt,
+        failures,
       }),
-    [statusQuery.data, sessionReports, supportsAdopt],
+    [statusQuery.data, sessionReports, supportsAdopt, failures],
   );
+
+  // Drop a row's recorded failure once the daemon's own view of that server moves on: a fresh
+  // mcp_status_update means the state changed independently of whether anyone retried, and a
+  // stale explanation under a new status would also keep the row's action withdrawn.
+  const rowStatusByNameRef = useRef<Record<string, McpStatusRowStatusKey>>({});
+  useEffect(() => {
+    const previousStatusByName = rowStatusByNameRef.current;
+    const nextStatusByName: Record<string, McpStatusRowStatusKey> = {};
+    const namesWithChangedStatus: string[] = [];
+    for (const row of model.rows) {
+      nextStatusByName[row.name] = row.statusKey;
+      const previous = previousStatusByName[row.name];
+      if (previous !== undefined && previous !== row.statusKey) {
+        namesWithChangedStatus.push(row.name);
+      }
+    }
+    rowStatusByNameRef.current = nextStatusByName;
+    if (namesWithChangedStatus.length === 0) return;
+    setFailures((prev) => {
+      let next: Record<string, McpStatusActionFailure> | undefined;
+      for (const name of namesWithChangedStatus) {
+        if (name in prev) {
+          next ??= { ...prev };
+          delete next[name];
+        }
+      }
+      return next ?? prev;
+    });
+  }, [model.rows]);
 
   const startAuthMutation = useMutation({
     mutationFn: async (name: string) => {
@@ -160,8 +206,19 @@ export function useMcpStatus(): UseMcpStatusResult {
   });
 
   const startAuth = useCallback(
-    (name: string) => startAuthMutation.mutateAsync(name),
-    [startAuthMutation],
+    async (name: string) => {
+      clearFailure(name);
+      const result = await startAuthMutation.mutateAsync(name);
+      if (result.error && !result.authorizationUrl) {
+        setFailures((prev) => ({
+          ...prev,
+          // auth.start has no reason vocabulary of its own; its sentence stands alone.
+          [name]: { reason: null, remedyCommand: null, error: result.error ?? "" },
+        }));
+      }
+      return result;
+    },
+    [clearFailure, startAuthMutation],
   );
 
   const adoptMutation = useMutation({
@@ -178,8 +235,22 @@ export function useMcpStatus(): UseMcpStatusResult {
   });
 
   const adoptServer = useCallback(
-    (name: string, agentId: string) => adoptMutation.mutateAsync({ name, agentId }),
-    [adoptMutation],
+    async (name: string, agentId: string) => {
+      clearFailure(name);
+      const result = await adoptMutation.mutateAsync({ name, agentId });
+      if (result.error && !result.authorizationUrl) {
+        setFailures((prev) => ({
+          ...prev,
+          [name]: {
+            reason: result.reason ?? null,
+            remedyCommand: result.remedyCommand ?? null,
+            error: result.error ?? "",
+          },
+        }));
+      }
+      return result;
+    },
+    [adoptMutation, clearFailure],
   );
 
   const openClaudeAiConnectors = useCallback(async () => {

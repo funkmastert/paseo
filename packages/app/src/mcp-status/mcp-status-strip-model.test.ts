@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildMcpStatusStripModel,
   deriveMcpStatusTone,
+  isTerminalAdoptFailure,
+  type McpStatusActionFailure,
   type McpStatusServerEntry,
   type McpStatusSessionReport,
 } from "./mcp-status-strip-model";
@@ -19,6 +21,7 @@ function report(overrides: Partial<McpStatusSessionReport> & { serverName: strin
   return {
     agentId: "agent-1",
     agentLabel: "Worker agent",
+    provider: "claude-personal",
     status: "failed",
     ...overrides,
   } satisfies McpStatusSessionReport;
@@ -109,7 +112,9 @@ describe("buildMcpStatusStripModel", () => {
     expect(row?.annotation).toEqual({
       agentLabel: "Backend worker",
       agentId: "agent-1",
+      agentProvider: "claude-personal",
       reporterCount: 1,
+      providerIds: ["claude-personal"],
     });
     expect(row?.action).toBeUndefined();
   });
@@ -127,7 +132,9 @@ describe("buildMcpStatusStripModel", () => {
     expect(sessionRow?.annotation).toEqual({
       agentLabel: "Leader agent",
       agentId: "agent-1",
+      agentProvider: "claude-personal",
       reporterCount: 1,
+      providerIds: ["claude-personal"],
     });
     expect(model.hasData).toBe(true);
   });
@@ -149,7 +156,9 @@ describe("buildMcpStatusStripModel", () => {
     expect(biblio?.annotation).toEqual({
       agentLabel: "Worker 1",
       agentId: "agent-1",
+      agentProvider: "claude-personal",
       reporterCount: 3,
+      providerIds: ["claude-personal"],
     });
     expect(biblio?.action).toBeUndefined();
   });
@@ -168,7 +177,9 @@ describe("buildMcpStatusStripModel", () => {
     expect(row?.annotation).toEqual({
       agentLabel: "Worker 1",
       agentId: "agent-1",
+      agentProvider: "claude-personal",
       reporterCount: 2,
+      providerIds: ["claude-personal"],
     });
     expect(row?.action).toBe("authenticate");
     expect(model.rows).toHaveLength(1);
@@ -288,5 +299,145 @@ describe("row actions", () => {
       });
       expect(model.rows[0]?.action).toBe("openClaudeAi");
     }
+  });
+});
+
+function failure(overrides: Partial<McpStatusActionFailure> = {}): McpStatusActionFailure {
+  return { reason: null, remedyCommand: null, error: "boom", ...overrides };
+}
+
+describe("isTerminalAdoptFailure", () => {
+  it.each([
+    "gateway_disabled",
+    "unknown_agent",
+    "provider_has_no_config",
+    "account_signed_out",
+    "server_not_in_config",
+    "server_is_local",
+  ])("treats %s as beyond retrying", (reason) => {
+    expect(isTerminalAdoptFailure(failure({ reason }))).toBe(true);
+  });
+
+  it.each(["adopt_failed", "authorization_failed"])("leaves %s retryable", (reason) => {
+    expect(isTerminalAdoptFailure(failure({ reason }))).toBe(false);
+  });
+
+  it("never withdraws an action on a reason it does not recognise, or on none at all", () => {
+    // A newer daemon naming a cause this build predates, and an older one naming none.
+    expect(isTerminalAdoptFailure(failure({ reason: "some_future_cause" }))).toBe(false);
+    expect(isTerminalAdoptFailure(failure())).toBe(false);
+    expect(isTerminalAdoptFailure(undefined)).toBe(false);
+  });
+});
+
+describe("buildMcpStatusStripModel action gating", () => {
+  const sessionOnly = [report({ serverName: "amplitude" })];
+
+  it("offers adopt before anything has been tried", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: sessionOnly,
+      canAdopt: true,
+    });
+
+    expect(model.rows[0]?.action).toBe("adopt");
+    expect(model.rows[0]?.failure).toBeUndefined();
+  });
+
+  it("withdraws adopt once the daemon names a cause signing in again cannot clear", () => {
+    const signedOut = failure({
+      reason: "account_signed_out",
+      remedyCommand: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+      error: "The account in /home/t/.claude-personal is not signed in",
+    });
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: sessionOnly,
+      canAdopt: true,
+      failures: { amplitude: signedOut },
+    });
+
+    expect(model.rows[0]?.action).toBeUndefined();
+    expect(model.rows[0]?.failure).toEqual(signedOut);
+  });
+
+  it("keeps adopt after a failure that retrying could clear", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: sessionOnly,
+      canAdopt: true,
+      failures: { amplitude: failure({ reason: "authorization_failed" }) },
+    });
+
+    expect(model.rows[0]?.action).toBe("adopt");
+  });
+
+  it("keeps sending claude.ai connectors to claude.ai, whatever adopt would have said", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [report({ serverName: "claude.ai Datadog" })],
+      canAdopt: true,
+      failures: { "claude.ai Datadog": failure({ reason: "server_not_in_config" }) },
+    });
+
+    expect(model.rows[0]?.action).toBe("openClaudeAi");
+  });
+
+  it("carries a failure onto a brokered row too", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "zeeq", status: "needs-auth" })],
+      sessionReports: [],
+      failures: { zeeq: failure({ error: "discovery failed" }) },
+    });
+
+    expect(model.rows[0]?.failure?.error).toBe("discovery failed");
+    // An unrecognised reason never withdraws the gateway's own authenticate action either.
+    expect(model.rows[0]?.action).toBe("authenticate");
+  });
+});
+
+describe("buildMcpStatusStripModel reporter provenance", () => {
+  it("records one provider when every reporter shares an account", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "amplitude", agentId: "a1", provider: "claude-personal" }),
+        report({ serverName: "amplitude", agentId: "a2", provider: "claude-personal" }),
+        report({ serverName: "amplitude", agentId: "a3", provider: "claude-personal" }),
+      ],
+    });
+
+    expect(model.rows[0]?.annotation).toMatchObject({
+      reporterCount: 3,
+      providerIds: ["claude-personal"],
+    });
+  });
+
+  it("records every provider, sorted, when reporters span accounts", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "amplitude", agentId: "a1", provider: "claude-personal" }),
+        report({ serverName: "amplitude", agentId: "a2", provider: "claude-backup" }),
+      ],
+    });
+
+    expect(model.rows[0]?.annotation).toMatchObject({
+      reporterCount: 2,
+      providerIds: ["claude-backup", "claude-personal"],
+    });
+  });
+
+  it("names the adopting agent's own provider, which is the account a failure is about", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "amplitude", agentId: "a1", provider: "claude-personal" }),
+        report({ serverName: "amplitude", agentId: "a2", provider: "claude-backup" }),
+      ],
+    });
+
+    expect(model.rows[0]?.annotation?.agentId).toBe("a1");
+    expect(model.rows[0]?.annotation?.agentProvider).toBe("claude-personal");
   });
 });

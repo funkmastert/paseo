@@ -2,7 +2,7 @@
 
 import React, { type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mcpStatusQueryKey, useMcpStatus, type McpStatusPayload } from "./use-mcp-status";
 
@@ -181,5 +181,92 @@ describe("useMcpStatus", () => {
     });
     // A resolved known failure never opens a URL — the caller surfaces `error` inline instead.
     expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("records the daemon's reason on the row and withdraws an action it says cannot work", async () => {
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true, mcpGatewayAdopt: true } },
+          agents: new Map([
+            [
+              "agent-9",
+              {
+                id: "agent-9",
+                title: "Worker",
+                provider: "claude-personal",
+                mcpServerStatuses: [{ name: "amplitude", status: "failed" }],
+              },
+            ],
+          ]),
+        },
+      },
+    };
+    adoptMcpGatewayServerMock.mockResolvedValue({
+      requestId: "req-4",
+      authorizationUrl: null,
+      error: "The account in /home/t/.claude-personal is not signed in",
+      reason: "account_signed_out",
+      remedyCommand: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+    });
+
+    const { result } = renderHook(() => useMcpStatus(), { wrapper });
+
+    await waitFor(() => expect(result.current.model.rows[0]?.action).toBe("adopt"));
+    await act(async () => {
+      await result.current.adoptServer("amplitude", "agent-9");
+    });
+
+    await waitFor(() => {
+      expect(result.current.model.rows[0]?.failure).toEqual({
+        reason: "account_signed_out",
+        remedyCommand: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+        error: "The account in /home/t/.claude-personal is not signed in",
+      });
+    });
+    expect(result.current.model.rows[0]?.action).toBeUndefined();
+    expect(openExternalUrlMock).not.toHaveBeenCalled();
+  });
+
+  it("records an old daemon's bare sentence with no reason, keeping the action offered", async () => {
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true, mcpGatewayAdopt: true } },
+          agents: new Map([
+            [
+              "agent-9",
+              {
+                id: "agent-9",
+                title: "Worker",
+                provider: "claude-personal",
+                mcpServerStatuses: [{ name: "amplitude", status: "failed" }],
+              },
+            ],
+          ]),
+        },
+      },
+    };
+    adoptMcpGatewayServerMock.mockResolvedValue({
+      requestId: "req-5",
+      authorizationUrl: null,
+      error: "Failed to broker the MCP server",
+    });
+
+    const { result } = renderHook(() => useMcpStatus(), { wrapper });
+
+    await waitFor(() => expect(result.current.model.rows[0]?.action).toBe("adopt"));
+    await act(async () => {
+      await result.current.adoptServer("amplitude", "agent-9");
+    });
+
+    await waitFor(() => {
+      expect(result.current.model.rows[0]?.failure).toEqual({
+        reason: null,
+        remedyCommand: null,
+        error: "Failed to broker the MCP server",
+      });
+    });
+    expect(result.current.model.rows[0]?.action).toBe("adopt");
   });
 });

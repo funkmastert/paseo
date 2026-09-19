@@ -21,6 +21,8 @@ export interface McpStatusServerEntry {
 export interface McpStatusSessionReport {
   agentId: string;
   agentLabel: string;
+  /** The agent's provider — the account its session loaded this server under. */
+  provider: string;
   serverName: string;
   status: string;
 }
@@ -46,8 +48,47 @@ export interface McpStatusRowAnnotation {
   agentLabel: string;
   /** Id of that agent — the adopt action reads its config dir and project for the definition. */
   agentId: string;
-  /** Distinct agents reporting it — the strip says "reported by N agents" above one. */
+  /** That agent's provider, which is the account any adopt failure will be about. */
+  agentProvider: string;
+  /** Distinct agents reporting it. */
   reporterCount: number;
+  /**
+   * Distinct providers among the reporters, sorted. One provider means one account, and the
+   * count of agents that happened to load a broken server is not the story — the account is.
+   */
+  providerIds: string[];
+}
+
+/**
+ * The daemon's answer to the last action on a row. `reason` is its machine-readable cause
+ * (docs/mcp-gateway.md); a daemon that predates it sends none and the row falls back to the
+ * `error` sentence. `remedyCommand` is something the person runs on the host, never a Paseo
+ * action — a row that has one is a row whose button cannot help.
+ */
+export interface McpStatusActionFailure {
+  reason: string | null;
+  remedyCommand: string | null;
+  error: string;
+}
+
+/**
+ * Causes that pressing the button again cannot clear. The daemon marks these; a reason it does
+ * not know, and a daemon too old to send one, both stay actionable — the app must not withdraw
+ * an action on a guess.
+ */
+const TERMINAL_ADOPT_REASONS: ReadonlySet<string> = new Set([
+  "gateway_disabled",
+  "unknown_agent",
+  "provider_has_no_config",
+  "account_signed_out",
+  "server_not_in_config",
+  "server_is_local",
+]);
+
+export function isTerminalAdoptFailure(failure: McpStatusActionFailure | undefined): boolean {
+  return failure?.reason !== undefined && failure?.reason !== null
+    ? TERMINAL_ADOPT_REASONS.has(failure.reason)
+    : false;
 }
 
 /** One rendered row — a brokered server (`sessionOnly: false`) or a session-only report with
@@ -62,6 +103,8 @@ export interface McpStatusRow {
   error?: string;
   /** Set when a session reported trouble with this server too — "reported by <agent>". */
   annotation?: McpStatusRowAnnotation;
+  /** The last failed attempt on this row, which decides its explanation and its action. */
+  failure?: McpStatusActionFailure;
   sessionOnly: boolean;
 }
 
@@ -174,7 +217,9 @@ function annotationFor(reports: McpStatusSessionReport[]): McpStatusRowAnnotatio
   return {
     agentLabel: first.agentLabel,
     agentId: first.agentId,
+    agentProvider: first.provider,
     reporterCount: new Set(reports.map((report) => report.agentId)).size,
+    providerIds: [...new Set(reports.map((report) => report.provider))].sort(),
   };
 }
 
@@ -185,9 +230,17 @@ export function isClaudeAiConnectorName(name: string): boolean {
   return name.startsWith(CLAUDE_AI_CONNECTOR_PREFIX);
 }
 
-function sessionOnlyActionFor(name: string, canAdopt: boolean): McpStatusRowAction | undefined {
-  if (isClaudeAiConnectorName(name)) return "openClaudeAi";
-  return canAdopt ? "adopt" : undefined;
+function sessionOnlyActionFor(input: {
+  name: string;
+  canAdopt: boolean;
+  failure: McpStatusActionFailure | undefined;
+}): McpStatusRowAction | undefined {
+  if (isClaudeAiConnectorName(input.name)) return "openClaudeAi";
+  if (!input.canAdopt) return undefined;
+  // Until it has been tried, adopt is worth offering: nothing before the attempt knows whether
+  // the daemon can read that server's definition. Once the daemon has named a cause retrying
+  // cannot clear, the button would only fail again, so the row explains instead.
+  return isTerminalAdoptFailure(input.failure) ? undefined : "adopt";
 }
 
 function isUnhealthyRow(row: McpStatusRow): boolean {
@@ -198,15 +251,18 @@ function isUnhealthyRow(row: McpStatusRow): boolean {
  * Pure derivation of the strip's rows and collapsed summary from the daemon's server snapshot
  * plus any per-agent init-reported statuses (KTD10). Never drops a session-reported failure
  * (AE3): a report for a known server becomes an annotation on that row; reports for an
- * unknown (non-brokered) server collapse into one row per server name with a reporter count —
- * never one row per agent, which with a dozen workers all loading the same broken user-scope
- * server read as a wall of duplicate notifications. Every row that can lead somewhere carries an
- * `action`; `canAdopt` is the daemon's `mcpGatewayAdopt` feature flag.
+ * unknown (non-brokered) server collapse into one row per server name, annotated with the
+ * accounts that reported it — never one row per agent, which with a dozen workers all loading
+ * the same broken user-scope server read as a wall of duplicate notifications. A row carries an
+ * `action` only while that action could still do something: `canAdopt` is the daemon's
+ * `mcpGatewayAdopt` feature flag, and a `failure` the daemon called terminal withdraws it.
  */
 export function buildMcpStatusStripModel(input: {
   servers: McpStatusServerEntry[];
   sessionReports: McpStatusSessionReport[];
   canAdopt?: boolean;
+  /** The last failed action per server name, keyed as the strip records them. */
+  failures?: Record<string, McpStatusActionFailure>;
 }): McpStatusStripModel {
   const serverNames = new Set(input.servers.map((server) => server.name));
   const unhealthyReportsByServer = groupUnhealthyReportsByServer(input.sessionReports);
@@ -222,6 +278,7 @@ export function buildMcpStatusStripModel(input: {
       ...(isUnhealthy(server.status) ? { action: "authenticate" as const } : {}),
       ...(server.error !== undefined ? { error: server.error } : {}),
       ...(annotation ? { annotation } : {}),
+      ...(input.failures?.[server.name] ? { failure: input.failures[server.name] } : {}),
       sessionOnly: false,
     };
   });
@@ -231,7 +288,12 @@ export function buildMcpStatusStripModel(input: {
     if (serverNames.has(serverName)) continue;
     const annotation = annotationFor(reports);
     if (!annotation) continue;
-    const action = sessionOnlyActionFor(serverName, input.canAdopt ?? false);
+    const failure = input.failures?.[serverName];
+    const action = sessionOnlyActionFor({
+      name: serverName,
+      canAdopt: input.canAdopt ?? false,
+      failure,
+    });
     sessionOnlyRows.push({
       key: `session:${serverName}`,
       name: serverName,
@@ -240,6 +302,7 @@ export function buildMcpStatusStripModel(input: {
       critical: false,
       ...(action ? { action } : {}),
       annotation,
+      ...(failure ? { failure } : {}),
       sessionOnly: true,
     });
   }

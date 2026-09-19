@@ -1910,8 +1910,23 @@ export const ar: TranslationResources = {
     adoptAction: "التوسيط وتسجيل الدخول",
     openClaudeAiAction: "افتح claude.ai",
     authError: "فشلت المصادقة: {{error}}",
+    failure: {
+      gatewayDisabled: "بوابة MCP معطلة على هذا المضيف.",
+      unknownAgent: "الوكيل الذي أبلغ عن هذا لم يعد مفتوحًا. افتح وكيلًا يستخدمه.",
+      providerHasNoConfig:
+        "لا يستطيع Paseo قراءة إعدادات MCP الخاصة بـ {{provider}}، لذا لا يمكنه توسيطه.",
+      accountSignedOut: "{{provider}} غير مسجّل الدخول. نفّذ هذا على المضيف ثم أعد المحاولة:",
+      serverNotInConfig:
+        "{{name}} غير موجود في إعدادات MCP التي يقرأها Paseo لـ {{provider}}. الوكيل يحمّله من مكان آخر، ولا يستطيع Paseo تحديد أيّه.",
+      serverIsLocal: "{{name}} يعمل كأمر محلي. يمكن توسيط خوادم http و sse فقط.",
+      adoptFailed: "تعذّر توسيط {{name}}: {{error}}",
+      authorizationFailed: "فشل تسجيل الدخول: {{error}}",
+      unknown: "تعذّر توسيط {{name}}: {{error}}",
+    },
     reportedBy: "أُبلغ عنها من {{agent}}",
+    reportedByOn: "{{agent}} على {{provider}}",
     reportedByCount: "أُبلغ عنها من {{count}} وكلاء",
+    reportedOn: "على {{provider}}",
     expand: "توسيع حالة MCP",
     collapse: "طي حالة MCP",
   },
