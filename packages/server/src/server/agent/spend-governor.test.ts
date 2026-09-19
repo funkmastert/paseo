@@ -264,4 +264,74 @@ describe("planSpendGovernorActions", () => {
       targetModel: "claude-sonnet-5",
     });
   });
+  // A guard rail that fires once and then never again reads as protection while the agent it
+  // stopped runs on unbounded. Measured before this: an agent paused at 450K of a 300K budget,
+  // re-prompted, and taken to 2.45M — eight times its budget — planned nothing at all.
+  test("pause re-arms when somebody starts the agent again", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+    expect(paused.actions.map((action) => action.stage)).toContain("pause");
+    // The sweep that pauses records the agent as stopped: the cancel it just planned is what
+    // stops it, and the restart may land before the next sweep looks.
+    expect(paused.nextState?.wasRunning).toBe(false);
+
+    const restarted = planSpendGovernorActions({
+      agent: agent({ totalTokens: 2_400_000, isRunning: true }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(restarted.actions.map((action) => action.stage)).toContain("pause");
+  });
+
+  test("pause does not re-fire twice for one turn", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    // The cancel has not settled yet, so the agent is still mid-turn on the next sweep. It was
+    // never observed stopped, so there is no restart to answer.
+    const stillSettling = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_650_000, isRunning: true }),
+      config: config(),
+      previousState: { ...paused.nextState!, wasRunning: true },
+    });
+    expect(stillSettling.actions).toEqual([]);
+  });
+
+  test("an agent left idle over its budget is not paused again on its own", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    const stillIdle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000, isRunning: false }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(stillIdle.actions).toEqual([]);
+  });
+
+  test("raising the budget past the spend releases a paused agent", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    // A human raises the label to 4M. That is a fresh episode, and 1.6M is under every stage.
+    const released = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000, labels: { [SPEND_BUDGET_LABEL]: "4M" } }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(released.actions).toEqual([]);
+    expect(released.nextState?.firedStages).toEqual([]);
+  });
 });

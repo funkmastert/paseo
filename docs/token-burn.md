@@ -63,6 +63,8 @@ Four stages, each switching independently at its own multiple of the budget. Ena
 
 A stage fires once per episode, not once per sweep. A **changed budget starts a fresh episode** — that is how a human releases a paused or cut-off agent: raise the label. Turning the governor off drops the carried state entirely, which releases a blocked agent too.
 
+`pause` is the exception: it re-arms whenever the agent is started again while still over the threshold, so a turn that follows a pause is stopped too. Firing once and never again would read as protection while the agent ran on unbounded — measured at eight times its budget, with the governor watching and planning nothing. The sweep that pauses records the agent as stopped rather than as it found it, because the cancel it just planned is what stops it; otherwise a parent re-prompting its paused child inside the next 60 seconds would look like an agent that never stopped. Re-arming is not a release. Raising the label is.
+
 `downgrade` and `pause` need a running agent. When the agent is idle they defer rather than mark themselves done, so an agent that blew its budget and went briefly quiet is still caught when it resumes. `downgrade` marks itself done without acting when there is no `downgradeToModel` or the agent is already on it.
 
 An agent that jumps several thresholds between two sweeps — 60 seconds at the measured healthy rate is ~200K weighted tokens, so a small budget can go in one — gets every crossed stage in ladder order in that sweep. It is always told before it is paused.

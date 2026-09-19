@@ -72,6 +72,15 @@ export interface SpendGovernorState {
    * only a real run flips this, and only this is what `create_agent` refuses on.
    */
   fanOutBlocked: boolean;
+  /**
+   * Whether the agent was mid-turn at the end of the last sweep, which is how `pause` re-arms.
+   *
+   * A sweep that plans a pause records this as false even though the agent is running as it
+   * plans: the pause is about to stop it. Recording the truth of the instant would hide the
+   * restart that follows — a parent that re-prompts its paused child inside the 60s before the
+   * next sweep would look like an agent that never stopped, and `pause` would stay fired.
+   */
+  wasRunning: boolean;
 }
 
 /** Per-agent facts the planner needs. A lean view, like the monitor summaries it is built from. */
@@ -151,6 +160,51 @@ function canPerform(stage: SpendGovernorStage, agent: SpendGovernorAgentInput): 
   return true;
 }
 
+/**
+ * Whether `pause` gets another turn. Somebody started this agent after the governor stopped it
+ * and it is still over the threshold, so the turn it has just begun is exactly the turn the
+ * stage exists to end. Without this a stage that fires once reads as protection while the agent
+ * it stopped runs on unbounded — measured at eight times its budget, with the governor watching
+ * and planning nothing.
+ *
+ * Re-arming is not a release. Raising the budget label is, and that starts a fresh episode.
+ */
+/** Switched on, not already fired this episode, and the spend is past its line. */
+function stageIsReady(
+  settings: SpendGovernorStageConfig,
+  stage: SpendGovernorStage,
+  fired: ReadonlySet<SpendGovernorStage>,
+  fraction: number,
+): boolean {
+  return settings.enabled && !fired.has(stage) && fraction >= settings.atFraction;
+}
+
+/**
+ * A downgrade with nowhere to go, or one to the model the agent is already on. Marked fired
+ * without acting: re-deciding it every sweep for the rest of the agent's life is pure noise.
+ */
+function downgradeIsMoot(agent: SpendGovernorAgentInput, config: SpendGovernorConfig): boolean {
+  return !config.downgradeToModel || agent.model === config.downgradeToModel;
+}
+
+/** Whether this sweep is about to stop the agent, which is what `wasRunning` has to record. */
+function isStoppingTheAgent(
+  actions: readonly SpendGovernorAction[],
+  config: SpendGovernorConfig,
+): boolean {
+  return !config.dryRun && actions.some((action) => action.stage === "pause");
+}
+
+function shouldReArmPause(
+  carried: SpendGovernorState | undefined,
+  agent: SpendGovernorAgentInput,
+  fraction: number,
+  config: SpendGovernorConfig,
+): boolean {
+  if (carried === undefined || carried.wasRunning || !agent.isRunning) return false;
+  return fraction >= config.pause.atFraction;
+}
+
 export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpendGovernorResult {
   const { agent, config } = input;
   if (!config.enabled) {
@@ -173,18 +227,17 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
   const fraction = spentTokens / budgetTokens;
   const actions: SpendGovernorAction[] = [];
 
+  if (shouldReArmPause(carried, agent, fraction, config)) {
+    fired.delete("pause");
+  }
+
   for (const stage of SPEND_GOVERNOR_STAGES) {
-    const settings = stageConfig(config, stage);
-    if (!settings.enabled || fired.has(stage) || fraction < settings.atFraction) {
+    if (!stageIsReady(stageConfig(config, stage), stage, fired, fraction)) {
       continue;
     }
-    if (stage === "downgrade") {
-      // Nothing to move to, or already there. Marked fired either way: re-deciding it every
-      // sweep for the rest of the agent's life would be pure noise.
-      if (!config.downgradeToModel || agent.model === config.downgradeToModel) {
-        fired.add(stage);
-        continue;
-      }
+    if (stage === "downgrade" && downgradeIsMoot(agent, config)) {
+      fired.add(stage);
+      continue;
     }
     if (!canPerform(stage, agent)) {
       continue;
@@ -207,6 +260,7 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
       budgetTokens,
       firedStages: [...fired],
       fanOutBlocked: fired.has("stopFanOut") && !config.dryRun,
+      wasRunning: agent.isRunning && !isStoppingTheAgent(actions, config),
     },
   };
 }
