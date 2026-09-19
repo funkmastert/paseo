@@ -89,6 +89,10 @@ export default function contribute(server: PluginServerContext) {
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
         ),
+      onDeclaredTaskClassUnknown: (episode) =>
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown task class "${episode.value}" (expected mechanical/standard/hard); falling through to automatic classification`,
+        ),
       onToolProfileWithheld: (episode) =>
         console.error(
           `[claude-account-pool] role-router: role "${episode.roleId}" was resolved by tier-${episode.tier} classification for caller "${episode.callerAgentId}", not an explicit label/mapping; its tool profile was withheld (model selection still applies) — label the agent with paseo.agent-type or paseo.agent-role to enforce it`,
@@ -99,18 +103,22 @@ export default function contribute(server: PluginServerContext) {
             ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" is not in the agent directory, so what it was restricted to is unknowable; role "${episode.roleId}"'s child was given the read-only floor rather than a clean profile`
             : `[claude-account-pool] role-router: the agent directory has not loaded yet, so caller "${episode.callerAgentId}"'s restrictions are unknown; role "${episode.roleId}"'s child inherits nothing this time`,
         ),
-      onRoleUnavailable: (episode) =>
+      onRoleUnavailable: (episode) => {
+        const pool = episode.taskClass ? `${episode.taskClass} pool` : "pool";
         console.error(
           episode.reason === "provider-not-registered"
             ? `[claude-account-pool] role-router: role "${episode.roleId}"'s resolved provider is not registered with the daemon for caller "${episode.callerAgentId}" (wanted "${episode.requestedModel}"); passing the request through untouched`
-            : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
-        ),
-      onExplicitModelOverridden: (episode) =>
+            : `[claude-account-pool] role-router: role "${episode.roleId}" has no eligible model in its ${pool} for caller "${episode.callerAgentId}"; falling back to its top configured model "${episode.requestedModel}"`,
+        );
+      },
+      onExplicitModelOverridden: (episode) => {
+        const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;
         console.error(
           episode.reason === "not-approved"
-            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in role "${episode.roleId}"'s pool; policy overrode it to "${episode.effectiveRef}"`
-            : `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which role "${episode.roleId}" approves but isn't currently selectable (catalog-missing, no viable pool member, or budget-gated); policy overrode it to "${episode.effectiveRef}"`,
-        ),
+            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in ${pool}; policy overrode it to "${episode.effectiveRef}"`
+            : `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which ${pool} approves but isn't currently selectable (catalog-missing, no viable pool member, or budget-gated); policy overrode it to "${episode.effectiveRef}"`,
+        );
+      },
     });
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({
       policyCache,

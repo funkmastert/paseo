@@ -3,8 +3,10 @@ import {
   AGENT_TYPE_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
+  classModels,
   type RoleModelPolicy,
   type RoleRecord,
+  type TaskClassId,
 } from "../shared/role-policy-schema";
 import { initialPromptWithNotice } from "../shared/restriction-notice";
 import {
@@ -23,7 +25,7 @@ import type { PolicyCache } from "./role-policy";
 import type { ProviderIdCache } from "./router";
 import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
 import type { ParentToolProfiles } from "./parent-profiles";
-import { resolveLeaderRole, resolveRole, type ResolveRoleTier } from "./role-resolve";
+import { resolveLeaderRole, resolveRole, resolveTaskClass, type ResolveRoleTier } from "./role-resolve";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
 const ROOT_AGENT_CALLER = "(root agent)";
@@ -33,10 +35,18 @@ export interface DeclaredRoleUnknownEpisode {
   value: string;
 }
 
+/** Fired when labels[paseo.task-class] didn't match mechanical/standard/hard. Mirrors DeclaredRoleUnknownEpisode. */
+export interface DeclaredTaskClassUnknownEpisode {
+  callerAgentId: string;
+  value: string;
+}
+
 export interface RoleUnavailableEpisode {
   callerAgentId: string;
   roleId: string;
   requestedModel: string;
+  /** The pool that was exhausted — undefined ("standard") means role.models itself. */
+  taskClass?: TaskClassId;
   /**
    * "no-eligible-model": the role's configured models were all catalog/pool
    * ineligible, so routing fell back to models[0] anyway.
@@ -79,6 +89,8 @@ export interface ExplicitModelOverriddenEpisode {
   requestedRef: string;
   /** What policy ran instead, spelled the same way. */
   effectiveRef: string;
+  /** The task class the request was evaluated against — undefined ("standard") means role.models. */
+  taskClass?: TaskClassId;
   /**
    * "not-approved": the requested ref was never one of the role's configured
    * entries — the role forbids it outright.
@@ -106,6 +118,8 @@ export interface RoleRouterOptions {
   providerIds?: ProviderIdCache;
   /** Called (deduplicated per caller+value) when a caller declared an unrecognized labels[AGENT_ROLE_LABEL] value. */
   onDeclaredRoleUnknown?: (episode: DeclaredRoleUnknownEpisode) => void;
+  /** Called (deduplicated per caller+value) when a caller declared an unrecognized labels[paseo.task-class] value. */
+  onDeclaredTaskClassUnknown?: (episode: DeclaredTaskClassUnknownEpisode) => void;
   /**
    * Called (deduplicated per caller+role) when a role's tool profile was
    * withheld because the role came from tier-3/4 classification rather than
@@ -333,6 +347,7 @@ function withToolProfile(
  */
 export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredUnknownSeen = new Set<string>();
+  const declaredTaskClassUnknownSeen = new Set<string>();
   const unavailableRoleIds = new Set<string>();
   const overriddenSeen = new Set<string>();
   const toolProfileWithheldSeen = new Set<string>();
@@ -345,6 +360,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         input,
         options,
         declaredUnknownSeen,
+        declaredTaskClassUnknownSeen,
         unavailableRoleIds,
         overriddenSeen,
         toolProfileWithheldSeen,
@@ -372,6 +388,7 @@ function routeRoleForCreateUnguarded(
   input: { request: PluginBeforeRequests["agent.create"] },
   options: RoleRouterOptions,
   declaredUnknownSeen: Set<string>,
+  declaredTaskClassUnknownSeen: Set<string>,
   unavailableRoleIds: Set<string>,
   overriddenSeen: Set<string>,
   toolProfileWithheldSeen: Set<string>,
@@ -422,6 +439,25 @@ function routeRoleForCreateUnguarded(
     role = resolveLeaderRole(policy);
   }
   const episodeCaller = callerAgentId ?? ROOT_AGENT_CALLER;
+
+  // Task class is orthogonal to role (see resolveTaskClass's own doc
+  // comment): it picks HOW MUCH MODEL the work is worth, not WHO runs it, so
+  // it's resolved for every create — including a root/leader one — the same
+  // way, from the same labels/title/initialPrompt. It only ever influences
+  // model selection below; it never touches tool enforcement.
+  const taskClassResolution = resolveTaskClass({
+    labels: extended.labels,
+    title: request.config.title,
+    initialPrompt: extended.initialPrompt,
+  });
+  const taskClass = taskClassResolution.taskClass;
+  if (taskClassResolution.unknownDeclaredValue !== undefined) {
+    const dedupeKey = `${episodeCaller} ${taskClassResolution.unknownDeclaredValue}`;
+    if (!declaredTaskClassUnknownSeen.has(dedupeKey)) {
+      declaredTaskClassUnknownSeen.add(dedupeKey);
+      options.onDeclaredTaskClassUnknown?.({ callerAgentId: episodeCaller, value: taskClassResolution.unknownDeclaredValue });
+    }
+  }
 
   // A guessed role (tier 3/4) may still pick a model below; it may not take
   // tools away unless the operator opted in. Withholding only matters — and
@@ -499,9 +535,10 @@ function routeRoleForCreateUnguarded(
   const requestedModel = request.config.model;
   const requestedRef = requestedModel ? `${request.config.provider}/${requestedModel}` : undefined;
   let explicitOverrideReason: ExplicitModelOverriddenEpisode["reason"] | undefined;
-  if (requestedModel && role.models.length > 0) {
+  if (requestedModel && classModels(role, taskClass).length > 0) {
     const evaluation = evaluateRequestedModel(role, requestedFamily, requestedModel, catalog, pool, options.health, {
       modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+      taskClass,
     });
     if (evaluation.eligible) {
       return withToolProfile(request, enforcement);
@@ -511,6 +548,7 @@ function routeRoleForCreateUnguarded(
 
   const outcome = selectModel(role, catalog, pool, options.health, {
     modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+    taskClass,
   });
 
   if (outcome.outcome === "unconfigured") {
@@ -527,16 +565,21 @@ function routeRoleForCreateUnguarded(
   // same registry snapshot before committing to the switch; same-family
   // selections (the common case) skip this, since that family is already
   // the one in active use.
+  // Deduped per (role, task class): a mechanical-pool exhaustion and a
+  // hard-pool exhaustion on the same role are different, actionable facts —
+  // fixing one must not silently suppress the notification for the other.
+  const unavailableDedupeKey = `${role.id}:${taskClass ?? "standard"}`;
   if (crossesFamily) {
     const pinnedProvider = outcome.provider as string; // crossesFamily implies a pinned (non-null) provider.
     const registeredProviderIds = options.providerIds?.get();
     if (registeredProviderIds && !registeredProviderIds.has(pinnedProvider)) {
-      if (!unavailableRoleIds.has(role.id)) {
-        unavailableRoleIds.add(role.id);
+      if (!unavailableRoleIds.has(unavailableDedupeKey)) {
+        unavailableRoleIds.add(unavailableDedupeKey);
         options.onRoleUnavailable?.({
           callerAgentId: episodeCaller,
           roleId: role.id,
           requestedModel: formatModelRef(outcome),
+          taskClass,
           reason: "provider-not-registered",
         });
       }
@@ -548,17 +591,18 @@ function routeRoleForCreateUnguarded(
   }
 
   if (outcome.outcome === "unavailable") {
-    if (!unavailableRoleIds.has(role.id)) {
-      unavailableRoleIds.add(role.id);
+    if (!unavailableRoleIds.has(unavailableDedupeKey)) {
+      unavailableRoleIds.add(unavailableDedupeKey);
       options.onRoleUnavailable?.({
         callerAgentId: episodeCaller,
         roleId: role.id,
         requestedModel: formatModelRef(outcome),
+        taskClass,
         reason: "no-eligible-model",
       });
     }
   } else {
-    unavailableRoleIds.delete(role.id); // Re-arm: the role recovered.
+    unavailableRoleIds.delete(unavailableDedupeKey); // Re-arm: this (role, class) recovered.
   }
 
   const nextConfig: AgentCreateConfig = { ...request.config, model: outcome.model };
@@ -583,11 +627,14 @@ function routeRoleForCreateUnguarded(
   }
 
   // The caller's explicit request didn't win — either it was never approved
-  // for this role, or it was approved but isn't selectable right now — and
-  // policy ran instead. Visible, not silent: logged once per
-  // (caller, role, requested ref), and recorded on the agent itself so the
-  // UI can show "model chosen by policy" instead of a quiet swap.
-  const overriddenDedupeKey = `${episodeCaller} ${role.id} ${requestedRef}`;
+  // for this role's resolved task class, or it was approved but isn't
+  // selectable right now — and policy ran instead. Visible, not silent:
+  // logged once per (caller, role, task class, requested ref), and recorded
+  // on the agent itself so the UI can show "model chosen by policy" instead
+  // of a quiet swap. This is exactly the "asked for Opus, got Sonnet" case —
+  // role-model-policy.explain (queried with the same taskClass) reports the
+  // same reason on demand.
+  const overriddenDedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${requestedRef}`;
   if (!overriddenSeen.has(overriddenDedupeKey)) {
     overriddenSeen.add(overriddenDedupeKey);
     options.onExplicitModelOverridden?.({
@@ -595,6 +642,7 @@ function routeRoleForCreateUnguarded(
       roleId: role.id,
       requestedRef: requestedRef as string,
       effectiveRef: formatModelRef(outcome),
+      taskClass,
       reason: explicitOverrideReason,
     });
   }

@@ -6,6 +6,7 @@ import {
   AGENT_TYPE_LABEL,
   DEFAULT_POLICY,
   MODEL_OVERRIDDEN_LABEL,
+  TASK_CLASS_LABEL,
   TOOLS_DENIED_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
@@ -1258,6 +1259,209 @@ describe("createRoleRouter", () => {
       expect(result).toBeUndefined();
       expect(onExplicitModelOverridden).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("createRoleRouter — task class", () => {
+  function policyWithWorkerClassPools(overrides: {
+    models?: string[];
+    mechanicalModels?: string[];
+    hardModels?: string[];
+  }): RoleModelPolicy {
+    return {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((role) =>
+        role.id === "worker"
+          ? {
+              ...role,
+              models: overrides.models ?? [],
+              mechanicalModels: overrides.mechanicalModels ?? [],
+              hardModels: overrides.hardModels ?? [],
+            }
+          : role,
+      ),
+    };
+  }
+
+  it("a declared task class routes to that class's pool over the standard pool", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(
+          policyWithWorkerClassPools({ models: ["claude-sonnet-5"], hardModels: ["claude-opus-5"] }),
+        ),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] })),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", labels: { [TASK_CLASS_LABEL]: "hard" } } as unknown as Record<string, unknown>),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-opus-5");
+  });
+
+  it("falls back to the standard pool when the resolved class has no override pool configured", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerClassPools({ models: ["claude-sonnet-5"] })),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+      }),
+    );
+
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        labels: { [TASK_CLASS_LABEL]: "mechanical" },
+      } as unknown as Record<string, unknown>),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-sonnet-5");
+  });
+
+  it("an unclassified spawn (no label, no seed match) gets the standard pool, unaffected by mechanical/hard pools", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(
+          policyWithWorkerClassPools({
+            models: ["claude-sonnet-5"],
+            mechanicalModels: ["claude-haiku-5"],
+            hardModels: ["claude-opus-5"],
+          }),
+        ),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"] })),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp", title: "do the thing" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-sonnet-5");
+  });
+
+  it("text classification picks the mechanical/hard pool when no label is declared", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(
+          policyWithWorkerClassPools({
+            models: ["claude-sonnet-5"],
+            mechanicalModels: ["claude-haiku-5"],
+            hardModels: ["claude-opus-5"],
+          }),
+        ),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"] })),
+      }),
+    );
+
+    expect(
+      router(
+        request({
+          callerAgentId: "c1",
+          config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp", title: "fix a typo in the readme" },
+        }),
+        fakeContext,
+      )?.config.model,
+    ).toBe("claude-haiku-5");
+    expect(
+      router(
+        request({
+          callerAgentId: "c2",
+          config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp", title: "fix the race condition in the scheduler" },
+        }),
+        fakeContext,
+      )?.config.model,
+    ).toBe("claude-opus-5");
+  });
+
+  it("an unknown declared task class never blocks: falls through to classification/default and fires onDeclaredTaskClassUnknown once per (caller, value)", () => {
+    const onDeclaredTaskClassUnknown = vi.fn();
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerClassPools({ models: ["claude-sonnet-5"] })),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+        onDeclaredTaskClassUnknown,
+      }),
+    );
+
+    const req = () =>
+      request({ callerAgentId: "c1", labels: { [TASK_CLASS_LABEL]: "urgent" } } as unknown as Record<string, unknown>);
+    const first = router(req(), fakeContext);
+    router(req(), fakeContext);
+
+    expect(first?.config.model).toBe("claude-sonnet-5"); // fell through to default, not blocked
+    expect(onDeclaredTaskClassUnknown).toHaveBeenCalledTimes(1);
+    expect(onDeclaredTaskClassUnknown).toHaveBeenCalledWith({ callerAgentId: "c1", value: "urgent" });
+  });
+
+  it("an explicit request is evaluated against the RESOLVED class's pool: approved for hard, not for standard", () => {
+    const onExplicitModelOverridden = vi.fn();
+    const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(
+          policyWithWorkerClassPools({ models: ["claude-sonnet-5"], hardModels: ["claude-opus-5"] }),
+        ),
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] })),
+        poolCache: fakePoolCache(pool),
+        onExplicitModelOverridden,
+      }),
+    );
+
+    // Same explicit request, declared hard: honored untouched.
+    const honored = router(
+      request({
+        callerAgentId: "c1",
+        labels: { [TASK_CLASS_LABEL]: "hard" },
+        config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" },
+      } as unknown as Record<string, unknown>),
+      fakeContext,
+    );
+    expect(honored).toBeUndefined(); // byte-identical pass-through
+    expect(onExplicitModelOverridden).not.toHaveBeenCalled();
+
+    // Same explicit request, no declared class (standard/default pool doesn't have opus): overridden.
+    const overridden = router(
+      request({
+        callerAgentId: "c2",
+        config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+    expect(overridden?.config.model).toBe("claude-sonnet-5");
+    expect(onExplicitModelOverridden).toHaveBeenCalledWith({
+      callerAgentId: "c2",
+      roleId: "worker",
+      requestedRef: "claude-backup/claude-opus-5",
+      effectiveRef: "claude-sonnet-5",
+      taskClass: undefined,
+      reason: "not-approved",
+    });
+  });
+
+  it("onRoleUnavailable/onExplicitModelOverridden dedupe independently per task class, not just per role", () => {
+    const onRoleUnavailable = vi.fn();
+    const router = createRoleRouter(
+      baseOptions({
+        // No catalog entries at all: every pool is catalog-miss -> UNAVAILABLE.
+        policyCache: fakePolicyCache(
+          policyWithWorkerClassPools({ models: ["claude-sonnet-5"], hardModels: ["claude-opus-5"] }),
+        ),
+        catalogCache: fakeCatalogCache(new Map()),
+        onRoleUnavailable,
+      }),
+    );
+
+    router(request({ callerAgentId: "c1" }), fakeContext); // standard pool unavailable
+    router(request({ callerAgentId: "c2", labels: { [TASK_CLASS_LABEL]: "hard" } } as unknown as Record<string, unknown>), fakeContext); // hard pool unavailable
+
+    expect(onRoleUnavailable).toHaveBeenCalledTimes(2);
+    expect(onRoleUnavailable).toHaveBeenCalledWith(
+      expect.objectContaining({ callerAgentId: "c1", taskClass: undefined }),
+    );
+    expect(onRoleUnavailable).toHaveBeenCalledWith(expect.objectContaining({ callerAgentId: "c2", taskClass: "hard" }));
   });
 });
 
