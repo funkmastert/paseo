@@ -91,6 +91,17 @@ export interface SpendGovernorState {
    * crossed 0.75x between turns used to be marked told and never hear a word.
    */
   undeliveredStages: readonly SpendGovernorStage[];
+  /**
+   * The model the agent was on before `downgrade` moved it. Kept so account failover can put a
+   * successor back on it: a migrated agent starts with its spend at zero but inherits the
+   * model, and the fresh episode then marks `downgrade` done because the agent is already on
+   * the target. Without this an agent that was downgraded once stays cheap forever, on a
+   * budget it is no longer anywhere near.
+   *
+   * Deliberately outlives an episode. It is not a fact about this budget, it is a fact about
+   * what the governor changed.
+   */
+  modelBeforeDowngrade?: string;
 }
 
 /** Per-agent facts the planner needs. A lean view, like the monitor summaries it is built from. */
@@ -216,6 +227,45 @@ function isStoppingTheAgent(
  * is where it finally gets said. Ladder order, and only what is genuinely outstanding.
  */
 /** Where a downgrade is headed. Empty for every other stage, and for a downgrade with nowhere to go. */
+/**
+ * The model to remember as this agent's own, the first time the governor moves it off one. A
+ * dry run moves nothing, so it has nothing to remember.
+ */
+/** What the next sweep is handed: this sweep's bookkeeping, plus what outlives the episode. */
+function buildNextState(input: {
+  previousState: SpendGovernorState | undefined;
+  agent: SpendGovernorAgentInput;
+  config: SpendGovernorConfig;
+  actions: readonly SpendGovernorAction[];
+  budgetTokens: number;
+  fired: ReadonlySet<SpendGovernorStage>;
+  undelivered: ReadonlySet<SpendGovernorStage>;
+}): SpendGovernorState {
+  const { agent, config, actions, fired } = input;
+  // Read from `previousState`, not the episode-matched `carried`: what the governor moved this
+  // agent off is not a fact about the budget it was over at the time, so a raised label must
+  // not forget it.
+  const modelBeforeDowngrade =
+    input.previousState?.modelBeforeDowngrade ?? modelDepartedThisSweep(actions, agent, config);
+  return {
+    budgetTokens: input.budgetTokens,
+    firedStages: [...fired],
+    fanOutBlocked: fired.has("stopFanOut") && !config.dryRun,
+    wasRunning: agent.isRunning && !isStoppingTheAgent(actions, config),
+    undeliveredStages: [...input.undelivered],
+    ...(modelBeforeDowngrade ? { modelBeforeDowngrade } : {}),
+  };
+}
+
+function modelDepartedThisSweep(
+  actions: readonly SpendGovernorAction[],
+  agent: SpendGovernorAgentInput,
+  config: SpendGovernorConfig,
+): string | undefined {
+  if (config.dryRun || !agent.model) return undefined;
+  return actions.some((action) => action.stage === "downgrade") ? agent.model : undefined;
+}
+
 function targetModelFor(
   stage: SpendGovernorStage,
   config: SpendGovernorConfig,
@@ -329,13 +379,15 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
 
   return {
     actions,
-    nextState: {
+    nextState: buildNextState({
+      previousState: input.previousState,
+      agent,
+      config,
+      actions,
       budgetTokens,
-      firedStages: [...fired],
-      fanOutBlocked: fired.has("stopFanOut") && !config.dryRun,
-      wasRunning: agent.isRunning && !isStoppingTheAgent(actions, config),
-      undeliveredStages: [...undelivered],
-    },
+      fired,
+      undelivered,
+    }),
   };
 }
 

@@ -416,4 +416,48 @@ describe("planSpendGovernorActions", () => {
     expect(released.actions).toEqual([]);
     expect(released.nextState?.firedStages).toEqual([]);
   });
+  // A migrated agent inherits its model but starts with its spend at zero. Without a memory of
+  // what it was on, an agent downgraded once stays cheap forever: the fresh episode marks
+  // `downgrade` done on sight, because the agent is already on the target model.
+  test("the model a downgrade moved an agent off is remembered", () => {
+    const downgraded = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+    expect(downgraded.actions.map((a) => a.stage)).toContain("downgrade");
+    expect(downgraded.nextState?.modelBeforeDowngrade).toBe("claude-opus-5");
+  });
+
+  test("a raised budget does not forget what the governor moved the agent off", () => {
+    const downgraded = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+
+    // A human raises the label. That starts a fresh episode, but what the governor changed is
+    // not a fact about the old budget.
+    const released = planSpendGovernorActions({
+      agent: agent({
+        totalTokens: 1_100_000,
+        model: "claude-sonnet-5",
+        labels: { [SPEND_BUDGET_LABEL]: "5M" },
+      }),
+      config: config(),
+      previousState: downgraded.nextState,
+    });
+    expect(released.nextState?.firedStages).toEqual([]);
+    expect(released.nextState?.modelBeforeDowngrade).toBe("claude-opus-5");
+  });
+
+  test("a dry run remembers nothing, because it moved nothing", () => {
+    const planned = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ dryRun: true }),
+      previousState: undefined,
+    });
+    expect(planned.actions.map((a) => a.stage)).toContain("downgrade");
+    expect(planned.nextState?.modelBeforeDowngrade).toBeUndefined();
+  });
 });

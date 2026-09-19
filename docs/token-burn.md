@@ -81,6 +81,7 @@ The fourth, `stopFanOut`, also arrives as the `create_agent` error itself — th
 
 Two ordering rules carry weight:
 
+- **A downgrade is remembered, so a migration can undo it.** The governor records the model it moved the agent off. [Account failover](account-failover.md) builds a successor that inherits the predecessor's model but starts with its spend at zero, so without that memory an agent downgraded once stayed cheap forever — the successor's fresh episode marks `downgrade` done on sight, because the agent is already on the target. The successor comes up on what the agent was on before. An in-place provider move keeps the same agent, its spend and its episode, so it keeps the downgrade too, which is right.
 - **Downgrade tells the agent after the model moved**, so the notice is true when read, and says it did nothing wrong so it does not go hunting for a bug. `setAgentModel` mid-turn is safe: it reaches the SDK's `query.setModel()`, which applies from the next API request in the same turn. The request in flight finishes on the old model, the conversation is untouched, nothing restarts.
 - **Pause steers first and cancels second.** The other order leaves an idle agent, and steering an idle agent starts a fresh turn (`agent-prompt.ts`'s fallback) — spending tokens to say it is out of tokens. This way the reason lands in the transcript for whoever resumes it.
 
