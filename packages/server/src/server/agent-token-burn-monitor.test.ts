@@ -76,6 +76,7 @@ function summary(overrides: Partial<TokenBurnMonitorAgentSummary>): TokenBurnMon
     totalTokens: undefined,
     labels: {},
     model: "claude-opus-5",
+    provider: "claude",
     ...overrides,
   };
 }
@@ -728,5 +729,117 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     agent.totalTokens = 840_000;
     await monitor.tick();
     expect(steer.calls).toHaveLength(1);
+  });
+  // `downgradeToModel` is one global string and the fleet is not one provider. `setAgentModel`
+  // validates nothing, so without this a Codex agent carrying a budget label was set to a
+  // Claude model id.
+  test("a downgrade to a model the provider does not have is skipped, not performed", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({
+        id: "codex-agent",
+        provider: "codex",
+        model: "gpt-5-codex",
+        labels: { [SPEND_BUDGET_LABEL]: "300k" },
+        totalTokens: 400_000,
+      }),
+    ]);
+    const push = createFakePushSender();
+    const steer = createFakeSteer();
+    const logger = createLogger();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: steer.fn,
+      listProviderModels: async () => ["gpt-5-codex", "gpt-5.4"],
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-haiku-4-5-20251001",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger,
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    // No message and no push either: announcing a downgrade that did not happen is worse than
+    // silence, because the notification is the only record most people read.
+    expect(steer.calls).toEqual([]);
+    expect(push.sent).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "codex", targetModel: "claude-haiku-4-5-20251001" }),
+      expect.stringContaining("not in this agent's provider catalog"),
+    );
+  });
+
+  test("a downgrade the provider does offer still happens", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({
+        labels: { [SPEND_BUDGET_LABEL]: "300k" },
+        totalTokens: 400_000,
+      }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      listProviderModels: async () => ["claude-opus-5", "claude-sonnet-5"],
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-sonnet-5",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).toHaveBeenCalledWith("agent-1", "claude-sonnet-5");
+  });
+
+  test("an unreadable catalog leaves the agent's model alone", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 400_000 }),
+    ]);
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: createFakePushSender().sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      listProviderModels: async () => {
+        throw new Error("provider snapshot timed out");
+      },
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-sonnet-5",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
   });
 });

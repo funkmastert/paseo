@@ -315,6 +315,8 @@ export interface TokenBurnMonitorAgentSummary {
   labels: Record<string, string>;
   /** So the governor's downgrade stage can skip an agent already on the target model. */
   model: string | undefined;
+  /** So the governor can check its target model against the right provider's catalog. */
+  provider: string;
 }
 
 /**
@@ -1467,6 +1469,7 @@ export class AgentManager {
       totalTokens: agent.totalTokens,
       labels: agent.labels,
       model: agent.config.model,
+      provider: agent.provider,
     }));
   }
 
