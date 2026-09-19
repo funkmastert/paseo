@@ -6288,6 +6288,20 @@ export const DeviceStatusEntrySchema = z.object({
   source: z.enum(["checkout", "launch"]).optional(),
   reason: z.string().optional(),
   processCount: z.number().optional(),
+  // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+  // The holder's provider and how strongly the cap binds it. A cap that refuses some agents and
+  // only asks others has to say which is which, or the whole readout is a half-truth.
+  provider: z.string().optional(),
+  enforcement: z.enum(["observes", "asks", "refuses"]).optional(),
+});
+
+// COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+// One provider with a live agent, and what the daemon can do about its device launches.
+export const DeviceStatusProviderEnforcementSchema = z.object({
+  provider: z.string(),
+  tier: z.enum(["observes", "asks", "refuses"]),
+  // Why it is not stronger — a Codex in Full Access asks nothing, a Pi never asks at all.
+  gap: z.string().optional(),
 });
 
 export const DeviceStatusWaiterSchema = z.object({
@@ -6320,6 +6334,8 @@ export const DeviceStatusUpdateMessageSchema = z.object({
     devices: z.array(DeviceStatusEntrySchema),
     waiting: z.array(DeviceStatusWaiterSchema),
     blocked: z.array(DeviceStatusBlockedSchema),
+    // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+    enforcement: z.array(DeviceStatusProviderEnforcementSchema).optional(),
     generatedAt: z.string(),
   }),
 });
@@ -7258,6 +7274,7 @@ export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
 export type DeviceStatusUpdateMessage = z.infer<typeof DeviceStatusUpdateMessageSchema>;
 export type DeviceStatusEntry = z.infer<typeof DeviceStatusEntrySchema>;
+export type DeviceStatusProviderEnforcement = z.infer<typeof DeviceStatusProviderEnforcementSchema>;
 export type McpGatewayAuthStartResponseMessage = z.infer<
   typeof McpGatewayAuthStartResponseMessageSchema
 >;

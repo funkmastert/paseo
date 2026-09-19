@@ -325,6 +325,8 @@ export interface TokenBurnMonitorAgentSummary {
  */
 export interface ResourceMonitorAgentSummary {
   id: string;
+  /** Which agent runtime this is. The device cap reads it to know whether it can refuse. */
+  provider: AgentProvider;
   workspaceId: string | undefined;
   internal: boolean;
   /** Mid-turn right now. Only a running agent can be told about its usage — steering a message
@@ -1471,6 +1473,7 @@ export class AgentManager {
   listAgentsForResourceMonitor(): ResourceMonitorAgentSummary[] {
     return Array.from(this.agents.values()).map((agent) => ({
       id: agent.id,
+      provider: agent.provider,
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",

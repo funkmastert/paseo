@@ -219,7 +219,7 @@ import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
-import { DeviceLeaseManager } from "./agent/device-lease-manager.js";
+import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
@@ -1087,11 +1087,14 @@ export async function createPaseoDaemon(
   // providers take its launch gate, and handed the agent list below once AgentManager exists —
   // it only ever reads ids, so a late binding costs nothing.
   const processSampler = createSystemProcessSampler({ logger });
-  let listDeviceLeaseAgentIds: () => string[] = () => [];
+  let listDeviceLeaseAgents: () => readonly DeviceLeaseAgentSummary[] = () => [];
+  let sendDeviceLeaseMessageToAgent: (agentId: string, body: string) => Promise<void> = async () =>
+    undefined;
   const deviceLeaseManager = new DeviceLeaseManager({
     processSampler,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
-    listAgentIds: () => listDeviceLeaseAgentIds(),
+    listAgents: () => listDeviceLeaseAgents(),
+    sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
     logger: logger.child({ module: "device-leases" }),
   });
 
@@ -1143,9 +1146,26 @@ export async function createPaseoDaemon(
     logger,
   });
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
-  // before AgentManager because the providers need its gate, and it only reads agent ids.
-  listDeviceLeaseAgentIds = () =>
-    agentManager.listAgentsForResourceMonitor().map((agent) => agent.id);
+  // before AgentManager because the providers need its gate, and it only reads the agent list.
+  listDeviceLeaseAgents = () =>
+    agentManager.listAgentsForResourceMonitor().map((agent) => ({
+      agentId: agent.id,
+      provider: agent.provider,
+      isRunning: agent.isRunning,
+    }));
+  // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
+  // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).
+  sendDeviceLeaseMessageToAgent = async (agentId, body) => {
+    await sendPromptToAgent({
+      agentManager,
+      agentStorage,
+      agentId,
+      prompt: formatSystemNotificationPrompt(body),
+      activeTurnBehavior: "steer",
+      unarchive: false,
+      logger,
+    });
+  };
   // The status surface clients subscribe to (`device_status_update`), reachable from Session
   // through the AgentManager it already holds.
   agentManager.setDeviceLeaseStatusSource({

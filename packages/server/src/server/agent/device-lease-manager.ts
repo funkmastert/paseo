@@ -10,6 +10,11 @@
  *   - the launch gate is enforcement. An agent that boots a device without checking out is
  *     refused at the tool call and told to check out instead (device-launch-commands.ts).
  *
+ * The gate is only as strong as the provider allows: some providers can be refused, some only
+ * asked, and one cannot be stopped at all (device-launch-enforcement.ts). A device that appears
+ * with no lease still fills a slot — occupancy is the union of running devices and leases — and
+ * is charged to the agent whose process tree owns it. Nothing is ever shut down.
+ *
  * Off by default, with a dry run that reports what it would have refused, like the build-daemon
  * reaper it is modelled on.
  */
@@ -35,6 +40,12 @@ import {
   type DeviceSlotCaps,
 } from "./device-lease-registry.js";
 import { readSystemHardware, type HardwareReader } from "./device-hardware.js";
+import {
+  DEVICE_LAUNCH_ENFORCEMENT_TIERS,
+  describeDeviceLaunchEnforcement,
+  resolveDeviceLaunchEnforcement,
+  type DeviceLaunchEnforcementTier,
+} from "./device-launch-enforcement.js";
 import { deriveDeviceSlotDefaults, evaluateMemoryHeadroom } from "./device-slot-defaults.js";
 import type { ProcessSampler, SystemMemorySample } from "./process-sampler.js";
 
@@ -72,6 +83,18 @@ export interface DeviceLeaseConfig {
 
 export type DeviceStatusAttribution = "lease" | "process" | "none";
 
+/**
+ * An agent as the cap needs to see it. Richer than an id because the cap has two questions the
+ * id cannot answer: which provider is holding this device (does the cap actually bind it —
+ * device-launch-enforcement.ts), and is the agent mid-turn (only a running agent can be told
+ * about a device it took without asking).
+ */
+export interface DeviceLeaseAgentSummary {
+  agentId: string;
+  provider: string;
+  isRunning: boolean;
+}
+
 export interface DeviceStatusEntry {
   platform: DevicePlatform;
   deviceId: string | null;
@@ -84,6 +107,9 @@ export interface DeviceStatusEntry {
   source?: DeviceLease["source"];
   reason?: string;
   processCount?: number;
+  /** The holder's provider, and how strongly the cap binds it. Absent with no holder. */
+  provider?: string;
+  enforcement?: DeviceLaunchEnforcementTier;
 }
 
 export interface DeviceStatusWaiter {
@@ -103,6 +129,14 @@ export interface DeviceStatusBlocked {
   at: string;
 }
 
+/** One provider with a live agent, and what the cap can do about its device launches. */
+export interface DeviceStatusProviderEnforcement {
+  provider: string;
+  tier: DeviceLaunchEnforcementTier;
+  /** Why it is not stronger. Absent for a provider the cap refuses outright. */
+  gap?: string;
+}
+
 export interface DeviceStatusSnapshot {
   enabled: boolean;
   dryRun: boolean;
@@ -113,6 +147,8 @@ export interface DeviceStatusSnapshot {
   devices: DeviceStatusEntry[];
   waiting: DeviceStatusWaiter[];
   blocked: DeviceStatusBlocked[];
+  /** Every provider with a live agent right now, weakest tier first. The cap's own asymmetry. */
+  enforcement: DeviceStatusProviderEnforcement[];
   generatedAt: string;
 }
 
@@ -144,7 +180,14 @@ export interface DeviceLeaseManagerOptions {
   processSampler: ProcessSampler;
   readDaemonConfig: () => { deviceLeases?: DeviceLeaseConfig };
   /** Agents the daemon still knows about; a lease held by anything else is released. */
-  listAgentIds: () => string[];
+  listAgents: () => readonly DeviceLeaseAgentSummary[];
+  /**
+   * Delivers ONE system-authored message into a running agent's conversation. The only lever
+   * the cap has over a provider it cannot refuse: a device that appeared without a lease is
+   * charged to the agent whose process tree owns it, and that agent is told. Shares the
+   * resource monitor's steer path and its injection shape for the same reason.
+   */
+  sendSystemMessageToAgent?: (agentId: string, body: string) => Promise<void>;
   logger: DeviceLeaseManagerLogger;
   now?: () => number;
   readHardware?: HardwareReader;
@@ -209,10 +252,38 @@ function resolveCaps(
   };
 }
 
+/**
+ * The providers behind the agents that exist right now, weakest tier first, so a reader sees
+ * what the cap cannot do before what it can. Only live agents: a tier for a provider nobody is
+ * running is noise, and the point of the list is "which of my agents is unguarded".
+ */
+function summarizeProviderEnforcement(
+  agents: readonly DeviceLeaseAgentSummary[],
+): DeviceStatusProviderEnforcement[] {
+  const byProvider = new Map<string, DeviceStatusProviderEnforcement>();
+  for (const agent of agents) {
+    if (byProvider.has(agent.provider)) continue;
+    const enforcement = resolveDeviceLaunchEnforcement(agent.provider);
+    byProvider.set(agent.provider, {
+      provider: agent.provider,
+      tier: enforcement.tier,
+      ...(enforcement.gap ? { gap: enforcement.gap } : {}),
+    });
+  }
+  return [...byProvider.values()].sort(
+    (a, b) =>
+      DEVICE_LAUNCH_ENFORCEMENT_TIERS.indexOf(a.tier) -
+        DEVICE_LAUNCH_ENFORCEMENT_TIERS.indexOf(b.tier) || a.provider.localeCompare(b.provider),
+  );
+}
+
 export class DeviceLeaseManager {
   private readonly processSampler: ProcessSampler;
   private readonly readDaemonConfig: DeviceLeaseManagerOptions["readDaemonConfig"];
-  private readonly listAgentIds: () => string[];
+  private readonly listAgents: () => readonly DeviceLeaseAgentSummary[];
+  private readonly sendSystemMessageToAgent:
+    | ((agentId: string, body: string) => Promise<void>)
+    | undefined;
   private readonly logger: DeviceLeaseManagerLogger;
   private readonly now: () => number;
   private readonly readHardware: HardwareReader;
@@ -227,12 +298,19 @@ export class DeviceLeaseManager {
   private inFlightSample: Promise<DeviceSample> | undefined;
   private derivedCaps: DeviceSlotCaps | undefined;
   private drainTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * `${agentId}:${deviceId}` for every unleased device already charged to its agent. The sweep
+   * runs a minute; the agent hears about a device it took once, not sixty times an hour.
+   * Pruned when the device goes, so booting a second one is a second message.
+   */
+  private readonly chargedUnleasedDevices = new Set<string>();
   private readonly listeners = new Set<() => void>();
 
   constructor(options: DeviceLeaseManagerOptions) {
     this.processSampler = options.processSampler;
     this.readDaemonConfig = options.readDaemonConfig;
-    this.listAgentIds = options.listAgentIds;
+    this.listAgents = options.listAgents;
+    this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
     this.readHardware = options.readHardware ?? readSystemHardware;
@@ -267,8 +345,97 @@ export class DeviceLeaseManager {
     systemMemory: SystemMemorySample | undefined;
   }): Promise<void> {
     this.sample = { ...input, takenAtMs: this.now() };
-    this.reconcile(this.resolveConfig(await this.resolveCaps()));
+    const config = this.resolveConfig(await this.resolveCaps());
+    this.reconcile(config);
+    await this.chargeUnleasedDevices(config);
     await this.drainWaiters();
+  }
+
+  /**
+   * What the cap does about a provider it cannot refuse (device-launch-enforcement.ts). The
+   * device is already counted — occupancy is the union of running devices and leases, so an
+   * unleased simulator takes a slot from everybody whether or not anyone owns up to it. What is
+   * missing is that its agent does not know, and will boot another. So: charge it.
+   *
+   * Only an agent whose own process tree contains the device can be charged. That is Android
+   * emulators and nothing else — `launchd_sim` is reparented to pid 1 the moment CoreSimulator
+   * boots it, so an unleased iOS simulator has no owner `ps` can name, and guessing one is
+   * worse than the silence. It stays unattributed, keeps its slot, and shows in the UI as
+   * pressure nobody is accountable for.
+   *
+   * Never reaps, never refuses: a booted device may have a build running against it.
+   */
+  private async chargeUnleasedDevices(config: ResolvedDeviceLeaseConfig): Promise<void> {
+    const devices = this.sample?.devices ?? [];
+    // A device that stopped may be booted again later, and that is worth saying again.
+    // Deleting the current entry mid-iteration is well-defined for a Set, so no copy.
+    for (const key of this.chargedUnleasedDevices) {
+      const deviceId = key.slice(key.indexOf(":") + 1);
+      if (!devices.some((device) => device.deviceId === deviceId)) {
+        this.chargedUnleasedDevices.delete(key);
+      }
+    }
+    if (!config.enabled) return;
+
+    const agents = new Map(this.listAgents().map((agent) => [agent.agentId, agent]));
+    for (const device of devices) {
+      if (!device.agentId) continue;
+      if (this.leases.some((lease) => lease.deviceId === device.deviceId)) continue;
+      const key = `${device.agentId}:${device.deviceId}`;
+      if (this.chargedUnleasedDevices.has(key)) continue;
+      this.chargedUnleasedDevices.add(key);
+
+      const agent = agents.get(device.agentId);
+      const enforcement = resolveDeviceLaunchEnforcement(agent?.provider);
+      this.logger.info(
+        {
+          agentId: device.agentId,
+          deviceId: device.deviceId,
+          platform: device.platform,
+          provider: agent?.provider,
+          enforcement: enforcement.tier,
+          dryRun: config.dryRun,
+        },
+        "Device running without a lease, charged to the agent whose process tree owns it",
+      );
+      // Dry run reports; it does not spend an agent's tokens on a message about a cap that is
+      // refusing nothing. Same contract as the launch gate above.
+      if (config.dryRun || !this.sendSystemMessageToAgent) continue;
+      // The steer path starts a new turn for an idle agent (agent-prompt.ts), which would spend
+      // tokens on an agent nobody is driving. Only tell one that is mid-turn.
+      if (!agent?.isRunning) continue;
+      try {
+        await this.sendSystemMessageToAgent(
+          device.agentId,
+          this.unleasedDeviceMessage(device.platform, device.deviceId, enforcement),
+        );
+      } catch (error) {
+        this.logger.warn(
+          { err: error, agentId: device.agentId, deviceId: device.deviceId },
+          "Failed to steer the device cap's unleased-device message into the agent",
+        );
+      }
+    }
+  }
+
+  private unleasedDeviceMessage(
+    platform: DevicePlatform,
+    deviceId: string,
+    enforcement: ReturnType<typeof resolveDeviceLaunchEnforcement>,
+  ): string {
+    const occupancy = evaluateDeviceOccupancy({
+      runningDevices: this.sample?.devices ?? [],
+      leases: this.leases,
+    });
+    const caps = this.derivedCaps;
+    const usage = caps ? ` (${occupancy.total} of ${caps.totalSlots} slots now in use)` : "";
+    return (
+      `Bozeo device cap: you are running a ${platform} device (${deviceId}) that you did not ` +
+      `check out. It is holding one of the machine's device slots${usage}, so other agents are ` +
+      `queueing behind it. Nothing has been shut down and nothing will be — keep using it. ` +
+      `${describeDeviceLaunchEnforcement(enforcement)} Call \`device_checkin\` as soon as you ` +
+      `are finished with this device, and call \`device_checkout\` before you boot the next one.`
+    );
   }
 
   async getSnapshot(): Promise<DeviceStatusSnapshot> {
@@ -637,7 +804,7 @@ export class DeviceLeaseManager {
     const result = reconcileDeviceLeases({
       leases: this.leases,
       runningDevices: this.sample?.devices ?? [],
-      liveAgentIds: new Set(this.listAgentIds()),
+      liveAgentIds: new Set(this.listAgents().map((agent) => agent.agentId)),
       nowMs: this.now(),
       pendingTtlMs: config.pendingTtlMs,
       maxLeaseMs: config.maxLeaseMs,
@@ -700,7 +867,10 @@ export class DeviceLeaseManager {
       this.processSampler.sampleProcesses(),
       this.processSampler.sampleSystemMemory(),
     ]);
-    const attribution = attributeProcessTrees(rows, this.listAgentIds());
+    const attribution = attributeProcessTrees(
+      rows,
+      this.listAgents().map((agent) => agent.agentId),
+    );
     const sample: DeviceSample = {
       devices: detectRunningDevices({ rows, agentTrees: attribution.agentTrees }),
       systemMemory,
@@ -728,6 +898,18 @@ export class DeviceLeaseManager {
       maxLeaseMs: (config?.maxLeaseHours ?? DEFAULT_MAX_LEASE_HOURS) * 3_600_000,
       queueTimeoutMs: (config?.queueTimeoutMinutes ?? DEFAULT_QUEUE_TIMEOUT_MINUTES) * 60_000,
     };
+  }
+
+  /** Stamps a status entry with its holder's provider and what the cap can do about it. */
+  private applyEnforcement(
+    entry: DeviceStatusEntry,
+    providerByAgentId: ReadonlyMap<string, string>,
+  ): DeviceStatusEntry {
+    const provider = entry.agentId ? providerByAgentId.get(entry.agentId) : undefined;
+    if (!provider) return entry;
+    entry.provider = provider;
+    entry.enforcement = resolveDeviceLaunchEnforcement(provider).tier;
+    return entry;
   }
 
   private toRunningDeviceEntry(
@@ -765,6 +947,8 @@ export class DeviceLeaseManager {
     sample: DeviceSample,
   ): DeviceStatusSnapshot {
     const nowMs = this.now();
+    const agents = this.listAgents();
+    const providerByAgentId = new Map(agents.map((agent) => [agent.agentId, agent.provider]));
     const leaseByDeviceId = new Map(
       this.leases
         .filter((lease) => lease.deviceId !== undefined)
@@ -773,21 +957,29 @@ export class DeviceLeaseManager {
 
     // Running devices come first and come from `ps`. A lease only decorates one with a holder.
     const devices: DeviceStatusEntry[] = sample.devices.map((device) =>
-      this.toRunningDeviceEntry(device, leaseByDeviceId.get(device.deviceId), nowMs),
+      this.applyEnforcement(
+        this.toRunningDeviceEntry(device, leaseByDeviceId.get(device.deviceId), nowMs),
+        providerByAgentId,
+      ),
     );
 
     for (const lease of this.leases) {
       if (lease.deviceId !== undefined) continue;
-      devices.push({
-        platform: lease.platform,
-        deviceId: null,
-        state: "starting",
-        agentId: lease.agentId,
-        attribution: "lease",
-        heldForSeconds: (nowMs - lease.acquiredAtMs) / 1000,
-        source: lease.source,
-        ...(lease.reason ? { reason: lease.reason } : {}),
-      });
+      devices.push(
+        this.applyEnforcement(
+          {
+            platform: lease.platform,
+            deviceId: null,
+            state: "starting",
+            agentId: lease.agentId,
+            attribution: "lease",
+            heldForSeconds: (nowMs - lease.acquiredAtMs) / 1000,
+            source: lease.source,
+            ...(lease.reason ? { reason: lease.reason } : {}),
+          },
+          providerByAgentId,
+        ),
+      );
     }
 
     const occupancy = evaluateDeviceOccupancy({
@@ -810,6 +1002,7 @@ export class DeviceLeaseManager {
         ...(waiter.reason ? { reason: waiter.reason } : {}),
       })),
       blocked: this.blocked,
+      enforcement: summarizeProviderEnforcement(agents),
       generatedAt: new Date(nowMs).toISOString(),
     };
   }
