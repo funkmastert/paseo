@@ -43,7 +43,15 @@ To deny a tool call deterministically on Claude, use a PreToolUse hook, not `can
 
 > `canUseTool` will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
 
-A gate built on `canUseTool` therefore does nothing for those agents, and fails silently: it never runs, so it never logs, and the first sign is the thing it was meant to prevent. A PreToolUse hook runs in every permission mode, resolves before `canUseTool`, and denies with `hookSpecificOutput.permissionDecision: "deny"` and a `permissionDecisionReason` the model reads. Register one matcher per gate with its own tool matcher and timeout (`providers/claude/agent.ts`), re-check the tool name inside the callback, and fail open on any error — a gate that breaks tool calls is worse than the problem it solves. This is a Claude mechanism; other providers have no equivalent, so a cap that must hold across all of them needs a second layer that observes rather than refuses. [docs/device-leases.md](device-leases.md) is the worked example of both.
+A gate built on `canUseTool` therefore does nothing for those agents, and fails silently: it never runs, so it never logs, and the first sign is the thing it was meant to prevent. A PreToolUse hook runs in every permission mode, resolves before `canUseTool`, and denies with `hookSpecificOutput.permissionDecision: "deny"` and a `permissionDecisionReason` the model reads. Register one matcher per gate with its own tool matcher and timeout (`providers/claude/agent.ts`), re-check the tool name inside the callback, and fail open on any error — a gate that breaks tool calls is worse than the problem it solves.
+
+The hook is a Claude mechanism, but "other providers cannot be gated" is wrong, and assuming it leaves the gate open. Before you conclude a provider has no interception point, check three things that are not hooks:
+
+- **The daemon runs the command itself.** Paseo is the ACP _client_, so `createTerminal` in `providers/acp-agent.ts` is a process this daemon is about to spawn. Declining to spawn it is the strongest gate there is, and the error text reaches the agent in band.
+- **The daemon answers an approval.** Codex's `item/commandExecution/requestApproval` and OMP's bash tool approval arrive before the command runs. Answer them before anything auto-approves, and before the request reaches a person — an auto-accept in front of your gate makes it decorative.
+- **The daemon is inside the agent's process.** The OpenCode bridge plugin runs in the OpenCode server, so its `tool.execute.before` hook throws below every OpenCode mode and permission setting.
+
+What is left over is real. Pi reports tool execution and never asks, so nothing can refuse it. Gate what you can, then add a layer that observes and attributes what you cannot, and make the difference visible rather than letting a partial gate read as a total one. [docs/device-leases.md](device-leases.md) is the worked example of all of it.
 
 ## Two Integration Patterns
 
