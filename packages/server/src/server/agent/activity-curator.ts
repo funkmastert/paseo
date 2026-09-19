@@ -205,6 +205,32 @@ function curateProjectedActivityEntries(
  * blank assistant chunk mid-stream) so callers can keep showing the
  * previous summary instead of clobbering it with an empty line.
  */
+/**
+ * The summary the live path would be showing, recovered from a timeline. Walks backwards to the
+ * newest item that produces one, applying the same exclusions `AgentManager` applies live so a
+ * restart reproduces the value rather than a different-looking one: `assistant_message` and
+ * `reasoning` are skipped there because the stream coalescer emits them as mid-message
+ * fragments, and skipping them here keeps the two paths agreeing.
+ *
+ * Returns undefined for a timeline with nothing summarizable, which is a real answer — some
+ * agents have only ever exchanged prose.
+ */
+export function recoverLatestActivitySummary(
+  items: readonly AgentTimelineItem[],
+): string | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!item || item.type === "assistant_message" || item.type === "reasoning") {
+      continue;
+    }
+    const summary = summarizeLatestActivityItem(item);
+    if (summary !== undefined) {
+      return summary;
+    }
+  }
+  return undefined;
+}
+
 export function summarizeLatestActivityItem(item: AgentTimelineItem): string | undefined {
   return clampActivitySummary(summarizeLatestActivityItemUnclamped(item));
 }

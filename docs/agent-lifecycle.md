@@ -189,6 +189,28 @@ The flag is also what stops a push repeating. `checkAndSetAttention` returns ear
 is already flagged, so an unread agent cannot notify twice — which means a stale flag suppresses
 notifications rather than causing them. The noise a stale flag causes is in the UI.
 
+## Activity summary
+
+`lastActivitySummary` is the one-line "what is this agent doing" the subagents track shows as a
+row's subtitle. It is computed from each discrete timeline item as it arrives and **is never
+persisted**, deliberately: it changes on every tool call, so writing it would mean an agent
+snapshot per tool call across the whole fleet. `assistant_message` and `reasoning` are excluded
+because the stream coalescer emits them as ~60ms fragments.
+
+It does not need persisting, because it is recoverable. Loading an agent already replays the
+provider's own transcript into the in-memory timeline (`hydrateTimelineFromProvider`), and that
+replay goes through `recordTimeline` rather than the live path that computes the summary — which
+is the whole reason it came back blank. `recoverActivitySummary` walks the replayed rows
+backwards for the newest summarizable item, applying the same exclusions the live path applies so
+a restart reproduces the value rather than a different-looking one. No read and no write of its
+own; the rows are already in memory.
+
+There is no durable timeline store in production — `durableTimelineStore` is wired only in a
+test — so the provider transcript is the only copy of these items, and it is the one being read.
+
+An agent whose transcript holds nothing summarizable (only assistant prose) recovers nothing.
+That is a true answer, not a gap: the live path would not have shown a subtitle for it either.
+
 ## Title tracking
 
 An agent's title refreshes from two triggers: a turn finishing (`running` -> `idle`), and a periodic sweep every 60 seconds over every non-internal, non-archived agent that is `running` or `idle`. Both routes call an LLM through the same fingerprint — a hash of the agent's newest user message and a digest of its recent activity — so an unchanged agent never costs a second call. The sweep additionally waits at least `agents.metadataGeneration.titleTracking.refreshIntervalMinutes` (default 10) since it last considered an agent before looking at it again. An idle agent costs nothing after its first refresh. An agent that keeps running has new activity at every checkpoint, so it costs one small call per interval for as long as it runs; raise the interval if that adds up across a large fleet. A title the user set explicitly (`titleManuallySet`) is never touched by either trigger. See `agent-title-tracker.ts`.
