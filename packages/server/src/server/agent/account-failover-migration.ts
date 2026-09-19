@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
 import type { WorkspaceProvisioningService } from "../session/workspace-provisioning/workspace-provisioning-service.js";
@@ -33,6 +34,26 @@ export interface MigrateStuckAgentInput {
   logger: Logger;
 }
 
+/**
+ * The resume prompt that restarts the conversation on its new account, and whether sending it
+ * threw. `prompt` is carried so a retry re-sends the same text rather than rebuilding it from an
+ * agent whose settings have since changed.
+ *
+ * A send that returns says almost nothing: the provider rejects the turn asynchronously, so the
+ * usual failure lands on the agent as `lifecycle: "error"` long after this resolves. Whoever owns
+ * the retry has to read the agent's state, not this field. It exists for the narrow synchronous
+ * case (no such agent, archived, a turn already active).
+ *
+ * Either way the migration is only half-done, and nothing else will finish it: the move clears
+ * the limit error, so `planAccountFailoverSweep` — which only considers limit-shaped errors —
+ * will never see this agent again.
+ */
+export interface AccountFailoverResume {
+  prompt: string;
+  /** Set only when the send itself threw. */
+  error: string | null;
+}
+
 export type AccountFailoverOutcome =
   /**
    * The conversation changed account without changing agent: same id, same timeline, same
@@ -47,6 +68,7 @@ export type AccountFailoverOutcome =
       targetProviderId: string;
       model: string | undefined;
       workspaceId: string | undefined;
+      resume: AccountFailoverResume;
     }
   | {
       kind: "migrated";
@@ -65,6 +87,7 @@ export type AccountFailoverOutcome =
        * history, not new evidence; the monitor records it as an already-expired sighting.
        */
       staleError: { error: string; timelineSeq: number | null } | null;
+      resume: AccountFailoverResume;
     }
   /** A successor already existed (an earlier sweep, or a person running `paseo import`). */
   | { kind: "adopted"; oldAgentId: string; newAgentId: string }
@@ -302,6 +325,7 @@ async function moveStuckAgentInPlace(input: {
 
   // No settings to restore: a move keeps the agent's config, unlike an import.
   const model = agentManager.getAgent(agent.id)?.config.model;
+  let resumeError: string | null = null;
   const prompt = buildMoveResumePrompt({
     agentId: agent.id,
     oldProviderId: agent.provider,
@@ -324,6 +348,7 @@ async function moveStuckAgentInPlace(input: {
       { err: error, agentId: agent.id },
       "Account failover: failed to send the resume prompt after moving the agent",
     );
+    resumeError = getErrorMessage(error);
   }
 
   return {
@@ -334,6 +359,7 @@ async function moveStuckAgentInPlace(input: {
     targetProviderId,
     model,
     workspaceId: agent.workspaceId,
+    resume: { prompt, error: resumeError },
   };
 }
 
@@ -344,7 +370,7 @@ async function sendResumePrompt(input: {
   successorId: string;
   targetProviderId: string;
   logger: Logger;
-}): Promise<void> {
+}): Promise<AccountFailoverResume> {
   const { agentManager, agentStorage, agent, successorId, targetProviderId, logger } = input;
   // State what the successor actually has after restoration, not what was requested.
   const config = agentManager.getAgent(successorId)?.config;
@@ -369,11 +395,13 @@ async function sendResumePrompt(input: {
       unarchive: false,
       logger,
     });
+    return { prompt, error: null };
   } catch (error) {
     logger.warn(
       { err: error, successorId },
       "Account failover: failed to send the resume prompt to the successor",
     );
+    return { prompt, error: getErrorMessage(error) };
   }
 }
 
@@ -502,7 +530,7 @@ export async function migrateStuckAgent(
   // failed restore must converge through adoption, never through a second import.
   await retirePredecessor(agentManager, predecessor, successorId);
   await restoreSessionSettings({ agentManager, agent, successorId, logger });
-  await sendResumePrompt({
+  const resume = await sendResumePrompt({
     agentManager,
     agentStorage,
     agent,
@@ -523,5 +551,6 @@ export async function migrateStuckAgent(
     workspaceId: agent.workspaceId,
     revived,
     staleError,
+    resume,
   };
 }

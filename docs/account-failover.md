@@ -85,7 +85,17 @@ The import path costs more, which is why it is second:
 5. **Push** old id → new id → account.
 6. **Tell a running parent.** For an imported subagent, the parent gets a steered system message naming the new id, but only while the parent is running. Steering an idle agent starts a new turn nobody is driving, the same trap [resource-monitor.md](resource-monitor.md) describes. An idle parent gets no message; the successor keeps the parent label, so it shows up under the parent in `list_agents`, and you get the push.
 
-Restoration and both resume prompts are best-effort: a failure there is logged and does not undo the move or the import.
+Restoration is best-effort: a failure there is logged and does not undo the move or the import.
+
+## An agent that moved but never restarted
+
+The resume prompt is the only thing that makes a migration finish, and sending it proves nothing. `sendPromptToAgent` returns once the turn starts; a provider that refuses the turn reports that asynchronously, so the agent lands in `lifecycle: "error"` well after the send resolved. Wrapping the send in a `try` catches only the synchronous cases — no such agent, archived, a turn already active.
+
+Nothing else will notice. The move clears the limit error, and a candidate needs a limit-shaped one, so a migrated agent that never restarted is invisible to the detector for good. Preserving the error instead would be worse: it is limit-shaped and the agent now sits on the target, so the next sweep would read it as evidence the _target_ is capped and condemn the account it was just rescued onto.
+
+So the monitor watches every migration until its resume demonstrably landed. Each following sweep reads the agent's state: running or idle means it resumed and the watch ends; `error` means re-send, up to three sends including the original. A limit-shaped error ends the watch too — the target is capped as well, which is the detector's job and would otherwise race this queue.
+
+When the attempts run out, the agent keeps its conversation and its place on the new account and is one message away from continuing, so the push says exactly that ("Agent moved but did not restart"). It carries `data.outcome: "needs_prompt"`, which is additive — an app that does not read it still gets the whole story from the body text.
 
 ## Idempotency
 

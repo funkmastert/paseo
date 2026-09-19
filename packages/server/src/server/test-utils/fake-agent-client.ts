@@ -479,8 +479,10 @@ class FakeAgentSession implements AgentSession {
     }
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
-    this.activeForegroundTurnId = turnId;
+    // Ahead of recording the turn as active: a hook that throws is a turn that never started,
+    // and leaving `activeForegroundTurnId` set would wedge every later turn on this client.
     this.onStartTurn?.(prompt);
+    this.activeForegroundTurnId = turnId;
 
     void this.emitTurnEvents(prompt);
 
