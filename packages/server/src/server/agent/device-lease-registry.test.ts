@@ -132,6 +132,29 @@ describe("reconcileDeviceLeases", () => {
     expect(result.leases.find((entry) => entry.deviceId === "Pixel_7")?.id).toBe("owner");
   });
 
+  test("never binds to a device that was already running when the lease was taken", () => {
+    // Otherwise a fresh checkout adopts somebody else's simulator, frees the slot it is about
+    // to fill, and the device it then boots puts the machine over the cap.
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 1_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 8040 })],
+    });
+
+    expect(result.leases[0].deviceId).toBeUndefined();
+    expect(result.unleasedDevices.map((entry) => entry.deviceId)).toEqual(["UDID-1"]);
+  });
+
+  test("binds to the device that booted after the lease", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "fresh", agentId: "a1", acquiredAtMs: 10 * MINUTE - 60_000 })],
+      runningDevices: [device({ deviceId: "UDID-1", uptimeSeconds: 30 })],
+    });
+
+    expect(result.leases[0].deviceId).toBe("UDID-1");
+  });
+
   test("releases a bound lease as soon as its device stops", () => {
     const result = reconcileDeviceLeases({
       ...base,

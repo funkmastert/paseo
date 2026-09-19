@@ -55,6 +55,18 @@ function isPending(lease: DeviceLease): boolean {
 }
 
 /**
+ * Whether this device could be the one the lease went on to boot. A device that was already up
+ * when the lease was taken cannot be: binding to it would hand the agent somebody else's
+ * simulator, free the slot it is about to fill, and let it boot a device over the cap. Uptime
+ * comes from `ps`'s elapsed column; a device that cannot report one is allowed to bind, since
+ * refusing on a missing signal would strand the lease instead.
+ */
+function startedAfterLease(device: RunningDevice, lease: DeviceLease, nowMs: number): boolean {
+  if (device.uptimeSeconds === undefined) return true;
+  return nowMs - device.uptimeSeconds * 1000 >= lease.acquiredAtMs - DEVICE_START_SLACK_MS;
+}
+
+/**
  * Occupancy is the union of what is running and what has been promised, counted by device
  * identity so a bound lease and its device are one slot, not two.
  */
@@ -100,6 +112,12 @@ export function evaluateDeviceSlot(input: {
   }
   return { available: true };
 }
+
+/**
+ * How much clock skew between the `ps` sample and the lease clock to forgive when deciding
+ * whether a device started after a lease was taken. One sweep's sampling jitter, no more.
+ */
+const DEVICE_START_SLACK_MS = 5_000;
 
 export interface ReconcileDeviceLeasesInput {
   leases: readonly DeviceLease[];
@@ -185,7 +203,8 @@ export function reconcileDeviceLeases(
       (lease) =>
         !boundLeaseIds.has(lease.id) &&
         lease.agentId === device.agentId &&
-        lease.platform === device.platform,
+        lease.platform === device.platform &&
+        startedAfterLease(device, lease, input.nowMs),
     );
     if (owner) bind(owner, device.deviceId);
   }
@@ -195,7 +214,10 @@ export function reconcileDeviceLeases(
     // A simulator's launchd_sim belongs to no tree, so most leases bind here: oldest lease to
     // the first unclaimed device of its platform, which is the order agents passed the gate in.
     const match = input.runningDevices.find(
-      (device) => device.platform === lease.platform && !claimedDeviceIds.has(device.deviceId),
+      (device) =>
+        device.platform === lease.platform &&
+        !claimedDeviceIds.has(device.deviceId) &&
+        startedAfterLease(device, lease, input.nowMs),
     );
     if (match) {
       bind(lease, match.deviceId);
