@@ -594,6 +594,51 @@ describe("toAgentPayload", () => {
 });
 
 describe("buildStoredAgentPayload", () => {
+  it("drops a stale finished flag from a delegated record written before the rule", () => {
+    // 27 such records existed on one daemon, nothing would ever have cleared them, and each
+    // one badged an agent a human never opens. The rule applies at read time so they stop
+    // showing without rewriting agent state.
+    const agent = createManagedAgent({ labels: { "paseo.parent-agent-id": "parent-1" } });
+    const record = {
+      ...toStoredAgentRecord(agent, { title: "Worker" }),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: "2026-08-22T02:40:47.743Z",
+    };
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload.requiresAttention).toBe(false);
+    expect(payload.attentionReason).toBeNull();
+    expect(payload.attentionTimestamp).toBeNull();
+  });
+
+  it("keeps a delegated record's error flag: a failed subagent is not the normal case", () => {
+    const agent = createManagedAgent({ labels: { "paseo.parent-agent-id": "parent-1" } });
+    const record = {
+      ...toStoredAgentRecord(agent, { title: "Worker" }),
+      requiresAttention: true,
+      attentionReason: "error" as const,
+      attentionTimestamp: "2026-08-22T02:40:47.743Z",
+    };
+
+    expect(buildStoredAgentPayload(record, ["claude"]).requiresAttention).toBe(true);
+  });
+
+  it("keeps a top-level record's finished flag, which is the whole signal", () => {
+    const record = {
+      ...toStoredAgentRecord(createManagedAgent({}), { title: "Leader" }),
+      requiresAttention: true,
+      attentionReason: "finished" as const,
+      attentionTimestamp: "2026-09-19T03:57:12.400Z",
+    };
+
+    const payload = buildStoredAgentPayload(record, ["claude"]);
+
+    expect(payload.requiresAttention).toBe(true);
+    expect(payload.attentionReason).toBe("finished");
+  });
+
   it("omits lastActivitySummary for persisted records, which never carry it", () => {
     const agent = createManagedAgent({ lastActivitySummary: "[Read] src/index.ts" });
     const record = toStoredAgentRecord(agent, { title: "Stored Agent" });

@@ -21,6 +21,7 @@ import type { ManagedAgent } from "./agent-manager.js";
 import type { JsonValue } from "../json-utils.js";
 import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
 import { computeTokenRate } from "./token-rate-tracker.js";
+import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
@@ -267,12 +268,36 @@ export function buildStoredAgentPayload(
     pendingPermissions: [],
     persistence,
     title: record.title ?? null,
-    requiresAttention: record.requiresAttention ?? false,
-    attentionReason: record.attentionReason ?? null,
-    attentionTimestamp: record.attentionTimestamp ?? null,
+    ...projectStoredAttention(record),
     archivedAt: record.archivedAt ?? null,
     labels: normalizeLabels(record.labels),
     ...(providerAvailable ? {} : { providerUnavailable: true }),
+  };
+}
+
+interface ProjectedAttention {
+  requiresAttention: boolean;
+  attentionReason: AgentSnapshotPayload["attentionReason"];
+  attentionTimestamp: string | null;
+}
+
+/**
+ * A delegated agent's finish is not shown as needing attention, matching what the manager now
+ * records (`checkAndSetAttention`). Applied at read time as well so records written before that
+ * rule stop badging: there were 27 of them on one daemon, some three weeks old, and nothing
+ * would ever have cleared them — a human does not open a subagent to read it. An error on a
+ * delegated agent still shows.
+ */
+function projectStoredAttention(record: StoredAgentRecord): ProjectedAttention {
+  const requiresAttention = record.requiresAttention ?? false;
+  const reason = record.attentionReason ?? null;
+  if (requiresAttention && reason === "finished" && isDelegatedAgent(record)) {
+    return { requiresAttention: false, attentionReason: null, attentionTimestamp: null };
+  }
+  return {
+    requiresAttention,
+    attentionReason: reason,
+    attentionTimestamp: record.attentionTimestamp ?? null,
   };
 }
 
