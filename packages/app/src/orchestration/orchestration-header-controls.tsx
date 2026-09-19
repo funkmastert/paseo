@@ -2,7 +2,7 @@ import type { ReactElement } from "react";
 import { useCallback, useMemo } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import { Archive } from "lucide-react-native";
+import { Archive, ChevronDown, ChevronUp } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import type { ArchiveFinishedStatus } from "@/subagents/archive-finished";
@@ -10,6 +10,8 @@ import type { Theme } from "@/styles/theme";
 import { ROW_ICON_SIZE } from "./orchestration-row";
 
 const ThemedArchive = withUnistyles(Archive);
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedChevronUp = withUnistyles(ChevronUp);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -27,13 +29,17 @@ export interface OrchestrationHeaderControlsProps {
   eligibleFinishedCount: number;
   archiveFinishedStatus: ArchiveFinishedStatus;
   onArchiveFinished: () => void;
+  /** Rows the recency window dropped. Always shown — a filtered list must say it is filtered. */
+  hiddenCount: number;
+  isShowingOlder: boolean;
+  onToggleOlder: () => void;
 }
 
 /**
- * The panel's own controls, starting with which slice of the fleet it is showing.
+ * The panel's own controls: which slice of the fleet it is showing, and what it is holding back.
  *
  * Separate from the panel shell because the shell's other header content (the budget strip, the
- * stale notice) needs a live host, and these controls are the whole of what changed about the
+ * stale notice) needs a live host, and these two controls are the whole of what changed about the
  * panel's presentation — the fleet-scale capture renders them beside the rows.
  */
 export function OrchestrationHeaderControls({
@@ -43,6 +49,9 @@ export function OrchestrationHeaderControls({
   eligibleFinishedCount,
   archiveFinishedStatus,
   onArchiveFinished,
+  hiddenCount,
+  isShowingOlder,
+  onToggleOlder,
 }: OrchestrationHeaderControlsProps): ReactElement | null {
   const { t } = useTranslation();
   const isArchiving = archiveFinishedStatus.kind === "archiving";
@@ -68,7 +77,7 @@ export function OrchestrationHeaderControls({
     [onScopeChange],
   );
 
-  if (!canScopeToLeader && !showArchiveFinished) {
+  if (!canScopeToLeader && !showArchiveFinished && hiddenCount === 0 && !isShowingOlder) {
     return null;
   }
 
@@ -83,7 +92,7 @@ export function OrchestrationHeaderControls({
           onValueChange={handleScopeChange}
         />
       ) : null}
-      {showArchiveFinished ? (
+      {showArchiveFinished || hiddenCount > 0 || isShowingOlder ? (
         <View style={styles.buttonRow}>
           {showArchiveFinished ? (
             <Pressable
@@ -123,6 +132,38 @@ export function OrchestrationHeaderControls({
                   ) : null}
                 </>
               )}
+            </Pressable>
+          ) : null}
+          {hiddenCount > 0 || isShowingOlder ? (
+            <Pressable
+              testID="orchestration-panel-toggle-older"
+              accessibilityRole="button"
+              accessibilityLabel={
+                isShowingOlder
+                  ? t("panels.orchestration.hideOlder")
+                  : t("panels.orchestration.showOlder", { count: hiddenCount })
+              }
+              onPress={onToggleOlder}
+              style={styles.headerButton}
+            >
+              {({ hovered, pressed }) => {
+                const Chevron = isShowingOlder ? ThemedChevronUp : ThemedChevronDown;
+                return (
+                  <>
+                    <Chevron
+                      size={ROW_ICON_SIZE}
+                      uniProps={
+                        hovered || pressed ? foregroundColorMapping : foregroundMutedColorMapping
+                      }
+                    />
+                    <Text style={styles.headerButtonLabel} numberOfLines={1}>
+                      {isShowingOlder
+                        ? t("panels.orchestration.hideOlder")
+                        : t("panels.orchestration.showOlder", { count: hiddenCount })}
+                    </Text>
+                  </>
+                );
+              }}
             </Pressable>
           ) : null}
         </View>

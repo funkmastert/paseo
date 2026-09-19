@@ -1,4 +1,4 @@
-import { useCallback, useMemo, type ReactElement } from "react";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { FlatList, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Network } from "lucide-react-native";
@@ -46,6 +46,7 @@ import {
 import { useOrchestrationTree } from "@/orchestration/select";
 import { useOrchestrationDirectoryDemand } from "@/orchestration/use-orchestration-directory-demand";
 import { useOrchestrationFreshness } from "@/orchestration/use-orchestration-freshness";
+import { useOrchestrationVisibleRows } from "@/orchestration/use-orchestration-visible-rows";
 import { useArchiveFinishedInTree } from "@/orchestration/use-archive-finished-in-tree";
 import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
 import type { TokenBurnSibling } from "@/utils/token-burn-tone-model";
@@ -115,22 +116,28 @@ function OrchestrationStaleNotice({ serverId }: { serverId: string }): ReactElem
 }
 
 /**
- * What the panel says when it has no rows to draw. A scoped tree that no longer exists and a host
- * with no agents at all are different facts; reporting the first as the second is how someone
- * concludes their agent vanished.
+ * What the panel says when it has no rows to draw. The three cases are different facts: a scoped
+ * tree that no longer exists, a fleet the window has emptied, and a host with no agents at all.
+ * Reporting the second as "no agents" is how someone concludes their agent vanished.
  */
 function OrchestrationEmptyState({
   isScoped,
   hasScopedTree,
+  hiddenCount,
 }: {
   isScoped: boolean;
   hasScopedTree: boolean;
+  hiddenCount: number;
 }): ReactElement {
   const { t } = useTranslation();
-  const message =
-    isScoped && !hasScopedTree
-      ? t("panels.orchestration.scopeMissing")
-      : t("panels.orchestration.emptyState");
+  let message: string;
+  if (isScoped && !hasScopedTree) {
+    message = t("panels.orchestration.scopeMissing");
+  } else if (hiddenCount > 0) {
+    message = t("panels.orchestration.emptyStateFiltered", { count: hiddenCount });
+  } else {
+    message = t("panels.orchestration.emptyState");
+  }
   return (
     <View style={styles.emptyState} testID="orchestration-panel-empty">
       <Text style={styles.emptyStateText}>{message}</Text>
@@ -161,7 +168,12 @@ function OrchestrationPanel(): ReactElement {
   );
   const allRoots = useOrchestrationTree({ serverId });
   const roots = useMemo(() => selectScopedOrchestrationRoots(allRoots, scope), [allRoots, scope]);
-  const rows = useMemo(() => flattenOrchestrationTree(roots), [roots]);
+  const allRows = useMemo(() => flattenOrchestrationTree(roots), [roots]);
+  const [isShowingOlder, setIsShowingOlder] = useState(false);
+  const { rows, hiddenCount } = useOrchestrationVisibleRows(allRows, {
+    showOlder: isShowingOlder,
+    alwaysKeepAgentId: target.scopeAgentId ?? null,
+  });
   const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
 
   // Collection rows never independently subscribe to token-rate data — the list owner derives
@@ -205,6 +217,8 @@ function OrchestrationPanel(): ReactElement {
     },
     [rememberedScopeAgentId, retargetCurrentTab, setCurrentTabState, target.scopeAgentId],
   );
+  const handleToggleOlder = useCallback(() => setIsShowingOlder((previous) => !previous), []);
+
   const handleOpenAgent = useCallback(
     (agent: Agent) => {
       const action = resolveOrchestrationRowOpenAction(agent, workspaceId);
@@ -273,12 +287,16 @@ function OrchestrationPanel(): ReactElement {
           eligibleFinishedCount={archiveFinished.eligibleCount}
           archiveFinishedStatus={archiveFinished.status}
           onArchiveFinished={archiveFinished.archiveFinished}
+          hiddenCount={hiddenCount}
+          isShowingOlder={isShowingOlder}
+          onToggleOlder={handleToggleOlder}
         />
       </View>
       {rows.length === 0 ? (
         <OrchestrationEmptyState
           isScoped={scope.kind === "leader"}
           hasScopedTree={roots.length > 0}
+          hiddenCount={hiddenCount}
         />
       ) : (
         <FlatList

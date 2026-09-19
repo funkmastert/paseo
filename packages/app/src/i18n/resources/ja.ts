@@ -1862,6 +1862,10 @@ export const ja: TranslationResources = {
       scopeLeader: "このツリー",
       scopeAll: "すべて",
       scopeMissing: "このツリーはもうありません。すべてに切り替えると残りを表示します。",
+      emptyStateFiltered:
+        "稼働中のものはありません。{{count}}件の古いエージェントを非表示にしています。",
+      showOlder: "古い{{count}}件を表示",
+      hideOlder: "古いものを隠す",
       usageUnavailable: "使用状況は利用できません",
       usageAsOf: "{{time}}時点の使用状況",
       staleTitle: "更新されていません",
