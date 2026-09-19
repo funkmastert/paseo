@@ -277,6 +277,8 @@ export const ko: TranslationResources = {
       archived: "보관됨",
       pending: "대기 {{count}}개",
       attention: "주의",
+      needsInput: "입력 필요",
+      failed: "실패",
       tokenBurnWarning: "높은 소비량",
       tokenBurnDanger: "매우 높은 소비량",
     },

@@ -274,6 +274,8 @@ export const en = {
       archived: "Archived",
       pending: "{{count}} pending",
       attention: "Attention",
+      needsInput: "Needs input",
+      failed: "Failed",
       tokenBurnWarning: "High burn",
       tokenBurnDanger: "Very high burn",
     },

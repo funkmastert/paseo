@@ -42,13 +42,13 @@ interface Mounted {
 }
 
 const mounted: Mounted[] = [];
-const PANEL_WIDTH = 560;
+const PANEL_WIDTH = 340;
 
-function mount(node: ReactNode): HTMLDivElement {
+function mount(node: ReactNode, width = PANEL_WIDTH): HTMLDivElement {
   const container = document.createElement("div");
-  container.style.width = `${PANEL_WIDTH}px`;
+  container.style.width = `${width}px`;
   document.body.style.margin = "0";
-  document.body.style.width = `${PANEL_WIDTH}px`;
+  document.body.style.width = `${width}px`;
   document.body.style.background = "#fff";
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -60,7 +60,7 @@ function mount(node: ReactNode): HTMLDivElement {
 const listStyle = { paddingVertical: 8 } as const;
 const noop = () => undefined;
 
-function Fleet({ slice }: { slice: [number, number] }) {
+function Fleet({ slice, canShowActivity }: { slice: [number, number]; canShowActivity: boolean }) {
   const rows = buildOrchestrationFixtureRows().slice(slice[0], slice[1]);
   const siblings: TokenBurnSibling[] = rows.map((row) => ({
     id: row.agent.id,
@@ -75,6 +75,7 @@ function Fleet({ slice }: { slice: [number, number] }) {
           row={row}
           serverId="fixture-host"
           canDetach
+          canShowActivity={canShowActivity}
           tokenBurnTone={tones.get(row.agent.id)}
           onPress={noop}
           onArchive={noop}
@@ -86,20 +87,56 @@ function Fleet({ slice }: { slice: [number, number] }) {
 }
 
 // The runner's iframe is shorter than 53 rows, and anything below its fold captures blank, so
-// the fleet is photographed in two halves rather than one tall image.
-const HALVES: Array<{ name: string; slice: [number, number] }> = [
-  { name: "../../../../docs/assets/orchestration-panel-fleet-1.png", slice: [0, 27] },
-  { name: "../../../../docs/assets/orchestration-panel-fleet-2.png", slice: [27, 53] },
+// the fleet is photographed in two halves rather than one tall image. It is photographed at two
+// widths because the activity column is width-gated: the narrow one is a side pane, the wide one
+// a main pane.
+const CAPTURES: Array<{
+  name: string;
+  slice: [number, number];
+  width: number;
+  canShowActivity: boolean;
+}> = [
+  {
+    name: "../../../../docs/assets/orchestration-panel-fleet-1.png",
+    slice: [0, 27],
+    width: PANEL_WIDTH,
+    canShowActivity: false,
+  },
+  {
+    name: "../../../../docs/assets/orchestration-panel-fleet-2.png",
+    slice: [27, 53],
+    width: PANEL_WIDTH,
+    canShowActivity: false,
+  },
+  {
+    name: "../../../../docs/assets/orchestration-panel-fleet-wide.png",
+    slice: [0, 27],
+    width: 440,
+    canShowActivity: true,
+  },
 ];
 
 describe("orchestration rows at fleet scale", () => {
   it("renders every agent in the fleet", () => {
-    const container = mount(<Fleet slice={[0, 53]} />);
+    const container = mount(<Fleet slice={[0, 53]} canShowActivity />);
     expect(container.querySelectorAll('[data-testid^="orchestration-row-"]').length).toBe(53);
   });
 
-  it.each(HALVES)("captures %#", async ({ name, slice }) => {
-    const container = mount(<Fleet slice={slice} />);
+  it.each([
+    { width: 340, canShowActivity: false },
+    { width: 440, canShowActivity: true },
+  ])("keeps every row inside a $width panel", ({ width, canShowActivity }) => {
+    const container = mount(<Fleet slice={[0, 53]} canShowActivity={canShowActivity} />, width);
+    const overflowing = Array.from(
+      container.querySelectorAll('[data-testid^="orchestration-row-"]'),
+    )
+      .filter((row) => row.scrollWidth > row.clientWidth + 1)
+      .map((row) => `${row.getAttribute("data-testid")}: ${row.scrollWidth}>${row.clientWidth}`);
+    expect(overflowing).toEqual([]);
+  });
+
+  it.each(CAPTURES)("captures %#", async ({ name, slice, width, canShowActivity }) => {
+    const container = mount(<Fleet slice={slice} canShowActivity={canShowActivity} />, width);
     await page.screenshot({ element: container, path: name });
   });
 });

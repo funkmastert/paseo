@@ -6,6 +6,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import invariant from "tiny-invariant";
 import { Alert } from "@/components/ui/alert";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
+import { useContainerWidthBelow } from "@/hooks/use-container-width";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import { useSettings } from "@/hooks/use-settings";
 import { usePaneContext } from "@/panels/pane-context";
@@ -186,6 +187,8 @@ function OrchestrationPanel(): ReactElement {
   const canDetachSubagents = useSessionStore(
     (state) => state.sessions[serverId]?.serverInfo?.features?.agentDetach === true,
   );
+  // One measurement for the whole list rather than a width read per row.
+  const { onLayout, isBelow: isNarrow } = useContainerWidthBelow(ACTIVITY_COLUMN_MIN_WIDTH);
   const archiveAgentRow = useArchiveSubagent({ serverId });
   const detachAgentRow = useDetachSubagent({ serverId });
 
@@ -221,6 +224,7 @@ function OrchestrationPanel(): ReactElement {
         row={item}
         serverId={serverId}
         canDetach={canDetachSubagents}
+        canShowActivity={!isNarrow}
         tokenBurnTone={tokenBurnTones.get(item.agent.id)}
         onPress={handleOpenAgent}
         onArchive={archiveAgentRow}
@@ -231,6 +235,7 @@ function OrchestrationPanel(): ReactElement {
       archiveAgentRow,
       canDetachSubagents,
       detachAgentRow,
+      isNarrow,
       handleOpenAgent,
       serverId,
       tokenBurnTones,
@@ -240,7 +245,7 @@ function OrchestrationPanel(): ReactElement {
   const keyExtractor = useCallback((item: OrchestrationFlatRow) => item.agent.id, []);
 
   return (
-    <View style={styles.container} testID="orchestration-panel">
+    <View style={styles.container} testID="orchestration-panel" onLayout={onLayout}>
       <OrchestrationHeader
         serverId={serverId}
         providerIds={providerIds}
@@ -263,6 +268,12 @@ function OrchestrationPanel(): ReactElement {
     </View>
   );
 }
+
+/**
+ * Below this the row drops its activity column. A title, a state and a time fit in a narrow pane;
+ * a fourth flexible column there just truncates everything, including the title.
+ */
+const ACTIVITY_COLUMN_MIN_WIDTH = 480;
 
 const styles = StyleSheet.create((theme) => ({
   container: { flex: 1, minHeight: 0 },

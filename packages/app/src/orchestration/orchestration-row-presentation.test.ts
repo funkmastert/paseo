@@ -1,0 +1,58 @@
+import { describe, expect, it } from "vitest";
+import { resolveOrchestrationRowPresentation } from "./orchestration-row-presentation";
+import { buildOrchestrationFixtureFleet } from "./fixture-fleet";
+import type { Agent } from "@/stores/session-store";
+
+const fleet = buildOrchestrationFixtureFleet();
+const byTitle = (title: string): Agent => {
+  const agent = fleet.find((candidate) => candidate.title === title);
+  if (!agent) throw new Error(`fixture has no agent titled ${title}`);
+  return agent;
+};
+
+describe("resolveOrchestrationRowPresentation", () => {
+  it("shows the activity line only while the agent is running", () => {
+    const running = resolveOrchestrationRowPresentation(
+      byTitle("Orchestration panel: staleness then presentation"),
+    );
+    expect(running).toMatchObject({ isRunning: true, showActivity: true });
+  });
+
+  it("hides a finished agent's last activity rather than passing it off as current work", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    const withStaleSummary: Agent = { ...finished, lastActivitySummary: "[Bash] npm run lint" };
+    expect(resolveOrchestrationRowPresentation(withStaleSummary)).toMatchObject({
+      isRunning: false,
+      showActivity: false,
+    });
+  });
+
+  it("badges only the states an orchestrator has to act on", () => {
+    expect(
+      resolveOrchestrationRowPresentation(byTitle("Match iOS pull-to-refresh on Android Home"))
+        .badge,
+    ).toBe("needs-input");
+    expect(
+      resolveOrchestrationRowPresentation(byTitle("Fix pool auth failure detection")).badge,
+    ).toBe("failed");
+  });
+
+  it("does not badge an agent that merely finished", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    const attention: Agent = {
+      ...finished,
+      requiresAttention: true,
+      attentionReason: "finished",
+    };
+    expect(resolveOrchestrationRowPresentation(attention).badge).toBeNull();
+  });
+
+  it("separates a closed agent from an idle one", () => {
+    expect(
+      resolveOrchestrationRowPresentation(byTitle("Reap leases whose holder went away")).isClosed,
+    ).toBe(true);
+    expect(
+      resolveOrchestrationRowPresentation(byTitle("Device lease protocol messages")).isClosed,
+    ).toBe(false);
+  });
+});

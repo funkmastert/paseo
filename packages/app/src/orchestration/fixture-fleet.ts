@@ -1,6 +1,7 @@
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import type { Agent } from "@/stores/session-store";
 import type { OrchestrationFlatRow } from "./orchestration-panel-model";
+import { agentStatePriority, compareOrchestrationRoots } from "./orchestration-ordering";
 
 // Inlined rather than imported from @/timeline/turn-liveness: this module is loaded by the
 // browser screenshot harness, where every runtime import drags another slice of the app (and
@@ -264,6 +265,12 @@ export function buildOrchestrationFixtureRows(): OrchestrationFlatRow[] {
     Boolean(agent.requiresAttention) ||
     (childrenByParent.get(agent.id) ?? []).some(requiresAttentionInSubtree);
 
+  const subtreePriority = (agent: Agent): number =>
+    Math.min(
+      agentStatePriority(agent),
+      ...(childrenByParent.get(agent.id) ?? []).map(subtreePriority),
+    );
+
   const rows: OrchestrationFlatRow[] = [];
   const visit = (agent: Agent, depth: number): void => {
     const children = childrenByParent.get(agent.id) ?? [];
@@ -274,6 +281,9 @@ export function buildOrchestrationFixtureRows(): OrchestrationFlatRow[] {
     });
     for (const child of children) visit(child, depth + 1);
   };
-  for (const root of roots) visit(root, 0);
+  const orderedRoots = roots
+    .map((agent) => ({ agent, subtreePriority: subtreePriority(agent) }))
+    .sort(compareOrchestrationRoots);
+  for (const root of orderedRoots) visit(root.agent, 0);
   return rows;
 }

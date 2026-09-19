@@ -276,6 +276,8 @@ export const ar: TranslationResources = {
       archived: "مؤرشف",
       pending: "{{count}}معلق",
       attention: "انتباه",
+      needsInput: "بحاجة إلى إدخال",
+      failed: "فشل",
       tokenBurnWarning: "استهلاك مرتفع",
       tokenBurnDanger: "استهلاك مرتفع جدًا",
     },

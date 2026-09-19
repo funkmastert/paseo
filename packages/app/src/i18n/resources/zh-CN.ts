@@ -276,6 +276,8 @@ export const zhCN: TranslationResources = {
       archived: "已归档",
       pending: "{{count}} 个待处理",
       attention: "需要注意",
+      needsInput: "需要输入",
+      failed: "失败",
       tokenBurnWarning: "消耗较高",
       tokenBurnDanger: "消耗过高",
     },

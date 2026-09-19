@@ -279,6 +279,8 @@ export const es: TranslationResources = {
       archived: "Archivado",
       pending: "{{count}}pendiente",
       attention: "Atención",
+      needsInput: "Necesita respuesta",
+      failed: "Con error",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muy alto",
     },

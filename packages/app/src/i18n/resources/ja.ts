@@ -279,6 +279,8 @@ export const ja: TranslationResources = {
       archived: "アーカイブ済み",
       pending: "{{count}}件保留中",
       attention: "注意",
+      needsInput: "入力が必要",
+      failed: "失敗",
       tokenBurnWarning: "高消費",
       tokenBurnDanger: "非常に高い消費",
     },

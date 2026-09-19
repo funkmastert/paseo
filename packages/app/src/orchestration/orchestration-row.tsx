@@ -16,6 +16,7 @@ import type { Theme } from "@/styles/theme";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import type { TokenBurnTone } from "@/utils/token-burn-tone-model";
 import type { OrchestrationFlatRow } from "./orchestration-panel-model";
+import { resolveOrchestrationRowPresentation } from "./orchestration-row-presentation";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedUnlink = withUnistyles(Unlink);
@@ -72,6 +73,12 @@ export interface OrchestrationRowProps {
   row: OrchestrationFlatRow;
   serverId: string;
   canDetach: boolean;
+  /**
+   * Whether the panel is wide enough to carry the activity column. Measured once by the list
+   * owner, never per row: below it a truncated "[Bas…" says less than the space it costs, and
+   * the title is what identifies the agent.
+   */
+  canShowActivity: boolean;
   tokenBurnTone?: TokenBurnTone;
   onPress: (agent: Agent) => void;
   onArchive: (agentId: string) => void;
@@ -82,6 +89,7 @@ export function OrchestrationRow({
   row,
   serverId,
   canDetach,
+  canShowActivity,
   tokenBurnTone,
   onPress,
   onArchive,
@@ -94,6 +102,7 @@ export function OrchestrationRow({
   const indentStyle = INDENT_STYLE_LIST[Math.min(row.depth, MAX_INDENT_LEVELS)];
   const displayTitle = agent.title?.trim() || t("agentList.fallbackTitle");
   const actionsAlwaysVisible = isNative || isCompact;
+  const presentation = resolveOrchestrationRowPresentation(agent);
 
   // Hover on a plain View, press on a separate inner Pressable — per docs/hover.md. The row
   // reveals nested action Pressables (archive/detach) on hover; tracking hover on the Pressable
@@ -120,11 +129,15 @@ export function OrchestrationRow({
         style={styles.row}
       >
         <View style={indentStyle} />
+        {/* showInactive so a finished agent gets a dim dot rather than nothing. Without it the
+            leading rail collapses on every idle and closed row — which is most of a real fleet —
+            and the titles sit at two different left edges down the list (docs/design.md §8). */}
         <AgentStatusDot
           status={agent.status}
           requiresAttention={agent.requiresAttention}
           attentionReason={agent.attentionReason}
           pendingPermissionCount={agent.pendingPermissions.length}
+          showInactive
           animated
         />
         {row.descendantRequiresAttention ? (
@@ -140,11 +153,14 @@ export function OrchestrationRow({
           size={ROW_ICON_SIZE}
           uniProps={foregroundMutedColorMapping}
         />
-        <Text style={styles.title} numberOfLines={1}>
+        <Text style={presentation.isClosed ? styles.titleClosed : styles.title} numberOfLines={1}>
           {displayTitle}
         </Text>
-        {agent.requiresAttention ? (
-          <StatusBadge label={t("agentList.badges.attention")} variant="error" />
+        {presentation.badge === "needs-input" ? (
+          <StatusBadge label={t("agentList.badges.needsInput")} variant="warning" />
+        ) : null}
+        {presentation.badge === "failed" ? (
+          <StatusBadge label={t("agentList.badges.failed")} variant="error" />
         ) : null}
         {tokenBurnTone ? (
           <TokenBurnBadge
@@ -154,14 +170,9 @@ export function OrchestrationRow({
             testID={`orchestration-token-burn-${agent.id}`}
           />
         ) : null}
-        {agent.lastActivitySummary ? (
+        {presentation.showActivity && canShowActivity ? (
           <Text style={styles.subtitle} numberOfLines={1}>
             {agent.lastActivitySummary}
-          </Text>
-        ) : null}
-        {agent.model ? (
-          <Text style={styles.model} numberOfLines={1}>
-            {agent.model}
           </Text>
         ) : null}
         <Text style={styles.time} numberOfLines={1}>
@@ -226,22 +237,29 @@ const styles = StyleSheet.create((theme) => {
       backgroundColor: attentionDotColor,
       opacity: 0.55,
     },
+    // minWidth, not 0: a wide badge plus a timestamp could otherwise squeeze the title out of
+    // its own row entirely, leaving a row that says a lot about an agent you cannot identify.
     title: {
       flexGrow: 1,
       flexShrink: 1,
       flexBasis: "auto",
-      minWidth: 0,
+      minWidth: 96,
       fontSize: theme.fontSize.base,
       color: theme.colors.foreground,
+    },
+    // A closed agent has no runtime behind it: it is context, not something being acted on, so it
+    // drops to the muted tier rather than earning a badge of its own (docs/design.md §3).
+    titleClosed: {
+      flexGrow: 1,
+      flexShrink: 1,
+      flexBasis: "auto",
+      minWidth: 96,
+      fontSize: theme.fontSize.base,
+      color: theme.colors.foregroundMuted,
     },
     subtitle: {
       flexShrink: 2,
       minWidth: 0,
-      fontSize: theme.fontSize.sm,
-      color: theme.colors.foregroundMuted,
-    },
-    model: {
-      flexShrink: 0,
       fontSize: theme.fontSize.sm,
       color: theme.colors.foregroundMuted,
     },

@@ -280,6 +280,8 @@ export const fr: TranslationResources = {
       archived: "Archivé",
       pending: "{{count}}en attente",
       attention: "Attention",
+      needsInput: "Attente de réponse",
+      failed: "En échec",
       tokenBurnWarning: "Consommation élevée",
       tokenBurnDanger: "Consommation très élevée",
     },

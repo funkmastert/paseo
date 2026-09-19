@@ -278,6 +278,8 @@ export const ru: TranslationResources = {
       archived: "В архиве",
       pending: "На рассмотрении: {{count}}",
       attention: "Внимание",
+      needsInput: "Нужен ответ",
+      failed: "Ошибка",
       tokenBurnWarning: "Высокий расход",
       tokenBurnDanger: "Очень высокий расход",
     },

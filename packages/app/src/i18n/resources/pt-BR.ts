@@ -279,6 +279,8 @@ export const ptBR: TranslationResources = {
       archived: "Arquivado",
       pending: "{{count}} pendente(s)",
       attention: "Atenção",
+      needsInput: "Precisa de resposta",
+      failed: "Com erro",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muito alto",
     },
