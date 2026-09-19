@@ -206,15 +206,16 @@ export function evaluateRequestedModel(
 }
 
 /**
- * Pure model selection: ordered intersection of role.models with the live
- * catalog. `role.models` empty -> UNCONFIGURED (byte-identical pass-through,
- * caller must not touch the request at all). Nothing eligible -> UNAVAILABLE
- * using role.models[0] anyway — routing problems get recovered, never used
- * to skip a requested subagent.
+ * Pure model selection: ordered intersection of the resolved (role, task
+ * class) pool — see `classModels` — with the live catalog. That pool empty
+ * -> UNCONFIGURED (byte-identical pass-through, caller must not touch the
+ * request at all). Nothing eligible -> UNAVAILABLE using its first entry
+ * anyway — routing problems get recovered, never used to skip a requested
+ * subagent.
  *
- * Exhaustion stays inside the role: a role whose every entry is gated out
- * falls back to its own models[0], never to another role's pool or to
- * whatever model the parent happened to be running.
+ * Exhaustion stays inside the (role, task class) pool: one whose every entry
+ * is gated out falls back to its own first entry, never to another
+ * role/class's pool or to whatever model the parent happened to be running.
  */
 export function selectModel(
   role: RoleRecord,

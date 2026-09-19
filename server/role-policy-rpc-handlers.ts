@@ -258,8 +258,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
               requestedRef,
               honored: false,
               // outcome can't actually be "unconfigured" here: that only
-              // happens when role.models is empty, which already forces
-              // honored=true above. requestedRef is a type-safe fallback.
+              // happens when the resolved class's pool (classModels) is
+              // empty, which already forces honored=true above. requestedRef
+              // is a type-safe fallback.
               effectiveRef: outcome.outcome === "unconfigured" ? requestedRef : formatModelRef(outcome),
               reason: evaluation.configured ? "not-currently-selectable" : "not-approved",
             };
