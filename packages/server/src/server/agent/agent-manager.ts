@@ -110,6 +110,11 @@ import type { TokenBurnMonitorState } from "./token-burn-detector.js";
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
+  isUnresponsiveCancelReason,
+  UNRESPONSIVE_CANCEL_ERROR,
+  UNRESPONSIVE_CANCEL_REASON,
+} from "./turn-cancel.js";
+import {
   AgentProviderMoveError,
   checkAgentProviderMove,
   resolveProviderSessionFamily,
@@ -3368,11 +3373,17 @@ export class AgentManager {
     mutableAgent.activeForegroundTurnId = null;
     this.applyActiveTurnTerminal(mutableAgent, turnId);
     const terminalError = mutableAgent.lastError;
+    // `lastError` was this method's only outcome signal, which conflated "something went wrong"
+    // with "the agent is in an error state". An unresponsive cancel is the case that separates
+    // them: the cause has to survive for the failover detector to read, and the lifecycle has
+    // to stay exactly where a cancel leaves it, or the app and the monitors start treating a
+    // stopped turn as an errored agent.
+    const canceled = mutableAgent.turnCanceled === true;
     const shouldHoldBusyForReplacement = mutableAgent.pendingReplacement && !terminalError;
     let nextLifecycle: "running" | "error" | "idle";
     if (shouldHoldBusyForReplacement) {
       nextLifecycle = "running";
-    } else if (terminalError) {
+    } else if (terminalError && !canceled) {
       nextLifecycle = "error";
     } else {
       nextLifecycle = "idle";
@@ -3825,7 +3836,10 @@ export class AgentManager {
       await this.dispatchSessionEvent(agent, {
         type: "turn_canceled",
         provider: agent.provider,
-        reason: "interrupted",
+        // Distinguished from a plain "interrupted": the session acknowledged the interrupt and
+        // then never settled. That is a dead session, and the layers that route around dead
+        // accounts have to be able to tell it from a person pressing stop.
+        reason: UNRESPONSIVE_CANCEL_REASON,
         turnId: runTurnId,
       });
       await run.settledPromise;
@@ -3839,6 +3853,7 @@ export class AgentManager {
         // This branch bypasses the turn-event path entirely, so a fix that only handles
         // `turn_canceled` would miss it — and it is the unresponsive-session case exactly.
         agent.turnCanceled = true;
+        agent.lastError = UNRESPONSIVE_CANCEL_ERROR;
         agent.lifecycle = "idle";
         this.touchUpdatedAt(agent);
         this.emitState(agent);
@@ -5356,7 +5371,13 @@ export class AgentManager {
     if (!isForegroundEvent && !agent.activeForegroundTurnId && !agent.pendingReplacement) {
       agent.lifecycle = "idle";
     }
-    agent.lastError = undefined;
+    // A person pressing stop leaves nothing wrong with the agent, so its error clears. A
+    // session that stopped answering is a failure, and `lastError` is the only thing the
+    // account-failover detector reads — clearing it there is what made an account outage
+    // invisible to the feature built to route around one. Lifecycle is untouched either way.
+    agent.lastError = isUnresponsiveCancelReason(event.reason)
+      ? UNRESPONSIVE_CANCEL_ERROR
+      : undefined;
     this.resolvePendingPermissionsForAgent(agent, event.provider, options, "Interrupted");
     if (!isForegroundEvent && !agent.activeForegroundTurnId) {
       this.emitState(agent);

@@ -1,4 +1,5 @@
 import type { AgentStreamEvent, AgentTimelineItem } from "../../agent/agent-sdk-types.js";
+import { isUnresponsiveCancelReason, UNRESPONSIVE_CANCEL_ERROR } from "../../agent/turn-cancel.js";
 import { z } from "zod";
 import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
 import type {
@@ -119,11 +120,18 @@ export function publishAgentStream(
       outcome: { kind: "failed", error: { message: event.error, code: event.code } },
     });
   } else if (event.type === "turn_canceled") {
+    // A session that acknowledged an interrupt and then never settled is a failed turn, not a
+    // cancelled one, and plugins that route around dead accounts only look at `failed`: the
+    // account-pool health tracker calls its classifier from that branch alone. Reported as
+    // `canceled` this reached nothing, which is how a logged-out account kept taking work.
+    // Only the outcome changes — the agent's lifecycle stays exactly as it is.
     lifecycle.emit("agent.turn_ended", {
       agent,
       turnId: event.turnId ?? null,
       timeline,
-      outcome: { kind: "canceled", reason: event.reason },
+      outcome: isUnresponsiveCancelReason(event.reason)
+        ? { kind: "failed", error: { message: UNRESPONSIVE_CANCEL_ERROR } }
+        : { kind: "canceled", reason: event.reason },
     });
   } else if (event.type === "permission_requested") {
     lifecycle.emit("agent.permission_requested", { agent, request: event.request });
