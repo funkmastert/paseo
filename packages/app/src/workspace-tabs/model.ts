@@ -32,6 +32,18 @@ export type PluginWorkspaceTabTarget =
       agentId: string;
     };
 
+/**
+ * The orchestration panel, scoped by the agent the tab was opened from.
+ *
+ * `scopeAgentId` absent is the host-wide view. Present, it is the agent whose session opened the
+ * tab — not necessarily the leader: the panel walks to the root of that agent's tree, so opening
+ * from a subagent and opening from its leader land on the same tree.
+ */
+export interface OrchestrationWorkspaceTabTarget {
+  kind: "orchestration";
+  scopeAgentId?: string;
+}
+
 export type WorkspaceTabTarget =
   | { kind: "new_tab" }
   | { kind: "draft"; draftId: string; setup?: WorkspaceDraftTabSetup }
@@ -42,7 +54,7 @@ export type WorkspaceTabTarget =
   | { kind: "changes_tree" }
   | { kind: "files" }
   | { kind: "pull_request" }
-  | { kind: "orchestration" }
+  | OrchestrationWorkspaceTabTarget
   | WorkspaceFileTabTarget
   | WorkspaceWorkingDiffTabTarget
   | PluginWorkspaceTabTarget

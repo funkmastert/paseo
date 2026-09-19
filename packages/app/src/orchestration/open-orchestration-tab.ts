@@ -11,6 +11,11 @@ export interface OpenOrchestrationTabInput {
   parentTabId?: string | null;
   /** Plain reveal fallback when splitting isn't available — mirrors agent-tracks.tsx's provider-subagent path. */
   openTab: (target: WorkspaceTabTarget) => void;
+  /**
+   * The agent whose session is opening the tab. Omitted from the Command Center, which is not in
+   * a session and opens the host-wide view.
+   */
+  scopeAgentId?: string;
 }
 
 /**
@@ -20,16 +25,19 @@ export interface OpenOrchestrationTabInput {
  * conceptually the same class of open as revealing a subagent.
  */
 export function openOrchestrationTab(input: OpenOrchestrationTabInput): void {
+  const target: WorkspaceTabTarget = input.scopeAgentId
+    ? { kind: "orchestration", scopeAgentId: input.scopeAgentId }
+    : { kind: "orchestration" };
   if (input.canSplit && input.workspaceKey) {
     openPreferredWorkspaceTarget({
       isCompact: input.isCompact,
       workspaceKey: input.workspaceKey,
-      target: { kind: "orchestration" },
+      target,
       source: "subagents",
       preferences: input.preferences,
       parentTabId: input.parentTabId,
     });
     return;
   }
-  input.openTab({ kind: "orchestration" });
+  input.openTab(target);
 }

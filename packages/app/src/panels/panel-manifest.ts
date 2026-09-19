@@ -62,7 +62,9 @@ const manifests = {
   orchestration: {
     kind: "orchestration",
     supportedHosts: ["main"],
-    resourceKey: () => "orchestration",
+    // The scoped tab and the host-wide one are different resources; opening one must not reveal
+    // the other (see workspace-tabs/identity.ts).
+    resourceKey: (target) => target.scopeAgentId ?? "all",
   },
   file: {
     kind: "file",

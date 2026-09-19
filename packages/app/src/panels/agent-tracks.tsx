@@ -40,6 +40,7 @@ export const AgentTracks = memo(function AgentTracks({
   archiveFinishedStatus,
   onArchiveFinished,
   hasPluginComposerPills,
+  isSubagent,
 }: {
   serverId: string;
   workspaceId: string;
@@ -50,6 +51,8 @@ export const AgentTracks = memo(function AgentTracks({
   archiveFinishedStatus: ArchiveFinishedStatus;
   onArchiveFinished: () => void;
   hasPluginComposerPills: boolean;
+  /** Whether this agent has a parent — see `isInAgentTree` for why the pill needs to know. */
+  isSubagent: boolean;
 }): ReactElement | null {
   const { tabId, openTab } = usePaneContext();
   const hasWorkspaceDiffStat = useWorkspaceHasDiffStat(serverId, workspaceId);
@@ -114,17 +117,20 @@ export const AgentTracks = memo(function AgentTracks({
     });
   }, [cwd, isCompact, openInSidePane, serverId, workspaceKey]);
 
-  const hasChildren = subagentRows.length > 0;
-  const handleOpenOrchestration = useCallback(() => {
-    openOrchestrationTab({
-      isCompact,
-      canSplit,
-      workspaceKey,
-      preferences: openInSidePane,
-      parentTabId: tabId,
-      openTab,
-    });
-  }, [canSplit, isCompact, openInSidePane, openTab, tabId, workspaceKey]);
+  const handleOpenOrchestration = useCallback(
+    (scopeAgentId: string) => {
+      openOrchestrationTab({
+        isCompact,
+        canSplit,
+        workspaceKey,
+        preferences: openInSidePane,
+        parentTabId: tabId,
+        openTab,
+        scopeAgentId,
+      });
+    },
+    [canSplit, isCompact, openInSidePane, openTab, tabId, workspaceKey],
+  );
 
   if (
     !hasWorkspaceDiffStat &&
@@ -133,6 +139,7 @@ export const AgentTracks = memo(function AgentTracks({
       tasks,
       archiveFinishedStatus,
       hasPluginComposerPills,
+      isSubagent,
     })
   ) {
     return null;
@@ -151,7 +158,7 @@ export const AgentTracks = memo(function AgentTracks({
         archiveFinishedStatus={archiveFinishedStatus}
         onDetachSubagent={canDetachSubagents ? detachSubagent : undefined}
       />
-      {hasChildren ? (
+      {isInAgentTree({ subagentRows, isSubagent }) ? (
         <OrchestrationTrackPill
           serverId={serverId}
           agentId={agentId}
@@ -173,19 +180,35 @@ export const AgentTracks = memo(function AgentTracks({
   );
 });
 
+/**
+ * Whether this agent sits in an agent tree, which is what the orchestration pill opens onto.
+ *
+ * Children are the obvious case. Having a parent counts too: a leaf subagent is a session like any
+ * other, and "show me this leader and its agents" is exactly the question someone working inside
+ * one asks. Without this the only way into a tree from its own subagent is the host-wide tab.
+ */
+function isInAgentTree(input: {
+  subagentRows: readonly SubagentRow[];
+  isSubagent: boolean;
+}): boolean {
+  return input.subagentRows.length > 0 || input.isSubagent;
+}
+
 export function hasAgentTracks({
   subagentRows,
   tasks,
   archiveFinishedStatus,
   hasPluginComposerPills = false,
+  isSubagent = false,
 }: {
   subagentRows: readonly SubagentRow[];
   tasks: readonly TodoEntry[] | undefined;
   archiveFinishedStatus: ArchiveFinishedStatus;
   hasPluginComposerPills?: boolean;
+  isSubagent?: boolean;
 }): boolean {
   return (
-    subagentRows.length > 0 ||
+    isInAgentTree({ subagentRows, isSubagent }) ||
     Boolean(tasks?.length) ||
     archiveFinishedStatus.kind !== "idle" ||
     hasPluginComposerPills

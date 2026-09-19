@@ -1,9 +1,10 @@
 import { useCallback, useMemo, type ReactElement } from "react";
-import { FlatList, Pressable, Text, View } from "react-native";
+import { FlatList, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import { Archive, Network } from "lucide-react-native";
+import { Network } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import invariant from "tiny-invariant";
+import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { Alert } from "@/components/ui/alert";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
 import { useContainerWidthBelow } from "@/hooks/use-container-width";
@@ -17,7 +18,6 @@ import {
 } from "@/panels/panel-registry";
 import { useSessionStore, type Agent } from "@/stores/session-store";
 import { useArchiveSubagent, useDetachSubagent } from "@/subagents";
-import type { Theme } from "@/styles/theme";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { buildWorkspaceTabPersistenceKey, type WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { openPreferredWorkspaceTarget } from "@/workspace-tabs/open-beside";
@@ -33,7 +33,16 @@ import {
   resolveOrchestrationTreeAttention,
   type OrchestrationFlatRow,
 } from "@/orchestration/orchestration-panel-model";
-import { OrchestrationRow, ROW_ICON_SIZE } from "@/orchestration/orchestration-row";
+import {
+  OrchestrationHeaderControls,
+  type OrchestrationScopeValue,
+} from "@/orchestration/orchestration-header-controls";
+import { OrchestrationRow } from "@/orchestration/orchestration-row";
+import {
+  resolveOrchestrationScope,
+  resolveScopedLeaderAgent,
+  selectScopedOrchestrationRoots,
+} from "@/orchestration/orchestration-scope";
 import { useOrchestrationTree } from "@/orchestration/select";
 import { useOrchestrationDirectoryDemand } from "@/orchestration/use-orchestration-directory-demand";
 import { useOrchestrationFreshness } from "@/orchestration/use-orchestration-freshness";
@@ -42,21 +51,39 @@ import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
 import type { TokenBurnSibling } from "@/utils/token-burn-tone-model";
 
 const ThemedNetwork = withUnistyles(Network);
-const ThemedArchive = withUnistyles(Archive);
 
-const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
-const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+/**
+ * The leader a host-wide tab came from, so switching scope is a two-way control rather than a
+ * door that locks behind you. Tab state survives a same-kind retarget, which is what a scope
+ * switch is.
+ */
+function readLastScopeAgentId(state: JsonValue | undefined): string | null {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+  const value = (state as Record<string, JsonValue | undefined>).lastScopeAgentId;
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
 
 function useOrchestrationPanelDescriptor(
-  _target: Extract<WorkspaceTabTarget, { kind: "orchestration" }>,
+  target: Extract<WorkspaceTabTarget, { kind: "orchestration" }>,
   context: PanelDescriptorContext,
 ): PanelDescriptor {
   const { t } = useTranslation();
   const roots = useOrchestrationTree({ serverId: context.serverId });
-  const requiresAttention = resolveOrchestrationTreeAttention(roots);
+  const scope = useMemo(
+    () => resolveOrchestrationScope(target.scopeAgentId),
+    [target.scopeAgentId],
+  );
+  const scopedRoots = useMemo(() => selectScopedOrchestrationRoots(roots, scope), [roots, scope]);
+  const leader = resolveScopedLeaderAgent(roots, scope);
+  // A scoped tab badges for its own tree only: an unrelated fleet's permission request is not
+  // this tab's business, and a mark that is never about what the tab shows stops being read.
+  const requiresAttention = resolveOrchestrationTreeAttention(scopedRoots);
   return {
     label: t("panels.orchestration.label"),
-    subtitle: t("panels.orchestration.subtitle"),
+    subtitle:
+      scope.kind === "all"
+        ? t("panels.orchestration.subtitleAll")
+        : leader?.title?.trim() || t("panels.orchestration.subtitleLeader"),
     tooltip: t("panels.orchestration.tooltip"),
     titleState: "ready",
     icon: ThemedNetwork,
@@ -87,84 +114,53 @@ function OrchestrationStaleNotice({ serverId }: { serverId: string }): ReactElem
   );
 }
 
-function OrchestrationHeader({
-  serverId,
-  providerIds,
-  eligibleFinishedCount,
-  archiveFinishedStatus,
-  onArchiveFinished,
+/**
+ * What the panel says when it has no rows to draw. A scoped tree that no longer exists and a host
+ * with no agents at all are different facts; reporting the first as the second is how someone
+ * concludes their agent vanished.
+ */
+function OrchestrationEmptyState({
+  isScoped,
+  hasScopedTree,
 }: {
-  serverId: string;
-  providerIds: string[];
-  eligibleFinishedCount: number;
-  archiveFinishedStatus: ReturnType<typeof useArchiveFinishedInTree>["status"];
-  onArchiveFinished: () => void;
+  isScoped: boolean;
+  hasScopedTree: boolean;
 }): ReactElement {
   const { t } = useTranslation();
-  const isArchiving = archiveFinishedStatus.kind === "archiving";
-  const isFailed = archiveFinishedStatus.kind === "failed";
-  const showArchiveFinished = eligibleFinishedCount > 0 || isArchiving || isFailed;
-
+  const message =
+    isScoped && !hasScopedTree
+      ? t("panels.orchestration.scopeMissing")
+      : t("panels.orchestration.emptyState");
   return (
-    <View style={styles.header}>
-      <OrchestrationStaleNotice serverId={serverId} />
-      <AccountBudgetStrip
-        serverId={serverId}
-        providerIds={providerIds}
-        refetchIntervalMs={DEFAULT_REFETCH_INTERVAL_MS}
-      />
-      {showArchiveFinished ? (
-        <Pressable
-          testID="orchestration-panel-archive-finished"
-          accessibilityRole="button"
-          accessibilityLabel={t("subagents.archiveFinishedAction")}
-          disabled={isArchiving}
-          onPress={onArchiveFinished}
-          style={styles.archiveFinishedButton}
-        >
-          {({ hovered, pressed }) => (
-            <>
-              <ThemedArchive
-                size={ROW_ICON_SIZE}
-                uniProps={hovered || pressed ? foregroundColorMapping : foregroundMutedColorMapping}
-              />
-              <Text style={styles.archiveFinishedLabel} numberOfLines={1}>
-                {t("subagents.archiveFinishedAction")}
-              </Text>
-              {isArchiving ? (
-                <Text
-                  style={styles.archiveFinishedTrailing}
-                  testID="orchestration-archive-progress"
-                >
-                  {archiveFinishedStatus.completedCount}/{archiveFinishedStatus.totalCount}
-                </Text>
-              ) : null}
-              {isFailed ? (
-                <Text style={styles.archiveFinishedTrailing} testID="orchestration-archive-failed">
-                  {t("subagents.archiveFinishedRetry", {
-                    failed: archiveFinishedStatus.failedCount,
-                    total: archiveFinishedStatus.totalCount,
-                  })}
-                </Text>
-              ) : null}
-            </>
-          )}
-        </Pressable>
-      ) : null}
+    <View style={styles.emptyState} testID="orchestration-panel-empty">
+      <Text style={styles.emptyStateText}>{message}</Text>
     </View>
   );
 }
 
 function OrchestrationPanel(): ReactElement {
-  const { t } = useTranslation();
-  const { serverId, workspaceId, tabId, target, openTab } = usePaneContext();
+  const {
+    serverId,
+    workspaceId,
+    tabId,
+    target,
+    state,
+    openTab,
+    retargetCurrentTab,
+    setCurrentTabState,
+  } = usePaneContext();
   invariant(target.kind === "orchestration", "OrchestrationPanel requires orchestration target");
 
   // The panel holds the agent-directory subscription itself rather than riding on whichever
   // other screen happens to be mounted — see the hook for why that matters on reconnect.
   useOrchestrationDirectoryDemand(serverId);
 
-  const roots = useOrchestrationTree({ serverId });
+  const scope = useMemo(
+    () => resolveOrchestrationScope(target.scopeAgentId),
+    [target.scopeAgentId],
+  );
+  const allRoots = useOrchestrationTree({ serverId });
+  const roots = useMemo(() => selectScopedOrchestrationRoots(allRoots, scope), [allRoots, scope]);
   const rows = useMemo(() => flattenOrchestrationTree(roots), [roots]);
   const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
 
@@ -185,13 +181,30 @@ function OrchestrationPanel(): ReactElement {
   const openInSidePane = useSettings((settings) => settings.openInSidePane);
   const workspaceKey = buildWorkspaceTabPersistenceKey({ serverId, workspaceId });
   const canDetachSubagents = useSessionStore(
-    (state) => state.sessions[serverId]?.serverInfo?.features?.agentDetach === true,
+    (state_) => state_.sessions[serverId]?.serverInfo?.features?.agentDetach === true,
   );
   // One measurement for the whole list rather than a width read per row.
   const { onLayout, isBelow: isNarrow } = useContainerWidthBelow(ACTIVITY_COLUMN_MIN_WIDTH);
   const archiveAgentRow = useArchiveSubagent({ serverId });
   const detachAgentRow = useDetachSubagent({ serverId });
 
+  const rememberedScopeAgentId = target.scopeAgentId ?? readLastScopeAgentId(state);
+  const handleScopeChange = useCallback(
+    (next: OrchestrationScopeValue) => {
+      if (next === "all") {
+        if (target.scopeAgentId) {
+          // Written before the retarget so the same-kind replacement carries it forward — it is
+          // the only record of which tree this tab came from.
+          setCurrentTabState({ lastScopeAgentId: target.scopeAgentId });
+        }
+        retargetCurrentTab({ kind: "orchestration" });
+        return;
+      }
+      if (!rememberedScopeAgentId) return;
+      retargetCurrentTab({ kind: "orchestration", scopeAgentId: rememberedScopeAgentId });
+    },
+    [rememberedScopeAgentId, retargetCurrentTab, setCurrentTabState, target.scopeAgentId],
+  );
   const handleOpenAgent = useCallback(
     (agent: Agent) => {
       const action = resolveOrchestrationRowOpenAction(agent, workspaceId);
@@ -246,17 +259,27 @@ function OrchestrationPanel(): ReactElement {
 
   return (
     <View style={styles.container} testID="orchestration-panel" onLayout={onLayout}>
-      <OrchestrationHeader
-        serverId={serverId}
-        providerIds={providerIds}
-        eligibleFinishedCount={archiveFinished.eligibleCount}
-        archiveFinishedStatus={archiveFinished.status}
-        onArchiveFinished={archiveFinished.archiveFinished}
-      />
+      <View style={styles.header}>
+        <OrchestrationStaleNotice serverId={serverId} />
+        <AccountBudgetStrip
+          serverId={serverId}
+          providerIds={providerIds}
+          refetchIntervalMs={DEFAULT_REFETCH_INTERVAL_MS}
+        />
+        <OrchestrationHeaderControls
+          scope={scope.kind === "all" ? "all" : "leader"}
+          canScopeToLeader={Boolean(rememberedScopeAgentId)}
+          onScopeChange={handleScopeChange}
+          eligibleFinishedCount={archiveFinished.eligibleCount}
+          archiveFinishedStatus={archiveFinished.status}
+          onArchiveFinished={archiveFinished.archiveFinished}
+        />
+      </View>
       {rows.length === 0 ? (
-        <View style={styles.emptyState} testID="orchestration-panel-empty">
-          <Text style={styles.emptyStateText}>{t("panels.orchestration.emptyState")}</Text>
-        </View>
+        <OrchestrationEmptyState
+          isScoped={scope.kind === "leader"}
+          hasScopedTree={roots.length > 0}
+        />
       ) : (
         <FlatList
           data={rows}
@@ -283,21 +306,6 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
     borderBottomWidth: theme.borderWidth[1],
     borderBottomColor: theme.colors.border,
-  },
-  archiveFinishedButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: theme.spacing[2],
-    alignSelf: "flex-start",
-    paddingVertical: theme.spacing[1],
-  },
-  archiveFinishedLabel: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
-  },
-  archiveFinishedTrailing: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foregroundMuted,
   },
   listContent: {
     paddingVertical: theme.spacing[2],

@@ -281,6 +281,9 @@ function buildPanelContributions(
 // trio above: those route through the explorer-sidebar split-placement machinery
 // (`resolveCommandCenterPanelTarget` in workspace-screen.tsx), and orchestration is a normal
 // panel-registry tab kind with Explorer hosting deferred (KTD4) — it has no placement variants.
+//
+// This opens the host-wide tab. The Command Center is a workspace surface, not a session one, so
+// it has no leader to scope to; the scoped tab is the composer pill's job.
 function buildOrchestrationContribution(
   source: WorkspaceCommandCenterSource,
 ): CommandCenterContribution {
@@ -289,7 +292,7 @@ function buildOrchestrationContribution(
     id: "tab:open:orchestration",
     rank: 7,
     title: source.labels.openOrchestration,
-    keywords: ["open", "orchestration", "tree", "subagents", "leader"],
+    keywords: ["open", "orchestration", "tree", "subagents", "leader", "all", "global", "fleet"],
     icon: source.icons.orchestration,
     run: source.openOrchestration,
     visibility: "query",

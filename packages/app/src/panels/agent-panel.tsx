@@ -1273,11 +1273,17 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
   });
   const hasPluginComposerPills = useHasPluginComposerPills(serverId, workspaceId, agentId);
   const hasActiveComposer = !agentState.archivedAt && !isArchivingCurrentAgent;
+  // A scalar read rather than a field on selectChatAgentState: the composer does not otherwise
+  // care who this agent's parent is, only the orchestration pill does.
+  const isSubagent = useSessionStore((state) =>
+    Boolean(resolveChatAgentFromSession(state, serverId, agentId)?.parentAgentId),
+  );
   const hasVisibleAgentTracks = hasAgentTracks({
     subagentRows,
     tasks,
     archiveFinishedStatus: archiveFinishedSubagents.status,
     hasPluginComposerPills,
+    isSubagent,
   });
   const rawAgentInputDraft = useAgentInputDraft({
     draftKey: buildDraftStoreKey({
@@ -1371,6 +1377,7 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
           archiveFinishedStatus={archiveFinishedSubagents.status}
           onArchiveFinished={archiveFinishedSubagents.archiveFinished}
           hasPluginComposerPills={hasPluginComposerPills}
+          isSubagent={isSubagent}
         />
       ) : null}
     </View>
