@@ -10,7 +10,9 @@
  * Three tiers, in descending strength:
  *
  *   refuses   The daemon stops the command before it runs, in every mode the provider has.
- *   asks      The daemon only gets a say when the agent asks. Some modes never ask.
+ *   asks      The daemon only gets a say when the agent routes the command through it — an
+ *             approval request, or a terminal it asks the daemon to spawn. Refusal is real
+ *             when that happens, and there are modes and agents where it does not.
  *   observes  Nothing intercepts. The device is counted after it boots, and never refused.
  *
  * Every tier still counts: occupancy is the union of running devices and leases, so a device
@@ -53,28 +55,33 @@ const ENFORCEMENT_BY_PROVIDER: Record<string, DeviceLaunchEnforcement> = {
   },
   copilot: {
     tier: "asks",
-    mechanism: "the ACP permission request the agent sends before a terminal command",
-    gap: "an agent that does not ask is not refused",
+    mechanism:
+      "the terminal the daemon spawns on the agent's behalf, and the permission request it sends first",
+    gap: "an agent that runs a shell inside its own process, asking the daemon for neither, is not refused",
   },
   cursor: {
     tier: "asks",
-    mechanism: "the ACP permission request the agent sends before a terminal command",
-    gap: "an agent that does not ask is not refused",
+    mechanism:
+      "the terminal the daemon spawns on the agent's behalf, and the permission request it sends first",
+    gap: "an agent that runs a shell inside its own process, asking the daemon for neither, is not refused",
   },
   kimi: {
     tier: "asks",
-    mechanism: "the ACP permission request the agent sends before a terminal command",
-    gap: "an agent that does not ask is not refused",
+    mechanism:
+      "the terminal the daemon spawns on the agent's behalf, and the permission request it sends first",
+    gap: "an agent that runs a shell inside its own process, asking the daemon for neither, is not refused",
   },
   kiro: {
     tier: "asks",
-    mechanism: "the ACP permission request the agent sends before a terminal command",
-    gap: "an agent that does not ask is not refused",
+    mechanism:
+      "the terminal the daemon spawns on the agent's behalf, and the permission request it sends first",
+    gap: "an agent that runs a shell inside its own process, asking the daemon for neither, is not refused",
   },
   traecli: {
     tier: "asks",
-    mechanism: "the ACP permission request the agent sends before a terminal command",
-    gap: "an agent that does not ask is not refused",
+    mechanism:
+      "the terminal the daemon spawns on the agent's behalf, and the permission request it sends first",
+    gap: "an agent that runs a shell inside its own process, asking the daemon for neither, is not refused",
   },
   omp: {
     tier: "asks",

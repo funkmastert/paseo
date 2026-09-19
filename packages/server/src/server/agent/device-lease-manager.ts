@@ -169,6 +169,12 @@ export type DeviceLaunchGateDecision =
  */
 export interface DeviceLaunchGate {
   gateLaunch(input: { agentId: string; command: string }): Promise<DeviceLaunchGateDecision>;
+  /**
+   * Says why, for a provider whose rejection cannot carry a sentence back to the model — Codex
+   * resolves an approval to a bare decision, ACP to an option id (device-launch-approval.ts).
+   * Optional: a provider that can answer in-band, like Claude's hook, never calls it.
+   */
+  explainRefusalToAgent?(input: { agentId: string; message: string }): Promise<void>;
 }
 
 interface DeviceLeaseManagerLogger {
@@ -530,6 +536,16 @@ export class DeviceLeaseManager {
       }
     }
     return { decision: "allow" };
+  }
+
+  /**
+   * Delivers a refusal a provider could not put in front of the model itself. Silent when the
+   * cap is off or in dry run: dry run refuses nothing, so it has nothing to explain.
+   */
+  async explainRefusalToAgent(input: { agentId: string; message: string }): Promise<void> {
+    const config = this.resolveConfig(await this.resolveCaps());
+    if (!config.enabled || config.dryRun || !this.sendSystemMessageToAgent) return;
+    await this.sendSystemMessageToAgent(input.agentId, input.message);
   }
 
   /**

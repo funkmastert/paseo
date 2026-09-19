@@ -208,17 +208,20 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new CodexAppServerAgentClient(logger, runtimeSettings, {
       workspaceGitService: options?.workspaceGitService,
       customProvider: options?.customProvider,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
-  copilot: (logger, runtimeSettings) =>
+  copilot: (logger, runtimeSettings, options) =>
     new CopilotACPAgentClient({
       logger,
       runtimeSettings,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
-  cursor: (logger, runtimeSettings) =>
+  cursor: (logger, runtimeSettings, options) =>
     new CursorACPAgentClient({
       logger,
       command: getCursorACPCommand(runtimeSettings),
       env: runtimeSettings?.env,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
   opencode: (logger, runtimeSettings, options) =>
     new OpenCodeAgentClient(logger, runtimeSettings, {
@@ -237,6 +240,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       runtimeSettings,
       providerParams: options?.providerParams,
       runtime: options?.ompRuntime,
+      deviceLaunchGate: options?.deviceLaunchGate,
     }),
   mock: (logger) => new MockLoadTestAgentClient(logger),
   "mock-slow": () => new MockSlowProviderClient(),
@@ -824,6 +828,8 @@ function addDerivedProviders(
             providerId,
             label: override.label ?? providerId,
             providerParams: override.params,
+            // A custom ACP provider runs against the same machine and the same devices.
+            deviceLaunchGate: options.deviceLaunchGate,
           };
           if (providerId === "cursor") {
             return new CursorACPAgentClient(acpOptions);
