@@ -5,6 +5,8 @@ import type { ModelCatalogState } from "./use-model-catalog";
 
 export interface AddModelDropdownProps {
   roleId: string;
+  /** Distinguishes this dropdown's testIDs when a role renders more than one (one per model-pool slot). Defaults to roleId. */
+  testIdKey?: string;
   families: readonly string[];
   catalog: ModelCatalogState["catalog"];
   ensureFamily: ModelCatalogState["ensureFamily"];
@@ -27,7 +29,17 @@ function composeModelRef(family: string, model: string): string {
 }
 
 /** Two-stage picker (provider family, then one of its models) feeding one ref into `onAdd`. */
-export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disabled, disabledReason, onAdd }: AddModelDropdownProps) {
+export function AddModelDropdown({
+  roleId,
+  testIdKey,
+  families,
+  catalog,
+  ensureFamily,
+  disabled,
+  disabledReason,
+  onAdd,
+}: AddModelDropdownProps) {
+  const idKey = testIdKey ?? roleId;
   const [family, setFamily] = useState<string>(families[0] ?? "");
   const [model, setModel] = useState<string>("");
 
@@ -41,7 +53,7 @@ export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disa
   }, [family, catalog[family]]);
 
   if (families.length === 0) {
-    return <SettingsRow label="Add model" hint="No provider families available yet." testID={`add-model-${roleId}`} />;
+    return <SettingsRow label="Add model" hint="No provider families available yet." testID={`add-model-${idKey}`} />;
   }
 
   const familyOptions = families.map((f) => ({ label: f, value: f }));
@@ -56,7 +68,7 @@ export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disa
         options={familyOptions}
         disabled={disabled}
         onValueChange={setFamily}
-        testID={`add-model-provider-${roleId}`}
+        testID={`add-model-provider-${idKey}`}
       />
       <SettingsSelect
         label="Model"
@@ -64,7 +76,7 @@ export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disa
         options={modelOptions.length > 0 ? modelOptions : [{ label: "(none loaded)", value: "" }]}
         disabled={disabled || modelOptions.length === 0}
         onValueChange={setModel}
-        testID={`add-model-model-${roleId}`}
+        testID={`add-model-model-${idKey}`}
       />
       <SettingsAction
         label="Add to this role"
@@ -80,7 +92,7 @@ export function AddModelDropdown({ roleId, families, catalog, ensureFamily, disa
           onAdd(composeModelRef(family, model));
           setModel("");
         }}
-        testID={`add-model-action-${roleId}`}
+        testID={`add-model-action-${idKey}`}
       />
     </>
   );

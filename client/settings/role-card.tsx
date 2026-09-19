@@ -1,11 +1,11 @@
 import { Text } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsRow } from "@getpaseo/plugin/client/ui";
-import { LEADER_ROLE_ID } from "../../shared/role-policy-schema";
+import { LEADER_ROLE_ID, type RoleRecord } from "../../shared/role-policy-schema";
 import { AddModelDropdown } from "./add-model-dropdown";
 import { ModelRow } from "./model-row";
 import { RoleCardMetadataEditor } from "./role-card-metadata-editor";
-import type { RoleModelPolicyModel, RoleModelPolicyModelState } from "./role-model-policy-model";
+import type { ModelPoolSlot, RoleModelPolicyModel, RoleModelPolicyModelState } from "./role-model-policy-model";
 import { ToolProfileRow } from "./tool-profile-row";
 import type { ModelCatalogState } from "./use-model-catalog";
 
@@ -15,6 +15,27 @@ import type { ModelCatalogState } from "./use-model-catalog";
  */
 const LEADER_HINT =
   "Governs root agents — the ones you, the CLI, or the app start. Their subagents resolve their own roles.";
+
+const POOL_SECTIONS: ReadonlyArray<{ slot: ModelPoolSlot; field: keyof RoleRecord; label: string; hint: string }> = [
+  {
+    slot: "standard",
+    field: "models",
+    label: "Standard pool",
+    hint: "Used for an unclassified task, and as the fallback for Mechanical/Hard below when either is empty.",
+  },
+  {
+    slot: "mechanical",
+    field: "mechanicalModels",
+    label: "Mechanical pool",
+    hint: "Used for a task classified mechanical (a rename, a typo, a formatting pass). Empty = falls back to the standard pool.",
+  },
+  {
+    slot: "hard",
+    field: "hardModels",
+    label: "Hard pool",
+    hint: "Used for a task classified hard (concurrency, migrations, security, architecture). Empty = falls back to the standard pool.",
+  },
+];
 
 export interface RoleCardProps {
   roleId: string;
@@ -30,7 +51,6 @@ export function RoleCard({ roleId, model, state, catalog, theme }: RoleCardProps
 
   const isEditingThis = state.editingRoleId === roleId;
   const deleteStatus = state.canDeleteRole(roleId);
-  const addModelStatus = state.canAddModel(roleId);
   const aliasesText = role.aliases.length > 0 ? role.aliases.join(", ") : "none";
   const isLeader = role.id === LEADER_ROLE_ID;
 
@@ -70,29 +90,39 @@ export function RoleCard({ roleId, model, state, catalog, theme }: RoleCardProps
       {role.models.length === 0 ? (
         <Text style={{ color: theme.colors.foregroundMuted }}>Unconfigured — requests routed to this role pass through untouched.</Text>
       ) : null}
-      {role.models.map((modelRef, index) => (
-        <ModelRow
-          key={modelRef}
-          modelRef={modelRef}
-          isFirst={index === 0}
-          isLast={index === role.models.length - 1}
-          disabled={state.saving || state.malformed}
-          theme={theme}
-          onMoveUp={() => void model.moveModel(roleId, modelRef, "up")}
-          onMoveDown={() => void model.moveModel(roleId, modelRef, "down")}
-          onRemove={() => void model.removeModel(roleId, modelRef)}
-        />
-      ))}
 
-      <AddModelDropdown
-        roleId={roleId}
-        families={catalog.families}
-        catalog={catalog.catalog}
-        ensureFamily={catalog.ensureFamily}
-        disabled={!addModelStatus.allowed || state.saving || state.malformed}
-        disabledReason={addModelStatus.reason}
-        onAdd={(modelRef) => void model.addModel(roleId, modelRef)}
-      />
+      {POOL_SECTIONS.map(({ slot, field, label, hint }) => {
+        const modelRefs = role[field] as readonly string[];
+        const addStatus = state.canAddModel(roleId, slot);
+        return (
+          <SettingsCard key={slot} testID={`role-card-${roleId}-pool-${slot}`}>
+            <SettingsRow label={label} hint={hint} />
+            {modelRefs.map((modelRef, index) => (
+              <ModelRow
+                key={modelRef}
+                modelRef={modelRef}
+                isFirst={index === 0}
+                isLast={index === modelRefs.length - 1}
+                disabled={state.saving || state.malformed}
+                theme={theme}
+                onMoveUp={() => void model.moveModel(roleId, modelRef, "up", slot)}
+                onMoveDown={() => void model.moveModel(roleId, modelRef, "down", slot)}
+                onRemove={() => void model.removeModel(roleId, modelRef, slot)}
+              />
+            ))}
+            <AddModelDropdown
+              roleId={roleId}
+              testIdKey={`${roleId}-${slot}`}
+              families={catalog.families}
+              catalog={catalog.catalog}
+              ensureFamily={catalog.ensureFamily}
+              disabled={!addStatus.allowed || state.saving || state.malformed}
+              disabledReason={addStatus.reason}
+              onAdd={(modelRef) => void model.addModel(roleId, modelRef, slot)}
+            />
+          </SettingsCard>
+        );
+      })}
     </SettingsCard>
   );
 }
