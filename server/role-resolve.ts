@@ -2,9 +2,12 @@ import {
   AGENT_ROLE_LABEL,
   AGENT_TYPE_LABEL,
   LEADER_ROLE_ID,
+  TASK_CLASS_IDS,
+  TASK_CLASS_LABEL,
   type RoleModelPolicy,
   type RoleRecord,
   type StandardRoleId,
+  type TaskClassId,
 } from "../shared/role-policy-schema";
 
 export type ResolveRoleTier = 1 | 2 | 3 | 4;
@@ -150,4 +153,80 @@ export function resolveRole(policy: RoleModelPolicy, input: ResolveRoleInput): R
   }
 
   return classify(policy, classificationText);
+}
+
+export type TaskClassSource = "declared" | "classified" | "default";
+
+export interface ResolveTaskClassResult {
+  /** Undefined means "default": no class resolved, so classModels() falls back to the role's standard pool. */
+  taskClass: TaskClassId | undefined;
+  source: TaskClassSource;
+  /** Set when the caller declared labels[TASK_CLASS_LABEL] but it matched none of TASK_CLASS_IDS. Never blocks. */
+  unknownDeclaredValue?: string;
+}
+
+/**
+ * Keyword seeds for the ungoverned fallback: no declared `paseo.task-class`
+ * label, so the only signal left is free text. Deliberately narrow — this
+ * only picks out fairly unambiguous cases; anything it doesn't recognize
+ * stays "default" (the role's standard pool), which is the safe, predictable
+ * answer per today's behavior. `hard` is checked first: a prompt that
+ * mentions both a trivial-sounding word and a genuine risk word (e.g. "fix
+ * the typo that's causing the race condition") must not be under-classified.
+ */
+const HARD_SEED_RE =
+  /race condition|deadlock|concurren(?:cy|t)|distributed|migrat(?:e|ion)|security|vulnerab|architecture|redesign|cross-cutting|consensus|data loss|corrupt/;
+const MECHANICAL_SEED_RE =
+  /\btypo\b|\brenam(?:e|ing)\b|\bformatting\b|\bwhitespace\b|\bchangelog\b|\blint(?:ing)?\b|\bdead code\b|\bunused import\b|\bone[- ]liner\b|\btrivial\b|\bbump(?:ed|ing)? (?:the )?version\b/;
+
+/** Tier "classified"/"default": deterministic keyword classification over lowercase(title + " " + initialPrompt). */
+function classifyTaskClass(text: string): ResolveTaskClassResult {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return { taskClass: undefined, source: "default" };
+  }
+  if (HARD_SEED_RE.test(trimmed)) {
+    return { taskClass: "hard", source: "classified" };
+  }
+  if (MECHANICAL_SEED_RE.test(trimmed)) {
+    return { taskClass: "mechanical", source: "classified" };
+  }
+  return { taskClass: undefined, source: "default" };
+}
+
+/**
+ * Resolves how hard a task is, independent of `resolveRole`'s role
+ * resolution — a role picks WHO runs the work, this picks HOW MUCH MODEL
+ * it's worth. Feeds ONLY model selection (see `classModels` in
+ * shared/role-policy-schema.ts); it must never influence tool-profile
+ * enforcement, which is role-based and evidence-gated on its own terms.
+ *
+ * Precedence, mirroring `resolveRole`'s "declared beats guessed" shape but
+ * with only two tiers (there is no per-policy task-class vocabulary to
+ * configure — TASK_CLASS_IDS is fixed):
+ *   1. Declared: labels[paseo.task-class], matched case-insensitively
+ *      against the fixed TASK_CLASS_IDS. The cheapest, most trustworthy
+ *      signal — the caller is stating what it's asking for.
+ *   2. Unknown declared value: never blocks — falls through to
+ *      classification/default, with `unknownDeclaredValue` set so the
+ *      caller can be told once.
+ *   3. Classified: seed-keyword text classification (title + initialPrompt).
+ *      A guess here may only ever pick a model; unlike the role guess it
+ *      doesn't gate anything else, so there is no evidence-based/withheld
+ *      split to make.
+ *   4. Default: undefined — classModels() falls back to the role's standard
+ *      pool, exactly what happens today with no task-class concept at all.
+ */
+export function resolveTaskClass(input: ResolveRoleInput): ResolveTaskClassResult {
+  const declared = input.labels?.[TASK_CLASS_LABEL];
+  const classificationText = `${input.title ?? ""} ${input.initialPrompt ?? ""}`.toLowerCase();
+  if (declared !== undefined) {
+    const lower = declared.trim().toLowerCase();
+    const matched = (TASK_CLASS_IDS as readonly string[]).find((id) => id === lower);
+    if (matched) {
+      return { taskClass: matched as TaskClassId, source: "declared" };
+    }
+    return { ...classifyTaskClass(classificationText), unknownDeclaredValue: declared };
+  }
+  return classifyTaskClass(classificationText);
 }

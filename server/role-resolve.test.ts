@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
-import { resolveRole } from "./role-resolve";
+import {
+  AGENT_ROLE_LABEL,
+  AGENT_TYPE_LABEL,
+  DEFAULT_POLICY,
+  TASK_CLASS_LABEL,
+  type RoleModelPolicy,
+} from "../shared/role-policy-schema";
+import { resolveRole, resolveTaskClass } from "./role-resolve";
 
 function withRoles(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
   return { ...DEFAULT_POLICY, ...overrides };
@@ -113,5 +119,64 @@ describe("resolveRole", () => {
   it("classification considers both title and initialPrompt together", () => {
     const result = resolveRole(DEFAULT_POLICY, { title: "untitled", initialPrompt: "please audit the output" });
     expect(result).toMatchObject({ tier: 3, role: { id: "reviewer" } });
+  });
+});
+
+describe("resolveTaskClass", () => {
+  it("declared: labels[paseo.task-class] matches a fixed class case-insensitively", () => {
+    expect(resolveTaskClass({ labels: { [TASK_CLASS_LABEL]: "Hard" } })).toEqual({ taskClass: "hard", source: "declared" });
+    expect(resolveTaskClass({ labels: { [TASK_CLASS_LABEL]: "MECHANICAL" } })).toEqual({
+      taskClass: "mechanical",
+      source: "declared",
+    });
+    expect(resolveTaskClass({ labels: { [TASK_CLASS_LABEL]: "standard" } })).toEqual({
+      taskClass: "standard",
+      source: "declared",
+    });
+  });
+
+  it("unknown declared value never blocks: falls through to classification/default and reports unknownDeclaredValue", () => {
+    const result = resolveTaskClass({ labels: { [TASK_CLASS_LABEL]: "urgent" }, title: "" });
+    expect(result.taskClass).toBeUndefined();
+    expect(result.source).toBe("default");
+    expect(result.unknownDeclaredValue).toBe("urgent");
+  });
+
+  it("an unknown declared value still lets classification win underneath it", () => {
+    const result = resolveTaskClass({ labels: { [TASK_CLASS_LABEL]: "urgent" }, title: "fix this typo" });
+    expect(result).toMatchObject({ taskClass: "mechanical", source: "classified", unknownDeclaredValue: "urgent" });
+  });
+
+  it("classified: hard seed words route to hard", () => {
+    for (const text of ["fix the race condition", "plan the database migration", "audit for a security hole"]) {
+      expect(resolveTaskClass({ title: text })).toMatchObject({ taskClass: "hard", source: "classified" });
+    }
+  });
+
+  it("classified: mechanical seed words route to mechanical", () => {
+    for (const text of ["fix a typo in the readme", "rename this variable", "bump the version"]) {
+      expect(resolveTaskClass({ title: text })).toMatchObject({ taskClass: "mechanical", source: "classified" });
+    }
+  });
+
+  it("hard wins over mechanical when both are present, so risk is never under-classified", () => {
+    const result = resolveTaskClass({ title: "fix the typo that's causing the race condition" });
+    expect(result).toMatchObject({ taskClass: "hard", source: "classified" });
+  });
+
+  it("default: no declared label and no seed match falls back to undefined (the role's standard pool)", () => {
+    expect(resolveTaskClass({ title: "implement the new export flow" })).toEqual({
+      taskClass: undefined,
+      source: "default",
+    });
+  });
+
+  it("default: no title/prompt to classify at all", () => {
+    expect(resolveTaskClass({})).toEqual({ taskClass: undefined, source: "default" });
+  });
+
+  it("considers both title and initialPrompt together, like resolveRole", () => {
+    const result = resolveTaskClass({ title: "untitled", initialPrompt: "watch out for the deadlock here" });
+    expect(result).toMatchObject({ taskClass: "hard", source: "classified" });
   });
 });
