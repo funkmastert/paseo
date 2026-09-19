@@ -135,6 +135,10 @@ Device cap would have refused a device launch
   agentId=<id> command="xcrun simctl boot" dryRun=true
 ```
 
+## Why a lease does not own disk cleanup
+
+An `xcodebuild test` run clones simulators onto disk and deletes them when it ends; a killed run leaves them. `agent-gone` is the right signal for that, but a lease is the wrong owner — it is released the moment the device stops, which is the event that was supposed to take the clone with it. [The artifact janitor](artifact-janitor.md) keeps its own cleanup obligations and reads the same agent list this registry does. All it needs from here is `listLeasedDeviceIds`, so it never deletes a device somebody is holding.
+
 ## Why this is not part of the resource monitor
 
 [The resource monitor](resource-monitor.md) watches usage and reacts once it is already bad: memory, CPU, swap, abandoned build daemons. This decides whether something starts at all. They share one `ps` sample and the same safety discipline — off by default, dry-runnable, fails open — but a threshold that fires after the fact cannot prevent the launch that crossed it.
