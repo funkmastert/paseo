@@ -197,6 +197,18 @@ function formatDuration(seconds: number): string {
   return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+/**
+ * Reconciliation only ever drops a lease or binds one to a device, and keeps the list sorted, so
+ * the same ids with the same devices in the same order means nothing happened.
+ */
+function sameLeases(before: readonly DeviceLease[], after: readonly DeviceLease[]): boolean {
+  if (before.length !== after.length) return false;
+  return before.every((lease, index) => {
+    const other = after[index];
+    return lease.id === other.id && lease.deviceId === other.deviceId;
+  });
+}
+
 function resolveCaps(
   config: DeviceLeaseConfig | undefined,
   defaults: DeviceSlotCaps,
@@ -646,7 +658,11 @@ export class DeviceLeaseManager {
     if (result.released.length > 0) {
       this.logRelease(result.released);
     }
-    if (result.released.length > 0 || before !== this.leases) {
+    // Compare by content, not identity: reconcileDeviceLeases always builds a fresh array. A
+    // session's listener answers a notify by taking a snapshot, which reconciles, so notifying on
+    // identity re-entered here forever — pure microtasks, the event loop never got control back,
+    // and the daemon pinned a core while pushing snapshots until the socket's buffer overflowed.
+    if (result.released.length > 0 || !sameLeases(before, this.leases)) {
       this.notify();
     }
   }

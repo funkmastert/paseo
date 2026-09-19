@@ -328,4 +328,32 @@ describe("DeviceLeaseManager", () => {
     state.nowMs += 11 * 60_000;
     expect((await manager.getSnapshot()).used).toBe(0);
   });
+
+  // A session answers every change by taking a snapshot. Snapshots that notified when nothing
+  // changed re-entered that listener forever without yielding: the daemon spun at 100% and the
+  // app sat on its loading screen (2026-09-19).
+  test("a snapshot that changes nothing does not notify, so a listener that re-snapshots settles", async () => {
+    const { manager } = createManager({
+      rows: [simulatorRow(1, UDID_A)],
+    });
+    await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    let notifications = 0;
+    const settled: Promise<unknown>[] = [];
+    manager.subscribe(() => {
+      notifications += 1;
+      if (notifications > 50) throw new Error("device status listener re-entered without end");
+      settled.push(manager.getSnapshot());
+    });
+
+    await manager.getSnapshot();
+    await manager.getSnapshot();
+    await Promise.all(settled);
+    expect(notifications).toBe(0);
+
+    // A real change still gets through, exactly once.
+    await manager.checkin({ agentId: "agent-1" });
+    await Promise.all(settled);
+    expect(notifications).toBe(1);
+  });
 });
