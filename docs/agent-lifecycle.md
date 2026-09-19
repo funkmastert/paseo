@@ -152,6 +152,28 @@ A finished workspace can be marked unread after it has been reviewed. The daemon
 `finished` attention on its newest eligible workspace-root agent without sending a new completion
 notification. Opening the workspace clears that attention through the normal focus flow.
 
+## Attention
+
+`requiresAttention` is an **unread** signal, not a state: `checkAndSetAttention` sets it on an
+edge (`running` → `idle` is `finished`, anything → `error` is `error`, a permission request is
+`permission`) and it stays until something reads it. Two things clear it — opening the agent, and
+archiving it. Closing does not: `closeAllAgents` runs on every shutdown, so clearing there would
+wipe every genuine unread finish each time the daemon restarts.
+
+**A delegated agent's finish never raises attention.** Its parent already has the result in-band,
+through the tool call that spawned it; `broadcastAgentAttention` has skipped delegated agents
+since #1293, so the flag was never surfaced either. What it did do was accumulate: nothing clears
+it, because a human does not open a subagent to read it. Measured on one daemon, 34 of 50
+unarchived agents were flagged, 27 of them finished subagents and the oldest three weeks old — a
+signal on two thirds of the fleet separates nothing. The rule is applied when the flag is set and
+again when a stored record is projected (`agent-projections.ts`), so records written before it
+stop badging without a migration. An **error** on a delegated agent still flags: a subagent that
+failed is not the normal case.
+
+The flag is also what stops a push repeating. `checkAndSetAttention` returns early when the agent
+is already flagged, so an unread agent cannot notify twice — which means a stale flag suppresses
+notifications rather than causing them. The noise a stale flag causes is in the UI.
+
 ## Title tracking
 
 An agent's title refreshes from two triggers: a turn finishing (`running` -> `idle`), and a periodic sweep every 60 seconds over every non-internal, non-archived agent that is `running` or `idle`. Both routes call an LLM through the same fingerprint — a hash of the agent's newest user message and a digest of its recent activity — so an unchanged agent never costs a second call. The sweep additionally waits at least `agents.metadataGeneration.titleTracking.refreshIntervalMinutes` (default 10) since it last considered an agent before looking at it again. An idle agent costs nothing after its first refresh. An agent that keeps running has new activity at every checkpoint, so it costs one small call per interval for as long as it runs; raise the interval if that adds up across a large fleet. A title the user set explicitly (`titleManuallySet`) is never touched by either trigger. See `agent-title-tracker.ts`.
