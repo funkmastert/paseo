@@ -5,14 +5,14 @@ import type { ProcessSampleRow, SystemMemorySample } from "./process-sampler.js"
 const GIBIBYTE = 1024 ** 3;
 
 // The real command line of a booted simulator on Tyler's machine, with a swappable UDID.
-function simulatorRow(pid: number, udid: string): ProcessSampleRow {
+function simulatorRow(pid: number, udid: string, etime = "02:14:00"): ProcessSampleRow {
   return {
     pid,
     ppid: 1,
     uid: 501,
     rssKb: 13_360,
     cpuPercent: 0.4,
-    etime: "02:14:00",
+    etime,
     command: `launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/${udid}/data/var/run/launchd_bootstrap.plist`,
   };
 }
@@ -54,6 +54,7 @@ function createManager(
     rows?: ProcessSampleRow[];
     memory?: SystemMemorySample;
     agentIds?: string[];
+    drainIntervalMs?: number;
   } = {},
 ) {
   const state = {
@@ -81,6 +82,7 @@ function createManager(
       performanceCpuCount: 12,
     }),
     sampleMaxAgeMs: 0,
+    ...(options.drainIntervalMs === undefined ? {} : { drainIntervalMs: options.drainIntervalMs }),
     createLeaseId: () => `lease-${++leaseCounter}`,
   });
   return { manager, state, logger };
@@ -327,5 +329,62 @@ describe("DeviceLeaseManager", () => {
 
     state.nowMs += 11 * 60_000;
     expect((await manager.getSnapshot()).used).toBe(0);
+  });
+  test("a rebuild against the agent's own simulator does not take a second slot", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // The simulator boots and the sweep binds the lease to it.
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({ devices: [], systemMemory: state.memory });
+    expect((await manager.getSnapshot()).used).toBe(1);
+
+    // Edit, rebuild, run again. A runner that names no device reuses the booted one, so this
+    // costs no new slot — leasing a second one would count one simulator twice.
+    state.nowMs += 120_000;
+    expect(await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" })).toEqual({
+      decision: "allow",
+    });
+    expect((await manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("an agent iterating on one device does not fill its platform by itself", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({ devices: [], systemMemory: state.memory });
+
+    state.nowMs += 120_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // One simulator is running and the machine allows two. agent-2 gets the other one.
+    state.nowMs += 1_000;
+    expect(
+      (await manager.checkout({ agentId: "agent-2", platform: "ios", wait: false })).status,
+    ).toBe("granted");
+  });
+
+  test("a queued agent is served when the device it was waiting on stops", async () => {
+    const { manager, state } = createManager({
+      rows: [simulatorRow(101, UDID_A), simulatorRow(102, UDID_B)],
+      drainIntervalMs: 20,
+    });
+
+    const waiting = manager.checkout({ agentId: "agent-3", platform: "ios", wait: true });
+    await vi.waitFor(async () => {
+      expect((await manager.getSnapshot()).waiting).toHaveLength(1);
+    });
+
+    // A simulator shuts down. Nothing reports that, so only a fresh scan can notice it.
+    state.rows = [simulatorRow(101, UDID_A)];
+    state.nowMs += 6_000;
+
+    expect((await waiting).status).toBe("granted");
   });
 });

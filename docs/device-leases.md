@@ -77,7 +77,7 @@ The gate is a **PreToolUse hook**, not the permission layer, because `canUseTool
 What happens on a match:
 
 - **The target is already running** (`simctl boot <udid>` for a booted device) → allowed. It costs no slot.
-- **The agent already checked out** and has not used the slot → allowed. This is the good path, and the agent never sees the gate.
+- **The agent already holds a slot on that platform** → allowed. This is the good path, and the agent never sees the gate. It covers both the lease it checked out and has not booted yet, and the device it already booted: a rebuild loop runs `expo run:ios` over and over, and a runner that names no device reuses the booted one rather than starting a second. A launch that names a device the scan has not seen is a new device and still goes to the cap.
 - **A slot is free** → allowed, and the gate takes a lease on the agent's behalf. A device booted without asking still fills a slot and still shows a holder, so the count is never quietly wrong.
 - **No slot, or no headroom** → denied.
 
@@ -103,7 +103,7 @@ Leases live in memory. After a daemon restart the count comes from the process s
 
 ## Waiting
 
-`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A freed slot is noticed two ways: immediately on a check-in, and by re-checking every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about. A canceled turn takes its agent out of the queue.
+`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A freed slot is noticed two ways: immediately on a check-in, and by re-scanning every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about, so the drain takes its own `ps` rather than reusing the sweep's. That is the one place the cap pays for a second scan, and only while somebody is waiting. A canceled turn takes its agent out of the queue.
 
 ## Status
 

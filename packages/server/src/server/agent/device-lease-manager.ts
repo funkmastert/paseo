@@ -384,13 +384,20 @@ export class DeviceLeaseManager {
     ) {
       return undefined;
     }
-    // The agent checked out first and has not used the slot yet. This is the good path.
+    // The agent already holds a slot on this platform, so this launch costs nothing new.
+    // Either it checked out and has not booted yet, or it booted and is launching again
+    // against the device it already has: a rebuild loop runs `expo run:ios` over and over, and
+    // a runner that names no device reuses the booted one rather than starting a second. A
+    // second lease for that would count one simulator twice, and on a machine with two slots
+    // per platform an agent iterating on its own device would fill the platform by itself.
+    // A launch that *does* name a device the scan has not seen is a genuinely new one and
+    // still goes to the cap below.
     if (
       this.leases.some(
         (lease) =>
           lease.agentId === agentId &&
           lease.platform === intent.platform &&
-          lease.deviceId === undefined,
+          (lease.deviceId === undefined || intent.target === undefined),
       )
     ) {
       return undefined;
@@ -581,7 +588,12 @@ export class DeviceLeaseManager {
       }
       return;
     }
-    await this.ensureSample();
+    // A fresh one, not whatever the last gate check left behind: the slot this drain is
+    // looking for is freed by a device *stopping*, and nothing reports that. Reusing the
+    // cached sample would re-read the same still-running device every tick and leave the
+    // queue waiting out its timeout next to an idle machine. It costs one `ps` every few
+    // seconds, and only while somebody is actually queued.
+    await this.ensureSample({ fresh: true });
     this.reconcile(config);
 
     for (const waiter of this.waiters.slice().sort((a, b) => a.enqueuedAtMs - b.enqueuedAtMs)) {
