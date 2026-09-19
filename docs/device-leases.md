@@ -128,6 +128,8 @@ Under `agents.deviceLeases` (`persisted-config.ts`), live-toggleable like its si
 | `maxLeaseHours`       | 12      | Backstop; 0 disables                                |
 | `queueTimeoutMinutes` | 20      | How long `device_checkout` waits                    |
 
+A dry-run `device_checkout` that the real cap would have made wait still hands back a lease, so the agent carries on, but that lease does not fill a slot — an agent waiting in a real run holds nothing. It shows in the status readout with its holder; only the count is the real cap's. Without that, a dry run inflates its own occupancy and reports refusals the real run would never have made, on the one readout a dry run exists to be trusted on.
+
 Dry run reports through `daemon.log` and the status surface, both tagged `dryRun`:
 
 ```

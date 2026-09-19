@@ -291,8 +291,18 @@ export class DeviceLeaseManager {
       return { status: "granted", leaseId: verdict.leaseId, platform: input.platform };
     }
     if (config.dryRun) {
-      // Dry run never makes anybody wait; it reports what the queue would have done.
-      const lease = this.createLease(input.agentId, input.platform, "checkout", input.reason);
+      // Dry run never makes anybody wait; it reports what the queue would have done. The lease
+      // it hands back does not fill a slot, because the agent it stands for would have been
+      // waiting and holding nothing. Counting it would push occupancy past the cap and make
+      // every later dry-run decision report a refusal the real run would never have made —
+      // on the one readout the whole point of a dry run is to be able to trust.
+      const lease = this.createLease({
+        agentId: input.agentId,
+        platform: input.platform,
+        source: "checkout",
+        reason: input.reason,
+        counted: false,
+      });
       return {
         status: "granted",
         leaseId: lease.id,
@@ -488,25 +498,40 @@ export class DeviceLeaseManager {
         return { granted: false, message: headroom.reason };
       }
     }
-    return { granted: true, leaseId: this.createLease(agentId, platform, source, reason).id };
+    return {
+      granted: true,
+      leaseId: this.createLease({ agentId, platform, source, reason }).id,
+    };
   }
 
-  private createLease(
-    agentId: string,
-    platform: DevicePlatform,
-    source: DeviceLease["source"],
-    reason: string | undefined,
-  ): DeviceLease {
+  private createLease(input: {
+    agentId: string;
+    platform: DevicePlatform;
+    source: DeviceLease["source"];
+    reason: string | undefined;
+    /** False only for the dry run's would-have-waited lease. See DeviceLease's `counted`. */
+    counted?: boolean;
+  }): DeviceLease {
     const lease: DeviceLease = {
       id: this.createLeaseId(),
-      agentId,
-      platform,
-      source,
+      agentId: input.agentId,
+      platform: input.platform,
+      source: input.source,
       acquiredAtMs: this.now(),
-      ...(reason ? { reason } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.counted === false ? { counted: false } : {}),
     };
     this.leases.push(lease);
-    this.logger.info({ leaseId: lease.id, agentId, platform, source }, "Device slot leased");
+    this.logger.info(
+      {
+        leaseId: lease.id,
+        agentId: input.agentId,
+        platform: input.platform,
+        source: input.source,
+        ...(lease.counted === false ? { counted: false } : {}),
+      },
+      "Device slot leased",
+    );
     this.notify();
     return lease;
   }

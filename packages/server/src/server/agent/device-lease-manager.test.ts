@@ -387,4 +387,34 @@ describe("DeviceLeaseManager", () => {
 
     expect((await waiting).status).toBe("granted");
   });
+  test("a dry run reports the occupancy the real cap would have seen", async () => {
+    const { manager } = createManager({ config: { enabled: true, dryRun: true } });
+
+    // Three agents want an iOS slot on a machine that allows two. In a real run the first two
+    // get leases and the third waits, holding nothing.
+    for (const agentId of ["agent-1", "agent-2", "agent-3"]) {
+      expect((await manager.checkout({ agentId, platform: "ios" })).status).toBe("granted");
+    }
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.usedByPlatform.ios).toBe(2);
+    // The readout still names all three holders; only the count is the real cap's.
+    expect(snapshot.devices.map((device) => device.agentId)).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+    ]);
+  });
+
+  test("a dry run's uncounted lease does not refuse the agent behind it", async () => {
+    const { manager } = createManager({ config: { enabled: true, dryRun: true } });
+
+    for (const agentId of ["agent-1", "agent-2", "agent-3"]) {
+      await manager.checkout({ agentId, platform: "ios" });
+    }
+
+    // Nothing actually booted, so the cap would not have refused this launch either.
+    const { blocked } = await manager.getSnapshot();
+    expect(blocked).toEqual([]);
+  });
 });
