@@ -32,8 +32,11 @@ export interface DeviceLaunchIntent {
  * `-destination 'platform=iOS Simulator,name=iPhone 17 Pro'` into six tokens and loses the
  * destination, and turns `simctl boot 'iPhone 17 Pro'` into a device named `'iPhone` — both of
  * which the gate would then misread.
+ *
+ * Exported for test-run-commands.ts, which classifies the same command lines for a different
+ * question and must not disagree with this file about where a token ends.
  */
-function tokenizeSegments(command: string): string[][] {
+export function tokenizeCommandSegments(command: string): string[][] {
   const segments: string[][] = [];
   let tokens: string[] = [];
   let current = "";
@@ -96,7 +99,7 @@ function basename(token: string): string {
  * The tokens of one command, with leading `env`/`VAR=value`/`sudo`/`time` prefixes stripped so
  * the first token is the program being run.
  */
-function stripCommandPrefixes(tokens: readonly string[]): string[] {
+export function stripCommandPrefixes(tokens: readonly string[]): string[] {
   let index = 0;
   while (index < tokens.length) {
     const token = tokens[index];
@@ -207,7 +210,7 @@ const MATCHERS = [
  */
 export function detectDeviceLaunchIntents(command: string): DeviceLaunchIntent[] {
   const intents: DeviceLaunchIntent[] = [];
-  for (const segment of tokenizeSegments(command)) {
+  for (const segment of tokenizeCommandSegments(command)) {
     const tokens = stripCommandPrefixes(segment);
     if (tokens.length === 0) continue;
     for (const matcher of MATCHERS) {
