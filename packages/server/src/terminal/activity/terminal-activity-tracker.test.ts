@@ -43,6 +43,31 @@ describe("TerminalActivityTracker — set", () => {
       attentionReason: "finished",
     });
   });
+
+  it("emits one transition per turn, not one per idle report", () => {
+    // This is what bounds terminal notifications: websocket-server pushes on every
+    // working -> idle transition it is handed, with no dedup of its own, so the tracker
+    // withholding repeats is the whole of the suppression. Unread finished attention swallows
+    // further idle reports exactly the way an agent's unread flag does; a genuinely new turn
+    // has to go through `working` first.
+    const tracker = new TerminalActivityTracker();
+    const transitions: Array<string | null> = [];
+    tracker.onChange((snapshot) => transitions.push(snapshot.attentionReason));
+
+    tracker.set("working");
+    tracker.set("idle");
+    tracker.set("idle");
+    tracker.set("idle");
+
+    expect(transitions).toEqual([null, "finished"]);
+
+    // Reading it re-arms, and the next turn reports once more.
+    tracker.clearAttention();
+    tracker.set("working");
+    tracker.set("idle");
+
+    expect(transitions).toEqual([null, "finished", null, null, "finished"]);
+  });
 });
 
 describe("TerminalActivityTracker — clearAttention", () => {
