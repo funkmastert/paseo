@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
@@ -25,22 +26,48 @@ export function AccountBudgetStrip({
   providerIds: string[];
   refetchIntervalMs?: number;
 }) {
-  const { view } = useProviderUsage(serverId, { refetchInterval: refetchIntervalMs });
+  const { view } = useProviderUsage(serverId, {
+    refetchInterval: refetchIntervalMs,
+    catchUpOnFocus: true,
+  });
   const { entries } = useProvidersSnapshot(serverId);
 
   const rows = useMemo(() => {
     if (view.kind !== "ready") return [];
     return buildAccountBudgetRows(view.payload.providers, providerIds, entries);
   }, [entries, providerIds, view]);
+  const fetchedAt = useMemo(
+    () => (view.kind === "ready" ? new Date(view.fetchedAt) : null),
+    [view],
+  );
 
   if (rows.length === 0) return null;
 
   return (
-    <View style={styles.container}>
-      {rows.map((row) => (
-        <AccountBudgetRow key={row.providerId} row={row} serverId={serverId} />
-      ))}
+    <View style={styles.strip}>
+      <View style={styles.container}>
+        {rows.map((row) => (
+          <AccountBudgetRow key={row.providerId} row={row} serverId={serverId} />
+        ))}
+      </View>
+      <UsageFreshness fetchedAt={fetchedAt} />
     </View>
+  );
+}
+
+/**
+ * When the bars were last read. Usage is polled and served from a daemon-side cache, so these
+ * numbers are never live; without a timestamp a strip that stopped polling — the window was in
+ * the background, the host went away — presents hours-old headroom as the headroom you have now.
+ */
+function UsageFreshness({ fetchedAt }: { fetchedAt: Date | null }) {
+  const { t } = useTranslation();
+  const label = useCompactTimeAgo(fetchedAt);
+  if (!label) return null;
+  return (
+    <Text style={styles.freshness} numberOfLines={1} testID="orchestration-usage-freshness">
+      {t("panels.orchestration.usageAsOf", { time: label })}
+    </Text>
   );
 }
 
@@ -89,10 +116,17 @@ function AccountBudgetRow({ row, serverId }: { row: AccountBudgetRowViewModel; s
 }
 
 const styles = StyleSheet.create((theme) => ({
+  strip: {
+    gap: theme.spacing[2],
+  },
   container: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: theme.spacing[4],
+  },
+  freshness: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
   },
   row: {
     flexGrow: 1,

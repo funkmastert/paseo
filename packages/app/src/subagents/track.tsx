@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, type ReactElement } from "react";
+import { useCallback, useMemo, type ReactElement } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
@@ -14,11 +14,8 @@ import {
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
 import type { Theme } from "@/styles/theme";
-import {
-  deriveTokenBurnTones,
-  type TokenBurnSibling,
-  type TokenBurnTone,
-} from "@/utils/token-burn-tone-model";
+import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
+import type { TokenBurnSibling, TokenBurnTone } from "@/utils/token-burn-tone-model";
 import type { SubagentRow } from "./select";
 import type { ArchiveFinishedStatus } from "./use-archive-finished";
 import {
@@ -75,22 +72,18 @@ export function SubagentsTrack({
   const { t } = useTranslation();
 
   // Collection rows never independently subscribe to token-rate data — the list owner derives
-  // the keyed tone model once per render (docs/coding-standards.md). previousTonesRef persists
-  // across renders so deriveTokenBurnTones can apply enter/exit hysteresis. Must run before the
-  // early return below so hook order stays stable regardless of `rows`.
-  const previousTokenBurnTonesRef = useRef<ReadonlyMap<string, TokenBurnTone>>(new Map());
-  const tokenBurnTones = useMemo(() => {
-    const siblings: TokenBurnSibling[] = rows
-      .filter((row): row is Extract<SubagentRow, { kind: "paseo" }> => row.kind === "paseo")
-      .map((row) => ({ id: row.id, recentTokenRate: row.recentTokenRate }));
-    return deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
-  }, [rows]);
-  // Committing the ref belongs in an effect, not the memo factory — useMemo must stay pure
-  // (React may call it speculatively/twice under Strict Mode) while the hysteresis ref needs
-  // exactly one write per commit.
-  useEffect(() => {
-    previousTokenBurnTonesRef.current = tokenBurnTones;
-  }, [tokenBurnTones]);
+  // the keyed tone model once (docs/coding-standards.md). useTokenBurnTones owns the hysteresis
+  // ref and re-derives on the minute tick, so a badge expires when its rate goes stale even
+  // though a quiet track sends no row update to trigger a re-render. Must run before the early
+  // return below so hook order stays stable regardless of `rows`.
+  const tokenBurnSiblings = useMemo<TokenBurnSibling[]>(
+    () =>
+      rows
+        .filter((row): row is Extract<SubagentRow, { kind: "paseo" }> => row.kind === "paseo")
+        .map((row) => ({ id: row.id, recentTokenRate: row.recentTokenRate })),
+    [rows],
+  );
+  const tokenBurnTones = useTokenBurnTones(tokenBurnSiblings);
 
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";

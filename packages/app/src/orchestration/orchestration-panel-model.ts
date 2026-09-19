@@ -1,4 +1,8 @@
 import { toSubagentRow } from "@/subagents/select";
+import type {
+  HostRuntimeAgentDirectoryStatus,
+  HostRuntimeConnectionStatus,
+} from "@/runtime/host-runtime";
 import type { Agent } from "@/stores/session-store";
 import type { WorkspaceTabTarget } from "@/workspace-tabs/model";
 import { listFinishedAgentsInSubtree, type OrchestrationTreeNode } from "./select";
@@ -117,3 +121,38 @@ export function groupAgentsByParent(agents: readonly Agent[]): Map<string | null
 
 /** Adapts an Agent into the row shape `runArchiveFinished` reads — the shared adapter from subagents/select.ts. */
 export const toOrchestrationArchiveRow = toSubagentRow;
+
+/**
+ * Whether what the panel is rendering is actually being kept current.
+ *
+ * The tree is a replica: it keeps its last contents when the socket drops, so a disconnected
+ * panel looks exactly like a connected one whose agents happen not to have moved. On a machine
+ * where connections drop routinely that is the whole of "the status seems out of date" — the
+ * rows are not wrong, they are just frozen, and nothing on screen says so.
+ */
+export type OrchestrationFreshness =
+  | { kind: "live" }
+  /** A refresh is in flight, or the host is still connecting. Resolves on its own; say nothing. */
+  | { kind: "syncing" }
+  /** The rows on screen are the last known state and nothing is updating them. */
+  | { kind: "stale" };
+
+export function resolveOrchestrationFreshness(input: {
+  connectionStatus: HostRuntimeConnectionStatus;
+  directoryStatus: HostRuntimeAgentDirectoryStatus;
+}): OrchestrationFreshness {
+  if (input.connectionStatus === "connecting") return { kind: "syncing" };
+  if (input.connectionStatus !== "online") return { kind: "stale" };
+  switch (input.directoryStatus) {
+    case "initial_loading":
+    case "revalidating":
+      return { kind: "syncing" };
+    // A refresh that failed after a good one leaves the replica populated but unattended: the
+    // socket is up, so nothing will retry until something else asks.
+    case "error_after_ready":
+    case "error_before_first_success":
+      return { kind: "stale" };
+    default:
+      return { kind: "live" };
+  }
+}

@@ -4,6 +4,11 @@ import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import { isFinishedSubagent } from "@/subagents/archive-finished";
 import { toSubagentRow } from "@/subagents/select";
 import { useSessionStore, type Agent } from "@/stores/session-store";
+import {
+  agentStatePriority,
+  compareByCreatedAt,
+  compareOrchestrationRoots,
+} from "./orchestration-ordering";
 
 type SessionStoreSnapshot = ReturnType<typeof useSessionStore.getState>;
 
@@ -20,13 +25,16 @@ export interface OrchestrationTreeNode {
   descendantRequiresAttention: boolean;
   /** True when this node or any descendant requires attention. */
   requiresAttentionInSubtree: boolean;
+  /**
+   * The most urgent agent-state bucket priority in this node's subtree, itself included. Lower is
+   * more urgent — see `getWorkspaceStateBucketPriority`. Roots are ordered by it.
+   */
+  subtreePriority: number;
 }
 
 const EMPTY_ORCHESTRATION_ROOTS: OrchestrationTreeNode[] = [];
 
-function byCreatedAt(left: Agent, right: Agent): number {
-  return left.createdAt.getTime() - right.createdAt.getTime();
-}
+const byCreatedAt = compareByCreatedAt;
 
 /**
  * Roots and full recursive descendant trees for a server, assembled from the live (non-archived,
@@ -69,7 +77,6 @@ export function selectOrchestrationTree(
     return EMPTY_ORCHESTRATION_ROOTS;
   }
 
-  roots.sort(byCreatedAt);
   for (const siblings of childrenByParentId.values()) siblings.sort(byCreatedAt);
 
   // Every live agent has exactly one parentAgentId, so the graph reachable from the roots found
@@ -94,10 +101,15 @@ export function selectOrchestrationTree(
       depth,
       descendantRequiresAttention,
       requiresAttentionInSubtree: Boolean(agent.requiresAttention) || descendantRequiresAttention,
+      subtreePriority: Math.min(
+        agentStatePriority(agent),
+        ...children.map((child) => child.subtreePriority),
+      ),
     };
   };
 
-  return roots.map((agent) => buildNode(agent, 0, new Set()));
+  // Root order is compareOrchestrationRoots; children keep creation order.
+  return roots.map((agent) => buildNode(agent, 0, new Set())).sort(compareOrchestrationRoots);
 }
 
 export function useOrchestrationTree(

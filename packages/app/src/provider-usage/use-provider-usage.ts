@@ -22,6 +22,14 @@ interface UseProviderUsageOptions {
   enabled?: boolean;
   /** Polling interval in ms. Omit to keep the default no-polling behavior. */
   refetchInterval?: number;
+  /**
+   * Catch up when the window comes back or the host reconnects. React Query skips a polling tick
+   * while the document is hidden and never backfills the ones it skipped, so a polled surface
+   * that does not opt in shows whatever it last fetched before the window went away — which is
+   * exactly what the user is looking at the moment they come back to it. Off by default to keep
+   * the unpolled callers unchanged.
+   */
+  catchUpOnFocus?: boolean;
 }
 
 export function useProviderUsage(
@@ -33,6 +41,7 @@ export function useProviderUsage(
   canFetch: boolean;
 } {
   const queryClient = useQueryClient();
+  const catchUpOnFocus = options.catchUpOnFocus ?? false;
   const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const supportsProviderUsage = useSessionStore(
@@ -55,8 +64,8 @@ export function useProviderUsage(
     enabled,
     staleTime: PROVIDER_USAGE_STALE_TIME_MS,
     refetchOnMount: true,
-    refetchOnReconnect: false,
-    refetchOnWindowFocus: false,
+    refetchOnReconnect: catchUpOnFocus,
+    refetchOnWindowFocus: catchUpOnFocus,
     ...(options.refetchInterval !== undefined ? { refetchInterval: options.refetchInterval } : {}),
   });
 
@@ -82,6 +91,7 @@ export function useProviderUsage(
         kind: "ready",
         payload: query.data,
         isRefreshing: query.isFetching,
+        fetchedAt: query.dataUpdatedAt,
       };
     }
     if (query.isError) {
@@ -95,6 +105,7 @@ export function useProviderUsage(
     client,
     isConnected,
     query.data,
+    query.dataUpdatedAt,
     query.error,
     query.isError,
     query.isFetching,

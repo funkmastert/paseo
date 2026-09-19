@@ -262,3 +262,63 @@ describe("listFinishedAgentsInSubtree", () => {
     );
   });
 });
+
+describe("root ordering", () => {
+  it("puts trees with live work above trees that are entirely finished", () => {
+    setAgents([
+      makeAgent({ id: "old-and-done", status: "idle", createdAt: new Date(1) }),
+      makeAgent({ id: "new-and-running", status: "running", createdAt: new Date(9) }),
+    ]);
+    expect(buildTree().map((root) => root.agent.id)).toEqual(["new-and-running", "old-and-done"]);
+  });
+
+  it("lifts a root whose only live work is a descendant", () => {
+    setAgents([
+      makeAgent({ id: "busy-elsewhere", status: "idle", createdAt: new Date(1) }),
+      makeAgent({ id: "quiet-leader", status: "idle", createdAt: new Date(2) }),
+      makeAgent({
+        id: "busy-child",
+        status: "running",
+        createdAt: new Date(3),
+        parentAgentId: "quiet-leader",
+      }),
+    ]);
+    expect(buildTree().map((root) => root.agent.id)).toEqual(["quiet-leader", "busy-elsewhere"]);
+  });
+
+  it("keeps children in the order the work was handed out", () => {
+    setAgents([
+      makeAgent({ id: "leader", status: "idle", createdAt: new Date(1) }),
+      makeAgent({
+        id: "second-child-still-running",
+        status: "running",
+        createdAt: new Date(3),
+        parentAgentId: "leader",
+      }),
+      makeAgent({
+        id: "first-child-done",
+        status: "idle",
+        createdAt: new Date(2),
+        parentAgentId: "leader",
+      }),
+    ]);
+    expect(buildTree()[0]?.children.map((child) => child.agent.id)).toEqual([
+      "first-child-done",
+      "second-child-still-running",
+    ]);
+  });
+
+  it("ranks an agent waiting on a permission above one that is merely running", () => {
+    setAgents([
+      makeAgent({ id: "running", status: "running", createdAt: new Date(1) }),
+      makeAgent({
+        id: "waiting",
+        status: "idle",
+        attentionReason: "permission",
+        requiresAttention: true,
+        createdAt: new Date(2),
+      }),
+    ]);
+    expect(buildTree().map((root) => root.agent.id)).toEqual(["waiting", "running"]);
+  });
+});
