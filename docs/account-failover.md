@@ -49,7 +49,7 @@ Two independent signals, either one sufficient (`account-failover-detector.ts`):
 
 A healthy usage reading does not clear a reactive signal. A monthly spend cap does not appear in the utilization windows at all.
 
-This monitor is the only thing that acts on a usage window. The token-burn monitor's account-pressure leg reads the same rows and warns at 90%, deliberately without acting, so the two never race for the same account — see [docs/token-burn.md](token-burn.md#account-pressure).
+This monitor is the only thing that acts on a usage window. Two others read the same rows and act on none of them, so nothing races this monitor for an account: the token-burn monitor's account-pressure leg warns at 90% ([docs/token-burn.md](token-burn.md#account-pressure)), and [budget pacing](budget-pacing.md) advises running leaders on how hard to fan out.
 
 An account's evidence has to outlive the agent that produced it. If it stopped counting the moment that agent was rescued, the account would look healthy on the next sweep and the next stuck agent would be sent straight back onto it. The two paths keep it differently: an import leaves the retired predecessor behind on the capped account, still carrying its error; a move takes the failure with the agent and clears it, so the monitor records the evidence against the provider instead. Both age out on the same 5-hour clock, dated by the original failure.
 
