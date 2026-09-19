@@ -4,7 +4,7 @@ import { createServer as createHTTPServer, type IncomingMessage, type ServerResp
 import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm } from "fs/promises";
 import { randomUUID } from "node:crypto";
-import { hostname as getHostname } from "node:os";
+import { homedir, hostname as getHostname } from "node:os";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Logger } from "pino";
@@ -220,6 +220,8 @@ import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { DeviceLeaseManager } from "./agent/device-lease-manager.js";
+import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
+import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
@@ -1095,6 +1097,22 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "device-leases" }),
   });
 
+  // The artifact janitor (docs/artifact-janitor.md). Built next to the cap and wrapped around
+  // its launch gate, so one PreToolUse hook serves both: the janitor refuses a launch onto a
+  // full volume and notes a test run's cleanup obligation, then the cap decides about slots.
+  const testArtifactJanitor = new TestArtifactJanitor({
+    homeDir: homedir(),
+    readDaemonConfig: () => ({ artifactJanitor: daemonConfigStore.get().artifactJanitor }),
+    listAgentIds: () => listDeviceLeaseAgentIds(),
+    listLeasedDeviceIds: () => deviceLeaseManager.listLeasedDeviceIds(),
+    logger: logger.child({ module: "artifact-janitor" }),
+  });
+  const deviceLaunchGate = createArtifactAwareLaunchGate({
+    janitor: testArtifactJanitor,
+    inner: deviceLeaseManager,
+    logger: logger.child({ module: "artifact-janitor" }),
+  });
+
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
     logger,
@@ -1104,7 +1122,7 @@ export async function createPaseoDaemon(
       providerOverrides: config.providerOverrides,
       workspaceGitService,
       managedProcesses,
-      deviceLaunchGate: deviceLeaseManager,
+      deviceLaunchGate,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -2059,6 +2077,9 @@ export async function createPaseoDaemon(
               // The cap counts devices from this same sweep sample rather than taking its own
               // `ps` — one scan a minute on a machine that is already struggling.
               reportDeviceSample: (sample) => deviceLeaseManager.reconcileFromSample(sample),
+              // Same deal for the artifact janitor: it needs the sweep's `ps` rows to prove
+              // nothing still references a simulator directory before it deletes one.
+              sweepTestArtifacts: (input) => testArtifactJanitor.sweep(input),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,

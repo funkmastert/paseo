@@ -14,6 +14,10 @@ export type ResourceMonitorNotificationReason =
   // union is untyped JSON on the wire, and a client that doesn't know this value falls back to
   // opening the server — no shim, nothing to remove later.
   | "resource_daemons_reaped"
+  // COMPAT(artifactJanitor): added in v0.8.2, remove nothing — the union is untyped JSON on the
+  // wire, so a client that doesn't know this value falls back to opening the server.
+  // Reported by the artifact janitor (server/agent/test-artifact-janitor.ts).
+  | "artifacts_reclaimed"
   | "resource_multi";
 
 export interface ResourceMonitorNotificationData {
@@ -239,6 +243,72 @@ export function buildResourceBuildDaemonReapNotificationPayload(
       reason: "resource_daemons_reaped",
       dryRun: input.dryRun,
       pids: input.daemons.map((daemon) => daemon.pid),
+    },
+  };
+}
+
+/** One directory the artifact janitor reclaimed, or — in dry run — would have. */
+export interface ReclaimedArtifactDirectory {
+  /** Human-readable kind, from the janitor's artifact-set allowlist. Never free text. */
+  label: string;
+  /** The directory's own name — a simulator UDID. Short enough for a notification body. */
+  name: string;
+  /**
+   * The absolute path. Carried in `data` rather than the body, which cannot hold three of them,
+   * but carried: an automatic delete nobody can audit is worse than none.
+   */
+  path: string;
+  sizeBytes: number;
+  /** How long it had sat untouched when the janitor picked it. */
+  ageMs: number;
+  /** "obligation" — the run that made it died. "unowned" — nothing on the machine claims it. */
+  claim: "obligation" | "unowned";
+}
+
+interface BuildArtifactJanitorNotificationPayloadInput {
+  serverId: string;
+  dryRun: boolean;
+  artifacts: readonly ReclaimedArtifactDirectory[];
+}
+
+const MAX_LISTED_ARTIFACTS = 3;
+
+/**
+ * What the janitor deleted, or would have. Sent through the same push path as the build-daemon
+ * reaper's report, for the same reason: a feature that removes things on its own has to say so
+ * where somebody will see it, with the path, the size and the reason for every entry.
+ */
+export function buildArtifactJanitorNotificationPayload(
+  input: BuildArtifactJanitorNotificationPayloadInput,
+): ResourceMonitorNotificationPayload {
+  if (input.artifacts.length === 0) {
+    throw new Error("buildArtifactJanitorNotificationPayload requires at least one artifact");
+  }
+  const totalBytes = input.artifacts.reduce((sum, artifact) => sum + artifact.sizeBytes, 0);
+  const noun = input.artifacts.length === 1 ? "directory" : "directories";
+  const kinds = [...new Set(input.artifacts.map((artifact) => artifact.label))].join(", ");
+  const listed = input.artifacts
+    .slice(0, MAX_LISTED_ARTIFACTS)
+    .map(
+      (artifact) =>
+        `${artifact.name} (${formatBytes(artifact.sizeBytes)}, idle ${formatIdleDuration(artifact.ageMs)})`,
+    )
+    .join(", ");
+  const overflow = input.artifacts.length - MAX_LISTED_ARTIFACTS;
+  const detail = overflow > 0 ? `${listed}, and ${overflow} more` : listed;
+  const verb = input.dryRun ? "Would reclaim" : "Reclaimed";
+  const suffix = input.dryRun ? " Dry run — nothing was deleted." : "";
+
+  return {
+    title: input.dryRun
+      ? "Leftover test artifacts would be reclaimed"
+      : "Reclaimed disk from leftover test artifacts",
+    body: `${verb} ${input.artifacts.length} leftover ${noun} holding ${formatBytes(totalBytes)} (${kinds}): ${detail}.${suffix}`,
+    data: {
+      serverId: input.serverId,
+      reason: "artifacts_reclaimed",
+      dryRun: input.dryRun,
+      paths: input.artifacts.map((artifact) => artifact.path),
     },
   };
 }
