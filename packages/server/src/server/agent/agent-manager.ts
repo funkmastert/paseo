@@ -5934,6 +5934,30 @@ export class AgentManager {
     return reason === "permission" && !this.hasFinishObserver(agent.id);
   }
 
+  /**
+   * Raise attention on a delegated agent whose parent could not be told what happened.
+   *
+   * `checkAndSetAttention` suppresses a delegated agent's finish on the premise that the parent
+   * receives the outcome in-band, and `broadcastAgentAttention` suppresses the push for the same
+   * reason. When the delivery itself fails — the parent is closed, or its session is gone — that
+   * premise is false, and the agent goes quiet with nobody informed: on a finish the result is
+   * stranded, on a permission the child never runs again. Only a person can act, so this bypasses
+   * both suppressions rather than routing through them.
+   */
+  flagUndeliveredDelegatedOutcome(agentId: string, reason: "finished" | "permission"): void {
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.internal || agent.attention.requiresAttention) {
+      return;
+    }
+    agent.attention = {
+      requiresAttention: true,
+      attentionReason: reason,
+      attentionTimestamp: new Date(),
+    };
+    this.onAgentAttention?.({ agentId: agent.id, provider: agent.provider, reason });
+    this.emitState(agent);
+  }
+
   private dispatchStream(
     agentId: string,
     event: AgentStreamEvent,

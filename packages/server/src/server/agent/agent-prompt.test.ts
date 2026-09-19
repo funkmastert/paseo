@@ -68,6 +68,7 @@ interface FinishNotificationScenario {
   parentPrompts(): string[];
   steerAttemptCount(): number;
   wasParentPrompted(): boolean;
+  flaggedOutcomes(): string[];
 }
 
 function createFinishNotificationScenario(
@@ -78,6 +79,7 @@ function createFinishNotificationScenario(
   let parentPrompted = false;
   let steerAttemptCount = 0;
   const parentPrompts: string[] = [];
+  const flaggedOutcomes: string[] = [];
 
   const childAgent: ManagedAgent = Object.create(null);
   Reflect.set(childAgent, "id", "child-agent");
@@ -110,6 +112,9 @@ function createFinishNotificationScenario(
     return options?.childLastAssistantMessage ?? null;
   });
   Reflect.set(agentManager, "tryRunOutOfBand", () => false);
+  Reflect.set(agentManager, "flagUndeliveredDelegatedOutcome", (_id: string, reason: string) => {
+    flaggedOutcomes.push(reason);
+  });
   Reflect.set(agentManager, "hasInFlightRun", () => Boolean(options?.parentPromptError));
   Reflect.set(agentManager, "steerOrReplaceActiveTurn", async () => {
     steerAttemptCount += 1;
@@ -276,6 +281,9 @@ function createFinishNotificationScenario(
     },
     wasParentPrompted() {
       return parentPrompted;
+    },
+    flaggedOutcomes() {
+      return flaggedOutcomes;
     },
   };
 }
@@ -513,6 +521,30 @@ test("finish notifications log a rejected parent prompt without an unhandled rej
       err: expect.objectContaining({ message: "parent provider rejected replacement" }),
     }),
   ]);
+});
+
+test("a notification the parent never received falls back to flagging the child", async () => {
+  // The delegated agent's finish is kept silent on the premise that the parent is told in-band.
+  // When that delivery fails the premise is false, and without this the child's work is finished,
+  // nobody has been told, and no flag exists for anyone to find it by.
+  const scenario = createFinishNotificationScenario({
+    parentPromptError: new Error("parent provider rejected replacement"),
+  });
+
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+  await vi.waitFor(() => expect(scenario.flaggedOutcomes()).toEqual(["finished"]));
+});
+
+test("a permission the parent never heard about falls back to flagging the child", async () => {
+  // Worse than a stranded finish: the child does not run again until somebody answers.
+  const scenario = createFinishNotificationScenario({
+    parentPromptError: new Error("parent provider rejected replacement"),
+  });
+
+  scenario.startWatchingChild();
+  scenario.requestChildPermission();
+  await vi.waitFor(() => expect(scenario.flaggedOutcomes()).toEqual(["permission"]));
 });
 
 it("does not notify archived callers", async () => {

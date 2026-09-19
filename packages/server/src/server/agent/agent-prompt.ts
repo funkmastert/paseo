@@ -510,6 +510,12 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
           { err: error, childAgentId, callerAgentId, reason },
           "Failed to notify caller agent",
         );
+        // The in-band delivery that justifies keeping a delegated agent silent just failed, so
+        // fall back to flagging the child for a person.
+        agentManager.flagUndeliveredDelegatedOutcome(
+          childAgentId,
+          reason === "needs permission" ? "permission" : "finished",
+        );
       });
   }
 
