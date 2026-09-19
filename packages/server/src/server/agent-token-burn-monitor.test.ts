@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { TokenBurnMonitorState } from "./agent/token-burn-detector.js";
-import type { SpendGovernorState } from "./agent/spend-governor.js";
+import { SPEND_BUDGET_LABEL, type SpendGovernorState } from "./agent/spend-governor.js";
 import { AgentTokenBurnMonitor, type TokenBurnMonitorConfig } from "./agent-token-burn-monitor.js";
 import type { PushPayload } from "./push/push-service.js";
 
@@ -633,5 +633,60 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     const { push, monitor } = createUsageMonitor({ usage: usage(96) });
     await monitor.tick();
     expect(push.sent).toHaveLength(1);
+  });
+  // A paused agent that carries no alert is indistinguishable in the app from one that finished
+  // its turn: `cancelReason` is log-only and the governor has no attentionReason of its own.
+  // The push is then the only notice, and a missed push is a lost agent.
+  test("a paused agent is flagged so a human can find it", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 600_000 }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: { governor: { enabled: true, pause: { enabled: true } } },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1", "spend-governor");
+    expect(agentManager.__alerts.get("agent-1")).toMatchObject({
+      trigger: "total",
+      budgetTokens: 300_000,
+      spentTokens: 600_000,
+      governorStage: "pause",
+    });
+  });
+
+  test("a dry run flags nothing, because it paused nothing", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 600_000 }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: { enabled: true, dryRun: true, pause: { enabled: true } },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(agentManager.__alerts.get("agent-1")).toBeUndefined();
   });
 });

@@ -54,12 +54,12 @@ An agent whose task declared no budget is **not governed**, unless `defaultBudge
 
 Four stages, each switching independently at its own multiple of the budget. Enabling the governor enables `notify` alone: turning it on starts telling you things, never starts changing things.
 
-| Stage        | Fires at | On by default | What it does                                                                 |
-| ------------ | -------- | ------------- | ---------------------------------------------------------------------------- |
-| `notify`     | 0.75×    | yes           | Push, live `tokenBurnAlert`, and a message into the agent's own conversation |
-| `downgrade`  | 1.0×     | no            | `setAgentModel` to `downgradeToModel` for the rest of the task               |
-| `stopFanOut` | 1.0×     | no            | `create_agent` refuses this caller, so a runaway cannot multiply             |
-| `pause`      | 1.5×     | no            | Ends the turn and leaves the agent flagged for a human                       |
+| Stage        | Fires at | On by default | What it does                                                     |
+| ------------ | -------- | ------------- | ---------------------------------------------------------------- |
+| `notify`     | 0.75×    | yes           | Push, and a message into the agent's own conversation            |
+| `downgrade`  | 1.0×     | no            | `setAgentModel` to `downgradeToModel` for the rest of the task   |
+| `stopFanOut` | 1.0×     | no            | `create_agent` refuses this caller, so a runaway cannot multiply |
+| `pause`      | 1.5×     | no            | Ends the turn and leaves the agent flagged for a human           |
 
 A stage fires once per episode, not once per sweep. A **changed budget starts a fresh episode** — that is how a human releases a paused or cut-off agent: raise the label. Turning the governor off drops the carried state entirely, which releases a blocked agent too.
 
@@ -82,7 +82,7 @@ Two ordering rules carry weight:
 - **Downgrade tells the agent after the model moved**, so the notice is true when read, and says it did nothing wrong so it does not go hunting for a bug. `setAgentModel` mid-turn is safe: it reaches the SDK's `query.setModel()`, which applies from the next API request in the same turn. The request in flight finishes on the old model, the conversation is untouched, nothing restarts.
 - **Pause steers first and cancels second.** The other order leaves an idle agent, and steering an idle agent starts a fresh turn (`agent-prompt.ts`'s fallback) — spending tokens to say it is out of tokens. This way the reason lands in the transcript for whoever resumes it.
 
-Pausing works inside the closed `attentionReason` enum without adding to it: the turn ends and the live `tokenBurnAlert` stays set, which `agent-state-bucket.ts` already treats as attention-worthy on its own.
+Pausing works inside the closed `attentionReason` enum without adding to it. The stage sets a `tokenBurnAlert` of its own before it cancels, which `agent-state-bucket.ts` already treats as attention-worthy. Without it a paused agent is indistinguishable in the app from one that finished its turn — `cancelReason` is log-only — so the push would be the only notice, and a missed push would be a lost agent. It reports `trigger: "total"`, because the wire enum is closed and a third value would fail to parse on every shipped client; `budgetTokens`, `spentTokens` and `governorStage` ride alongside as additive-optional fields, so an old app renders the usual total copy and a new one can say it was the governor. The alert is set before the cancel rather than after: an agent whose cancel failed is still over budget and still worth a human's eye.
 
 ### Config
 

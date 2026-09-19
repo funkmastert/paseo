@@ -549,6 +549,20 @@ export class AgentTokenBurnMonitor {
         // say it is over budget. This way the reason lands in the transcript for whoever
         // resumes it, and then the turn ends.
         await this.tellAgent(action.agentId, body);
+        // Flag it before the cancel, not after. `cancelReason` is log-only and the governor has
+        // no `attentionReason` of its own, so without this a paused agent is indistinguishable
+        // in the app from one that finished its turn normally — a push notification and then
+        // nothing to find. The alert is what agent-state-bucket.ts already treats as
+        // attention-worthy. Before rather than after because an agent whose cancel failed is
+        // still over budget and still worth a human's eye, so the flag is true either way.
+        this.agentManager.setTokenBurnAlert(action.agentId, {
+          trigger: "total",
+          totalTokens: action.budgetTokens,
+          budgetTokens: action.budgetTokens,
+          spentTokens: action.spentTokens,
+          governorStage: action.stage,
+          firstBreachedAt: new Date(this.now()).toISOString(),
+        });
         await this.agentManager.cancelAgentRun(action.agentId, "spend-governor");
         return;
     }
