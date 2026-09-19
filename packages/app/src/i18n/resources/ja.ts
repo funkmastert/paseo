@@ -1855,6 +1855,10 @@ export const ja: TranslationResources = {
       tooltip: "リーダーとサブエージェントのツリーを表示",
       emptyState: "このワークスペースにはまだエージェントがありません",
       usageUnavailable: "使用状況は利用できません",
+      usageAsOf: "{{time}}時点の使用状況",
+      staleTitle: "更新されていません",
+      staleLastSynced: "最終同期 {{time}}",
+      staleNeverSynced: "まだ同期していません",
     },
     diff: {
       changesLabel: "変更",

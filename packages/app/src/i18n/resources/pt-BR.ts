@@ -1869,6 +1869,10 @@ export const ptBR: TranslationResources = {
       tooltip: "Ver a árvore do agente líder e dos subagentes",
       emptyState: "Ainda não há agentes neste espaço de trabalho",
       usageUnavailable: "Uso indisponível",
+      usageAsOf: "Uso em {{time}}",
+      staleTitle: "Sem atualizar",
+      staleLastSynced: "Última sincronização {{time}}",
+      staleNeverSynced: "Ainda não sincronizado",
     },
     diff: {
       changesLabel: "Alterações",

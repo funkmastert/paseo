@@ -1837,6 +1837,10 @@ export const ar: TranslationResources = {
       tooltip: "عرض شجرة الوكيل الرئيسي والوكلاء الفرعيين",
       emptyState: "لا يوجد وكلاء في مساحة العمل هذه بعد",
       usageUnavailable: "الاستخدام غير متوفر",
+      usageAsOf: "الاستخدام حتى {{time}}",
+      staleTitle: "لا يتم التحديث",
+      staleLastSynced: "آخر مزامنة {{time}}",
+      staleNeverSynced: "لم تتم المزامنة بعد",
     },
     diff: {
       changesLabel: "التغييرات",

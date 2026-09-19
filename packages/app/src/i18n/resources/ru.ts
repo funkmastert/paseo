@@ -1868,6 +1868,10 @@ export const ru: TranslationResources = {
       tooltip: "Просмотр дерева ведущего агента и субагентов",
       emptyState: "В этом рабочем пространстве пока нет агентов",
       usageUnavailable: "Использование недоступно",
+      usageAsOf: "Использование на {{time}}",
+      staleTitle: "Не обновляется",
+      staleLastSynced: "Последняя синхронизация: {{time}}",
+      staleNeverSynced: "Ещё не синхронизировано",
     },
     diff: {
       changesLabel: "Изменения",

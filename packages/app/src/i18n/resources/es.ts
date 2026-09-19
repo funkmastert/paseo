@@ -1883,6 +1883,10 @@ export const es: TranslationResources = {
       tooltip: "Ver el árbol del agente líder y los subagentes",
       emptyState: "Aún no hay agentes en este espacio de trabajo",
       usageUnavailable: "Uso no disponible",
+      usageAsOf: "Uso a fecha de {{time}}",
+      staleTitle: "Sin actualizar",
+      staleLastSynced: "Última sincronización {{time}}",
+      staleNeverSynced: "Aún sin sincronizar",
     },
     diff: {
       changesLabel: "Cambios",

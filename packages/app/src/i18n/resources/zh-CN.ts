@@ -1816,6 +1816,10 @@ export const zhCN: TranslationResources = {
       tooltip: "查看主 Agent 与 subagent 树",
       emptyState: "此工作区中还没有 Agent",
       usageUnavailable: "用量不可用",
+      usageAsOf: "{{time}}的用量",
+      staleTitle: "未在更新",
+      staleLastSynced: "上次同步 {{time}}",
+      staleNeverSynced: "尚未同步",
     },
     diff: {
       changesLabel: "更改",

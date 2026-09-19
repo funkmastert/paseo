@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { FlatList, Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Network, Unlink } from "lucide-react-native";
@@ -7,6 +7,7 @@ import invariant from "tiny-invariant";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { getProviderIcon } from "@/components/provider-icons";
 import { RowActionButton } from "@/components/row-action-button";
+import { Alert } from "@/components/ui/alert";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { TokenBurnBadge } from "@/components/token-burn-badge";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
@@ -39,12 +40,11 @@ import {
   type OrchestrationFlatRow,
 } from "@/orchestration/orchestration-panel-model";
 import { useOrchestrationTree } from "@/orchestration/select";
+import { useOrchestrationDirectoryDemand } from "@/orchestration/use-orchestration-directory-demand";
+import { useOrchestrationFreshness } from "@/orchestration/use-orchestration-freshness";
 import { useArchiveFinishedInTree } from "@/orchestration/use-archive-finished-in-tree";
-import {
-  deriveTokenBurnTones,
-  type TokenBurnSibling,
-  type TokenBurnTone,
-} from "@/utils/token-burn-tone-model";
+import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
+import type { TokenBurnSibling, TokenBurnTone } from "@/utils/token-burn-tone-model";
 
 const ThemedNetwork = withUnistyles(Network);
 const ThemedArchive = withUnistyles(Archive);
@@ -113,6 +113,29 @@ function useOrchestrationPanelDescriptor(
   };
 }
 
+/**
+ * Says so when the tree has stopped being updated. Without this the panel is indistinguishable
+ * from a live one whose agents happen not to have moved — see resolveOrchestrationFreshness.
+ */
+function OrchestrationStaleNotice({ serverId }: { serverId: string }): ReactElement | null {
+  const { t } = useTranslation();
+  const { freshness, liveUntil } = useOrchestrationFreshness(serverId);
+  const liveUntilLabel = useCompactTimeAgo(liveUntil);
+  if (freshness.kind !== "stale") return null;
+  return (
+    <Alert
+      variant="warning"
+      testID="orchestration-stale-notice"
+      title={t("panels.orchestration.staleTitle")}
+      description={
+        liveUntilLabel
+          ? t("panels.orchestration.staleLastSynced", { time: liveUntilLabel })
+          : t("panels.orchestration.staleNeverSynced")
+      }
+    />
+  );
+}
+
 function OrchestrationHeader({
   serverId,
   providerIds,
@@ -133,6 +156,7 @@ function OrchestrationHeader({
 
   return (
     <View style={styles.header}>
+      <OrchestrationStaleNotice serverId={serverId} />
       <AccountBudgetStrip
         serverId={serverId}
         providerIds={providerIds}
@@ -324,27 +348,23 @@ function OrchestrationPanel(): ReactElement {
   const { serverId, workspaceId, tabId, target, openTab } = usePaneContext();
   invariant(target.kind === "orchestration", "OrchestrationPanel requires orchestration target");
 
+  // The panel holds the agent-directory subscription itself rather than riding on whichever
+  // other screen happens to be mounted — see the hook for why that matters on reconnect.
+  useOrchestrationDirectoryDemand(serverId);
+
   const roots = useOrchestrationTree({ serverId });
   const rows = useMemo(() => flattenOrchestrationTree(roots), [roots]);
   const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
 
   // Collection rows never independently subscribe to token-rate data — the list owner derives
-  // the keyed tone model once per render (docs/coding-standards.md). previousTonesRef persists
-  // across renders so deriveTokenBurnTones can apply enter/exit hysteresis.
-  const previousTokenBurnTonesRef = useRef<ReadonlyMap<string, TokenBurnTone>>(new Map());
-  const tokenBurnTones = useMemo(() => {
-    const siblings: TokenBurnSibling[] = rows.map((row) => ({
-      id: row.agent.id,
-      recentTokenRate: row.agent.recentTokenRate,
-    }));
-    return deriveTokenBurnTones(siblings, previousTokenBurnTonesRef.current, Date.now());
-  }, [rows]);
-  // Committing the ref belongs in an effect, not the memo factory — useMemo must stay pure
-  // (React may call it speculatively/twice under Strict Mode) while the hysteresis ref needs
-  // exactly one write per commit.
-  useEffect(() => {
-    previousTokenBurnTonesRef.current = tokenBurnTones;
-  }, [tokenBurnTones]);
+  // the keyed tone model once (docs/coding-standards.md). useTokenBurnTones owns the hysteresis
+  // ref and re-derives on the minute tick, so a badge expires when its rate goes stale even
+  // though a quiet fleet sends no row update to trigger a re-render.
+  const tokenBurnSiblings = useMemo<TokenBurnSibling[]>(
+    () => rows.map((row) => ({ id: row.agent.id, recentTokenRate: row.agent.recentTokenRate })),
+    [rows],
+  );
+  const tokenBurnTones = useTokenBurnTones(tokenBurnSiblings);
   const finishedAgents = useMemo(() => collectFinishedAgentsAcrossRoots(roots), [roots]);
   const archiveFinished = useArchiveFinishedInTree({ serverId, agents: finishedAgents });
 

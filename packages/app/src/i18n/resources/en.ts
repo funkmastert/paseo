@@ -1847,6 +1847,10 @@ export const en = {
       tooltip: "View the leader and subagent tree",
       emptyState: "No agents in this workspace yet",
       usageUnavailable: "Usage unavailable",
+      usageAsOf: "Usage as of {{time}}",
+      staleTitle: "Not updating",
+      staleLastSynced: "Last synced {{time}}",
+      staleNeverSynced: "Not synced yet",
     },
     diff: {
       changesLabel: "Changes",

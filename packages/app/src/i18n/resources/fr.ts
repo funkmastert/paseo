@@ -1888,6 +1888,10 @@ export const fr: TranslationResources = {
       tooltip: "Afficher l’arborescence de l’agent principal et des sous-agents",
       emptyState: "Aucun agent dans cet espace de travail pour le moment",
       usageUnavailable: "Utilisation non disponible",
+      usageAsOf: "Utilisation à {{time}}",
+      staleTitle: "Pas de mise à jour",
+      staleLastSynced: "Dernière synchronisation {{time}}",
+      staleNeverSynced: "Pas encore synchronisé",
     },
     diff: {
       changesLabel: "Modifications",
