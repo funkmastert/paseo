@@ -17,6 +17,7 @@ import {
   providersSnapshotQueryRoot,
 } from "@/data/providers-snapshot";
 import { mcpStatusQueryKey, type McpStatusPayload } from "@/mcp-status/use-mcp-status";
+import { deviceStatusQueryKey, type DeviceStatusPayload } from "@/device-status/use-device-status";
 import { refreshProviderSubagents } from "@/subagents/provider-store";
 
 type ProvidersSnapshotUpdateMessage = Extract<
@@ -24,6 +25,7 @@ type ProvidersSnapshotUpdateMessage = Extract<
   { type: "providers_snapshot_update" }
 >;
 type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
+type DeviceStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "device_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -34,6 +36,7 @@ type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminal
 type ServerDataEventType =
   | "providers_snapshot_update"
   | "mcp_status_update"
+  | "device_status_update"
   | "checkout_diff_update"
   | "subscribe_checkout_diff_response"
   | "status"
@@ -307,6 +310,21 @@ export function applyMcpStatusUpdate(input: {
   );
 }
 
+/**
+ * Applies a `device_status_update` push into the query cache, like the MCP status one above:
+ * the payload is the whole current picture, so there is no RPC to follow it with.
+ */
+export function applyDeviceStatusUpdate(input: {
+  queryClient: QueryClient;
+  serverId: string;
+  message: DeviceStatusUpdateMessage;
+}): void {
+  input.queryClient.setQueryData<DeviceStatusPayload>(
+    deviceStatusQueryKey(input.serverId),
+    input.message.payload,
+  );
+}
+
 export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const activeCheckoutDiffSubscriptions = new Map<string, CheckoutDiffRoute>();
   const activeTerminalSubscriptions = new Map<string, WorkspaceTerminalsRoute>();
@@ -386,6 +404,9 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
   const unsubscribeMcpStatus = input.client.on("mcp_status_update", (message) => {
     applyMcpStatusUpdate({ queryClient: input.queryClient, serverId: input.serverId, message });
   });
+  const unsubscribeDeviceStatus = input.client.on("device_status_update", (message) => {
+    applyDeviceStatusUpdate({ queryClient: input.queryClient, serverId: input.serverId, message });
+  });
   const unsubscribeDaemonConfig = input.client.on("status", (message) => {
     applyDaemonConfigStatus({ queryClient: input.queryClient, serverId: input.serverId, message });
   });
@@ -435,6 +456,7 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
     unsubscribeQueryCache();
     unsubscribeProviders();
     unsubscribeMcpStatus();
+    unsubscribeDeviceStatus();
     unsubscribeDaemonConfig();
     unsubscribeCheckoutDiffUpdate();
     unsubscribeCheckoutDiffResponse();

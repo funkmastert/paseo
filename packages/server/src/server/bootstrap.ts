@@ -1146,6 +1146,12 @@ export async function createPaseoDaemon(
   // before AgentManager because the providers need its gate, and it only reads agent ids.
   listDeviceLeaseAgentIds = () =>
     agentManager.listAgentsForResourceMonitor().map((agent) => agent.id);
+  // The status surface clients subscribe to (`device_status_update`), reachable from Session
+  // through the AgentManager it already holds.
+  agentManager.setDeviceLeaseStatusSource({
+    getSnapshot: () => deviceLeaseManager.getSnapshot(),
+    subscribe: (listener) => deviceLeaseManager.subscribe(listener),
+  });
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
       providerSnapshotManager.replacePluginProviders(pluginRuntime.getProviderRegistrations()),

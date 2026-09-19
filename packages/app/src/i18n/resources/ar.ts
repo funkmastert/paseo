@@ -1892,6 +1892,24 @@ export const ar: TranslationResources = {
   sidebarCallout: {
     dismiss: "رفض",
   },
+  deviceStatus: {
+    summary: "{{used}} من {{total}} أجهزة",
+    summaryCapOff: "{{used}} أجهزة قيد التشغيل",
+    dryRun: "تشغيل تجريبي",
+    platform: {
+      ios: "محاكي iOS",
+      android: "محاكي Android",
+    },
+    heldBy: "محجوز بواسطة {{agent}}",
+    unleased: "بلا حجز",
+    starting: "قيد البدء",
+    waiting_one: "{{count}} وكيل ينتظر خانة",
+    waiting_other: "{{count}} وكلاء ينتظرون خانة",
+    unleasedCount_one: "{{count}} جهاز بلا حجز",
+    unleasedCount_other: "{{count}} أجهزة بلا حجز",
+    expand: "توسيع حالة الأجهزة",
+    collapse: "طي حالة الأجهزة",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "خوادم MCP متصلة",

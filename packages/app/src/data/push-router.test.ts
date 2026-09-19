@@ -21,6 +21,7 @@ type ProvidersSnapshotUpdateMessage = Extract<
   { type: "providers_snapshot_update" }
 >;
 type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
+type DeviceStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "device_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -31,6 +32,7 @@ type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminal
 type RouterMessage =
   | ProvidersSnapshotUpdateMessage
   | McpStatusUpdateMessage
+  | DeviceStatusUpdateMessage
   | CheckoutDiffUpdateMessage
   | SubscribeCheckoutDiffResponseMessage
   | StatusMessage
@@ -65,6 +67,7 @@ function createFakeClient(config: { rejectCheckoutDiffSubscribe?: boolean } = {}
   const handlers: Record<RouterMessageType, RouterHandler[]> = {
     providers_snapshot_update: [],
     mcp_status_update: [],
+    device_status_update: [],
     checkout_diff_update: [],
     subscribe_checkout_diff_response: [],
     status: [],

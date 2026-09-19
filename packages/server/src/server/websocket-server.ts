@@ -1675,6 +1675,8 @@ export class VoiceAssistantWebSocketServer {
         mcpStatus: true,
         // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
         mcpGatewayAdopt: true,
+        // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
+        deviceLeases: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

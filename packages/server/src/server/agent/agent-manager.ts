@@ -1,4 +1,5 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
@@ -143,6 +144,15 @@ function submittedPromptText(prompt: AgentPromptInput): string {
     .flatMap((block) => (block.type === "text" && !("mimeType" in block) ? [block.text] : []))
     .join("\n")
     .trim();
+}
+
+/**
+ * How the AgentManager reaches the device cap: read a snapshot, hear about changes. Narrow on
+ * purpose — nothing here can acquire or release a slot.
+ */
+export interface DeviceLeaseStatusSource {
+  getSnapshot(): Promise<DeviceStatusSnapshot>;
+  subscribe(listener: () => void): () => void;
 }
 
 export class AgentManagerShuttingDownError extends Error {
@@ -964,6 +974,7 @@ export class AgentManager {
   > | null = null;
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
+  private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -1120,6 +1131,25 @@ export class AgentManager {
   ): void {
     this.mcpGateway = gateway;
     this.mcpGatewayAuthToken = authToken;
+  }
+
+  /**
+   * The device cap's status source (docs/device-leases.md), set by bootstrap. Hung off the
+   * AgentManager for the same reason the MCP gateway's is: Session already has one, and the
+   * WebSocket server's constructor does not need a forty-first parameter to carry a snapshot.
+   */
+  setDeviceLeaseStatusSource(source: DeviceLeaseStatusSource | null): void {
+    this.deviceLeaseStatusSource = source;
+  }
+
+  /** Current device-cap snapshot, or null when no cap is wired. */
+  async getDeviceStatusSnapshot(): Promise<DeviceStatusSnapshot | null> {
+    return (await this.deviceLeaseStatusSource?.getSnapshot()) ?? null;
+  }
+
+  /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
+  onDeviceStatusChange(listener: () => void): () => void {
+    return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
   }
 
   /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
