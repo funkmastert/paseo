@@ -287,3 +287,18 @@ export function buildOrchestrationFixtureRows(): OrchestrationFlatRow[] {
   for (const root of orderedRoots) visit(root.agent, 0);
   return rows;
 }
+
+/**
+ * The rows of one root's tree, as the panel's scoped flatten would produce them: a root and the
+ * contiguous run of deeper rows that follows it in the pre-order list.
+ */
+export function sliceOrchestrationFixtureTree(
+  rows: readonly OrchestrationFlatRow[],
+  rootTitle: string,
+): OrchestrationFlatRow[] {
+  const start = rows.findIndex((row) => row.depth === 0 && row.agent.title === rootTitle);
+  if (start < 0) return [];
+  let end = start + 1;
+  while (end < rows.length && (rows[end]?.depth ?? 0) > 0) end += 1;
+  return rows.slice(start, end);
+}

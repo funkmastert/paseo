@@ -1,12 +1,78 @@
 # Orchestration panel
 
-The fleet view: every live agent on a host as one tree, spanning workspaces, with the per-account
-budget strip above it. `packages/app/src/panels/orchestration-panel.tsx` is the shell;
-`packages/app/src/orchestration/` holds the row, the tree selector, and the models.
+Agent trees on a host, spanning workspaces, with the per-account budget strip above them.
+`packages/app/src/panels/orchestration-panel.tsx` is the shell; `packages/app/src/orchestration/`
+holds the row, the tree selector, and the models.
 
 It answers four questions at a glance — which agents are alive, what each is doing now, which are
 stuck or waiting, what they are costing. A real fleet is 50-odd agents of which a handful are
-running, so every rule below exists to keep those four answers legible against that ratio.
+running, and only a fraction of those are in the tree you are working in. Every rule below exists
+to keep those four answers legible against that ratio.
+
+## Scope
+
+Two tabs, not one tab with a mode.
+
+| Target                                    | Shows                  | Opened from                 |
+| ----------------------------------------- | ---------------------- | --------------------------- |
+| `{ kind: "orchestration", scopeAgentId }` | one tree               | the composer track-bar pill |
+| `{ kind: "orchestration" }`               | every tree on the host | the Command Center          |
+
+`scopeAgentId` is the agent whose session opened the tab, not necessarily the leader:
+`orchestration-scope.ts` walks it to the root of its tree, so opening from a leader and from any
+of its subagents land on the same tab. The walk is over the assembled tree rather than over
+`parentAgentId` hops, because the tree already decides who counts as a root — an agent whose
+parent is archived, pending-archive, or on another server is one — and already refuses to follow a
+cyclic snapshot.
+
+A scoped tree that no longer exists renders as "this tree is gone", never as the whole fleet and
+never as "no agents". A scoped tab also badges for its own tree only.
+
+They are separate tab identities so a split can hold both. The header's segmented control switches
+by retargeting the current tab; a tab that moves to host-wide records the leader it came from in
+tab state, which survives a same-kind retarget, so the control works in both directions.
+
+**The global view is not a route.** Route ownership is the fragile part of this app — see
+[expo-router.md](expo-router.md) — and nothing about "all agents" needs one. The tree already spans
+workspaces from inside a workspace tab, and the panel depends on its pane context to open an agent
+beside itself; a host route would duplicate that plumbing and buy a startup-restore question for
+nothing.
+
+The pill shows for any agent that is part of a tree, which includes one that only has a parent. A
+leaf subagent is a session like any other, and without that the only way into your own tree from
+inside it is the host-wide tab.
+
+## What the default view shows
+
+Archiving is the only thing that removes a row and nobody archives, so an unfiltered panel is a
+log of every agent the machine has run this week. Measured on one daemon: 39 unarchived agents, 1
+running, 22 idle, 16 closed, the oldest six weeks old.
+
+A row is in the default view when any of these holds (`orchestration-visibility.ts`):
+
+- it moved inside `ORCHESTRATION_RECENT_WINDOW_MS` — six hours, one working session;
+- it is **alive** (`running`, `initializing`), **blocked** (a pending permission), **failed**
+  (`error` status or attention), or **over budget** (`tokenBurnAlert`) — at any age;
+- it is an ancestor of a row that is kept, or it is the agent the tab is scoped to.
+
+Ancestors are kept so a running subagent never renders at a depth with nothing above it, and so
+`depth` stays correct without renumbering.
+
+Unread **finished** attention deliberately does not pin a row. It is set on every finish and only
+a human opening the agent clears it, so a third of a fleet carries it indefinitely
+([agent-lifecycle.md](agent-lifecycle.md#attention)) — the row declines to badge it for the same
+reason.
+
+Nothing is hidden silently. The header carries the count and the control that shows them, and an
+empty list says whether it is empty because of the window or because there are no agents.
+
+**Archive finished acts on the whole tree, not the visible rows.** Hiding a row is a reading
+decision; archiving is a lifecycle one, and the backlog you want gone is mostly what the window
+already dropped.
+
+The cutoff is re-evaluated on the shared half-hourly tick, not only when an agent moves
+(`use-orchestration-visible-rows.ts`). A fleet that goes quiet sends no updates, and a filter
+frozen at the last update is the freshness problem below in a new costume.
 
 ## Freshness
 
@@ -69,15 +135,24 @@ the order the work was handed out.
 ## Capturing it
 
 `orchestration-row.browser.test.tsx` renders a fixture fleet — 53 agents, 4 running, 30 idle, 19
-closed, modelled on a measured one — in a real browser and writes the screenshots in
-`docs/assets/orchestration-panel-fleet-*.png`. Run it before and after a presentation change; the
-panel's problems only appear at that size, and no daemon is reliably in that shape when you want to
-look at it.
+closed, modelled on a measured one — in a real browser and writes screenshots to `docs/assets/`:
+
+| Capture                                | What it shows                                     |
+| -------------------------------------- | ------------------------------------------------- |
+| `orchestration-panel-fleet-*.png`      | every row, unfiltered — the shape the rules fight |
+| `orchestration-panel-default.png`      | the host-wide default view with its hidden count  |
+| `orchestration-panel-scoped.png`       | one tree, from a tab opened in a session          |
+| `orchestration-panel-scoped-older.png` | the same tab with its older agents shown          |
+
+Run it before and after a presentation change; the panel's problems only appear at that size, and
+no daemon is reliably in that shape when you want to look at it.
 
 ```bash
 npx vitest run --project browser src/orchestration/orchestration-row.browser.test.tsx
 ```
 
-The rows are captured rather than the whole panel: importing the panel pulls `navigateToAgent` and
-therefore expo-router, which does not bundle for the browser project. Keep the row module free of
-runtime imports that reach the app graph, or the capture stops working.
+The rows and `orchestration-header-controls.tsx` are captured rather than the whole panel:
+importing the panel pulls `navigateToAgent` and therefore expo-router, which does not bundle for
+the browser project, and the budget strip needs a live host. Keep those two modules free of runtime
+imports that reach the app graph, or the capture stops working. A new lucide icon also needs adding
+to `packages/app/test-stubs/lucide-react-native.ts`.
