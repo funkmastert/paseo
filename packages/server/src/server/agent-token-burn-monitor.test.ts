@@ -172,9 +172,9 @@ describe("AgentTokenBurnMonitor", () => {
     expect(push.sent).toHaveLength(0);
   });
 
-  test("an idle agent can still breach the cumulative total leg", async () => {
+  test("a running agent over a configured total breaches, and says what it spent", async () => {
     const agentManager = createFakeAgentManager([
-      summary({ id: "agent-1", totalTokens: 6_000, isRunning: false }),
+      summary({ id: "agent-1", totalTokens: 6_000, isRunning: true }),
     ]);
     const push = createFakePushSender();
     const monitor = new AgentTokenBurnMonitor({
@@ -196,6 +196,50 @@ describe("AgentTokenBurnMonitor", () => {
     expect(push.sent).toHaveLength(1);
     expect(push.sent[0]?.data?.reason).toBe("token_burn_total");
     expect(push.sent[0]?.title).toBe("Agent has used a lot of tokens");
+  });
+
+  test("an idle agent never breaches the total leg: its spend is already spent", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ id: "agent-1", totalTokens: 6_000, isRunning: false }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({ tokenBurnMonitor: { totalTokens: 5_000 } }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setTokenBurnAlert).not.toHaveBeenCalled();
+    expect(push.sent).toHaveLength(0);
+  });
+
+  test("the total leg is off unless a threshold is configured", async () => {
+    // Four of Tyler's agents held a `total` alert at once on the old flat 5M default, all of
+    // them idle and all doing legitimate work. A global total cannot tell those from a runaway.
+    const agentManager = createFakeAgentManager([
+      summary({ id: "agent-1", totalTokens: 9_100_000, isRunning: true }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({ tokenBurnMonitor: {} }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setTokenBurnAlert).not.toHaveBeenCalled();
+    expect(push.sent).toHaveLength(0);
   });
 
   test("internal agents are never in scope", async () => {

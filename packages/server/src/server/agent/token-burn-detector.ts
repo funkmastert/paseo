@@ -14,7 +14,14 @@
 export interface TokenBurnMonitorConfig {
   ratePerMinute: number;
   sustainedMinutes: number;
-  totalTokens: number;
+  /**
+   * Cumulative weighted tokens that fire the total leg, or null to disable it. Null is the
+   * shipped default: a flat global total cannot tell a costly-but-worthwhile agent from a
+   * runaway — measured healthy agents straddle any line you pick — so every threshold low
+   * enough to catch a runaway also fires on ordinary work. The spend governor's budget-relative
+   * `notify` is the leg that discriminates. See docs/token-burn.md.
+   */
+  totalTokens: number | null;
 }
 
 export interface TokenBurnMonitorState {
@@ -35,14 +42,19 @@ export function createInitialTokenBurnMonitorState(
     consecutiveAboveRate: 0,
     consecutiveBelowRate: 0,
     rateFired: false,
-    nextTotalThreshold: config.totalTokens,
+    nextTotalThreshold: config.totalTokens ?? Number.POSITIVE_INFINITY,
   };
 }
 
 export interface EvaluateTokenBurnInput {
   /** Current trailing-window tokens/min, or undefined for providers/agents with no rate signal
-   * (OMP, Pi, an idle agent) — the rate leg never breaches on undefined, the total leg still can. */
+   * (OMP, Pi, an idle agent) — the rate leg never breaches on undefined. */
   tokenRate: number | undefined;
+  /**
+   * Cumulative weighted tokens, or undefined when the total leg must not fire for this agent —
+   * which now includes every agent that is not running. The money an idle agent spent is spent;
+   * telling someone about it after the turn ended is a receipt, not an alert.
+   */
   totalTokens: number | undefined;
   config: TokenBurnMonitorConfig;
   previousState: TokenBurnMonitorState | undefined;
@@ -83,10 +95,16 @@ export function evaluateTokenBurn(input: EvaluateTokenBurnInput): EvaluateTokenB
   // hits both never gets silently swallowed — a suppressed total breach reports on the next
   // sweep instead, since totalTokens only grows and the threshold multiple hasn't advanced.
   let totalTriggered = false;
-  if (!rateTriggered && totalTokens !== undefined && totalTokens >= state.nextTotalThreshold) {
+  const totalThreshold = config.totalTokens;
+  if (
+    !rateTriggered &&
+    totalThreshold !== null &&
+    totalTokens !== undefined &&
+    totalTokens >= state.nextTotalThreshold
+  ) {
     totalTriggered = true;
-    const stepsCleared = Math.floor(totalTokens / config.totalTokens);
-    state.nextTotalThreshold = (stepsCleared + 1) * config.totalTokens;
+    const stepsCleared = Math.floor(totalTokens / totalThreshold);
+    state.nextTotalThreshold = (stepsCleared + 1) * totalThreshold;
   }
 
   let trigger: "rate" | "total" | null = null;

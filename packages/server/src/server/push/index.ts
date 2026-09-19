@@ -37,7 +37,20 @@ export function createPushNotifications(options: {
     },
     async send(payload) {
       const tokens = store.getActiveTokens();
-      options.logger.info({ tokenCount: tokens.length }, "Sending push notification");
+      // Log what went out, not just that something did. Every sender funnels through here, and
+      // with only a token count on the line there is no way after the fact to tell which
+      // subsystem produced a day's notifications — which is exactly the question asked when
+      // someone says the notifications are noise.
+      options.logger.info(
+        {
+          tokenCount: tokens.length,
+          title: payload.title,
+          reason: payload.data?.reason,
+          agentId: payload.data?.agentId,
+          workspaceId: payload.data?.workspaceId,
+        },
+        "Sending push notification",
+      );
       if (tokens.length === 0) return;
       await deliver(tokens, payload);
     },

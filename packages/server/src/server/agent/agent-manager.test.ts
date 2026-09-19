@@ -6469,6 +6469,45 @@ test("runAgent persists finished attention and idle status without an external s
   expect(persisted?.attentionTimestamp).toEqual(expect.any(String));
 });
 
+test("a delegated agent finishing raises no attention: its parent already has the result", async () => {
+  // 27 of 34 outstanding attention flags on one live daemon were finished subagents. Nothing
+  // surfaces them (broadcastAgentAttention skips delegated agents) and nothing clears them,
+  // because a human never opens a subagent to read it.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-delegated-attention-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    idFactory: () => randomUUID(),
+  });
+
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Leader" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const child = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Worker" },
+    undefined,
+    { labels: { [PARENT_AGENT_ID_LABEL]: parent.id }, workspaceId: undefined },
+  );
+
+  await manager.runAgent(child.id, "say hello");
+  await manager.runAgent(parent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(child.id))?.lastStatus).toBe("idle");
+  expect((await storage.get(child.id))?.requiresAttention).toBe(false);
+  expect((await storage.get(child.id))?.attentionReason).toBeNull();
+  // The human-started agent still does, or the signal would carry nothing at all.
+  expect((await storage.get(parent.id))?.requiresAttention).toBe(true);
+  expect((await storage.get(parent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
+});
+
 test("archiveSnapshot clears persisted attention and normalizes running status", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archive-attention-"));
   const storagePath = join(workdir, "agents");

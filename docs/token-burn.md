@@ -19,12 +19,18 @@ Raw counting is what made the monitor cry wolf. A Claude agent re-reads its whol
 
 ## Monitor legs
 
-Config lives under `agents.tokenBurnMonitor` (`persisted-config.ts`); defaults are 400K weighted tokens/min sustained for 3 sweeps, and 5M weighted tokens per session, ratcheting to the next multiple.
+Config lives under `agents.tokenBurnMonitor` (`persisted-config.ts`). The rate default is 400K weighted tokens/min sustained for 3 sweeps. **The total leg ships off**; set `totalTokens` to turn it on, and it then ratchets to the next multiple.
 
 - **Rate** is evaluated only for agents that are mid-turn. The trailing-window average stays flat for up to five minutes after the last request, so an idle agent can never be "burning"; `sustainedMinutes` alone filters nothing.
-- **Total** applies regardless of lifecycle.
+- **Total** is evaluated only for agents that are mid-turn too, for a different reason: an agent that has stopped cannot spend any more, so an alert naming what it already spent is a receipt. It is also off by default — see below.
 
-Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a threshold breach; the push log's `Sending push notification` lines at the tick phase (`:42` when the daemon started at `:42`) are its footprint.
+Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a threshold breach; the push log's `Sending push notification` lines carry the title and `data.reason` of whatever went out, which is how you attribute a day's notifications to a subsystem after the fact.
+
+### Why the total leg is off
+
+It was 5M, flat and global, and it fired on four of one machine's agents at once — every one idle, every one legitimate, sitting between 6.4M and 9.1M after real work. That is the same argument the governor section below makes and then acts on: measured healthy agents straddle every line you could draw, so a threshold low enough to catch a runaway also catches ordinary work, and one that spares ordinary work catches nothing. A leg that fires on the normal case is noise by construction, and noise costs more than the missing alert — it is what teaches someone to swipe away the capped-account and runaway-spend notifications too.
+
+What replaces it is the governor's `notify` stage, which compares spend against the budget the caller declared for that task. Keep `totalTokens` for a machine where a global ceiling genuinely means something (a shared host with a hard monthly cap, say); do not treat it as a runaway detector.
 
 ### Why the rate leg is a smoke alarm and not a signal
 

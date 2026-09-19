@@ -5640,6 +5640,15 @@ export class AgentManager {
 
     // Check if agent transitioned from running to idle (finished)
     if (previousStatus === "running" && currentStatus === "idle") {
+      // A delegated agent finishing is the normal case and is already delivered: its parent
+      // gets the result in-band through the tool call that spawned it. Flagging it too left a
+      // signal nobody surfaces — broadcastAgentAttention has skipped delegated agents since
+      // #1293 — and nobody clears, because a human never opens a subagent to read it. On one
+      // live daemon that was 27 of 34 outstanding flags, the oldest three weeks old. Errors
+      // still flag: a subagent that failed is not the normal case.
+      if (isDelegatedAgent(agent)) {
+        return;
+      }
       agent.attention = {
         requiresAttention: true,
         attentionReason: "finished",

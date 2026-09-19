@@ -30,7 +30,12 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 // the work is worth doing. See docs/token-burn.md.
 const DEFAULT_RATE_PER_MINUTE = 400_000;
 const DEFAULT_SUSTAINED_MINUTES = 3;
-const DEFAULT_TOTAL_TOKENS = 5_000_000;
+// The total leg ships off. A flat global threshold cannot separate an expensive agent doing
+// real work from a runaway — docs/token-burn.md measures healthy agents on both sides of every
+// line — so at 5,000,000 it fired on four of Tyler's agents at once, all idle, all legitimate,
+// all already finished. What discriminates is the spend governor's budget-relative `notify`,
+// which knows what the task was declared to be worth. Set `totalTokens` to opt back in.
+const DEFAULT_TOTAL_TOKENS: number | null = null;
 const DEFAULT_BREACH_BATCH_THRESHOLD = 3;
 // Governor defaults. Off unless turned on, and every stage past `notify` off even then, so
 // enabling it can only ever start reporting. Fractions are multiples of the task's budget:
@@ -177,6 +182,22 @@ function resolveConfig(config: TokenBurnMonitorConfig | undefined): ResolvedToke
       enabled: config?.accountPressure?.enabled ?? false,
       usedPct: config?.accountPressure?.usedPct ?? DEFAULT_ACCOUNT_PRESSURE_USED_PCT,
     },
+  };
+}
+
+/** The threshold the breach crossed, for the badge. `total` only fires when one is configured. */
+function buildTokenBurnAlert(
+  trigger: "rate" | "total",
+  config: ResolvedTokenBurnMonitorConfig,
+  nowMs: number,
+): TokenBurnAlert {
+  return {
+    trigger,
+    ...(trigger === "rate" ? { ratePerMinute: config.ratePerMinute } : {}),
+    ...(trigger === "total" && config.totalTokens !== null
+      ? { totalTokens: config.totalTokens }
+      : {}),
+    firstBreachedAt: new Date(nowMs).toISOString(),
   };
 }
 
@@ -364,10 +385,11 @@ export class AgentTokenBurnMonitor {
       const result = evaluateTokenBurn({
         // The trailing-window rate keeps reading high for up to five minutes after an agent's
         // last request, so only a running agent may breach the rate leg — an idle agent that
-        // just finished a heavy turn is not "burning". The total leg is cumulative and applies
-        // regardless of lifecycle.
+        // just finished a heavy turn is not "burning". The total leg is gated the same way for
+        // a different reason: an agent that has stopped cannot spend any more, so an alert
+        // about what it already spent names nothing anyone can do.
         tokenRate: agent.isRunning ? agent.tokenRate : undefined,
-        totalTokens: agent.totalTokens,
+        totalTokens: agent.isRunning ? agent.totalTokens : undefined,
         config,
         previousState,
       });
@@ -382,12 +404,7 @@ export class AgentTokenBurnMonitor {
         continue;
       }
 
-      const alert: TokenBurnAlert = {
-        trigger: result.trigger,
-        ...(result.trigger === "rate" ? { ratePerMinute: config.ratePerMinute } : {}),
-        ...(result.trigger === "total" ? { totalTokens: config.totalTokens } : {}),
-        firstBreachedAt: new Date(nowMs).toISOString(),
-      };
+      const alert = buildTokenBurnAlert(result.trigger, config, nowMs);
       this.agentManager.setTokenBurnAlert(agent.id, alert);
       breaches.push({
         agentId: agent.id,
