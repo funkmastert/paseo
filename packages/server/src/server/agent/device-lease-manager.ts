@@ -318,6 +318,16 @@ export class DeviceLeaseManager {
     return await this.enqueue(input, config, verdict.message);
   }
 
+  /**
+   * The device ids currently under a lease. Read by the artifact janitor, which must never
+   * delete a simulator directory somebody is holding on purpose (docs/artifact-janitor.md).
+   */
+  listLeasedDeviceIds(): string[] {
+    return this.leases
+      .map((lease) => lease.deviceId)
+      .filter((deviceId): deviceId is string => deviceId !== undefined);
+  }
+
   /** Gives a slot back. Without a lease id, every lease this agent holds is released. */
   async checkin(input: { agentId: string; leaseId?: string }): Promise<number> {
     const released = this.leases.filter(
