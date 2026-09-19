@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
 import type { RoleRecord } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
-import { selectModel, type AvailabilityPool, type ModelCatalog } from "./role-availability";
+import {
+  evaluateRequestedModel,
+  isRequestedModelApproved,
+  selectModel,
+  type AvailabilityPool,
+  type ModelCatalog,
+} from "./role-availability";
 
 function role(overrides: Partial<RoleRecord>): RoleRecord {
   return {
@@ -238,6 +244,57 @@ describe("selectModel", () => {
         poolAtFableUsage({ leader: 94, "worker-a": 88 }),
       );
       expect(result).toEqual({ outcome: "unavailable", provider: null, model: FABLE });
+    });
+  });
+
+  describe("taskClass-scoped pools", () => {
+    it("uses role.models (standard) when taskClass is omitted, even if mechanicalModels/hardModels are configured", () => {
+      const result = selectModel(
+        role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: ["claude-opus-5"] }),
+        catalog({ claude: ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"] }),
+        ONE_WORKER_POOL,
+        createHealthTracker(),
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+    });
+
+    it("uses the class-specific pool when taskClass is set and configured", () => {
+      const result = selectModel(
+        role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: ["claude-opus-5"] }),
+        catalog({ claude: ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"] }),
+        ONE_WORKER_POOL,
+        createHealthTracker(),
+        { taskClass: "hard" },
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-opus-5" });
+    });
+
+    it("falls back to role.models for a class with no override pool configured", () => {
+      const result = selectModel(
+        role({ models: ["claude-sonnet-5"], mechanicalModels: [], hardModels: [] }),
+        catalog({ claude: ["claude-sonnet-5"] }),
+        ONE_WORKER_POOL,
+        createHealthTracker(),
+        { taskClass: "mechanical" },
+      );
+      expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-sonnet-5" });
+    });
+
+    it("an explicitly requested model is only 'configured' against the resolved class's pool", () => {
+      const r = role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: [] });
+      expect(isRequestedModelApproved(r, "claude", "claude-haiku-5")).toBe(false); // standard (default) pool
+      expect(isRequestedModelApproved(r, "claude", "claude-haiku-5", "mechanical")).toBe(true);
+
+      const evaluation = evaluateRequestedModel(
+        r,
+        "claude",
+        "claude-haiku-5",
+        catalog({ claude: ["claude-sonnet-5", "claude-haiku-5"] }),
+        ONE_WORKER_POOL,
+        createHealthTracker(),
+        { taskClass: "mechanical" },
+      );
+      expect(evaluation).toEqual({ configured: true, eligible: true });
     });
   });
 

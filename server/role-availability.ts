@@ -1,9 +1,11 @@
 import {
   DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   POOL_FAMILY,
+  classModels,
   modelRefFamily,
   splitModelRef,
   type RoleRecord,
+  type TaskClassId,
 } from "../shared/role-policy-schema";
 import { detectModelFamily, weeklyModelWindow, type ModelFamily } from "./windows";
 
@@ -89,6 +91,13 @@ function poolHasMemberWithinModelBudget(
 export interface SelectModelOptions {
   /** Percent at/above which a budget-gated family stops being selectable. */
   modelBudgetThresholdPct?: number;
+  /**
+   * Which of the role's model pools to use — see `classModels` in
+   * shared/role-policy-schema.ts. Omitted (or "standard") means
+   * `role.models`, the same pool every role has always used; this makes the
+   * task-class dimension purely additive for every existing caller.
+   */
+  taskClass?: TaskClassId;
 }
 
 /**
@@ -143,12 +152,17 @@ export function familyOfProvider(pool: FamilyResolvablePool, providerId: string)
 
 /**
  * Whether an explicitly requested (family, model) pair is literally one of
- * the role's own configured entries — the caller choosing among models the
- * operator already approved for this role, as opposed to asking for
- * something the role was never configured to run.
+ * the role's own configured entries for the given task class — the caller
+ * choosing among models the operator already approved for this (role, task
+ * class), as opposed to asking for something never configured to run.
  */
-export function isRequestedModelApproved(role: RoleRecord, requestedFamily: string, requestedModel: string): boolean {
-  return role.models.some((ref) => {
+export function isRequestedModelApproved(
+  role: RoleRecord,
+  requestedFamily: string,
+  requestedModel: string,
+  taskClass?: TaskClassId,
+): boolean {
+  return classModels(role, taskClass).some((ref) => {
     const parsed = splitModelRef(ref);
     return parsed !== null && parsed.model === requestedModel && modelRefFamily(parsed) === requestedFamily;
   });
@@ -182,7 +196,7 @@ export function evaluateRequestedModel(
   health: AvailabilityHealth,
   options: SelectModelOptions = {},
 ): RequestedModelEvaluation {
-  const configured = isRequestedModelApproved(role, requestedFamily, requestedModel);
+  const configured = isRequestedModelApproved(role, requestedFamily, requestedModel, options.taskClass);
   if (!configured) {
     return { configured: false, eligible: false };
   }
@@ -209,12 +223,13 @@ export function selectModel(
   health: AvailabilityHealth,
   options: SelectModelOptions = {},
 ): SelectModelResult {
-  if (role.models.length === 0) {
+  const models = classModels(role, options.taskClass);
+  if (models.length === 0) {
     return { outcome: "unconfigured" };
   }
   const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
 
-  for (const ref of role.models) {
+  for (const ref of models) {
     const parsed = splitModelRef(ref);
     if (!parsed) {
       continue; // Defensive: schema validation already prevents malformed refs from being stored.
@@ -227,7 +242,7 @@ export function selectModel(
     return { outcome: "selected", provider: parsed.provider, model };
   }
 
-  const fallback = splitModelRef(role.models[0]);
+  const fallback = splitModelRef(models[0]);
   if (!fallback) {
     return { outcome: "unconfigured" }; // Defensive: same guarantee as above.
   }
