@@ -10,7 +10,7 @@ import { z } from "zod";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createAgentMcpServer } from "./mcp-server.js";
-import { AgentManager, type ManagedAgent } from "./agent-manager.js";
+import { AgentManager, type CreateAgentOptions, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import type { AgentMode, AgentProvider, ProviderSnapshotEntry } from "./agent-sdk-types.js";
@@ -194,6 +194,24 @@ interface TestDeps {
   };
 }
 
+/**
+ * The third argument `create_agent` really hands `AgentManager.createAgent`, from
+ * `resolveMcpCreateAgent` (create-agent/create.ts). Spelled out rather than matched loosely so
+ * a field the MCP path stops threading through — an owner, a caller id, the initial prompt —
+ * fails the test instead of slipping past an `objectContaining`.
+ */
+function mcpCreateOptions(
+  overrides: Partial<CreateAgentOptions> & { workspaceId: string | undefined },
+): CreateAgentOptions {
+  return {
+    initialPrompt: undefined,
+    owner: undefined,
+    env: undefined,
+    callerAgentId: undefined,
+    ...overrides,
+  };
+}
+
 function buildAgentManagerSpies() {
   return {
     createAgent: vi.fn(),
@@ -228,6 +246,10 @@ function buildAgentManagerSpies() {
     getPendingPermissions: vi.fn(),
     getRegisteredProviderIds: vi.fn().mockReturnValue(["claude"]),
     listDraftFeatures: vi.fn(),
+    // create_agent asks the spend governor before it provisions anything (spend-governor.ts).
+    // null is the real "this caller may fan out" answer; a test that wants the refusal path
+    // overrides it with a { budgetTokens, spentTokens } pair.
+    getSpendFanOutDenial: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -576,6 +598,11 @@ class BoundaryAgentManagerFake {
 
   public listAgents(): ManagedAgent[] {
     return [];
+  }
+
+  /** No budget, so no fan-out denial. See AgentManager.getSpendFanOutDenial. */
+  public getSpendFanOutDenial(): null {
+    return null;
   }
 }
 
@@ -1313,7 +1340,7 @@ describe("create_agent MCP tool", () => {
     expect(spies.agentManager.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: existingCwd }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
@@ -1433,7 +1460,7 @@ describe("create_agent MCP tool", () => {
         cwd: existingCwd,
       }),
       undefined,
-      { workspaceId: "wks_existing" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "wks_existing" }),
     );
   });
 
@@ -1477,7 +1504,7 @@ describe("create_agent MCP tool", () => {
         featureValues: { fast_mode: true },
       }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
@@ -1697,7 +1724,7 @@ describe("create_agent MCP tool", () => {
         title: "Fix auth bug",
       }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
@@ -1732,7 +1759,7 @@ describe("create_agent MCP tool", () => {
         title: "Fix auth",
       }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
@@ -1773,10 +1800,11 @@ describe("create_agent MCP tool", () => {
         thinkingOptionId: "think-hard",
       }),
       undefined,
-      {
+      mcpCreateOptions({
+        initialPrompt: "Do work",
         labels: { source: "mcp" },
         workspaceId: "workspace-created",
-      },
+      }),
     );
   });
 
@@ -1863,7 +1891,7 @@ describe("create_agent MCP tool", () => {
           cwd: expect.stringContaining("agent-worktree"),
         }),
         undefined,
-        { workspaceId: createdWorkspaceIds[0] },
+        mcpCreateOptions({ initialPrompt: "Do work", workspaceId: createdWorkspaceIds[0] }),
       );
     } finally {
       await removeTempDir(tempDir);
@@ -2212,7 +2240,7 @@ describe("create_agent MCP tool", () => {
           title: "Explicit Agent Title",
         }),
         undefined,
-        { workspaceId },
+        mcpCreateOptions({ initialPrompt: "Generate the workspace title anyway", workspaceId }),
       );
       expect(workspace).toMatchObject({
         title: "Generated Workspace Title",
@@ -2322,7 +2350,10 @@ describe("create_agent MCP tool", () => {
           title: "Directory agent",
         }),
         undefined,
-        { workspaceId: "workspace-directory-auto-title" },
+        mcpCreateOptions({
+          initialPrompt: "Name a directory workspace from the prompt",
+          workspaceId: "workspace-directory-auto-title",
+        }),
       );
       expect(workspaceRecords.get("workspace-directory-auto-title")).toMatchObject({
         title: "Directory Workspace Title",
@@ -2538,7 +2569,10 @@ describe("create_agent MCP tool", () => {
     expect(spies.agentManager.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: "/tmp/worktrees/pr-123" }),
       undefined,
-      { workspaceId: "ws-pr-123" },
+      mcpCreateOptions({
+        initialPrompt: "Rename this PR branch from prompt",
+        workspaceId: "ws-pr-123",
+      }),
     );
     await waitForUnexpectedWorkspaceNamingSideEffects();
     expect(workspaceGitService.getSnapshot).not.toHaveBeenCalled();
@@ -3101,13 +3135,15 @@ describe("create_agent MCP tool", () => {
         cwd: subdir,
       }),
       undefined,
-      {
+      mcpCreateOptions({
+        initialPrompt: "Do work",
+        callerAgentId: "voice-agent",
         labels: {
           [PARENT_AGENT_ID_LABEL]: "voice-agent",
           source: "voice",
         },
         workspaceId: "wks_voice",
-      },
+      }),
     );
     await rm(baseDir, { recursive: true, force: true });
   });
@@ -3203,6 +3239,84 @@ describe("create_agent MCP tool", () => {
     );
   });
 
+  it("refuses fan-out for a caller the spend governor cut off, before provisioning anything", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "parent-agent",
+      cwd: existingCwd,
+      workspaceId: "wks_parent",
+      provider: "codex",
+      currentModeId: "full-access",
+    } as ManagedAgent);
+    // What AgentManager.getSpendFanOutDenial returns once the governor has blocked fan-out.
+    spies.agentManager.getSpendFanOutDenial.mockReturnValue({
+      budgetTokens: 500_000,
+      spentTokens: 612_345,
+    });
+    const ensureWorkspace = vi.fn(async () => "workspace-created");
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      ensureWorkspaceForCreate: ensureWorkspace,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    await expect(
+      registeredTool(server, "create_agent").handler({
+        ...detachedCurrentWorkspace(),
+        title: "Fan out",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+      }),
+    ).rejects.toThrow(/spend governor has cut off this task's fan-out/);
+
+    expect(spies.agentManager.getSpendFanOutDenial).toHaveBeenCalledWith("parent-agent");
+    // The refusal has to land before provisioning: a cut-off caller must not leave a workspace
+    // or a worktree behind on its way to being told no.
+    expect(ensureWorkspace).not.toHaveBeenCalled();
+    expect(spies.agentManager.createAgent).not.toHaveBeenCalled();
+  });
+
+  it("tells a refused caller what it spent, so it stops instead of retrying", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.getAgent.mockReturnValue({
+      id: "parent-agent",
+      cwd: existingCwd,
+      workspaceId: "wks_parent",
+      provider: "codex",
+      currentModeId: "full-access",
+    } as ManagedAgent);
+    spies.agentManager.getSpendFanOutDenial.mockReturnValue({
+      budgetTokens: 500_000,
+      spentTokens: 612_345,
+    });
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    const error = await registeredTool(server, "create_agent")
+      .handler({
+        ...detachedCurrentWorkspace(),
+        title: "Fan out",
+        provider: "codex/gpt-5.4",
+        initialPrompt: "Do work",
+      })
+      .catch((caught: unknown) => caught as Error);
+
+    // The numbers and the "not a transient failure" wording are the whole point: an agent that
+    // reads this as a broken tool retries, and burns the budget the governor is protecting.
+    expect(error.message).toContain("612345 of this task's 500000 weighted-token budget");
+    expect(error.message).toContain("not a transient failure");
+  });
+
   it("creates detached caller agents without a parent label", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     spies.agentManager.getAgent.mockReturnValue({
@@ -3246,12 +3360,14 @@ describe("create_agent MCP tool", () => {
         cwd: existingCwd,
       }),
       undefined,
-      {
+      mcpCreateOptions({
+        initialPrompt: "Take over",
+        callerAgentId: "parent-agent",
         labels: {
           source: "handoff",
         },
         workspaceId: "wks_parent",
-      },
+      }),
     );
   });
 
@@ -3306,12 +3422,14 @@ describe("create_agent MCP tool", () => {
         featureValues: { fast_mode: true },
       }),
       undefined,
-      {
+      mcpCreateOptions({
+        initialPrompt: "Do work",
+        callerAgentId: "parent-agent",
         labels: {
           [PARENT_AGENT_ID_LABEL]: "parent-agent",
         },
         workspaceId: "wks_parent",
-      },
+      }),
     );
   });
 
@@ -3447,9 +3565,9 @@ describe("create_agent MCP tool", () => {
     });
     expect(configArg.mcpServers).toBeUndefined();
     expect(agentIdArg).toBeUndefined();
-    expect(optionsArg).toEqual({
-      workspaceId: "workspace-created",
-    });
+    expect(optionsArg).toEqual(
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
+    );
   });
 
   it("rejects an explicit mode that is not valid for the target provider", async () => {
@@ -3526,7 +3644,7 @@ describe("create_agent MCP tool", () => {
     expect(spies.agentManager.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({ modeId: "dynamic" }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
@@ -3565,7 +3683,7 @@ describe("create_agent MCP tool", () => {
     expect(spies.agentManager.createAgent).toHaveBeenCalledWith(
       expect.objectContaining({ modeId: "build", featureValues: { auto_accept: true } }),
       undefined,
-      { workspaceId: "workspace-created" },
+      mcpCreateOptions({ initialPrompt: "Do work", workspaceId: "workspace-created" }),
     );
   });
 
