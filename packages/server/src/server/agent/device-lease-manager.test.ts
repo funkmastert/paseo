@@ -9,14 +9,14 @@ import type { ProcessSampleRow, SystemMemorySample } from "./process-sampler.js"
 const GIBIBYTE = 1024 ** 3;
 
 // The real command line of a booted simulator on Tyler's machine, with a swappable UDID.
-function simulatorRow(pid: number, udid: string): ProcessSampleRow {
+function simulatorRow(pid: number, udid: string, etime = "02:14:00"): ProcessSampleRow {
   return {
     pid,
     ppid: 1,
     uid: 501,
     rssKb: 13_360,
     cpuPercent: 0.4,
-    etime: "02:14:00",
+    etime,
     command: `launchd_sim /Users/tylerthackray/Library/Developer/CoreSimulator/Devices/${udid}/data/var/run/launchd_bootstrap.plist`,
   };
 }
@@ -31,6 +31,11 @@ function emulatorRow(pid: number, ppid: number, avd: string): ProcessSampleRow {
     etime: "10:00",
     command: `/Users/tylerthackray/Library/Android/sdk/emulator/emulator -avd ${avd}`,
   };
+}
+
+/** What the sweep hands the cap once `ps` has been read. */
+function runningSimulator(udid: string, uptimeSeconds: number) {
+  return { platform: "ios" as const, deviceId: udid, pid: 101, pids: [101], uptimeSeconds };
 }
 
 const UDID_A = "A0A912ED-C766-4778-957C-F9680C7309F3";
@@ -58,6 +63,7 @@ function createManager(
     rows?: ProcessSampleRow[];
     memory?: SystemMemorySample;
     agentIds?: string[];
+    drainIntervalMs?: number;
     agents?: DeviceLeaseAgentSummary[];
   } = {},
 ) {
@@ -94,6 +100,7 @@ function createManager(
       performanceCpuCount: 12,
     }),
     sampleMaxAgeMs: 0,
+    ...(options.drainIntervalMs === undefined ? {} : { drainIntervalMs: options.drainIntervalMs }),
     createLeaseId: () => `lease-${++leaseCounter}`,
   });
   return { manager, state, logger, sendSystemMessageToAgent };
@@ -338,8 +345,138 @@ describe("DeviceLeaseManager", () => {
     await manager.checkout({ agentId: "agent-1", platform: "ios" });
     expect((await manager.getSnapshot()).used).toBe(1);
 
-    state.nowMs += 11 * 60_000;
+    state.nowMs += 26 * 60_000;
     expect((await manager.getSnapshot()).used).toBe(0);
+  });
+
+  test("a long native build keeps the slot it is building for", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+
+    // A cold `expo run:ios`: pods, then a native build, then the simulator.
+    state.nowMs += 20 * 60_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // Well past the TTL measured from checkout, but only 20 minutes into this build.
+    state.nowMs += 20 * 60_000;
+    expect((await manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("restarting the build clock does not stop the device binding to the lease", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    state.nowMs += 60_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // The simulator this lease was waiting for boots 30s after that launch.
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: UDID_A, attribution: "lease", agentId: "agent-1" }),
+    ]);
+  });
+
+  test("a rebuild against the agent's own simulator does not take a second slot", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // The simulator boots and the sweep binds the lease to it.
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
+    expect((await manager.getSnapshot()).used).toBe(1);
+
+    // Edit, rebuild, run again. A runner that names no device reuses the booted one, so this
+    // costs no new slot — leasing a second one would count one simulator twice.
+    state.nowMs += 120_000;
+    expect(await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" })).toEqual({
+      decision: "allow",
+    });
+    expect((await manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("an agent iterating on one device does not fill its platform by itself", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
+
+    state.nowMs += 120_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // One simulator is running and the machine allows two. agent-2 gets the other one.
+    state.nowMs += 1_000;
+    expect(
+      (await manager.checkout({ agentId: "agent-2", platform: "ios", wait: false })).status,
+    ).toBe("granted");
+  });
+
+  test("a queued agent is served when the device it was waiting on stops", async () => {
+    const { manager, state } = createManager({
+      rows: [simulatorRow(101, UDID_A), simulatorRow(102, UDID_B)],
+      drainIntervalMs: 20,
+    });
+
+    const waiting = manager.checkout({ agentId: "agent-3", platform: "ios", wait: true });
+    await vi.waitFor(async () => {
+      expect((await manager.getSnapshot()).waiting).toHaveLength(1);
+    });
+
+    // A simulator shuts down. Nothing reports that, so only a fresh scan can notice it.
+    state.rows = [simulatorRow(101, UDID_A)];
+    state.nowMs += 6_000;
+
+    expect((await waiting).status).toBe("granted");
+  });
+  test("a dry run reports the occupancy the real cap would have seen", async () => {
+    const { manager } = createManager({ config: { enabled: true, dryRun: true } });
+
+    // Three agents want an iOS slot on a machine that allows two. In a real run the first two
+    // get leases and the third waits, holding nothing.
+    for (const agentId of ["agent-1", "agent-2", "agent-3"]) {
+      expect((await manager.checkout({ agentId, platform: "ios" })).status).toBe("granted");
+    }
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.usedByPlatform.ios).toBe(2);
+    // The readout still names all three holders; only the count is the real cap's.
+    expect(snapshot.devices.map((device) => device.agentId)).toEqual([
+      "agent-1",
+      "agent-2",
+      "agent-3",
+    ]);
+  });
+
+  test("a dry run's uncounted lease does not refuse the agent behind it", async () => {
+    const { manager } = createManager({ config: { enabled: true, dryRun: true } });
+
+    for (const agentId of ["agent-1", "agent-2", "agent-3"]) {
+      await manager.checkout({ agentId, platform: "ios" });
+    }
+
+    // Nothing actually booted, so the cap would not have refused this launch either.
+    const { blocked } = await manager.getSnapshot();
+    expect(blocked).toEqual([]);
   });
 
   // A session answers every change by taking a snapshot. Snapshots that notified when nothing

@@ -2,7 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { TokenBurnMonitorState } from "./agent/token-burn-detector.js";
-import type { SpendGovernorState } from "./agent/spend-governor.js";
+import { SPEND_BUDGET_LABEL, type SpendGovernorState } from "./agent/spend-governor.js";
 import { AgentTokenBurnMonitor, type TokenBurnMonitorConfig } from "./agent-token-burn-monitor.js";
 import type { PushPayload } from "./push/push-service.js";
 
@@ -76,6 +76,7 @@ function summary(overrides: Partial<TokenBurnMonitorAgentSummary>): TokenBurnMon
     totalTokens: undefined,
     labels: {},
     model: "claude-opus-5",
+    provider: "claude",
     ...overrides,
   };
 }
@@ -633,5 +634,212 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     const { push, monitor } = createUsageMonitor({ usage: usage(96) });
     await monitor.tick();
     expect(push.sent).toHaveLength(1);
+  });
+  // A paused agent that carries no alert is indistinguishable in the app from one that finished
+  // its turn: `cancelReason` is log-only and the governor has no attentionReason of its own.
+  // The push is then the only notice, and a missed push is a lost agent.
+  test("a paused agent is flagged so a human can find it", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 600_000 }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: { governor: { enabled: true, pause: { enabled: true } } },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1", "spend-governor");
+    expect(agentManager.__alerts.get("agent-1")).toMatchObject({
+      trigger: "total",
+      budgetTokens: 300_000,
+      spentTokens: 600_000,
+      governorStage: "pause",
+    });
+  });
+
+  test("a dry run flags nothing, because it paused nothing", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 600_000 }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: { enabled: true, dryRun: true, pause: { enabled: true } },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
+    expect(agentManager.__alerts.get("agent-1")).toBeUndefined();
+  });
+  test("a notify owed to an idle agent is said when it resumes, and not pushed twice", async () => {
+    const agent = summary({
+      labels: { [SPEND_BUDGET_LABEL]: "1M" },
+      totalTokens: 800_000,
+      isRunning: false,
+    });
+    const agentManager = createFakeAgentManager([agent]);
+    const push = createFakePushSender();
+    const steer = createFakeSteer();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: steer.fn,
+      readDaemonConfig: () => ({ tokenBurnMonitor: { governor: { enabled: true } } }),
+      logger: createLogger(),
+    });
+
+    // It crosses 0.75x between turns: a human hears about it, the agent cannot be told without
+    // starting a turn to say it.
+    await monitor.tick();
+    expect(push.sent).toHaveLength(1);
+    expect(steer.calls).toHaveLength(0);
+
+    // Its next turn starts. Now the message can land, and it is worth landing: wrapping up
+    // early is the only thing this stage is for.
+    agent.isRunning = true;
+    agent.totalTokens = 820_000;
+    await monitor.tick();
+    expect(steer.calls).toHaveLength(1);
+    expect(steer.calls[0]?.body).toContain("Start wrapping up");
+    // The human was already told. One crossing, one push.
+    expect(push.sent).toHaveLength(1);
+
+    // And it is not repeated every sweep from here on.
+    agent.totalTokens = 840_000;
+    await monitor.tick();
+    expect(steer.calls).toHaveLength(1);
+  });
+  // `downgradeToModel` is one global string and the fleet is not one provider. `setAgentModel`
+  // validates nothing, so without this a Codex agent carrying a budget label was set to a
+  // Claude model id.
+  test("a downgrade to a model the provider does not have is skipped, not performed", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({
+        id: "codex-agent",
+        provider: "codex",
+        model: "gpt-5-codex",
+        labels: { [SPEND_BUDGET_LABEL]: "300k" },
+        totalTokens: 400_000,
+      }),
+    ]);
+    const push = createFakePushSender();
+    const steer = createFakeSteer();
+    const logger = createLogger();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: steer.fn,
+      listProviderModels: async () => ["gpt-5-codex", "gpt-5.4"],
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-haiku-4-5-20251001",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger,
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
+    // No message and no push either: announcing a downgrade that did not happen is worse than
+    // silence, because the notification is the only record most people read.
+    expect(steer.calls).toEqual([]);
+    expect(push.sent).toEqual([]);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "codex", targetModel: "claude-haiku-4-5-20251001" }),
+      expect.stringContaining("not in this agent's provider catalog"),
+    );
+  });
+
+  test("a downgrade the provider does offer still happens", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({
+        labels: { [SPEND_BUDGET_LABEL]: "300k" },
+        totalTokens: 400_000,
+      }),
+    ]);
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      listProviderModels: async () => ["claude-opus-5", "claude-sonnet-5"],
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-sonnet-5",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).toHaveBeenCalledWith("agent-1", "claude-sonnet-5");
+  });
+
+  test("an unreadable catalog leaves the agent's model alone", async () => {
+    const agentManager = createFakeAgentManager([
+      summary({ labels: { [SPEND_BUDGET_LABEL]: "300k" }, totalTokens: 400_000 }),
+    ]);
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: createFakePushSender().sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      listProviderModels: async () => {
+        throw new Error("provider snapshot timed out");
+      },
+      readDaemonConfig: () => ({
+        tokenBurnMonitor: {
+          governor: {
+            enabled: true,
+            downgradeToModel: "claude-sonnet-5",
+            notify: { enabled: false },
+            downgrade: { enabled: true },
+          },
+        },
+      }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+
+    expect(agentManager.setAgentModel).not.toHaveBeenCalled();
   });
 });

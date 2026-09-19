@@ -42,7 +42,7 @@ That is structural, not an outlier. A Claude agent re-reads its context from cac
 
 Off by default. Turn it on under `agents.tokenBurnMonitor.governor`, and turn on `dryRun` first: it runs the whole ladder and reports exactly what it would do, without doing any of it — not even the message to the agent, which would spend tokens on a hypothetical.
 
-### Budgets are per task, because nothing else separates the cases
+### Budgets are per agent, because nothing else separates the cases
 
 Three agents measured on one machine: two healthy implementation agents that finished their work at 1.08M and 1.48M weighted tokens, and one that spent 1.1M discovering it had no Edit tool and then spawned helpers that also could not edit. No rate tells those apart. No single global total tells those apart either — the healthy pair straddle the runaway. What separates them is what the task was worth, and only the caller knows that.
 
@@ -50,20 +50,26 @@ So a caller declares it: the **`paseo.budget` label**, in weighted tokens, accep
 
 An agent whose task declared no budget is **not governed**, unless `defaultBudgetTokens` is set. That is the shipped default, so turning the governor on cannot act on agents nobody has sized. Set it once dry-run has shown what your agents actually cost.
 
+**A budget covers one agent, not a task tree.** Labels are not inherited: a child created by `create_agent` carries the labels that call gave it and no others, and every agent's spend is its own. A leader with a budget is governed on what the leader itself spends, which for an orchestrator that delegates everything stays small while its fleet spends the real money. `stopFanOut` is the stage aimed squarely at that case and it fires on the caller's own spend — the number that stays low. Budget the agents that do the work, or give the leader a budget sized to its own coordination, not to the job.
+
+Releasing a governed agent means changing its `paseo.budget`, and the app has no label editor: that is `update_agent` from another agent, or the CLI. Worth knowing before you enable a stage that stops one.
+
 ### The ladder
 
 Four stages, each switching independently at its own multiple of the budget. Enabling the governor enables `notify` alone: turning it on starts telling you things, never starts changing things.
 
-| Stage        | Fires at | On by default | What it does                                                                 |
-| ------------ | -------- | ------------- | ---------------------------------------------------------------------------- |
-| `notify`     | 0.75×    | yes           | Push, live `tokenBurnAlert`, and a message into the agent's own conversation |
-| `downgrade`  | 1.0×     | no            | `setAgentModel` to `downgradeToModel` for the rest of the task               |
-| `stopFanOut` | 1.0×     | no            | `create_agent` refuses this caller, so a runaway cannot multiply             |
-| `pause`      | 1.5×     | no            | Ends the turn and leaves the agent flagged for a human                       |
+| Stage        | Fires at | On by default | What it does                                                     |
+| ------------ | -------- | ------------- | ---------------------------------------------------------------- |
+| `notify`     | 0.75×    | yes           | Push, and a message into the agent's own conversation            |
+| `downgrade`  | 1.0×     | no            | `setAgentModel` to `downgradeToModel` for the rest of the task   |
+| `stopFanOut` | 1.0×     | no            | `create_agent` refuses this caller, so a runaway cannot multiply |
+| `pause`      | 1.5×     | no            | Ends the turn and leaves the agent flagged for a human           |
 
 A stage fires once per episode, not once per sweep. A **changed budget starts a fresh episode** — that is how a human releases a paused or cut-off agent: raise the label. Turning the governor off drops the carried state entirely, which releases a blocked agent too.
 
-`downgrade` and `pause` need a running agent. When the agent is idle they defer rather than mark themselves done, so an agent that blew its budget and went briefly quiet is still caught when it resumes. `downgrade` marks itself done without acting when there is no `downgradeToModel` or the agent is already on it.
+`pause` is the exception: it re-arms whenever the agent is started again while still over the threshold, so a turn that follows a pause is stopped too. Firing once and never again would read as protection while the agent ran on unbounded — measured at eight times its budget, with the governor watching and planning nothing. The sweep that pauses records the agent as stopped rather than as it found it, because the cancel it just planned is what stops it; otherwise a parent re-prompting its paused child inside the next 60 seconds would look like an agent that never stopped. Re-arming is not a release. Raising the label is.
+
+`downgrade` and `pause` need a running agent. When the agent is idle they defer rather than mark themselves done, so an agent that blew its budget and went briefly quiet is still caught when it resumes. `downgrade` marks itself done without acting when there is no `downgradeToModel` or the agent is already on it, and it is skipped outright when the target is not in that agent's provider catalog. `downgradeToModel` is one global string and a fleet is not one provider: `setAgentModel` validates nothing, so a Codex agent carrying a budget label would otherwise be set to a Claude model id. A catalog that cannot be read counts as a no — an agent left on the model it already had costs money, an agent set to a model its provider never heard of costs the turn. A skip logs its reason and sends no push: a notification announcing a downgrade that did not happen is worse than silence.
 
 An agent that jumps several thresholds between two sweeps — 60 seconds at the measured healthy rate is ~200K weighted tokens, so a small budget can go in one — gets every crossed stage in ladder order in that sweep. It is always told before it is paused.
 
@@ -71,16 +77,19 @@ An agent that jumps several thresholds between two sweeps — 60 seconds at the 
 
 Silently changing an agent's model or refusing its tool calls produces exactly the confused, expensive flailing the governor exists to prevent. Every stage names the spend, the budget, and what to do differently.
 
-Three of the four arrive as one steered `<paseo-system>` message, the same path chat mentions, notify-on-finish and the resource monitor use (`agent-prompt.ts`, `activeTurnBehavior: "steer"`), and only while the agent is mid-turn. `notify` and `stopFanOut` can fire on an idle agent, and steering an idle agent starts a fresh turn — spending tokens to tell an agent it is out of tokens, on the agent already over budget. An idle agent gets the push and the live alert, and for `stopFanOut` the `create_agent` refusal itself, which lands at the only moment it changes anything. **Not** `providerOptions.appendSystemPrompt`: that is folded into the SDK options when the query is built, so using it mid-session would mean restarting the session and losing the turn being governed. It stays the right channel for a create-time restriction ([docs/plugins.md](plugins.md)), which is a different problem.
+Three of the four arrive as one steered `<paseo-system>` message, the same path chat mentions, notify-on-finish and the resource monitor use (`agent-prompt.ts`, `activeTurnBehavior: "steer"`), and only while the agent is mid-turn. `notify` and `stopFanOut` can fire on an idle agent, and steering an idle agent starts a fresh turn — spending tokens to tell an agent it is out of tokens, on the agent already over budget. An idle agent gets the push straight away, and for `stopFanOut` the `create_agent` refusal itself, which lands at the only moment it changes anything.
+
+**Firing and telling are separate.** A stage that fires on an idle agent keeps its message in `undeliveredStages` and says it on the first sweep the agent is mid-turn again, carrying the spend as it reads then rather than as it read when the stage fired. Once, not every sweep after, and with no second push — the human was told at the crossing. Without this the stage that is on by default was the one that silently did nothing: an agent that crossed 0.75× between turns was marked told and never heard a word, losing the chance to wrap up early that is the entire point of `notify`. **Not** `providerOptions.appendSystemPrompt`: that is folded into the SDK options when the query is built, so using it mid-session would mean restarting the session and losing the turn being governed. It stays the right channel for a create-time restriction ([docs/plugins.md](plugins.md)), which is a different problem.
 
 The fourth, `stopFanOut`, also arrives as the `create_agent` error itself — the most direct channel there is, delivered at the moment the agent tries. That message names the budget, the spend, that no agent was created, that this is a cap rather than a transient failure so retrying will keep failing, and the label a human would raise. An agent told only "create_agent failed" retries in a loop.
 
 Two ordering rules carry weight:
 
+- **A downgrade is remembered, so a migration can undo it.** The governor records the model it moved the agent off. [Account failover](account-failover.md) builds a successor that inherits the predecessor's model but starts with its spend at zero, so without that memory an agent downgraded once stayed cheap forever — the successor's fresh episode marks `downgrade` done on sight, because the agent is already on the target. The successor comes up on what the agent was on before. An in-place provider move keeps the same agent, its spend and its episode, so it keeps the downgrade too, which is right.
 - **Downgrade tells the agent after the model moved**, so the notice is true when read, and says it did nothing wrong so it does not go hunting for a bug. `setAgentModel` mid-turn is safe: it reaches the SDK's `query.setModel()`, which applies from the next API request in the same turn. The request in flight finishes on the old model, the conversation is untouched, nothing restarts.
 - **Pause steers first and cancels second.** The other order leaves an idle agent, and steering an idle agent starts a fresh turn (`agent-prompt.ts`'s fallback) — spending tokens to say it is out of tokens. This way the reason lands in the transcript for whoever resumes it.
 
-Pausing works inside the closed `attentionReason` enum without adding to it: the turn ends and the live `tokenBurnAlert` stays set, which `agent-state-bucket.ts` already treats as attention-worthy on its own.
+Pausing works inside the closed `attentionReason` enum without adding to it. The stage sets a `tokenBurnAlert` of its own before it cancels, which `agent-state-bucket.ts` already treats as attention-worthy. Without it a paused agent is indistinguishable in the app from one that finished its turn — `cancelReason` is log-only — so the push would be the only notice, and a missed push would be a lost agent. It reports `trigger: "total"`, because the wire enum is closed and a third value would fail to parse on every shipped client; `budgetTokens`, `spentTokens` and `governorStage` ride alongside as additive-optional fields, so an old app renders the usual total copy and a new one can say it was the governor. The alert is set before the cancel rather than after: an agent whose cancel failed is still over budget and still worth a human's eye.
 
 ### Config
 

@@ -95,7 +95,7 @@ Neither Codex's approval response nor ACP's carries a sentence back to the model
 What happens on a match:
 
 - **The target is already running** (`simctl boot <udid>` for a booted device) → allowed. It costs no slot.
-- **The agent already checked out** and has not used the slot → allowed. This is the good path, and the agent never sees the gate.
+- **The agent already holds a slot on that platform** → allowed. This is the good path, and the agent never sees the gate. It covers both the lease it checked out and has not booted yet, and the device it already booted: a rebuild loop runs `expo run:ios` over and over, and a runner that names no device reuses the booted one rather than starting a second. A launch that names a device the scan has not seen is a new device and still goes to the cap.
 - **A slot is free** → allowed, and the gate takes a lease on the agent's behalf. A device booted without asking still fills a slot and still shows a holder, so the count is never quietly wrong.
 - **No slot, or no headroom** → denied, with who holds the slots and for how long, how many are running without a lease, and what to do instead — call `device_checkout` and wait.
 
@@ -119,9 +119,11 @@ Reconciliation runs every sweep against the process scan:
 | ---------------- | ---------------------------------------------------------------- |
 | `released`       | The agent called `device_checkin`                                |
 | `device-stopped` | Its device is gone from the scan                                 |
-| `never-started`  | It never became a device within `pendingTtlMinutes` (10)         |
+| `never-started`  | It never became a device within `pendingTtlMinutes` (25)         |
 | `agent-gone`     | The daemon no longer knows the agent — archived, closed, crashed |
 | `expired`        | `maxLeaseHours` (12), the backstop                               |
+
+The `never-started` clock runs from the last launch the gate saw, not from checkout. A cold `expo run:ios` spends its first several minutes on pods and a native build before it boots anything, and a lease that expired mid-build would hand the slot to another agent moments before the device it was holding it for appeared — putting the machine over the cap, which is the state this exists to prevent. The gate restarts that clock, so the TTL only has to cover one build rather than a whole session. It deliberately does not touch `acquiredAtMs`: that is the clock a device binds against, and moving it forward would put the device the lease is waiting for in its own past.
 
 None of that can under-count, because occupancy is the **union** of running devices and leases-without-a-device. Reclaiming a crashed agent's lease does not hide its still-running emulator; the device simply becomes unattributed and keeps its slot. That invariant is what makes aggressive reclamation safe.
 
@@ -129,7 +131,7 @@ Leases live in memory. After a daemon restart the count comes from the process s
 
 ## Waiting
 
-`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A freed slot is noticed two ways: immediately on a check-in, and by re-checking every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about. A canceled turn takes its agent out of the queue.
+`device_checkout` with `wait` (the default) parks the agent until a slot frees, up to `queueTimeoutMinutes` (20). Waiters are served oldest first. A freed slot is noticed two ways: immediately on a check-in, and by re-scanning every few seconds while anybody is queued — a device stopping is not something anything notifies the daemon about, so the drain takes its own `ps` rather than reusing the sweep's. That is the one place the cap pays for a second scan, and only while somebody is waiting. A canceled turn takes its agent out of the queue.
 
 ## Status
 
@@ -150,9 +152,11 @@ Under `agents.deviceLeases` (`persisted-config.ts`), live-toggleable like its si
 | `requireHeadroom`     | `true`  | Also refuse when memory is gone                     |
 | `minAvailableBytes`   | 0.5 GiB | Free-memory floor                                   |
 | `maxSwapUsedRatio`    | 0.85    | Swap ceiling                                        |
-| `pendingTtlMinutes`   | 10      | How long a lease may wait for its device to appear  |
+| `pendingTtlMinutes`   | 25      | How long a lease may wait for its device to appear  |
 | `maxLeaseHours`       | 12      | Backstop; 0 disables                                |
 | `queueTimeoutMinutes` | 20      | How long `device_checkout` waits                    |
+
+A dry-run `device_checkout` that the real cap would have made wait still hands back a lease, so the agent carries on, but that lease does not fill a slot — an agent waiting in a real run holds nothing. It shows in the status readout with its holder; only the count is the real cap's. Without that, a dry run inflates its own occupancy and reports refusals the real run would never have made, on the one readout a dry run exists to be trusted on.
 
 Dry run reports through `daemon.log` and the status surface, both tagged `dryRun`:
 

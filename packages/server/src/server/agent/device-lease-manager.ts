@@ -50,7 +50,15 @@ import { deriveDeviceSlotDefaults, evaluateMemoryHeadroom } from "./device-slot-
 import type { ProcessSampler, SystemMemorySample } from "./process-sampler.js";
 
 const GIBIBYTE = 1024 ** 3;
-const DEFAULT_PENDING_TTL_MINUTES = 10;
+/**
+ * How long a lease may wait for its device to appear. Generous on purpose: this is the window
+ * a cold `expo run:ios` needs to get through pods and a native build before it boots anything,
+ * and a lease that expires mid-build gives the slot away moments before the device it was
+ * holding it for shows up — putting the machine over the cap, which is the one state this
+ * whole feature exists to prevent. The gate restarts the clock on every launch it sees, so
+ * this only has to cover one build, not a whole session.
+ */
+const DEFAULT_PENDING_TTL_MINUTES = 25;
 const DEFAULT_MAX_LEASE_HOURS = 12;
 const DEFAULT_QUEUE_TIMEOUT_MINUTES = 20;
 /**
@@ -476,8 +484,18 @@ export class DeviceLeaseManager {
       return { status: "granted", leaseId: verdict.leaseId, platform: input.platform };
     }
     if (config.dryRun) {
-      // Dry run never makes anybody wait; it reports what the queue would have done.
-      const lease = this.createLease(input.agentId, input.platform, "checkout", input.reason);
+      // Dry run never makes anybody wait; it reports what the queue would have done. The lease
+      // it hands back does not fill a slot, because the agent it stands for would have been
+      // waiting and holding nothing. Counting it would push occupancy past the cap and make
+      // every later dry-run decision report a refusal the real run would never have made —
+      // on the one readout the whole point of a dry run is to be able to trust.
+      const lease = this.createLease({
+        agentId: input.agentId,
+        platform: input.platform,
+        source: "checkout",
+        reason: input.reason,
+        counted: false,
+      });
       return {
         status: "granted",
         leaseId: lease.id,
@@ -579,15 +597,24 @@ export class DeviceLeaseManager {
     ) {
       return undefined;
     }
-    // The agent checked out first and has not used the slot yet. This is the good path.
-    if (
-      this.leases.some(
-        (lease) =>
-          lease.agentId === agentId &&
-          lease.platform === intent.platform &&
-          lease.deviceId === undefined,
-      )
-    ) {
+    // The agent already holds a slot on this platform, so this launch costs nothing new.
+    // Either it checked out and has not booted yet, or it booted and is launching again
+    // against the device it already has: a rebuild loop runs `expo run:ios` over and over, and
+    // a runner that names no device reuses the booted one rather than starting a second. A
+    // second lease for that would count one simulator twice, and on a machine with two slots
+    // per platform an agent iterating on its own device would fill the platform by itself.
+    // A launch that *does* name a device the scan has not seen is a genuinely new one and
+    // still goes to the cap below.
+    const held = this.leases.find(
+      (lease) =>
+        lease.agentId === agentId &&
+        lease.platform === intent.platform &&
+        (lease.deviceId === undefined || intent.target === undefined),
+    );
+    if (held) {
+      // Restart the never-started clock. The agent is demonstrably still trying to bring this
+      // device up, and the build it is waiting on can outlast the TTL on its own.
+      if (held.deviceId === undefined) held.lastLaunchAtMs = this.now();
       return undefined;
     }
 
@@ -676,25 +703,40 @@ export class DeviceLeaseManager {
         return { granted: false, message: headroom.reason };
       }
     }
-    return { granted: true, leaseId: this.createLease(agentId, platform, source, reason).id };
+    return {
+      granted: true,
+      leaseId: this.createLease({ agentId, platform, source, reason }).id,
+    };
   }
 
-  private createLease(
-    agentId: string,
-    platform: DevicePlatform,
-    source: DeviceLease["source"],
-    reason: string | undefined,
-  ): DeviceLease {
+  private createLease(input: {
+    agentId: string;
+    platform: DevicePlatform;
+    source: DeviceLease["source"];
+    reason: string | undefined;
+    /** False only for the dry run's would-have-waited lease. See DeviceLease's `counted`. */
+    counted?: boolean;
+  }): DeviceLease {
     const lease: DeviceLease = {
       id: this.createLeaseId(),
-      agentId,
-      platform,
-      source,
+      agentId: input.agentId,
+      platform: input.platform,
+      source: input.source,
       acquiredAtMs: this.now(),
-      ...(reason ? { reason } : {}),
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.counted === false ? { counted: false } : {}),
     };
     this.leases.push(lease);
-    this.logger.info({ leaseId: lease.id, agentId, platform, source }, "Device slot leased");
+    this.logger.info(
+      {
+        leaseId: lease.id,
+        agentId: input.agentId,
+        platform: input.platform,
+        source: input.source,
+        ...(lease.counted === false ? { counted: false } : {}),
+      },
+      "Device slot leased",
+    );
     this.notify();
     return lease;
   }
@@ -776,7 +818,12 @@ export class DeviceLeaseManager {
       }
       return;
     }
-    await this.ensureSample();
+    // A fresh one, not whatever the last gate check left behind: the slot this drain is
+    // looking for is freed by a device *stopping*, and nothing reports that. Reusing the
+    // cached sample would re-read the same still-running device every tick and leave the
+    // queue waiting out its timeout next to an idle machine. It costs one `ps` every few
+    // seconds, and only while somebody is actually queued.
+    await this.ensureSample({ fresh: true });
     this.reconcile(config);
 
     for (const waiter of this.waiters.slice().sort((a, b) => a.enqueuedAtMs - b.enqueuedAtMs)) {

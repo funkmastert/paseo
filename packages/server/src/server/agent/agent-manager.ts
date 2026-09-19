@@ -311,10 +311,12 @@ export interface TokenBurnMonitorAgentSummary {
   isRunning: boolean;
   tokenRate: number | undefined;
   totalTokens: number | undefined;
-  /** Carries the caller's declared per-task budget (spend-governor.ts's SPEND_BUDGET_LABEL). */
+  /** Carries the budget declared for this agent alone (spend-governor.ts's SPEND_BUDGET_LABEL). */
   labels: Record<string, string>;
   /** So the governor's downgrade stage can skip an agent already on the target model. */
   model: string | undefined;
+  /** So the governor can check its target model against the right provider's catalog. */
+  provider: string;
 }
 
 /**
@@ -341,7 +343,8 @@ export interface ResourceMonitorAgentSummary {
  * `provider` (which account it's stuck on), `lifecycle` (never migrate a running agent),
  * `lastError` (the reactive cap-text signal), `labels` (parent lookup and the
  * already-migrated marker), and the session/model/mode fields the migration action restores
- * on the successor.
+ * on the successor. `model` is what to restore rather than what is running: see
+ * toAccountFailoverSummary.
  */
 export interface AccountFailoverAgentSummary {
   id: string;
@@ -1467,6 +1470,7 @@ export class AgentManager {
       totalTokens: agent.totalTokens,
       labels: agent.labels,
       model: agent.config.model,
+      provider: agent.provider,
     }));
   }
 
@@ -1504,7 +1508,12 @@ export class AgentManager {
         : null,
       labels: agent.labels,
       sessionId: agent.persistence?.sessionId,
-      model: agent.config.model,
+      // The model the successor should come up on, which is not always the one running now. A
+      // migrated agent inherits its predecessor's model but starts with its spend at zero, so
+      // an agent the spend governor had downgraded would come back cheap on a budget it is
+      // nowhere near — and the fresh episode marks `downgrade` done on sight, because the
+      // agent is already on the target. Restore what it was on before the governor moved it.
+      model: agent.spendGovernorState?.modelBeforeDowngrade ?? agent.config.model,
       modeId: agent.config.modeId,
       thinkingOptionId: agent.config.thinkingOptionId,
     };

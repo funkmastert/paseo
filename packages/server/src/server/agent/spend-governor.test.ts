@@ -172,7 +172,13 @@ describe("planSpendGovernorActions", () => {
     const result = planSpendGovernorActions({
       agent: agent({ totalTokens: 5_000_000 }),
       config: config({ enabled: false }),
-      previousState: { budgetTokens: 1_000_000, firedStages: ["stopFanOut"], fanOutBlocked: true },
+      previousState: {
+        budgetTokens: 1_000_000,
+        firedStages: ["stopFanOut"],
+        fanOutBlocked: true,
+        wasRunning: true,
+        undeliveredStages: [],
+      },
     });
     expect(result.actions).toEqual([]);
     // State is dropped, which is what releases an agent whose fan-out was blocked.
@@ -193,7 +199,83 @@ describe("planSpendGovernorActions", () => {
       config: config(),
       previousState: idle.nextState,
     });
-    expect(resumed.actions.map((a) => a.stage)).toEqual(["downgrade", "pause"]);
+    // The two that fired while it was idle are said to it now, and the two that waited for a
+    // running agent happen now. Ladder order throughout.
+    expect(resumed.actions).toEqual([
+      expect.objectContaining({ stage: "notify", redelivery: true }),
+      expect.objectContaining({ stage: "stopFanOut", redelivery: true }),
+      expect.objectContaining({ stage: "downgrade" }),
+      expect.objectContaining({ stage: "pause" }),
+    ]);
+  });
+
+  // `notify` is the only stage on by default and its whole value is the chance to wrap up
+  // early. An agent that crossed 0.75x between turns was marked told and never heard a word.
+  test("notify reaches an agent that was idle when it crossed", () => {
+    const crossedWhileIdle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({
+        downgrade: { enabled: false, atFraction: 1 },
+        stopFanOut: { enabled: false, atFraction: 1 },
+        pause: { enabled: false, atFraction: 1.5 },
+      }),
+      previousState: undefined,
+    });
+    expect(crossedWhileIdle.actions.map((a) => a.stage)).toEqual(["notify"]);
+    expect(crossedWhileIdle.nextState?.undeliveredStages).toEqual(["notify"]);
+
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({
+        downgrade: { enabled: false, atFraction: 1 },
+        stopFanOut: { enabled: false, atFraction: 1 },
+        pause: { enabled: false, atFraction: 1.5 },
+      }),
+      previousState: crossedWhileIdle.nextState,
+    });
+    expect(resumed.actions).toEqual([
+      // The spend as it reads now, not as it read when the stage fired: the agent is about to
+      // read this sentence and should get the number it can still act on.
+      expect.objectContaining({ stage: "notify", redelivery: true, spentTokens: 850_000 }),
+    ]);
+    expect(resumed.nextState?.undeliveredStages).toEqual([]);
+  });
+
+  test("a message owed is said once, not every sweep after", () => {
+    const idle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: idle.nextState,
+    });
+    expect(resumed.actions.filter((a) => a.redelivery)).not.toEqual([]);
+
+    const later = planSpendGovernorActions({
+      agent: agent({ totalTokens: 900_000, isRunning: true }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: resumed.nextState,
+    });
+    expect(later.actions).toEqual([]);
+  });
+
+  test("a dry run owes nothing, because it says nothing", () => {
+    const idle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({ dryRun: true }),
+      previousState: undefined,
+    });
+    expect(idle.nextState?.undeliveredStages).toEqual([]);
+
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({ dryRun: true }),
+      previousState: idle.nextState,
+    });
+    expect(resumed.actions.filter((a) => a.redelivery)).toEqual([]);
   });
 
   test("downgrade is skipped, and not retried forever, when there is nowhere to go", () => {
@@ -263,5 +345,119 @@ describe("planSpendGovernorActions", () => {
       spentTokens: 1_100_000,
       targetModel: "claude-sonnet-5",
     });
+  });
+  // A guard rail that fires once and then never again reads as protection while the agent it
+  // stopped runs on unbounded. Measured before this: an agent paused at 450K of a 300K budget,
+  // re-prompted, and taken to 2.45M — eight times its budget — planned nothing at all.
+  test("pause re-arms when somebody starts the agent again", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+    expect(paused.actions.map((action) => action.stage)).toContain("pause");
+    // The sweep that pauses records the agent as stopped: the cancel it just planned is what
+    // stops it, and the restart may land before the next sweep looks.
+    expect(paused.nextState?.wasRunning).toBe(false);
+
+    const restarted = planSpendGovernorActions({
+      agent: agent({ totalTokens: 2_400_000, isRunning: true }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(restarted.actions.map((action) => action.stage)).toContain("pause");
+  });
+
+  test("pause does not re-fire twice for one turn", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    // The cancel has not settled yet, so the agent is still mid-turn on the next sweep. It was
+    // never observed stopped, so there is no restart to answer.
+    const stillSettling = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_650_000, isRunning: true }),
+      config: config(),
+      previousState: { ...paused.nextState!, wasRunning: true },
+    });
+    expect(stillSettling.actions).toEqual([]);
+  });
+
+  test("an agent left idle over its budget is not paused again on its own", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    const stillIdle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000, isRunning: false }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(stillIdle.actions).toEqual([]);
+  });
+
+  test("raising the budget past the spend releases a paused agent", () => {
+    const paused = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000 }),
+      config: config(),
+      previousState: undefined,
+    });
+
+    // A human raises the label to 4M. That is a fresh episode, and 1.6M is under every stage.
+    const released = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_600_000, labels: { [SPEND_BUDGET_LABEL]: "4M" } }),
+      config: config(),
+      previousState: paused.nextState,
+    });
+    expect(released.actions).toEqual([]);
+    expect(released.nextState?.firedStages).toEqual([]);
+  });
+  // A migrated agent inherits its model but starts with its spend at zero. Without a memory of
+  // what it was on, an agent downgraded once stays cheap forever: the fresh episode marks
+  // `downgrade` done on sight, because the agent is already on the target model.
+  test("the model a downgrade moved an agent off is remembered", () => {
+    const downgraded = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+    expect(downgraded.actions.map((a) => a.stage)).toContain("downgrade");
+    expect(downgraded.nextState?.modelBeforeDowngrade).toBe("claude-opus-5");
+  });
+
+  test("a raised budget does not forget what the governor moved the agent off", () => {
+    const downgraded = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+
+    // A human raises the label. That starts a fresh episode, but what the governor changed is
+    // not a fact about the old budget.
+    const released = planSpendGovernorActions({
+      agent: agent({
+        totalTokens: 1_100_000,
+        model: "claude-sonnet-5",
+        labels: { [SPEND_BUDGET_LABEL]: "5M" },
+      }),
+      config: config(),
+      previousState: downgraded.nextState,
+    });
+    expect(released.nextState?.firedStages).toEqual([]);
+    expect(released.nextState?.modelBeforeDowngrade).toBe("claude-opus-5");
+  });
+
+  test("a dry run remembers nothing, because it moved nothing", () => {
+    const planned = planSpendGovernorActions({
+      agent: agent({ totalTokens: 1_100_000, model: "claude-opus-5" }),
+      config: config({ dryRun: true }),
+      previousState: undefined,
+    });
+    expect(planned.actions.map((a) => a.stage)).toContain("downgrade");
+    expect(planned.nextState?.modelBeforeDowngrade).toBeUndefined();
   });
 });

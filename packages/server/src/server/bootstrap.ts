@@ -2061,6 +2061,10 @@ export async function createPaseoDaemon(
                 });
               },
               readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+              // So the governor's downgrade never sets a model the agent's provider does not
+              // have. `downgradeToModel` is one string for a fleet that is not one provider.
+              listProviderModels: async (provider) =>
+                (await providerSnapshotManager.listModels({ provider })).map((model) => model.id),
               readDaemonConfig: () => ({
                 tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
               }),

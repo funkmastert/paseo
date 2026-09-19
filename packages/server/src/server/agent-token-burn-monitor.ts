@@ -113,6 +113,13 @@ export interface AgentTokenBurnMonitorOptions {
   sendSystemMessageToAgent: (agentId: string, body: string) => Promise<void>;
   /** Provider usage windows for the report-only account-pressure leg. Null when unreadable. */
   readProviderUsage?: () => Promise<readonly ProviderUsage[] | null>;
+  /**
+   * Model ids an agent's provider can actually be set to, so `downgrade` never moves an agent
+   * onto a model that provider has never heard of. `downgradeToModel` is one global string and
+   * the fleet is not one provider. Absent — a monitor built without it — skips the check and
+   * behaves as it did before, which is what the tests that predate it rely on.
+   */
+  listProviderModels?: (provider: string) => Promise<readonly string[]>;
   readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
   logger: AgentTokenBurnMonitorLogger;
   sweepIntervalMs?: number;
@@ -276,6 +283,7 @@ export class AgentTokenBurnMonitor {
   private readonly serverId: string;
   private readonly sendSystemMessageToAgent: AgentTokenBurnMonitorOptions["sendSystemMessageToAgent"];
   private readonly readProviderUsage: AgentTokenBurnMonitorOptions["readProviderUsage"];
+  private readonly listProviderModels: AgentTokenBurnMonitorOptions["listProviderModels"];
   private readonly readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
   private readonly logger: AgentTokenBurnMonitorLogger;
   private readonly sweepIntervalMs: number;
@@ -296,6 +304,7 @@ export class AgentTokenBurnMonitor {
     this.serverId = options.serverId;
     this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
     this.readProviderUsage = options.readProviderUsage;
+    this.listProviderModels = options.listProviderModels;
     this.readDaemonConfig = options.readDaemonConfig;
     this.logger = options.logger;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
@@ -462,6 +471,22 @@ export class AgentTokenBurnMonitor {
     dryRun: boolean,
   ): Promise<void> {
     for (const { agent, action } of planned) {
+      if (action.redelivery) {
+        // The stage already happened and was already pushed, on a sweep where the agent was
+        // idle and could not be steered. Only the message is outstanding: perform nothing,
+        // push nothing again, just say the thing it never heard.
+        await this.tellAgent(action.agentId, formatGovernorMessage(action));
+        this.logger.info(
+          {
+            agentId: action.agentId,
+            stage: action.stage,
+            budgetTokens: action.budgetTokens,
+            spentTokens: Math.round(action.spentTokens),
+          },
+          "Spend governor told a resumed agent about a stage it missed",
+        );
+        continue;
+      }
       if (dryRun) {
         this.logger.info(
           {
@@ -476,7 +501,12 @@ export class AgentTokenBurnMonitor {
         );
       } else {
         try {
-          await this.applyGovernorAction(action, agent.isRunning);
+          if (!(await this.applyGovernorAction(action, agent))) {
+            // Skipped, not failed, and already logged with its reason. No success log and no
+            // push: a notification announcing a downgrade that did not happen is worse than
+            // silence, because it is the only record most people ever read.
+            continue;
+          }
         } catch (error) {
           this.logger.warn(
             { err: error, agentId: action.agentId, stage: action.stage },
@@ -513,10 +543,12 @@ export class AgentTokenBurnMonitor {
     }
   }
 
+  /** True when the stage was performed. False when it was deliberately skipped and logged. */
   private async applyGovernorAction(
     action: SpendGovernorAction,
-    isRunning: boolean,
-  ): Promise<void> {
+    agent: TokenBurnMonitorAgentSummary,
+  ): Promise<boolean> {
+    const isRunning = agent.isRunning;
     const body = formatGovernorMessage(action);
     switch (action.stage) {
       case "notify":
@@ -533,24 +565,76 @@ export class AgentTokenBurnMonitor {
         if (isRunning) {
           await this.tellAgent(action.agentId, body);
         }
-        return;
+        return true;
       case "downgrade":
         // Only reached for a running agent: spend-governor.ts defers this stage otherwise.
         // `setAgentModel` on a live session calls the SDK's `query.setModel()`, which applies
         // from the next API request in the same turn: the request already in flight finishes
         // on the old model, the conversation is untouched, and no session restart happens. The
         // notice goes out after the change so it is true when the agent reads it.
+        if (!(await this.providerOffersModel(agent.provider, action.targetModel))) {
+          this.logger.warn(
+            {
+              agentId: action.agentId,
+              provider: agent.provider,
+              targetModel: action.targetModel,
+            },
+            "Spend governor skipped a downgrade: the target model is not in this agent's provider catalog",
+          );
+          return false;
+        }
         await this.agentManager.setAgentModel(action.agentId, action.targetModel ?? null);
         await this.tellAgent(action.agentId, body);
-        return;
+        return true;
       case "pause":
         // Steer first, cancel second. The other order leaves an idle agent, and steering into
         // an idle agent starts a fresh turn (agent-prompt.ts's fallback) — spending tokens to
         // say it is over budget. This way the reason lands in the transcript for whoever
         // resumes it, and then the turn ends.
         await this.tellAgent(action.agentId, body);
+        // Flag it before the cancel, not after. `cancelReason` is log-only and the governor has
+        // no `attentionReason` of its own, so without this a paused agent is indistinguishable
+        // in the app from one that finished its turn normally — a push notification and then
+        // nothing to find. The alert is what agent-state-bucket.ts already treats as
+        // attention-worthy. Before rather than after because an agent whose cancel failed is
+        // still over budget and still worth a human's eye, so the flag is true either way.
+        this.agentManager.setTokenBurnAlert(action.agentId, {
+          trigger: "total",
+          totalTokens: action.budgetTokens,
+          budgetTokens: action.budgetTokens,
+          spentTokens: action.spentTokens,
+          governorStage: action.stage,
+          firstBreachedAt: new Date(this.now()).toISOString(),
+        });
         await this.agentManager.cancelAgentRun(action.agentId, "spend-governor");
-        return;
+        return true;
+    }
+  }
+
+  /**
+   * Whether this provider will accept the model `downgrade` wants to move to. `downgradeToModel`
+   * is one global string and the fleet is not one provider, so without this a Codex agent that
+   * carried a budget label was handed a Claude model id — `setAgentModel` validates nothing, it
+   * just sets it.
+   *
+   * An unreadable catalog counts as no. The cost of skipping a downgrade is that an agent keeps
+   * running on the model it was already on; the cost of guessing wrong is an agent set to a
+   * model its provider has never heard of, which is the failure this whole review class is
+   * about. Silence is the safe direction here, and it is logged either way.
+   */
+  private async providerOffersModel(
+    provider: string,
+    targetModel: string | undefined,
+  ): Promise<boolean> {
+    if (!targetModel || !this.listProviderModels) return true;
+    try {
+      return (await this.listProviderModels(provider)).includes(targetModel);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, provider, targetModel },
+        "Spend governor could not read a provider's models; leaving the agent's model alone",
+      );
+      return false;
     }
   }
 

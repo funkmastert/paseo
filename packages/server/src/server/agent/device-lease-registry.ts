@@ -23,6 +23,25 @@ export interface DeviceLease {
   acquiredAtMs: number;
   /** Set once reconciliation matches a running device to this lease. */
   deviceId?: string;
+  /**
+   * When the gate last saw this agent start the device it is waiting for. The never-started TTL
+   * runs from here, falling back to `acquiredAtMs`: a cold `expo run:ios` spends its first
+   * several minutes on pods and a native build, and a lease that expires mid-build hands the
+   * slot to somebody else moments before the device it was holding it for appears.
+   *
+   * Deliberately a second clock rather than moving `acquiredAtMs` forward. That one is what
+   * `startedAfterLease` binds against, so advancing it would put the device this lease is
+   * waiting for in its own past and stop it binding at all.
+   */
+  lastLaunchAtMs?: number;
+  /**
+   * False for a lease only the dry run handed out — one the real cap would have made wait. It
+   * still shows in the status readout, so the agent has a holder, but it must not fill a slot:
+   * an agent waiting in a real run holds nothing, and counting it here would push occupancy
+   * past the cap and make every later dry-run decision report a refusal the real run would
+   * never have made. Absent means counted, which is every lease outside dry run.
+   */
+  counted?: boolean;
 }
 
 export type DeviceLeaseReleaseReason =
@@ -54,6 +73,11 @@ function isPending(lease: DeviceLease): boolean {
   return lease.deviceId === undefined;
 }
 
+/** A pending lease that fills a slot. See DeviceLease's `counted`. */
+function fillsSlot(lease: DeviceLease): boolean {
+  return isPending(lease) && lease.counted !== false;
+}
+
 /**
  * Whether this device could be the one the lease went on to boot. A device that was already up
  * when the lease was taken cannot be: binding to it would hand the agent somebody else's
@@ -81,7 +105,7 @@ export function evaluateDeviceOccupancy(input: {
     seenDeviceIds.add(device.deviceId);
     byPlatform[device.platform] += 1;
   }
-  const pendingLeases = input.leases.filter(isPending);
+  const pendingLeases = input.leases.filter(fillsSlot);
   for (const lease of pendingLeases) {
     byPlatform[lease.platform] += 1;
   }
@@ -225,7 +249,8 @@ export function reconcileDeviceLeases(
     }
     // Nothing booted yet. A lease that never turns into a device must not hold a slot forever:
     // the agent may have crashed between checking out and launching, or given up on its own.
-    if (input.nowMs - lease.acquiredAtMs >= input.pendingTtlMs) {
+    // Measured from the last launch the gate saw, so a long native build keeps its slot.
+    if (input.nowMs - (lease.lastLaunchAtMs ?? lease.acquiredAtMs) >= input.pendingTtlMs) {
       release(lease, "never-started");
       continue;
     }
