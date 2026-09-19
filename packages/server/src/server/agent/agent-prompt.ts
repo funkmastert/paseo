@@ -377,7 +377,12 @@ export interface SetupFinishNotificationParams {
   logger: Logger;
 }
 
-type FinishNotificationReason = "finished" | "errored" | "needs permission" | "was closed";
+type FinishNotificationReason =
+  | "finished"
+  | "errored"
+  | "needs permission"
+  | "was closed"
+  | "was canceled";
 
 const FINISH_NOTIFICATION_MESSAGE_LIMIT = 4000;
 
@@ -392,6 +397,16 @@ interface FinishNotificationBodyInput {
 function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
   const statusLine = `Agent ${params.childAgentId} (${params.title}) ${params.reason}.`;
   const sections = [statusLine];
+  if (params.reason === "was canceled") {
+    // A cancelled delegation produced no answer. Told it "finished" with an empty response, a
+    // parent reads the silence as a result it did not understand and creates the agent again —
+    // one parent made four of the same subagent in 45 seconds that way.
+    sections.push(
+      "It did not finish its work, and whatever it did produce is incomplete. Do not create " +
+        "another agent for the same task until you know why this one was stopped: check it " +
+        "with get_agent_activity, and check its provider with inspect_provider.",
+    );
+  }
   if (params.reason === "needs permission" && params.permissionRequest) {
     sections.push(
       "Respond with `respond_to_permission` using the `agentId` and `requestId` below.",
@@ -513,7 +528,9 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
           return;
         }
         if (event.agent.lifecycle === "idle" && hasSeenRunning) {
-          notifySafely("finished");
+          // `turnCanceled` is set by both cancel paths and cleared at the same edge the manager
+          // evaluates attention on, so reading it here is reading the outcome of this turn.
+          notifySafely(event.agent.turnCanceled === true ? "was canceled" : "finished");
           return;
         }
         if (event.agent.lifecycle === "closed") {

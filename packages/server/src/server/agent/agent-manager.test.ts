@@ -529,6 +529,44 @@ class TestAgentSession implements AgentSession {
   async close(): Promise<void> {}
 }
 
+/**
+ * A session whose turn stays open until it is interrupted, then reports `turn_canceled` — what
+ * a provider does when a run is stopped. `TestAgentSession` completes its turn synchronously,
+ * so it cannot be cancelled mid-flight.
+ */
+class CancelableTestAgentSession extends TestAgentSession {
+  private openTurnId: string | null = null;
+  private cancelNextTurn = true;
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    const turnId = `cancelable-turn-${randomUUID()}`;
+    this.openTurnId = turnId;
+    const shouldHang = this.cancelNextTurn;
+    this.cancelNextTurn = false;
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: "codex", turnId });
+      if (!shouldHang) {
+        this.pushEvent({ type: "turn_completed", provider: "codex", turnId });
+        this.openTurnId = null;
+      }
+    }, 0);
+    return { turnId };
+  }
+
+  override async interrupt(): Promise<void> {
+    const turnId = this.openTurnId;
+    if (!turnId) return;
+    this.openTurnId = null;
+    this.pushEvent({ type: "turn_canceled", provider: "codex", reason: "interrupted", turnId });
+  }
+}
+
+class CancelableTestAgentClient extends TestAgentClient {
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    return new CancelableTestAgentSession(config);
+  }
+}
+
 class ResumeTrackingTestAgentClient extends TestAgentClient {
   private readonly retryStarted = deferred<void>();
 
@@ -6467,6 +6505,45 @@ test("runAgent persists finished attention and idle status without an external s
   expect(persisted?.requiresAttention).toBe(true);
   expect(persisted?.attentionReason).toBe("finished");
   expect(persisted?.attentionTimestamp).toEqual(expect.any(String));
+});
+
+test("a cancelled turn is not a finish, and does not survive into the next one", async () => {
+  // Reproduces the shape four of Tyler's agents were left in: cancelled mid-turn, recorded
+  // idle with `finished` attention and no lastError, indistinguishable from real completion.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-cancel-attention-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new CancelableTestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    idFactory: () => randomUUID(),
+  });
+
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Cancelled" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  void manager.streamAgent(agent.id, "sleep 30").next();
+  await vi.waitFor(() => expect(manager.getAgent(agent.id)?.lifecycle).toBe("running"));
+  await manager.cancelAgentRun(agent.id, "user");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
+  expect(manager.getAgent(agent.id)?.attention.requiresAttention).toBe(false);
+  expect((await storage.get(agent.id))?.requiresAttention).toBe(false);
+  expect(attentionReasons).toEqual([]);
+
+  // The next turn, which really does finish, still raises attention — the suppression is
+  // scoped to the cancelled turn and nothing else.
+  await manager.runAgent(agent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
 });
 
 test("a delegated agent finishing raises no attention: its parent already has the result", async () => {

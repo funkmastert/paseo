@@ -549,7 +549,7 @@ export class AgentTokenBurnMonitor {
         // say it is over budget. This way the reason lands in the transcript for whoever
         // resumes it, and then the turn ends.
         await this.tellAgent(action.agentId, body);
-        await this.agentManager.cancelAgentRun(action.agentId);
+        await this.agentManager.cancelAgentRun(action.agentId, "spend-governor");
         return;
     }
   }

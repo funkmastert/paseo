@@ -368,6 +368,17 @@ interface AgentManagerRescueTimeouts {
   interruptSessionMs?: number;
 }
 
+/** Who asked for a turn to stop. Logged, never persisted, never on the wire. */
+export type AgentCancelReason =
+  | "user"
+  | "reload"
+  | "replace"
+  | "rewind"
+  | "archive"
+  | "spend-governor"
+  | "hub"
+  | "unspecified";
+
 interface ProviderEnabledFlag {
   enabled: boolean;
   derivedFromProviderId?: string | null;
@@ -526,6 +537,13 @@ interface ManagedAgentBase {
   >;
   inFlightPermissionResponses: Set<string>;
   pendingReplacement: boolean;
+  /**
+   * Set when this agent's turn ended by cancellation rather than by finishing. Consumed at the
+   * `running` -> `idle` edge in `checkAndSetAttention`, in the same synchronous `emitState` that
+   * observes the edge, so it cannot leak into a later genuine finish. Live-only, never persisted:
+   * it describes one turn, not the agent.
+   */
+  turnCanceled?: boolean;
   persistence: AgentPersistenceHandle | null;
   historyPrimed: boolean;
   lastUserMessageAt: Date | null;
@@ -3750,11 +3768,18 @@ export class AgentManager {
     }
   }
 
-  async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
+  /** `cancelReason` is for the log only — who stopped this turn, which nothing else records. */
+  async cancelAgentRun(
+    agentId: string,
+    cancelReason: AgentCancelReason = "unspecified",
+  ): Promise<AgentRunCancellationResult> {
+    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId, cancelReason));
   }
 
-  private async cancelAgentRunNow(agentId: string): Promise<AgentRunCancellationResult> {
+  private async cancelAgentRunNow(
+    agentId: string,
+    cancelReason: AgentCancelReason,
+  ): Promise<AgentRunCancellationResult> {
     const agent = this.requireSessionAgent(agentId);
     const run =
       this.runs.getRun(agentId) ??
@@ -3762,6 +3787,22 @@ export class AgentManager {
     if (!run) {
       return { status: "not_running" };
     }
+
+    // A cancel is the one turn outcome that leaves no trace of itself: it clears lastError and
+    // lands idle, so afterwards nothing says the turn was stopped, let alone by what. Four
+    // agents were cancelled on one machine and the log could not answer either question.
+    this.logger.info(
+      {
+        agentId,
+        provider: agent.provider,
+        sessionId: agent.persistence?.sessionId ?? undefined,
+        turnId: this.runs.getTurnId(agentId) ?? undefined,
+        runKind: run.kind,
+        lifecycle: agent.lifecycle,
+        cancelReason,
+      },
+      "Canceling agent run",
+    );
 
     const interruptAcknowledged = await this.interruptSession(agent.session, agentId);
     const settlement = await this.waitWithTimeout({
@@ -3795,6 +3836,9 @@ export class AgentManager {
       );
       this.runs.settleForegroundRun(agentId, run.token);
       if (!agent.pendingReplacement) {
+        // This branch bypasses the turn-event path entirely, so a fix that only handles
+        // `turn_canceled` would miss it — and it is the unresponsive-session case exactly.
+        agent.turnCanceled = true;
         agent.lifecycle = "idle";
         this.touchUpdatedAt(agent);
         this.emitState(agent);
@@ -3823,7 +3867,7 @@ export class AgentManager {
     agentId: string,
     action: "reload" | "replace" | "rewind",
   ): Promise<void> {
-    const result = await this.cancelAgentRun(agentId);
+    const result = await this.cancelAgentRun(agentId, action);
     if (result.status === "refused") {
       throw new AgentRunCancellationError(agentId, action);
     }
@@ -5308,6 +5352,7 @@ export class AgentManager {
       "agent.manager.turn.canceled",
     );
     if (terminalDisposition === "stale") return;
+    agent.turnCanceled = true;
     if (!isForegroundEvent && !agent.activeForegroundTurnId && !agent.pendingReplacement) {
       agent.lifecycle = "idle";
     }
@@ -5584,6 +5629,10 @@ export class AgentManager {
     // that method early-returns once attention is already unread, which would
     // otherwise swallow a turn-2 finish while turn 1's attention is uncleared.
     const previousStatus = this.previousStatuses.get(agent.id);
+    // Captured before checkAndSetAttention consumes it, so the snapshot subscribers receive
+    // still carries this turn's outcome — notify-on-finish reads it to tell a parent its
+    // delegation was cancelled rather than finished.
+    const turnCanceled = agent.turnCanceled === true;
     // Keep attention as an edge-triggered unread signal, not a level signal.
     this.checkAndSetAttention(agent);
     if (previousStatus === "running" && agent.lifecycle === "idle" && !agent.internal) {
@@ -5611,7 +5660,7 @@ export class AgentManager {
 
     this.dispatch({
       type: "agent_state",
-      agent: { ...agent },
+      agent: { ...agent, turnCanceled },
     });
   }
 
@@ -5628,6 +5677,12 @@ export class AgentManager {
     // Track the new status
     this.previousStatuses.set(agent.id, currentStatus);
 
+    // A turn that was cancelled did not finish. Read and cleared before every early return
+    // below, so the flag can never outlive the turn that set it and suppress a later genuine
+    // finish — which would lose real signal, the one failure worse than the noise.
+    const canceled = agent.turnCanceled === true;
+    agent.turnCanceled = false;
+
     // Skip attention tracking for internal agents
     if (agent.internal) {
       return;
@@ -5640,6 +5695,9 @@ export class AgentManager {
 
     // Check if agent transitioned from running to idle (finished)
     if (previousStatus === "running" && currentStatus === "idle") {
+      if (canceled) {
+        return;
+      }
       // A delegated agent finishing is the normal case and is already delivered: its parent
       // gets the result in-band through the tool call that spawned it. Flagging it too left a
       // signal nobody surfaces — broadcastAgentAttention has skipped delegated agents since

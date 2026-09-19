@@ -62,6 +62,7 @@ interface FinishNotificationScenario {
   resolveChildPermissionWhileIdle(requestId?: string): void;
   finishChild(): void;
   finishChildAndReadParentPrompt(): Promise<string>;
+  cancelChildAndReadParentPrompt(): Promise<string>;
   closeChildAndReadParentPrompt(): Promise<string>;
   parentPrompts(): string[];
   steerAttemptCount(): number;
@@ -228,6 +229,22 @@ function createFinishNotificationScenario(
 
       return parentPrompt;
     },
+    async cancelChildAndReadParentPrompt() {
+      const parentPrompt = new Promise<string>((resolve) => {
+        resolveParentPrompt = resolve;
+      });
+      childAgent.lifecycle = "running";
+      subscriber?.({ type: "agent_state", agent: childAgent });
+
+      // The shape emitState dispatches for a cancelled turn: idle, and carrying the outcome.
+      childAgent.lifecycle = "idle";
+      subscriber?.({
+        type: "agent_state",
+        agent: { ...childAgent, turnCanceled: true },
+      });
+
+      return parentPrompt;
+    },
     async closeChildAndReadParentPrompt() {
       const parentPrompt = new Promise<string>((resolve) => {
         resolveParentPrompt = resolve;
@@ -278,6 +295,36 @@ test("finish notifications tell the parent the child's last assistant message", 
     ),
   );
   expect(scenario.steerAttemptCount()).toBe(1);
+});
+
+test("a cancelled delegation is reported as cancelled, not as a finish with no answer", async () => {
+  // The bug this pins: a cancelled child reached its parent as "finished" with an empty
+  // response, which reads as a result the parent did not understand. One parent created four
+  // copies of the same subagent in 45 seconds on that signal.
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: null });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.cancelChildAndReadParentPrompt();
+
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) was canceled.");
+  expect(parentPrompt).not.toContain("finished");
+  // And the instruction that stops the retry loop.
+  expect(parentPrompt).toContain("did not finish its work");
+  expect(parentPrompt).toContain("Do not create another agent for the same task");
+  expect(scenario.steerAttemptCount()).toBe(1);
+});
+
+test("an ordinary finish is untouched by the cancel path", async () => {
+  const scenario = createFinishNotificationScenario({
+    childLastAssistantMessage: "Done.",
+  });
+
+  scenario.startWatchingChild();
+  const parentPrompt = await scenario.finishChildAndReadParentPrompt();
+
+  expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
+  expect(parentPrompt).not.toContain("was canceled");
+  expect(parentPrompt).not.toContain("Do not create another agent");
 });
 
 test("finish notifications truncate oversized child responses", async () => {

@@ -1534,7 +1534,7 @@ export class Session {
     );
 
     const t0 = Date.now();
-    const cancellation = await this.agentManager.cancelAgentRun(agentId);
+    const cancellation = await this.agentManager.cancelAgentRun(agentId, "user");
     this.sessionLogger.debug(
       { agentId, cancellation: cancellation.status, durationMs: Date.now() - t0 },
       "interruptAgentIfRunning: cancelAgentRun completed",

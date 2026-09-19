@@ -485,7 +485,7 @@ describe("AgentTokenBurnMonitor spend governor", () => {
 
     await monitor.tick();
 
-    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1");
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1", "spend-governor");
     // Steering into an already-cancelled agent would start a fresh turn, so the notice has to
     // go in while the turn is still alive. Last steer before the cancel is the pause notice.
     const steerOrder = steer.calls.map((call) => call.body);
@@ -558,7 +558,7 @@ describe("AgentTokenBurnMonitor spend governor", () => {
 
     await monitor.tick();
 
-    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1");
+    expect(agentManager.cancelAgentRun).toHaveBeenCalledWith("agent-1", "spend-governor");
     // The failed stage is not reported as something that happened.
     expect(push.sent.map((p) => p.data?.stage)).toEqual(["notify", "stopFanOut", "pause"]);
   });
