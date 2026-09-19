@@ -37,6 +37,14 @@ Each provider definition owns its option schema and exact MCP preapproval mappin
 must fail closed for Hub unattended execution until it can approve one exact injected MCP server
 and tool identity without approving native tools.
 
+## Gating a tool call
+
+To deny a tool call deterministically on Claude, use a PreToolUse hook, not `canUseTool`. The permission callback is not consulted at all in `bypassPermissions` mode, which is the mode most agents here run in — from the SDK itself:
+
+> `canUseTool` will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
+
+A gate built on `canUseTool` therefore does nothing for those agents, and fails silently: it never runs, so it never logs, and the first sign is the thing it was meant to prevent. A PreToolUse hook runs in every permission mode, resolves before `canUseTool`, and denies with `hookSpecificOutput.permissionDecision: "deny"` and a `permissionDecisionReason` the model reads. Register one matcher per gate with its own tool matcher and timeout (`providers/claude/agent.ts`), re-check the tool name inside the callback, and fail open on any error — a gate that breaks tool calls is worse than the problem it solves. This is a Claude mechanism; other providers have no equivalent, so a cap that must hold across all of them needs a second layer that observes rather than refuses. [docs/device-leases.md](device-leases.md) is the worked example of both.
+
 ## Two Integration Patterns
 
 ### ACP (Agent Client Protocol) -- recommended

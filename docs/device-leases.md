@@ -70,11 +70,7 @@ Free memory here means free + speculative + purgeable pages, deliberately not th
 
 ## Enforcement
 
-The gate is a **PreToolUse hook**, not the permission layer. The SDK is explicit about why:
-
-> canUseTool will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
-
-Most of Tyler's agents run in `bypassPermissions`, so a deny from `handlePermissionRequest` would never fire for them. A hook does, in every permission mode, and it resolves before `canUseTool` runs.
+The gate is a **PreToolUse hook**, not the permission layer, because `canUseTool` is skipped entirely in `bypassPermissions` — the rule and the SDK's own wording are in [gating a tool call](providers.md#gating-a-tool-call).
 
 `agent/device-launch-commands.ts` decides what counts as a device launch: `xcrun simctl boot`, `open -a Simulator`, `xcodebuild -destination 'platform=iOS Simulator…'`, `emulator -avd <name>` / `emulator @<name>`, and `expo run:*` / `react-native run-*`. Matching is on argv tokens of the command actually being run, with quotes honoured, so `grep -rn 'simctl boot' docs/` is not a device launch. Commands that _use_ a device without booting one — `adb install`, `./gradlew installDebug`, `xcrun simctl launch` — are deliberately absent: they need a device that already exists, so gating them would refuse work that costs no slot.
 
