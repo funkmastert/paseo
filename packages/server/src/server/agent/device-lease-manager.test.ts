@@ -29,6 +29,11 @@ function emulatorRow(pid: number, ppid: number, avd: string): ProcessSampleRow {
   };
 }
 
+/** What the sweep hands the cap once `ps` has been read. */
+function runningSimulator(udid: string, uptimeSeconds: number) {
+  return { platform: "ios" as const, deviceId: udid, pid: 101, pids: [101], uptimeSeconds };
+}
+
 const UDID_A = "A0A912ED-C766-4778-957C-F9680C7309F3";
 const UDID_B = "1A9C8E3A-A8AC-4FAB-9286-D970E0F83945";
 const UDID_C = "00000000-1111-2222-3333-444444444444";
@@ -327,9 +332,46 @@ describe("DeviceLeaseManager", () => {
     await manager.checkout({ agentId: "agent-1", platform: "ios" });
     expect((await manager.getSnapshot()).used).toBe(1);
 
-    state.nowMs += 11 * 60_000;
+    state.nowMs += 26 * 60_000;
     expect((await manager.getSnapshot()).used).toBe(0);
   });
+
+  test("a long native build keeps the slot it is building for", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+
+    // A cold `expo run:ios`: pods, then a native build, then the simulator.
+    state.nowMs += 20 * 60_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // Well past the TTL measured from checkout, but only 20 minutes into this build.
+    state.nowMs += 20 * 60_000;
+    expect((await manager.getSnapshot()).used).toBe(1);
+  });
+
+  test("restarting the build clock does not stop the device binding to the lease", async () => {
+    const { manager, state } = createManager();
+
+    await manager.checkout({ agentId: "agent-1", platform: "ios", wait: false });
+    state.nowMs += 60_000;
+    await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
+
+    // The simulator this lease was waiting for boots 30s after that launch.
+    state.nowMs += 60_000;
+    state.rows = [simulatorRow(101, UDID_A, "00:30")];
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
+
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices).toEqual([
+      expect.objectContaining({ deviceId: UDID_A, attribution: "lease", agentId: "agent-1" }),
+    ]);
+  });
+
   test("a rebuild against the agent's own simulator does not take a second slot", async () => {
     const { manager, state } = createManager();
 
@@ -339,7 +381,10 @@ describe("DeviceLeaseManager", () => {
     // The simulator boots and the sweep binds the lease to it.
     state.nowMs += 60_000;
     state.rows = [simulatorRow(101, UDID_A, "00:30")];
-    await manager.reconcileFromSample({ devices: [], systemMemory: state.memory });
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
     expect((await manager.getSnapshot()).used).toBe(1);
 
     // Edit, rebuild, run again. A runner that names no device reuses the booted one, so this
@@ -358,7 +403,10 @@ describe("DeviceLeaseManager", () => {
     await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });
     state.nowMs += 60_000;
     state.rows = [simulatorRow(101, UDID_A, "00:30")];
-    await manager.reconcileFromSample({ devices: [], systemMemory: state.memory });
+    await manager.reconcileFromSample({
+      devices: [runningSimulator(UDID_A, 30)],
+      systemMemory: state.memory,
+    });
 
     state.nowMs += 120_000;
     await manager.gateLaunch({ agentId: "agent-1", command: "npx expo run:ios" });

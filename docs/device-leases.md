@@ -93,9 +93,11 @@ Reconciliation runs every sweep against the process scan:
 | ---------------- | ---------------------------------------------------------------- |
 | `released`       | The agent called `device_checkin`                                |
 | `device-stopped` | Its device is gone from the scan                                 |
-| `never-started`  | It never became a device within `pendingTtlMinutes` (10)         |
+| `never-started`  | It never became a device within `pendingTtlMinutes` (25)         |
 | `agent-gone`     | The daemon no longer knows the agent — archived, closed, crashed |
 | `expired`        | `maxLeaseHours` (12), the backstop                               |
+
+The `never-started` clock runs from the last launch the gate saw, not from checkout. A cold `expo run:ios` spends its first several minutes on pods and a native build before it boots anything, and a lease that expired mid-build would hand the slot to another agent moments before the device it was holding it for appeared — putting the machine over the cap, which is the state this exists to prevent. The gate restarts that clock, so the TTL only has to cover one build rather than a whole session. It deliberately does not touch `acquiredAtMs`: that is the clock a device binds against, and moving it forward would put the device the lease is waiting for in its own past.
 
 None of that can under-count, because occupancy is the **union** of running devices and leases-without-a-device. Reclaiming a crashed agent's lease does not hide its still-running emulator; the device simply becomes unattributed and keeps its slot. That invariant is what makes aggressive reclamation safe.
 
@@ -124,7 +126,7 @@ Under `agents.deviceLeases` (`persisted-config.ts`), live-toggleable like its si
 | `requireHeadroom`     | `true`  | Also refuse when memory is gone                     |
 | `minAvailableBytes`   | 0.5 GiB | Free-memory floor                                   |
 | `maxSwapUsedRatio`    | 0.85    | Swap ceiling                                        |
-| `pendingTtlMinutes`   | 10      | How long a lease may wait for its device to appear  |
+| `pendingTtlMinutes`   | 25      | How long a lease may wait for its device to appear  |
 | `maxLeaseHours`       | 12      | Backstop; 0 disables                                |
 | `queueTimeoutMinutes` | 20      | How long `device_checkout` waits                    |
 

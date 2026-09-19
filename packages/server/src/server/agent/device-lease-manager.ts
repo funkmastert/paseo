@@ -39,7 +39,15 @@ import { deriveDeviceSlotDefaults, evaluateMemoryHeadroom } from "./device-slot-
 import type { ProcessSampler, SystemMemorySample } from "./process-sampler.js";
 
 const GIBIBYTE = 1024 ** 3;
-const DEFAULT_PENDING_TTL_MINUTES = 10;
+/**
+ * How long a lease may wait for its device to appear. Generous on purpose: this is the window
+ * a cold `expo run:ios` needs to get through pods and a native build before it boots anything,
+ * and a lease that expires mid-build gives the slot away moments before the device it was
+ * holding it for shows up — putting the machine over the cap, which is the one state this
+ * whole feature exists to prevent. The gate restarts the clock on every launch it sees, so
+ * this only has to cover one build, not a whole session.
+ */
+const DEFAULT_PENDING_TTL_MINUTES = 25;
 const DEFAULT_MAX_LEASE_HOURS = 12;
 const DEFAULT_QUEUE_TIMEOUT_MINUTES = 20;
 /**
@@ -402,14 +410,16 @@ export class DeviceLeaseManager {
     // per platform an agent iterating on its own device would fill the platform by itself.
     // A launch that *does* name a device the scan has not seen is a genuinely new one and
     // still goes to the cap below.
-    if (
-      this.leases.some(
-        (lease) =>
-          lease.agentId === agentId &&
-          lease.platform === intent.platform &&
-          (lease.deviceId === undefined || intent.target === undefined),
-      )
-    ) {
+    const held = this.leases.find(
+      (lease) =>
+        lease.agentId === agentId &&
+        lease.platform === intent.platform &&
+        (lease.deviceId === undefined || intent.target === undefined),
+    );
+    if (held) {
+      // Restart the never-started clock. The agent is demonstrably still trying to bring this
+      // device up, and the build it is waiting on can outlast the TTL on its own.
+      if (held.deviceId === undefined) held.lastLaunchAtMs = this.now();
       return undefined;
     }
 
