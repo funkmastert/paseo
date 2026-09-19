@@ -689,4 +689,44 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     expect(agentManager.cancelAgentRun).not.toHaveBeenCalled();
     expect(agentManager.__alerts.get("agent-1")).toBeUndefined();
   });
+  test("a notify owed to an idle agent is said when it resumes, and not pushed twice", async () => {
+    const agent = summary({
+      labels: { [SPEND_BUDGET_LABEL]: "1M" },
+      totalTokens: 800_000,
+      isRunning: false,
+    });
+    const agentManager = createFakeAgentManager([agent]);
+    const push = createFakePushSender();
+    const steer = createFakeSteer();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager,
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: steer.fn,
+      readDaemonConfig: () => ({ tokenBurnMonitor: { governor: { enabled: true } } }),
+      logger: createLogger(),
+    });
+
+    // It crosses 0.75x between turns: a human hears about it, the agent cannot be told without
+    // starting a turn to say it.
+    await monitor.tick();
+    expect(push.sent).toHaveLength(1);
+    expect(steer.calls).toHaveLength(0);
+
+    // Its next turn starts. Now the message can land, and it is worth landing: wrapping up
+    // early is the only thing this stage is for.
+    agent.isRunning = true;
+    agent.totalTokens = 820_000;
+    await monitor.tick();
+    expect(steer.calls).toHaveLength(1);
+    expect(steer.calls[0]?.body).toContain("Start wrapping up");
+    // The human was already told. One crossing, one push.
+    expect(push.sent).toHaveLength(1);
+
+    // And it is not repeated every sweep from here on.
+    agent.totalTokens = 840_000;
+    await monitor.tick();
+    expect(steer.calls).toHaveLength(1);
+  });
 });

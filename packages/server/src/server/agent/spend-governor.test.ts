@@ -172,7 +172,13 @@ describe("planSpendGovernorActions", () => {
     const result = planSpendGovernorActions({
       agent: agent({ totalTokens: 5_000_000 }),
       config: config({ enabled: false }),
-      previousState: { budgetTokens: 1_000_000, firedStages: ["stopFanOut"], fanOutBlocked: true },
+      previousState: {
+        budgetTokens: 1_000_000,
+        firedStages: ["stopFanOut"],
+        fanOutBlocked: true,
+        wasRunning: true,
+        undeliveredStages: [],
+      },
     });
     expect(result.actions).toEqual([]);
     // State is dropped, which is what releases an agent whose fan-out was blocked.
@@ -193,7 +199,83 @@ describe("planSpendGovernorActions", () => {
       config: config(),
       previousState: idle.nextState,
     });
-    expect(resumed.actions.map((a) => a.stage)).toEqual(["downgrade", "pause"]);
+    // The two that fired while it was idle are said to it now, and the two that waited for a
+    // running agent happen now. Ladder order throughout.
+    expect(resumed.actions).toEqual([
+      expect.objectContaining({ stage: "notify", redelivery: true }),
+      expect.objectContaining({ stage: "stopFanOut", redelivery: true }),
+      expect.objectContaining({ stage: "downgrade" }),
+      expect.objectContaining({ stage: "pause" }),
+    ]);
+  });
+
+  // `notify` is the only stage on by default and its whole value is the chance to wrap up
+  // early. An agent that crossed 0.75x between turns was marked told and never heard a word.
+  test("notify reaches an agent that was idle when it crossed", () => {
+    const crossedWhileIdle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({
+        downgrade: { enabled: false, atFraction: 1 },
+        stopFanOut: { enabled: false, atFraction: 1 },
+        pause: { enabled: false, atFraction: 1.5 },
+      }),
+      previousState: undefined,
+    });
+    expect(crossedWhileIdle.actions.map((a) => a.stage)).toEqual(["notify"]);
+    expect(crossedWhileIdle.nextState?.undeliveredStages).toEqual(["notify"]);
+
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({
+        downgrade: { enabled: false, atFraction: 1 },
+        stopFanOut: { enabled: false, atFraction: 1 },
+        pause: { enabled: false, atFraction: 1.5 },
+      }),
+      previousState: crossedWhileIdle.nextState,
+    });
+    expect(resumed.actions).toEqual([
+      // The spend as it reads now, not as it read when the stage fired: the agent is about to
+      // read this sentence and should get the number it can still act on.
+      expect.objectContaining({ stage: "notify", redelivery: true, spentTokens: 850_000 }),
+    ]);
+    expect(resumed.nextState?.undeliveredStages).toEqual([]);
+  });
+
+  test("a message owed is said once, not every sweep after", () => {
+    const idle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: undefined,
+    });
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: idle.nextState,
+    });
+    expect(resumed.actions.filter((a) => a.redelivery)).not.toEqual([]);
+
+    const later = planSpendGovernorActions({
+      agent: agent({ totalTokens: 900_000, isRunning: true }),
+      config: config({ pause: { enabled: false, atFraction: 1.5 } }),
+      previousState: resumed.nextState,
+    });
+    expect(later.actions).toEqual([]);
+  });
+
+  test("a dry run owes nothing, because it says nothing", () => {
+    const idle = planSpendGovernorActions({
+      agent: agent({ totalTokens: 800_000, isRunning: false }),
+      config: config({ dryRun: true }),
+      previousState: undefined,
+    });
+    expect(idle.nextState?.undeliveredStages).toEqual([]);
+
+    const resumed = planSpendGovernorActions({
+      agent: agent({ totalTokens: 850_000, isRunning: true }),
+      config: config({ dryRun: true }),
+      previousState: idle.nextState,
+    });
+    expect(resumed.actions.filter((a) => a.redelivery)).toEqual([]);
   });
 
   test("downgrade is skipped, and not retried forever, when there is nowhere to go", () => {

@@ -81,6 +81,16 @@ export interface SpendGovernorState {
    * next sweep would look like an agent that never stopped, and `pause` would stay fired.
    */
   wasRunning: boolean;
+  /**
+   * Stages that fired while the agent was idle, so the message never reached it. Steering an
+   * idle agent starts a fresh turn (agent-prompt.ts's fallback), which would spend tokens to
+   * say an agent is out of tokens — so the message waits here until the agent is mid-turn.
+   *
+   * Firing and telling are separate for exactly one stage that matters: `notify` is the only
+   * stage on by default, its whole value is the chance to wrap up early, and an agent that
+   * crossed 0.75x between turns used to be marked told and never hear a word.
+   */
+  undeliveredStages: readonly SpendGovernorStage[];
 }
 
 /** Per-agent facts the planner needs. A lean view, like the monitor summaries it is built from. */
@@ -102,6 +112,11 @@ export interface SpendGovernorAction {
   spentTokens: number;
   /** Set on `downgrade`: the model to move to. */
   targetModel?: string;
+  /**
+   * This stage already fired and was already pushed; all that is left is the message that
+   * could not be delivered at the time. Perform nothing, push nothing, just tell the agent.
+   */
+  redelivery?: boolean;
 }
 
 export interface PlanSpendGovernorInput {
@@ -195,6 +210,53 @@ function isStoppingTheAgent(
   return !config.dryRun && actions.some((action) => action.stage === "pause");
 }
 
+/**
+ * The messages owed to an agent that has just come back mid-turn. A stage that fired while it
+ * was idle went out as a push and a state change but was never said to the agent itself; this
+ * is where it finally gets said. Ladder order, and only what is genuinely outstanding.
+ */
+/** Where a downgrade is headed. Empty for every other stage, and for a downgrade with nowhere to go. */
+function targetModelFor(
+  stage: SpendGovernorStage,
+  config: SpendGovernorConfig,
+): { targetModel?: string } {
+  if (stage !== "downgrade" || !config.downgradeToModel) return {};
+  return { targetModel: config.downgradeToModel };
+}
+
+/**
+ * Whether this stage's message has to wait. An idle agent cannot be steered without starting a
+ * turn, and a dry run says nothing to anybody.
+ */
+function messageWaits(agent: SpendGovernorAgentInput, config: SpendGovernorConfig): boolean {
+  if (config.dryRun) return false;
+  return !agent.isRunning;
+}
+
+function planRedeliveries(input: {
+  agent: SpendGovernorAgentInput;
+  undelivered: Set<SpendGovernorStage>;
+  budgetTokens: number;
+  spentTokens: number;
+  config: SpendGovernorConfig;
+}): SpendGovernorAction[] {
+  if (!input.agent.isRunning || input.config.dryRun) return [];
+  const actions: SpendGovernorAction[] = [];
+  for (const stage of SPEND_GOVERNOR_STAGES) {
+    if (!input.undelivered.delete(stage)) continue;
+    actions.push({
+      agentId: input.agent.id,
+      stage,
+      budgetTokens: input.budgetTokens,
+      // The spend as it reads now, not as it read when the stage fired: the agent is about to
+      // read this sentence, and the number in it should be the one it can still act on.
+      spentTokens: input.spentTokens,
+      redelivery: true,
+    });
+  }
+  return actions;
+}
+
 function shouldReArmPause(
   carried: SpendGovernorState | undefined,
   agent: SpendGovernorAgentInput,
@@ -224,12 +286,20 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
       ? input.previousState
       : undefined;
   const fired = new Set<SpendGovernorStage>(carried?.firedStages ?? []);
+  const undelivered = new Set<SpendGovernorStage>(carried?.undeliveredStages ?? []);
   const fraction = spentTokens / budgetTokens;
-  const actions: SpendGovernorAction[] = [];
 
   if (shouldReArmPause(carried, agent, fraction, config)) {
     fired.delete("pause");
   }
+
+  const actions: SpendGovernorAction[] = planRedeliveries({
+    agent,
+    undelivered,
+    budgetTokens,
+    spentTokens,
+    config,
+  });
 
   for (const stage of SPEND_GOVERNOR_STAGES) {
     if (!stageIsReady(stageConfig(config, stage), stage, fired, fraction)) {
@@ -243,14 +313,17 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
       continue;
     }
     fired.add(stage);
+    // `notify` and `stopFanOut` can fire on an idle agent, and an idle agent cannot be steered
+    // without starting a turn. Remember the message rather than counting it as said.
+    if (messageWaits(agent, config)) {
+      undelivered.add(stage);
+    }
     actions.push({
       agentId: agent.id,
       stage,
       budgetTokens,
       spentTokens,
-      ...(stage === "downgrade" && config.downgradeToModel
-        ? { targetModel: config.downgradeToModel }
-        : {}),
+      ...targetModelFor(stage, config),
     });
   }
 
@@ -261,6 +334,7 @@ export function planSpendGovernorActions(input: PlanSpendGovernorInput): PlanSpe
       firedStages: [...fired],
       fanOutBlocked: fired.has("stopFanOut") && !config.dryRun,
       wasRunning: agent.isRunning && !isStoppingTheAgent(actions, config),
+      undeliveredStages: [...undelivered],
     },
   };
 }

@@ -462,6 +462,22 @@ export class AgentTokenBurnMonitor {
     dryRun: boolean,
   ): Promise<void> {
     for (const { agent, action } of planned) {
+      if (action.redelivery) {
+        // The stage already happened and was already pushed, on a sweep where the agent was
+        // idle and could not be steered. Only the message is outstanding: perform nothing,
+        // push nothing again, just say the thing it never heard.
+        await this.tellAgent(action.agentId, formatGovernorMessage(action));
+        this.logger.info(
+          {
+            agentId: action.agentId,
+            stage: action.stage,
+            budgetTokens: action.budgetTokens,
+            spentTokens: Math.round(action.spentTokens),
+          },
+          "Spend governor told a resumed agent about a stage it missed",
+        );
+        continue;
+      }
       if (dryRun) {
         this.logger.info(
           {
