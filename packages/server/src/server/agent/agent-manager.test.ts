@@ -20,7 +20,7 @@ import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
-import { McpAdoptError } from "../mcp-gateway/adopt-failure.js";
+import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
 import type { ProviderSubagentStore } from "./provider-subagents/store.js";
@@ -3783,7 +3783,7 @@ test("adoptMcpGatewayServer names the cause instead of flattening every failure 
   const reasonOf = async (name: string, agentId: string): Promise<unknown> =>
     manager.adoptMcpGatewayServer({ name, agentId }).then(
       () => null,
-      (error: unknown) => (error instanceof McpAdoptError ? error.reason : error),
+      (error: unknown) => (error instanceof McpGatewayActionError ? error.reason : error),
     );
 
   expect(await reasonOf("remote", "no-such-agent")).toBe("unknown_agent");
@@ -3809,10 +3809,10 @@ test("adoptMcpGatewayServer names the cause instead of flattening every failure 
   };
   const signedOut = await manager.adoptMcpGatewayServer({ name: "absent", agentId: agent.id }).then(
     () => null,
-    (error: unknown) => (error instanceof McpAdoptError ? error : null),
+    (error: unknown) => (error instanceof McpGatewayActionError ? error : null),
   );
   expect(signedOut?.reason).toBe("account_signed_out");
-  expect(signedOut?.remedyCommand).toBe(`CLAUDE_CONFIG_DIR=${configDir} claude /login`);
+  expect(signedOut?.remedy).toEqual({ command: `CLAUDE_CONFIG_DIR=${configDir} claude /login` });
   // A local entry is decided about this server, so it still wins over the account's state.
   expect(await reasonOf("local-fs", agent.id)).toBe("server_is_local");
 

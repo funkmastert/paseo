@@ -48,7 +48,8 @@ import {
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
 import { AgentProviderMoveError } from "./agent/provider-move.js";
-import { McpAdoptError } from "./mcp-gateway/adopt-failure.js";
+import { McpGatewayActionError } from "./mcp-gateway/action-failure.js";
+import type { McpGatewayRemedy } from "./mcp-gateway/action-failure.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -683,6 +684,26 @@ function workspaceLabelErrorCode(error: unknown): string {
     return error.code;
   }
   return "workspace_label_failed";
+}
+
+interface GatewayRemedyPayload {
+  remedyCommand: string | null;
+  remedyPath: string | null;
+  remedyRedirectUrl: string | null;
+}
+
+/** Flattens a failure's remedy onto the wire; every field null when there is nothing to do. */
+function gatewayRemedyPayload(failure: { remedy: McpGatewayRemedy } | null): GatewayRemedyPayload {
+  const remedy = failure?.remedy;
+  return {
+    remedyCommand: remedy?.command ?? null,
+    remedyPath: remedy?.path ?? null,
+    remedyRedirectUrl: remedy?.redirectUrl ?? null,
+  };
+}
+
+function emptyGatewayRemedy(): GatewayRemedyPayload {
+  return gatewayRemedyPayload(null);
 }
 
 export class Session {
@@ -4512,15 +4533,28 @@ export class Session {
       );
       this.emit({
         type: "mcp_gateway.auth.start.response",
-        payload: { requestId: request.requestId, authorizationUrl, error: null },
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          ...emptyGatewayRemedy(),
+        },
       });
     } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, reason: failure?.reason },
+        "Failed to start MCP gateway authorization",
+      );
       this.emit({
         type: "mcp_gateway.auth.start.response",
         payload: {
           requestId: request.requestId,
           authorizationUrl: null,
           error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
+          reason: failure?.reason ?? null,
+          ...gatewayRemedyPayload(failure),
         },
       });
     }
@@ -4541,11 +4575,11 @@ export class Session {
           authorizationUrl,
           error: null,
           reason: null,
-          remedyCommand: null,
+          ...emptyGatewayRemedy(),
         },
       });
     } catch (error) {
-      const failure = error instanceof McpAdoptError ? error : null;
+      const failure = error instanceof McpGatewayActionError ? error : null;
       this.sessionLogger.warn(
         { err: error, name: request.name, agentId: request.agentId, reason: failure?.reason },
         "Failed to broker the MCP server",
@@ -4557,7 +4591,7 @@ export class Session {
           authorizationUrl: null,
           error: getErrorMessageOr(error, "Failed to broker the MCP server"),
           reason: failure?.reason ?? null,
-          remedyCommand: failure?.remedyCommand ?? null,
+          ...gatewayRemedyPayload(failure),
         },
       });
     }

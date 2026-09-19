@@ -87,6 +87,12 @@ export class McpGatewayTokenStore {
     this.logger = logger?.child({ module: "mcp-gateway-token-store" });
   }
 
+  /** Where hand-written credentials go. Named in the error that asks for them, resolved rather
+   * than as `$PASEO_HOME/…` so the person reading it can open the file without resolving it. */
+  get credentialsPath(): string {
+    return this.filePath;
+  }
+
   private readAll(): McpGatewayTokenFile {
     if (!existsSync(this.filePath)) {
       return EMPTY_TOKEN_FILE;

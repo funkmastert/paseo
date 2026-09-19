@@ -8,6 +8,7 @@ import {
   McpGatewayOAuthStateStore,
   MissingOAuthClientError,
   createGatewayOAuthClientProvider,
+  describeOAuthFailure,
 } from "./oauth.js";
 
 function writeTokenFile(paseoHome: string, servers: Record<string, unknown>): void {
@@ -245,13 +246,83 @@ describe("MissingOAuthClientError", () => {
     const error = new MissingOAuthClientError(
       "slack",
       "https://daemon.example.test/mcp/gateway/oauth/callback",
+      "/home/t/.paseo/mcp-gateway/tokens.json",
     );
 
     expect(error.message).toContain('"slack"');
     expect(error.message).toContain("https://daemon.example.test/mcp/gateway/oauth/callback");
-    expect(error.message).toContain("$PASEO_HOME/mcp-gateway/tokens.json");
+    // The resolved path, not "$PASEO_HOME/…" the reader would have to expand themselves.
+    expect(error.message).toContain("/home/t/.paseo/mcp-gateway/tokens.json");
     expect(error.message).toContain("clientCredentials");
     // The SDK's own phrasing ("Incompatible auth server") names a limitation with no next step.
     expect(error.message).not.toContain("Incompatible auth server");
+    // It leads with what to do, not with what the server does not support.
+    expect(error.message.indexOf("needs an OAuth app you register yourself")).toBeLessThan(
+      error.message.indexOf("does not support dynamic client registration"),
+    );
+  });
+});
+
+describe("describeOAuthFailure", () => {
+  test("humanises the SDK's parse failure into the refusal it was actually reporting", () => {
+    // Verbatim shape from client/auth.js `parseErrorResponse` when a body is not OAuth JSON.
+    const sdkError = new Error(
+      "HTTP 403: Invalid OAuth error response: SyntaxError: Unexpected token 'F', " +
+        '"Forbidden" is not valid JSON. Raw body: Forbidden',
+    );
+
+    expect(describeOAuthFailure("figma", sdkError)).toEqual({
+      reason: "server_rejected",
+      message: "figma refused the sign-in request with HTTP 403 and said: Forbidden.",
+    });
+  });
+
+  test("keeps the status code, which is the only part of that message worth reading", () => {
+    const described = describeOAuthFailure(
+      "figma",
+      new Error("HTTP 503: Invalid OAuth error response: SyntaxError: boom. Raw body: "),
+    );
+
+    expect(described.message).toBe(
+      "figma refused the sign-in request with HTTP 503 and gave no reason.",
+    );
+  });
+
+  test("clips a long upstream body instead of pasting a whole error page into the strip", () => {
+    const described = describeOAuthFailure(
+      "figma",
+      new Error(
+        `HTTP 500: Invalid OAuth error response: SyntaxError: boom. Raw body: ${"<html>".repeat(80)}`,
+      ),
+    );
+
+    expect(described.message.length).toBeLessThan(220);
+    expect(described.message).toContain("…");
+  });
+
+  test("names an unreachable server separately from one that refused", () => {
+    const network = new Error("fetch failed");
+    (network as Error & { cause?: unknown }).cause = new Error(
+      "getaddrinfo ENOTFOUND mcp.figma.com",
+    );
+
+    expect(describeOAuthFailure("figma", network).reason).toBe("server_unreachable");
+  });
+
+  test("falls back to the error's own message when it is already a real OAuth description", () => {
+    expect(describeOAuthFailure("figma", new Error("The user denied the request"))).toEqual({
+      reason: "authorization_failed",
+      message: "The user denied the request",
+    });
+  });
+
+  test("says something when the server sent an OAuth error with no description at all", () => {
+    const bare = new Error("");
+    bare.name = "AccessDeniedError";
+
+    expect(describeOAuthFailure("figma", bare)).toEqual({
+      reason: "server_rejected",
+      message: "figma refused the sign-in request (AccessDeniedError).",
+    });
   });
 });

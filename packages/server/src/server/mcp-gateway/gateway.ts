@@ -31,12 +31,15 @@ import {
 } from "./state.js";
 import {
   createGatewayOAuthClientProvider,
+  describeOAuthFailure,
   exchangeMcpGatewayAuthorizationCode,
   McpGatewayOAuthStateStore,
+  MissingOAuthClientError,
   startMcpGatewayAuthorization,
   type StartMcpGatewayAuthResult,
 } from "./oauth.js";
 import { McpGatewayTokenStore } from "./token-store.js";
+import { McpGatewayActionError } from "./action-failure.js";
 import type { PushNotificationSender } from "../push/index.js";
 
 interface LoggerLike {
@@ -138,6 +141,25 @@ function nextConnectEvent(
 export interface McpGatewayNotifier {
   pushNotificationSender: PushNotificationSender;
   serverId: string;
+}
+
+/**
+ * Maps whatever the OAuth start threw onto a reason. `MissingOAuthClientError` is the one that
+ * is not a failure at all — sign-in never began, because the operator has not supplied a client
+ * yet — so it carries the two host facts that let a client tell them what to do.
+ */
+function toStartAuthorizationFailure(name: string, error: unknown): McpGatewayActionError {
+  if (error instanceof McpGatewayActionError) {
+    return error;
+  }
+  if (error instanceof MissingOAuthClientError) {
+    return new McpGatewayActionError("client_not_registered", error.message, {
+      redirectUrl: error.redirectUrl,
+      path: error.credentialsPath,
+    });
+  }
+  const described = describeOAuthFailure(name, error);
+  return new McpGatewayActionError(described.reason, described.message);
 }
 
 export interface McpGatewayOptions {
@@ -431,17 +453,37 @@ export class McpGateway {
   async startAuthorization(name: string): Promise<StartMcpGatewayAuthResult> {
     const runtime = this.servers.get(name);
     if (!runtime) {
-      throw new Error(`Unknown MCP gateway server "${name}"`);
+      throw new McpGatewayActionError("unknown_server", `Unknown MCP gateway server "${name}"`);
     }
     if (runtime.config.auth === "static") {
-      throw new Error(`MCP gateway server "${name}" uses static auth; nothing to authorize`);
+      throw new McpGatewayActionError(
+        "static_auth",
+        `MCP gateway server "${name}" uses static auth; nothing to authorize`,
+      );
     }
-    return startMcpGatewayAuthorization({
-      serverName: name,
-      serverUrl: runtime.config.url,
-      redirectUrl: this.resolveOAuthRedirectUrl(name),
-      provider: this.buildOAuthProvider(name),
-    });
+    const redirectUrl = this.requireOAuthRedirectUrl(name);
+    try {
+      return await startMcpGatewayAuthorization({
+        serverName: name,
+        serverUrl: runtime.config.url,
+        redirectUrl,
+        credentialsPath: this.tokenStore.credentialsPath,
+        provider: this.buildOAuthProvider(name),
+      });
+    } catch (error) {
+      throw toStartAuthorizationFailure(name, error);
+    }
+  }
+
+  /** Same as `resolveOAuthRedirectUrl`, typed as a failure the strip can explain. */
+  private requireOAuthRedirectUrl(name: string): string {
+    if (!this.oauthRedirectBaseUrl) {
+      throw new McpGatewayActionError(
+        "no_redirect_url",
+        `MCP gateway server "${name}" needs OAuth but no reachable redirect base URL is configured`,
+      );
+    }
+    return `${this.oauthRedirectBaseUrl}/mcp/gateway/oauth/callback`;
   }
 
   buildOAuthProvider(name: string): OAuthClientProvider {

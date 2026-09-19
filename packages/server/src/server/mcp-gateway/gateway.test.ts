@@ -18,6 +18,7 @@ import {
   type McpGatewaySnapshotEntry,
 } from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
+import { McpGatewayActionError } from "./action-failure.js";
 
 interface FakePushPayload {
   title: string;
@@ -131,7 +132,11 @@ async function startFixtureMcpServer(options: {
  * mocks. No protected resource endpoint is mounted — `startAuthorization()` never calls it,
  * only the authorization server's own discovery and registration endpoints.
  */
-async function startOAuthAuthorizationServer(): Promise<{ url: string }> {
+async function startOAuthAuthorizationServer(options?: {
+  /** false drops `registration_endpoint` from the metadata, the way an upstream without DCR
+   * advertises itself — which is what makes the SDK ask for a hand-registered client. */
+  supportsRegistration?: boolean;
+}): Promise<{ url: string }> {
   // Bind an ephemeral port first (port 0) so `issuerUrl` can be constructed before the
   // auth router — which signs URLs from it — is mounted.
   const probe = http.createServer();
@@ -143,6 +148,19 @@ async function startOAuthAuthorizationServer(): Promise<{ url: string }> {
   const app = express();
   app.use(express.json());
   app.use(express.urlencoded({ extended: false }));
+  if (options?.supportsRegistration === false) {
+    app.use((_req, res, next) => {
+      const sendJson = res.json.bind(res);
+      res.json = (body: unknown) => {
+        if (body && typeof body === "object" && "registration_endpoint" in body) {
+          const { registration_endpoint: _dropped, ...rest } = body as Record<string, unknown>;
+          return sendJson(rest);
+        }
+        return sendJson(body);
+      };
+      next();
+    });
+  }
   app.use(
     mcpAuthRouter({
       provider: new DemoInMemoryAuthProvider(),
@@ -159,6 +177,18 @@ async function startOAuthAuthorizationServer(): Promise<{ url: string }> {
   fixtureServers.push(() => new Promise<void>((resolve) => httpServer.close(() => resolve())));
 
   return { url: baseUrl.toString() };
+}
+
+/** The typed failure a gateway action rejected with, for asserting on `reason` and `remedy`. */
+async function actionFailureOf(operation: Promise<unknown>): Promise<McpGatewayActionError> {
+  let caught: unknown;
+  try {
+    await operation;
+  } catch (error) {
+    caught = error;
+  }
+  expect(caught).toBeInstanceOf(McpGatewayActionError);
+  return caught as McpGatewayActionError;
 }
 
 describe("McpGateway", () => {
@@ -473,6 +503,9 @@ describe("McpGateway", () => {
       await expect(gateway.startAuthorization("never-configured")).rejects.toThrow(
         /Unknown MCP gateway server/,
       );
+      await expect(gateway.startAuthorization("never-configured")).rejects.toMatchObject({
+        reason: "unknown_server",
+      });
     });
 
     test("a static-auth server rejects: its credential is a stored header, not an interactive flow", async () => {
@@ -485,7 +518,59 @@ describe("McpGateway", () => {
         oauthRedirectBaseUrl: "https://daemon.example.test",
       });
 
-      await expect(gateway.startAuthorization("slack")).rejects.toThrow(/static auth/);
+      await expect(gateway.startAuthorization("slack")).rejects.toMatchObject({
+        reason: "static_auth",
+      });
+    });
+
+    test("names the reason for every way starting sign-in can fail", async () => {
+      const home = createTempHome();
+      const withoutRedirectBase = new McpGateway({
+        paseoHome: home,
+        config: {
+          enabled: true,
+          servers: { fixture: { url: "http://127.0.0.1:1/mcp", transport: "http", auth: "oauth" } },
+        },
+      });
+
+      // Nothing the daemon can hand an upstream as a callback target.
+      await expect(withoutRedirectBase.startAuthorization("fixture")).rejects.toMatchObject({
+        reason: "no_redirect_url",
+      });
+
+      // An upstream that is not listening at all is unreachable, not unauthenticated.
+      const unreachable = new McpGateway({
+        paseoHome: home,
+        config: {
+          enabled: true,
+          servers: { fixture: { url: "http://127.0.0.1:1/mcp", transport: "http", auth: "oauth" } },
+        },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+      const failure = await actionFailureOf(unreachable.startAuthorization("fixture"));
+      expect(failure.reason).toBe("server_unreachable");
+      expect(failure.message).not.toContain("SyntaxError");
+    });
+
+    test("asks for a hand-registered OAuth app, naming the redirect URI and the file to write", async () => {
+      const authServer = await startOAuthAuthorizationServer({ supportsRegistration: false });
+      const home = createTempHome();
+      const gateway = new McpGateway({
+        paseoHome: home,
+        config: {
+          enabled: true,
+          servers: { slack: { url: authServer.url, transport: "http", auth: "oauth" } },
+        },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+
+      const failure = await actionFailureOf(gateway.startAuthorization("slack"));
+
+      expect(failure.reason).toBe("client_not_registered");
+      expect(failure.remedy).toEqual({
+        redirectUrl: "https://daemon.example.test/mcp/gateway/oauth/callback",
+        path: path.join(home, "mcp-gateway", "tokens.json"),
+      });
     });
 
     test("an oauth-class server returns an authorization URL carrying a PKCE challenge (R6, happy path)", async () => {

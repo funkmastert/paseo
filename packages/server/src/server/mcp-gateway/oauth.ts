@@ -179,6 +179,8 @@ export async function startMcpGatewayAuthorization(params: {
   serverUrl: string;
   /** Named in the pre-registration error: the URI the operator's own OAuth app must allow. */
   redirectUrl: string;
+  /** Named in the same error: the file the operator writes the client credentials into. */
+  credentialsPath: string;
   provider: OAuthClientProvider;
 }): Promise<StartMcpGatewayAuthResult> {
   let capturedUrl: URL | undefined;
@@ -194,7 +196,11 @@ export async function startMcpGatewayAuthorization(params: {
     result = await runOAuthOrchestration(provider, { serverUrl: params.serverUrl });
   } catch (error) {
     if (isDynamicClientRegistrationUnsupported(error)) {
-      throw new MissingOAuthClientError(params.serverName, params.redirectUrl);
+      throw new MissingOAuthClientError(
+        params.serverName,
+        params.redirectUrl,
+        params.credentialsPath,
+      );
     }
     throw error;
   }
@@ -217,24 +223,104 @@ function isDynamicClientRegistrationUnsupported(error: unknown): boolean {
 
 /**
  * Raised instead of the SDK's DCR complaint when a server needs an OAuth app registered by hand.
- * The message is what the MCP status strip shows, so it names the file to edit, the shape to
- * write, and the redirect URI the upstream app has to be registered with — none of which the
- * user can derive from "incompatible auth server".
+ * Sign-in never starts, so this is not an authentication failure; it is a request for a
+ * credential only the operator can supply. The message stays a complete sentence for logs and
+ * for a client too old to read `reason`, while the two host facts a person needs — the redirect
+ * URI to register and the file to write — also travel structurally so the app can lead with
+ * them instead of burying them at the end of a paragraph.
  */
 export class MissingOAuthClientError extends Error {
   constructor(
     readonly serverName: string,
     readonly redirectUrl: string,
+    readonly credentialsPath: string,
   ) {
     super(
-      `MCP server "${serverName}" does not support dynamic client registration, so it needs an ` +
-        `OAuth app you register yourself. Register one with redirect URI ${redirectUrl}, then add ` +
-        `its credentials to $PASEO_HOME/mcp-gateway/tokens.json as servers."${serverName}" = ` +
-        `{"auth":"oauth","clientCredentials":{"clientId":"…","clientSecret":"…"}} ` +
-        `(omit clientSecret if the server issues none) and sign in again.`,
+      `MCP server "${serverName}" needs an OAuth app you register yourself: it does not support ` +
+        `dynamic client registration. Register an app with redirect URI ${redirectUrl}, then put ` +
+        `its client id and secret in ${credentialsPath} under ` +
+        `servers."${serverName}".clientCredentials and sign in again.`,
     );
     this.name = "MissingOAuthClientError";
   }
+}
+
+/**
+ * The SDK's fallback when an upstream answers an OAuth request with something that is not an
+ * OAuth error body: it JSON-parses the body, fails, and reports the parse failure. What reached
+ * the strip was `HTTP 403: Invalid OAuth error response: SyntaxError: Unexpected token 'F',
+ * "Forbidden" i…` — a message about a parser, for a person who wanted to know their request was
+ * refused. The status code and the body are the parts worth keeping.
+ */
+const INVALID_OAUTH_ERROR_BODY =
+  /^(?:HTTP (\d{3}): )?Invalid OAuth error response: .*?\. Raw body: ([\s\S]*)$/;
+
+const MAX_UPSTREAM_BODY_CHARS = 120;
+
+export interface OAuthFailureDescription {
+  reason: "server_rejected" | "server_unreachable" | "authorization_failed";
+  message: string;
+}
+
+/**
+ * Turns whatever the SDK's `auth()` threw into something a person can act on. Network failures
+ * and upstream refusals are different problems with different next steps, and neither is the
+ * authorization step failing.
+ */
+export function describeOAuthFailure(serverName: string, error: unknown): OAuthFailureDescription {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.trim().length === 0) {
+    // The SDK builds an OAuth error from `error_description`, which the spec lets a server omit.
+    // The class name is then the only thing left that says anything.
+    const kind = error instanceof Error ? error.name : "unknown error";
+    return {
+      reason: "server_rejected",
+      message: `${serverName} refused the sign-in request (${kind}).`,
+    };
+  }
+  const unparseable = INVALID_OAUTH_ERROR_BODY.exec(raw);
+  if (unparseable) {
+    const status = unparseable[1];
+    const body = summarizeUpstreamBody(unparseable[2] ?? "");
+    const statusClause = status ? ` with HTTP ${status}` : "";
+    const bodyClause = body ? ` and said: ${body}` : " and gave no reason";
+    return {
+      reason: "server_rejected",
+      message: `${serverName} refused the sign-in request${statusClause}${bodyClause}.`,
+    };
+  }
+  if (isNetworkFailure(error)) {
+    return {
+      reason: "server_unreachable",
+      message: `${serverName} could not be reached: ${raw}`,
+    };
+  }
+  return { reason: "authorization_failed", message: raw };
+}
+
+function summarizeUpstreamBody(body: string): string {
+  const collapsed = body.replace(/\s+/g, " ").trim();
+  if (collapsed.length === 0) {
+    return "";
+  }
+  return collapsed.length > MAX_UPSTREAM_BODY_CHARS
+    ? `${collapsed.slice(0, MAX_UPSTREAM_BODY_CHARS)}…`
+    : collapsed;
+}
+
+// Node reports a failed connection as a TypeError from fetch with a `cause`; the SDK does not
+// wrap it, so the shape is all there is to go on.
+function isNetworkFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (/fetch failed|ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|network/i.test(error.message)) {
+    return true;
+  }
+  const cause = (error as { cause?: unknown }).cause;
+  return (
+    cause instanceof Error && /ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN/i.test(cause.message)
+  );
 }
 
 /**

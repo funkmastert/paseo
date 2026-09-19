@@ -6324,6 +6324,18 @@ export const DeviceStatusUpdateMessageSchema = z.object({
   }),
 });
 
+/**
+ * How a person clears a gateway failure, in host specifics a client composes its own sentence
+ * from — a command to run, a file to edit, a redirect URI to register an OAuth app with. Never
+ * product copy, which the client owns and translates, and never a secret.
+ */
+const McpGatewayRemedyFields = {
+  // COMPAT(mcpGatewayRemedy): added in v0.8.0, remove optional parsing after 2027-09-18.
+  remedyCommand: z.string().nullable().optional(),
+  remedyPath: z.string().nullable().optional(),
+  remedyRedirectUrl: z.string().nullable().optional(),
+};
+
 // Response to McpGatewayServerAdoptRequestSchema. `authorizationUrl` is set when the adopted
 // server still needs interactive OAuth; null with `error` null means it connected outright (a
 // static header adopted from the agent's config). Same no-secrets rule as auth.start below.
@@ -6341,21 +6353,28 @@ export const McpGatewayServerAdoptResponseMessageSchema = z.object({
     error: z.string().nullable(),
     // COMPAT(mcpAdoptReason): added in v0.8.0, remove optional parsing after 2027-09-18.
     reason: z.string().nullable().optional(),
-    /** A command the person runs on the host to clear it. Never something Paseo can do. */
-    remedyCommand: z.string().nullable().optional(),
+    ...McpGatewayRemedyFields,
   }),
 });
 
 // Response to McpGatewayAuthStartRequestSchema (U6/KTD3). `authorizationUrl` is null only
 // when `error` is set — unknown server, a static-auth server with nothing to authorize
-// interactively, or a discovery/PKCE failure surfaced as a friendly message. Never carries
-// tokens or the PKCE verifier — the authorization URL itself is public (challenge only).
+// interactively, an upstream that needs a hand-registered OAuth app, or a discovery/PKCE
+// failure. Never carries tokens or the PKCE verifier — the authorization URL itself is public
+// (challenge only), and the remedy fields are host paths and URIs, never a secret.
+//
+// `reason` names the cause the way the adopt response does, from the same vocabulary. Known
+// values here: gateway_disabled, unknown_server, static_auth, no_redirect_url,
+// client_not_registered, server_rejected, server_unreachable, authorization_failed.
 export const McpGatewayAuthStartResponseMessageSchema = z.object({
   type: z.literal("mcp_gateway.auth.start.response"),
   payload: z.object({
     requestId: z.string(),
     authorizationUrl: z.string().nullable(),
     error: z.string().nullable(),
+    // COMPAT(mcpAuthStartReason): added in v0.8.0, remove optional parsing after 2027-09-18.
+    reason: z.string().nullable().optional(),
+    ...McpGatewayRemedyFields,
   }),
 });
 

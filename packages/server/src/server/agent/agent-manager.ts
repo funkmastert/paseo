@@ -95,7 +95,7 @@ import {
 } from "./runtime-mcp-config.js";
 import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
 import { findPerDirMcpServer, type PerDirMcpServerLookup } from "../mcp-gateway/per-dir-stdio.js";
-import { McpAdoptError } from "../mcp-gateway/adopt-failure.js";
+import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -1178,7 +1178,7 @@ export class AgentManager {
    */
   async startMcpGatewayAuthorization(name: string): Promise<{ authorizationUrl: string }> {
     if (!this.mcpGateway) {
-      throw new Error("MCP gateway is not enabled");
+      throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
     }
     return this.mcpGateway.startAuthorization(name);
   }
@@ -1194,16 +1194,16 @@ export class AgentManager {
   }): Promise<{ authorizationUrl: string | null }> {
     const gateway = this.mcpGateway;
     if (!gateway) {
-      throw new McpAdoptError("gateway_disabled", "MCP gateway is not enabled");
+      throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
     }
     const agent = this.getAgent(input.agentId);
     if (!agent) {
-      throw new McpAdoptError("unknown_agent", `Unknown agent "${input.agentId}"`);
+      throw new McpGatewayActionError("unknown_agent", `Unknown agent "${input.agentId}"`);
     }
     const client = this.clients.get(agent.provider);
     const scope = client?.resolveMcpConfigScope?.(agent.cwd);
     if (!client || !scope) {
-      throw new McpAdoptError(
+      throw new McpGatewayActionError(
         "provider_has_no_config",
         `Sessions on provider "${agent.provider}" don't expose an MCP config the gateway can adopt`,
       );
@@ -1217,7 +1217,7 @@ export class AgentManager {
     try {
       adopted = await gateway.adoptServer({ name: input.name, ...lookup.server });
     } catch (error) {
-      throw new McpAdoptError("adopt_failed", getErrorMessage(error));
+      throw new McpGatewayActionError("adopt_failed", getErrorMessage(error));
     }
     if (adopted.auth === "static" || adopted.status === "connected") {
       return { authorizationUrl: null };
@@ -1225,7 +1225,7 @@ export class AgentManager {
     try {
       return await gateway.startAuthorization(input.name);
     } catch (error) {
-      throw new McpAdoptError("authorization_failed", getErrorMessage(error));
+      throw new McpGatewayActionError("authorization_failed", getErrorMessage(error));
     }
   }
 
@@ -1240,22 +1240,22 @@ export class AgentManager {
     client: AgentClient;
     scope: { configDir: string; projectDir: string };
     lookup: PerDirMcpServerLookup;
-  }): Promise<McpAdoptError> {
+  }): Promise<McpGatewayActionError> {
     if (input.lookup.kind === "local") {
-      return new McpAdoptError(
+      return new McpGatewayActionError(
         "server_is_local",
         `MCP server "${input.name}" runs as a local command; only http and sse servers can be brokered`,
       );
     }
     const auth = await input.client.describeAccountAuth?.().catch(() => undefined);
     if (auth?.state === "signed-out") {
-      return new McpAdoptError(
+      return new McpGatewayActionError(
         "account_signed_out",
         `The account in ${input.scope.configDir} is not signed in`,
-        auth.signInCommand,
+        auth.signInCommand ? { command: auth.signInCommand } : {},
       );
     }
-    return new McpAdoptError(
+    return new McpGatewayActionError(
       "server_not_in_config",
       `No remote MCP server named "${input.name}" in ${input.scope.configDir}/.claude.json or ${input.scope.projectDir}/.mcp.json`,
     );

@@ -20,6 +20,7 @@ import {
   type FileTransferFrame,
 } from "@getpaseo/protocol/binary-frames/index";
 import { Session } from "./session.js";
+import { McpGatewayActionError } from "./mcp-gateway/action-failure.js";
 import { OWNER_PERMISSIONS, type DaemonPermission } from "./authorization/index.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import { StructuredAgentFallbackError } from "./agent/agent-response-loop.js";
@@ -5513,7 +5514,12 @@ test("mcp_gateway.auth.start.request against an unknown server returns an error 
     agentManager: {
       startMcpGatewayAuthorization: vi
         .fn()
-        .mockRejectedValue(new Error('Unknown MCP gateway server "never-configured"')),
+        .mockRejectedValue(
+          new McpGatewayActionError(
+            "unknown_server",
+            'Unknown MCP gateway server "never-configured"',
+          ),
+        ),
     },
   });
 
@@ -5530,6 +5536,10 @@ test("mcp_gateway.auth.start.request against an unknown server returns an error 
         requestId: "auth-1",
         authorizationUrl: null,
         error: 'Unknown MCP gateway server "never-configured"',
+        reason: "unknown_server",
+        remedyCommand: null,
+        remedyPath: null,
+        remedyRedirectUrl: null,
       },
     },
   ]);
@@ -5561,6 +5571,10 @@ test("mcp_gateway.auth.start.request against a static-auth server returns an err
         requestId: "auth-2",
         authorizationUrl: null,
         error: 'MCP gateway server "slack" uses static auth; nothing to authorize',
+        reason: null,
+        remedyCommand: null,
+        remedyPath: null,
+        remedyRedirectUrl: null,
       },
     },
   ]);
@@ -5590,6 +5604,10 @@ test("mcp_gateway.auth.start.request happy path returns the authorization URL (U
         requestId: "auth-3",
         authorizationUrl: "https://github.com/login/oauth/authorize?code_challenge=abc",
         error: null,
+        reason: null,
+        remedyCommand: null,
+        remedyPath: null,
+        remedyRedirectUrl: null,
       },
     },
   ]);
