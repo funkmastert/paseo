@@ -7,6 +7,13 @@ import { DEFAULT_TOOL_PROFILE, ToolProfileSchema } from "./tool-profiles";
  */
 export const AGENT_TYPE_LABEL = "paseo.agent-type";
 export const AGENT_ROLE_LABEL = "paseo.agent-role";
+/**
+ * Declares how hard the caller believes this task is, independent of which
+ * role it resolves to. The cheapest and most trustworthy signal there is —
+ * the caller is stating what it's asking for, not leaving it to be guessed
+ * from prompt text. See server/role-resolve.ts's `resolveTaskClass`.
+ */
+export const TASK_CLASS_LABEL = "paseo.task-class";
 
 /**
  * Set by the role router (never read by it) when an explicitly requested
@@ -55,6 +62,30 @@ export const LEADER_ROLE_ID = "leader";
 /** Fixed, non-renamable, non-deletable role ids. Aliases and models remain editable. */
 export const STANDARD_ROLE_IDS = ["worker", "reviewer", "advisor", LEADER_ROLE_ID] as const;
 export type StandardRoleId = (typeof STANDARD_ROLE_IDS)[number];
+
+/**
+ * How hard a task is, orthogonal to which role runs it: a role picks WHO
+ * (worker/reviewer/advisor/...), a task class picks HOW MUCH MODEL that work
+ * is worth. Fixed and small, deliberately — a taxonomy nobody can apply
+ * consistently is worse than none, and three levels are enough to separate
+ * "cheaper than usual", "the default", and "reach for the best model":
+ *
+ * - `mechanical`: rote, low-risk, narrowly-scoped (a rename, a typo, a
+ *   formatting pass, a comment/changelog tweak, a dependency bump). Wrong
+ *   output is cheap to spot and cheap to redo.
+ * - `standard`: everyday work of ordinary, unestablished difficulty — the
+ *   default. This is exactly what `RoleRecord.models` has always meant;
+ *   nothing about it changes here.
+ * - `hard`: real correctness or design risk (concurrency, migrations,
+ *   security, architecture, cross-cutting refactors) where a cheap model's
+ *   subtly-wrong answer is expensive to catch later.
+ *
+ * Not user-definable, unlike role names: a fixed, small, fixed-meaning enum
+ * is something every caller and every operator can apply the same way, which
+ * a free-text vocabulary here would not be.
+ */
+export const TASK_CLASS_IDS = ["mechanical", "standard", "hard"] as const;
+export type TaskClassId = (typeof TASK_CLASS_IDS)[number];
 
 /** One namespace word: a role name or alias. Case-insensitively unique across the whole policy. */
 export const ROLE_WORD_RE = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
@@ -105,8 +136,21 @@ export const RoleRecordSchema = z.object({
   name: z.string().regex(ROLE_WORD_RE),
   standard: z.boolean(),
   aliases: z.array(z.string().regex(ROLE_WORD_RE)).max(MAX_ALIASES_PER_ROLE),
-  /** Ordered, most-preferred first. Empty = unconfigured (never routed). */
+  /**
+   * Ordered, most-preferred first. Empty = unconfigured (never routed). This
+   * is the STANDARD-class pool: what an unclassified spawn gets, and the
+   * fallback for `mechanicalModels`/`hardModels` when either is empty. See
+   * `classModels` and TASK_CLASS_IDS's doc comment above.
+   */
   models: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE),
+  /**
+   * Optional override pool for a task classified `mechanical`. Empty (the
+   * default) means "no override — use `models`", so adding this field
+   * changes nothing for a role that never configures it.
+   */
+  mechanicalModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
+  /** Optional override pool for a task classified `hard`. Same empty-means-unset semantics as `mechanicalModels`. */
+  hardModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
   /**
    * Which tools agents resolved to this role may use. Defaults to
    * `unrestricted`, so a policy written before tool profiles existed keeps
@@ -122,7 +166,7 @@ const AgentTypeMappingsSchema = z
     message: `agentTypeMappings must not exceed ${MAX_MAPPINGS} entries`,
   });
 
-export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 4;
 
 export const RoleModelPolicySchema = z
   .object({
@@ -208,14 +252,24 @@ export const RoleModelPolicySchema = z
       }
     }
 
+    // Duplicates are checked WITHIN each pool independently — the same model
+    // legitimately appearing in both `models` and `hardModels` (e.g. sonnet
+    // as both the standard default and a hard-pool fallback member) is not a
+    // dupe; only repeating an entry inside the same ordered pool is.
     for (const role of policy.roles) {
-      const lowerModels = role.models.map((model) => model.toLowerCase());
-      if (new Set(lowerModels).size !== lowerModels.length) {
-        ctx.addIssue({
-          code: "custom",
-          message: `role "${role.id}" has a duplicate model entry`,
-          path: ["roles"],
-        });
+      for (const [field, pool] of [
+        ["models", role.models],
+        ["mechanicalModels", role.mechanicalModels],
+        ["hardModels", role.hardModels],
+      ] as const) {
+        const lowerModels = pool.map((model) => model.toLowerCase());
+        if (new Set(lowerModels).size !== lowerModels.length) {
+          ctx.addIssue({
+            code: "custom",
+            message: `role "${role.id}" has a duplicate model entry in ${field}`,
+            path: ["roles"],
+          });
+        }
       }
     }
 
@@ -240,12 +294,12 @@ export type RoleModelPolicy = z.infer<typeof RoleModelPolicySchema>;
 export const DEFAULT_POLICY: RoleModelPolicy = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
   roles: [
-    { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
-    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
-    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "worker", name: "worker", standard: true, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: "advisor", name: "advisor", standard: true, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE },
     // Unconfigured and unrestricted by default: installing this version must
     // not silently change how a root agent runs. Tyler opts in from settings.
-    { id: LEADER_ROLE_ID, name: LEADER_ROLE_ID, standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE },
+    { id: LEADER_ROLE_ID, name: LEADER_ROLE_ID, standard: true, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE },
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
@@ -288,7 +342,7 @@ export function modelRefFamily(parsed: ParsedModelRef): string {
 export function rolePolicyFamilies(policy: RoleModelPolicy): string[] {
   const families = new Set<string>();
   for (const role of policy.roles) {
-    for (const ref of role.models) {
+    for (const ref of [...role.models, ...role.mechanicalModels, ...role.hardModels]) {
       const parsed = splitModelRef(ref);
       if (parsed) {
         families.add(modelRefFamily(parsed));
@@ -296,6 +350,25 @@ export function rolePolicyFamilies(policy: RoleModelPolicy): string[] {
     }
   }
   return [...families];
+}
+
+/**
+ * The ordered model pool a role effectively uses for a given task class:
+ * the class's own override pool when it's configured (non-empty), else
+ * `role.models` (the standard pool). `taskClass` undefined (no class
+ * resolved — see `resolveTaskClass`) or `"standard"` both mean `role.models`
+ * directly, so an unclassified spawn and an explicitly-"standard" one behave
+ * identically, and a role that never configures `mechanicalModels`/
+ * `hardModels` behaves exactly as it did before those fields existed.
+ */
+export function classModels(role: RoleRecord, taskClass: TaskClassId | undefined): readonly string[] {
+  if (taskClass === "mechanical" && role.mechanicalModels.length > 0) {
+    return role.mechanicalModels;
+  }
+  if (taskClass === "hard" && role.hardModels.length > 0) {
+    return role.hardModels;
+  }
+  return role.models;
 }
 
 export interface MigrateRolePolicyOptions {
@@ -406,6 +479,17 @@ function migrateV2ToV3(document: Record<string, unknown>): Record<string, unknow
 }
 
 /**
+ * v3 -> v4: no data changes at all. `mechanicalModels`/`hardModels` default
+ * to `[]` via `RoleRecordSchema` itself (`.default([])`), so every role's
+ * existing `models` pool — Tyler's live [opus, sonnet]/[sonnet, haiku,
+ * opus]/[sonnet]/[opus, sonnet] pools included — round-trips byte-identical.
+ * A version bump is the whole migration; there is nothing to re-pin.
+ */
+function migrateV3ToV4(document: Record<string, unknown>): Record<string, unknown> {
+  return { ...document, schemaVersion: 4 };
+}
+
+/**
  * Brings a stored policy document up to CURRENT_SCHEMA_VERSION, in memory
  * only — this never writes settings. Anything that isn't a recognized older
  * version passes through untouched for `RoleModelPolicySchema` to accept or
@@ -419,12 +503,15 @@ export function migrateRoleModelPolicy(raw: unknown, options: MigrateRolePolicyO
     return raw;
   }
   let document = raw as Record<string, unknown>;
-  if (document.schemaVersion !== 1 && document.schemaVersion !== 2) {
+  if (document.schemaVersion !== 1 && document.schemaVersion !== 2 && document.schemaVersion !== 3) {
     return raw;
   }
 
   if (document.schemaVersion === 1) {
     document = migrateV1ToV2(document, options);
   }
-  return migrateV2ToV3(document);
+  if (document.schemaVersion === 2) {
+    document = migrateV2ToV3(document);
+  }
+  return migrateV3ToV4(document);
 }

@@ -23,7 +23,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
     return {
       status: "saved",
       policy: {
-        schemaVersion: 3,
+        schemaVersion: 4,
         roles: input.patch.roles,
         agentTypeMappings: input.patch.agentTypeMappings,
         modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
@@ -90,7 +90,7 @@ describe("openRoleModelPolicyModel — metadata draft (rename/setAliases/save/ca
   it("a custom role can be renamed via the same save() path", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
 
@@ -195,6 +195,37 @@ describe("openRoleModelPolicyModel — immediate model mutations", () => {
     expect(await model.moveModel("worker", "b/2", "up")).toBe(false); // already first
     expect(await model.moveModel("worker", "c/3", "down")).toBe(false); // already last
   });
+
+  it("addModel/removeModel/moveModel target the mechanical/hard pools independently of the standard pool via the slot argument", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.addModel("worker", "claude-haiku-5", "mechanical")).toBe(true);
+    expect(await model.addModel("worker", "claude-opus-5", "hard")).toBe(true);
+    let worker = model.getState().policy.roles.find((r) => r.id === "worker");
+    expect(worker?.models).toEqual([]); // standard pool untouched
+    expect(worker?.mechanicalModels).toEqual(["claude-haiku-5"]);
+    expect(worker?.hardModels).toEqual(["claude-opus-5"]);
+
+    expect(await model.addModel("worker", "claude-opus-5-fallback", "hard")).toBe(true);
+    expect(await model.moveModel("worker", "claude-opus-5-fallback", "up", "hard")).toBe(true);
+    worker = model.getState().policy.roles.find((r) => r.id === "worker");
+    expect(worker?.hardModels).toEqual(["claude-opus-5-fallback", "claude-opus-5"]);
+
+    expect(await model.removeModel("worker", "claude-haiku-5", "mechanical")).toBe(true);
+    worker = model.getState().policy.roles.find((r) => r.id === "worker");
+    expect(worker?.mechanicalModels).toEqual([]);
+    expect(worker?.hardModels).toEqual(["claude-opus-5-fallback", "claude-opus-5"]); // untouched by the mechanical removal
+  });
+
+  it("canAddModel enforces the per-role model limit independently per pool", async () => {
+    const model = openModel(policyWith());
+    for (let i = 0; i < MAX_MODELS_PER_ROLE; i += 1) {
+      expect(await model.addModel("worker", `claude/model-${i}`, "mechanical")).toBe(true);
+    }
+    expect(model.getState().canAddModel("worker", "mechanical").allowed).toBe(false);
+    expect(model.getState().canAddModel("worker", "standard").allowed).toBe(true);
+    expect(model.getState().canAddModel("worker", "hard").allowed).toBe(true);
+  });
 });
 
 describe("openRoleModelPolicyModel — mappings", () => {
@@ -235,7 +266,16 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
     const model = openModel(policyWith());
     expect(await model.addRole("helper")).toBe(true);
     const created = model.getState().policy.roles.find((r) => r.id === "role-fixed-id");
-    expect(created).toEqual({ id: "role-fixed-id", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE });
+    expect(created).toEqual({
+      id: "role-fixed-id",
+      name: "helper",
+      standard: false,
+      aliases: [],
+      models: [],
+      mechanicalModels: [],
+      hardModels: [],
+      toolProfile: DEFAULT_TOOL_PROFILE,
+    });
   });
 
   it("rejects addRole at the role limit before calling write", async () => {
@@ -249,6 +289,8 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
           standard: false,
           aliases: [],
           models: [],
+          mechanicalModels: [],
+          hardModels: [],
           toolProfile: DEFAULT_TOOL_PROFILE,
         })),
       ],
@@ -264,7 +306,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
   it("deleteRole is blocked (locally) for standard roles and for a custom role referenced by a mapping", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE }],
       agentTypeMappings: { ...policyWith().agentTypeMappings, "ce-helper": "custom-1" },
     };
     const { write, calls } = fakeSavingWrite();
@@ -280,7 +322,7 @@ describe("openRoleModelPolicyModel — roles (add/delete)", () => {
   it("deleteRole succeeds for an unreferenced custom role", async () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
     expect(await model.deleteRole("custom-1")).toBe(true);
@@ -341,7 +383,7 @@ describe("openRoleModelPolicyModel — conflict, malformed lock, and applyPolicy
   it("applyPolicySnapshot closes the editor if the role being edited no longer exists", () => {
     const withCustom: RoleModelPolicy = {
       ...policyWith(),
-      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE }],
+      roles: [...policyWith().roles, { id: "custom-1", name: "helper", standard: false, aliases: [], models: [], mechanicalModels: [], hardModels: [], toolProfile: DEFAULT_TOOL_PROFILE }],
     };
     const model = openModel(withCustom);
     model.beginEditRole("custom-1");

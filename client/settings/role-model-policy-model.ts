@@ -10,6 +10,20 @@ import {
   type RoleModelPolicy,
   type RoleRecord,
 } from "../../shared/role-policy-schema";
+
+/**
+ * Which of a role's three model pools a mutation targets. "standard" is
+ * `RoleRecord.models` — the default pool, unaffected in name by this
+ * feature. Exported so the settings screen can render one editor per slot
+ * instead of duplicating add/remove/move per pool.
+ */
+export type ModelPoolSlot = "standard" | "mechanical" | "hard";
+
+function poolField(slot: ModelPoolSlot): "models" | "mechanicalModels" | "hardModels" {
+  if (slot === "mechanical") return "mechanicalModels";
+  if (slot === "hard") return "hardModels";
+  return "models";
+}
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
 import { DEFAULT_TOOL_PROFILE, ToolProfileSchema, type ToolProfile } from "../../shared/tool-profiles";
 
@@ -60,7 +74,7 @@ export interface RoleModelPolicyModelState {
   canAddRole: LimitStatus;
   canAddMapping: LimitStatus;
   canAddAlias(roleId: string): LimitStatus;
-  canAddModel(roleId: string): LimitStatus;
+  canAddModel(roleId: string, slot?: ModelPoolSlot): LimitStatus;
   canDeleteRole(roleId: string): LimitStatus;
   roleById(roleId: string): RoleRecord | undefined;
 }
@@ -81,9 +95,10 @@ export interface RoleModelPolicyModel {
 
   addRole(name: string): Promise<boolean>;
   deleteRole(roleId: string): Promise<boolean>;
-  addModel(roleId: string, modelRef: string): Promise<boolean>;
-  removeModel(roleId: string, modelRef: string): Promise<boolean>;
-  moveModel(roleId: string, modelRef: string, direction: "up" | "down"): Promise<boolean>;
+  /** `slot` defaults to "standard" (`RoleRecord.models`); pass "mechanical"/"hard" to edit that class's override pool instead. */
+  addModel(roleId: string, modelRef: string, slot?: ModelPoolSlot): Promise<boolean>;
+  removeModel(roleId: string, modelRef: string, slot?: ModelPoolSlot): Promise<boolean>;
+  moveModel(roleId: string, modelRef: string, direction: "up" | "down", slot?: ModelPoolSlot): Promise<boolean>;
   addMapping(agentType: string, roleId: string): Promise<boolean>;
   removeMapping(agentType: string): Promise<boolean>;
   /** Sets the percent at/above which a budget-gated model family stops being selectable. */
@@ -172,10 +187,10 @@ export function openRoleModelPolicyModel(
     return limitStatus(role.aliases.length < MAX_ALIASES_PER_ROLE, `at the ${MAX_ALIASES_PER_ROLE}-alias limit`);
   }
 
-  function canAddModel(roleId: string): LimitStatus {
+  function canAddModel(roleId: string, slot: ModelPoolSlot = "standard"): LimitStatus {
     const role = roleById(roleId);
     if (!role) return { allowed: false, reason: "unknown role" };
-    return limitStatus(role.models.length < MAX_MODELS_PER_ROLE, `at the ${MAX_MODELS_PER_ROLE}-model limit`);
+    return limitStatus(role[poolField(slot)].length < MAX_MODELS_PER_ROLE, `at the ${MAX_MODELS_PER_ROLE}-model limit`);
   }
 
   function canDeleteRole(roleId: string): LimitStatus {
@@ -390,6 +405,8 @@ export function openRoleModelPolicyModel(
         standard: false,
         aliases: [],
         models: [],
+        mechanicalModels: [],
+        hardModels: [],
         toolProfile: DEFAULT_TOOL_PROFILE,
       };
       return commit([...policy.roles, newRole], policy.agentTypeMappings);
@@ -407,11 +424,12 @@ export function openRoleModelPolicyModel(
       return commit(nextRoles, policy.agentTypeMappings);
     },
 
-    async addModel(roleId, modelRef) {
+    async addModel(roleId, modelRef, slot = "standard") {
       if (!guardEditable()) return false;
       const role = roleById(roleId);
       if (!role) return false;
-      const { allowed, reason } = canAddModel(roleId);
+      const field = poolField(slot);
+      const { allowed, reason } = canAddModel(roleId, slot);
       if (!allowed) {
         saveError = reason ?? "can't add another model";
         publish();
@@ -423,36 +441,38 @@ export function openRoleModelPolicyModel(
         publish();
         return false;
       }
-      if (role.models.some((m) => m.toLowerCase() === trimmed.toLowerCase())) {
-        saveError = `"${trimmed}" is already in this role's model list`;
+      if (role[field].some((m) => m.toLowerCase() === trimmed.toLowerCase())) {
+        saveError = `"${trimmed}" is already in this role's ${slot} model list`;
         publish();
         return false;
       }
-      const nextRoles = policy.roles.map((r) => (r.id === roleId ? { ...r, models: [...r.models, trimmed] } : r));
+      const nextRoles = policy.roles.map((r) => (r.id === roleId ? { ...r, [field]: [...r[field], trimmed] } : r));
       return commit(nextRoles, policy.agentTypeMappings);
     },
 
-    async removeModel(roleId, modelRef) {
+    async removeModel(roleId, modelRef, slot = "standard") {
       if (!guardEditable()) return false;
       const role = roleById(roleId);
       if (!role) return false;
+      const field = poolField(slot);
       const nextRoles = policy.roles.map((r) =>
-        r.id === roleId ? { ...r, models: r.models.filter((m) => m !== modelRef) } : r,
+        r.id === roleId ? { ...r, [field]: r[field].filter((m) => m !== modelRef) } : r,
       );
       return commit(nextRoles, policy.agentTypeMappings);
     },
 
-    async moveModel(roleId, modelRef, direction) {
+    async moveModel(roleId, modelRef, direction, slot = "standard") {
       if (!guardEditable()) return false;
       const role = roleById(roleId);
       if (!role) return false;
-      const index = role.models.indexOf(modelRef);
+      const field = poolField(slot);
+      const index = role[field].indexOf(modelRef);
       if (index === -1) return false;
       const swapWith = direction === "up" ? index - 1 : index + 1;
-      if (swapWith < 0 || swapWith >= role.models.length) return false;
-      const nextModels = [...role.models];
+      if (swapWith < 0 || swapWith >= role[field].length) return false;
+      const nextModels = [...role[field]];
       [nextModels[index], nextModels[swapWith]] = [nextModels[swapWith], nextModels[index]];
-      const nextRoles = policy.roles.map((r) => (r.id === roleId ? { ...r, models: nextModels } : r));
+      const nextRoles = policy.roles.map((r) => (r.id === roleId ? { ...r, [field]: nextModels } : r));
       return commit(nextRoles, policy.agentTypeMappings);
     },
 

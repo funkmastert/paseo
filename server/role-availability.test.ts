@@ -5,7 +5,17 @@ import { createHealthTracker } from "./health";
 import { selectModel, type AvailabilityPool, type ModelCatalog } from "./role-availability";
 
 function role(overrides: Partial<RoleRecord>): RoleRecord {
-  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE, ...overrides };
+  return {
+    id: "worker",
+    name: "worker",
+    standard: true,
+    aliases: [],
+    models: [],
+    mechanicalModels: [],
+    hardModels: [],
+    toolProfile: DEFAULT_TOOL_PROFILE,
+    ...overrides,
+  };
 }
 
 function catalog(entries: Record<string, string[]>): ModelCatalog {

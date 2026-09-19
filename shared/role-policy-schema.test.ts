@@ -8,6 +8,7 @@ import {
   MAX_ROLES,
   DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   RoleModelPolicySchema,
+  classModels,
   migrateRoleModelPolicy,
   rolePolicyFamilies,
   splitModelRef,
@@ -16,12 +17,22 @@ import {
 } from "./role-policy-schema";
 
 function role(overrides: Partial<RoleRecord>): RoleRecord {
-  return { id: "worker", name: "worker", standard: true, aliases: [], models: [], toolProfile: DEFAULT_TOOL_PROFILE, ...overrides };
+  return {
+    id: "worker",
+    name: "worker",
+    standard: true,
+    aliases: [],
+    models: [],
+    mechanicalModels: [],
+    hardModels: [],
+    toolProfile: DEFAULT_TOOL_PROFILE,
+    ...overrides,
+  };
 }
 
 function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     roles: [
       role({ id: "worker", name: "worker" }),
       role({ id: "reviewer", name: "reviewer" }),
@@ -265,7 +276,7 @@ describe("migrateRoleModelPolicy", () => {
 
   it("unpins leader-account refs and leaves cross-family pins intact", () => {
     const migrated = migrateRoleModelPolicy(v1, { poolLeaderProviderId: "claude" }) as typeof v1;
-    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.schemaVersion).toBe(4);
     expect(migrated.roles[0].models).toEqual(["claude-sonnet-5", "codex/gpt-5.1"]);
     expect(migrated.roles[1].models).toEqual(["claude-opus-5"]);
   });
@@ -291,7 +302,7 @@ describe("migrateRoleModelPolicy", () => {
   });
 
   it("passes a current-version document through untouched", () => {
-    const current = { ...v1, schemaVersion: 3 };
+    const current = { ...v1, schemaVersion: 4 };
     expect(migrateRoleModelPolicy(current, { poolLeaderProviderId: "claude" })).toBe(current);
   });
 
@@ -299,9 +310,50 @@ describe("migrateRoleModelPolicy", () => {
     const v2 = { ...v1, schemaVersion: 2 };
     const migrated = migrateRoleModelPolicy(v2) as { schemaVersion: number; roles: { id: string; name: string; models: string[]; toolProfile: unknown }[] };
 
-    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.schemaVersion).toBe(4);
     const leader = migrated.roles.find((role) => role.id === "leader");
     expect(leader).toMatchObject({ name: "leader", models: [], toolProfile: { kind: "unrestricted" } });
+  });
+
+  it("migrates v3 to v4 with a version bump only — every role's model pool is untouched, and the schema fills mechanicalModels/hardModels as empty", () => {
+    // Mirrors Tyler's live v3 config: leader [opus, sonnet], worker
+    // [sonnet, haiku, opus], reviewer [sonnet], advisor [opus, sonnet].
+    const v3 = {
+      schemaVersion: 3,
+      roles: [
+        { id: "leader", name: "leader", standard: true, aliases: [], models: ["claude-opus-5", "claude-sonnet-5"], toolProfile: { kind: "unrestricted" } },
+        { id: "worker", name: "worker", standard: true, aliases: [], models: ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"], toolProfile: { kind: "unrestricted" } },
+        { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: ["claude-sonnet-5"], toolProfile: { kind: "unrestricted" } },
+        { id: "advisor", name: "advisor", standard: true, aliases: [], models: ["claude-opus-5", "claude-sonnet-5"], toolProfile: { kind: "unrestricted" } },
+      ],
+      agentTypeMappings: {},
+      modelBudgetThresholdPct: 80,
+      revision: "live-rev",
+    };
+    const migrated = migrateRoleModelPolicy(v3) as { schemaVersion: number; roles: unknown[]; revision: string };
+    expect(migrated.schemaVersion).toBe(4);
+    expect(migrated.revision).toBe("live-rev");
+    // Roles are untouched by the migration step itself — no mechanicalModels/
+    // hardModels key is injected; the schema parse below is what fills them.
+    expect((migrated.roles as { models: string[] }[]).map((r) => r.models)).toEqual([
+      ["claude-opus-5", "claude-sonnet-5"],
+      ["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"],
+      ["claude-sonnet-5"],
+      ["claude-opus-5", "claude-sonnet-5"],
+    ]);
+
+    const parsed = RoleModelPolicySchema.safeParse(migrated);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      for (const role of parsed.data.roles) {
+        expect(role.mechanicalModels).toEqual([]);
+        expect(role.hardModels).toEqual([]);
+      }
+      expect(parsed.data.roles.find((r) => r.id === "leader")?.models).toEqual(["claude-opus-5", "claude-sonnet-5"]);
+      expect(parsed.data.roles.find((r) => r.id === "worker")?.models).toEqual(["claude-sonnet-5", "claude-haiku-5", "claude-opus-5"]);
+      expect(parsed.data.roles.find((r) => r.id === "reviewer")?.models).toEqual(["claude-sonnet-5"]);
+      expect(parsed.data.modelBudgetThresholdPct).toBe(80);
+    }
   });
 
   it("keeps a v2 document's model refs untouched (the unpin is a v1-only step)", () => {
@@ -350,5 +402,47 @@ describe("rolePolicyFamilies", () => {
 
   it("returns an empty array when no role has configured models", () => {
     expect(rolePolicyFamilies(DEFAULT_POLICY)).toEqual([]);
+  });
+
+  it("includes families referenced only from mechanicalModels/hardModels", () => {
+    const withClassPools = policy({
+      roles: [
+        role({ id: "worker", name: "worker", models: [], mechanicalModels: ["claude/haiku"], hardModels: ["gemini/gemini-3-pro"] }),
+        role({ id: "reviewer", name: "reviewer" }),
+        role({ id: "advisor", name: "advisor" }),
+      ],
+    });
+    expect(rolePolicyFamilies(withClassPools).sort()).toEqual(["claude", "gemini"]);
+  });
+});
+
+describe("classModels", () => {
+  it("uses the standard pool for an undefined (unclassified) task class", () => {
+    const r = role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: ["claude-opus-5"] });
+    expect(classModels(r, undefined)).toEqual(["claude-sonnet-5"]);
+  });
+
+  it("uses the standard pool for an explicit 'standard' task class", () => {
+    const r = role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: ["claude-opus-5"] });
+    expect(classModels(r, "standard")).toEqual(["claude-sonnet-5"]);
+  });
+
+  it("uses the class-specific pool when configured", () => {
+    const r = role({ models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-5"], hardModels: ["claude-opus-5"] });
+    expect(classModels(r, "mechanical")).toEqual(["claude-haiku-5"]);
+    expect(classModels(r, "hard")).toEqual(["claude-opus-5"]);
+  });
+
+  it("falls back to the standard pool when the class-specific pool is empty", () => {
+    const r = role({ models: ["claude-sonnet-5"], mechanicalModels: [], hardModels: [] });
+    expect(classModels(r, "mechanical")).toEqual(["claude-sonnet-5"]);
+    expect(classModels(r, "hard")).toEqual(["claude-sonnet-5"]);
+  });
+
+  it("stays unconfigured for every class when the whole role is unconfigured", () => {
+    const r = role({ models: [], mechanicalModels: [], hardModels: [] });
+    expect(classModels(r, undefined)).toEqual([]);
+    expect(classModels(r, "mechanical")).toEqual([]);
+    expect(classModels(r, "hard")).toEqual([]);
   });
 });
