@@ -27,6 +27,7 @@ interface SupportedMutableConfigPatch {
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
   deviceLeases?: MutableDaemonConfig["deviceLeases"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
+  budgetPacing?: MutableDaemonConfig["budgetPacing"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -204,6 +205,7 @@ const RELOADABLE_PATHS = [
   "agents.resourceMonitor",
   "agents.deviceLeases",
   "agents.accountFailover",
+  "agents.budgetPacing",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -239,6 +241,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.resourceMonitor", "resourceMonitor"],
   ["agents.deviceLeases", "deviceLeases"],
   ["agents.accountFailover", "accountFailover"],
+  ["agents.budgetPacing", "budgetPacing"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -325,6 +328,12 @@ function pickAccountFailoverPatch(
   return accountFailover === undefined ? {} : { accountFailover };
 }
 
+function pickBudgetPacingPatch(
+  budgetPacing: MutableDaemonConfigPatch["budgetPacing"],
+): Pick<SupportedMutableConfigPatch, "budgetPacing"> {
+  return budgetPacing === undefined ? {} : { budgetPacing };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -353,6 +362,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickResourceMonitorPatch(patch.resourceMonitor),
     ...pickDeviceLeasesPatch(patch.deviceLeases),
     ...pickAccountFailoverPatch(patch.accountFailover),
+    ...pickBudgetPacingPatch(patch.budgetPacing),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -794,6 +804,23 @@ function mergeDeviceLeasesForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedBudgetPacing = NonNullable<PersistedConfig["agents"]>["budgetPacing"];
+
+// Deep, like resourceMonitor above: `speedUp`/`slowDown` are nested objects, so a patch that
+// touches one threshold has to keep the rest of that direction's settings on disk.
+function mergeBudgetPacingForPersist(
+  persisted: PersistedBudgetPacing,
+  patch: SupportedMutableConfigPatch["budgetPacing"],
+): PersistedBudgetPacing {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedBudgetPacing;
+}
+
 type PersistedAccountFailover = NonNullable<PersistedConfig["agents"]>["accountFailover"];
 
 function mergeAccountFailoverForPersist(
@@ -865,6 +892,7 @@ function touchesAgentConfig(
     patch.resourceMonitor !== undefined ||
     patch.deviceLeases !== undefined ||
     patch.accountFailover !== undefined ||
+    patch.budgetPacing !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
@@ -921,6 +949,12 @@ function mergeMutableAgentPatch(
     patch.accountFailover,
   );
   if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
+
+  const budgetPacing = mergeBudgetPacingForPersist(
+    persistedAgents?.budgetPacing,
+    patch.budgetPacing,
+  );
+  if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

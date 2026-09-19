@@ -548,6 +548,21 @@ interface ResolveConfigFromPersistedOptions {
   relayEnabledFallback?: boolean;
 }
 
+/**
+ * The opt-in agent monitor sections, lifted out of `resolveConfigFromPersisted` so each new one
+ * does not cost that function another branch. Absent stays absent: every monitor treats an
+ * undefined section as its shipped default.
+ */
+function resolveAgentMonitorSections(
+  agents: PersistedConfig["agents"],
+): Pick<PaseoDaemonConfig, "tokenBurnMonitor" | "accountFailover" | "budgetPacing"> {
+  return {
+    tokenBurnMonitor: agents?.tokenBurnMonitor,
+    accountFailover: agents?.accountFailover,
+    budgetPacing: agents?.budgetPacing,
+  };
+}
+
 export function resolveConfigFromPersisted(
   paseoHome: string,
   persisted: PersistedConfig,
@@ -639,8 +654,7 @@ export function resolveConfigFromPersisted(
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
-    tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
-    accountFailover: persisted.agents?.accountFailover,
+    ...resolveAgentMonitorSections(persisted.agents),
     diskSweeper: persisted.worktrees?.diskSweeper,
     // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
     // which is why its absence here went unnoticed until a real daemon booted with the section.

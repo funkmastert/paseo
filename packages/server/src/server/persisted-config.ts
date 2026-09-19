@@ -329,6 +329,44 @@ const AgentAccountFailoverSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.accountFailover above — same mutable/patch split, same reason.
+// Every field optional and absent means today's behaviour: the leg is off unless `enabled` says
+// otherwise. See docs/budget-pacing.md.
+const AgentBudgetPacingSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    paceLookbackMinutes: z.number().positive().optional(),
+    minObservationMinutes: z.number().positive().optional(),
+    staleUsageMinutes: z.number().positive().optional(),
+    minActionableMinutes: z.number().nonnegative().optional(),
+    repeatAfterMinutes: z.number().nonnegative().optional(),
+    repeatWorseningPct: z.number().nonnegative().optional(),
+    // 0 silences a direction for the rest of every cycle without turning the leg off.
+    maxAdvisoriesPerCycle: z.number().int().nonnegative().optional(),
+    speedUp: z
+      .object({
+        enabled: z.boolean().optional(),
+        horizonMinutes: z.number().positive().optional(),
+        paceRatio: z.number().positive().optional(),
+        minStrandedPct: z.number().nonnegative().optional(),
+        minRemainingPct: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+    slowDown: z
+      .object({
+        enabled: z.boolean().optional(),
+        paceRatio: z.number().positive().optional(),
+        maxRemainingPct: z.number().nonnegative().optional(),
+        minOvershootPct: z.number().nonnegative().optional(),
+        minEarlyMinutes: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -480,6 +518,7 @@ export const PersistedConfigSchema = z
         resourceMonitor: AgentResourceMonitorSchema.optional(),
         deviceLeases: AgentDeviceLeasesSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
+        budgetPacing: AgentBudgetPacingSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
