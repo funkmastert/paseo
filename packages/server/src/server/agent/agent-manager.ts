@@ -311,7 +311,7 @@ export interface TokenBurnMonitorAgentSummary {
   isRunning: boolean;
   tokenRate: number | undefined;
   totalTokens: number | undefined;
-  /** Carries the caller's declared per-task budget (spend-governor.ts's SPEND_BUDGET_LABEL). */
+  /** Carries the budget declared for this agent alone (spend-governor.ts's SPEND_BUDGET_LABEL). */
   labels: Record<string, string>;
   /** So the governor's downgrade stage can skip an agent already on the target model. */
   model: string | undefined;

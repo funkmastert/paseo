@@ -42,13 +42,17 @@ That is structural, not an outlier. A Claude agent re-reads its context from cac
 
 Off by default. Turn it on under `agents.tokenBurnMonitor.governor`, and turn on `dryRun` first: it runs the whole ladder and reports exactly what it would do, without doing any of it — not even the message to the agent, which would spend tokens on a hypothetical.
 
-### Budgets are per task, because nothing else separates the cases
+### Budgets are per agent, because nothing else separates the cases
 
 Three agents measured on one machine: two healthy implementation agents that finished their work at 1.08M and 1.48M weighted tokens, and one that spent 1.1M discovering it had no Edit tool and then spawned helpers that also could not edit. No rate tells those apart. No single global total tells those apart either — the healthy pair straddle the runaway. What separates them is what the task was worth, and only the caller knows that.
 
 So a caller declares it: the **`paseo.budget` label**, in weighted tokens, accepting `300000`, `300k` or `1.5M`. A label rather than a create field because labels are already on `create_agent`'s input schema, an `agent.create` plugin hook can impose or override one, `update_agent` can raise one on a live agent, and none of it costs a protocol change. Anything that isn't unambiguously a token count is read as no budget at all rather than guessed at.
 
 An agent whose task declared no budget is **not governed**, unless `defaultBudgetTokens` is set. That is the shipped default, so turning the governor on cannot act on agents nobody has sized. Set it once dry-run has shown what your agents actually cost.
+
+**A budget covers one agent, not a task tree.** Labels are not inherited: a child created by `create_agent` carries the labels that call gave it and no others, and every agent's spend is its own. A leader with a budget is governed on what the leader itself spends, which for an orchestrator that delegates everything stays small while its fleet spends the real money. `stopFanOut` is the stage aimed squarely at that case and it fires on the caller's own spend — the number that stays low. Budget the agents that do the work, or give the leader a budget sized to its own coordination, not to the job.
+
+Releasing a governed agent means changing its `paseo.budget`, and the app has no label editor: that is `update_agent` from another agent, or the CLI. Worth knowing before you enable a stage that stops one.
 
 ### The ladder
 

@@ -11,7 +11,11 @@
  * whether the work is worth doing. Two finished, entirely healthy implementation agents spent
  * 1.08M and 1.48M; the flailing agent this feature exists to catch spent 1.1M discovering it
  * had no Edit tool. No rate and no single global total separates those three. What separates
- * them is what their tasks were worth, which only the caller knows — hence a per-task budget.
+ * them is what their tasks were worth, which only the caller knows — hence a declared budget.
+ *
+ * One budget covers one agent, not a task tree. Labels are not inherited, and every agent's spend is
+ * its own, so a leader that delegates its work is governed on its coordination rather than on the
+ * job. Budget the agents that spend.
  *
  * See docs/token-burn.md.
  */
