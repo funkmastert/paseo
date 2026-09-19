@@ -95,6 +95,14 @@ export interface SystemMemorySample {
   totalPhysicalBytes: number;
   swapTotalBytes: number;
   swapUsedBytes: number;
+  /**
+   * Memory a new process could have right now, for the device-lease headroom gate
+   * (device-slot-defaults.ts). Deliberately excludes the file cache: macOS keeps most of RAM
+   * mapped to files, so counting it would report tens of gigabytes "available" on the machine
+   * that was swapping 20 GiB. Optional — a host whose memory tool is missing reports nothing,
+   * and the gate treats no signal as no objection.
+   */
+  availableBytes?: number;
 }
 
 const SWAP_UNIT_MULTIPLIER: Record<string, number> = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
@@ -122,6 +130,26 @@ export function parseMacosSwapUsage(
   return { swapTotalBytes, swapUsedBytes };
 }
 
+const VM_STAT_PAGE_SIZE = /page size of (\d+) bytes/;
+
+/**
+ * Parses macOS `vm_stat`. Available means free + speculative + purgeable: pages that are
+ * genuinely spare or can be dropped without writing anything back. Inactive pages are left out
+ * on purpose — on this machine "inactive" was 21 GiB while the compressor held 22 GiB and swap
+ * was full, and calling that available is how you talk yourself into booting one more device.
+ */
+export function parseMacosVmStat(output: string): number | undefined {
+  const pageSize = Number.parseInt(VM_STAT_PAGE_SIZE.exec(output)?.[1] ?? "", 10);
+  if (!Number.isFinite(pageSize)) return undefined;
+  const readPages = (label: string): number => {
+    const match = new RegExp(`^${label}:\\s*(\\d+)\\.`, "m").exec(output);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  };
+  const free = readPages("Pages free");
+  if (free === 0 && !/^Pages free:/m.test(output)) return undefined;
+  return (free + readPages("Pages speculative") + readPages("Pages purgeable")) * pageSize;
+}
+
 function extractMeminfoKb(content: string, key: string): number | undefined {
   const match = content.match(new RegExp(`^${key}:\\s*(\\d+)\\s*kB`, "m"));
   return match ? Number.parseInt(match[1], 10) : undefined;
@@ -135,10 +163,12 @@ export function parseProcMeminfo(content: string): SystemMemorySample | undefine
   if (totalKb === undefined || swapTotalKb === undefined || swapFreeKb === undefined) {
     return undefined;
   }
+  const availableKb = extractMeminfoKb(content, "MemAvailable");
   return {
     totalPhysicalBytes: totalKb * 1024,
     swapTotalBytes: swapTotalKb * 1024,
     swapUsedBytes: (swapTotalKb - swapFreeKb) * 1024,
+    ...(availableKb !== undefined ? { availableBytes: availableKb * 1024 } : {}),
   };
 }
 
@@ -163,14 +193,20 @@ const SAMPLE_TIMEOUT_MS = 15_000;
 
 async function sampleMacosMemory(): Promise<SystemMemorySample | undefined> {
   try {
-    const [memsize, swapUsage] = await Promise.all([
+    const [memsize, swapUsage, vmStat] = await Promise.all([
       execFileAsync("sysctl", ["-n", "hw.memsize"], { timeout: SAMPLE_TIMEOUT_MS }),
       execFileAsync("sysctl", ["vm.swapusage"], { timeout: SAMPLE_TIMEOUT_MS }),
+      execFileAsync("vm_stat", [], { timeout: SAMPLE_TIMEOUT_MS }).catch(() => undefined),
     ]);
     const totalPhysicalBytes = Number.parseInt(memsize.stdout.trim(), 10);
     const swap = parseMacosSwapUsage(swapUsage.stdout);
     if (!Number.isFinite(totalPhysicalBytes) || !swap) return undefined;
-    return { totalPhysicalBytes, ...swap };
+    const availableBytes = vmStat ? parseMacosVmStat(vmStat.stdout) : undefined;
+    return {
+      totalPhysicalBytes,
+      ...swap,
+      ...(availableBytes !== undefined ? { availableBytes } : {}),
+    };
   } catch {
     // sysctl is unavailable or its output shape changed — no system memory signal this sweep.
     return undefined;

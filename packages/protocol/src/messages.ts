@@ -204,6 +204,25 @@ const MutableResourceMonitorConfigSchema = z
 
 const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
 
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason.
+// See docs/device-leases.md.
+const MutableDeviceLeasesConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    totalSlots: z.number().int().positive().optional(),
+    slotsPerPlatform: z.number().int().positive().optional(),
+    requireHeadroom: z.boolean().optional(),
+    minAvailableBytes: z.number().positive().optional(),
+    maxSwapUsedRatio: z.number().positive().optional(),
+    pendingTtlMinutes: z.number().positive().optional(),
+    maxLeaseHours: z.number().nonnegative().optional(),
+    queueTimeoutMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDeviceLeasesPatchSchema = MutableDeviceLeasesConfigSchema;
+
 // Live-toggleable like tokenBurnMonitor/resourceMonitor above — same mutable/patch split, same
 // reason. See docs/account-failover.md.
 const MutableAccountFailoverConfigSchema = z
@@ -384,6 +403,8 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
+    deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
@@ -410,6 +431,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
@@ -3305,6 +3327,8 @@ export const SessionEventSubscriptionSchema = z.enum([
   "agent_permission_resolved",
   // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
   "mcp_status_update",
+  // COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
+  "device_status_update",
 ]);
 export type SessionEventSubscription = z.infer<typeof SessionEventSubscriptionSchema>;
 export const SessionEventsSetSubscriptionRequestSchema = z.object({
@@ -3850,6 +3874,8 @@ export const ServerInfoStatusPayloadSchema = z
         mcpStatus: z.boolean().optional(),
         // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
         mcpGatewayAdopt: z.boolean().optional(),
+        // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
+        deviceLeases: z.boolean().optional(),
       })
       .optional(),
   })
@@ -6244,6 +6270,60 @@ export const McpStatusUpdateMessageSchema = z.object({
   }),
 });
 
+// One device the daemon's device cap knows about (docs/device-leases.md). Every "running"
+// entry came from the process scan, not the lease table: a simulator Tyler booted by hand is
+// in here, and the UI must never report bookkeeping as if it were reality. A "starting" entry
+// is a lease whose device has not appeared yet.
+export const DeviceStatusEntrySchema = z.object({
+  platform: z.enum(["ios", "android"]),
+  // Null while a checked-out slot has no device yet — there is nothing truthful to name.
+  deviceId: z.string().nullable(),
+  state: z.enum(["running", "starting"]),
+  // How the holder was established: "lease" (it checked out or the gate leased for it),
+  // "process" (unleased, but the device sits in this agent's process tree), "none" (nobody's).
+  attribution: z.enum(["lease", "process", "none"]),
+  agentId: z.string().optional(),
+  // Since the lease was taken, or — with no lease — how long the device itself has been up.
+  heldForSeconds: z.number().optional(),
+  source: z.enum(["checkout", "launch"]).optional(),
+  reason: z.string().optional(),
+  processCount: z.number().optional(),
+});
+
+export const DeviceStatusWaiterSchema = z.object({
+  agentId: z.string(),
+  platform: z.enum(["ios", "android"]),
+  reason: z.string().optional(),
+  waitingForSeconds: z.number(),
+});
+
+export const DeviceStatusBlockedSchema = z.object({
+  agentId: z.string(),
+  platform: z.enum(["ios", "android"]),
+  command: z.string(),
+  message: z.string(),
+  dryRun: z.boolean(),
+  at: z.string(),
+});
+
+// COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
+// Copies mcp_status_update's pattern exactly: new session message, SessionEventSubscriptionSchema
+// entry, feature flag, permission mapping to daemon.read, subscription-gated emission.
+export const DeviceStatusUpdateMessageSchema = z.object({
+  type: z.literal("device_status_update"),
+  payload: z.object({
+    enabled: z.boolean(),
+    dryRun: z.boolean(),
+    totalSlots: z.number(),
+    slotsPerPlatform: z.number(),
+    used: z.number(),
+    devices: z.array(DeviceStatusEntrySchema),
+    waiting: z.array(DeviceStatusWaiterSchema),
+    blocked: z.array(DeviceStatusBlockedSchema),
+    generatedAt: z.string(),
+  }),
+});
+
 // Response to McpGatewayServerAdoptRequestSchema. `authorizationUrl` is set when the adopted
 // server still needs interactive OAuth; null with `error` null means it connected outright (a
 // static header adopted from the agent's config). Same no-secrets rule as auth.start below.
@@ -6970,6 +7050,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProvidersSnapshotUpdateMessageSchema,
   RefreshProvidersSnapshotResponseMessageSchema,
   McpStatusUpdateMessageSchema,
+  DeviceStatusUpdateMessageSchema,
   McpGatewayAuthStartResponseMessageSchema,
   McpGatewayServerAdoptResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
@@ -7156,6 +7237,8 @@ export type McpGatewayServerAdoptResponseMessage = z.infer<
 >;
 export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
+export type DeviceStatusUpdateMessage = z.infer<typeof DeviceStatusUpdateMessageSchema>;
+export type DeviceStatusEntry = z.infer<typeof DeviceStatusEntrySchema>;
 export type McpGatewayAuthStartResponseMessage = z.infer<
   typeof McpGatewayAuthStartResponseMessageSchema
 >;

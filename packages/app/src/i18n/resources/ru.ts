@@ -1923,6 +1923,24 @@ export const ru: TranslationResources = {
   sidebarCallout: {
     dismiss: "Закрыть",
   },
+  deviceStatus: {
+    summary: "{{used}} из {{total}} устройств",
+    summaryCapOff: "{{used}} устройств запущено",
+    dryRun: "пробный запуск",
+    platform: {
+      ios: "Симулятор",
+      android: "Эмулятор",
+    },
+    heldBy: "Занято агентом {{agent}}",
+    unleased: "Без брони",
+    starting: "Запускается",
+    waiting_one: "{{count}} агент ждёт слот",
+    waiting_other: "{{count}} агентов ждут слот",
+    unleasedCount_one: "{{count}} устройство без брони",
+    unleasedCount_other: "{{count}} устройств без брони",
+    expand: "Развернуть состояние устройств",
+    collapse: "Свернуть состояние устройств",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "Серверы MCP подключены",

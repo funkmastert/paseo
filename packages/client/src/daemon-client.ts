@@ -3139,6 +3139,10 @@ export class DaemonClient {
     if (this.lastServerInfoMessage?.features?.mcpStatus === true) {
       events.push("mcp_status_update");
     }
+    // COMPAT(deviceLeases): added in v0.8.1, gated for the same reason as mcpStatus above.
+    if (this.lastServerInfoMessage?.features?.deviceLeases === true) {
+      events.push("device_status_update");
+    }
     if (this.eventListeners.size === 0 && !this.messageHandlers.has("providers_snapshot_update")) {
       this.providerSnapshotUpdates.clear();
     }

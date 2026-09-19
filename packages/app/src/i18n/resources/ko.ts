@@ -1902,6 +1902,24 @@ export const ko: TranslationResources = {
   sidebarCallout: {
     dismiss: "닫기",
   },
+  deviceStatus: {
+    summary: "{{total}}대 중 {{used}}대 사용 중",
+    summaryCapOff: "{{used}}대 실행 중",
+    dryRun: "드라이런",
+    platform: {
+      ios: "시뮬레이터",
+      android: "에뮬레이터",
+    },
+    heldBy: "{{agent}} 사용 중",
+    unleased: "예약 없음",
+    starting: "시작 중",
+    waiting_one: "에이전트 {{count}}개가 자리를 기다리는 중",
+    waiting_other: "에이전트 {{count}}개가 자리를 기다리는 중",
+    unleasedCount_one: "예약 없는 기기 {{count}}대",
+    unleasedCount_other: "예약 없는 기기 {{count}}대",
+    expand: "기기 상태 펼치기",
+    collapse: "기기 상태 접기",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "MCP 서버 연결됨",

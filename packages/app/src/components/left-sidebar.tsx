@@ -50,6 +50,7 @@ import { MobilePanelOverlay } from "@/mobile-panels/presentation";
 import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-routes";
 import { openHostOverview } from "@/navigation/settings-navigation";
 import { McpStatusStrip } from "@/mcp-status/mcp-status-strip";
+import { DeviceStatusStrip } from "@/device-status/device-status-strip";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -603,6 +604,7 @@ function MobileSidebar({
           />
         )}
 
+        <DeviceStatusStrip />
         <McpStatusStrip />
 
         <SidebarFooter
@@ -781,6 +783,7 @@ function DesktopSidebar({
         )}
 
         <SidebarCalloutSlot />
+        <DeviceStatusStrip />
         <McpStatusStrip />
 
         <SidebarFooter

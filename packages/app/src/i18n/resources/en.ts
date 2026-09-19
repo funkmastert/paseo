@@ -1902,6 +1902,24 @@ export const en = {
   sidebarCallout: {
     dismiss: "Dismiss",
   },
+  deviceStatus: {
+    summary: "{{used}} of {{total}} devices",
+    summaryCapOff: "{{used}} devices running",
+    dryRun: "dry run",
+    platform: {
+      ios: "Simulator",
+      android: "Emulator",
+    },
+    heldBy: "Held by {{agent}}",
+    unleased: "No lease",
+    starting: "Starting",
+    waiting_one: "{{count}} agent waiting for a slot",
+    waiting_other: "{{count}} agents waiting for a slot",
+    unleasedCount_one: "{{count}} device without a lease",
+    unleasedCount_other: "{{count}} devices without a lease",
+    expand: "Expand device status",
+    collapse: "Collapse device status",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "MCP servers connected",

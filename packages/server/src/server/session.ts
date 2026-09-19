@@ -344,6 +344,27 @@ function beginAgentDeleteIfSupported(agentStorage: AgentStorage, agentId: string
 
 const FETCH_AGENTS_SORT_KEYS = ["status_priority", "created_at", "updated_at", "title"] as const;
 
+/**
+ * Broadcasts a client only receives once it has explicitly subscribed (SessionEventSubscription).
+ * Kept as a set rather than a chain of `||` in `emit` so adding one is a one-line change that
+ * cannot push that method over its complexity budget.
+ */
+const SUBSCRIPTION_GATED_EVENTS = new Set<SessionEventSubscription>([
+  "project.update",
+  "providers_snapshot_update",
+  "mcp_status_update",
+  "device_status_update",
+  "agent_attention_required",
+  "agent_permission_request",
+  "agent_permission_resolved",
+]);
+
+function isSubscriptionGatedEvent(
+  type: SessionOutboundMessage["type"],
+): type is SessionEventSubscription {
+  return SUBSCRIPTION_GATED_EVENTS.has(type as SessionEventSubscription);
+}
+
 export function resolveWaitForFinishError(options: {
   status: "permission" | "error" | "idle";
   final: AgentSnapshotPayload | null;
@@ -713,6 +734,7 @@ export class Session {
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
   private unsubscribeMcpGatewayStatus: (() => void) | null = null;
+  private unsubscribeDeviceStatus: (() => void) | null = null;
   private registryMutationQueue: Promise<void> = Promise.resolve();
   private projectUpdateQueue: Promise<void> = Promise.resolve();
   private isCleanedUp = false;
@@ -1549,6 +1571,50 @@ export class Session {
       if (!this.wantsEvent("mcp_status_update")) return;
       this.emit(this.mcpStatusUpdateMessage(snapshot));
     });
+  }
+
+  /**
+   * Subscribes to the device cap's changes the first time a client asks for them
+   * (docs/device-leases.md). On demand rather than at construction: a session that never
+   * subscribes to `device_status_update` — every CLI call, every old client — has no reason to
+   * hold a listener on the cap.
+   */
+  private ensureDeviceStatusSubscription(): void {
+    if (this.unsubscribeDeviceStatus) return;
+    this.unsubscribeDeviceStatus = this.agentManager.onDeviceStatusChange(() => {
+      if (!this.wantsEvent("device_status_update")) return;
+      void this.emitDeviceStatusUpdate();
+    });
+  }
+
+  /**
+   * Snapshots the device cap and pushes it. Reads the cap's cached `ps` sample rather than
+   * taking a new one, so a burst of lease changes costs nothing; the numbers are still the
+   * process scan's, only up to one sweep old.
+   */
+  private async emitDeviceStatusUpdate(source?: object): Promise<void> {
+    try {
+      const snapshot = await this.agentManager.getDeviceStatusSnapshot();
+      if (!snapshot) return;
+      const message = {
+        type: "device_status_update" as const,
+        payload: {
+          enabled: snapshot.enabled,
+          dryRun: snapshot.dryRun,
+          totalSlots: snapshot.totalSlots,
+          slotsPerPlatform: snapshot.slotsPerPlatform,
+          used: snapshot.used,
+          devices: snapshot.devices,
+          waiting: snapshot.waiting,
+          blocked: snapshot.blocked,
+          generatedAt: snapshot.generatedAt,
+        },
+      };
+      if (source) this.emitForSource(message, source);
+      else this.emit(message);
+    } catch (error) {
+      this.sessionLogger.warn({ err: error }, "Failed to emit device status update");
+    }
   }
 
   private mcpStatusUpdateMessage(servers: McpGatewaySnapshotEntry[]) {
@@ -2390,6 +2456,12 @@ export class Session {
           if (snapshot.length > 0) {
             this.emitForSource(this.mcpStatusUpdateMessage(snapshot), source);
           }
+        }
+        // Same eager hand-off as above: the cap only pushes on change, so a client connecting
+        // to a settled daemon would otherwise see nothing until a device came or went.
+        if (msg.events.includes("device_status_update")) {
+          this.ensureDeviceStatusSubscription();
+          void this.emitDeviceStatusUpdate(source);
         }
         return undefined;
       }
@@ -7966,14 +8038,7 @@ export class Session {
     if (!this.authorization.allowsOutbound(msg)) {
       return;
     }
-    if (
-      msg.type === "project.update" ||
-      msg.type === "providers_snapshot_update" ||
-      msg.type === "mcp_status_update" ||
-      msg.type === "agent_attention_required" ||
-      msg.type === "agent_permission_request" ||
-      msg.type === "agent_permission_resolved"
-    ) {
+    if (isSubscriptionGatedEvent(msg.type)) {
       if (this.clientCapabilitiesBySource.size > 0 && this.onMessageToSource) {
         for (const source of this.clientCapabilitiesBySource.keys()) {
           if (this.wantsEvent(msg.type, source)) this.onMessageToSource(source, msg);
@@ -8077,6 +8142,8 @@ export class Session {
     this.unsubscribeWorkspaceMutations = null;
     this.unsubscribeMcpGatewayStatus?.();
     this.unsubscribeMcpGatewayStatus = null;
+    this.unsubscribeDeviceStatus?.();
+    this.unsubscribeDeviceStatus = null;
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

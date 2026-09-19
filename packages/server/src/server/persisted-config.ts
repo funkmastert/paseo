@@ -298,6 +298,26 @@ const AgentResourceMonitorSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.resourceMonitor above — same mutable/patch split, same reason.
+// Off by default like the reaper it is modelled on. See docs/device-leases.md.
+const AgentDeviceLeasesSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    // Both caps default to what the machine can carry (agent/device-slot-defaults.ts) rather
+    // than a constant, so a bigger desk gets a bigger number without editing anything.
+    totalSlots: z.number().int().positive().optional(),
+    slotsPerPlatform: z.number().int().positive().optional(),
+    requireHeadroom: z.boolean().optional(),
+    minAvailableBytes: z.number().positive().optional(),
+    maxSwapUsedRatio: z.number().positive().optional(),
+    pendingTtlMinutes: z.number().positive().optional(),
+    // 0 disables the backstop.
+    maxLeaseHours: z.number().nonnegative().optional(),
+    queueTimeoutMinutes: z.number().positive().optional(),
+  })
+  .strict();
+
 // Live-toggleable like agents.tokenBurnMonitor/resourceMonitor above — same mutable/patch
 // split, same reason. See docs/account-failover.md.
 const AgentAccountFailoverSchema = z
@@ -458,6 +478,7 @@ export const PersistedConfigSchema = z
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
+        deviceLeases: AgentDeviceLeasesSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })

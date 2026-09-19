@@ -1943,6 +1943,24 @@ export const fr: TranslationResources = {
   sidebarCallout: {
     dismiss: "Rejeter",
   },
+  deviceStatus: {
+    summary: "{{used}} sur {{total}} appareils",
+    summaryCapOff: "{{used}} appareils en cours",
+    dryRun: "simulation",
+    platform: {
+      ios: "Simulateur",
+      android: "Émulateur",
+    },
+    heldBy: "Utilisé par {{agent}}",
+    unleased: "Sans réservation",
+    starting: "Démarrage",
+    waiting_one: "{{count}} agent en attente d'une place",
+    waiting_other: "{{count}} agents en attente d'une place",
+    unleasedCount_one: "{{count}} appareil sans réservation",
+    unleasedCount_other: "{{count}} appareils sans réservation",
+    expand: "Développer l'état des appareils",
+    collapse: "Réduire l'état des appareils",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "Serveurs MCP connectés",

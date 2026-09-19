@@ -1924,6 +1924,24 @@ export const ptBR: TranslationResources = {
   sidebarCallout: {
     dismiss: "Dispensar",
   },
+  deviceStatus: {
+    summary: "{{used}} de {{total}} dispositivos",
+    summaryCapOff: "{{used}} dispositivos em execução",
+    dryRun: "simulação",
+    platform: {
+      ios: "Simulador",
+      android: "Emulador",
+    },
+    heldBy: "Em uso por {{agent}}",
+    unleased: "Sem reserva",
+    starting: "Iniciando",
+    waiting_one: "{{count}} agente aguardando uma vaga",
+    waiting_other: "{{count}} agentes aguardando uma vaga",
+    unleasedCount_one: "{{count}} dispositivo sem reserva",
+    unleasedCount_other: "{{count}} dispositivos sem reserva",
+    expand: "Expandir status dos dispositivos",
+    collapse: "Recolher status dos dispositivos",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "Servidores MCP conectados",

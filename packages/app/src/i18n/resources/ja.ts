@@ -1910,6 +1910,24 @@ export const ja: TranslationResources = {
   sidebarCallout: {
     dismiss: "閉じる",
   },
+  deviceStatus: {
+    summary: "{{total}} 台中 {{used}} 台使用中",
+    summaryCapOff: "{{used}} 台が実行中",
+    dryRun: "ドライラン",
+    platform: {
+      ios: "シミュレータ",
+      android: "エミュレータ",
+    },
+    heldBy: "{{agent}} が使用中",
+    unleased: "予約なし",
+    starting: "起動中",
+    waiting_one: "{{count}} 件のエージェントが空きを待機中",
+    waiting_other: "{{count}} 件のエージェントが空きを待機中",
+    unleasedCount_one: "予約のないデバイス {{count}} 台",
+    unleasedCount_other: "予約のないデバイス {{count}} 台",
+    expand: "デバイス状態を展開",
+    collapse: "デバイス状態を折りたたむ",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "MCPサーバーは接続済み",

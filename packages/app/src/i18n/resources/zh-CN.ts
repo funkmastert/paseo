@@ -1871,6 +1871,24 @@ export const zhCN: TranslationResources = {
   sidebarCallout: {
     dismiss: "关闭",
   },
+  deviceStatus: {
+    summary: "{{total}} 个设备中已用 {{used}} 个",
+    summaryCapOff: "{{used}} 个设备正在运行",
+    dryRun: "试运行",
+    platform: {
+      ios: "模拟器",
+      android: "模拟器（Android）",
+    },
+    heldBy: "由 {{agent}} 占用",
+    unleased: "无占用登记",
+    starting: "正在启动",
+    waiting_one: "{{count}} 个代理正在等待空位",
+    waiting_other: "{{count}} 个代理正在等待空位",
+    unleasedCount_one: "{{count}} 个设备没有占用登记",
+    unleasedCount_other: "{{count}} 个设备没有占用登记",
+    expand: "展开设备状态",
+    collapse: "收起设备状态",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "MCP 服务器已连接",

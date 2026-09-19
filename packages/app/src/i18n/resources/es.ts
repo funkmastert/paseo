@@ -1938,6 +1938,24 @@ export const es: TranslationResources = {
   sidebarCallout: {
     dismiss: "Despedir",
   },
+  deviceStatus: {
+    summary: "{{used}} de {{total}} dispositivos",
+    summaryCapOff: "{{used}} dispositivos en ejecución",
+    dryRun: "simulación",
+    platform: {
+      ios: "Simulador",
+      android: "Emulador",
+    },
+    heldBy: "En uso por {{agent}}",
+    unleased: "Sin reserva",
+    starting: "Iniciando",
+    waiting_one: "{{count}} agente esperando un puesto",
+    waiting_other: "{{count}} agentes esperando un puesto",
+    unleasedCount_one: "{{count}} dispositivo sin reserva",
+    unleasedCount_other: "{{count}} dispositivos sin reserva",
+    expand: "Expandir estado de dispositivos",
+    collapse: "Contraer estado de dispositivos",
+  },
   mcpStatus: {
     collapsedSummary: {
       healthy: "Servidores MCP conectados",
