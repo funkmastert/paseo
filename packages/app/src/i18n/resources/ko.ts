@@ -1923,6 +1923,11 @@ export const ko: TranslationResources = {
     waiting_other: "에이전트 {{count}}개가 자리를 기다리는 중",
     unleasedCount_one: "예약 없는 기기 {{count}}대",
     unleasedCount_other: "예약 없는 기기 {{count}}대",
+    unenforced: "상한 미적용: {{providers}}",
+    enforcement: {
+      asks: "거부되지 않을 수 있음",
+      observes: "거부할 수 없음",
+    },
     expand: "기기 상태 펼치기",
     collapse: "기기 상태 접기",
   },

@@ -1944,6 +1944,11 @@ export const ru: TranslationResources = {
     waiting_other: "{{count}} агентов ждут слот",
     unleasedCount_one: "{{count}} устройство без брони",
     unleasedCount_other: "{{count}} устройств без брони",
+    unenforced: "Лимит не применяется к: {{providers}}",
+    enforcement: {
+      asks: "может не быть отклонено",
+      observes: "не может быть отклонено",
+    },
     expand: "Развернуть состояние устройств",
     collapse: "Свернуть состояние устройств",
   },

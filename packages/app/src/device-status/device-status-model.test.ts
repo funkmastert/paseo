@@ -109,3 +109,66 @@ describe("buildDeviceStatusStripModel", () => {
     expect(buildDeviceStatusStripModel(payload({ used: 4 })).tone).toBe("danger");
   });
 });
+
+/**
+ * The cap refuses Claude and OpenCode, only gets a say with Codex and the ACP agents, and
+ * cannot stop Pi at all (docs/device-leases.md). A strip that reports "2 of 3 devices" without
+ * saying which of those agents the number actually binds is a half-truth.
+ */
+describe("buildDeviceStatusStripModel and the provider asymmetry", () => {
+  test("names the live providers the cap cannot refuse, and stays quiet about the ones it can", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 1,
+        devices: [
+          {
+            platform: "android",
+            deviceId: "Pixel_7",
+            state: "running",
+            attribution: "process",
+            agentId: "agent-pi",
+          },
+        ],
+        enforcement: [
+          { provider: "pi", tier: "observes", gap: "cannot be refused" },
+          { provider: "codex", tier: "asks", gap: "Full Access asks nothing" },
+          { provider: "claude", tier: "refuses" },
+        ],
+      }),
+    );
+
+    expect(model.unenforcedProviders).toEqual([
+      { provider: "pi", tier: "observes" },
+      { provider: "codex", tier: "asks" },
+    ]);
+  });
+
+  test("a device row carries its holder's tier, so it is clear which device that is", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 1,
+        devices: [
+          {
+            platform: "android",
+            deviceId: "Pixel_7",
+            state: "running",
+            attribution: "process",
+            agentId: "agent-pi",
+            provider: "pi",
+            enforcement: "observes",
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({ enforcement: "observes" });
+  });
+
+  test("an older daemon that says nothing about enforcement claims nothing", () => {
+    // COMPAT(deviceLeaseEnforcement): the field is optional, and its absence must not be read
+    // as "everything is enforced".
+    const model = buildDeviceStatusStripModel(payload({ used: 1 }));
+    expect(model.unenforcedProviders).toEqual([]);
+    expect(model.rows.every((row) => row.enforcement === undefined)).toBe(true);
+  });
+});

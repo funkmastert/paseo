@@ -1931,6 +1931,11 @@ export const ja: TranslationResources = {
     waiting_other: "{{count}} 件のエージェントが空きを待機中",
     unleasedCount_one: "予約のないデバイス {{count}} 台",
     unleasedCount_other: "予約のないデバイス {{count}} 台",
+    unenforced: "上限が適用されない: {{providers}}",
+    enforcement: {
+      asks: "拒否できない場合あり",
+      observes: "拒否できません",
+    },
     expand: "デバイス状態を展開",
     collapse: "デバイス状態を折りたたむ",
   },

@@ -39,6 +39,12 @@ function DeviceRow({ row }: { row: DeviceStatusRow }) {
       ? t("deviceStatus.heldBy", { agent: row.agentLabel ?? row.agentId })
       : t(`deviceStatus.${row.holderKey}`);
   const heldFor = row.heldForSeconds === undefined ? "" : ` · ${formatHeldFor(row.heldForSeconds)}`;
+  // Said on the row itself, not only in a footnote: this is the device the cap could not have
+  // stopped, and which device that is matters as much as how many there are.
+  const enforcement =
+    row.enforcement && row.enforcement !== "refuses"
+      ? ` · ${t(`deviceStatus.enforcement.${row.enforcement}`)}`
+      : "";
 
   return (
     <View style={styles.row} testID={`device-status-row-${row.key}`}>
@@ -50,6 +56,7 @@ function DeviceRow({ row }: { row: DeviceStatusRow }) {
         <Text style={styles.rowStatus} numberOfLines={1}>
           {holder}
           {heldFor}
+          {enforcement}
           {row.reason ? ` · ${row.reason}` : ""}
         </Text>
       </View>
@@ -65,6 +72,11 @@ function DeviceRow({ row }: { row: DeviceStatusRow }) {
  * Every number here came from the daemon's process scan (docs/device-leases.md), so a
  * simulator Tyler booted by hand appears with no holder rather than not appearing. Renders
  * nothing on a daemon without the cap, or when there is no device and nobody waiting.
+ *
+ * It also says which of the running agents the cap cannot refuse. The cap binds Claude and
+ * OpenCode at the tool call, Codex and the ACP agents only when they ask, and Pi not at all —
+ * a count presented as enforced when it is only enforced for some agents is the half-truth
+ * that makes the whole readout untrustworthy.
  */
 export function DeviceStatusStrip() {
   const { t } = useTranslation();
@@ -118,6 +130,13 @@ export function DeviceStatusStrip() {
           {model.unleasedCount > 0 ? (
             <Text style={styles.footnote} testID="device-status-unleased">
               {t("deviceStatus.unleasedCount", { count: model.unleasedCount })}
+            </Text>
+          ) : null}
+          {model.enabled && model.unenforcedProviders.length > 0 ? (
+            <Text style={styles.footnote} testID="device-status-unenforced">
+              {t("deviceStatus.unenforced", {
+                providers: model.unenforcedProviders.map((entry) => entry.provider).join(", "),
+              })}
             </Text>
           ) : null}
         </View>

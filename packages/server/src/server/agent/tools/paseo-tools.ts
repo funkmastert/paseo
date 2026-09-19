@@ -1229,6 +1229,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       registerTool,
       manager: options.deviceLeaseManager,
       callerAgentId,
+      // The cap binds different providers to different degrees, and the agent asking is the
+      // one that needs to know which it is (docs/device-leases.md).
+      resolveCallerProvider: () => resolveCallerAgent()?.provider,
     });
   }
 
