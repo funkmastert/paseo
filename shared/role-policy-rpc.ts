@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   MAX_ROLES,
+  TASK_CLASS_IDS,
   RoleModelPolicySchema,
   RoleRecordSchema,
 } from "./role-policy-schema";
@@ -54,6 +55,16 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   model: z.string().optional(),
   /** The tools this role removes. Applies even when `outcome` is "unconfigured". */
   deniedTools: z.array(z.string()),
+  /**
+   * The resolved task class driving `outcome`/`model` — undefined means
+   * "default": the role's standard `models` pool, exactly what every role
+   * used before this dimension existed. See classModels() and
+   * server/role-resolve.ts's resolveTaskClass.
+   */
+  taskClass: z.enum(TASK_CLASS_IDS).optional(),
+  taskClassSource: z.union([z.literal("declared"), z.literal("classified"), z.literal("default")]),
+  /** Set when the query's `taskClass` didn't match mechanical/standard/hard; resolution still fell through, never blocked. */
+  unknownDeclaredTaskClass: z.string().optional(),
   /**
    * Present only when the query named `requestedModel`: what the role
    * router would actually do with that explicit request — honored because
@@ -110,6 +121,14 @@ export const roleModelPolicyRpc = {
     input: z.object({
       agentType: z.string().optional(),
       title: z.string().optional(),
+      /**
+       * Simulates labels[paseo.task-class] — same declared/unknown/default
+       * fallthrough resolveTaskClass applies at create time. Omitted means
+       * "not declared": the result falls back to text classification over
+       * `title` alone (initialPrompt isn't simulated here, matching the
+       * existing gap for role classification below).
+       */
+      taskClass: z.string().optional(),
       /**
        * Simulates an explicit `config.model` request against the resolved
        * role, alongside `requestedProvider` (defaults to the pool family).

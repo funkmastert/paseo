@@ -292,7 +292,14 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "scout" }, context(fakePaseo({})));
 
-      expect(result).toEqual({ roleId: "worker", roleName: "worker", tier: 1, outcome: "unconfigured", deniedTools: [] });
+      expect(result).toEqual({
+        roleId: "worker",
+        roleName: "worker",
+        tier: 1,
+        outcome: "unconfigured",
+        deniedTools: [],
+        taskClassSource: "default",
+      });
     });
 
     it("reports SELECTED with the chosen provider/model when the role is configured and catalog-eligible", async () => {
@@ -315,6 +322,7 @@ describe("role-model-policy RPC handlers", () => {
         provider: "codex",
         model: "gpt-5.1",
         deniedTools: [],
+        taskClassSource: "default",
       });
     });
 
@@ -461,6 +469,123 @@ describe("role-model-policy RPC handlers", () => {
         const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
 
         expect(result.requestedModelOverride).toBeUndefined();
+      });
+    });
+
+    describe("taskClass — answers 'why did I get this model' in one call", () => {
+      function policyWithWorkerClassPools(): RoleModelPolicy {
+        return {
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((r) =>
+            r.id === "worker" ? { ...r, models: ["claude-sonnet-5"], hardModels: ["claude-opus-5"] } : r,
+          ),
+        };
+      }
+
+      it("a declared taskClass reports the class-specific pool's outcome, not the standard pool's", async () => {
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5", "claude-opus-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({
+            policyCache: fakePolicyCache(policyWithWorkerClassPools()),
+            catalogCache: fakeCatalogCache(catalog),
+            poolCache,
+          }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", taskClass: "hard" },
+          context(fakePaseo({})),
+        );
+
+        expect(result).toMatchObject({ outcome: "selected", model: "claude-opus-5", taskClass: "hard", taskClassSource: "declared" });
+      });
+
+      it("omits taskClass and reports source 'default' when nothing is declared and no seed word matches", async () => {
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({
+            policyCache: fakePolicyCache(policyWithWorkerClassPools()),
+            catalogCache: fakeCatalogCache(catalog),
+            poolCache,
+          }),
+        );
+
+        const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
+
+        expect(result.taskClass).toBeUndefined();
+        expect(result.taskClassSource).toBe("default");
+        expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" });
+      });
+
+      it("an unknown declared taskClass never blocks: falls through and reports unknownDeclaredTaskClass", async () => {
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({
+            policyCache: fakePolicyCache(policyWithWorkerClassPools()),
+            catalogCache: fakeCatalogCache(catalog),
+            poolCache,
+          }),
+        );
+
+        const result = await handlers.explain(
+          { agentType: "worker", taskClass: "urgent" },
+          context(fakePaseo({})),
+        );
+
+        expect(result.taskClass).toBeUndefined();
+        expect(result.taskClassSource).toBe("default");
+        expect(result.unknownDeclaredTaskClass).toBe("urgent");
+        expect(result).toMatchObject({ outcome: "selected", model: "claude-sonnet-5" }); // fell through, not blocked
+      });
+
+      it("requestedModelOverride is evaluated against the RESOLVED class's pool — exactly the 'asked for Opus, got Sonnet' case, explained", async () => {
+        const catalog: ModelCatalog = new Map([["claude", new Set(["claude-sonnet-5", "claude-opus-5"])]]);
+        const poolCache = {
+          get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        };
+        const handlers = createRoleModelPolicyRpcHandlers(
+          baseDeps({
+            policyCache: fakePolicyCache(policyWithWorkerClassPools()),
+            catalogCache: fakeCatalogCache(catalog),
+            poolCache,
+          }),
+        );
+
+        // No declared task class: default/standard pool doesn't have opus -> overridden.
+        const undeclared = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5" },
+          context(fakePaseo({})),
+        );
+        expect(undeclared.requestedModelOverride).toEqual({
+          requestedRef: "claude/claude-opus-5",
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+          reason: "not-approved",
+        });
+
+        // Declared hard: the hard pool DOES have opus -> honored.
+        const declaredHard = await handlers.explain(
+          { agentType: "worker", requestedModel: "claude-opus-5", taskClass: "hard" },
+          context(fakePaseo({})),
+        );
+        expect(declaredHard.requestedModelOverride).toEqual({ requestedRef: "claude/claude-opus-5", honored: true });
       });
     });
   });

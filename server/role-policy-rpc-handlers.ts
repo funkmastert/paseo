@@ -9,8 +9,8 @@ import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
 import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
-import { resolveRole } from "./role-resolve";
-import { AGENT_TYPE_LABEL, POOL_FAMILY } from "../shared/role-policy-schema";
+import { resolveRole, resolveTaskClass } from "./role-resolve";
+import { AGENT_TYPE_LABEL, POOL_FAMILY, TASK_CLASS_LABEL, classModels } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
@@ -214,10 +214,19 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         labels: input.agentType !== undefined ? { [AGENT_TYPE_LABEL]: input.agentType } : undefined,
         title: input.title,
       });
+      // Independent of role resolution — same fixed-vocabulary resolution
+      // routeRoleForCreateUnguarded runs at create time. `initialPrompt`
+      // isn't simulated, matching the existing gap in role resolution above.
+      const taskClassResolution = resolveTaskClass({
+        labels: input.taskClass !== undefined ? { [TASK_CLASS_LABEL]: input.taskClass } : undefined,
+        title: input.title,
+      });
+      const taskClass = taskClassResolution.taskClass;
       const catalog = deps.catalogCache.get();
       const { pool } = deps.poolCache.get();
       const outcome = selectModel(resolution.role, catalog, pool, deps.health, {
         modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+        taskClass,
       });
 
       // Mirrors role-router.ts's precedence exactly: an explicit request
@@ -240,9 +249,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           catalog,
           pool,
           deps.health,
-          { modelBudgetThresholdPct: policy.modelBudgetThresholdPct },
+          { modelBudgetThresholdPct: policy.modelBudgetThresholdPct, taskClass },
         );
-        const honored = resolution.role.models.length === 0 || evaluation.eligible;
+        const honored = classModels(resolution.role, taskClass).length === 0 || evaluation.eligible;
         requestedModelOverride = honored
           ? { requestedRef, honored: true }
           : {
@@ -267,6 +276,11 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         // router is still free to pick any healthy pooled account.
         ...(outcome.outcome !== "unconfigured" && outcome.provider !== null
           ? { provider: outcome.provider }
+          : {}),
+        ...(taskClass !== undefined ? { taskClass } : {}),
+        taskClassSource: taskClassResolution.source,
+        ...(taskClassResolution.unknownDeclaredValue !== undefined
+          ? { unknownDeclaredTaskClass: taskClassResolution.unknownDeclaredValue }
           : {}),
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
       };
