@@ -451,10 +451,14 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   const notifiedPermissionRequestIds = new Set<string>();
   let unsubscribe: (() => void) | null = null;
   let notificationQueue = Promise.resolve();
+  // Tells the manager someone is watching this child, so a permission it blocks on is answered
+  // here rather than escalated to a person. Released the moment this observer stops.
+  const releaseObserver = agentManager.noteFinishObserver(childAgentId);
 
   function stop(): void {
     if (stopped) return;
     stopped = true;
+    releaseObserver();
     unsubscribe?.();
   }
 
@@ -464,6 +468,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   ): Promise<void> {
     const callerRecord = await agentStorage.get(callerAgentId);
     if (callerRecord?.archivedAt) {
+      // An archived caller will never read another notification, so this observer is dead. Say
+      // so rather than staying registered: while it counts as a watcher, a permission the child
+      // blocks on is suppressed as "someone will answer it" when nobody will.
+      stop();
       return;
     }
 

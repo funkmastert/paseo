@@ -170,6 +170,21 @@ again when a stored record is projected (`agent-projections.ts`), so records wri
 stop badging without a migration. An **error** on a delegated agent still flags: a subagent that
 failed is not the normal case.
 
+A **permission** is the exception to the delegated rule. A finished subagent is fine unheard —
+its parent has the result in-band. A blocked one produces nothing at all: it does not run, and
+if its parent is waiting on it, the parent waits forever. So a delegated agent's permission
+request escalates to a person, but only when nothing else can answer it. `AgentManager` tracks
+which children have a live notify-on-finish observer (`noteFinishObserver`, set by
+`setupFinishNotification`); while one exists, the request goes to the caller, which answers with
+`respond_to_permission`, and no push is sent. With none — after a daemon restart, which is when
+those in-memory observers are lost, with `notifyOnFinish: false`, or once an archived caller
+releases its own observer — the push is the only way anyone learns.
+
+Most subagents run `bypassPermissions` and never prompt: 27 of 28 live delegated agents on one
+machine, and 844 of 1007 across its history. The other 163 ran in `auto`, `acceptEdits`, `plan`
+or `default`, any of which can block. Rare, but the failure is a permanent hang rather than a
+delay, and nothing times a pending permission out.
+
 The flag is also what stops a push repeating. `checkAndSetAttention` returns early when the agent
 is already flagged, so an unread agent cannot notify twice — which means a stale flag suppresses
 notifications rather than causing them. The noise a stale flag causes is in the UI.

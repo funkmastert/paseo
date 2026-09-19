@@ -963,6 +963,13 @@ export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
+  /**
+   * Children with a live notify-on-finish observer, and how many watch each. Set by
+   * `setupFinishNotification` so `broadcastAgentAttention` can tell whether a blocked delegated
+   * agent has anyone to answer it. In-memory on purpose: it mirrors the observers, which are
+   * themselves closures that do not survive a restart.
+   */
+  private readonly finishObservers = new Map<string, number>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
@@ -1120,6 +1127,27 @@ export class AgentManager {
 
   getRegisteredProviderIds(): AgentProvider[] {
     return Array.from(this.clients.keys());
+  }
+
+  /** Registers a notify-on-finish observer for `childAgentId`; returns its release function. */
+  noteFinishObserver(childAgentId: string): () => void {
+    this.finishObservers.set(childAgentId, (this.finishObservers.get(childAgentId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.finishObservers.get(childAgentId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.finishObservers.set(childAgentId, remaining);
+      } else {
+        this.finishObservers.delete(childAgentId);
+      }
+    };
+  }
+
+  /** Whether any caller is being notified about this agent's turns. */
+  hasFinishObserver(childAgentId: string): boolean {
+    return (this.finishObservers.get(childAgentId) ?? 0) > 0;
   }
 
   setAgentAttentionCallback(callback: AgentAttentionCallback): void {
@@ -5852,7 +5880,7 @@ export class AgentManager {
     agent: ManagedAgent,
     reason: "finished" | "error" | "permission",
   ): void {
-    if (isDelegatedAgent(agent)) {
+    if (isDelegatedAgent(agent) && !this.isUnansweredDelegatedPermission(agent, reason)) {
       return;
     }
 
@@ -5861,6 +5889,21 @@ export class AgentManager {
       provider: agent.provider,
       reason,
     });
+  }
+
+  /**
+   * A delegated agent blocked on a permission with nobody watching it. Its finishes and errors
+   * stay silent (#1293): the parent has those in-band. A permission is different — the child
+   * does not run until someone answers, and if no observer exists nobody ever will. That is a
+   * permanent hang rather than a delay, so it is the one delegated case worth a person's
+   * attention. An observer that is alive answers it instead, through `respond_to_permission`,
+   * which is why this only fires when there is none.
+   */
+  private isUnansweredDelegatedPermission(
+    agent: ManagedAgent,
+    reason: "finished" | "error" | "permission",
+  ): boolean {
+    return reason === "permission" && !this.hasFinishObserver(agent.id);
   }
 
   private dispatchStream(

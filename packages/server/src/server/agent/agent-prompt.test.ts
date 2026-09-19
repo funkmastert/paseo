@@ -63,6 +63,7 @@ interface FinishNotificationScenario {
   finishChild(): void;
   finishChildAndReadParentPrompt(): Promise<string>;
   cancelChildAndReadParentPrompt(): Promise<string>;
+  isChildObserved(): boolean;
   closeChildAndReadParentPrompt(): Promise<string>;
   parentPrompts(): string[];
   steerAttemptCount(): number;
@@ -264,6 +265,9 @@ function createFinishNotificationScenario(
 
       return parentPrompt;
     },
+    isChildObserved() {
+      return agentManager.hasFinishObserver("child-agent");
+    },
     parentPrompts() {
       return parentPrompts;
     },
@@ -279,6 +283,19 @@ function createFinishNotificationScenario(
 test("isSystemInjectedEnvelope matches the envelope formatSystemNotificationPrompt produces", () => {
   expect(isSystemInjectedEnvelope(formatSystemNotificationPrompt("child finished"))).toBe(true);
   expect(isSystemInjectedEnvelope("hello world")).toBe(false);
+});
+
+test("a watched child is registered as observed, and released when it finishes", async () => {
+  // The registry is what tells the manager a blocked delegated child has somebody who can
+  // answer it. It has to be true while watching and false the moment the observer stops.
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: "Done." });
+
+  scenario.startWatchingChild();
+  expect(scenario.isChildObserved()).toBe(true);
+
+  await scenario.finishChildAndReadParentPrompt();
+
+  expect(scenario.isChildObserved()).toBe(false);
 });
 
 test("finish notifications tell the parent the child's last assistant message", async () => {
@@ -577,6 +594,9 @@ it("does not notify archived callers", async () => {
 
   expect(streamAgentSpy).not.toHaveBeenCalled();
   expect(replaceAgentRunSpy).not.toHaveBeenCalled();
+  // And it stops watching. While it counted as a watcher, a permission the child blocked on
+  // was suppressed as "someone will answer it" when nobody ever would.
+  expect(agentManager.hasFinishObserver("child-agent")).toBe(false);
 });
 
 // Deliberately independent literals rather than the production constants these tests
