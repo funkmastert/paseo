@@ -1,5 +1,9 @@
 import { describe, expect, test, vi } from "vitest";
-import { DeviceLeaseManager, type DeviceLeaseConfig } from "./device-lease-manager.js";
+import {
+  DeviceLeaseManager,
+  type DeviceLeaseAgentSummary,
+  type DeviceLeaseConfig,
+} from "./device-lease-manager.js";
 import type { ProcessSampleRow, SystemMemorySample } from "./process-sampler.js";
 
 const GIBIBYTE = 1024 ** 3;
@@ -54,24 +58,33 @@ function createManager(
     rows?: ProcessSampleRow[];
     memory?: SystemMemorySample;
     agentIds?: string[];
+    agents?: DeviceLeaseAgentSummary[];
   } = {},
 ) {
   const state = {
     config: options.config ?? { enabled: true },
     rows: options.rows ?? [],
     memory: options.memory ?? HEALTHY_MEMORY,
-    agentIds: options.agentIds ?? ["agent-1", "agent-2", "agent-3"],
+    agents:
+      options.agents ??
+      (options.agentIds ?? ["agent-1", "agent-2", "agent-3"]).map((agentId) => ({
+        agentId,
+        provider: "claude",
+        isRunning: true,
+      })),
     nowMs: 1_000_000,
   };
   let leaseCounter = 0;
   const logger = { info: vi.fn(), warn: vi.fn() };
+  const sendSystemMessageToAgent = vi.fn(async () => undefined);
   const manager = new DeviceLeaseManager({
     processSampler: {
       sampleProcesses: async () => state.rows,
       sampleSystemMemory: async () => state.memory,
     },
     readDaemonConfig: () => ({ deviceLeases: state.config }),
-    listAgentIds: () => state.agentIds,
+    listAgents: () => state.agents,
+    sendSystemMessageToAgent,
     logger,
     now: () => state.nowMs,
     // An M3 Max: 3 total slots, 2 per platform.
@@ -83,7 +96,7 @@ function createManager(
     sampleMaxAgeMs: 0,
     createLeaseId: () => `lease-${++leaseCounter}`,
   });
-  return { manager, state, logger };
+  return { manager, state, logger, sendSystemMessageToAgent };
 }
 
 describe("DeviceLeaseManager", () => {
@@ -305,7 +318,7 @@ describe("DeviceLeaseManager", () => {
     });
 
     // The agent dies. Its emulator does not.
-    state.agentIds = [];
+    state.agents = [];
     await manager.reconcileFromSample({
       devices: [{ platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10] }],
       systemMemory: HEALTHY_MEMORY,
@@ -355,5 +368,216 @@ describe("DeviceLeaseManager", () => {
     await manager.checkin({ agentId: "agent-1" });
     await Promise.all(settled);
     expect(notifications).toBe(1);
+  });
+});
+
+/**
+ * The half of the cap that exists because not every provider can be refused
+ * (device-launch-enforcement.ts). A Codex or Pi agent boots a device nothing stopped; the cap
+ * still has to hold in aggregate, still has to say whose it is, and still must not touch it.
+ */
+describe("DeviceLeaseManager with a provider it cannot refuse", () => {
+  const UNGUARDED_AGENTS = [
+    { agentId: "agent-claude", provider: "claude", isRunning: true },
+    { agentId: "agent-pi", provider: "pi", isRunning: true },
+  ];
+
+  test("an unleased device from an unguarded agent takes a slot from the guarded ones", async () => {
+    const { manager } = createManager({
+      agents: UNGUARDED_AGENTS,
+      config: { enabled: true, totalSlots: 2, slotsPerPlatform: 2 },
+    });
+
+    // Pi boots two emulators. Nothing refused them; nobody checked them out.
+    await manager.reconcileFromSample({
+      devices: [
+        { platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10], agentId: "agent-pi" },
+        { platform: "android", deviceId: "Pixel_8", pid: 20, pids: [20], agentId: "agent-pi" },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    });
+
+    // The cap holds in aggregate: occupancy is the union of running devices and leases, so the
+    // Claude agent is refused even though the slots went to an agent the cap could not refuse.
+    const decision = await manager.gateLaunch({
+      agentId: "agent-claude",
+      command: "emulator -avd Pixel_9",
+    });
+    expect(decision.decision).toBe("deny");
+    expect((await manager.getSnapshot()).used).toBe(2);
+  });
+
+  test("an unleased device is charged to the agent whose process tree owns it, once", async () => {
+    const { manager, sendSystemMessageToAgent } = createManager({ agents: UNGUARDED_AGENTS });
+    const sample = {
+      devices: [
+        {
+          platform: "android" as const,
+          deviceId: "Pixel_7",
+          pid: 10,
+          pids: [10],
+          agentId: "agent-pi",
+        },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    };
+
+    await manager.reconcileFromSample(sample);
+    expect(sendSystemMessageToAgent).toHaveBeenCalledTimes(1);
+    const [agentId, body] = sendSystemMessageToAgent.mock.calls[0] as unknown as [string, string];
+    expect(agentId).toBe("agent-pi");
+    expect(body).toContain("Pixel_7");
+    expect(body).toContain("device_checkout");
+    // It says the cap cannot refuse this agent rather than implying a gate that does not exist.
+    expect(body).toContain("Nothing refuses your device launches");
+    // And it promises not to do anything to the device, because a build may be running on it.
+    expect(body).toContain("Nothing has been shut down");
+
+    // The sweep runs every minute. The agent hears about one device once.
+    await manager.reconcileFromSample(sample);
+    await manager.reconcileFromSample(sample);
+    expect(sendSystemMessageToAgent).toHaveBeenCalledTimes(1);
+  });
+
+  test("a second device is a second message, and a reboot is said again", async () => {
+    const { manager, sendSystemMessageToAgent } = createManager({ agents: UNGUARDED_AGENTS });
+    const pixel7 = {
+      platform: "android" as const,
+      deviceId: "Pixel_7",
+      pid: 10,
+      pids: [10],
+      agentId: "agent-pi",
+    };
+    const pixel8 = { ...pixel7, deviceId: "Pixel_8", pid: 20, pids: [20] };
+
+    await manager.reconcileFromSample({ devices: [pixel7], systemMemory: HEALTHY_MEMORY });
+    await manager.reconcileFromSample({
+      devices: [pixel7, pixel8],
+      systemMemory: HEALTHY_MEMORY,
+    });
+    expect(sendSystemMessageToAgent).toHaveBeenCalledTimes(2);
+
+    // Both stop, then Pixel_7 comes back. A new device is new news.
+    await manager.reconcileFromSample({ devices: [], systemMemory: HEALTHY_MEMORY });
+    await manager.reconcileFromSample({ devices: [pixel7], systemMemory: HEALTHY_MEMORY });
+    expect(sendSystemMessageToAgent).toHaveBeenCalledTimes(3);
+  });
+
+  test("a device the agent checked out is not charged to it", async () => {
+    const { manager, sendSystemMessageToAgent } = createManager({ agents: UNGUARDED_AGENTS });
+    await manager.checkout({ agentId: "agent-pi", platform: "android" });
+
+    await manager.reconcileFromSample({
+      devices: [
+        { platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10], agentId: "agent-pi" },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    });
+
+    expect(sendSystemMessageToAgent).not.toHaveBeenCalled();
+  });
+
+  test("an idle agent is not steered, and a dry run tells nobody", async () => {
+    const idle = [{ agentId: "agent-pi", provider: "pi", isRunning: false }];
+    const { manager: idleManager, sendSystemMessageToAgent: idleSend } = createManager({
+      agents: idle,
+    });
+    await idleManager.reconcileFromSample({
+      devices: [
+        { platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10], agentId: "agent-pi" },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    });
+    // Steering an idle agent starts a turn of its own; it gets the UI and the log instead.
+    expect(idleSend).not.toHaveBeenCalled();
+
+    const { manager: dryManager, sendSystemMessageToAgent: drySend } = createManager({
+      agents: UNGUARDED_AGENTS,
+      config: { enabled: true, dryRun: true },
+    });
+    await dryManager.reconcileFromSample({
+      devices: [
+        { platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10], agentId: "agent-pi" },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    });
+    expect(drySend).not.toHaveBeenCalled();
+  });
+
+  test("an unleased simulator has no owner ps can name, so nobody is told and it still counts", async () => {
+    const { manager, sendSystemMessageToAgent } = createManager({ agents: UNGUARDED_AGENTS });
+
+    // launchd_sim is reparented to pid 1, so a simulator never sits in an agent's tree.
+    await manager.reconcileFromSample({
+      devices: [{ platform: "ios", deviceId: UDID_A, pid: 7, pids: [7], uptimeSeconds: 8_040 }],
+      systemMemory: HEALTHY_MEMORY,
+    });
+
+    expect(sendSystemMessageToAgent).not.toHaveBeenCalled();
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.used).toBe(1);
+    expect(snapshot.devices[0]).toMatchObject({ attribution: "none", heldForSeconds: 8_040 });
+    // Nothing invents a holder for it. Unattributed pressure is reported as exactly that.
+    expect(snapshot.devices[0]?.agentId).toBeUndefined();
+  });
+
+  test("nothing about an unleased device is killed, stopped or signalled", async () => {
+    const { manager } = createManager({ agents: UNGUARDED_AGENTS });
+    const sample = {
+      devices: [
+        {
+          platform: "android" as const,
+          deviceId: "Pixel_7",
+          pid: 10,
+          pids: [10],
+          agentId: "agent-pi",
+        },
+      ],
+      systemMemory: THRASHING_MEMORY,
+    };
+
+    await manager.reconcileFromSample(sample);
+    // Even with the machine thrashing — the state this whole feature exists for — the device
+    // survives every sweep. Reaping a booted device is a different, riskier feature.
+    await manager.reconcileFromSample(sample);
+    expect((await manager.getSnapshot()).devices).toEqual([
+      expect.objectContaining({ deviceId: "Pixel_7" }),
+    ]);
+  });
+
+  test("the snapshot says which of the live providers the cap cannot refuse", async () => {
+    const { manager } = createManager({
+      agents: [
+        { agentId: "agent-claude", provider: "claude", isRunning: true },
+        { agentId: "agent-codex", provider: "codex", isRunning: true },
+        { agentId: "agent-pi", provider: "pi", isRunning: true },
+        { agentId: "agent-pi-2", provider: "pi", isRunning: false },
+      ],
+    });
+
+    const snapshot = await manager.getSnapshot();
+    // Weakest first: what the cap cannot do is the part worth reading.
+    expect(snapshot.enforcement).toEqual([
+      expect.objectContaining({ provider: "pi", tier: "observes" }),
+      expect.objectContaining({ provider: "codex", tier: "asks" }),
+      expect.objectContaining({ provider: "claude", tier: "refuses" }),
+    ]);
+  });
+
+  test("a device entry carries its holder's provider and tier", async () => {
+    const { manager } = createManager({ agents: UNGUARDED_AGENTS });
+    await manager.reconcileFromSample({
+      devices: [
+        { platform: "android", deviceId: "Pixel_7", pid: 10, pids: [10], agentId: "agent-pi" },
+      ],
+      systemMemory: HEALTHY_MEMORY,
+    });
+
+    expect((await manager.getSnapshot()).devices[0]).toMatchObject({
+      agentId: "agent-pi",
+      attribution: "process",
+      provider: "pi",
+      enforcement: "observes",
+    });
   });
 });

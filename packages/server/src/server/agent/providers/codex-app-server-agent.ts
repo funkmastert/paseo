@@ -50,6 +50,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import {
+  evaluateDeviceLaunchApproval,
+  explainDeviceLaunchRefusal,
+} from "../device-launch-approval.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
@@ -255,6 +260,11 @@ interface CodexAppServerClientLike {
 
 interface CodexAppServerAgentDeps {
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
+  /**
+   * The device cap's launch gate (docs/device-leases.md). Codex has no hook, so the strongest
+   * thing available is its own command-approval request — which Full Access never sends.
+   */
+  deviceLaunchGate?: DeviceLaunchGate;
   customProvider?: {
     id: string;
     label: string;
@@ -6789,7 +6799,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     );
   }
 
-  private handleCommandApprovalRequest(params: unknown): Promise<unknown> {
+  private async handleCommandApprovalRequest(params: unknown): Promise<unknown> {
     const parsed = z
       .object({
         itemId: z.string(),
@@ -6800,6 +6810,32 @@ export class CodexAppServerAgentSession implements AgentSession {
         reason: z.string().nullable().optional(),
       })
       .parse(params);
+
+    // The device cap's only say over Codex. It answers before the request reaches a person or
+    // an auto-approver, so a device launch with no slot is declined rather than queued behind
+    // Tyler's attention (docs/device-leases.md).
+    const refusal = await evaluateDeviceLaunchApproval({
+      gate: this.deps.deviceLaunchGate,
+      agentId: this.agentId,
+      command: parsed.command,
+      logger: this.logger,
+    });
+    if (refusal) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "assistant_message", text: formatOutOfBandStatusMessage(refusal) },
+      });
+      // Codex's approval response is a bare decision, so the reason travels separately.
+      explainDeviceLaunchRefusal({
+        gate: this.deps.deviceLaunchGate,
+        agentId: this.agentId,
+        message: refusal,
+        logger: this.logger,
+      });
+      return { decision: "decline" };
+    }
+
     const commandPreview = mapCodexExecNotificationToToolCall({
       callId: parsed.itemId,
       command: parsed.command,

@@ -1945,6 +1945,11 @@ export const ptBR: TranslationResources = {
     waiting_other: "{{count}} agentes aguardando uma vaga",
     unleasedCount_one: "{{count}} dispositivo sem reserva",
     unleasedCount_other: "{{count}} dispositivos sem reserva",
+    unenforced: "Limite não aplicado a: {{providers}}",
+    enforcement: {
+      asks: "pode não ser recusado",
+      observes: "não pode ser recusado",
+    },
     expand: "Expandir status dos dispositivos",
     collapse: "Recolher status dos dispositivos",
   },

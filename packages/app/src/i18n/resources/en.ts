@@ -1923,6 +1923,11 @@ export const en = {
     waiting_other: "{{count}} agents waiting for a slot",
     unleasedCount_one: "{{count}} device without a lease",
     unleasedCount_other: "{{count}} devices without a lease",
+    unenforced: "Cap not enforced for: {{providers}}",
+    enforcement: {
+      asks: "may not be refused",
+      observes: "cannot be refused",
+    },
     expand: "Expand device status",
     collapse: "Collapse device status",
   },

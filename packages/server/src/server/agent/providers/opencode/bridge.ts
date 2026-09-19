@@ -11,6 +11,7 @@ import {
   addModelVisibleStructuredContent,
   serializePaseoToolInputParameters,
 } from "../../tools/paseo-tool-serialization.js";
+import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import type { PaseoToolCatalog } from "../../tools/types.js";
 
 const INTERNAL_PREFIX = "/_internal/opencode";
@@ -19,11 +20,19 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 interface OpenCodeBridgeOptions {
   paseoHome: string;
   logger: Logger;
+  /**
+   * The device cap's launch gate (docs/device-leases.md). OpenCode is the one non-Claude
+   * provider that can be refused outright: the bridge plugin already runs inside the OpenCode
+   * server, so its `tool.execute.before` hook can call back here and throw before bash runs.
+   */
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 interface OpenCodeSessionBinding {
   env: Record<string, string>;
   tools?: PaseoToolCatalog;
+  /** Which Paseo agent this OpenCode session belongs to. The cap counts per agent. */
+  agentId?: string;
 }
 
 interface BindOpenCodeSessionInput extends OpenCodeSessionBinding {
@@ -43,6 +52,7 @@ interface OpenCodeConfig {
 export class OpenCodeBridge {
   private readonly paseoHome: string;
   private readonly logger: Logger;
+  private readonly deviceLaunchGate: DeviceLaunchGate | undefined;
   private readonly token = randomBytes(32).toString("hex");
   private readonly sessions = new Map<string, OpenCodeSessionBinding>();
   private server: Server | null = null;
@@ -52,6 +62,7 @@ export class OpenCodeBridge {
 
   constructor(options: OpenCodeBridgeOptions) {
     this.paseoHome = options.paseoHome;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.logger = options.logger.child({ module: "agent", component: "opencode-bridge" });
   }
 
@@ -85,6 +96,7 @@ export class OpenCodeBridge {
     const binding: OpenCodeSessionBinding = {
       env: { ...input.env },
       ...(input.tools ? { tools: input.tools } : {}),
+      ...(input.agentId ? { agentId: input.agentId } : {}),
     };
     this.sessions.set(input.sessionId, binding);
     return () => {
@@ -156,6 +168,18 @@ export class OpenCodeBridge {
         return;
       }
 
+      const deviceGateMatch = url.pathname.match(
+        new RegExp(`^${INTERNAL_PREFIX}/sessions/([^/]+)/device-gate$`),
+      );
+      if (request.method === "POST" && deviceGateMatch) {
+        await this.gateDeviceLaunch({
+          sessionId: decodeURIComponent(deviceGateMatch[1]),
+          request,
+          response,
+        });
+        return;
+      }
+
       const toolMatch = url.pathname.match(
         new RegExp(`^${INTERNAL_PREFIX}/sessions/([^/]+)/tools/([^/]+)$`),
       );
@@ -192,6 +216,38 @@ export class OpenCodeBridge {
       if (tool.title) definition.title = tool.title;
       return definition;
     });
+  }
+
+  /**
+   * The device cap's enforcement point for OpenCode. Answers the plugin's `tool.execute.before`
+   * hook: allow, or a sentence the model reads when the tool call is aborted.
+   *
+   * Fails open on everything — no gate wired, no agent bound, an unreadable body, a cap that
+   * throws. Same discipline as the Claude hook: a device cap that breaks tool calls is worse
+   * than one that misses a device the process scan catches a sweep later.
+   */
+  private async gateDeviceLaunch(input: {
+    sessionId: string;
+    request: IncomingMessage;
+    response: ServerResponse;
+  }): Promise<void> {
+    const gate = this.deviceLaunchGate;
+    const agentId = this.sessions.get(input.sessionId)?.agentId;
+    if (!gate || !agentId) {
+      sendJson(input.response, 200, { decision: "allow" });
+      return;
+    }
+    try {
+      const body = (await readJsonBody(input.request)) as { command?: unknown };
+      if (typeof body.command !== "string" || body.command.trim() === "") {
+        sendJson(input.response, 200, { decision: "allow" });
+        return;
+      }
+      sendJson(input.response, 200, await gate.gateLaunch({ agentId, command: body.command }));
+    } catch (error) {
+      this.logger.warn({ err: error, agentId }, "Device launch gate failed; allowing the command");
+      sendJson(input.response, 200, { decision: "allow" });
+    }
   }
 
   private async executeTool(input: {

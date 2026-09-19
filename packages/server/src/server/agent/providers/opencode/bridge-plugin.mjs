@@ -58,6 +58,37 @@ export default async function paseoPlugin(input, options) {
 
   return {
     tool: tools,
+    /**
+     * The device cap's enforcement point for OpenCode (docs/device-leases.md). This is the one
+     * non-Claude provider the daemon can refuse outright, because this plugin runs inside the
+     * OpenCode server and a throw here aborts the tool call before the command runs.
+     *
+     * Fails open on everything — an unknown tool shape, a bridge that cannot be reached, a
+     * daemon with no cap. A device cap that breaks tool calls is worse than the problem it
+     * solves, and the daemon's process scan catches whatever booted a sweep later.
+     */
+    "tool.execute.before": async ({ tool, sessionID }, output) => {
+      if (tool !== "bash" || !sessionID) return;
+      const command = output?.args?.command;
+      if (typeof command !== "string" || command.trim() === "") return;
+      let verdict;
+      try {
+        verdict = await request(
+          `${INTERNAL_PREFIX}/sessions/${encodeURIComponent(sessionID)}/device-gate`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command }),
+          },
+        );
+      } catch (error) {
+        logPluginError("tool.execute.before", { sessionID }, error);
+        return;
+      }
+      if (verdict?.decision === "deny") {
+        throw new Error(verdict.message ?? "The Bozeo device cap refused this device launch.");
+      }
+    },
     "shell.env": async ({ cwd, sessionID }, output) => {
       if (!sessionID) return;
       let context;

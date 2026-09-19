@@ -1,5 +1,10 @@
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import {
+  evaluateDeviceLaunchApproval,
+  explainDeviceLaunchRefusal,
+} from "../device-launch-approval.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -417,6 +422,12 @@ interface ACPAgentClientOptions {
   provider: string;
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  /**
+   * The device cap's launch gate (docs/device-leases.md). ACP has no hook, but the daemon is
+   * the ACP *client*: it spawns the terminals the agent asks for, and it answers the agent's
+   * permission requests. Both are checked.
+   */
+  deviceLaunchGate?: DeviceLaunchGate;
   defaultCommand: [string, ...string[]];
   defaultModes?: AgentMode[];
   catalogModelResolver?: ACPCatalogModelResolver;
@@ -449,6 +460,7 @@ interface ACPAgentSessionOptions {
   provider: string;
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  deviceLaunchGate?: DeviceLaunchGate;
   defaultCommand: [string, ...string[]];
   defaultModes: AgentMode[];
   modelTransformer?: (models: AgentModelDefinition[]) => AgentModelDefinition[];
@@ -909,6 +921,7 @@ export class ACPAgentClient implements AgentClient {
   ) => SessionConfigOption[];
   private readonly configFeatureOptions: ACPConfigFeatureOption[];
   private readonly clientCapabilities?: ACPClientCapabilities;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly clientCapabilityMeta?: ACPClientCapabilityMeta;
   private readonly modeIdTransformer?: (modeId: string) => string | null;
   private readonly toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
@@ -947,6 +960,7 @@ export class ACPAgentClient implements AgentClient {
     this.configOptionsTransformer = options.configOptionsTransformer;
     this.configFeatureOptions = options.configFeatureOptions ?? [];
     this.clientCapabilities = options.clientCapabilities;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.clientCapabilityMeta = options.clientCapabilityMeta;
     this.modeIdTransformer = options.modeIdTransformer;
     this.toolSnapshotTransformer = options.toolSnapshotTransformer;
@@ -978,6 +992,7 @@ export class ACPAgentClient implements AgentClient {
         configFeatureOptions: this.configFeatureOptions,
         clientCapabilities: this.clientCapabilities,
         clientCapabilityMeta: this.clientCapabilityMeta,
+        deviceLaunchGate: this.deviceLaunchGate,
         modeIdTransformer: this.modeIdTransformer,
         toolSnapshotTransformer: this.toolSnapshotTransformer,
         providerModeWriter: this.providerModeWriter,
@@ -1028,6 +1043,7 @@ export class ACPAgentClient implements AgentClient {
       configFeatureOptions: this.configFeatureOptions,
       clientCapabilities: this.clientCapabilities,
       clientCapabilityMeta: this.clientCapabilityMeta,
+      deviceLaunchGate: this.deviceLaunchGate,
       modeIdTransformer: this.modeIdTransformer,
       toolSnapshotTransformer: this.toolSnapshotTransformer,
       providerModeWriter: this.providerModeWriter,
@@ -1661,6 +1677,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   ) => SessionConfigOption[];
   private readonly configFeatureOptions: ACPConfigFeatureOption[];
   private readonly clientCapabilities?: ACPClientCapabilities;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly clientCapabilityMeta?: ACPClientCapabilityMeta;
   private readonly modeIdTransformer?: (modeId: string) => string | null;
   private readonly toolSnapshotTransformer?: (snapshot: ACPToolSnapshot) => ACPToolSnapshot;
@@ -1735,6 +1752,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     this.configOptionsTransformer = options.configOptionsTransformer;
     this.configFeatureOptions = options.configFeatureOptions ?? [];
     this.clientCapabilities = options.clientCapabilities;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.clientCapabilityMeta = options.clientCapabilityMeta;
     this.modeIdTransformer = options.modeIdTransformer;
     this.toolSnapshotTransformer = options.toolSnapshotTransformer;
@@ -2490,8 +2508,40 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    // Before auto-accept, not after: auto-accept is on by default for unattended agents, so a
+    // gate behind it would approve every device launch the cap was built to refuse.
+    const refusal = await evaluateDeviceLaunchApproval({
+      gate: this.deviceLaunchGate,
+      agentId: this.agentId,
+      command: readACPPermissionCommand(params),
+      logger: this.logger,
+    });
+    if (refusal) {
+      const rejectOption = selectPermissionOption(params.options, { behavior: "deny" });
+      if (rejectOption) {
+        this.logger.info(
+          { toolCallId: params.toolCall.toolCallId, optionId: rejectOption.optionId },
+          "Device cap rejected an ACP permission request",
+        );
+        // ACP's outcome is an option id, so the reason travels separately.
+        explainDeviceLaunchRefusal({
+          gate: this.deviceLaunchGate,
+          agentId: this.agentId,
+          message: refusal,
+          logger: this.logger,
+        });
+        return { outcome: { outcome: "selected", optionId: rejectOption.optionId } };
+      }
+      // An agent that offered no way to say no gets the request put in front of a person
+      // instead of being auto-approved past the cap.
+      this.logger.warn(
+        { toolCallId: params.toolCall.toolCallId },
+        "Device cap wanted to reject an ACP permission request, but it offered no deny option",
+      );
+    }
+
     const canAutoAccept =
-      isACPAutoAcceptEnabled(this.config) && !isACPChooserRequest(params.options);
+      !refusal && isACPAutoAcceptEnabled(this.config) && !isACPChooserRequest(params.options);
     if (canAutoAccept) {
       const allowOption = selectPermissionOption(params.options, { behavior: "allow" });
       if (allowOption) {
@@ -2642,6 +2692,20 @@ export class ACPAgentSession implements AgentSession, ACPClient {
   }
 
   async createTerminal(params: CreateTerminalRequest): Promise<{ terminalId: string }> {
+    // The device cap's strongest hold on an ACP agent: this daemon is the ACP *client*, so the
+    // command the agent wants is a process this method is about to spawn (docs/device-leases.md).
+    // Refusing here is a real refusal, and unlike Codex's bare decision the error text reaches
+    // the agent in band.
+    const refusal = await evaluateDeviceLaunchApproval({
+      gate: this.deviceLaunchGate,
+      agentId: this.agentId,
+      command: resolveTerminalCommand(params.command, params.args).shell
+        ? params.command
+        : [params.command, ...(params.args ?? [])].join(" "),
+      logger: this.logger,
+    });
+    if (refusal) throw new Error(refusal);
+
     const terminalId = randomUUID();
     const env = Object.fromEntries(
       (params.env ?? []).map((entry: EnvVariable) => [entry.name, entry.value]),
@@ -3904,6 +3968,24 @@ function readNumber(record: Record<string, unknown> | null, keys: string[]): num
     if (typeof value === "number" && Number.isFinite(value)) {
       return value;
     }
+  }
+  return undefined;
+}
+
+/**
+ * The shell command a permission request is about, or undefined when it is not about one. ACP
+ * leaves the tool's input opaque, so this reads the two shapes agents actually send — a
+ * `rawInput` carrying `command` (+ `args`), and a terminal-backed tool call — and never guesses
+ * from the title, which is prose.
+ */
+function readACPPermissionCommand(params: RequestPermissionRequest): string | undefined {
+  const rawInput = readRecord(params.toolCall.rawInput);
+  const fromRawInput = buildShellCommand(rawInput) ?? readString(rawInput, ["command"]);
+  if (fromRawInput) return fromRawInput;
+  for (const block of params.toolCall.content ?? []) {
+    const record = readRecord(block);
+    const command = readString(readRecord(record?.["terminal"]), ["command"]);
+    if (command) return command;
   }
   return undefined;
 }

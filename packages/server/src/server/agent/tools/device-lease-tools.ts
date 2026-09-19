@@ -4,13 +4,21 @@
  * MCP catalog like registerBrowserTools, so every provider gets them, not just Claude.
  *
  * These tools are a convention, not a control — an agent can skip them. What makes them worth
- * calling is the gate in front of the shell command (device-lease-manager.ts), which refuses a
- * device launch that never checked out and names these tools in the refusal.
+ * calling is the gate in front of the shell command, which refuses a device launch that never
+ * checked out and names these tools in the refusal. How strong that gate is depends on the
+ * provider (device-launch-enforcement.ts), so `device_status` tells the agent asking exactly
+ * what the cap can do about *its* launches — an agent nothing refuses needs to know these
+ * tools are the only thing holding the cap, and an agent that would be refused needs to know
+ * checking out is how it avoids that.
  *
  * See docs/device-leases.md.
  */
 
 import { z } from "zod";
+import {
+  describeDeviceLaunchEnforcement,
+  resolveDeviceLaunchEnforcement,
+} from "../device-launch-enforcement.js";
 import type { DeviceLeaseManager, DeviceStatusSnapshot } from "../device-lease-manager.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
 
@@ -23,6 +31,8 @@ export interface RegisterDeviceLeaseToolsOptions {
   ) => void;
   manager: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot">;
   callerAgentId?: string;
+  /** Throws when the caller is gone, so it is resolved lazily at each call, not at register. */
+  resolveCallerProvider?: () => string | undefined;
 }
 
 const PlatformSchema = z.enum(["ios", "android"]);
@@ -47,6 +57,26 @@ function summarize(snapshot: DeviceStatusSnapshot): string {
 export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOptions): void {
   const { manager, callerAgentId } = options;
 
+  /** What the cap can do about the calling agent's own device launches, in one sentence. */
+  const describeCallerEnforcement = (): { tier: string; detail: string } | undefined => {
+    let provider: string | undefined;
+    try {
+      provider = options.resolveCallerProvider?.();
+    } catch {
+      // The caller is gone. The cap has nothing to tell it.
+      return undefined;
+    }
+    if (!provider) return undefined;
+    const enforcement = resolveDeviceLaunchEnforcement(provider);
+    return { tier: enforcement.tier, detail: describeDeviceLaunchEnforcement(enforcement) };
+  };
+
+  // "Booting without checking out is refused" is true for Claude and OpenCode and a lie for
+  // Pi, so the sentence that follows is the caller's own (device-launch-enforcement.ts).
+  const checkoutConsequence =
+    describeCallerEnforcement()?.detail ??
+    "Booting a device without checking out may be refused, and always fills a slot either way.";
+
   options.registerTool(
     "device_checkout",
     {
@@ -54,7 +84,7 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       description:
         "Claim one of the machine's limited iOS simulator / Android emulator slots before booting a device. " +
         "Waits for a slot when they are all taken (the usual case — the work is right, just early) and returns " +
-        "as soon as one frees. Booting a device without checking out is refused. Call device_checkin when done.",
+        `as soon as one frees. ${checkoutConsequence} Call device_checkin when done.`,
       inputSchema: {
         platform: PlatformSchema.describe("ios for a simulator, android for an emulator."),
         reason: z
@@ -112,12 +142,18 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       title: "Show running devices",
       description:
         "Every iOS simulator and Android emulator running on this machine, who holds each one and for how long, " +
-        "and how they count against the cap. Counted from the process list, so devices nobody checked out are included.",
+        "and how they count against the cap. Counted from the process list, so devices nobody checked out are included. " +
+        "Also says what the cap can and cannot do about your own device launches, which depends on which agent you are.",
       inputSchema: {},
     },
     async () => {
       const snapshot = await manager.getSnapshot();
-      return toResult({ summary: summarize(snapshot), ...snapshot });
+      const enforcement = describeCallerEnforcement();
+      return toResult({
+        summary: summarize(snapshot),
+        ...snapshot,
+        ...(enforcement ? { yourEnforcement: enforcement } : {}),
+      });
     },
   );
 }

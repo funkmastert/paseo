@@ -1590,6 +1590,8 @@ export class OpenCodeAgentClient implements AgentClient {
       sessionId,
       env: launchContext.env ?? {},
       tools: launchContext.paseoTools,
+      // The device cap counts per agent, and the bridge only sees OpenCode session ids.
+      ...(launchContext.agentId ? { agentId: launchContext.agentId } : {}),
     });
   }
 

@@ -5,6 +5,8 @@ type DeviceStatusEntry = DeviceStatusPayload["devices"][number];
 
 export type DeviceStatusTone = "ok" | "warning" | "danger";
 
+export type DeviceStatusEnforcementTier = "observes" | "asks" | "refuses";
+
 export interface DeviceStatusRow {
   key: string;
   platform: "ios" | "android";
@@ -17,6 +19,12 @@ export interface DeviceStatusRow {
   agentLabel?: string;
   heldForSeconds?: number;
   reason?: string;
+  /**
+   * How strongly the cap binds the holder's provider. Present only where the daemon knows the
+   * holder; a row carrying "asks" or "observes" is a device the cap might not have been able
+   * to refuse, which is worth seeing next to the device itself.
+   */
+  enforcement?: DeviceStatusEnforcementTier;
 }
 
 export interface DeviceStatusStripModel {
@@ -31,6 +39,12 @@ export interface DeviceStatusStripModel {
   waiting: DeviceStatusPayload["waiting"];
   /** Devices running under nobody's lease. Called out because they are the cap's blind spot. */
   unleasedCount: number;
+  /**
+   * Providers with a live agent that the cap cannot refuse outright, weakest first. A cap that
+   * silently binds some agents and not others is the half-truth that makes the whole readout
+   * untrustworthy, so the strip names them rather than implying the number is enforced.
+   */
+  unenforcedProviders: Array<{ provider: string; tier: "observes" | "asks" }>;
 }
 
 /** A UDID is 36 characters of noise in a 200px sidebar; the first block identifies it fine. */
@@ -61,6 +75,7 @@ function toRow(
       : {}),
     ...(device.heldForSeconds !== undefined ? { heldForSeconds: device.heldForSeconds } : {}),
     ...(device.reason ? { reason: device.reason } : {}),
+    ...(device.enforcement ? { enforcement: device.enforcement } : {}),
   };
 }
 
@@ -73,6 +88,19 @@ function resolveTone(used: number, totalSlots: number): DeviceStatusTone {
   if (used > totalSlots) return "danger";
   if (used >= totalSlots) return "warning";
   return "ok";
+}
+
+/** The providers the cap cannot refuse outright. An old daemon says nothing, and claims nothing. */
+function resolveUnenforcedProviders(
+  payload: DeviceStatusPayload | undefined,
+): DeviceStatusStripModel["unenforcedProviders"] {
+  const entries = payload?.enforcement ?? [];
+  const unenforced: DeviceStatusStripModel["unenforcedProviders"] = [];
+  for (const entry of entries) {
+    if (entry.tier === "refuses") continue;
+    unenforced.push({ provider: entry.provider, tier: entry.tier });
+  }
+  return unenforced;
 }
 
 export function buildDeviceStatusStripModel(
@@ -95,5 +123,6 @@ export function buildDeviceStatusStripModel(
     unleasedCount: devices.filter(
       (device) => device.state === "running" && device.attribution === "none",
     ).length,
+    unenforcedProviders: resolveUnenforcedProviders(payload),
   };
 }
