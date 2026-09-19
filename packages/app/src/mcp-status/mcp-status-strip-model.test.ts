@@ -327,6 +327,7 @@ describe("isTerminalActionFailure", () => {
     "static_auth",
     "no_redirect_url",
     "client_not_registered",
+    "client_registration_refused",
   ])("treats %s as beyond retrying", (reason) => {
     expect(isTerminalActionFailure(failure({ reason }))).toBe(true);
   });

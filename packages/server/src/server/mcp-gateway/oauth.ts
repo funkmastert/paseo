@@ -202,6 +202,16 @@ export async function startMcpGatewayAuthorization(params: {
         params.credentialsPath,
       );
     }
+    // The upstream answered with a status, nothing was registered, and no browser redirect was
+    // produced: the flow never got past client registration, so what it refused is this client
+    // rather than anything about the request. Measured against Figma — every payload shape, an
+    // empty body, and a bearer token all answer 403 "Forbidden" identically. A network failure
+    // is deliberately excluded here; an upstream nobody could reach refused nothing.
+    const refusedByUpstream =
+      describeOAuthFailure(params.serverName, error).reason === "server_rejected";
+    if (refusedByUpstream && !capturedUrl && !(await params.provider.clientInformation())) {
+      throw new ClientRegistrationRefusedError(params.serverName, describeHttpRefusal(error));
+    }
     throw error;
   }
   if (result !== "REDIRECT" || !capturedUrl) {
@@ -243,6 +253,35 @@ export class MissingOAuthClientError extends Error {
     );
     this.name = "MissingOAuthClientError";
   }
+}
+
+/**
+ * Raised when an upstream advertises dynamic client registration and then refuses to perform it.
+ * Distinct from `MissingOAuthClientError`, where registration is not offered and the operator's
+ * own OAuth app is the answer: here supplying credentials fixes nothing, because the provider
+ * will not accept this client at all. Figma is the worked example — its docs say only clients in
+ * its own catalog may connect, and its registration endpoint returns a bare 403 to everyone else.
+ */
+export class ClientRegistrationRefusedError extends Error {
+  constructor(
+    readonly serverName: string,
+    readonly refusal: string,
+  ) {
+    super(
+      `MCP server "${serverName}" refused to register Paseo as a client (${refusal}). Some ` +
+        `providers only accept MCP clients from their own allowlist, so this is not something ` +
+        `credentials or configuration can change. Check whether the provider offers a local ` +
+        `server you can point this entry at instead.`,
+    );
+    this.name = "ClientRegistrationRefusedError";
+  }
+}
+
+/** "HTTP 403" when the upstream gave one, else the raw message, for naming a refusal compactly. */
+function describeHttpRefusal(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const status = /^(?:HTTP (\d{3}): )/.exec(raw)?.[1];
+  return status ? `HTTP ${status}` : raw;
 }
 
 /**

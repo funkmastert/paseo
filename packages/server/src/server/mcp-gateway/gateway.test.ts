@@ -136,6 +136,8 @@ async function startOAuthAuthorizationServer(options?: {
   /** false drops `registration_endpoint` from the metadata, the way an upstream without DCR
    * advertises itself — which is what makes the SDK ask for a hand-registered client. */
   supportsRegistration?: boolean;
+  /** Advertise registration and then refuse it, with a non-JSON body, exactly as Figma does. */
+  registrationStatus?: number;
 }): Promise<{ url: string }> {
   // Bind an ephemeral port first (port 0) so `issuerUrl` can be constructed before the
   // auth router — which signs URLs from it — is mounted.
@@ -159,6 +161,14 @@ async function startOAuthAuthorizationServer(options?: {
         return sendJson(body);
       };
       next();
+    });
+  }
+  if (options?.registrationStatus !== undefined) {
+    const status = options.registrationStatus;
+    app.post("/register", (_req, res) => {
+      // Content-Type says JSON, body is the bare word — the shape that produced the SDK's
+      // "Invalid OAuth error response: SyntaxError" in the strip.
+      res.status(status).type("application/json").send("Forbidden");
     });
   }
   app.use(
@@ -549,6 +559,33 @@ describe("McpGateway", () => {
       });
       const failure = await actionFailureOf(unreachable.startAuthorization("fixture"));
       expect(failure.reason).toBe("server_unreachable");
+      expect(failure.message).not.toContain("SyntaxError");
+    });
+
+    test("says the provider refused to register us when it offers registration and then 403s", async () => {
+      // Figma, measured on the wire: discovery succeeds, the metadata advertises
+      // `registration_endpoint`, and the POST to it answers `403 Forbidden` to every payload
+      // shape including an empty body and a bearer token. Its docs say only clients in Figma's
+      // own catalog may connect, so no credential or config on this host is the answer — which
+      // makes this a different failure from `client_not_registered`.
+      const authServer = await startOAuthAuthorizationServer({ registrationStatus: 403 });
+      const gateway = new McpGateway({
+        paseoHome: createTempHome(),
+        config: {
+          enabled: true,
+          servers: { figma: { url: authServer.url, transport: "http", auth: "oauth" } },
+        },
+        oauthRedirectBaseUrl: "https://daemon.example.test",
+      });
+
+      const failure = await actionFailureOf(gateway.startAuthorization("figma"));
+
+      expect(failure.reason).toBe("client_registration_refused");
+      expect(failure.message).toContain("refused to register Paseo as a client");
+      expect(failure.message).toContain("HTTP 403");
+      // Nothing to change on this host, so no remedy is offered — offering one would be a lie.
+      expect(failure.remedy).toEqual({});
+      // And never the SDK's parse failure about the non-JSON body.
       expect(failure.message).not.toContain("SyntaxError");
     });
 

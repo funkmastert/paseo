@@ -1983,6 +1983,8 @@ export const ptBR: TranslationResources = {
         "Este host não tem um endereço acessível para {{name}} devolver você. Defina a URL pública do daemon e tente de novo.",
       clientNotRegistered:
         "Registre você mesmo um app OAuth para {{name}} e adicione o client id e o segredo ao arquivo de tokens do host. {{name}} não oferece registro automático, então o Paseo não pode fazer isso por você.",
+      clientRegistrationRefused:
+        "O {{name}} não registra o Paseo como cliente, então o login não pode começar. Alguns provedores só aceitam clientes MCP da própria lista, e nada que você configure aqui muda isso. Veja se o {{name}} oferece um servidor local para apontar esta entrada.",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "Falha ao entrar: {{error}}",

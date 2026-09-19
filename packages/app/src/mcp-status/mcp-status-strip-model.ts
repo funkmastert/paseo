@@ -94,6 +94,7 @@ const TERMINAL_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "static_auth",
   "no_redirect_url",
   "client_not_registered",
+  "client_registration_refused",
 ]);
 
 export function isTerminalActionFailure(failure: McpStatusActionFailure | undefined): boolean {

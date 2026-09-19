@@ -1999,6 +1999,8 @@ export const es: TranslationResources = {
         "Este host no tiene una dirección accesible a la que {{name}} pueda devolverte. Configura la URL pública del daemon y vuelve a intentarlo.",
       clientNotRegistered:
         "Registra tú mismo una app OAuth para {{name}} y añade su client id y su secreto al archivo de tokens del host. {{name}} no ofrece registro automático, así que Paseo no puede hacerlo por ti.",
+      clientRegistrationRefused:
+        "{{name}} no registrará a Paseo como cliente, así que el inicio de sesión no puede empezar. Algunos proveedores solo aceptan clientes MCP de su propia lista; nada de lo que configures aquí cambia eso. Comprueba si {{name}} ofrece un servidor local al que apuntar esta entrada.",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "Fallo al iniciar sesión: {{error}}",

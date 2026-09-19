@@ -28,6 +28,8 @@ export type McpGatewayFailureReason =
   | "no_redirect_url"
   /** The upstream needs an OAuth app registered by hand; sign-in never started. */
   | "client_not_registered"
+  /** The upstream offers registration and refuses to register this client; credentials cannot help. */
+  | "client_registration_refused"
   /** The upstream refused the request — a real OAuth error, or an HTTP status with no body. */
   | "server_rejected"
   /** The upstream could not be reached at all. */

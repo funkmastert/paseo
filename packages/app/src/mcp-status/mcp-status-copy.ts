@@ -42,6 +42,7 @@ const FAILURE_COPY_KEY_BY_REASON: Record<string, string> = {
   static_auth: "mcpStatus.failure.staticAuth",
   no_redirect_url: "mcpStatus.failure.noRedirectUrl",
   client_not_registered: "mcpStatus.failure.clientNotRegistered",
+  client_registration_refused: "mcpStatus.failure.clientRegistrationRefused",
   server_rejected: "mcpStatus.failure.serverRejected",
   server_unreachable: "mcpStatus.failure.serverUnreachable",
   authorization_failed: "mcpStatus.failure.authorizationFailed",

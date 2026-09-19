@@ -2003,6 +2003,8 @@ export const fr: TranslationResources = {
         "Cet hôte n'a aucune adresse joignable vers laquelle {{name}} puisse vous renvoyer. Définissez l'URL publique du démon, puis réessayez.",
       clientNotRegistered:
         "Enregistrez vous-même une application OAuth pour {{name}}, puis ajoutez son client id et son secret au fichier de jetons de l'hôte. {{name}} ne propose pas d'enregistrement automatique, Paseo ne peut donc pas le faire à votre place.",
+      clientRegistrationRefused:
+        "{{name}} refuse d'enregistrer Paseo comme client : la connexion ne peut pas démarrer. Certains fournisseurs n'acceptent que les clients MCP de leur propre liste, et aucun réglage ici n'y change quoi que ce soit. Vérifiez si {{name}} propose un serveur local vers lequel pointer cette entrée.",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "Échec de la connexion : {{error}}",

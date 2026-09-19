@@ -1970,6 +1970,8 @@ export const ja: TranslationResources = {
         "このホストには {{name}} が戻り先にできるアドレスがありません。デーモンの公開 URL を設定してから再試行してください。",
       clientNotRegistered:
         "{{name}} 用の OAuth アプリをご自身で登録し、クライアント ID とシークレットをホストのトークンファイルに追加してください。{{name}} は自動登録に対応していないため、Paseo が代行することはできません。",
+      clientRegistrationRefused:
+        "{{name}} は Paseo をクライアントとして登録しないため、サインインを開始できません。一部のプロバイダーは自社の許可リストにある MCP クライアントしか受け付けず、ここでの設定では変えられません。{{name}} がローカルサーバーを提供していないか確認し、この項目をそちらに向けてください。",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "ログインに失敗しました: {{error}}",

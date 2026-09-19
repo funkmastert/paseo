@@ -30,6 +30,7 @@ import {
   type McpGatewayServerState,
 } from "./state.js";
 import {
+  ClientRegistrationRefusedError,
   createGatewayOAuthClientProvider,
   describeOAuthFailure,
   exchangeMcpGatewayAuthorizationCode,
@@ -157,6 +158,10 @@ function toStartAuthorizationFailure(name: string, error: unknown): McpGatewayAc
       redirectUrl: error.redirectUrl,
       path: error.credentialsPath,
     });
+  }
+  if (error instanceof ClientRegistrationRefusedError) {
+    // No remedy fields: there is nothing on this host to change.
+    return new McpGatewayActionError("client_registration_refused", error.message);
   }
   const described = describeOAuthFailure(name, error);
   return new McpGatewayActionError(described.reason, described.message);

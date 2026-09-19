@@ -1927,6 +1927,8 @@ export const zhCN: TranslationResources = {
       noRedirectUrl: "此主机没有可供 {{name}} 回跳的地址。请设置守护进程的公开 URL 后重试。",
       clientNotRegistered:
         "请自行为 {{name}} 注册一个 OAuth 应用，然后把它的 client id 和密钥添加到主机的令牌文件中。{{name}} 不支持自动注册，Paseo 无法代劳。",
+      clientRegistrationRefused:
+        "{{name}} 不会把 Paseo 注册为客户端，因此无法开始登录。有些提供方只接受自家名单中的 MCP 客户端，在这里做任何配置都无法改变。请查看 {{name}} 是否提供可供此条目指向的本地服务器。",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "登录失败：{{error}}",

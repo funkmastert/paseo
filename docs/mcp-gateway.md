@@ -74,22 +74,23 @@ Stored credentials outrank anything a past dynamic registration saved, and the S
 
 Both actions the strip offers — **Authenticate** on a brokered server and **Broker & sign in** on a session-reported one — answer with a `reason` beside their `error` sentence. One sentence cannot be both a log line and the thing a person reads, and the strip cannot decide whether the button is still worth offering without knowing the cause. `action-failure.ts` owns one vocabulary for both:
 
-| Reason                   | What happened                                            | Can the button help? |
-| ------------------------ | -------------------------------------------------------- | -------------------- |
-| `gateway_disabled`       | No gateway on this host                                  | No                   |
-| `unknown_agent`          | The reporting agent is no longer loaded                  | No                   |
-| `provider_has_no_config` | That provider cannot expose an MCP config at all         | No                   |
-| `account_signed_out`     | The provider's account is not signed in                  | No — `remedyCommand` |
-| `server_not_in_config`   | The config Paseo reads has no entry with that name       | No                   |
-| `server_is_local`        | It has one, as a local command; only http and sse broker | No                   |
-| `adopt_failed`           | The gateway refused the definition                       | Yes                  |
-| `unknown_server`         | The gateway brokers nothing by that name                 | No                   |
-| `static_auth`            | Its credential is a stored header, set out of band       | No                   |
-| `no_redirect_url`        | The daemon has no reachable address to be sent back to   | No                   |
-| `client_not_registered`  | The upstream needs an OAuth app registered by hand       | No — `remedy*`       |
-| `server_rejected`        | The upstream refused the request                         | Yes                  |
-| `server_unreachable`     | The upstream could not be reached                        | Yes                  |
-| `authorization_failed`   | Sign-in itself failed                                    | Yes                  |
+| Reason                        | What happened                                            | Can the button help?  |
+| ----------------------------- | -------------------------------------------------------- | --------------------- |
+| `gateway_disabled`            | No gateway on this host                                  | No                    |
+| `unknown_agent`               | The reporting agent is no longer loaded                  | No                    |
+| `provider_has_no_config`      | That provider cannot expose an MCP config at all         | No                    |
+| `account_signed_out`          | The provider's account is not signed in                  | No — `remedyCommand`  |
+| `server_not_in_config`        | The config Paseo reads has no entry with that name       | No                    |
+| `server_is_local`             | It has one, as a local command; only http and sse broker | No                    |
+| `adopt_failed`                | The gateway refused the definition                       | Yes                   |
+| `unknown_server`              | The gateway brokers nothing by that name                 | No                    |
+| `static_auth`                 | Its credential is a stored header, set out of band       | No                    |
+| `no_redirect_url`             | The daemon has no reachable address to be sent back to   | No                    |
+| `client_not_registered`       | The upstream needs an OAuth app registered by hand       | No — `remedy*`        |
+| `client_registration_refused` | It offers registration and refuses to register us        | No — not fixable here |
+| `server_rejected`             | The upstream refused the request                         | Yes                   |
+| `server_unreachable`          | The upstream could not be reached                        | Yes                   |
+| `authorization_failed`        | Sign-in itself failed                                    | Yes                   |
 
 Only the last one is authentication. The strip withdraws the action for the "no" rows and shows the reason in its place; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row. `server_rejected` and `server_unreachable` stay actionable on purpose: an upstream that is down or refusing now may not be in a minute, and removing the only way to find out is worse than a button that sometimes fails again.
 
@@ -98,6 +99,30 @@ A remedy travels as host specifics — `remedyCommand`, `remedyPath`, `remedyRed
 `account_signed_out` is read structurally: the CLI writes `oauthAccount` into the account's own `.claude.json` on login and drops it on logout, so the check is a read of the file adopt already opens rather than a `claude auth status` subprocess. It is deliberately one-directional. The token lives in the OS keychain, so the key's presence is not proof the account still works — only its absence is acted on, and a provider that cannot answer says `unknown`, which nothing infers a failure from.
 
 Two things the daemon cannot tell you, and the copy does not pretend otherwise. It does not know where an agent loaded a server it cannot find — a plugin, a claude.ai connector, and a config file outside the scopes below are indistinguishable from "absent". And when an account is signed out _and_ the server is missing, it reports the account: that is the more upstream fact and the one with a fix, not a claim that signing in will make that particular server appear.
+
+### A provider that will not have us
+
+`client_not_registered` and `client_registration_refused` look alike and have opposite remedies.
+The first means the upstream does not offer dynamic registration, so you create an OAuth app and
+put its credentials in the token file. The second means it _does_ offer registration, over a
+`registration_endpoint` it advertises, and then refuses — so there is nothing to supply and the
+copy must not send anyone hunting for credentials.
+
+Figma is the worked example, measured on the wire on 2026-09-19. Discovery is entirely healthy:
+`/.well-known/oauth-protected-resource/mcp` returns 200 naming `https://api.figma.com` as the
+authorization server, that server's metadata returns 200 and advertises
+`registration_endpoint: https://api.figma.com/v1/oauth/mcp/register`, and the MCP endpoint itself
+answers an unauthenticated call with a correct `401` plus a `WWW-Authenticate` header. Only the
+registration POST fails, with `403` and a nine-byte `Forbidden` body sent as
+`content-type: application/json` — which is what produced the SDK's "Invalid OAuth error
+response: SyntaxError" in the strip. Every payload shape, an empty body, and a bearer token all
+get the identical 403, so nothing about the request is being judged. Figma's documentation states
+the rule: "Only clients listed in the Figma MCP Catalog can connect to the Figma MCP Server."
+
+The daemon tells the two apart by what had happened when the SDK threw: the upstream answered
+with a status, no client information was stored, and no authorization URL was produced, so the
+flow never got past registration. A network failure is excluded from that test — an upstream
+nobody could reach refused nothing.
 
 ### What the SDK says, and what we say instead
 

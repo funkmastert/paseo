@@ -1959,6 +1959,8 @@ export const en = {
         "This host has no reachable address for {{name}} to send you back to. Set the daemon's public URL, then try again.",
       clientNotRegistered:
         "Register an OAuth app for {{name}} yourself, then add its client id and secret to the host's token file. {{name}} doesn't offer automatic registration, so Paseo can't do this for you.",
+      clientRegistrationRefused:
+        "{{name}} won't register Paseo as a client, so signing in can't start. Some providers only accept MCP clients from their own allowlist; nothing you configure here changes that. Check whether {{name}} offers a local server to point this entry at instead.",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "Sign-in failed: {{error}}",

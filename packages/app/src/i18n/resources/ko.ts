@@ -1962,6 +1962,8 @@ export const ko: TranslationResources = {
         "이 호스트에는 {{name}}이(가) 되돌려 보낼 수 있는 주소가 없습니다. 데몬의 공개 URL을 설정한 뒤 다시 시도하세요.",
       clientNotRegistered:
         "{{name}}용 OAuth 앱을 직접 등록한 뒤, 클라이언트 ID와 시크릿을 호스트의 토큰 파일에 추가하세요. {{name}}은(는) 자동 등록을 지원하지 않아 Paseo가 대신할 수 없습니다.",
+      clientRegistrationRefused:
+        "{{name}}이(가) Paseo를 클라이언트로 등록하지 않아 로그인을 시작할 수 없습니다. 일부 제공자는 자체 허용 목록의 MCP 클라이언트만 받아들이며, 여기서 설정하는 것으로는 바뀌지 않습니다. {{name}}이(가) 로컬 서버를 제공하는지 확인해 이 항목을 그쪽으로 연결하세요.",
       serverRejected: "{{error}}",
       serverUnreachable: "{{error}}",
       authorizationFailed: "로그인 실패: {{error}}",

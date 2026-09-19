@@ -203,6 +203,26 @@ describe("failureText for the errors Tyler was shown", () => {
     expect(text).not.toContain("SyntaxError");
   });
 
+  it("tells the reader a refused registration is not theirs to fix", () => {
+    // Figma: it advertises dynamic registration and then 403s every caller, because only
+    // clients in its own catalog may connect. Offering credentials here would be a false lead —
+    // that is the remedy for `client_not_registered`, which this deliberately is not.
+    const text = failureText(
+      t,
+      row(undefined, { name: "figma" }),
+      failure({
+        reason: "client_registration_refused",
+        error: 'MCP server "figma" refused to register Paseo as a client (HTTP 403).',
+      }),
+    );
+
+    expect(text).toContain("won't register Paseo as a client");
+    expect(text).toContain("allowlist");
+    expect(text).toContain("local server");
+    expect(text).not.toContain("clientCredentials");
+    expect(text).not.toContain("SyntaxError");
+  });
+
   it("explains a static-auth server instead of offering to authenticate it", () => {
     expect(failureText(t, brokeredRow(), failure({ reason: "static_auth" }))).toBe(
       "github signs in with a stored header, so there's nothing to authorize.",
