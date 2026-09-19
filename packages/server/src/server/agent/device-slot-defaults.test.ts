@@ -55,7 +55,8 @@ describe("deriveDeviceSlotDefaults", () => {
 });
 
 describe("evaluateMemoryHeadroom", () => {
-  const thresholds = { minAvailableBytes: 2 * GIBIBYTE, maxSwapUsedRatio: 0.85 };
+  // The daemon's defaults (device-lease-manager.ts): a floor rather than a comfort margin.
+  const thresholds = { minAvailableBytes: 0.5 * GIBIBYTE, maxSwapUsedRatio: 0.85 };
 
   test("refuses on the machine state this feature was written for", () => {
     // Measured: 0.4 GB free, 20.6 of 21.5 GB of swap in use, with a slot nominally free.
@@ -69,8 +70,16 @@ describe("evaluateMemoryHeadroom", () => {
 
   test("refuses on free memory alone when swap is healthy", () => {
     expect(
-      evaluateMemoryHeadroom({ availableBytes: 1.2 * GIBIBYTE, swapUsedRatio: 0.1 }, thresholds),
-    ).toEqual({ ok: false, reason: "only 1.2 GB of memory is free (need 2.0 GB)" });
+      evaluateMemoryHeadroom({ availableBytes: 0.3 * GIBIBYTE, swapUsedRatio: 0.1 }, thresholds),
+    ).toEqual({ ok: false, reason: "only 0.3 GB of memory is free (need 0.5 GB)" });
+  });
+
+  test("does not refuse a healthy machine that simply keeps few free pages", () => {
+    // Measured on the same machine right after a restart: 2.8 GiB free, no swap in use. macOS
+    // keeps free low by design, so a generous floor here would refuse work for no reason.
+    expect(
+      evaluateMemoryHeadroom({ availableBytes: 2.83 * GIBIBYTE, swapUsedRatio: 0 }, thresholds),
+    ).toEqual({ ok: true });
   });
 
   test("allows a machine with room, and never refuses for lack of a signal", () => {

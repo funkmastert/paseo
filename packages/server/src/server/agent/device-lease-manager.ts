@@ -42,7 +42,13 @@ const GIBIBYTE = 1024 ** 3;
 const DEFAULT_PENDING_TTL_MINUTES = 10;
 const DEFAULT_MAX_LEASE_HOURS = 12;
 const DEFAULT_QUEUE_TIMEOUT_MINUTES = 20;
-const DEFAULT_MIN_AVAILABLE_BYTES = 2 * GIBIBYTE;
+/**
+ * A floor, not a comfort margin. macOS keeps free pages low on purpose — a freshly restarted
+ * 64 GiB machine with no swap in use measured 2.8 GiB free — so this only fires when there is
+ * genuinely nothing left. The machine this cap was written for was at 0.4 GiB. Swap pressure
+ * below is the signal that usually catches trouble first; it was 96% on that same machine.
+ */
+const DEFAULT_MIN_AVAILABLE_BYTES = 0.5 * GIBIBYTE;
 const DEFAULT_MAX_SWAP_USED_RATIO = 0.85;
 /** How stale a `ps` snapshot may be before a gate decision re-takes it. */
 const SAMPLE_MAX_AGE_MS = 5_000;
