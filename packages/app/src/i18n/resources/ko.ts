@@ -1950,9 +1950,27 @@ export const ko: TranslationResources = {
       serverIsLocal:
         "{{name}}은(는) 로컬 명령으로 실행됩니다. http와 sse 서버만 중계할 수 있습니다.",
       adoptFailed: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
+      unknownServer: "게이트웨이가 중계하는 {{name}} 서버가 없습니다.",
+      staticAuth: "{{name}}은(는) 저장된 헤더로 로그인하므로 승인할 것이 없습니다.",
+      noRedirectUrl:
+        "이 호스트에는 {{name}}이(가) 되돌려 보낼 수 있는 주소가 없습니다. 데몬의 공개 URL을 설정한 뒤 다시 시도하세요.",
+      clientNotRegistered:
+        "{{name}}용 OAuth 앱을 직접 등록한 뒤, 클라이언트 ID와 시크릿을 호스트의 토큰 파일에 추가하세요. {{name}}은(는) 자동 등록을 지원하지 않아 Paseo가 대신할 수 없습니다.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "로그인 실패: {{error}}",
       unknown: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
     },
+    remedy: {
+      redirectUrl: "등록할 리디렉션 URI",
+      path: "호스트의 파일",
+      snippet: "추가할 내용",
+      command: "호스트에서 실행",
+    },
+    showFullError: "메시지 전체 보기",
+    showLessError: "메시지 줄이기",
+    copyError: "메시지 복사",
+    copiedError: "복사됨",
     reportedBy: "{{agent}}가 보고함",
     reportedByOn: "{{provider}}의 {{agent}}",
     reportedByCount: "에이전트 {{count}}개가 보고함",

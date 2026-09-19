@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   buildMcpStatusStripModel,
   deriveMcpStatusTone,
-  isTerminalAdoptFailure,
+  isTerminalActionFailure,
+  showsReporterProvenance,
   type McpStatusActionFailure,
+  type McpStatusRow,
   type McpStatusServerEntry,
   type McpStatusSessionReport,
 } from "./mcp-status-strip-model";
@@ -303,10 +305,17 @@ describe("row actions", () => {
 });
 
 function failure(overrides: Partial<McpStatusActionFailure> = {}): McpStatusActionFailure {
-  return { reason: null, remedyCommand: null, error: "boom", ...overrides };
+  return {
+    reason: null,
+    remedyCommand: null,
+    remedyPath: null,
+    remedyRedirectUrl: null,
+    error: "boom",
+    ...overrides,
+  };
 }
 
-describe("isTerminalAdoptFailure", () => {
+describe("isTerminalActionFailure", () => {
   it.each([
     "gateway_disabled",
     "unknown_agent",
@@ -314,19 +323,29 @@ describe("isTerminalAdoptFailure", () => {
     "account_signed_out",
     "server_not_in_config",
     "server_is_local",
+    "unknown_server",
+    "static_auth",
+    "no_redirect_url",
+    "client_not_registered",
   ])("treats %s as beyond retrying", (reason) => {
-    expect(isTerminalAdoptFailure(failure({ reason }))).toBe(true);
+    expect(isTerminalActionFailure(failure({ reason }))).toBe(true);
   });
 
-  it.each(["adopt_failed", "authorization_failed"])("leaves %s retryable", (reason) => {
-    expect(isTerminalAdoptFailure(failure({ reason }))).toBe(false);
+  it.each([
+    "adopt_failed",
+    "authorization_failed",
+    // An upstream that is down or refusing now may not be in a minute.
+    "server_rejected",
+    "server_unreachable",
+  ])("leaves %s retryable", (reason) => {
+    expect(isTerminalActionFailure(failure({ reason }))).toBe(false);
   });
 
   it("never withdraws an action on a reason it does not recognise, or on none at all", () => {
     // A newer daemon naming a cause this build predates, and an older one naming none.
-    expect(isTerminalAdoptFailure(failure({ reason: "some_future_cause" }))).toBe(false);
-    expect(isTerminalAdoptFailure(failure())).toBe(false);
-    expect(isTerminalAdoptFailure(undefined)).toBe(false);
+    expect(isTerminalActionFailure(failure({ reason: "some_future_cause" }))).toBe(false);
+    expect(isTerminalActionFailure(failure())).toBe(false);
+    expect(isTerminalActionFailure(undefined)).toBe(false);
   });
 });
 
@@ -439,5 +458,53 @@ describe("buildMcpStatusStripModel reporter provenance", () => {
 
     expect(model.rows[0]?.annotation?.agentId).toBe("a1");
     expect(model.rows[0]?.annotation?.agentProvider).toBe("claude-personal");
+  });
+});
+
+describe("brokered rows", () => {
+  it("withdraws authenticate once the daemon says signing in cannot start", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "github", status: "needs-auth" })],
+      sessionReports: [],
+      failures: { github: failure({ reason: "client_not_registered" }) },
+    });
+
+    expect(model.rows[0]?.action).toBeUndefined();
+    expect(model.rows[0]?.failure?.reason).toBe("client_not_registered");
+  });
+
+  it("keeps authenticate after an upstream refusal, which may not repeat", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [server({ name: "figma", status: "needs-auth" })],
+      sessionReports: [],
+      failures: { figma: failure({ reason: "server_rejected" }) },
+    });
+
+    expect(model.rows[0]?.action).toBe("authenticate");
+  });
+});
+
+describe("showsReporterProvenance", () => {
+  function rowNamed(name: string): McpStatusRow {
+    const found = buildMcpStatusStripModel({
+      servers: [server({ name: "github", status: "needs-auth" }), server({ name: "zeeq" })],
+      sessionReports: [
+        report({ serverName: "github" }),
+        report({ serverName: "zeeq" }),
+        report({ serverName: "amplitude" }),
+      ],
+    }).rows.find((row) => row.name === name);
+    if (!found) throw new Error(`no row for ${name}`);
+    return found;
+  }
+
+  it("drops the reporter tally from a row whose own status already says it is broken", () => {
+    expect(showsReporterProvenance(rowNamed("github"))).toBe(false);
+  });
+
+  it("keeps it where the reports are the only evidence anything is wrong", () => {
+    // A brokered server the gateway calls healthy, and a server it has never heard of.
+    expect(showsReporterProvenance(rowNamed("zeeq"))).toBe(true);
+    expect(showsReporterProvenance(rowNamed("amplitude"))).toBe(true);
   });
 });

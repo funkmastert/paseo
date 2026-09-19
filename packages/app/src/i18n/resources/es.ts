@@ -1986,9 +1986,28 @@ export const es: TranslationResources = {
       serverIsLocal:
         "{{name}} se ejecuta como un comando local. Solo se pueden intermediar servidores http y sse.",
       adoptFailed: "No se pudo intermediar {{name}}: {{error}}",
+      unknownServer: "La pasarela no intermedia ningún servidor llamado {{name}}.",
+      staticAuth:
+        "{{name}} inicia sesión con una cabecera guardada, así que no hay nada que autorizar.",
+      noRedirectUrl:
+        "Este host no tiene una dirección accesible a la que {{name}} pueda devolverte. Configura la URL pública del daemon y vuelve a intentarlo.",
+      clientNotRegistered:
+        "Registra tú mismo una app OAuth para {{name}} y añade su client id y su secreto al archivo de tokens del host. {{name}} no ofrece registro automático, así que Paseo no puede hacerlo por ti.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "Fallo al iniciar sesión: {{error}}",
       unknown: "No se pudo intermediar {{name}}: {{error}}",
     },
+    remedy: {
+      redirectUrl: "URI de redirección a registrar",
+      path: "Archivo en el host",
+      snippet: "Añade",
+      command: "Ejecuta en el host",
+    },
+    showFullError: "Ver el mensaje completo",
+    showLessError: "Acortar el mensaje",
+    copyError: "Copiar el mensaje",
+    copiedError: "Copiado",
     reportedBy: "Reportado por {{agent}}",
     reportedByOn: "{{agent}} en {{provider}}",
     reportedByCount: "Reportado por {{count}} agentes",

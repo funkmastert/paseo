@@ -1991,9 +1991,27 @@ export const fr: TranslationResources = {
       serverIsLocal:
         "{{name}} s'exécute comme une commande locale. Seuls les serveurs http et sse peuvent être relayés.",
       adoptFailed: "Impossible de relayer {{name}} : {{error}}",
+      unknownServer: "La passerelle ne relaie aucun serveur nommé {{name}}.",
+      staticAuth: "{{name}} se connecte avec un en-tête stocké : il n'y a rien à autoriser.",
+      noRedirectUrl:
+        "Cet hôte n'a aucune adresse joignable vers laquelle {{name}} puisse vous renvoyer. Définissez l'URL publique du démon, puis réessayez.",
+      clientNotRegistered:
+        "Enregistrez vous-même une application OAuth pour {{name}}, puis ajoutez son client id et son secret au fichier de jetons de l'hôte. {{name}} ne propose pas d'enregistrement automatique, Paseo ne peut donc pas le faire à votre place.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "Échec de la connexion : {{error}}",
       unknown: "Impossible de relayer {{name}} : {{error}}",
     },
+    remedy: {
+      redirectUrl: "URI de redirection à enregistrer",
+      path: "Fichier sur l'hôte",
+      snippet: "Ajoutez",
+      command: "Exécutez sur l'hôte",
+    },
+    showFullError: "Afficher tout le message",
+    showLessError: "Raccourcir le message",
+    copyError: "Copier le message",
+    copiedError: "Copié",
     reportedBy: "Signalé par {{agent}}",
     reportedByOn: "{{agent}} sur {{provider}}",
     reportedByCount: "Signalé par {{count}} agents",

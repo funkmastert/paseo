@@ -212,8 +212,13 @@ export function useMcpStatus(): UseMcpStatusResult {
       if (result.error && !result.authorizationUrl) {
         setFailures((prev) => ({
           ...prev,
-          // auth.start has no reason vocabulary of its own; its sentence stands alone.
-          [name]: { reason: null, remedyCommand: null, error: result.error ?? "" },
+          [name]: {
+            reason: result.reason ?? null,
+            remedyCommand: result.remedyCommand ?? null,
+            remedyPath: result.remedyPath ?? null,
+            remedyRedirectUrl: result.remedyRedirectUrl ?? null,
+            error: result.error ?? "",
+          },
         }));
       }
       return result;
@@ -244,6 +249,8 @@ export function useMcpStatus(): UseMcpStatusResult {
           [name]: {
             reason: result.reason ?? null,
             remedyCommand: result.remedyCommand ?? null,
+            remedyPath: result.remedyPath ?? null,
+            remedyRedirectUrl: result.remedyRedirectUrl ?? null,
             error: result.error ?? "",
           },
         }));

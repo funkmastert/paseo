@@ -1971,9 +1971,27 @@ export const ru: TranslationResources = {
       serverIsLocal:
         "{{name}} запускается как локальная команда. Проксировать можно только серверы http и sse.",
       adoptFailed: "Не удалось проксировать {{name}}: {{error}}",
+      unknownServer: "Шлюз не проксирует сервер с именем {{name}}.",
+      staticAuth: "{{name}} входит по сохранённому заголовку, авторизовывать нечего.",
+      noRedirectUrl:
+        "У этого хоста нет доступного адреса, на который {{name}} мог бы вас вернуть. Задайте публичный URL демона и повторите попытку.",
+      clientNotRegistered:
+        "Зарегистрируйте приложение OAuth для {{name}} сами, затем добавьте его client id и секрет в файл токенов на хосте. {{name}} не поддерживает автоматическую регистрацию, поэтому Paseo не сделает это за вас.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "Не удалось войти: {{error}}",
       unknown: "Не удалось проксировать {{name}}: {{error}}",
     },
+    remedy: {
+      redirectUrl: "URI перенаправления для регистрации",
+      path: "Файл на хосте",
+      snippet: "Добавьте",
+      command: "Выполните на хосте",
+    },
+    showFullError: "Показать сообщение целиком",
+    showLessError: "Свернуть сообщение",
+    copyError: "Скопировать сообщение",
+    copiedError: "Скопировано",
     reportedBy: "Сообщено агентом {{agent}}",
     reportedByOn: "{{agent}} на {{provider}}",
     reportedByCount: "Сообщено {{count}} агентами",

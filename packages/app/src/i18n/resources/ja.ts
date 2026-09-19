@@ -1958,9 +1958,27 @@ export const ja: TranslationResources = {
       serverIsLocal:
         "{{name}} はローカルコマンドとして動作します。中継できるのは http と sse のサーバーだけです。",
       adoptFailed: "{{name}} を中継できませんでした: {{error}}",
+      unknownServer: "ゲートウェイは {{name}} という名前のサーバーを中継していません。",
+      staticAuth: "{{name}} は保存済みヘッダーでサインインするため、認可するものはありません。",
+      noRedirectUrl:
+        "このホストには {{name}} が戻り先にできるアドレスがありません。デーモンの公開 URL を設定してから再試行してください。",
+      clientNotRegistered:
+        "{{name}} 用の OAuth アプリをご自身で登録し、クライアント ID とシークレットをホストのトークンファイルに追加してください。{{name}} は自動登録に対応していないため、Paseo が代行することはできません。",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "ログインに失敗しました: {{error}}",
       unknown: "{{name}} を中継できませんでした: {{error}}",
     },
+    remedy: {
+      redirectUrl: "登録するリダイレクト URI",
+      path: "ホスト上のファイル",
+      snippet: "追加する内容",
+      command: "ホストで実行",
+    },
+    showFullError: "メッセージ全体を表示",
+    showLessError: "メッセージを短く表示",
+    copyError: "メッセージをコピー",
+    copiedError: "コピーしました",
     reportedBy: "{{agent}} が報告",
     reportedByOn: "{{provider}} の {{agent}}",
     reportedByCount: "エージェント {{count}} 件が報告",

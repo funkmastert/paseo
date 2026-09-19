@@ -67,28 +67,37 @@ export interface McpStatusRowAnnotation {
  */
 export interface McpStatusActionFailure {
   reason: string | null;
+  /** Host specifics the client composes its own instruction from — never product copy. */
   remedyCommand: string | null;
+  remedyPath: string | null;
+  remedyRedirectUrl: string | null;
   error: string;
 }
 
 /**
- * Causes that pressing the button again cannot clear. The daemon marks these; a reason it does
- * not know, and a daemon too old to send one, both stay actionable — the app must not withdraw
- * an action on a guess.
+ * Causes that pressing the button again cannot clear — the host's configuration has to change
+ * first. The daemon marks these; a reason it does not know, and a daemon too old to send one,
+ * both stay actionable, because the app must not withdraw an action on a guess.
+ *
+ * `server_rejected` and `server_unreachable` are deliberately absent: an upstream that is down
+ * or refusing right now may not be in a minute, and taking away the only way to find out is
+ * worse than a button that sometimes fails again.
  */
-const TERMINAL_ADOPT_REASONS: ReadonlySet<string> = new Set([
+const TERMINAL_FAILURE_REASONS: ReadonlySet<string> = new Set([
   "gateway_disabled",
   "unknown_agent",
   "provider_has_no_config",
   "account_signed_out",
   "server_not_in_config",
   "server_is_local",
+  "unknown_server",
+  "static_auth",
+  "no_redirect_url",
+  "client_not_registered",
 ]);
 
-export function isTerminalAdoptFailure(failure: McpStatusActionFailure | undefined): boolean {
-  return failure?.reason !== undefined && failure?.reason !== null
-    ? TERMINAL_ADOPT_REASONS.has(failure.reason)
-    : false;
+export function isTerminalActionFailure(failure: McpStatusActionFailure | undefined): boolean {
+  return failure?.reason ? TERMINAL_FAILURE_REASONS.has(failure.reason) : false;
 }
 
 /** One rendered row — a brokered server (`sessionOnly: false`) or a session-only report with
@@ -240,7 +249,18 @@ function sessionOnlyActionFor(input: {
   // Until it has been tried, adopt is worth offering: nothing before the attempt knows whether
   // the daemon can read that server's definition. Once the daemon has named a cause retrying
   // cannot clear, the button would only fail again, so the row explains instead.
-  return isTerminalAdoptFailure(input.failure) ? undefined : "adopt";
+  return isTerminalActionFailure(input.failure) ? undefined : "adopt";
+}
+
+/**
+ * Whether naming who reported this server tells the reader anything. On a row the gateway
+ * already calls unhealthy, it does not: the status and its action say everything, and the
+ * reporters are a tally of who noticed. On a row the gateway thinks is fine, the reports are
+ * the only evidence anything is wrong, so they stay.
+ */
+export function showsReporterProvenance(row: McpStatusRow): boolean {
+  if (!row.annotation) return false;
+  return row.sessionOnly || (row.statusKey !== "needsAuth" && row.statusKey !== "error");
 }
 
 function isUnhealthyRow(row: McpStatusRow): boolean {
@@ -275,7 +295,11 @@ export function buildMcpStatusStripModel(input: {
       tone: deriveMcpStatusTone(server.status),
       statusKey: statusKeyFor(server.status),
       critical: server.critical,
-      ...(isUnhealthy(server.status) ? { action: "authenticate" as const } : {}),
+      // Same withdrawal rule as adopt: an authenticate button the daemon already said cannot
+      // work teaches the reader the strip is guessing.
+      ...(isUnhealthy(server.status) && !isTerminalActionFailure(input.failures?.[server.name])
+        ? { action: "authenticate" as const }
+        : {}),
       ...(server.error !== undefined ? { error: server.error } : {}),
       ...(annotation ? { annotation } : {}),
       ...(input.failures?.[server.name] ? { failure: input.failures[server.name] } : {}),

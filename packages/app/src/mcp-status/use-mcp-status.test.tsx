@@ -221,6 +221,8 @@ describe("useMcpStatus", () => {
       expect(result.current.model.rows[0]?.failure).toEqual({
         reason: "account_signed_out",
         remedyCommand: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+        remedyPath: null,
+        remedyRedirectUrl: null,
         error: "The account in /home/t/.claude-personal is not signed in",
       });
     });
@@ -264,9 +266,60 @@ describe("useMcpStatus", () => {
       expect(result.current.model.rows[0]?.failure).toEqual({
         reason: null,
         remedyCommand: null,
+        remedyPath: null,
+        remedyRedirectUrl: null,
         error: "Failed to broker the MCP server",
       });
     });
     expect(result.current.model.rows[0]?.action).toBe("adopt");
+  });
+
+  it("records an auth.start failure with its remedy, and stops offering Authenticate", async () => {
+    sessionState.current = {
+      sessions: {
+        "server-1": {
+          serverInfo: { features: { mcpStatus: true } },
+          agents: new Map(),
+        },
+      },
+    };
+    startMcpGatewayAuthMock.mockResolvedValue({
+      requestId: "req-6",
+      authorizationUrl: null,
+      error: 'MCP server "github" needs an OAuth app you register yourself…',
+      reason: "client_not_registered",
+      remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+      remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+    });
+
+    function Wrapper({ children }: { children: ReactNode }) {
+      const [queryClient] = React.useState(() => {
+        const client = new QueryClient();
+        const payload: McpStatusPayload = {
+          servers: [{ name: "github", status: "needs-auth", critical: true, lastChangedAt: 1 }],
+          generatedAt: "2026-09-18T00:00:00.000Z",
+        };
+        client.setQueryData(mcpStatusQueryKey(HOST.serverId), payload);
+        return client;
+      });
+      return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+    }
+
+    const { result } = renderHook(() => useMcpStatus(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(result.current.model.rows[0]?.action).toBe("authenticate"));
+    await act(async () => {
+      await result.current.startAuth("github");
+    });
+
+    await waitFor(() => {
+      expect(result.current.model.rows[0]?.failure).toMatchObject({
+        reason: "client_not_registered",
+        remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+        remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+      });
+    });
+    expect(result.current.model.rows[0]?.action).toBeUndefined();
+    expect(openExternalUrlMock).not.toHaveBeenCalled();
   });
 });

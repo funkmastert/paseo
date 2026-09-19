@@ -1,7 +1,13 @@
 import { createInstance, type TFunction } from "i18next";
 import { beforeAll, describe, expect, it } from "vitest";
 import { en } from "@/i18n/resources/en";
-import { failureText, reportedByText } from "./mcp-status-copy";
+import {
+  clientCredentialsSnippet,
+  failureClipboardText,
+  failureText,
+  remedyLines,
+  reportedByText,
+} from "./mcp-status-copy";
 import type {
   McpStatusActionFailure,
   McpStatusRow,
@@ -31,7 +37,10 @@ function annotation(overrides: Partial<McpStatusRowAnnotation> = {}): McpStatusR
   };
 }
 
-function row(lastFailure?: McpStatusActionFailure): McpStatusRow {
+function row(
+  lastFailure?: McpStatusActionFailure,
+  overrides: Partial<McpStatusRow> = {},
+): McpStatusRow {
   return {
     key: "session:amplitude",
     name: "amplitude",
@@ -41,32 +50,70 @@ function row(lastFailure?: McpStatusActionFailure): McpStatusRow {
     annotation: annotation(),
     ...(lastFailure ? { failure: lastFailure } : {}),
     sessionOnly: true,
+    ...overrides,
   };
 }
 
+function brokeredRow(overrides: Partial<McpStatusRow> = {}): McpStatusRow {
+  return row(undefined, {
+    key: "server:github",
+    name: "github",
+    statusKey: "needsAuth",
+    sessionOnly: false,
+    ...overrides,
+  });
+}
+
 function failure(overrides: Partial<McpStatusActionFailure> = {}): McpStatusActionFailure {
-  return { reason: null, remedyCommand: null, error: "boom", ...overrides };
+  return {
+    reason: null,
+    remedyCommand: null,
+    remedyPath: null,
+    remedyRedirectUrl: null,
+    error: "boom",
+    ...overrides,
+  };
 }
 
 describe("reportedByText", () => {
   it("names the account instead of counting the agents stuck behind it", () => {
     expect(t).toBeDefined();
-    expect(
-      reportedByText(t, annotation({ reporterCount: 15, providerIds: ["claude-personal"] })),
-    ).toBe("On claude-personal");
+    const many = row(undefined, {
+      annotation: annotation({ reporterCount: 15, providerIds: ["claude-personal"] }),
+    });
+
+    expect(reportedByText(t, many)).toBe("On claude-personal");
   });
 
   it("names the agent and its account when only one reported", () => {
-    expect(reportedByText(t, annotation())).toBe("Amp analyst on claude-personal");
+    expect(reportedByText(t, row())).toBe("Amp analyst on claude-personal");
   });
 
   it("falls back to a count only when the reporters are genuinely independent", () => {
+    const mixed = row(undefined, {
+      annotation: annotation({
+        reporterCount: 4,
+        providerIds: ["claude-backup", "claude-personal"],
+      }),
+    });
+
+    expect(reportedByText(t, mixed)).toBe("Reported by 4 agents");
+  });
+
+  it("says nothing on a brokered row the gateway already calls unhealthy", () => {
+    // "Needs auth · Reported by 8 agents" counts who noticed; the status and its button
+    // already say what to do, and the same fix serves all eight.
     expect(
-      reportedByText(
-        t,
-        annotation({ reporterCount: 4, providerIds: ["claude-backup", "claude-personal"] }),
-      ),
-    ).toBe("Reported by 4 agents");
+      reportedByText(t, brokeredRow({ annotation: annotation({ reporterCount: 8 }) })),
+    ).toBeNull();
+    expect(reportedByText(t, brokeredRow({ statusKey: "error" }))).toBeNull();
+  });
+
+  it("keeps the reporters on a brokered row the gateway thinks is fine", () => {
+    // Then they are the only sign anything is wrong.
+    expect(reportedByText(t, brokeredRow({ statusKey: "connected" }))).toBe(
+      "Amp analyst on claude-personal",
+    );
   });
 });
 
@@ -120,5 +167,111 @@ describe("failureText", () => {
       "raw",
     );
     expect(failureText(t, row(), failure({ error: "raw" }))).toBe("raw");
+  });
+});
+
+describe("failureText for the errors Tyler was shown", () => {
+  it("does not call a missing OAuth client an authentication failure", () => {
+    const text = failureText(
+      t,
+      brokeredRow(),
+      failure({
+        reason: "client_not_registered",
+        remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+        remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+        error: 'MCP server "github" needs an OAuth app you register yourself…',
+      }),
+    );
+
+    expect(text).not.toContain("Authentication failed");
+    // Leads with what to do, not with what the server does not support.
+    expect(text.indexOf("Register an OAuth app")).toBe(0);
+    expect(text.indexOf("doesn't offer automatic registration")).toBeGreaterThan(0);
+  });
+
+  it("shows the daemon's humanised refusal rather than a JSON parse error", () => {
+    const text = failureText(
+      t,
+      row(undefined, { name: "figma" }),
+      failure({
+        reason: "server_rejected",
+        error: "figma refused the sign-in request with HTTP 403 and said: Forbidden.",
+      }),
+    );
+
+    expect(text).toBe("figma refused the sign-in request with HTTP 403 and said: Forbidden.");
+    expect(text).not.toContain("SyntaxError");
+  });
+
+  it("explains a static-auth server instead of offering to authenticate it", () => {
+    expect(failureText(t, brokeredRow(), failure({ reason: "static_auth" }))).toBe(
+      "github signs in with a stored header, so there's nothing to authorize.",
+    );
+  });
+});
+
+describe("remedyLines", () => {
+  const missingClient = failure({
+    reason: "client_not_registered",
+    remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+    remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+  });
+
+  it("hands over every host fact needed to register an OAuth app, in working order", () => {
+    expect(remedyLines(t, brokeredRow(), missingClient)).toEqual([
+      {
+        key: "redirectUrl",
+        label: "Redirect URI to register",
+        value: "https://host.example/mcp/gateway/oauth/callback",
+      },
+      { key: "path", label: "File on the host", value: "/home/t/.paseo/mcp-gateway/tokens.json" },
+      { key: "snippet", label: "Add", value: clientCredentialsSnippet("github") },
+    ]);
+  });
+
+  it("writes a snippet that is valid JSON naming the server", () => {
+    expect(JSON.parse(clientCredentialsSnippet("github"))).toEqual({
+      servers: {
+        github: { auth: "oauth", clientCredentials: { clientId: "…", clientSecret: "…" } },
+      },
+    });
+  });
+
+  it("offers the sign-in command for a signed-out account and nothing else", () => {
+    const signedOut = failure({
+      reason: "account_signed_out",
+      remedyCommand: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+    });
+
+    expect(remedyLines(t, row(), signedOut)).toEqual([
+      {
+        key: "command",
+        label: "Run on the host",
+        value: "CLAUDE_CONFIG_DIR=/home/t/.claude-personal claude /login",
+      },
+    ]);
+  });
+
+  it("offers nothing when the daemon sent nothing to act on", () => {
+    expect(remedyLines(t, row(), failure({ reason: "server_rejected" }))).toEqual([]);
+  });
+});
+
+describe("failureClipboardText", () => {
+  it("copies the whole instruction, which is the part nobody retypes by hand", () => {
+    const copied = failureClipboardText(
+      t,
+      brokeredRow(),
+      failure({
+        reason: "client_not_registered",
+        remedyRedirectUrl: "https://host.example/mcp/gateway/oauth/callback",
+        remedyPath: "/home/t/.paseo/mcp-gateway/tokens.json",
+      }),
+    );
+
+    expect(copied).toContain("github: Register an OAuth app for github");
+    expect(copied).toContain("https://host.example/mcp/gateway/oauth/callback");
+    expect(copied).toContain("/home/t/.paseo/mcp-gateway/tokens.json");
+    expect(copied).toContain('"clientCredentials"');
   });
 });

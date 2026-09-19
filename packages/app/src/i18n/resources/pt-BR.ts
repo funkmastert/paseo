@@ -1971,9 +1971,27 @@ export const ptBR: TranslationResources = {
       serverIsLocal:
         "{{name}} roda como um comando local. Só servidores http e sse podem ser intermediados.",
       adoptFailed: "Não foi possível intermediar {{name}}: {{error}}",
+      unknownServer: "O gateway não intermedia nenhum servidor chamado {{name}}.",
+      staticAuth: "{{name}} entra com um cabeçalho salvo, então não há nada a autorizar.",
+      noRedirectUrl:
+        "Este host não tem um endereço acessível para {{name}} devolver você. Defina a URL pública do daemon e tente de novo.",
+      clientNotRegistered:
+        "Registre você mesmo um app OAuth para {{name}} e adicione o client id e o segredo ao arquivo de tokens do host. {{name}} não oferece registro automático, então o Paseo não pode fazer isso por você.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
       authorizationFailed: "Falha ao entrar: {{error}}",
       unknown: "Não foi possível intermediar {{name}}: {{error}}",
     },
+    remedy: {
+      redirectUrl: "URI de redirecionamento a registrar",
+      path: "Arquivo no host",
+      snippet: "Adicione",
+      command: "Execute no host",
+    },
+    showFullError: "Ver a mensagem inteira",
+    showLessError: "Encurtar a mensagem",
+    copyError: "Copiar a mensagem",
+    copiedError: "Copiado",
     reportedBy: "Reportado por {{agent}}",
     reportedByOn: "{{agent}} em {{provider}}",
     reportedByCount: "Reportado por {{count}} agentes",

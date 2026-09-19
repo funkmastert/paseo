@@ -1,19 +1,26 @@
 import { useCallback, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
-import { ChevronDown, ChevronUp, ExternalLink, KeyRound, Server } from "lucide-react-native";
+import { ChevronDown, ChevronUp, Copy, ExternalLink, KeyRound, Server } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { ProviderUsageTone } from "@getpaseo/protocol/messages";
 import type { Theme } from "@/styles/theme";
+import * as Clipboard from "expo-clipboard";
+import { useToast } from "@/contexts/toast-context";
 import { useMcpStatus } from "./use-mcp-status";
-import { failureText, reportedByText } from "./mcp-status-copy";
-import type { McpStatusRow, McpStatusRowStatusKey } from "./mcp-status-strip-model";
+import { failureClipboardText, failureText, remedyLines, reportedByText } from "./mcp-status-copy";
+import type {
+  McpStatusActionFailure,
+  McpStatusRow,
+  McpStatusRowStatusKey,
+} from "./mcp-status-strip-model";
 
 const ThemedServer = withUnistyles(Server);
 const ThemedChevronUp = withUnistyles(ChevronUp);
 const ThemedChevronDown = withUnistyles(ChevronDown);
 const ThemedKeyRound = withUnistyles(KeyRound);
 const ThemedExternalLink = withUnistyles(ExternalLink);
+const ThemedCopy = withUnistyles(Copy);
 
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const accentColorMapping = (theme: Theme) => ({ color: theme.colors.accent });
@@ -68,6 +75,7 @@ function McpStatusRowView({
 }) {
   const { t } = useTranslation();
   const handleActionPress = useCallback(() => onAction(row), [onAction, row]);
+  const reporters = reportedByText(t, row);
 
   return (
     <View testID={`mcp-status-row-${row.name}`}>
@@ -79,7 +87,7 @@ function McpStatusRowView({
           </Text>
           <Text style={styles.rowStatus} numberOfLines={1}>
             {t(statusLabelKeyFor(row.statusKey))}
-            {row.annotation ? ` · ${reportedByText(t, row.annotation)}` : ""}
+            {reporters ? ` · ${reporters}` : ""}
           </Text>
         </View>
         {row.action ? (
@@ -100,25 +108,79 @@ function McpStatusRowView({
           </Pressable>
         ) : null}
       </View>
-      {row.failure ? (
-        <Text
-          style={styles.authErrorText}
-          numberOfLines={3}
+      {row.failure ? <McpStatusRowFailure row={row} failure={row.failure} /> : null}
+    </View>
+  );
+}
+
+/**
+ * A failure under its row. The message is clamped to two lines and opens on tap: several of
+ * these carry instructions — a redirect URI to register, a file to edit, JSON to paste — and a
+ * clamp turns instructions into a teaser. Copy takes the whole thing, because nobody retypes a
+ * callback URL from a sidebar.
+ */
+function McpStatusRowFailure({
+  row,
+  failure,
+}: {
+  row: McpStatusRow;
+  failure: McpStatusActionFailure;
+}) {
+  const { t } = useTranslation();
+  const toast = useToast();
+  const [expanded, setExpanded] = useState(false);
+  const lines = remedyLines(t, row, failure);
+
+  const handleToggle = useCallback(() => setExpanded((previous) => !previous), []);
+  const handleCopy = useCallback(() => {
+    void (async () => {
+      try {
+        await Clipboard.setStringAsync(failureClipboardText(t, row, failure));
+        toast.copied(t("mcpStatus.copiedError"));
+      } catch {
+        toast.error(t("mcpStatus.copyError"));
+      }
+    })();
+  }, [failure, row, t, toast]);
+
+  return (
+    <View style={styles.failureBlock}>
+      <View style={styles.failureHeader}>
+        <Pressable
+          onPress={handleToggle}
+          accessibilityRole="button"
+          accessibilityLabel={t(expanded ? "mcpStatus.showLessError" : "mcpStatus.showFullError")}
+          style={styles.failureTextPressable}
           testID={`mcp-status-auth-error-${row.name}`}
         >
-          {failureText(t, row, row.failure)}
-        </Text>
-      ) : null}
-      {row.failure?.remedyCommand ? (
-        <Text
-          style={styles.remedyCommandText}
-          numberOfLines={2}
-          selectable
-          testID={`mcp-status-remedy-${row.name}`}
+          <Text style={styles.authErrorText} numberOfLines={expanded ? undefined : 2}>
+            {failureText(t, row, failure)}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={handleCopy}
+          accessibilityRole="button"
+          accessibilityLabel={t("mcpStatus.copyError")}
+          style={styles.failureCopyButton}
+          testID={`mcp-status-copy-error-${row.name}`}
         >
-          {row.failure.remedyCommand}
-        </Text>
-      ) : null}
+          <ThemedCopy size={13} uniProps={foregroundMutedColorMapping} />
+        </Pressable>
+      </View>
+      {expanded
+        ? lines.map((line) => (
+            <View key={line.key} style={styles.remedyLine}>
+              <Text style={styles.remedyLabel}>{line.label}</Text>
+              <Text
+                style={styles.remedyValue}
+                selectable
+                testID={`mcp-status-remedy-${line.key}-${row.name}`}
+              >
+                {line.value}
+              </Text>
+            </View>
+          ))
+        : null}
     </View>
   );
 }
@@ -257,15 +319,35 @@ const styles = StyleSheet.create((theme) => ({
   authErrorText: {
     fontSize: theme.fontSize.sm,
     color: theme.colors.statusDanger,
+  },
+  failureBlock: {
     paddingHorizontal: theme.spacing[3],
     paddingBottom: theme.spacing[1],
+    gap: theme.spacing[1],
   },
-  remedyCommandText: {
+  failureHeader: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[1],
+  },
+  failureTextPressable: {
+    flex: 1,
+  },
+  failureCopyButton: {
+    paddingHorizontal: theme.spacing[1],
+    paddingVertical: 1,
+  },
+  remedyLine: {
+    gap: 1,
+  },
+  remedyLabel: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+  },
+  remedyValue: {
     fontSize: theme.fontSize.sm,
     fontFamily: theme.fontFamily.mono,
-    color: theme.colors.foregroundMuted,
-    paddingHorizontal: theme.spacing[3],
-    paddingBottom: theme.spacing[1],
+    color: theme.colors.foreground,
   },
   authButton: {
     flexDirection: "row",
