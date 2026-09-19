@@ -66,21 +66,13 @@ Put them in the token store, not config — a client secret is a secret, and con
 }
 ```
 
-Omit `clientSecret` for a public client. Register the app's redirect URI as the daemon's `/mcp/gateway/oauth/callback` URL — the error the strip shows when credentials are missing names the exact URL to use. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
+Omit `clientSecret` for a public client. Register the app's redirect URI as the daemon's `/mcp/gateway/oauth/callback` URL. You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
 
 Stored credentials outrank anything a past dynamic registration saved, and the SDK never registers when they are present, so the hand-written record is never overwritten.
 
-## Adopting a session-reported server
+## When an action fails
 
-Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows, annotated with the account that reported them. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the definition the way the CLI would for that session — local scope first, then the project `.mcp.json`, then user scope, with `${VAR}` expanded against the session's provider env (`per-dir-stdio.ts`) — adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. The first scope that names the server decides, even when its entry turns out to be a local command: falling through would broker a definition the session is not using. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
-
-Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are. `wrapClientProvider` rebuilds a client field by field, so anything the adopt path asks a client — `resolveMcpConfigScope`, `describeAccountAuth` — has to be forwarded there or every derived provider silently answers for the base account.
-
-claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
-
-### When adopting fails
-
-The response carries a `reason` beside its `error` sentence, because one sentence cannot be both a log line and the thing a person reads — and because the strip cannot decide whether to keep offering the button without knowing the cause. `adopt-failure.ts` owns the vocabulary:
+Both actions the strip offers — **Authenticate** on a brokered server and **Broker & sign in** on a session-reported one — answer with a `reason` beside their `error` sentence. One sentence cannot be both a log line and the thing a person reads, and the strip cannot decide whether the button is still worth offering without knowing the cause. `action-failure.ts` owns one vocabulary for both:
 
 | Reason                   | What happened                                            | Can the button help? |
 | ------------------------ | -------------------------------------------------------- | -------------------- |
@@ -91,13 +83,37 @@ The response carries a `reason` beside its `error` sentence, because one sentenc
 | `server_not_in_config`   | The config Paseo reads has no entry with that name       | No                   |
 | `server_is_local`        | It has one, as a local command; only http and sse broker | No                   |
 | `adopt_failed`           | The gateway refused the definition                       | Yes                  |
-| `authorization_failed`   | OAuth failed after the definition was adopted            | Yes                  |
+| `unknown_server`         | The gateway brokers nothing by that name                 | No                   |
+| `static_auth`            | Its credential is a stored header, set out of band       | No                   |
+| `no_redirect_url`        | The daemon has no reachable address to be sent back to   | No                   |
+| `client_not_registered`  | The upstream needs an OAuth app registered by hand       | No — `remedy*`       |
+| `server_rejected`        | The upstream refused the request                         | Yes                  |
+| `server_unreachable`     | The upstream could not be reached                        | Yes                  |
+| `authorization_failed`   | Sign-in itself failed                                    | Yes                  |
 
-Only the last one is authentication. The strip withdraws the action for the rest and shows the reason in its place; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row.
+Only the last one is authentication. The strip withdraws the action for the "no" rows and shows the reason in its place; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row. `server_rejected` and `server_unreachable` stay actionable on purpose: an upstream that is down or refusing now may not be in a minute, and removing the only way to find out is worse than a button that sometimes fails again.
+
+A remedy travels as host specifics — `remedyCommand`, `remedyPath`, `remedyRedirectUrl` — never as a composed sentence. The client owns the wording and translates it; the daemon owns the paths and URIs, which no translation should touch. Nothing in a remedy is a secret.
 
 `account_signed_out` is read structurally: the CLI writes `oauthAccount` into the account's own `.claude.json` on login and drops it on logout, so the check is a read of the file adopt already opens rather than a `claude auth status` subprocess. It is deliberately one-directional. The token lives in the OS keychain, so the key's presence is not proof the account still works — only its absence is acted on, and a provider that cannot answer says `unknown`, which nothing infers a failure from.
 
-Two things the daemon cannot tell you, and the copy does not pretend otherwise. It does not know where an agent loaded a server it cannot find — a plugin, a claude.ai connector, and a config file outside the scopes above are indistinguishable from "absent". And when an account is signed out _and_ the server is missing, it reports the account: that is the more upstream fact and the one with a fix, not a claim that signing in will make that particular server appear.
+Two things the daemon cannot tell you, and the copy does not pretend otherwise. It does not know where an agent loaded a server it cannot find — a plugin, a claude.ai connector, and a config file outside the scopes below are indistinguishable from "absent". And when an account is signed out _and_ the server is missing, it reports the account: that is the more upstream fact and the one with a fix, not a claim that signing in will make that particular server appear.
+
+### What the SDK says, and what we say instead
+
+Two upstream messages are rewritten rather than passed through, because both describe the daemon's internals to someone who wanted to know about their own server.
+
+`parseErrorResponse` JSON-parses an error body and, when that fails, reports the parse failure: `HTTP 403: Invalid OAuth error response: SyntaxError: Unexpected token 'F', "Forbidden" is not valid JSON. Raw body: Forbidden`. Nobody can act on a `SyntaxError`. `describeOAuthFailure` keeps the two parts that mean something — the status code and the body — and says `figma refused the sign-in request with HTTP 403 and said: Forbidden.` A long body is clipped; an OAuth error with no description at all falls back to naming its error class; a connection that never landed is `server_unreachable`, not a refusal.
+
+The DCR complaint becomes `client_not_registered` with the redirect URI and the resolved token-file path attached, which is what the next section is about.
+
+## Adopting a session-reported server
+
+Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows, annotated with the account that reported them. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the definition the way the CLI would for that session — local scope first, then the project `.mcp.json`, then user scope, with `${VAR}` expanded against the session's provider env (`per-dir-stdio.ts`) — adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. The first scope that names the server decides, even when its entry turns out to be a local command: falling through would broker a definition the session is not using. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
+
+Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are. `wrapClientProvider` rebuilds a client field by field, so anything the adopt path asks a client — `resolveMcpConfigScope`, `describeAccountAuth` — has to be forwarded there or every derived provider silently answers for the base account.
+
+claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
 
 ## Tokens
 
