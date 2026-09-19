@@ -72,11 +72,32 @@ Stored credentials outrank anything a past dynamic registration saved, and the S
 
 ## Adopting a session-reported server
 
-Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows with a reporter count. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the definition the way the CLI would for that session — local scope first, then the project `.mcp.json`, then user scope, with `${VAR}` expanded against the session's provider env (`per-dir-stdio.ts`'s remote reader) — adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
+Agents also load MCP servers from their own Claude config (user scope in the account's `.claude.json`, the project `.mcp.json`, local scope). Those show in the strip as session-reported rows, annotated with the account that reported them. Pressing **Broker & sign in** on one calls `mcp_gateway.server.adopt`: the daemon reads the definition the way the CLI would for that session — local scope first, then the project `.mcp.json`, then user scope, with `${VAR}` expanded against the session's provider env (`per-dir-stdio.ts`) — adds the server to the live gateway, persists it into `mcpGateway.servers`, and starts OAuth in the same call. The first scope that names the server decides, even when its entry turns out to be a local command: falling through would broker a definition the session is not using. A definition that already carries an `Authorization` header becomes a static-auth server and connects at once; other headers ride along as extra headers on the OAuth record. Adopted servers are non-critical; edit config to change that.
 
-Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are.
+Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are. `wrapClientProvider` rebuilds a client field by field, so anything the adopt path asks a client — `resolveMcpConfigScope`, `describeAccountAuth` — has to be forwarded there or every derived provider silently answers for the base account.
 
 claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
+
+### When adopting fails
+
+The response carries a `reason` beside its `error` sentence, because one sentence cannot be both a log line and the thing a person reads — and because the strip cannot decide whether to keep offering the button without knowing the cause. `adopt-failure.ts` owns the vocabulary:
+
+| Reason                   | What happened                                            | Can the button help? |
+| ------------------------ | -------------------------------------------------------- | -------------------- |
+| `gateway_disabled`       | No gateway on this host                                  | No                   |
+| `unknown_agent`          | The reporting agent is no longer loaded                  | No                   |
+| `provider_has_no_config` | That provider cannot expose an MCP config at all         | No                   |
+| `account_signed_out`     | The provider's account is not signed in                  | No — `remedyCommand` |
+| `server_not_in_config`   | The config Paseo reads has no entry with that name       | No                   |
+| `server_is_local`        | It has one, as a local command; only http and sse broker | No                   |
+| `adopt_failed`           | The gateway refused the definition                       | Yes                  |
+| `authorization_failed`   | OAuth failed after the definition was adopted            | Yes                  |
+
+Only the last one is authentication. The strip withdraws the action for the rest and shows the reason in its place; it never withdraws one on a reason it does not recognise, so a daemon naming a new cause degrades to "still offered" rather than to a dead row.
+
+`account_signed_out` is read structurally: the CLI writes `oauthAccount` into the account's own `.claude.json` on login and drops it on logout, so the check is a read of the file adopt already opens rather than a `claude auth status` subprocess. It is deliberately one-directional. The token lives in the OS keychain, so the key's presence is not proof the account still works — only its absence is acted on, and a provider that cannot answer says `unknown`, which nothing infers a failure from.
+
+Two things the daemon cannot tell you, and the copy does not pretend otherwise. It does not know where an agent loaded a server it cannot find — a plugin, a claude.ai connector, and a config file outside the scopes above are indistinguishable from "absent". And when an account is signed out _and_ the server is missing, it reports the account: that is the more upstream fact and the one with a fix, not a claim that signing in will make that particular server appear.
 
 ## Tokens
 
