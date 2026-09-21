@@ -819,6 +819,13 @@ export interface AgentClient {
   resolveMcpConfigScope?(
     cwd: string,
   ): { configDir: string; projectDir: string; env?: NodeJS.ProcessEnv } | undefined;
+  /**
+   * Whether this client's sessions consume the MCP gateway's brokered `mcpServers` entries
+   * (docs/mcp-gateway.md "Session injection"). Asked of the client rather than read off the
+   * provider id, because every account-pool provider is a derived id (`extends: "claude"`) on a
+   * Claude client.
+   */
+  readonly acceptsMcpGatewayServers?: boolean;
   createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,
