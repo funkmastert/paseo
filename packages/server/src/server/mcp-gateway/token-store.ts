@@ -55,6 +55,11 @@ const OAuthTokenRecordSchema = z.object({
 const StaticTokenRecordSchema = z.object({
   auth: z.literal("static"),
   headers: z.record(z.string(), z.string()),
+  /** Environment for a local (stdio) server, which is where such servers take credentials.
+   * `headers` stays required even though a local server has none: a daemon older than local
+   * servers parses this file with `headers` required, and one record it cannot parse makes it
+   * treat the whole file as empty. */
+  env: z.record(z.string(), z.string()).optional(),
 });
 
 const McpGatewayTokenRecordSchema = z.discriminatedUnion("auth", [
@@ -189,6 +194,11 @@ export class McpGatewayTokenStore {
   getStaticHeaders(serverName: string): Record<string, string> | undefined {
     const record = this.readAll().servers[serverName];
     return record?.auth === "static" ? record.headers : undefined;
+  }
+
+  getStaticEnv(serverName: string): Record<string, string> | undefined {
+    const record = this.readAll().servers[serverName];
+    return record?.auth === "static" ? record.env : undefined;
   }
 
   saveStaticHeaders(serverName: string, headers: Record<string, string>): void {

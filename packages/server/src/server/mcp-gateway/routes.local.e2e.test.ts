@@ -12,6 +12,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -435,6 +436,77 @@ describe("MCP gateway proxy + OAuth callback (local e2e, fixture upstream)", () 
     } finally {
       await daemon.stop();
       await fixture.close();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  test("a local stdio server is relayed to sessions like a remote one, with its stored env", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-mcp-gateway-local-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-mcp-gateway-local-"));
+    const daemonPort = await getAvailablePort();
+    const require = createRequire(import.meta.url);
+    const script = path.join(paseoHome, "fixture-stdio-server.cjs");
+    await writeFile(
+      script,
+      `
+const { McpServer } = require(${JSON.stringify(require.resolve("@modelcontextprotocol/sdk/server/mcp.js"))});
+const { StdioServerTransport } = require(${JSON.stringify(require.resolve("@modelcontextprotocol/sdk/server/stdio.js"))});
+const server = new McpServer({ name: "fixture-stdio-server", version: "1.0.0" });
+server.registerTool("whoami", { description: "Names the stored credential", inputSchema: {} },
+  async () => ({ content: [{ type: "text", text: process.env.FIXTURE_TOKEN ?? "none" }] }));
+void server.connect(new StdioServerTransport());
+`,
+    );
+    await mkdir(path.join(paseoHome, "mcp-gateway"), { recursive: true });
+    await writeFile(
+      path.join(paseoHome, "mcp-gateway", "tokens.json"),
+      JSON.stringify({
+        version: 1,
+        servers: { local: { auth: "static", headers: {}, env: { FIXTURE_TOKEN: "token-1" } } },
+      }),
+      { mode: 0o600 },
+    );
+
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${daemonPort}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createTestAgentClients(),
+        agentStoragePath: path.join(paseoHome, "agents"),
+        mcpGateway: {
+          enabled: true,
+          localServers: { local: { command: process.execPath, args: [script], auth: "static" } },
+        },
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    try {
+      await vi.waitFor(() => {
+        expect(daemon.mcpGateway.getServerState("local")?.status).toBe("connected");
+      });
+
+      const client = await createGatewayMcpClient(
+        `http://127.0.0.1:${daemonPort}/mcp/gateway/local`,
+        daemon.getMcpGatewayAuthToken(),
+      );
+      try {
+        const result = (await client.callTool({ name: "whoami", args: {} })) as {
+          content?: Array<{ text?: string }>;
+        };
+        expect(result.content?.[0]?.text).toBe("token-1");
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await daemon.stop();
       await rm(paseoHome, { recursive: true, force: true });
       await rm(staticDir, { recursive: true, force: true });
     }

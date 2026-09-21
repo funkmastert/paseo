@@ -34,6 +34,7 @@ Add an `mcpGateway` section to the daemon config (`~/.paseo/config.json`):
 - `critical`: critical-tier servers get named in the collapsed strip when unhealthy and fire an immediate push notification on auth loss or unavailability. Non-critical servers change strip state only.
 - `auth`: `oauth` (default) or `static`. Secrets never go in this config — it is broadcast to every connected client. Static header values live in the private token store (below).
 - `sessionMode`: `overlay` (default) or `strict`. How brokered entries meet the CLI's own MCP loading; see Session injection.
+- `localServers`: stdio servers the daemon runs itself; see Local servers.
 - Adding a server is configuration only; no code. Editing `mcpGateway` requires a daemon restart — the config store persists the change and reports it as restart-required.
 
 When the gateway is disabled or unconfigured, nothing is constructed and session launches are byte-identical to a gateway-less daemon.
@@ -71,9 +72,48 @@ Omit `clientSecret` for a public client. Register the app's redirect URI as the 
 - `redirectUrl`: the URI you registered, when the provider will not accept the one the daemon derives. It must still reach this daemon's callback path. The loopback daemon derives `http://127.0.0.1:<port>/…`, and Slack only treats `http://localhost` redirects as desktop redirects, so register and set `http://localhost:6767/mcp/gateway/oauth/callback`.
 - `scope`: the space-separated scopes to request. Without it the SDK requests everything the resource advertises in `scopes_supported`, which for Slack includes posting, writing canvases, and uploading files as you.
 
-Both fields are ignored by daemons older than this feature, and such a daemon rewrites the file without them the next time it saves a token, so upgrade the daemon before you add them. You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
+Both fields are ignored by daemons older than this feature, and such a daemon rewrites the file without them the next time it saves a token, so upgrade the daemon before you add them.
+
+You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
 
 Stored credentials outrank anything a past dynamic registration saved, and the SDK never registers when they are present, so the hand-written record is never overwritten.
+
+## Local servers
+
+Some upstreams cannot be brokered remotely at all: Figma's hosted server refuses every client outside its catalog (see A provider that will not have us). A local server is the way around that: an MCP server the daemon runs as a stdio subprocess and brokers under `/mcp/gateway/<name>` like any other. Sessions on every account see the same entry, and the credential lives once in the daemon.
+
+```json
+{
+  "mcpGateway": {
+    "localServers": {
+      "figma": {
+        "command": "/absolute/path/to/node",
+        "args": ["/absolute/path/to/figma-developer-mcp/dist/bin.js", "--stdio", "--no-telemetry"],
+        "auth": "static"
+      }
+    }
+  }
+}
+```
+
+Its credentials go in the token file as environment variables, on a static record:
+
+```json
+{
+  "version": 1,
+  "servers": { "figma": { "auth": "static", "headers": {}, "env": { "FIGMA_API_KEY": "…" } } }
+}
+```
+
+- Keep `"headers": {}`. A daemon older than local servers requires the field, and one record it cannot parse makes it read the whole file as empty.
+- The child inherits only the SDK's minimal environment (`HOME`, `PATH`, `SHELL`, `TERM`, `USER`, `LOGNAME`) plus `env`, never the daemon's own. The daemon's `PATH` is whatever launched it, so give `command` as an absolute path and point it at the interpreter, not at a script that starts with `#!/usr/bin/env node`.
+- Install the server at a pinned version in a directory of its own. `npx -y package@latest` fetches whatever was published last, every time the daemon restarts, with your credential in its environment.
+- `auth: "static"` means the server needs its env: with no record it waits in needs-auth and is never spawned. Leave `auth` out for a server that needs no credential.
+- A process that exits on its own is restarted, after 2s and then doubling up to 5 minutes. A process that stays up for a minute resets the backoff.
+- When one fails to start, its stderr goes to the daemon log with every stored env value of 8 or more characters replaced by `[redacted]`.
+- A name in both `servers` and `localServers` keeps the remote entry and logs a warning.
+
+Figma is the worked example. [Framelink](https://github.com/GLips/Figma-Context-MCP) (`figma-developer-mcp`, MIT) reads the Figma REST API with a personal access token. Its telemetry is on by default, so pass `--no-telemetry`. Its image-download tool writes only under `--image-dir`, which defaults to the daemon's working directory, so pass `--skip-image-downloads` or name a directory your agents can use.
 
 ## When an action fails
 
@@ -108,6 +148,7 @@ Two things the daemon cannot tell you, and the copy does not pretend otherwise. 
 ### A provider that will not have us
 
 `client_not_registered` and `client_registration_refused` look alike and have opposite remedies.
+For the second, see Local servers.
 The first means the upstream does not offer dynamic registration, so you create an OAuth app and
 put its credentials in the token file. The second means it _does_ offer registration, over a
 `registration_endpoint` it advertises, and then refuses — so there is nothing to supply and the

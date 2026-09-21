@@ -6,6 +6,7 @@ import {
   type OAuthClientProvider,
 } from "@modelcontextprotocol/sdk/client/auth.js";
 import { SseError, SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import {
   StreamableHTTPClientTransport,
   StreamableHTTPError,
@@ -14,6 +15,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type {
   McpGatewaySessionMode,
   MutableMcpGatewayConfig,
+  MutableMcpGatewayLocalServerConfig,
   MutableMcpGatewayServerConfig,
 } from "@getpaseo/protocol/messages";
 import {
@@ -50,6 +52,37 @@ interface LoggerLike {
 
 export type McpGatewayConfig = MutableMcpGatewayConfig;
 export type McpGatewayServerConfig = MutableMcpGatewayServerConfig;
+export type McpGatewayLocalServerConfig = MutableMcpGatewayLocalServerConfig;
+
+function isLocalServerConfig(
+  config: McpGatewayServerConfig | McpGatewayLocalServerConfig,
+): config is McpGatewayLocalServerConfig {
+  return "command" in config;
+}
+
+/** First retry delay after a local server exits on its own; doubles per exit up to the cap. */
+const LOCAL_SERVER_RESTART_BASE_MS = 2_000;
+const LOCAL_SERVER_RESTART_MAX_MS = 5 * 60_000;
+/** A local server up at least this long before exiting has its backoff reset. */
+const LOCAL_SERVER_STABLE_UPTIME_MS = 60_000;
+/** How much of a local server's stderr is kept for the log line when it fails to start. */
+const LOCAL_SERVER_STDERR_TAIL_CHARS = 2_000;
+
+/** Stored env values shorter than this are flags like `1` or `off`, not credentials; replacing
+ * them would mangle every digit in the log line. */
+const MIN_REDACTED_VALUE_LENGTH = 8;
+
+/** Replaces every stored env value in a local server's own output. Such a server is third-party
+ * code holding a credential, and nothing stops it echoing its environment into an error. */
+function redactValues(text: string, values: readonly string[]): string {
+  let redacted = text;
+  for (const value of values) {
+    if (value.length >= MIN_REDACTED_VALUE_LENGTH) {
+      redacted = redacted.replaceAll(value, "[redacted]");
+    }
+  }
+  return redacted;
+}
 
 export interface McpGatewaySnapshotEntry {
   readonly name: string;
@@ -60,11 +93,15 @@ export interface McpGatewaySnapshotEntry {
 }
 
 interface McpGatewayServerRuntime {
-  config: McpGatewayServerConfig;
+  config: McpGatewayServerConfig | McpGatewayLocalServerConfig;
   state: McpGatewayServerState;
   client?: Client;
   /** Whether the current unhealthy episode (if any) already produced a push (U5). */
   notified: boolean;
+  /** Local servers only: consecutive unexpected exits, for restart backoff. */
+  restarts?: number;
+  connectedAt?: number;
+  restartTimer?: NodeJS.Timeout;
 }
 
 const NOTIFICATION_BATCH_THRESHOLD = 3;
@@ -224,6 +261,7 @@ export class McpGateway {
   private lastEmittedSnapshot: McpGatewaySnapshotEntry[] = [];
   private notifier: McpGatewayNotifier | undefined;
   private persistServer: McpGatewayServerPersister | undefined;
+  private stopped = false;
   private readonly pendingNotifications: Array<{
     name: string;
     status: McpGatewayNotifiableStatus;
@@ -242,6 +280,21 @@ export class McpGateway {
       return;
     }
     for (const [name, serverConfig] of Object.entries(this.config.servers ?? {})) {
+      this.servers.set(name, {
+        config: serverConfig,
+        state: createDisabledServerState(),
+        notified: false,
+      });
+    }
+    for (const [name, serverConfig] of Object.entries(this.config.localServers ?? {})) {
+      // Sessions reach every brokered server by name, so one name cannot mean two servers.
+      if (this.servers.has(name)) {
+        this.logger?.warn(
+          { server: name },
+          "MCP gateway local server shares a name with a remote server; ignoring the local one",
+        );
+        continue;
+      }
       this.servers.set(name, {
         config: serverConfig,
         state: createDisabledServerState(),
@@ -400,8 +453,10 @@ export class McpGateway {
 
   /** Closes every connected upstream client. Best-effort — called at daemon shutdown. */
   async stop(): Promise<void> {
+    this.stopped = true;
     await Promise.all(
       Array.from(this.servers.values()).map(async (runtime) => {
+        clearTimeout(runtime.restartTimer);
         try {
           await runtime.client?.close();
         } catch (error) {
@@ -440,6 +495,9 @@ export class McpGateway {
     if (!runtime) {
       throw new Error(`Unknown MCP gateway server "${name}"`);
     }
+    if (isLocalServerConfig(runtime.config)) {
+      throw new Error(`MCP gateway server "${name}" runs locally and has no OAuth flow`);
+    }
     await exchangeMcpGatewayAuthorizationCode({
       serverUrl: runtime.config.url,
       provider: this.buildOAuthProvider(name),
@@ -460,7 +518,7 @@ export class McpGateway {
     if (!runtime) {
       throw new McpGatewayActionError("unknown_server", `Unknown MCP gateway server "${name}"`);
     }
-    if (runtime.config.auth === "static") {
+    if (runtime.config.auth === "static" || isLocalServerConfig(runtime.config)) {
       throw new McpGatewayActionError(
         "static_auth",
         `MCP gateway server "${name}" uses static auth; nothing to authorize`,
@@ -596,11 +654,17 @@ export class McpGateway {
     if (!event) return;
     this.transitionRuntime(name, runtime, event);
 
+    if (isLocalServerConfig(runtime.config)) {
+      await this.connectLocalServer(name, runtime, runtime.config);
+      return;
+    }
+    const config = runtime.config;
+
     try {
       let headers: Record<string, string> | undefined;
       let authProvider: OAuthClientProvider | undefined;
 
-      if (runtime.config.auth === "static") {
+      if (config.auth === "static") {
         headers = this.tokenStore.getStaticHeaders(name);
         if (!headers) {
           this.transitionRuntime(name, runtime, { type: "needsAuth" });
@@ -621,8 +685,8 @@ export class McpGateway {
       }
 
       const transport = this.buildTransport({
-        url: runtime.config.url,
-        transport: runtime.config.transport,
+        url: config.url,
+        transport: config.transport,
         headers,
         authProvider,
       });
@@ -641,5 +705,84 @@ export class McpGateway {
       );
       this.logger?.warn({ err: error, server: name }, "MCP gateway server connection failed");
     }
+  }
+
+  /**
+   * Spawns a local server and connects to it over stdio (docs/mcp-gateway.md "Local servers").
+   * The child gets the SDK's minimal inherited environment (HOME, PATH, USER, …) plus the env
+   * stored for it, never the daemon's own. A credential therefore reaches exactly the one
+   * process that needs it, and sessions only ever see the gateway route.
+   */
+  private async connectLocalServer(
+    name: string,
+    runtime: McpGatewayServerRuntime,
+    config: McpGatewayLocalServerConfig,
+  ): Promise<void> {
+    const env = this.tokenStore.getStaticEnv(name);
+    if (config.auth === "static" && !env) {
+      this.transitionRuntime(name, runtime, { type: "needsAuth" });
+      return;
+    }
+    const secrets = Object.values(env ?? {});
+    let stderrTail = "";
+    const transport = new StdioClientTransport({
+      command: config.command,
+      args: config.args ?? [],
+      ...(env ? { env } : {}),
+      stderr: "pipe",
+    });
+    transport.stderr?.on("data", (chunk: Buffer) => {
+      stderrTail = (stderrTail + chunk.toString("utf8")).slice(-LOCAL_SERVER_STDERR_TAIL_CHARS);
+    });
+    const client = new Client({ name: "paseo-mcp-gateway", version: "1.0.0" });
+    try {
+      await client.connect(transport);
+    } catch (error) {
+      await client.close().catch(() => undefined);
+      this.transitionRuntime(name, runtime, {
+        type: "connectionFailed",
+        error: redactValues(getErrorMessage(error), secrets),
+      });
+      this.logger?.warn(
+        { err: error, server: name, stderr: redactValues(stderrTail, secrets) },
+        "MCP gateway local server failed to start",
+      );
+      return;
+    }
+    runtime.client = client;
+    runtime.connectedAt = Date.now();
+    // The SDK's Client has no addEventListener; `onclose` is the only close hook it offers.
+    // oxlint-disable-next-line unicorn/prefer-add-event-listener
+    client.onclose = () => this.handleLocalServerExit(name, runtime, client);
+    this.transitionRuntime(name, runtime, { type: "connected" });
+  }
+
+  /** A local server that exits on its own is restarted with backoff; one closed by `stop()` or
+   * replaced by a newer connection is left alone. */
+  private handleLocalServerExit(
+    name: string,
+    runtime: McpGatewayServerRuntime,
+    client: Client,
+  ): void {
+    if (this.stopped || runtime.client !== client) return;
+    runtime.client = undefined;
+    this.transitionRuntime(name, runtime, {
+      type: "connectionFailed",
+      error: "The local server process exited",
+    });
+    const uptime = Date.now() - (runtime.connectedAt ?? 0);
+    const restarts = uptime >= LOCAL_SERVER_STABLE_UPTIME_MS ? 0 : (runtime.restarts ?? 0);
+    runtime.restarts = restarts + 1;
+    const delay = Math.min(
+      LOCAL_SERVER_RESTART_BASE_MS * 2 ** restarts,
+      LOCAL_SERVER_RESTART_MAX_MS,
+    );
+    this.logger?.warn({ server: name, delay }, "MCP gateway local server exited; restarting");
+    runtime.restartTimer = setTimeout(() => {
+      runtime.restartTimer = undefined;
+      if (this.stopped) return;
+      void this.reconnect(name);
+    }, delay);
+    runtime.restartTimer.unref?.();
   }
 }

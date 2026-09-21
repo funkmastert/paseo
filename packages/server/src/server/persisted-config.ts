@@ -112,6 +112,16 @@ const McpGatewayServerConfigSchema = z
   })
   .strict();
 
+// docs/mcp-gateway.md "Local servers": a stdio server the daemon runs and brokers itself.
+const McpGatewayLocalServerConfigSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    critical: z.boolean().optional(),
+    auth: z.literal("static").optional(),
+  })
+  .strict();
+
 // New top-level section (KTD9), same mutable/patch split as diskSweeper/tokenBurnMonitor —
 // see the `MutableMcpGatewayConfigSchema` comment in @getpaseo/protocol/messages for why this
 // isn't shared with the wire schema. Adding a server is config-only (R9): drop an entry into
@@ -127,6 +137,7 @@ const McpGatewayConfigSchema = z
     // docs/mcp-gateway.md "Session injection": overlay (default) or strict.
     sessionMode: z.enum(["overlay", "strict"]).optional(),
     servers: z.record(z.string(), McpGatewayServerConfigSchema).optional(),
+    localServers: z.record(z.string(), McpGatewayLocalServerConfigSchema).optional(),
   })
   .strict();
 

@@ -1,10 +1,11 @@
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import http from "node:http";
+import { createRequire } from "node:module";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import express from "express";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -944,5 +945,187 @@ describe("adoptServer (session-reported server → brokered)", () => {
     await expect(
       gateway.adoptServer({ name: "x", url: "http://127.0.0.1:1/mcp", transport: "http" }),
     ).rejects.toThrow(/disabled/);
+  });
+});
+
+/**
+ * Writes a real stdio MCP server to a temp dir and returns the command that runs it. It requires
+ * the SDK by absolute path, so it runs from outside the repo exactly as a third-party server
+ * would. Tools: `env` reports the named variables it can see, `exit` kills the process.
+ * `FIXTURE_FAIL_ON_START` makes it print its credential to stderr and exit before serving.
+ */
+function writeStdioFixtureServer(): { command: string; args: string[] } {
+  const require = createRequire(import.meta.url);
+  const dir = createTempHome();
+  const script = path.join(dir, "fixture-stdio-server.cjs");
+  writeFileSync(
+    script,
+    `
+const { McpServer } = require(${JSON.stringify(require.resolve("@modelcontextprotocol/sdk/server/mcp.js"))});
+const { StdioServerTransport } = require(${JSON.stringify(require.resolve("@modelcontextprotocol/sdk/server/stdio.js"))});
+const { z } = require(${JSON.stringify(require.resolve("zod"))});
+if (process.env.FIXTURE_FAIL_ON_START) {
+  process.stderr.write("starting with key " + process.env.FIGMA_API_KEY + "\\n");
+  process.exit(1);
+}
+const server = new McpServer({ name: "fixture-stdio-server", version: "1.0.0" });
+server.registerTool("env", { description: "Reports env", inputSchema: { names: z.array(z.string()) } },
+  async ({ names }) => ({ content: [{ type: "text", text: JSON.stringify(Object.fromEntries(names.map((n) => [n, process.env[n] ?? null]))) }] }));
+server.registerTool("exit", { description: "Exits", inputSchema: {} }, async () => { setTimeout(() => process.exit(1), 10); return { content: [] }; });
+void server.connect(new StdioServerTransport());
+`,
+  );
+  return { command: process.execPath, args: [script] };
+}
+
+function writeStaticEnv(paseoHome: string, name: string, env: Record<string, string>): void {
+  const filePath = path.join(paseoHome, "mcp-gateway", "tokens.json");
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileSync(
+    filePath,
+    JSON.stringify({ version: 1, servers: { [name]: { auth: "static", headers: {}, env } } }),
+    { mode: 0o600 },
+  );
+}
+
+async function callEnvTool(gateway: McpGateway, name: string, names: string[]): Promise<unknown> {
+  const result = (await gateway
+    .getClient(name)
+    ?.callTool({ name: "env", arguments: { names } })) as
+    | { content?: Array<{ text?: string }> }
+    | undefined;
+  return JSON.parse(result?.content?.[0]?.text ?? "null");
+}
+
+describe("local (stdio) servers", () => {
+  const gateways: McpGateway[] = [];
+  afterEach(async () => {
+    while (gateways.length > 0) await gateways.pop()?.stop();
+    delete process.env.PASEO_GATEWAY_TEST_DAEMON_ONLY;
+  });
+
+  function createLocalGateway(
+    paseoHome: string,
+    localServers: NonNullable<
+      ConstructorParameters<typeof McpGateway>[0]["config"]["localServers"]
+    >,
+    extra: Partial<ConstructorParameters<typeof McpGateway>[0]> = {},
+  ): McpGateway {
+    const gateway = new McpGateway({
+      paseoHome,
+      config: { enabled: true, localServers },
+      ...extra,
+    });
+    gateways.push(gateway);
+    return gateway;
+  }
+
+  test("runs with the env stored for it and none of the daemon's own", async () => {
+    const paseoHome = createTempHome();
+    writeStaticEnv(paseoHome, "figma", { FIGMA_API_KEY: "figd_stored" });
+    process.env.PASEO_GATEWAY_TEST_DAEMON_ONLY = "daemon-secret";
+    const gateway = createLocalGateway(paseoHome, {
+      figma: { ...writeStdioFixtureServer(), auth: "static" },
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("figma")?.status).toBe("connected");
+    expect(
+      await callEnvTool(gateway, "figma", ["FIGMA_API_KEY", "PASEO_GATEWAY_TEST_DAEMON_ONLY"]),
+    ).toEqual({ FIGMA_API_KEY: "figd_stored", PASEO_GATEWAY_TEST_DAEMON_ONLY: null });
+  });
+
+  test("a static local server with nothing stored waits in needs-auth without being spawned", async () => {
+    const gateway = createLocalGateway(createTempHome(), {
+      figma: { command: "/nonexistent/should-never-run", auth: "static" },
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("figma")?.status).toBe("needs-auth");
+  });
+
+  test("a local server that needs no credential starts with nothing stored", async () => {
+    const gateway = createLocalGateway(createTempHome(), { tool: writeStdioFixtureServer() });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("tool")?.status).toBe("connected");
+  });
+
+  test("sign-in is refused as static auth: its credential is set in the token file", async () => {
+    const gateway = createLocalGateway(createTempHome(), { tool: writeStdioFixtureServer() });
+    await gateway.start();
+
+    const failure = await gateway.startAuthorization("tool").catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(McpGatewayActionError);
+    expect((failure as McpGatewayActionError).reason).toBe("static_auth");
+  });
+
+  test("a process that exits on its own is restarted", async () => {
+    const gateway = createLocalGateway(createTempHome(), { tool: writeStdioFixtureServer() });
+    await gateway.start();
+    const firstClient = gateway.getClient("tool");
+
+    await firstClient?.callTool({ name: "exit", arguments: {} });
+
+    await vi.waitFor(() => expect(gateway.getServerState("tool")?.status).toBe("error"));
+    await vi.waitFor(
+      () => {
+        expect(gateway.getServerState("tool")?.status).toBe("connected");
+        expect(gateway.getClient("tool")).not.toBe(firstClient);
+      },
+      { timeout: 10_000 },
+    );
+  }, 15_000);
+
+  test("a remote server keeps its name when a local server claims it too", async () => {
+    const gateway = createLocalGateway(
+      createTempHome(),
+      {},
+      {
+        config: {
+          enabled: true,
+          servers: { figma: { url: "https://mcp.figma.com/mcp", transport: "http" } },
+          localServers: { figma: writeStdioFixtureServer() },
+        },
+      },
+    );
+
+    await gateway.start();
+
+    expect(gateway.getServerNames()).toEqual(["figma"]);
+    // The remote entry has no tokens, so it never spawned the local command.
+    expect(gateway.getServerState("figma")?.status).toBe("needs-auth");
+  });
+
+  test("a server that fails to start never gets its stored credential into the log", async () => {
+    const paseoHome = createTempHome();
+    writeStaticEnv(paseoHome, "figma", {
+      FIGMA_API_KEY: "figd_must_not_leak",
+      FIXTURE_FAIL_ON_START: "yes",
+    });
+    const warnings: unknown[][] = [];
+    const logger = {
+      child: () => logger,
+      warn: (...args: unknown[]) => void warnings.push(args),
+    };
+    const gateway = createLocalGateway(
+      paseoHome,
+      { figma: { ...writeStdioFixtureServer(), auth: "static" } },
+      { logger },
+    );
+
+    await gateway.start();
+
+    expect(gateway.getServerState("figma")?.status).toBe("error");
+    const logged = JSON.stringify(warnings, (_key, value: unknown) =>
+      value instanceof Error ? value.message : value,
+    );
+    expect(logged).toContain("starting with key [redacted]");
+    expect(logged).not.toContain("figd_must_not_leak");
+    expect(gateway.getServerState("figma")?.error ?? "").not.toContain("figd_must_not_leak");
   });
 });
