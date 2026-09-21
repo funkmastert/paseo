@@ -103,7 +103,9 @@ Archiving runs through `AgentManager.archiveAgent` (`packages/server/src/server/
 
 Cascade is what keeps subagent fleets from outliving their orchestrator.
 
-Workspace archive is a separate lifecycle. Archiving or removing a worktree can close a surviving
+Workspace archive is a separate lifecycle: archiving an agent never archives its workspace, so a
+finished agent's worktree stays on disk until someone archives the workspace. The opt-in
+[done janitor](done-janitor.md) does both for work it can prove is finished. Archiving or removing a worktree can close a surviving
 agent record without setting the agent's `archivedAt`, while its `workspaceId` still points at the
 archived workspace. History navigation must not infer workspace lifecycle from `agent.archivedAt`
 or mutate either lifecycle. The workspace route asks the daemon for authoritative recovery state;
