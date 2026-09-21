@@ -56,6 +56,8 @@ function createCapturingClaudeClient(
   return {
     provider: baseClient.provider,
     capabilities: baseClient.capabilities,
+    // Stands in for the Claude client, which is what takes the gateway's brokered servers.
+    acceptsMcpGatewayServers: true,
     createSession: (config, launchContext, options) => {
       onCreateSession(config);
       return baseClient.createSession(config, launchContext, options);
