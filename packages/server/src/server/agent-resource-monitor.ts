@@ -35,6 +35,7 @@ import type {
   SystemMemorySample,
 } from "./agent/process-sampler.js";
 import type { PushNotificationSender } from "./push/index.js";
+import { MonitorModeLog } from "./monitor-mode-log.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const GIBIBYTE = 1024 ** 3;
@@ -242,6 +243,7 @@ export class AgentResourceMonitor {
   /** How long each reap candidate has been idle, accumulated across sweeps (build-daemon-reaper.ts). */
   private reapMemory: BuildDaemonReaperMemory | undefined;
   private sweepInFlight = false;
+  private readonly modeLog: MonitorModeLog;
 
   constructor(options: AgentResourceMonitorOptions) {
     this.agentManager = options.agentManager;
@@ -258,12 +260,14 @@ export class AgentResourceMonitor {
     this.ownerUid = "ownerUid" in options ? options.ownerUid : process.getuid?.();
     this.sleep = options.sleep ?? defaultSleep;
     this.reportDeviceSample = options.reportDeviceSample;
+    this.modeLog = new MonitorModeLog(options.logger);
   }
 
   start(): void {
     if (this.timer) {
       return;
     }
+    this.reportMode();
     const timer = setInterval(() => {
       void this.tick().catch((error) => {
         this.logger.error({ err: error }, "Resource monitor sweep failed");
@@ -294,7 +298,19 @@ export class AgentResourceMonitor {
     }
   }
 
+  /** Logs the mode this monitor reads from its config, once per change (monitor-mode-log.ts). */
+  reportMode(): void {
+    const rawConfig = this.readDaemonConfig().resourceMonitor;
+    const enabled = rawConfig?.enabled !== false;
+    const reaper = resolveReaperConfig(rawConfig?.reaper);
+    this.modeLog.report([
+      { monitor: "resource-monitor", enabled },
+      { monitor: "reaper", enabled: enabled && reaper.enabled, dryRun: reaper.dryRun },
+    ]);
+  }
+
   private async sweep(): Promise<void> {
+    this.reportMode();
     const rawConfig = this.readDaemonConfig().resourceMonitor;
     if (rawConfig?.enabled === false) {
       return;

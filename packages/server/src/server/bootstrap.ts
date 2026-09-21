@@ -1105,6 +1105,7 @@ export async function createPaseoDaemon(
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
     logger: logger.child({ module: "device-leases" }),
   });
+  deviceLeaseManager.reportMode();
 
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
@@ -2108,6 +2109,15 @@ export async function createPaseoDaemon(
               logger,
             });
             agentResourceMonitor.start();
+            // A reload or a config patch logs each monitor's new mode now rather than at its next
+            // sweep, a minute later — the moment someone is most likely to be checking.
+            const tokenBurnMonitorForModeLog = agentTokenBurnMonitor;
+            const resourceMonitorForModeLog = agentResourceMonitor;
+            daemonConfigStore.onChange(() => {
+              tokenBurnMonitorForModeLog.reportMode();
+              resourceMonitorForModeLog.reportMode();
+              deviceLeaseManager.reportMode();
+            });
             pluginConnectionMonitor = new PluginConnectionMonitor({
               listConnectivity: () => pluginRuntime.listSessionConnectivity(),
               pushNotificationSender: wsServer.getPushNotificationSender(),

@@ -18,6 +18,7 @@ import {
   type SpendGovernorConfig as GovernorDecisionConfig,
 } from "./agent/spend-governor.js";
 import type { PushNotificationSender } from "./push/index.js";
+import { MonitorModeLog } from "./monitor-mode-log.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 // Measured, not chosen: a healthy Opus agent doing ordinary tool work on this machine sustains
@@ -296,6 +297,7 @@ export class AgentTokenBurnMonitor {
    */
   private reportedAccountWindows = new Map<string, string>();
   private sweepInFlight = false;
+  private readonly modeLog: MonitorModeLog;
 
   constructor(options: AgentTokenBurnMonitorOptions) {
     this.agentManager = options.agentManager;
@@ -309,12 +311,14 @@ export class AgentTokenBurnMonitor {
     this.logger = options.logger;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.now = options.now ?? Date.now;
+    this.modeLog = new MonitorModeLog(options.logger);
   }
 
   start(): void {
     if (this.timer) {
       return;
     }
+    this.reportMode();
     const timer = setInterval(() => {
       void this.tick().catch((error) => {
         this.logger.error({ err: error }, "Token burn monitor sweep failed");
@@ -346,7 +350,24 @@ export class AgentTokenBurnMonitor {
     }
   }
 
+  /** Logs the mode this monitor reads from its config, once per change (monitor-mode-log.ts). */
+  reportMode(): void {
+    const rawConfig = this.readDaemonConfig().tokenBurnMonitor;
+    const enabled = rawConfig?.enabled !== false;
+    const config = resolveConfig(rawConfig);
+    this.modeLog.report([
+      { monitor: "token-burn", enabled },
+      {
+        monitor: "spend-governor",
+        enabled: enabled && config.governor.enabled,
+        dryRun: config.governor.dryRun,
+      },
+      { monitor: "account-pressure", enabled: enabled && config.accountPressure.enabled },
+    ]);
+  }
+
   private async sweep(): Promise<void> {
+    this.reportMode();
     const rawConfig = this.readDaemonConfig().tokenBurnMonitor;
     if (rawConfig?.enabled === false) {
       return;

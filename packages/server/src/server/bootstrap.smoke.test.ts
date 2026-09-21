@@ -336,7 +336,7 @@ describe("paseo daemon bootstrap", () => {
   // The reaper, the device cap and the spend governor are all off unless config.json turns them
   // on, so a section that never reaches them is indistinguishable from "configured off". This
   // goes the whole way a real daemon does — config.json on disk, loadConfig, createPaseoDaemon,
-  // then `paseo daemon reload` — and reads the answer back over the daemon's own config RPC.
+  // then `paseo daemon reload` — and reads the answer from each monitor's own startup line.
   test("monitor sections in config.json reach the running monitors at boot and on reload", async () => {
     const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-monitor-config-"));
     const paseoHome = path.join(paseoHomeRoot, ".paseo");
@@ -359,7 +359,22 @@ describe("paseo daemon bootstrap", () => {
     config.agentClients = createTestAgentClients();
     config.agentStoragePath = path.join(paseoHome, "agents");
     config.isDev = true;
-    const daemon = await createPaseoDaemon(config, pino({ level: "silent" }));
+    const logLines: Array<Record<string, unknown>> = [];
+    const logger = pino(
+      { level: "info" },
+      {
+        write: (line: string) => {
+          logLines.push(JSON.parse(line) as Record<string, unknown>);
+        },
+      },
+    );
+    const monitorModes = () =>
+      Object.fromEntries(
+        logLines
+          .filter((line) => line.msg === "Monitor mode")
+          .map((line) => [line.monitor, { enabled: line.enabled, dryRun: line.dryRun }]),
+      );
+    const daemon = await createPaseoDaemon(config, logger);
     let client: DaemonClient | null = null;
 
     try {
@@ -373,6 +388,14 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.resourceMonitor).toEqual(bootPersisted.agents.resourceMonitor);
       expect(booted.deviceLeases).toEqual(bootPersisted.agents.deviceLeases);
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
+      expect(monitorModes()).toEqual({
+        "resource-monitor": { enabled: true, dryRun: undefined },
+        reaper: { enabled: true, dryRun: true },
+        "device-cap": { enabled: true, dryRun: true },
+        "token-burn": { enabled: true, dryRun: undefined },
+        "spend-governor": { enabled: true, dryRun: true },
+        "account-pressure": { enabled: false, dryRun: undefined },
+      });
 
       const reloadedPersisted = {
         ...bootPersisted,
@@ -389,6 +412,11 @@ describe("paseo daemon bootstrap", () => {
       const reloaded = (await client.getDaemonConfig()).config;
       expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
       expect(reloaded.deviceLeases).toEqual(reloadedPersisted.agents.deviceLeases);
+      expect(monitorModes()).toMatchObject({
+        reaper: { enabled: true, dryRun: false },
+        "device-cap": { enabled: false, dryRun: false },
+        "spend-governor": { enabled: true, dryRun: true },
+      });
     } finally {
       await client?.close().catch(() => undefined);
       await daemon.stop().catch(() => undefined);
