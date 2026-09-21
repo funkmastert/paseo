@@ -1323,6 +1323,17 @@ export const ja: TranslationResources = {
         title: "終了後もデーモンを実行し続ける",
         hint: "Bozeoを終了してもデーモンは実行し続けます",
       },
+      keepAwake: {
+        title: "Mac をスリープさせない",
+        hint: "Bozeo を開いている間は Mac をスリープさせず、エージェントを動かし続けます",
+      },
+      keepDisplayAwake: {
+        title: "ディスプレイをオンのままにする",
+        hint: "ディスプレイをオンにするとバッテリーの消耗が早くなります",
+        always: "常に",
+        onPowerAdapter: "電源接続時",
+        never: "しない",
+      },
       logs: {
         title: "ログファイル",
         modalTitle: "デーモンログ",

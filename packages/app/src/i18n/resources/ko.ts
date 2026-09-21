@@ -1317,6 +1317,17 @@ export const ko: TranslationResources = {
         title: "종료 후에도 데몬 계속 실행",
         hint: "Bozeo를 종료해도 데몬이 계속 실행됩니다",
       },
+      keepAwake: {
+        title: "Mac 깨어 있게 유지",
+        hint: "Bozeo가 열려 있는 동안 Mac이 잠자기 상태가 되지 않도록 하여 에이전트가 계속 실행됩니다",
+      },
+      keepDisplayAwake: {
+        title: "디스플레이 켜 두기",
+        hint: "디스플레이를 켜 두면 배터리가 더 빨리 소모됩니다",
+        always: "항상",
+        onPowerAdapter: "전원 연결 시",
+        never: "안 함",
+      },
       logs: {
         title: "로그 파일",
         modalTitle: "데몬 로그",

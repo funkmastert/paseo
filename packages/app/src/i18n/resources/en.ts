@@ -1320,6 +1320,17 @@ export const en = {
         title: "Keep daemon running after quit",
         hint: "Daemon keeps running when you quit Bozeo",
       },
+      keepAwake: {
+        title: "Keep Mac awake",
+        hint: "Stops your Mac from sleeping while Bozeo is open, so agents keep running",
+      },
+      keepDisplayAwake: {
+        title: "Keep display on",
+        hint: "A lit display drains the battery faster",
+        always: "Always",
+        onPowerAdapter: "On power",
+        never: "Never",
+      },
       logs: {
         title: "Log file",
         modalTitle: "Daemon logs",

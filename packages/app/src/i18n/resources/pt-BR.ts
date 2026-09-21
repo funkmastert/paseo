@@ -1336,6 +1336,17 @@ export const ptBR: TranslationResources = {
         title: "Manter daemon em execução ao sair",
         hint: "O daemon continua em execução quando você sai do Bozeo",
       },
+      keepAwake: {
+        title: "Manter o Mac acordado",
+        hint: "Impede que o Mac entre em repouso enquanto o Bozeo estiver aberto, para que os agentes continuem rodando",
+      },
+      keepDisplayAwake: {
+        title: "Manter a tela ligada",
+        hint: "A tela ligada gasta a bateria mais rápido",
+        always: "Sempre",
+        onPowerAdapter: "Na tomada",
+        never: "Nunca",
+      },
       logs: {
         title: "Arquivo de log",
         modalTitle: "Logs do daemon",

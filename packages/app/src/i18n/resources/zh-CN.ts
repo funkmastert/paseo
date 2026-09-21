@@ -1299,6 +1299,17 @@ export const zhCN: TranslationResources = {
         title: "退出后保持 daemon 运行",
         hint: "退出 Bozeo 后 daemon 会继续运行",
       },
+      keepAwake: {
+        title: "保持 Mac 唤醒",
+        hint: "Bozeo 打开期间阻止 Mac 进入睡眠，让智能体持续运行",
+      },
+      keepDisplayAwake: {
+        title: "保持显示器开启",
+        hint: "显示器常亮会更快耗电",
+        always: "始终",
+        onPowerAdapter: "接通电源时",
+        never: "从不",
+      },
       logs: {
         title: "日志文件",
         modalTitle: "Daemon 日志",
