@@ -367,6 +367,34 @@ export interface AccountFailoverAgentSummary {
   thinkingOptionId: string | undefined;
 }
 
+/**
+ * Lean per-agent view for AgentDoneJanitor's sweep. Only live agents are here: a closed agent has
+ * no runtime, so the janitor reads its stored record instead. Every field is a reason the agent
+ * might not be finished; see agent/done-janitor-detector.ts for how each one is used.
+ */
+export interface DoneJanitorAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  cwd: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  /** A foreground turn, a pending run, or a replacement in flight. */
+  busy: boolean;
+  pendingPermissionCount: number;
+  requiresAttention: boolean;
+  attentionReason: "finished" | "error" | "permission" | null;
+  /** A live token-burn, spend-governor or resource alert. Never persisted. */
+  hasAlert: boolean;
+  /** Provider-native children (Task subagents, workflows) still reported running. */
+  runningProviderSubagentCount: number;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
+  labels: Record<string, string>;
+  title: string | null;
+  sessionId: string | undefined;
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -386,6 +414,7 @@ export type AgentCancelReason =
   | "rewind"
   | "archive"
   | "spend-governor"
+  | "done-janitor"
   | "hub"
   | "unspecified";
 
@@ -554,6 +583,13 @@ interface ManagedAgentBase {
    * it describes one turn, not the agent.
    */
   turnCanceled?: boolean;
+  /**
+   * Set by `markQuietTurn` before the done janitor asks an idle agent whether it is finished.
+   * Consumed at the next edge out of `running`, so the answer to that question raises no
+   * `finished` attention, sends no push and does not refresh the title: the janitor asking is not
+   * the agent finishing work. An error on that turn still flags. Live-only, never persisted.
+   */
+  quietTurn?: boolean;
   persistence: AgentPersistenceHandle | null;
   historyPrimed: boolean;
   lastUserMessageAt: Date | null;
@@ -1486,6 +1522,83 @@ export class AgentManager {
 
   listAgentsForAccountFailover(): AccountFailoverAgentSummary[] {
     return Array.from(this.agents.values()).map((agent) => this.toAccountFailoverSummary(agent));
+  }
+
+  listAgentsForDoneJanitor(): DoneJanitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => this.toDoneJanitorSummary(agent));
+  }
+
+  getDoneJanitorSummary(agentId: string): DoneJanitorAgentSummary | null {
+    const agent = this.agents.get(agentId);
+    return agent ? this.toDoneJanitorSummary(agent) : null;
+  }
+
+  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
+    const timestamps = [
+      agent.updatedAt.getTime(),
+      agent.lastUserMessageAt?.getTime(),
+      agent.activeTurnStartedAt?.getTime(),
+      this.timelineStore.has(agent.id)
+        ? Date.parse(this.timelineStore.getLastRowTimestamp(agent.id) ?? "")
+        : undefined,
+    ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return {
+      id: agent.id,
+      provider: agent.provider,
+      cwd: agent.cwd,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      busy:
+        Boolean(agent.activeForegroundTurnId) ||
+        Boolean(agent.activeTurnId) ||
+        agent.pendingReplacement ||
+        Boolean(this.runs.getPendingRun(agent.id)),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      requiresAttention: agent.attention.requiresAttention,
+      attentionReason: agent.attention.requiresAttention ? agent.attention.attentionReason : null,
+      hasAlert: Boolean(agent.tokenBurnAlert) || Boolean(agent.resourceAlert),
+      runningProviderSubagentCount: this.providerSubagents
+        .list(agent.id)
+        .filter((subagent) => subagent.status === "running").length,
+      lastActivityAt:
+        timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null,
+      labels: agent.labels,
+      title: agent.config.title ?? null,
+      sessionId: agent.persistence?.sessionId,
+    };
+  }
+
+  /** Where the timeline ends now. Null when the agent is not loaded. */
+  getTimelineCursor(agentId: string): number | null {
+    if (!this.agents.has(agentId) || !this.timelineStore.has(agentId)) return null;
+    return this.timelineStore.getNextSeq(agentId);
+  }
+
+  /** What the agent said and did at or after `cursor`: its assistant text and every row type. */
+  readTimelineSince(
+    agentId: string,
+    cursor: number,
+  ): { assistantText: string; itemTypes: AgentTimelineItem["type"][] } | null {
+    if (!this.agents.has(agentId) || !this.timelineStore.has(agentId)) return null;
+    const rows = this.timelineStore.getRows(agentId).filter((row) => row.seq >= cursor);
+    return {
+      assistantText: rows
+        .flatMap((row) => (row.item.type === "assistant_message" ? [row.item.text] : []))
+        .join(""),
+      itemTypes: rows.map((row) => row.item.type),
+    };
+  }
+
+  /**
+   * Marks the next turn of a loaded agent as the done janitor's question, so its finish is not
+   * reported as the agent finishing. Returns false when the agent is not loaded.
+   */
+  markQuietTurn(agentId: string): boolean {
+    const agent = this.agents.get(agentId);
+    if (!agent) return false;
+    agent.quietTurn = true;
+    return true;
   }
 
   getAccountFailoverSummary(agentId: string): AccountFailoverAgentSummary | null {
@@ -5722,9 +5835,19 @@ export class AgentManager {
     // still carries this turn's outcome — notify-on-finish reads it to tell a parent its
     // delegation was cancelled rather than finished.
     const turnCanceled = agent.turnCanceled === true;
+    // Consumed on the first edge out of running, like turnCanceled, so it cannot outlive the
+    // janitor's question and silence a later genuine finish.
+    const quietTurn =
+      agent.quietTurn === true && previousStatus === "running" && agent.lifecycle !== "running";
+    if (quietTurn) agent.quietTurn = false;
     // Keep attention as an edge-triggered unread signal, not a level signal.
-    this.checkAndSetAttention(agent);
-    if (previousStatus === "running" && agent.lifecycle === "idle" && !agent.internal) {
+    this.checkAndSetAttention(agent, { quietTurn });
+    if (
+      previousStatus === "running" &&
+      agent.lifecycle === "idle" &&
+      !agent.internal &&
+      !quietTurn
+    ) {
       this.onAgentTurnFinished?.({ agentId: agent.id, cwd: agent.cwd });
     }
     if (options?.persist !== false) {
@@ -5759,7 +5882,7 @@ export class AgentManager {
     }
   }
 
-  private checkAndSetAttention(agent: ManagedAgent): void {
+  private checkAndSetAttention(agent: ManagedAgent, options?: { quietTurn?: boolean }): void {
     const previousStatus = this.previousStatuses.get(agent.id);
     const currentStatus = agent.lifecycle;
 
@@ -5784,7 +5907,7 @@ export class AgentManager {
 
     // Check if agent transitioned from running to idle (finished)
     if (previousStatus === "running" && currentStatus === "idle") {
-      if (canceled) {
+      if (canceled || options?.quietTurn) {
         return;
       }
       // A delegated agent finishing is the normal case and is already delivered: its parent

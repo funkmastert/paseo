@@ -6546,6 +6546,51 @@ test("a cancelled turn is not a finish, and does not survive into the next one",
   expect(attentionReasons).toEqual(["finished"]);
 });
 
+test("the done janitor's question raises no finish, and does not silence the next one", async () => {
+  // The janitor asks an idle agent whether it is done. Its answer is not the agent finishing
+  // work: flagging it would push "finished" to a person for every question asked.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-quiet-turn-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const finishedTurns: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+    idFactory: () => randomUUID(),
+  });
+
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Asked" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  // What the agent said before the question must never be read as its answer.
+  await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "DONE" });
+  const cursor = manager.getTimelineCursor(agent.id);
+  expect(manager.markQuietTurn(agent.id)).toBe(true);
+  await manager.runAgent(agent.id, "are you done?");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention.requiresAttention).toBe(false);
+  expect((await storage.get(agent.id))?.requiresAttention).toBe(false);
+  expect(attentionReasons).toEqual([]);
+  expect(finishedTurns).toEqual([]);
+  expect(manager.readTimelineSince(agent.id, cursor!)?.assistantText).toBe("");
+  await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "NOT_DONE" });
+  expect(manager.readTimelineSince(agent.id, cursor!)?.assistantText).toBe("NOT_DONE");
+
+  await manager.runAgent(agent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
+  expect(finishedTurns).toEqual([agent.id]);
+});
+
 test("a delegated agent finishing raises no attention: its parent already has the result", async () => {
   // 27 of 34 outstanding attention flags on one live daemon were finished subagents. Nothing
   // surfaces them (broadcastAgentAttention skips delegated agents) and nothing clears them,
