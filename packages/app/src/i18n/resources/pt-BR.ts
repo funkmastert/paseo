@@ -1965,6 +1965,7 @@ export const ptBR: TranslationResources = {
       error: "Erro",
       disabled: "Desativado",
       sessionReported: "Problema de sessão",
+      claudeAiConnector: "Entre em cada conta do Claude",
     },
     authAction: "Autenticar",
     reauthAction: "Reautenticar",

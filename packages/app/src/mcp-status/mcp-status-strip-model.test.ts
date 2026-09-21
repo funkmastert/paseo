@@ -302,6 +302,21 @@ describe("row actions", () => {
       expect(model.rows[0]?.action).toBe("openClaudeAi");
     }
   });
+
+  it("labels a claude.ai connector as a per-account sign-in, not a session fault", () => {
+    const model = buildMcpStatusStripModel({
+      servers: [],
+      sessionReports: [
+        report({ serverName: "claude.ai Robinhood", status: "needs-auth" }),
+        report({ serverName: "sentry", status: "needs-auth" }),
+      ],
+    });
+    const statusByName = Object.fromEntries(model.rows.map((row) => [row.name, row.statusKey]));
+    expect(statusByName).toEqual({
+      "claude.ai Robinhood": "claudeAiConnector",
+      sentry: "sessionReported",
+    });
+  });
 });
 
 function failure(overrides: Partial<McpStatusActionFailure> = {}): McpStatusActionFailure {

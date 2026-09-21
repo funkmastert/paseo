@@ -1984,6 +1984,7 @@ export const fr: TranslationResources = {
       error: "Erreur",
       disabled: "Désactivé",
       sessionReported: "Problème de session",
+      claudeAiConnector: "Connexion par compte Claude",
     },
     authAction: "S'authentifier",
     reauthAction: "Se réauthentifier",

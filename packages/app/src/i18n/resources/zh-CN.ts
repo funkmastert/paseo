@@ -1912,6 +1912,7 @@ export const zhCN: TranslationResources = {
       error: "错误",
       disabled: "已禁用",
       sessionReported: "会话问题",
+      claudeAiConnector: "需在每个 Claude 账户中登录",
     },
     authAction: "授权",
     reauthAction: "重新授权",

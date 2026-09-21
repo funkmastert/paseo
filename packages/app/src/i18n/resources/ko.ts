@@ -1943,6 +1943,7 @@ export const ko: TranslationResources = {
       error: "오류",
       disabled: "사용 안 함",
       sessionReported: "세션 문제",
+      claudeAiConnector: "Claude 계정마다 로그인 필요",
     },
     authAction: "인증",
     reauthAction: "재인증",

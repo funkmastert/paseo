@@ -55,6 +55,8 @@ function statusLabelKeyFor(statusKey: McpStatusRowStatusKey): string {
       return "mcpStatus.status.needsAuth";
     case "sessionReported":
       return "mcpStatus.status.sessionReported";
+    case "claudeAiConnector":
+      return "mcpStatus.status.claudeAiConnector";
     default:
       return `mcpStatus.status.${statusKey}`;
   }

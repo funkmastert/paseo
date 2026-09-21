@@ -1979,6 +1979,7 @@ export const es: TranslationResources = {
       error: "Error",
       disabled: "Deshabilitado",
       sessionReported: "Problema de sesión",
+      claudeAiConnector: "Inicia sesión en cada cuenta de Claude",
     },
     authAction: "Autenticar",
     reauthAction: "Reautenticar",
