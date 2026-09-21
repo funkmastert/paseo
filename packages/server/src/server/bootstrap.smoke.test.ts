@@ -333,6 +333,69 @@ describe("paseo daemon bootstrap", () => {
     }
   });
 
+  // The reaper, the device cap and the spend governor are all off unless config.json turns them
+  // on, so a section that never reaches them is indistinguishable from "configured off". This
+  // goes the whole way a real daemon does — config.json on disk, loadConfig, createPaseoDaemon,
+  // then `paseo daemon reload` — and reads the answer back over the daemon's own config RPC.
+  test("monitor sections in config.json reach the running monitors at boot and on reload", async () => {
+    const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-monitor-config-"));
+    const paseoHome = path.join(paseoHomeRoot, ".paseo");
+    await mkdir(paseoHome, { recursive: true });
+    const configPath = path.join(paseoHome, "config.json");
+    const bootPersisted = {
+      version: 1 as const,
+      daemon: {
+        listen: "127.0.0.1:0",
+        relay: { enabled: false },
+      },
+      agents: {
+        resourceMonitor: { reaper: { enabled: true, dryRun: true } },
+        deviceLeases: { enabled: true, dryRun: true, pendingTtlMinutes: 25 },
+        tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
+      },
+    };
+    await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
+    const config = loadConfig(paseoHome, { env: {} });
+    config.agentClients = createTestAgentClients();
+    config.agentStoragePath = path.join(paseoHome, "agents");
+    config.isDev = true;
+    const daemon = await createPaseoDaemon(config, pino({ level: "silent" }));
+    let client: DaemonClient | null = null;
+
+    try {
+      await daemon.start();
+      const target = daemon.getListenTarget();
+      if (!target || target.type !== "tcp") throw new Error("Expected a TCP listener");
+      client = new DaemonClient({ url: `ws://127.0.0.1:${target.port}/ws`, appVersion: "0.4.0" });
+      await client.connect();
+
+      const booted = (await client.getDaemonConfig()).config;
+      expect(booted.resourceMonitor).toEqual(bootPersisted.agents.resourceMonitor);
+      expect(booted.deviceLeases).toEqual(bootPersisted.agents.deviceLeases);
+      expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
+
+      const reloadedPersisted = {
+        ...bootPersisted,
+        agents: {
+          resourceMonitor: { reaper: { enabled: true, dryRun: false } },
+          deviceLeases: { enabled: false },
+          tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
+        },
+      };
+      await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
+      const result = await client.reloadDaemonConfig("monitor-sections");
+
+      expect(result.appliedPaths).toEqual(["agents.deviceLeases", "agents.resourceMonitor"]);
+      const reloaded = (await client.getDaemonConfig()).config;
+      expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
+      expect(reloaded.deviceLeases).toEqual(reloadedPersisted.agents.deviceLeases);
+    } finally {
+      await client?.close().catch(() => undefined);
+      await daemon.stop().catch(() => undefined);
+      await rm(paseoHomeRoot, { recursive: true, force: true });
+    }
+  });
+
   function httpGetWithHost(
     port: number,
     host: string,

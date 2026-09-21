@@ -515,6 +515,7 @@ export interface PaseoDaemonConfig {
       graceMs?: number;
     };
   };
+  deviceLeases?: MutableDaemonConfig["deviceLeases"];
   accountFailover?: {
     enabled?: boolean;
     migrateSubagents?: boolean;
@@ -634,6 +635,12 @@ function withResourceMonitorConfig(
   return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
 }
 
+function withDeviceLeasesConfig(
+  config: Pick<PaseoDaemonConfig, "deviceLeases">,
+): Pick<MutableDaemonConfig, "deviceLeases"> {
+  return config.deviceLeases !== undefined ? { deviceLeases: config.deviceLeases } : {};
+}
+
 function withAccountFailoverConfig(
   config: Pick<PaseoDaemonConfig, "accountFailover">,
 ): Pick<MutableDaemonConfig, "accountFailover"> {
@@ -708,6 +715,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     },
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
+    ...withDeviceLeasesConfig(config),
     ...withAccountFailoverConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),

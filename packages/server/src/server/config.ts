@@ -548,6 +548,24 @@ interface ResolveConfigFromPersistedOptions {
   relayEnabledFallback?: boolean;
 }
 
+// Every monitor defaults to off or to report-only, so a section missing here is indistinguishable
+// from one configured off. resourceMonitor and deviceLeases were missing, and on every real boot
+// and reload the reaper and the device cap ran on their defaults — the same gap mcpGateway had.
+function resolveAgentMonitorConfig(
+  persisted: PersistedConfig,
+): Pick<
+  PaseoDaemonConfig,
+  "tokenBurnMonitor" | "resourceMonitor" | "deviceLeases" | "accountFailover"
+> {
+  const agents = persisted.agents;
+  return {
+    tokenBurnMonitor: agents?.tokenBurnMonitor,
+    resourceMonitor: agents?.resourceMonitor,
+    deviceLeases: agents?.deviceLeases,
+    accountFailover: agents?.accountFailover,
+  };
+}
+
 export function resolveConfigFromPersisted(
   paseoHome: string,
   persisted: PersistedConfig,
@@ -639,8 +657,7 @@ export function resolveConfigFromPersisted(
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
-    tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
-    accountFailover: persisted.agents?.accountFailover,
+    ...resolveAgentMonitorConfig(persisted),
     diskSweeper: persisted.worktrees?.diskSweeper,
     // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
     // which is why its absence here went unnoticed until a real daemon booted with the section.
