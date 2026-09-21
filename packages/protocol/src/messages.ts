@@ -236,6 +236,22 @@ const MutableAccountFailoverConfigSchema = z
 
 const MutableAccountFailoverPatchSchema = MutableAccountFailoverConfigSchema;
 
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/done-janitor.md.
+const MutableDoneJanitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    quietHours: z.number().positive().optional(),
+    maxQuestionsPerSweep: z.number().int().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    answerTimeoutMinutes: z.number().positive().optional(),
+    reclaimWorkspaces: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
+
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
 // reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
@@ -406,6 +422,7 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
     deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
+    doneJanitor: MutableDoneJanitorConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -433,6 +450,7 @@ export const MutableDaemonConfigPatchSchema = z
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
     deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
+    doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),

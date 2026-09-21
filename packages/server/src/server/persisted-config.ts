@@ -329,6 +329,20 @@ const AgentAccountFailoverSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.accountFailover above — same mutable/patch split, same reason.
+// Off unless `enabled` says otherwise. See docs/done-janitor.md.
+const AgentDoneJanitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    quietHours: z.number().positive().optional(),
+    maxQuestionsPerSweep: z.number().int().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    answerTimeoutMinutes: z.number().positive().optional(),
+    reclaimWorkspaces: z.boolean().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -480,6 +494,7 @@ export const PersistedConfigSchema = z
         resourceMonitor: AgentResourceMonitorSchema.optional(),
         deviceLeases: AgentDeviceLeasesSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
+        doneJanitor: AgentDoneJanitorSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

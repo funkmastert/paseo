@@ -34,6 +34,35 @@ describe("PersistedConfigSchema daemon auth config", () => {
   });
 });
 
+describe("PersistedConfigSchema agents.doneJanitor config", () => {
+  test("every key is optional: an empty section parses", () => {
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: {} } }).agents?.doneJanitor,
+    ).toEqual({});
+  });
+
+  test("accepts the full section", () => {
+    const doneJanitor = {
+      enabled: true,
+      dryRun: true,
+      quietHours: 96,
+      maxQuestionsPerSweep: 2,
+      maxArchivesPerSweep: 4,
+      answerTimeoutMinutes: 5,
+      reclaimWorkspaces: false,
+    };
+    expect(PersistedConfigSchema.parse({ agents: { doneJanitor } }).agents?.doneJanitor).toEqual(
+      doneJanitor,
+    );
+  });
+
+  test("rejects an unknown key, like its siblings", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { quietDays: 3 } } }),
+    ).toThrow();
+  });
+});
+
 describe("PersistedConfigSchema daemon append system prompt config", () => {
   test("accepts optional append system prompt", () => {
     const parsed = PersistedConfigSchema.parse({

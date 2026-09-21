@@ -548,6 +548,16 @@ interface ResolveConfigFromPersistedOptions {
   relayEnabledFallback?: boolean;
 }
 
+function pickAgentsConfig(agents: PersistedConfig["agents"]) {
+  return {
+    providerCatalogRefreshTimeoutMs: agents?.catalogRefreshTimeoutMs,
+    metadataGeneration: agents?.metadataGeneration,
+    tokenBurnMonitor: agents?.tokenBurnMonitor,
+    accountFailover: agents?.accountFailover,
+    doneJanitor: agents?.doneJanitor,
+  };
+}
+
 export function resolveConfigFromPersisted(
   paseoHome: string,
   persisted: PersistedConfig,
@@ -637,10 +647,7 @@ export function resolveConfigFromPersisted(
     voiceLlmProviderExplicit: voiceLlm.providerExplicit,
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
-    providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
-    metadataGeneration: persisted.agents?.metadataGeneration,
-    tokenBurnMonitor: persisted.agents?.tokenBurnMonitor,
-    accountFailover: persisted.agents?.accountFailover,
+    ...pickAgentsConfig(persisted.agents),
     diskSweeper: persisted.worktrees?.diskSweeper,
     // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
     // which is why its absence here went unnoticed until a real daemon booted with the section.

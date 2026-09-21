@@ -1108,6 +1108,44 @@ describe("DaemonConfigStore", () => {
     expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({ reaper: expected });
   });
 
+  test("patch live-toggles doneJanitor.dryRun without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify(
+        { version: 1, agents: { doneJanitor: { enabled: true, quietHours: 96 } } },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        doneJanitor: { enabled: true, quietHours: 96 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ doneJanitor: { dryRun: true } });
+
+    expect(next.doneJanitor).toEqual({ enabled: true, quietHours: 96, dryRun: true });
+    expect(loadPersistedConfig(paseoHome).agents?.doneJanitor).toEqual({
+      enabled: true,
+      quietHours: 96,
+      dryRun: true,
+    });
+  });
+
   test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

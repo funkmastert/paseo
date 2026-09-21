@@ -27,6 +27,7 @@ interface SupportedMutableConfigPatch {
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
   deviceLeases?: MutableDaemonConfig["deviceLeases"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
+  doneJanitor?: MutableDaemonConfig["doneJanitor"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -204,6 +205,7 @@ const RELOADABLE_PATHS = [
   "agents.resourceMonitor",
   "agents.deviceLeases",
   "agents.accountFailover",
+  "agents.doneJanitor",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -239,6 +241,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.resourceMonitor", "resourceMonitor"],
   ["agents.deviceLeases", "deviceLeases"],
   ["agents.accountFailover", "accountFailover"],
+  ["agents.doneJanitor", "doneJanitor"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -325,6 +328,12 @@ function pickAccountFailoverPatch(
   return accountFailover === undefined ? {} : { accountFailover };
 }
 
+function pickDoneJanitorPatch(
+  doneJanitor: MutableDaemonConfigPatch["doneJanitor"],
+): Pick<SupportedMutableConfigPatch, "doneJanitor"> {
+  return doneJanitor === undefined ? {} : { doneJanitor };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -353,6 +362,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickResourceMonitorPatch(patch.resourceMonitor),
     ...pickDeviceLeasesPatch(patch.deviceLeases),
     ...pickAccountFailoverPatch(patch.accountFailover),
+    ...pickDoneJanitorPatch(patch.doneJanitor),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -806,6 +816,18 @@ function mergeAccountFailoverForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedDoneJanitor = NonNullable<PersistedConfig["agents"]>["doneJanitor"];
+
+function mergeDoneJanitorForPersist(
+  persisted: PersistedDoneJanitor,
+  patch: SupportedMutableConfigPatch["doneJanitor"],
+): PersistedDoneJanitor {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -865,6 +887,7 @@ function touchesAgentConfig(
     patch.resourceMonitor !== undefined ||
     patch.deviceLeases !== undefined ||
     patch.accountFailover !== undefined ||
+    patch.doneJanitor !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
@@ -921,6 +944,9 @@ function mergeMutableAgentPatch(
     patch.accountFailover,
   );
   if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
+
+  const doneJanitor = mergeDoneJanitorForPersist(persistedAgents?.doneJanitor, patch.doneJanitor);
+  if (doneJanitor !== undefined) next["doneJanitor"] = doneJanitor;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };
