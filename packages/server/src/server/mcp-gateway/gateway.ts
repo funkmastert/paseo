@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { isDeepStrictEqual } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,6 +12,12 @@ import {
   StreamableHTTPError,
 } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import {
+  InvalidClientError,
+  InvalidGrantError,
+  InvalidTokenError,
+  UnauthorizedClientError,
+} from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import type {
   McpGatewaySessionMode,
   MutableMcpGatewayConfig,
@@ -36,6 +43,8 @@ import {
   exchangeMcpGatewayAuthorizationCode,
   McpGatewayOAuthStateStore,
   MissingOAuthClientError,
+  registrationExcludesScope,
+  resolveOfflineAccessScope,
   startMcpGatewayAuthorization,
   type StartMcpGatewayAuthResult,
 } from "./oauth.js";
@@ -85,9 +94,7 @@ interface EvaluateTransitionNotificationResult {
  * notification per unhealthy episode (needs-auth or error) — repeat sweeps that land back in
  * the same unhealthy status don't re-fire. Reaching "connected" re-arms the episode so the
  * next excursion notifies again. Non-critical servers never notify (AE5). Kept pure and
- * exported so the episode/re-arm sequencing is directly testable without live network I/O —
- * `gateway.ts` has no public API to force a connected server back to unhealthy yet (that
- * lands with the mid-session failure hook in a later unit).
+ * exported so the episode/re-arm sequencing is directly testable without live network I/O.
  */
 export function evaluateTransitionNotification(
   input: EvaluateTransitionNotificationInput,
@@ -111,6 +118,16 @@ const AUTH_FAILURE_HTTP_CODES = new Set([401, 403]);
 
 function isAuthFailure(error: unknown): boolean {
   if (error instanceof UnauthorizedError) return true;
+  // What a token refresh throws when the upstream will not refresh: the refresh token was
+  // revoked or expired, or the client it was issued to is gone. Either way only sign-in helps.
+  if (
+    error instanceof InvalidGrantError ||
+    error instanceof InvalidTokenError ||
+    error instanceof InvalidClientError ||
+    error instanceof UnauthorizedClientError
+  ) {
+    return true;
+  }
   if (error instanceof StreamableHTTPError || error instanceof SseError) {
     return error.code !== undefined && AUTH_FAILURE_HTTP_CODES.has(error.code);
   }
@@ -135,6 +152,17 @@ function nextConnectEvent(
       // callers that need to force a fresh attempt on a connected server should disable/
       // re-enable it explicitly instead.
       return undefined;
+  }
+}
+
+/**
+ * Thrown by `requestUpstream` when a server has no live upstream to send to — never connected,
+ * or its login just died under a request. The proxy route turns it into its needs-auth error.
+ */
+export class McpGatewayUpstreamUnavailableError extends Error {
+  constructor(readonly serverName: string) {
+    super(`MCP gateway server "${serverName}" needs authentication`);
+    this.name = "McpGatewayUpstreamUnavailableError";
   }
 }
 
@@ -385,6 +413,42 @@ export class McpGateway {
     return runtime?.state.status === "connected" ? runtime.client : undefined;
   }
 
+  /**
+   * Sends one proxied request to a server's live upstream. The SDK transport refreshes an
+   * expired access token on the 401 by itself and persists the result through the token store,
+   * so a refreshable login never surfaces here. What does surface is a login that cannot be
+   * renewed — an access token with no refresh token, or a refresh the upstream refused — and
+   * the connect-time state never sees that, so this is where the server moves to needs-auth and
+   * a critical one pushes, instead of reading "connected" while every call fails.
+   */
+  async requestUpstream<T>(name: string, request: (client: Client) => Promise<T>): Promise<T> {
+    const runtime = this.servers.get(name);
+    const client = runtime?.state.status === "connected" ? runtime.client : undefined;
+    if (!runtime || !client) {
+      throw new McpGatewayUpstreamUnavailableError(name);
+    }
+    try {
+      return await request(client);
+    } catch (error) {
+      // A request still in flight on a client an earlier failure already retired fails with
+      // "connection closed"; the cause is the same lost login.
+      const retired = runtime.client !== client;
+      if (!retired && !isAuthFailure(error)) {
+        throw error;
+      }
+      // Concurrent requests fail together; only the first one still holding the live client
+      // moves the state, so the episode notifies once.
+      if (!retired && runtime.state.status === "connected") {
+        runtime.client = undefined;
+        this.transitionRuntime(name, runtime, { type: "refreshFailed" });
+        this.logger?.warn({ err: error, server: name }, "MCP gateway upstream login expired");
+        void client.close().catch(() => undefined);
+        await this.flushPendingNotifications();
+      }
+      throw new McpGatewayUpstreamUnavailableError(name);
+    }
+  }
+
   /** Attempts to connect every configured server. No-ops entirely when disabled. */
   async start(): Promise<void> {
     if (!this.enabled) return;
@@ -467,6 +531,17 @@ export class McpGateway {
       );
     }
     const redirectUrl = this.requireOAuthRedirectUrl(name);
+    const scope = await resolveOfflineAccessScope(runtime.config.url);
+    if (
+      scope !== undefined &&
+      !this.tokenStore.getClientCredentials(name) &&
+      registrationExcludesScope(this.tokenStore.getClientInformation(name), scope)
+    ) {
+      // A dynamic registration made for the narrower scope may be refused the wider one at the
+      // authorize step, in the browser, where nothing can explain it. Registering again is
+      // what DCR is for; a hand-registered app is the operator's and is never touched.
+      this.tokenStore.forgetClientInformation(name);
+    }
     try {
       return await startMcpGatewayAuthorization({
         serverName: name,
@@ -474,6 +549,7 @@ export class McpGateway {
         redirectUrl,
         credentialsPath: this.tokenStore.credentialsPath,
         provider: this.buildOAuthProvider(name),
+        ...(scope === undefined ? {} : { scope }),
       });
     } catch (error) {
       throw toStartAuthorizationFailure(name, error);
@@ -498,6 +574,23 @@ export class McpGateway {
       stateStore: this.oauthStateStore,
       redirectUrl: this.resolveOAuthRedirectUrl(name),
     });
+  }
+
+  /**
+   * The provider a live connection authenticates with. When the transport meets a 401 it runs
+   * the SDK's `auth()`, which refreshes when it can and otherwise begins a fresh authorization:
+   * minting a `state` and saving a PKCE verifier. On the interactive provider that would
+   * invalidate a sign-in someone started from the strip a moment earlier and overwrite its
+   * verifier, so their callback fails as an expired link. Nobody is waiting on a browser here,
+   * so this one keeps both stores untouched and lets `auth()` end in `UnauthorizedError`.
+   */
+  private buildConnectionOAuthProvider(name: string): OAuthClientProvider {
+    return {
+      ...this.buildOAuthProvider(name),
+      state: () => randomUUID(),
+      saveCodeVerifier: () => undefined,
+      redirectToAuthorization: () => undefined,
+    };
   }
 
   private resolveOAuthRedirectUrl(name: string): string {
@@ -613,7 +706,7 @@ export class McpGateway {
           this.transitionRuntime(name, runtime, { type: "needsAuth" });
           return;
         }
-        authProvider = this.buildOAuthProvider(name);
+        authProvider = this.buildConnectionOAuthProvider(name);
         // The SDK's authProvider owns Authorization; extraHeaders ride requestInit for
         // OAuth upstreams that additionally require non-auth headers (see token-store.ts).
         headers = this.tokenStore.getOAuthExtraHeaders(name);

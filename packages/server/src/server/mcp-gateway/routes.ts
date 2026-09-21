@@ -11,7 +11,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 
 import { isAgentMcpRequestAuthorized } from "../auth.js";
-import type { McpGateway } from "./gateway.js";
+import { McpGatewayUpstreamUnavailableError, type McpGateway } from "./gateway.js";
 
 interface LoggerLike {
   child(bindings: Record<string, unknown>): LoggerLike;
@@ -59,29 +59,31 @@ function firstStringQueryParam(value: unknown): string | undefined {
 /**
  * Builds the per-request MCP server facade that stands in for the upstream connection (KTD1's
  * "reverse-proxy routes" approach). Tool list/call requests forward verbatim to the gateway's
- * live upstream `Client`; when the server isn't connected, handlers throw a generic needs-auth
- * `McpError` instead of touching the network, so the response is always a clean, well-formed
- * MCP error rather than a hang or a passthrough of upstream details.
+ * live upstream `Client`; when the server isn't connected, or its login dies under the request,
+ * handlers throw a generic needs-auth `McpError`, so the response is always a clean,
+ * well-formed MCP error rather than a hang or a passthrough of upstream details.
  */
 function createProxyFacadeServer(gateway: McpGateway, name: string): McpProtocolServer {
-  const requireClient = (): Client => {
-    const client = gateway.getClient(name);
-    if (!client) {
-      throw new McpError(
-        MCP_GATEWAY_NEEDS_AUTH_ERROR_CODE,
-        `MCP gateway server "${name}" needs authentication`,
-      );
+  const forward = async <T>(request: (client: Client) => Promise<T>): Promise<T> => {
+    try {
+      return await gateway.requestUpstream(name, request);
+    } catch (error) {
+      if (error instanceof McpGatewayUpstreamUnavailableError) {
+        throw new McpError(MCP_GATEWAY_NEEDS_AUTH_ERROR_CODE, error.message);
+      }
+      throw error;
     }
-    return client;
   };
 
   const server = new McpProtocolServer(
     { name: `paseo-mcp-gateway-${name}`, version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => requireClient().listTools());
+  server.setRequestHandler(ListToolsRequestSchema, async () =>
+    forward((client) => client.listTools()),
+  );
   server.setRequestHandler(CallToolRequestSchema, async (request) =>
-    requireClient().callTool(request.params),
+    forward((client) => client.callTool(request.params)),
   );
   return server;
 }
