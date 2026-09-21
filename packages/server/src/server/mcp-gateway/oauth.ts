@@ -99,13 +99,18 @@ export function createGatewayOAuthClientProvider(
 ): OAuthClientProvider {
   const { serverName, tokenStore, stateStore, redirectUrl, onRedirect } = options;
 
+  // A hand-registered app may name its own redirect URI; the SDK sends this one in both the
+  // authorization request and the code exchange, so the two always agree.
+  const resolveRedirectUrl = (): string =>
+    tokenStore.getClientCredentials(serverName)?.redirectUrl ?? redirectUrl;
+
   return {
     get redirectUrl(): string {
-      return redirectUrl;
+      return resolveRedirectUrl();
     },
     get clientMetadata(): OAuthClientMetadata {
       return {
-        redirect_uris: [redirectUrl],
+        redirect_uris: [resolveRedirectUrl()],
         client_name: "Paseo MCP Gateway",
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
@@ -182,6 +187,8 @@ export async function startMcpGatewayAuthorization(params: {
   /** Named in the same error: the file the operator writes the client credentials into. */
   credentialsPath: string;
   provider: OAuthClientProvider;
+  /** Outranks the resource's advertised `scopes_supported` in the SDK's scope selection. */
+  scope?: string;
 }): Promise<StartMcpGatewayAuthResult> {
   let capturedUrl: URL | undefined;
   const provider: OAuthClientProvider = {
@@ -193,7 +200,10 @@ export async function startMcpGatewayAuthorization(params: {
 
   let result: Awaited<ReturnType<typeof runOAuthOrchestration>>;
   try {
-    result = await runOAuthOrchestration(provider, { serverUrl: params.serverUrl });
+    result = await runOAuthOrchestration(provider, {
+      serverUrl: params.serverUrl,
+      ...(params.scope === undefined ? {} : { scope: params.scope }),
+    });
   } catch (error) {
     if (isDynamicClientRegistrationUnsupported(error)) {
       throw new MissingOAuthClientError(

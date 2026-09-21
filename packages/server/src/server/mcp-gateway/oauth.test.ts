@@ -159,6 +159,30 @@ describe("createGatewayOAuthClientProvider", () => {
     });
   });
 
+  test("a pre-registered client's own redirect URI replaces the one the daemon derived", async () => {
+    const paseoHome = createTempHome();
+    writeTokenFile(paseoHome, {
+      slack: {
+        auth: "oauth",
+        clientCredentials: {
+          clientId: "slack-app-id",
+          redirectUrl: "http://localhost:6767/mcp/gateway/oauth/callback",
+        },
+      },
+    });
+    const provider = createGatewayOAuthClientProvider({
+      serverName: "slack",
+      tokenStore: new McpGatewayTokenStore(paseoHome),
+      stateStore: new McpGatewayOAuthStateStore(),
+      redirectUrl: "http://127.0.0.1:6767/mcp/gateway/oauth/callback",
+    });
+
+    expect(provider.redirectUrl).toBe("http://localhost:6767/mcp/gateway/oauth/callback");
+    expect(provider.clientMetadata.redirect_uris).toEqual([
+      "http://localhost:6767/mcp/gateway/oauth/callback",
+    ]);
+  });
+
   test("a pre-registered client outranks a client the daemon registered dynamically", async () => {
     const paseoHome = createTempHome();
     writeTokenFile(paseoHome, {

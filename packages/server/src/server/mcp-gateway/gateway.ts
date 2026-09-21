@@ -474,6 +474,7 @@ export class McpGateway {
         redirectUrl,
         credentialsPath: this.tokenStore.credentialsPath,
         provider: this.buildOAuthProvider(name),
+        scope: this.tokenStore.getClientCredentials(name)?.scope,
       });
     } catch (error) {
       throw toStartAuthorizationFailure(name, error);

@@ -59,7 +59,7 @@ interface OAuthFixtureMcpServer {
  * login step, which is exactly what a test driving the flow without a browser needs.
  */
 async function startOAuthFixtureMcpServer(
-  options: { preregisteredClient?: OAuthClientInformationFull } = {},
+  options: { preregisteredClient?: OAuthClientInformationFull; scopesSupported?: string[] } = {},
 ): Promise<OAuthFixtureMcpServer> {
   const port = await getAvailablePort();
   const baseUrl = new URL(`http://127.0.0.1:${port}`);
@@ -84,7 +84,7 @@ async function startOAuthFixtureMcpServer(
       provider,
       issuerUrl: baseUrl,
       resourceServerUrl: mcpUrl,
-      scopesSupported: ["mcp:tools"],
+      scopesSupported: options.scopesSupported ?? ["mcp:tools"],
     }),
   );
 
@@ -353,6 +353,85 @@ describe("MCP gateway proxy + OAuth callback (local e2e, fixture upstream)", () 
         clientSecret: "slack-app-secret",
       });
       expect(tokenFile.servers.slack?.clientInformation).toBeUndefined();
+    } finally {
+      await daemon.stop();
+      await fixture.close();
+      await rm(paseoHome, { recursive: true, force: true });
+      await rm(staticDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+  test("a pre-registered client signs in on its own redirect URI and asks only for its own scopes", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-home-mcp-gateway-prereg-uri-"));
+    const staticDir = await mkdtemp(path.join(os.tmpdir(), "paseo-static-mcp-gateway-prereg-uri-"));
+    const daemonPort = await getAvailablePort();
+    // Slack's case: the app allows `localhost`, while the daemon derives `127.0.0.1`. The
+    // fixture's authorize endpoint rejects any redirect URI the client did not register.
+    const redirectUrl = `http://localhost:${daemonPort}${MCP_GATEWAY_CALLBACK_ROUTE}`;
+    const fixture = await startOAuthFixtureMcpServer({
+      preregisteredClient: {
+        client_id: "slack-app-id",
+        redirect_uris: [redirectUrl],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      },
+      scopesSupported: ["mcp:read", "mcp:write"],
+    });
+    await mkdir(path.join(paseoHome, "mcp-gateway"), { recursive: true });
+    await writeFile(
+      path.join(paseoHome, "mcp-gateway", "tokens.json"),
+      JSON.stringify({
+        version: 1,
+        servers: {
+          slack: {
+            auth: "oauth",
+            clientCredentials: { clientId: "slack-app-id", redirectUrl, scope: "mcp:read" },
+          },
+        },
+      }),
+      { mode: 0o600 },
+    );
+
+    const daemon = await createPaseoDaemon(
+      {
+        listen: `127.0.0.1:${daemonPort}`,
+        paseoHome,
+        corsAllowedOrigins: [],
+        hostnames: true,
+        mcpEnabled: true,
+        staticDir,
+        mcpDebug: false,
+        agentClients: createTestAgentClients(),
+        agentStoragePath: path.join(paseoHome, "agents"),
+        mcpGateway: {
+          enabled: true,
+          servers: { slack: { url: fixture.mcpUrl, transport: "http", auth: "oauth" } },
+        },
+      },
+      pino({ level: "silent" }),
+    );
+    await daemon.start();
+
+    try {
+      await vi.waitFor(() => {
+        expect(daemon.mcpGateway.getServerState("slack")?.status).toBe("needs-auth");
+      });
+
+      const { authorizationUrl } = await daemon.mcpGateway.startAuthorization("slack");
+      const params = new URL(authorizationUrl).searchParams;
+      expect(params.get("redirect_uri")).toBe(redirectUrl);
+      // Without the override the SDK would request every advertised scope: "mcp:read mcp:write".
+      expect(params.get("scope")).toBe("mcp:read");
+
+      const authorizeResponse = await fetch(authorizationUrl, { redirect: "manual" });
+      const redirectLocation = authorizeResponse.headers.get("location");
+      expect(redirectLocation?.startsWith(redirectUrl)).toBe(true);
+
+      // The code exchange must repeat the same redirect URI, or the authorization server
+      // refuses it; reaching "connected" proves it did.
+      const callbackResponse = await fetch(redirectLocation!);
+      expect(callbackResponse.status).toBe(200);
+      expect(daemon.mcpGateway.getServerState("slack")?.status).toBe("connected");
     } finally {
       await daemon.stop();
       await fixture.close();

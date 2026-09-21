@@ -19,6 +19,14 @@ interface LoggerLike {
 const PreregisteredOAuthClientSchema = z.object({
   clientId: z.string().min(1),
   clientSecret: z.string().min(1).optional(),
+  /** The redirect URI registered on the app, when it cannot be the one the daemon derives.
+   * Slack only treats `http://localhost` as a desktop redirect; the daemon derives
+   * `http://127.0.0.1`. It must still reach this daemon's `/mcp/gateway/oauth/callback`. */
+  redirectUrl: z.string().url().optional(),
+  /** Space-separated scopes to request instead of everything the server advertises. The SDK
+   * otherwise asks for the resource's whole `scopes_supported`, which for Slack includes
+   * posting and writing as the signed-in user. */
+  scope: z.string().min(1).optional(),
 });
 
 // KTD4: OAuth token records carry the SDK's own token/registration shapes verbatim (no

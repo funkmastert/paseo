@@ -66,7 +66,12 @@ Put them in the token store, not config — a client secret is a secret, and con
 }
 ```
 
-Omit `clientSecret` for a public client. Register the app's redirect URI as the daemon's `/mcp/gateway/oauth/callback` URL. You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
+Omit `clientSecret` for a public client. Register the app's redirect URI as the daemon's `/mcp/gateway/oauth/callback` URL. Two optional fields cover providers that are fussy about either:
+
+- `redirectUrl`: the URI you registered, when the provider will not accept the one the daemon derives. It must still reach this daemon's callback path. The loopback daemon derives `http://127.0.0.1:<port>/…`, and Slack only treats `http://localhost` redirects as desktop redirects, so register and set `http://localhost:6767/mcp/gateway/oauth/callback`.
+- `scope`: the space-separated scopes to request. Without it the SDK requests everything the resource advertises in `scopes_supported`, which for Slack includes posting, writing canvases, and uploading files as you.
+
+Both fields are ignored by daemons older than this feature, and such a daemon rewrites the file without them the next time it saves a token, so upgrade the daemon before you add them. You do not have to derive any of this: sign-in fails with `client_not_registered`, and the strip shows the exact redirect URI, the resolved path of this file, and the JSON to add, with a copy button — it is the one failure whose whole point is to be read and followed. The daemon re-reads `tokens.json` on every credential lookup, so pressing sign in again picks the record up without a restart.
 
 Stored credentials outrank anything a past dynamic registration saved, and the SDK never registers when they are present, so the hand-written record is never overwritten.
 
