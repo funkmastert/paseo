@@ -232,8 +232,14 @@ describe("createHealthTracker", () => {
     expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
     expect(tracker.isHealthyForAllWindows(PROVIDER)).toBe(false);
 
-    // Probation counts as usable, matching isHealthyFor.
+    // A weekly cap with no knowable reset does NOT expire on the session-window clock: five
+    // hours later it is still capped, because a weekly window can be dead for days.
     advance(5 * 60 * 60 * 1000);
+    expect(tracker.snapshot()[PROVIDER]?.[weeklyModelWindow("opus")]?.status).toBe("capped");
+    expect(tracker.isHealthyForAllWindows(PROVIDER)).toBe(false);
+
+    // Probation counts as usable, matching isHealthyFor — a week on.
+    advance(7 * 24 * 60 * 60 * 1000);
     expect(tracker.snapshot()[PROVIDER]?.[weeklyModelWindow("opus")]?.status).toBe("probation");
     expect(tracker.isHealthyForAllWindows(PROVIDER)).toBe(true);
 

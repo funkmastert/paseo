@@ -1,5 +1,5 @@
 import { classify } from "./classify";
-import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, modelWindowFor } from "./windows";
+import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, isWeeklyWindow, modelWindowFor } from "./windows";
 
 export type WindowStatus = "healthy" | "drained" | "capped" | "probation";
 
@@ -40,6 +40,17 @@ export interface HealthTrackerOptions {
   capThresholdPct?: number;
   /** Fallback cap duration when a reactive failure carries no parseable reset time. Default 5h. */
   defaultCapTtlMs?: number;
+  /**
+   * Fallback cap duration for a WEEKLY window with no knowable reset time. Default 7 days.
+   *
+   * Separate from defaultCapTtlMs because the two windows recover on completely different
+   * clocks, and using the 5-hour figure for both is how a weekly-exhausted account came back
+   * into rotation the same afternoon it died. The daemon's weekly rows carry `resets_at`
+   * nullishly (quota-fetcher/providers/claude.ts), so "no reset time" is a real state, not a
+   * defensive one — and every time it occurs the 5-hour default would promote a window that is
+   * dead for days to `probation`, which is routable.
+   */
+  weeklyCapTtlMs?: number;
   /** How long a window stays in probation before auto-healing if no turn completes. Default 30min. */
   probationTtlMs?: number;
   /**
@@ -77,6 +88,15 @@ export interface HealthTracker {
    * coarser healthy/drained/capped status.
    */
   windowUtilization(providerId: string, window: string): number | undefined;
+  /**
+   * The settled state of one (provider, window), or undefined when nothing has ever been
+   * observed for it. Unlike `windowUtilization` it also answers "when does this come back",
+   * which is what headroom scoring needs to tell a window resetting within the hour apart from
+   * one resetting on Friday.
+   */
+  describeWindow(providerId: string, window: string): WindowSnapshot | undefined;
+  /** Every window id ever observed for one provider, settled. */
+  windowIds(providerId: string): string[];
   /** Debug/notification snapshot of every tracked (providerId, window) pair. */
   snapshot(): HealthSnapshot;
   /** Subscribes to cap/recovery transitions. Returns an unsubscribe function. */
@@ -86,6 +106,7 @@ export interface HealthTracker {
 const DEFAULT_DRAIN_THRESHOLD_PCT = 90;
 const DEFAULT_CAP_THRESHOLD_PCT = 100;
 const DEFAULT_CAP_TTL_MS = 5 * 60 * 60 * 1000;
+const DEFAULT_WEEKLY_CAP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_PROBATION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_AUTH_FAILURE_CAP_TTL_MS = 5 * 60 * 1000;
 
@@ -106,7 +127,13 @@ interface InternalWindowState {
   authFailure?: boolean;
 }
 
-function relevantWindows(modelId: string): string[] {
+/**
+ * The windows a spawn of `modelId` actually has to get past. Exported so headroom scoring
+ * ranks accounts on the same windows that decide whether they are usable at all — scoring a
+ * window the health check ignores (or ignoring one it enforces) is how a "best" account turns
+ * out to be the one that is capped.
+ */
+export function relevantWindows(modelId: string): string[] {
   const windows = [WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY];
   const modelWindow = modelWindowFor(modelId);
   if (modelWindow) {
@@ -120,6 +147,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   const drainThresholdPct = options.drainThresholdPct ?? DEFAULT_DRAIN_THRESHOLD_PCT;
   const capThresholdPct = options.capThresholdPct ?? DEFAULT_CAP_THRESHOLD_PCT;
   const defaultCapTtlMs = options.defaultCapTtlMs ?? DEFAULT_CAP_TTL_MS;
+  const weeklyCapTtlMs = options.weeklyCapTtlMs ?? DEFAULT_WEEKLY_CAP_TTL_MS;
   const probationTtlMs = options.probationTtlMs ?? DEFAULT_PROBATION_TTL_MS;
   const authFailureCapTtlMs = options.authFailureCapTtlMs ?? DEFAULT_AUTH_FAILURE_CAP_TTL_MS;
 
@@ -187,7 +215,15 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     state.status = "capped";
     state.resetsAt = resetsAt;
     state.authFailure = authFailure;
-    state.capExpiry = resetsAt ?? new Date(currentTime + (authFailure ? authFailureCapTtlMs : defaultCapTtlMs));
+    // An auth failure is account-wide and retried quickly; otherwise the fallback tracks the
+    // window's own clock, so a weekly cap with no reset time doesn't expire on a session-window
+    // timer and hand the account back out days early.
+    const fallbackTtlMs = authFailure
+      ? authFailureCapTtlMs
+      : isWeeklyWindow(window)
+        ? weeklyCapTtlMs
+        : defaultCapTtlMs;
+    state.capExpiry = resetsAt ?? new Date(currentTime + fallbackTtlMs);
     state.probationExpiry = undefined;
     emit({ providerId, window, kind: "capped", resetsAt: state.resetsAt ?? state.capExpiry });
   }
@@ -293,6 +329,26 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     return windowsByProvider.get(providerId)?.get(window)?.utilizationPct;
   }
 
+  function describeWindow(providerId: string, window: string): WindowSnapshot | undefined {
+    const state = windowsByProvider.get(providerId)?.get(window);
+    if (!state) {
+      return undefined;
+    }
+    settle(providerId, window, state);
+    return { status: state.status, resetsAt: state.resetsAt, utilizationPct: state.utilizationPct };
+  }
+
+  function windowIds(providerId: string): string[] {
+    const providerWindows = windowsByProvider.get(providerId);
+    if (!providerWindows) {
+      return [];
+    }
+    for (const [window, state] of providerWindows) {
+      settle(providerId, window, state);
+    }
+    return [...providerWindows.keys()];
+  }
+
   function snapshot(): HealthSnapshot {
     const result: HealthSnapshot = {};
     for (const [providerId, providerWindows] of windowsByProvider) {
@@ -323,6 +379,8 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     isLastResortEligible,
     isHealthyForAllWindows,
     windowUtilization,
+    describeWindow,
+    windowIds,
     snapshot,
     onChange,
   };

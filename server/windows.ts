@@ -53,3 +53,13 @@ export function modelWindowFor(modelId: string): string | undefined {
   const family = detectModelFamily(modelId);
   return family ? weeklyModelWindow(family) : undefined;
 }
+
+/**
+ * Whether a window id is a weekly one — the general 7-day window or a
+ * per-model weekly one. Weekly windows are the reason cap expiry can't be
+ * one constant: a 5-hour window is back within the working day, while a
+ * weekly window can be dead until Friday. See health.ts's cap TTL split.
+ */
+export function isWeeklyWindow(window: string): boolean {
+  return window === WINDOW_SEVEN_DAY || window.startsWith("weekly_");
+}
