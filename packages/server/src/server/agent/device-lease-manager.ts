@@ -48,6 +48,7 @@ import {
 } from "./device-launch-enforcement.js";
 import { deriveDeviceSlotDefaults, evaluateMemoryHeadroom } from "./device-slot-defaults.js";
 import type { ProcessSampler, SystemMemorySample } from "./process-sampler.js";
+import { MonitorModeLog } from "../monitor-mode-log.js";
 
 const GIBIBYTE = 1024 ** 3;
 /**
@@ -331,6 +332,7 @@ export class DeviceLeaseManager {
    */
   private readonly chargedUnleasedDevices = new Set<string>();
   private readonly listeners = new Set<() => void>();
+  private readonly modeLog: MonitorModeLog;
 
   constructor(options: DeviceLeaseManagerOptions) {
     this.processSampler = options.processSampler;
@@ -343,6 +345,15 @@ export class DeviceLeaseManager {
     this.sampleMaxAgeMs = options.sampleMaxAgeMs ?? SAMPLE_MAX_AGE_MS;
     this.drainIntervalMs = options.drainIntervalMs ?? DRAIN_INTERVAL_MS;
     this.createLeaseId = options.createLeaseId ?? (() => randomUUID());
+    this.modeLog = new MonitorModeLog(options.logger);
+  }
+
+  /** Logs the mode the cap reads from its config, once per change (monitor-mode-log.ts). */
+  reportMode(): void {
+    const config = this.readDaemonConfig().deviceLeases;
+    this.modeLog.report([
+      { monitor: "device-cap", enabled: config?.enabled ?? false, dryRun: config?.dryRun ?? false },
+    ]);
   }
 
   /** Fires whenever the count, the leases, or the queue change — the UI's push signal. */
@@ -371,6 +382,7 @@ export class DeviceLeaseManager {
     systemMemory: SystemMemorySample | undefined;
   }): Promise<void> {
     this.sample = { ...input, takenAtMs: this.now() };
+    this.reportMode();
     const config = this.resolveConfig(await this.resolveCaps());
     this.reconcile(config);
     await this.chargeUnleasedDevices(config);

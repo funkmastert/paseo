@@ -317,6 +317,14 @@ Check `$PASEO_HOME/daemon.log` for daemon logs. The default level is `info`; set
 `PASEO_LOG_LEVEL=trace` before launching the daemon when you need full provider,
 session, and agent-manager traces for stuck-state debugging.
 
+To see what the monitors are doing, grep for `"msg":"Monitor mode"`. Each monitor
+(`resource-monitor`, `reaper`, `device-cap`, `token-burn`, `spend-governor`,
+`account-pressure`) logs its `enabled` and `dryRun` at startup and again whenever a
+reload or config patch changes them. The line reports what the monitor itself read,
+so a config section that never reached it shows up as the wrong value. The alerting
+legs log nothing when they fire. Their pushes show up as `Sending push notification`
+lines, with `data.reason` naming the leg.
+
 The supervisor rotates `daemon.log`. Persisted `log.file.rotate` settings in
 `$PASEO_HOME/config.json` win first. Without persisted config, the optional
 `PASEO_LOG_ROTATE_SIZE` and `PASEO_LOG_ROTATE_COUNT` env vars override the

@@ -515,6 +515,7 @@ export interface PaseoDaemonConfig {
       graceMs?: number;
     };
   };
+  deviceLeases?: MutableDaemonConfig["deviceLeases"];
   accountFailover?: {
     enabled?: boolean;
     migrateSubagents?: boolean;
@@ -634,6 +635,12 @@ function withResourceMonitorConfig(
   return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
 }
 
+function withDeviceLeasesConfig(
+  config: Pick<PaseoDaemonConfig, "deviceLeases">,
+): Pick<MutableDaemonConfig, "deviceLeases"> {
+  return config.deviceLeases !== undefined ? { deviceLeases: config.deviceLeases } : {};
+}
+
 function withAccountFailoverConfig(
   config: Pick<PaseoDaemonConfig, "accountFailover">,
 ): Pick<MutableDaemonConfig, "accountFailover"> {
@@ -708,6 +715,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     },
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
+    ...withDeviceLeasesConfig(config),
     ...withAccountFailoverConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
@@ -1097,6 +1105,7 @@ export async function createPaseoDaemon(
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
     logger: logger.child({ module: "device-leases" }),
   });
+  deviceLeaseManager.reportMode();
 
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
@@ -2100,6 +2109,15 @@ export async function createPaseoDaemon(
               logger,
             });
             agentResourceMonitor.start();
+            // A reload or a config patch logs each monitor's new mode now rather than at its next
+            // sweep, a minute later — the moment someone is most likely to be checking.
+            const tokenBurnMonitorForModeLog = agentTokenBurnMonitor;
+            const resourceMonitorForModeLog = agentResourceMonitor;
+            daemonConfigStore.onChange(() => {
+              tokenBurnMonitorForModeLog.reportMode();
+              resourceMonitorForModeLog.reportMode();
+              deviceLeaseManager.reportMode();
+            });
             pluginConnectionMonitor = new PluginConnectionMonitor({
               listConnectivity: () => pluginRuntime.listSessionConnectivity(),
               pushNotificationSender: wsServer.getPushNotificationSender(),
