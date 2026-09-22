@@ -255,7 +255,8 @@ record written before provenance existed reads as manual, because silently renam
 user named is worse than leaving a stale name. A workspace created without a name carries no
 provenance at all — "nobody named this" and "Paseo owns naming this" are different states.
 Renaming a workspace to **empty** produces the second, and is how an existing workspace hands
-naming back to Paseo. Provenance is re-read inside the registry write, so a rename that lands
+naming back to Paseo: the row falls back to the branch or directory name the rename field shows
+as its placeholder, and the tracker names it from there. Provenance is re-read inside the registry write, so a rename that lands
 while the LLM is running wins.
 
 **Cost.** A refresh is one small structured call: about 700 input tokens and 20 output — under a
