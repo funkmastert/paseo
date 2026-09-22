@@ -58,8 +58,13 @@ function normalizeSimpleWorkspaceTabTarget(value: WorkspaceTabTarget): Workspace
     case "changes_tree":
     case "files":
     case "pull_request":
-    case "orchestration":
       return { kind: value.kind };
+    case "orchestration": {
+      // A blank scope is the host-wide tab, so an unusable id degrades to it rather than to null:
+      // a persisted layout whose scoped agent is gone still restores an orchestration tab.
+      const scopeAgentId = trimNonEmpty(value.scopeAgentId);
+      return scopeAgentId ? { kind: "orchestration", scopeAgentId } : { kind: "orchestration" };
+    }
     case "setup": {
       const workspaceId = trimNonEmpty(value.workspaceId);
       return workspaceId ? { kind: "setup", workspaceId } : null;
@@ -151,7 +156,7 @@ function secondaryWorkspaceTabTargetsEqual(
     return true;
   }
   if (left.kind === "orchestration" && right.kind === "orchestration") {
-    return true;
+    return left.scopeAgentId === right.scopeAgentId;
   }
   if (left.kind === "setup" && right.kind === "setup") {
     return left.workspaceId === right.workspaceId;
@@ -223,12 +228,11 @@ export function buildDeterministicWorkspaceTabId(target: WorkspaceTabTarget): st
   if (target.kind === "working_diff") {
     return "working_diff";
   }
-  if (
-    target.kind === "changes_tree" ||
-    target.kind === "files" ||
-    target.kind === "pull_request" ||
-    target.kind === "orchestration"
-  ) {
+  if (target.kind === "orchestration") {
+    // The scoped and host-wide panels are separate tabs so a split can hold both at once.
+    return target.scopeAgentId ? `orchestration_${target.scopeAgentId}` : "orchestration";
+  }
+  if (target.kind === "changes_tree" || target.kind === "files" || target.kind === "pull_request") {
     return target.kind;
   }
   if (target.kind === "plugin") {

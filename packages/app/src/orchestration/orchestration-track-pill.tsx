@@ -6,6 +6,7 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { composerPillStyles } from "@/composer/pill-styles";
 import { findOrchestrationNode } from "@/orchestration/orchestration-panel-model";
+import { findOrchestrationRootAgentId } from "@/orchestration/orchestration-scope";
 import { useOrchestrationTree } from "@/orchestration/select";
 import type { Theme } from "@/styles/theme";
 import { getStatusDotColor } from "@/utils/status-dot-color";
@@ -15,8 +16,13 @@ const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foregrou
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
 /**
- * The composer track-bar entry point into the orchestration panel. Visible whenever the current
- * agent has children — callers gate that, this component only draws the pill and its rollup dot.
+ * The composer track-bar entry point into the orchestration panel. Callers gate visibility on the
+ * agent being part of a tree at all; this component draws the pill, its rollup dot, and resolves
+ * the scope the tab opens with.
+ *
+ * It resolves the root here rather than in the panel because it already holds the tree for the
+ * rollup dot: one subscription answers both, and the tab target then names the leader, so opening
+ * from a leader and from any of its subagents lands on the same tab instead of one per member.
  */
 export function OrchestrationTrackPill({
   serverId,
@@ -25,7 +31,8 @@ export function OrchestrationTrackPill({
 }: {
   serverId: string;
   agentId: string;
-  onPress: () => void;
+  /** Receives the tree's root — the leader the opened tab scopes to. */
+  onPress: (scopeAgentId: string) => void;
 }) {
   const { t } = useTranslation();
   const orchestrationRoots = useOrchestrationTree({ serverId });
@@ -34,6 +41,10 @@ export function OrchestrationTrackPill({
     [agentId, orchestrationRoots],
   );
   const requiresAttention = orchestrationNode?.requiresAttentionInSubtree ?? false;
+  // Falls back to this agent when the tree has not arrived yet: a scope naming an agent the panel
+  // cannot place is still this agent's own tree once it does.
+  const scopeAgentId = findOrchestrationRootAgentId(orchestrationRoots, agentId) ?? agentId;
+  const handlePress = useCallback(() => onPress(scopeAgentId), [onPress, scopeAgentId]);
   const [isHovered, setIsHovered] = useState(false);
   const handleHoverIn = useCallback(() => setIsHovered(true), []);
   const handleHoverOut = useCallback(() => setIsHovered(false), []);
@@ -50,7 +61,7 @@ export function OrchestrationTrackPill({
           testID="composer-orchestration-pill"
           accessibilityRole="button"
           accessibilityLabel={label}
-          onPress={onPress}
+          onPress={handlePress}
           onHoverIn={handleHoverIn}
           onHoverOut={handleHoverOut}
           style={bodyStyle}

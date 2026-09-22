@@ -337,7 +337,7 @@ export function useWorkspaceCommandCenterActions(): void {
           files: t("workspace.tabs.actions.files"),
           pullRequest: t("workspace.tabs.actions.pullRequest"),
           openOrchestration: t("shell.commandCenter.open", {
-            name: t("panels.orchestration.label"),
+            name: t("panels.orchestration.labelAll"),
           }),
           openPanel: (name, placement) => t(OPEN_PANEL_LABEL_KEYS[placement], { name }),
           previousTab: t("settings.shortcuts.help.previousTab"),
