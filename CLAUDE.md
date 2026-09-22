@@ -56,6 +56,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                       |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                 |
+| [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                      |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                     |
 | [docs/testing.md](docs/testing.md)                                   | TDD workflow, determinism, real dependencies over mocks, test organization                                                     |
 | [docs/qa.md](docs/qa.md)                                             | QA evidence bar for pull requests — platform matrix, version drift, performance, UI proof                                      |

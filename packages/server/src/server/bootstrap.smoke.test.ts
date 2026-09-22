@@ -355,6 +355,7 @@ describe("paseo daemon bootstrap", () => {
         tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
+        doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
       },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
@@ -394,6 +395,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
+      expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(monitorModes()).toEqual({
         "resource-monitor": { enabled: true, dryRun: undefined },
         reaper: { enabled: true, dryRun: true },
@@ -412,6 +414,7 @@ describe("paseo daemon bootstrap", () => {
           tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
+          doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
         },
       };
       await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
@@ -422,6 +425,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.artifactJanitor",
         "agents.budgetPacing",
         "agents.deviceLeases",
+        "agents.doneJanitor",
         "agents.resourceMonitor",
       ]);
       const reloaded = (await client.getDaemonConfig()).config;
@@ -430,6 +434,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
+      expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
       expect(monitorModes()).toMatchObject({
         reaper: { enabled: true, dryRun: false },
         "device-cap": { enabled: false, dryRun: false },

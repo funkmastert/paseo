@@ -563,6 +563,7 @@ function resolveAgentMonitorConfig(
   | "artifactJanitor"
   | "accountFailover"
   | "budgetPacing"
+  | "doneJanitor"
 > {
   const agents = persisted.agents;
   return {
@@ -572,6 +573,7 @@ function resolveAgentMonitorConfig(
     artifactJanitor: agents?.artifactJanitor,
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
+    doneJanitor: agents?.doneJanitor,
   };
 }
 

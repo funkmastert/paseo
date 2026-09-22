@@ -300,6 +300,21 @@ const MutableBudgetPacingConfigSchema = z
   .passthrough();
 
 const MutableBudgetPacingPatchSchema = MutableBudgetPacingConfigSchema;
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/done-janitor.md.
+const MutableDoneJanitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    quietHours: z.number().positive().optional(),
+    maxQuestionsPerSweep: z.number().int().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    answerTimeoutMinutes: z.number().positive().optional(),
+    reclaimWorkspaces: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
 
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
@@ -475,6 +490,7 @@ export const MutableDaemonConfigSchema = z
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
+    doneJanitor: MutableDoneJanitorConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -504,6 +520,7 @@ export const MutableDaemonConfigPatchSchema = z
     artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
+    doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),

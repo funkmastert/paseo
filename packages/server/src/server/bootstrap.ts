@@ -167,6 +167,7 @@ import {
   archivePersistedWorkspaceRecord,
   killTerminalsForWorkspace,
   type ActiveWorkspaceRef,
+  type ArchiveResult,
 } from "./workspace-archive-service.js";
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
 import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
@@ -219,6 +220,15 @@ import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
+import {
+  AgentDoneJanitor,
+  askAgentWhetherDone,
+  readProviderHealth,
+  type DoneJanitorConfig,
+} from "./agent-done-janitor.js";
+import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
+import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
@@ -539,6 +549,15 @@ export interface PaseoDaemonConfig {
     sweepIntervalMs?: number;
     now?: () => number;
   };
+  doneJanitor?: DoneJanitorConfig;
+  /**
+   * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
+   * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
+   */
+  doneJanitorOverrides?: {
+    sweepIntervalMs?: number;
+    now?: () => number;
+  };
   diskSweeper?: {
     enabled?: boolean;
     sweepIntervalMs?: number;
@@ -576,6 +595,8 @@ export interface PaseoDaemon {
   getListenTarget(): ListenTarget | null;
   /** Null until start() has constructed it (it needs the WebSocket server's push sender). */
   getAccountFailoverMonitor(): AccountFailoverMonitor | null;
+  /** Null until start() has constructed it, like the account-failover monitor. */
+  getDoneJanitor(): AgentDoneJanitor | null;
 }
 
 export interface PaseoDaemonDependencies {
@@ -660,6 +681,103 @@ function withAccountFailoverConfig(
   return config.accountFailover !== undefined ? { accountFailover: config.accountFailover } : {};
 }
 
+function withDoneJanitorConfig(
+  config: Pick<PaseoDaemonConfig, "doneJanitor">,
+): Pick<MutableDaemonConfig, "doneJanitor"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.doneJanitor !== undefined ? { doneJanitor: { ...config.doneJanitor } } : {};
+}
+
+// Wired once the WebSocket server exists, like AccountFailoverMonitor below: it owns the push
+// sender and the provider-usage cache.
+function createDoneJanitor(input: {
+  config: Pick<PaseoDaemonConfig, "doneJanitorOverrides" | "paseoHome" | "worktreesRoot">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  workspaceRegistry: Pick<FileBackedWorkspaceRegistry, "list">;
+  scheduleService: Pick<ScheduleService, "list">;
+  terminalManager: TerminalManager | null;
+  archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  serverId: string;
+  logger: Logger;
+}): AgentDoneJanitor {
+  const { agentManager, agentStorage, terminalManager, logger } = input;
+  const overrides = input.config.doneJanitorOverrides;
+  return new AgentDoneJanitor({
+    dependencies: {
+      listLiveAgents: () => agentManager.listAgentsForDoneJanitor(),
+      listStoredAgents: () => agentStorage.list(),
+      listWorkspaces: () => input.workspaceRegistry.list(),
+      listScheduledAgentIds: async () =>
+        new Set(
+          (await input.scheduleService.list()).flatMap((schedule) =>
+            schedule.target.type === "agent" && schedule.status !== "completed"
+              ? [schedule.target.agentId]
+              : [],
+          ),
+        ),
+      getProviderHealth: async (provider) => {
+        const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
+        for (const agent of agentManager.listAgentsForAccountFailover()) {
+          const errors = lastErrorsByProvider.get(agent.provider) ?? [];
+          errors.push(agent.lastError);
+          lastErrorsByProvider.set(agent.provider, errors);
+        }
+        return readProviderHealth({
+          provider,
+          isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
+          listUsage: async () => {
+            try {
+              return (await input.wsServer.getProviderUsageService().listUsage()).providers;
+            } catch {
+              return null;
+            }
+          },
+          lastErrorsByProvider,
+        });
+      },
+      askAgent: (ask) => askAgentWhetherDone({ agentManager, agentStorage, logger }, ask),
+      archiveAgent: async (agentId) => {
+        await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
+      },
+      countTerminals: async (workspaceId) => {
+        if (!terminalManager) return 0;
+        const lists = await Promise.all(
+          terminalManager
+            .listDirectories()
+            .map((cwd) => terminalManager.getTerminals(cwd, { workspaceId })),
+        );
+        return lists.flat().filter((terminal) => terminal.workspaceId === workspaceId).length;
+      },
+      isPaseoOwnedWorktreePath: async (worktreePath) =>
+        (
+          await isPaseoOwnedWorktreeCwd(worktreePath, {
+            paseoHome: input.config.paseoHome,
+            worktreesRoot: input.config.worktreesRoot,
+          })
+        ).allowed,
+      checkWorktree: (check) => checkWorktreeDeletionSafety(check),
+      measureBytes: (worktreePath) =>
+        sampleDirectorySizeBytes(worktreePath, { timeoutMs: 120_000 }),
+      reclaimWorkspace: async (workspaceId) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
+        return { removedDirectory: result.removedDirectory };
+      },
+    },
+    getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
+    serverId: input.serverId,
+    readDaemonConfig: () => ({ doneJanitor: input.daemonConfigStore.get().doneJanitor }),
+    logger,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    now: overrides?.now,
+  });
+}
+
 // Wired once the WebSocket server exists: it owns the push sender and the provider-usage cache.
 function createAccountFailoverMonitor(input: {
   config: Pick<PaseoDaemonConfig, "accountFailoverOverrides">;
@@ -738,6 +856,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...withArtifactJanitorConfig(config),
     ...withAccountFailoverConfig(config),
     ...withBudgetPacingConfig(config),
+    ...withDoneJanitorConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
@@ -875,6 +994,7 @@ export async function createPaseoDaemon(
   let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
+  let doneJanitor: AgentDoneJanitor | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -2200,6 +2320,20 @@ export async function createPaseoDaemon(
               logger,
             });
             budgetPacingMonitor.start();
+            doneJanitor = createDoneJanitor({
+              config,
+              agentManager,
+              agentStorage,
+              workspaceRegistry,
+              scheduleService,
+              terminalManager,
+              archiveWorkspaceById: archiveWorkspaceByIdExternal,
+              wsServer,
+              daemonConfigStore,
+              serverId,
+              logger,
+            });
+            doneJanitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2278,6 +2412,7 @@ export async function createPaseoDaemon(
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();
+    doneJanitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
@@ -2319,6 +2454,7 @@ export async function createPaseoDaemon(
     stop,
     getListenTarget: () => boundListenTarget,
     getAccountFailoverMonitor: () => accountFailoverMonitor,
+    getDoneJanitor: () => doneJanitor,
   };
 }
 
