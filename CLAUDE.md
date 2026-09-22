@@ -51,6 +51,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/terminal-performance.md](docs/terminal-performance.md)         | Terminal latency pipeline, coalescing/backpressure invariants, benchmark + perf spec usage                                     |
 | [docs/agent-stream-performance.md](docs/agent-stream-performance.md) | Assistant text pipeline — coalescing window, paced reveal, why arrival lumps are smoothed at render                            |
 | [docs/token-burn.md](docs/token-burn.md)                             | Token burn — cost-weighted unit, per-request deltas, why the monitor only rates running agents                                 |
+| [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds          |
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — process-tree attribution by callerAgentId, orphan build daemons, thresholds                                 |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                       |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                 |

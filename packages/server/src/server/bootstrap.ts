@@ -214,6 +214,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
+import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
@@ -522,6 +523,9 @@ export interface PaseoDaemonConfig {
     migrationConcurrency?: number;
     notifyParent?: boolean;
   };
+  // Wire-shaped like mcpGateway above rather than restated as a literal: the monitor's own
+  // settings interface would not carry the passthrough index signature this has to accept.
+  budgetPacing?: MutableDaemonConfig["budgetPacing"];
   /**
    * Test seams for AccountFailoverMonitor; production leaves this unset. Tests inject a fake usage
    * source (no real usage API call), push the timer past their own runtime and drive sweeps with
@@ -679,6 +683,12 @@ function createAccountFailoverMonitor(input: {
   });
 }
 
+function withBudgetPacingConfig(
+  config: Pick<PaseoDaemonConfig, "budgetPacing">,
+): Pick<MutableDaemonConfig, "budgetPacing"> {
+  return config.budgetPacing !== undefined ? { budgetPacing: config.budgetPacing } : {};
+}
+
 function withDiskSweeperConfig(
   config: Pick<PaseoDaemonConfig, "diskSweeper">,
 ): Pick<MutableDaemonConfig, "diskSweeper"> {
@@ -717,6 +727,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...withResourceMonitorConfig(config),
     ...withDeviceLeasesConfig(config),
     ...withAccountFailoverConfig(config),
+    ...withBudgetPacingConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
@@ -853,6 +864,7 @@ export async function createPaseoDaemon(
   let agentResourceMonitor: AgentResourceMonitor | null = null;
   let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
+  let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -2136,6 +2148,29 @@ export async function createPaseoDaemon(
               logger,
             });
             accountFailoverMonitor.start();
+            // Advice-only sibling of the two monitors above: it reads the same cached usage rows
+            // the failover monitor does and the same steer path, and never acts on either.
+            budgetPacingMonitor = new AgentBudgetPacingMonitor({
+              agentManager,
+              providerUsage: providerUsageService,
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              readDaemonConfig: () => ({
+                budgetPacing: daemonConfigStore.get().budgetPacing,
+                providers: daemonConfigStore.get().providers,
+              }),
+              logger,
+            });
+            budgetPacingMonitor.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2213,6 +2248,7 @@ export async function createPaseoDaemon(
     deviceLeaseManager.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
+    budgetPacingMonitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);

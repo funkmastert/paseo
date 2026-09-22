@@ -551,11 +551,13 @@ interface ResolveConfigFromPersistedOptions {
 // Every monitor defaults to off or to report-only, so a section missing here is indistinguishable
 // from one configured off. resourceMonitor and deviceLeases were missing, and on every real boot
 // and reload the reaper and the device cap ran on their defaults — the same gap mcpGateway had.
+// Every agents.* monitor section goes through here, and bootstrap.smoke.test.ts boots a real
+// config.json through it; a new section added here belongs in that test too.
 function resolveAgentMonitorConfig(
   persisted: PersistedConfig,
 ): Pick<
   PaseoDaemonConfig,
-  "tokenBurnMonitor" | "resourceMonitor" | "deviceLeases" | "accountFailover"
+  "tokenBurnMonitor" | "resourceMonitor" | "deviceLeases" | "accountFailover" | "budgetPacing"
 > {
   const agents = persisted.agents;
   return {
@@ -563,6 +565,7 @@ function resolveAgentMonitorConfig(
     resourceMonitor: agents?.resourceMonitor,
     deviceLeases: agents?.deviceLeases,
     accountFailover: agents?.accountFailover,
+    budgetPacing: agents?.budgetPacing,
   };
 }
 

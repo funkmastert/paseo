@@ -236,6 +236,44 @@ const MutableAccountFailoverConfigSchema = z
 
 const MutableAccountFailoverPatchSchema = MutableAccountFailoverConfigSchema;
 
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off by
+// default like the reaper and the device cap it is modelled on. See docs/budget-pacing.md.
+const MutableBudgetPacingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    paceLookbackMinutes: z.number().positive().optional(),
+    minObservationMinutes: z.number().positive().optional(),
+    staleUsageMinutes: z.number().positive().optional(),
+    minActionableMinutes: z.number().nonnegative().optional(),
+    repeatAfterMinutes: z.number().nonnegative().optional(),
+    repeatWorseningPct: z.number().nonnegative().optional(),
+    maxAdvisoriesPerCycle: z.number().int().nonnegative().optional(),
+    speedUp: z
+      .object({
+        enabled: z.boolean().optional(),
+        horizonMinutes: z.number().positive().optional(),
+        paceRatio: z.number().positive().optional(),
+        minStrandedPct: z.number().nonnegative().optional(),
+        minRemainingPct: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+    slowDown: z
+      .object({
+        enabled: z.boolean().optional(),
+        paceRatio: z.number().positive().optional(),
+        maxRemainingPct: z.number().nonnegative().optional(),
+        minOvershootPct: z.number().nonnegative().optional(),
+        minEarlyMinutes: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableBudgetPacingPatchSchema = MutableBudgetPacingConfigSchema;
+
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
 // reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
@@ -406,6 +444,8 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
     deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
+    // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
+    budgetPacing: MutableBudgetPacingConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -433,6 +473,7 @@ export const MutableDaemonConfigPatchSchema = z
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
     deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
+    budgetPacing: MutableBudgetPacingPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),

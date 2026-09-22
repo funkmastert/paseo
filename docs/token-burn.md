@@ -112,3 +112,5 @@ Off by default (`agents.tokenBurnMonitor.accountPressure`), and **report-only on
 Acting here would fight two things that already own the decision. The account pool plugin routes new agents away from a hot account, so refusing a caller's `create_agent` on account pressure would block a child the plugin would have placed somewhere healthy anyway. And `AccountFailoverMonitor` already migrates agents off an account at 100% ([docs/account-failover.md](account-failover.md)). Warning before the wall is the gap neither fills.
 
 It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt`, so a window that resets warns afresh and one sitting at 94% all week does not warn every 60 seconds.
+
+This is a threshold on one number. [Budget pacing](budget-pacing.md) reads the same rows as a rate against the clock and advises running leaders on how hard to fan out; it is the third reader of the usage windows and, like this leg, acts on none of them.
