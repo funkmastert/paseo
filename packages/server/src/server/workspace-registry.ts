@@ -705,9 +705,14 @@ export function createPersistedWorkspaceRecord(input: {
   labels?: string[];
   untrustedSource?: UntrustedWorkspaceSource;
 }): PersistedWorkspaceRecord {
+  const title = input.title ?? null;
   return PersistedWorkspaceRecordSchema.parse({
     ...input,
-    title: input.title ?? null,
+    title,
+    // Provenance describes a name, so a workspace created without one carries none:
+    // "nobody has named this" and "Paseo owns naming this" are different states, and
+    // only an explicit rename to empty produces the second.
+    titleSource: title === null ? undefined : input.titleSource,
     branch: input.branch ?? null,
     worktreeRoot: input.worktreeRoot ?? null,
     baseBranch: input.baseBranch ?? null,
