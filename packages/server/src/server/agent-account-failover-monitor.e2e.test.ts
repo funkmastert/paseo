@@ -5,8 +5,9 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
-import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
+import type { AgentAccountAuth, AgentPromptInput } from "./agent/agent-sdk-types.js";
 import {
+  ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL,
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   HANDOFF_FROM_LABEL,
 } from "./agent/account-failover-detector.js";
@@ -22,6 +23,7 @@ const REAL_LIMIT_MESSAGE =
   "3:10pm (America/Los_Angeles)";
 const REACTIVE_TTL_MS = 5 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 
 const POOL_PROVIDERS = ["claude", "claude-personal", "claude-backup"] as const;
 type PoolProvider = (typeof POOL_PROVIDERS)[number];
@@ -35,6 +37,8 @@ interface Harness {
   setUsage(providers: ProviderUsage[]): void;
   /** Make the next `times` resume prompts on `provider` fail the way a busy provider would. */
   failResumes(provider: PoolProvider, times: number): void;
+  /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
+  setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -87,6 +91,13 @@ async function createHarness(): Promise<Harness> {
     "claude-personal": 0,
     "claude-backup": 0,
   };
+  // "unknown" is what a config dir the CLI never wrote reports, and what every test that does not
+  // care about account identity gets: two shrugs never read as one account.
+  const accounts: Record<PoolProvider, AgentAccountAuth> = {
+    claude: { state: "unknown" },
+    "claude-personal": { state: "unknown" },
+    "claude-backup": { state: "unknown" },
+  };
   // Sightings are dated by the failure's timeline row, clamped to the monitor clock. Starting the
   // monitor clock before any real timestamp keeps that clamp in effect, so ages depend only on
   // advanceClock and never on the wall clock the test happens to run at.
@@ -106,6 +117,7 @@ async function createHarness(): Promise<Harness> {
         POOL_PROVIDERS.map((provider) => [
           provider,
           createTestAgentClient(provider, {
+            accountAuth: () => accounts[provider],
             onStartTurn: (prompt) => {
               const text = promptText(prompt);
               if (text.includes("Account handoff") && resumeFailures[provider] > 0) {
@@ -187,6 +199,9 @@ async function createHarness(): Promise<Harness> {
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
     },
+    setAccount: (provider, auth) => {
+      accounts[provider] = auth;
+    },
     setUsage: (providers) => {
       usage = providers;
     },
@@ -264,6 +279,30 @@ function successorOf(harness: Harness, agentId: string): string | undefined {
 
 function providerOf(harness: Harness, agentId: string): string {
   return managed(harness, agentId).provider;
+}
+
+/** Null once the label is blanked, which is how it is removed. */
+function homeOf(harness: Harness, agentId: string): string | null {
+  const home = managed(harness, agentId).labels[ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL];
+  return home === undefined || home === "" ? null : home;
+}
+
+/**
+ * Put the monitor clock far enough past the wall clock that every real agent timestamp reads as
+ * long-settled and every reactive sighting has expired — the state of the pool five hours after a
+ * cap, which is when a return becomes possible. The tests before this point deliberately keep the
+ * clock *behind* the wall clock so the failure-dating clamp is in effect.
+ */
+function windowHasReset(harness: Harness): void {
+  harness.setClock(Date.now() + REACTIVE_TTL_MS + HOUR_MS);
+}
+
+async function settle(harness: Harness, agentId: string): Promise<void> {
+  await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("idle");
+}
+
+function returnPushes(harness: Harness): PushPayload[] {
+  return failoverPushes(harness).filter((push) => push.data?.outcome === "returned_home");
 }
 
 function assistantText(harness: Harness, agentId: string): string {
@@ -631,5 +670,303 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.client.patchDaemonConfig({ accountFailover: { enabled: true } });
     await harness.sweep();
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+  test("brings a rescued leader home once its own account's window has reset", async () => {
+    harness.setUsage([usageRow("claude", [5]), usageRow("claude-personal", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    // The rescue remembers where the conversation came from; nothing else does.
+    expect(homeOf(harness, leader)).toBe("claude");
+    await settle(harness, leader);
+    const promptsBefore = harness.prompts.claude.length;
+
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude");
+    // Same agent, same conversation, and nothing to resume — a return never starts a turn.
+    expect(assistantText(harness, leader)).toContain("CONTEXT-MARKER-42");
+    expect(harness.prompts.claude.slice(promptsBefore)).toEqual([]);
+    expect(managed(harness, leader).lifecycle).toBe("idle");
+    // Home is cleared, so it is not a candidate to move anywhere on the next sweep.
+    expect(homeOf(harness, leader)).toBeNull();
+    const record = await harness.daemon.agentStorage.get(leader);
+    expect(record?.provider).toBe("claude");
+    expect(record?.persistence?.provider).toBe("claude");
+
+    expect(returnPushes(harness)).toEqual([
+      expect.objectContaining({
+        title: "Agent returned to its own account",
+        body: expect.stringContaining("went back to claude from claude-personal"),
+        data: expect.objectContaining({ agentId: leader, outcome: "returned_home" }),
+      }),
+    ]);
+
+    // The round trip is finished: a later sweep has nothing left to do.
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+    expect(returnPushes(harness)).toHaveLength(1);
+
+    // And the conversation still runs, on its own budget, with its history intact.
+    await converse(harness, leader, "HOME-AGAIN");
+    expect(assistantText(harness, leader)).toContain("CONTEXT-MARKER-42");
+    expect(providerOf(harness, leader)).toBe("claude");
+  }, 60_000);
+
+  test("brings agents home even while another agent is stuck with nowhere to go", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const rescued = await createAgent(harness, { provider: "claude", title: "Rescued" });
+    await failOnLimit(harness, rescued);
+    await harness.sweep();
+    expect(providerOf(harness, rescued)).toBe("claude-personal");
+    await settle(harness, rescued);
+
+    // Both workers capped: this one is a migration candidate on every sweep and can never be
+    // moved, because the leader account is never a target. It must not hold up the round trip.
+    const stranded = await createAgent(harness, { provider: "claude-backup", title: "Stranded" });
+    windowHasReset(harness);
+    await failOnLimit(harness, stranded);
+    harness.setUsage([usageRow("claude", [5]), usageRow("claude-personal", [100])]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, stranded)).toBe("claude-backup");
+    expect(providerOf(harness, rescued)).toBe("claude");
+  }, 60_000);
+
+  test("a conversation that hops twice still belongs to the account it started on", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Hopper" });
+    await converse(harness, leader, "HOP-MARKER");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(homeOf(harness, leader)).toBe("claude");
+
+    // The rescuer caps too, so it hops again. Home must stay the leader account, not become the
+    // rescuer it happened to pass through — otherwise a week of hops walks it onto the workers.
+    await settle(harness, leader);
+    await failOnLimit(harness, leader);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+    expect(homeOf(harness, leader)).toBe("claude");
+
+    await settle(harness, leader);
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude");
+    expect(homeOf(harness, leader)).toBeNull();
+  }, 60_000);
+
+  test("a rescue that lands back on home finishes the round trip by itself", async () => {
+    const hopper = await createAgent(harness, { provider: "claude-personal", title: "Hopper" });
+    await failOnLimit(harness, hopper);
+    await harness.sweep();
+    expect(providerOf(harness, hopper)).toBe("claude-backup");
+    expect(homeOf(harness, hopper)).toBe("claude-personal");
+
+    // Backup caps while personal's evidence expires, so the ordinary rescue leg sends it back to
+    // the account it came from. It is home; there is nothing left for the return leg to want.
+    await settle(harness, hopper);
+    harness.advanceClock(REACTIVE_TTL_MS - MINUTE_MS);
+    await failOnLimit(harness, hopper);
+    await harness.sweep();
+    harness.advanceClock(2 * MINUTE_MS);
+    await harness.sweep();
+
+    expect(providerOf(harness, hopper)).toBe("claude-personal");
+    expect(homeOf(harness, hopper)).toBeNull();
+  }, 60_000);
+
+  test("will not come home to a window that has reset into someone else's spending", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    await settle(harness, leader);
+
+    // Past the reset, below the 100% that condemns an account, and still far too hot to return to:
+    // the clock passing `resetsAt` is not the signal, a fresh reading with real headroom is.
+    windowHasReset(harness);
+    harness.setUsage([usageRow("claude", [80])]);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(homeOf(harness, leader)).toBe("claude");
+    expect(returnPushes(harness)).toEqual([]);
+
+    // A window the leader can actually use.
+    harness.setUsage([usageRow("claude", [12])]);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+  }, 60_000);
+
+  test("never takes the account out from under an agent that is working", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, {
+      provider: "claude",
+      title: "Leader",
+      modeId: "default",
+    });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    await settle(harness, leader);
+
+    // Mid-turn, holding on a permission prompt: a rescue is worth interrupting a turn for, a
+    // tidy-up is not.
+    await harness.client.sendMessage(leader, 'create a file named "hold.txt" with the content "x"');
+    await expect
+      .poll(() => managed(harness, leader).pendingPermissions.size, { timeout: 10_000 })
+      .toBe(1);
+
+    windowHasReset(harness);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(homeOf(harness, leader)).toBe("claude");
+
+    const [permission] = harness.daemon.agentManager.getPendingPermissions(leader);
+    if (!permission) throw new Error("expected a pending permission to release");
+    await harness.client.respondToPermission(leader, permission.id, { behavior: "allow" });
+    await settle(harness, leader);
+
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
+  }, 60_000);
+
+  test("drops a home account that was disabled instead of retrying it forever", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(homeOf(harness, leader)).toBe("claude");
+    await settle(harness, leader);
+
+    // The leader slot is turned off. Its home label now points at nothing the monitor may use, so
+    // it goes, and the agent stays on the healthy account it is already working on.
+    await harness.client.patchDaemonConfig({ providers: { claude: { enabled: false } } });
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(homeOf(harness, leader)).toBeNull();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(returnPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("treats two providers signed into one Claude account as one account", async () => {
+    // Tyler's live shape: ~/.claude-personal and ~/.claude-leader on the same login. Their usage
+    // windows are the same windows, so moving between them buys no budget at all.
+    const shared: AgentAccountAuth = { state: "signed-in", accountLabel: "tyler@example.com" };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setAccount("claude-backup", {
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+    });
+
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    // claude-personal is the higher-priority worker, and is skipped: it is the exhausted account
+    // under another name. The rescue goes to the one account that has its own budget.
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+    expect(homeOf(harness, leader)).toBe("claude");
+  }, 60_000);
+
+  test("drops a home label that turns out to name the account the agent is already on", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(homeOf(harness, leader)).toBe("claude");
+    await settle(harness, leader);
+
+    // Tyler logs the leader slot into the same account the rescuer uses. Going "home" would move
+    // the agent onto the same windows it is already spending, so the label is dropped instead.
+    const shared: AgentAccountAuth = { state: "signed-in", accountLabel: "tyler@example.com" };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setUsage([usageRow("claude", [5])]);
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(homeOf(harness, leader)).toBeNull();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(returnPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("drops a home account nobody is signed into any more", async () => {
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(homeOf(harness, leader)).toBe("claude");
+    await settle(harness, leader);
+
+    harness.setAccount("claude", { state: "signed-out", signInCommand: "claude /login" });
+    harness.setUsage([usageRow("claude", [5])]);
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(homeOf(harness, leader)).toBeNull();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("keeps the home label when home refuses the move, and moves nothing", async () => {
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await converse(harness, leader, "REFUSED-MARKER");
+    const session = managed(harness, leader).persistence!.sessionId;
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    await settle(harness, leader);
+
+    // Somebody imported the same conversation back onto the home account by hand, so the move
+    // home is refused with session_conflict. A return is an optimisation: it gives up quietly and
+    // keeps the label, rather than falling back to minting a second agent the way a rescue does.
+    const squatter = await harness.client.importAgent({
+      provider: "claude",
+      sessionId: session,
+      cwd: harness.cwd,
+    });
+    const agentsBefore = agentCount(harness);
+
+    windowHasReset(harness);
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    expect(homeOf(harness, leader)).toBe("claude");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(returnPushes(harness)).toEqual([]);
+    expect(providerOf(harness, squatter.id)).toBe("claude");
+  }, 60_000);
+
+  test("does not return anything while the return leg is switched off", async () => {
+    await harness.client.patchDaemonConfig({ accountFailover: { returnHome: false } });
+    harness.setUsage([usageRow("claude", [5])]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    await settle(harness, leader);
+
+    windowHasReset(harness);
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+    // Still remembered, so turning the leg back on completes the round trip rather than starting it.
+    expect(homeOf(harness, leader)).toBe("claude");
+
+    await harness.client.patchDaemonConfig({ accountFailover: { returnHome: true } });
+    await harness.sweep();
+    expect(providerOf(harness, leader)).toBe("claude");
   }, 60_000);
 });
