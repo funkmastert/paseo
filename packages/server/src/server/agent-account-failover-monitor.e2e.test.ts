@@ -281,6 +281,10 @@ function agentCount(harness: Harness): number {
   return harness.daemon.agentManager.listAgents().length;
 }
 
+function poolExhaustedPushes(harness: Harness): PushPayload[] {
+  return harness.pushes.filter((push) => push.data?.reason === "account_pool_exhausted");
+}
+
 describe("AccountFailoverMonitor (e2e)", () => {
   let harness: Harness;
 
@@ -555,15 +559,19 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(providerOf(harness, hopper)).toBe("claude-backup");
 
-    // Backup caps too, while personal's cap is still fresh: nowhere to go yet.
+    // Backup caps too, while personal's cap is still fresh: both workers are out, so the pool
+    // collapses onto the leader account rather than leaving the agent stuck on a dead one.
     harness.advanceClock(REACTIVE_TTL_MS - MINUTE_MS);
     await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
     await failOnLimit(harness, hopper);
     await harness.sweep();
-    expect(providerOf(harness, hopper)).toBe("claude-backup");
+    expect(providerOf(harness, hopper)).toBe("claude");
 
-    // Personal's evidence expires; backup's is still fresh. The conversation goes back.
+    // Personal's evidence expires while the leader account caps: the conversation goes back to
+    // an account it already left, on the same id and the same session.
     harness.advanceClock(2 * MINUTE_MS);
+    await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
+    await failOnLimit(harness, hopper);
     await harness.sweep();
 
     expect(providerOf(harness, hopper)).toBe("claude-personal");
@@ -632,4 +640,106 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(providerOf(harness, leader)).toBe("claude-personal");
   }, 60_000);
+
+  test("sends the agent to the account with the most budget left, not the lowest priority number", async () => {
+    // claude-personal is priority 1 and nearly spent; claude-backup is priority 2 and barely
+    // used. Priority order alone sends the agent to the account about to cap.
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [85]),
+      usageRow("claude-backup", [20]),
+    ]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  });
+
+  test("collapses onto the leader account when no worker can take the agent", async () => {
+    // Both workers out for the week, the leader account still has budget. Strict isolation
+    // stranded the agent here; a shared account runs it.
+    harness.setUsage([
+      usageRow("claude", [30]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-77");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude");
+    // Moved in place, conversation intact — not handed to a second agent.
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(assistantText(harness, worker)).toContain("CONTEXT-MARKER-77");
+  });
+
+  test("strands the agent and says so once when every account is out of budget", async () => {
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-88");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    // Nothing moved: every target would fail on its first turn.
+    expect(providerOf(harness, worker)).toBe("claude-personal");
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(failoverPushes(harness)).toHaveLength(0);
+    expect(agentCount(harness)).toBe(1);
+
+    const exhausted = poolExhaustedPushes(harness);
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0]?.data?.providerIds).toEqual(
+      expect.arrayContaining(["claude", "claude-personal", "claude-backup"]),
+    );
+    expect(exhausted[0]?.body).toContain("1 agent is");
+    expect(exhausted[0]?.data?.strandedAgentCount).toBe(1);
+
+    // The sweep runs every 60s; a weekly cap must not produce a push a minute for days.
+    await harness.sweep();
+    await harness.sweep();
+    expect(poolExhaustedPushes(harness)).toHaveLength(1);
+  });
+
+  test("re-arms the exhausted notice when the set of dead accounts changes", async () => {
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-99");
+    await failOnLimit(harness, worker);
+    await harness.sweep();
+    expect(poolExhaustedPushes(harness)).toHaveLength(1);
+
+    // claude-backup recovers, so the agent moves and the episode is over.
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [10]),
+    ]);
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+    expect(poolExhaustedPushes(harness)).toHaveLength(1);
+  });
 });

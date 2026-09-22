@@ -38,7 +38,31 @@ A session family is the built-in provider whose client owns the transcript forma
 
 The pool is the `params.accountPool` of each Claude account entry in `agents.providers` (`{ role: "leader" | "worker", priority: <n> }`; [custom-providers.md](custom-providers.md) covers the entries themselves). A Claude account entry is the built-in `claude` entry or any entry with `extends: "claude"`. Entries without a valid `accountPool` are ignored.
 
-A migration target is the enabled worker with the lowest `priority` number that is not dead this sweep and is not the account being left. Ties break by provider id. The leader account is never a target. It can be the account that ran dry, and when it isn't, it holds the budget the pool protects, so there is no "leader as last resort": with no eligible worker, the agent waits and is retried on the next sweep.
+## Where a rescued agent goes
+
+An enabled account that is not dead this sweep and is not the one being left, preferring a worker, and among equals preferring the one with the most budget left.
+
+**Isolation is a preference, not a rule.** Workers come first — keeping rescued agents off the leader's account is the budget separation the pool exists for, and it stays the normal case. But when no worker can take the agent, the leader account takes it. "The leader is never a target" stranded a leader on 2026-09-15 with the leader account and the primary worker both out for the week and a backup account sitting idle. Everything on one account is worse than isolation and far better than nothing running. The account-pool plugin makes the same choice at spawn time; the two have to agree, or a migration strands a leader on an account placement is happily using for children.
+
+Set `collapseToSharedAccount: false` to get the old strict isolation back, at the cost of that stranding.
+
+### Ranking by headroom
+
+Within a role tier, the target is the account with the most usable budget (`account-pool-headroom.ts`), from the same `ProviderUsage` rows the sweep already reads — so "which account is deadest" and "which has the most left" can never disagree about what the usage said.
+
+An account scores as its **tightest window**, because a window is a wall: 95% free on the session window buys nothing when the weekly window has 2% left. Each window is what is free in it now, plus what its reset gives back, discounted by how long you wait, over a one-day horizon. The discount is what puts "20% left, resets in an hour" above "30% left, resets on Friday" — the first is about to be a whole fresh window, the second is all there is until the weekend.
+
+A provider with no usable reading is treated as full rather than worst: a usage poll that failed must not demote an account below a nearly-capped one. With no readings at all every candidate ties and the configured `priority` decides, which is the order this used before.
+
+Role beats headroom. A leader account with more room left is still the account whose budget the pool is protecting.
+
+### When no account is left
+
+Nothing moves, and Tyler gets one push naming the dead accounts, how many agents are stuck, and the earliest reset. That is the deliberate outcome, not a failure to act: every remaining target would fail on the first turn, so a rescue onto one spends a move and a resume to leave the agent exactly as stuck on a different account, with its evidence scattered across two. Stranded and visible beats moved and still broken — and the agent keeps its conversation, so it continues the moment an account recovers.
+
+The push is once per **episode**, keyed on the set of dead accounts, not once per sweep or per agent: the sweep runs every 60 seconds, and a weekly cap would otherwise produce a push a minute for days. The set changing — an account recovering, or another going down — is a different situation and re-arms it.
+
+The account-pool plugin handles the other half of the same state: it refuses new spawns rather than starting them on a dead account, which is what stops a leader from looping "that one failed, try another" into an instant-death fan-out.
 
 ## When an account is dead
 
@@ -116,18 +140,21 @@ A conversation that has hopped accounts by import eventually needs to return to 
 
 `agents.accountFailover` in `$PASEO_HOME/config.json`. Every field is optional, and the defaults work without any config change:
 
-| Field                  | Default | Effect                                                                     |
-| ---------------------- | ------- | -------------------------------------------------------------------------- |
-| `enabled`              | `true`  | `false` stops all sweeps.                                                  |
-| `migrateSubagents`     | `true`  | `false` moves leaders only and leaves subagents to their leader.           |
-| `migrationConcurrency` | `3`     | Migrations run at once per sweep.                                          |
-| `notifyParent`         | `true`  | `false` skips the steered message a running parent gets after an _import_. |
+| Field                     | Default | Effect                                                                     |
+| ------------------------- | ------- | -------------------------------------------------------------------------- |
+| `enabled`                 | `true`  | `false` stops all sweeps.                                                  |
+| `migrateSubagents`        | `true`  | `false` moves leaders only and leaves subagents to their leader.           |
+| `migrationConcurrency`    | `3`     | Migrations run at once per sweep.                                          |
+| `notifyParent`            | `true`  | `false` skips the steered message a running parent gets after an _import_. |
+| `collapseToSharedAccount` | `true`  | `false` bars the leader account as a target, restoring strict isolation.   |
 
 It is live-toggleable like `tokenBurnMonitor` and `resourceMonitor`: the monitor re-reads it every sweep, and it uses the same mutable/patch schema split so a patch that omits a field doesn't reset it. The sweep interval is fixed at 60 seconds.
 
 ## Known limits
 
 - **Caps that outlast five hours.** A monthly spend cap can outlive its evidence. The account then looks healthy again, and one migration lands there, fails, and marks it dead for another five hours. So a capped worker is re-probed at most once per five hours.
+- **Headroom is only as fresh as the usage cache.** Ranking reads the same cached rows the dead-account check does, so a sweep can rank on numbers up to one refresh old. It costs a suboptimal target, never a dead one — the dead check and the ranking see the same rows.
+- **Two entries on one Claude login look like two accounts here.** They report identical windows, so they score identically and a "move" between them buys no budget. The return leg excludes them via `describeProviderAccount`, and its exclusions reach this code through the same `deadProviderIds` set, so the two compose rather than duplicating the check.
 - **Loaded agents only**, as described under [Which agents move](#which-agents-move).
 - **The import fallback still orphans.** Everything under [When it falls back to importing](#when-it-falls-back-to-importing) applies when it runs: a second agent id, a parent that may relaunch the subagent before the sweep reaches it (leaving two copies), and no finish notification for the successor. If duplicates become a pattern there, set `migrateSubagents: false`.
 

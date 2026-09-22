@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import pLimit from "p-limit";
-import { buildAccountFailoverNotificationPayload } from "@getpaseo/protocol/account-failover-notification";
+import {
+  buildAccountFailoverNotificationPayload,
+  buildAccountPoolExhaustedNotificationPayload,
+} from "@getpaseo/protocol/account-failover-notification";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
@@ -10,10 +13,12 @@ import type { ProviderUsageService } from "../services/quota-fetcher/service.js"
 import {
   DEFAULT_REACTIVE_SIGNAL_TTL_MS,
   isLimitShapedError,
+  parseResetTimeHint,
   planAccountFailoverSweep,
   type LimitErrorSighting,
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
+import { headroomByProvider } from "./agent/account-pool-headroom.js";
 import {
   resolveAccountPoolEntries,
   type AccountPoolProviderEntry,
@@ -45,6 +50,14 @@ export interface AccountFailoverConfig {
   migrateSubagents?: boolean;
   migrationConcurrency?: number;
   notifyParent?: boolean;
+  /**
+   * Whether the leader account may take a rescued agent once no worker can. Default `true`.
+   *
+   * `false` restores the strict isolation failover used to enforce, at the cost of stranding an
+   * agent whenever every worker is out — which is the state Tyler's pool reaches when two
+   * accounts run out for the week one after the other.
+   */
+  collapseToSharedAccount?: boolean;
 }
 
 export interface AccountFailoverMonitorOptions {
@@ -69,6 +82,7 @@ interface ResolvedAccountFailoverConfig {
   migrateSubagents: boolean;
   migrationConcurrency: number;
   notifyParent: boolean;
+  collapseToSharedAccount: boolean;
 }
 
 function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccountFailoverConfig {
@@ -76,6 +90,7 @@ function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccou
     migrateSubagents: config?.migrateSubagents ?? true,
     migrationConcurrency: config?.migrationConcurrency ?? DEFAULT_MIGRATION_CONCURRENCY,
     notifyParent: config?.notifyParent ?? true,
+    collapseToSharedAccount: config?.collapseToSharedAccount ?? true,
   };
 }
 
@@ -113,6 +128,8 @@ export class AccountFailoverMonitor {
   private sightings = new Map<string, LimitErrorSighting>();
   private providerSightings = new Map<string, ProviderLimitSighting>();
   private unresumed = new Map<string, UnresumedAgent>();
+  /** The dead-account set already reported as exhausted, or null when the pool has targets. */
+  private exhaustionEpisode: string | null = null;
 
   constructor(options: AccountFailoverMonitorOptions) {
     this.options = options;
@@ -167,13 +184,15 @@ export class AccountFailoverMonitor {
       return;
     }
 
+    const nowMs = this.now();
+    const usage = await this.readUsage();
     const plan = planAccountFailoverSweep({
       poolProviderIds: new Set(poolEntries.map((entry) => entry.providerId)),
       agents: this.options.agentManager.listAgentsForAccountFailover(),
-      usage: await this.readUsage(),
+      usage,
       previousSightings: this.sightings,
       previousProviderSightings: this.providerSightings,
-      nowMs: this.now(),
+      nowMs,
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
     });
@@ -186,20 +205,78 @@ export class AccountFailoverMonitor {
       return;
     }
 
+    // Ranked from the same rows the plan read, so "which account is deadest" and "which has the
+    // most left" can never disagree about what the usage said this sweep.
+    const headroom = headroomByProvider(usage, nowMs);
     const limit = pLimit({ concurrency: config.migrationConcurrency });
-    await Promise.all(
+    const outcomes = await Promise.all(
       plan.candidates.map((agent) =>
         limit(() =>
           this.migrateOne({
             agent,
             poolEntries,
             deadProviderIds: plan.deadProviderIds,
+            headroom,
             sighting: plan.sightings.get(agent.id),
             config,
           }),
         ),
       ),
     );
+
+    const stranded = plan.candidates.filter((_, index) => outcomes[index] === "no-target");
+    await this.reportExhaustion({ stranded, poolEntries, deadProviderIds: plan.deadProviderIds });
+  }
+
+  /**
+   * Nobody could be moved because there was nowhere to move them. Said once per episode, not
+   * once per sweep and not once per agent: the sweep runs every 60 seconds, and an account that
+   * is out for the week would otherwise produce a push a minute for days.
+   *
+   * The episode is keyed on the set of dead accounts, so it re-arms the moment that set changes
+   * — an account recovering, or a new one going down, is a different situation and worth saying.
+   * Stranding is the deliberate outcome here, not a failure to act: every remaining target would
+   * fail on the first turn, so a move would spend a rescue to leave the agent exactly as stuck.
+   */
+  private async reportExhaustion(input: {
+    stranded: readonly AccountFailoverAgentSummary[];
+    poolEntries: readonly AccountPoolProviderEntry[];
+    deadProviderIds: ReadonlySet<string>;
+  }): Promise<void> {
+    if (input.stranded.length === 0) {
+      this.exhaustionEpisode = null;
+      return;
+    }
+    const poolIds = input.poolEntries.map((entry) => entry.providerId);
+    const deadPoolIds = poolIds.filter((providerId) => input.deadProviderIds.has(providerId));
+    const episode = deadPoolIds.slice().sort().join(",");
+    if (this.exhaustionEpisode === episode) {
+      return;
+    }
+    this.exhaustionEpisode = episode;
+
+    const resetHint = input.stranded
+      .map((agent) => parseResetTimeHint(agent.lastError))
+      .find((hint) => hint !== null);
+    this.options.logger.error(
+      { deadProviderIds: deadPoolIds, strandedAgentCount: input.stranded.length },
+      "Account failover: every pool account is out of budget; agents are stranded where they are",
+    );
+    try {
+      await this.options.pushNotificationSender.send(
+        buildAccountPoolExhaustedNotificationPayload({
+          serverId: this.options.serverId,
+          providerIds: deadPoolIds.length > 0 ? deadPoolIds : poolIds,
+          strandedAgentCount: input.stranded.length,
+          resetHint,
+        }),
+      );
+    } catch (error) {
+      this.options.logger.warn(
+        { err: error },
+        "Account failover: pool-exhausted push notification failed",
+      );
+    }
   }
 
   private async readUsage(): Promise<ProviderUsage[] | null> {
@@ -297,13 +374,16 @@ export class AccountFailoverMonitor {
     this.unresumed.set(entry.agentId, entry);
   }
 
+  /** Returns the outcome kind, or "failed" when the migration threw. The sweep reads it to tell
+   * "nowhere to go" apart from every other reason an agent didn't move. */
   private async migrateOne(input: {
     agent: AccountFailoverAgentSummary;
     poolEntries: readonly AccountPoolProviderEntry[];
     deadProviderIds: ReadonlySet<string>;
+    headroom: ReadonlyMap<string, number>;
     sighting: LimitErrorSighting | undefined;
     config: ResolvedAccountFailoverConfig;
-  }): Promise<void> {
+  }): Promise<AccountFailoverOutcome["kind"] | "failed"> {
     const { agent, poolEntries, deadProviderIds, config } = input;
     const { logger } = this.options;
     let outcome: AccountFailoverOutcome;
@@ -312,6 +392,8 @@ export class AccountFailoverMonitor {
         agent,
         poolEntries,
         deadProviderIds,
+        headroom: input.headroom,
+        allowLeaderTarget: config.collapseToSharedAccount,
         agentManager: this.options.agentManager,
         agentStorage: this.options.agentStorage,
         workspaceProvisioning: this.options.workspaceProvisioning,
@@ -322,7 +404,7 @@ export class AccountFailoverMonitor {
         { err: error, agentId: agent.id, provider: agent.provider },
         "Account failover: migration failed; will retry next sweep",
       );
-      return;
+      return "failed";
     }
 
     switch (outcome.kind) {
@@ -360,19 +442,19 @@ export class AccountFailoverMonitor {
         });
         // No parent message: the subagent kept its id, so the parent's finish notification and
         // every existing handle to it still work.
-        return;
+        return outcome.kind;
       case "no-target":
         logger.warn(
           { agentId: agent.id, provider: agent.provider, deadProviderIds: [...deadProviderIds] },
-          "Account failover: no healthy worker account; will retry next sweep",
+          "Account failover: no account in the pool can take this agent; will retry next sweep",
         );
-        return;
+        return outcome.kind;
       case "adopted":
         logger.info(
           { agentId: outcome.oldAgentId, successorId: outcome.newAgentId },
           "Account failover: agent was already handed off; marked it retired",
         );
-        return;
+        return outcome.kind;
       case "migrated":
         logger.info(
           {
@@ -409,7 +491,7 @@ export class AccountFailoverMonitor {
         if (config.notifyParent) {
           await this.notifyParent(outcome);
         }
-        return;
+        return outcome.kind;
     }
   }
 

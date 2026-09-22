@@ -28,6 +28,16 @@ export interface MigrateStuckAgentInput {
   agent: AccountFailoverAgentSummary;
   poolEntries: readonly AccountPoolProviderEntry[];
   deadProviderIds: ReadonlySet<string>;
+  /**
+   * Per-provider budget headroom from `headroomByProvider`, used to rank otherwise-equal
+   * targets. Absent (or missing a provider) means "rank on the configured priority order".
+   */
+  headroom?: ReadonlyMap<string, number>;
+  /**
+   * Whether the leader account may take a rescued agent when no worker can. Defaults to true —
+   * see `pickFailoverTarget`.
+   */
+  allowLeaderTarget?: boolean;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
@@ -456,6 +466,8 @@ export async function migrateStuckAgent(
     }
   }
   const targetProviderId = pickFailoverTarget(input.poolEntries, {
+    headroom: input.headroom,
+    allowLeader: input.allowLeaderTarget,
     deadProviderIds: unavailable,
     sourceProviderId: agent.provider,
   });
