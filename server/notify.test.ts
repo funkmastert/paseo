@@ -137,6 +137,86 @@ describe("createNotifier", () => {
     notifier.stop();
   });
 
+  it("says the pool collapsed onto one account exactly once, and re-arms when capacity returns", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "claude-leader" },
+      { id: "caller-1", parentLabel: "leader-1", title: "Worker Agent", provider: "claude-leader" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+    const episode = {
+      callerAgentId: "caller-1",
+      requestedModel: "claude-sonnet",
+      targetProviderId: "claude-leader",
+      sharedProviderIds: ["claude-leader", "claude-personal"],
+      exhaustedProviderIds: ["worker-a", "backup"],
+    };
+
+    notifier.onTurnEnded("leader-1");
+    notifier.notePoolCollapsed(episode);
+    notifier.notePoolCollapsed(episode);
+    notifier.notePoolCollapsed({ ...episode, requestedModel: "claude-opus" });
+    await flush();
+
+    // Once, however many spawns hit the collapsed pool.
+    expect(sendCalls).toHaveLength(1);
+    const text = sendCalls[0].text;
+    expect(text).toContain("ONE usable account");
+    expect(text).toContain("claude-leader");
+    // Names the duplicate-login entries, so a "move" between them is visibly pointless.
+    expect(text).toContain("claude-personal");
+    expect(text).toContain("worker-a, backup");
+    // The three things only a person can do.
+    expect(text).toMatch(/Sign another Claude account in, raise a limit, or wind the fleet down/);
+    // And that it undoes itself.
+    expect(text).toContain("Isolation resumes");
+
+    // An account recovering re-arms it: losing isolation again is a new thing to say.
+    health.reportTurnFailure("worker-a", "hit your limit");
+    health.reportUsage("worker-a", [{ window: "account", usedPct: 10 }]);
+    await flush();
+    notifier.notePoolCollapsed(episode);
+    await flush();
+
+    expect(sendCalls).toHaveLength(2);
+    notifier.stop();
+  });
+
+  it("says an exhausted pool is refusing spawns, naming the earliest reset", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "claude-leader" },
+      { id: "caller-1", parentLabel: "leader-1", title: "Worker Agent", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker();
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health, schedule });
+
+    notifier.onTurnEnded("leader-1");
+    const earliestResetAt = new Date("2026-09-26T09:00:00.000Z");
+    notifier.notePoolExhausted({
+      callerAgentId: "caller-1",
+      requestedModel: "claude-sonnet",
+      exhaustedProviderIds: ["worker-a", "backup", "claude-leader"],
+      earliestResetAt,
+    });
+    notifier.notePoolExhausted({
+      callerAgentId: "caller-1",
+      requestedModel: "claude-sonnet",
+      exhaustedProviderIds: ["worker-a", "backup", "claude-leader"],
+      earliestResetAt,
+    });
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].text).toContain("EVERY Claude account is out of budget");
+    expect(sendCalls[0].text).toContain("being refused");
+    expect(sendCalls[0].text).toContain(earliestResetAt.toISOString());
+    notifier.stop();
+  });
+
   it("sends at most one fail-open notification per leader until notePoolRecovered re-arms it", async () => {
     const rows: FakeAgentRow[] = [{ id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" }];
     const { paseo, sendCalls } = fakePaseo(rows);

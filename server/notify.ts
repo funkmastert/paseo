@@ -1,8 +1,8 @@
 import type { PluginHookContext } from "@getpaseo/plugin/server";
 import type { CapEvent, HealthTracker } from "./health";
-import type { FailOpenEpisode, PoolDryEpisode } from "./router";
+import type { FailOpenEpisode, PoolCollapsedEpisode, PoolDryEpisode, PoolExhaustedEpisode } from "./router";
 
-export type { FailOpenEpisode, PoolDryEpisode } from "./router";
+export type { FailOpenEpisode, PoolCollapsedEpisode, PoolDryEpisode, PoolExhaustedEpisode } from "./router";
 
 /** The subset of PaseoApi this module needs: listing and messaging agents. */
 export type NotifierPaseoApi = Pick<PluginHookContext["paseo"], "agents">;
@@ -28,6 +28,10 @@ export interface NotifierOptions {
 export interface Notifier {
   /** Router calls this when it fell back to the leader because every worker was unhealthy. */
   notePoolDry(episode: PoolDryEpisode): void;
+  /** Router calls this when one account is left serving both leaders and children. */
+  notePoolCollapsed(episode: PoolCollapsedEpisode): void;
+  /** Router calls this when no pooled account can run anything. */
+  notePoolExhausted(episode: PoolExhaustedEpisode): void;
   /** Router calls this whenever it fails open. */
   noteFailOpen(episode: FailOpenEpisode): void;
   /** Router calls this when the pool cache recovers from fail-open, re-arming fail-open episodes. */
@@ -217,6 +221,38 @@ function forgetCappedEpisodes(notified: Set<string>, providerId: string, window:
   }
 }
 
+/**
+ * Said once per collapse, not once per spawn: it is a standing state, and the difference
+ * between telling Tyler his budget isolation is gone and burying that in a message per
+ * subagent is whether he reads it at all. What it has to carry is what he can act on — that one
+ * account now runs everything, that a single cap will now take down the whole fleet, and the
+ * three things only a person can do about it.
+ */
+function formatPoolCollapsedMessage(episode: PoolCollapsedEpisode): string {
+  const shared =
+    episode.sharedProviderIds.length > 1
+      ? ` (entries ${episode.sharedProviderIds.join(", ")} are the same account)`
+      : "";
+  const out = episode.exhaustedProviderIds.length > 0 ? ` Out of budget: ${episode.exhaustedProviderIds.join(", ")}.` : "";
+  return (
+    `Account pool: down to ONE usable account, "${episode.targetProviderId}"${shared}, now running both leaders and their children. ` +
+    `Budget isolation is gone — the next cap stops every agent at once.${out} ` +
+    `Sign another Claude account in, raise a limit, or wind the fleet down. ` +
+    `Isolation resumes on its own for new agents once another account has budget.`
+  );
+}
+
+function formatPoolExhaustedMessage(episode: PoolExhaustedEpisode): string {
+  const when = episode.earliestResetAt
+    ? ` The earliest window reset is ${episode.earliestResetAt.toISOString()}.`
+    : " No account reported a reset time.";
+  return (
+    `Account pool: EVERY Claude account is out of budget (${episode.exhaustedProviderIds.join(", ")}). ` +
+    `New agents are being refused rather than started on a dead account.${when} ` +
+    `Nothing will run until an account resets or another one is signed in.`
+  );
+}
+
 function formatFailOpenMessage(episode: FailOpenEpisode): string {
   const target = episode.targetProviderId ? ` (target "${episode.targetProviderId}")` : "";
   return (
@@ -231,6 +267,8 @@ export function createNotifier(options: NotifierOptions): Notifier {
   const now = options.now ?? (() => new Date());
 
   const poolDryNotifiedLeaders = new Set<string>();
+  const poolCollapsedNotifiedLeaders = new Set<string>();
+  const poolExhaustedNotifiedLeaders = new Set<string>();
   const failOpenNotifiedLeaders = new Set<string>();
   /**
    * (leaderId, cap episode) pairs already notified. A cap episode is
@@ -345,6 +383,32 @@ export function createNotifier(options: NotifierOptions): Notifier {
     await deliver(leader.id, formatPoolDryMessage(episode));
   }
 
+  async function processPoolCollapsed(episode: PoolCollapsedEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || poolCollapsedNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolCollapsedNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolCollapsedMessage(episode));
+  }
+
+  async function processPoolExhausted(episode: PoolExhaustedEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || poolExhaustedNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolExhaustedNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolExhaustedMessage(episode));
+  }
+
   async function processFailOpen(episode: FailOpenEpisode): Promise<void> {
     const rows = await safeListDirectory();
     if (!rows) {
@@ -387,8 +451,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
     if (event.kind === "capped") {
       schedule(() => enqueue(() => processCapped(event)));
     } else {
-      // A pool account transitioning back to healthy re-arms the pool-dry episode.
+      // A pool account transitioning back to healthy re-arms the pool-dry episode, and with it
+      // the collapse and exhaustion ones: capacity coming back is exactly when isolation resumes
+      // for new placements, so the next time it is lost is a new thing to say.
       poolDryNotifiedLeaders.clear();
+      poolCollapsedNotifiedLeaders.clear();
+      poolExhaustedNotifiedLeaders.clear();
       forgetCappedEpisodes(cappedEpisodesNotified, event.providerId, event.window);
     }
   });
@@ -396,6 +464,12 @@ export function createNotifier(options: NotifierOptions): Notifier {
   return {
     notePoolDry(episode) {
       schedule(() => enqueue(() => processPoolDry(episode)));
+    },
+    notePoolCollapsed(episode) {
+      schedule(() => enqueue(() => processPoolCollapsed(episode)));
+    },
+    notePoolExhausted(episode) {
+      schedule(() => enqueue(() => processPoolExhausted(episode)));
     },
     noteFailOpen(episode) {
       schedule(() => enqueue(() => processFailOpen(episode)));
@@ -427,6 +501,8 @@ export function createNotifier(options: NotifierOptions): Notifier {
       // The agent is gone: drop any held sends rather than deliver them, and
       // forget it entirely so its state doesn't linger past archival.
       poolDryNotifiedLeaders.delete(agentId);
+      poolCollapsedNotifiedLeaders.delete(agentId);
+      poolExhaustedNotifiedLeaders.delete(agentId);
       failOpenNotifiedLeaders.delete(agentId);
       pendingPermissionCounts.delete(agentId);
       heldSends.delete(agentId);

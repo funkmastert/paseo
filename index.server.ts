@@ -1,4 +1,5 @@
 import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import { createAccountIdentity } from "./server/account-identity";
 import { createHealthTracker } from "./server/health";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
 import { createNotifier, type Notifier } from "./server/notify";
@@ -23,6 +24,9 @@ function isPoolProvider(pool: PoolCache, providerId: string): boolean {
 
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
+  // Long-lived alongside the health tracker: both are fed by the same usage poll, and both
+  // start empty after a reload rather than being rebuilt per hook dispatch.
+  const accountIdentity = createAccountIdentity();
 
   let poolCache: PoolCache | null = null;
   let providerIds: ProviderIdCache | null = null;
@@ -131,7 +135,20 @@ export default function contribute(server: PluginServerContext) {
       poolCache,
       health,
       providerIds,
+      accountIdentity,
       onPoolDry: (episode) => notifier?.notePoolDry(episode),
+      onPoolCollapsed: (episode) => {
+        notifier?.notePoolCollapsed(episode);
+        console.error(
+          `[claude-account-pool] router: pool collapsed onto a single account "${episode.targetProviderId}" (shared entries: ${episode.sharedProviderIds.join(", ")}; out of budget: ${episode.exhaustedProviderIds.join(", ") || "none"}) — budget isolation is gone until another account has capacity`,
+        );
+      },
+      onPoolExhausted: (episode) => {
+        notifier?.notePoolExhausted(episode);
+        console.error(
+          `[claude-account-pool] router: every pooled account is out of budget (${episode.exhaustedProviderIds.join(", ")}); refusing the spawn from caller "${episode.callerAgentId}" rather than starting it on a dead account (earliest reset: ${episode.earliestResetAt?.toISOString() ?? "unknown"})`,
+        );
+      },
       onFailOpen: (episode) => notifier?.noteFailOpen(episode),
       onPoolRecovered: () => notifier?.notePoolRecovered(),
     });
@@ -149,7 +166,7 @@ export default function contribute(server: PluginServerContext) {
         })),
       };
     };
-    usagePoller = createUsagePoller(health, { fetchUsage });
+    usagePoller = createUsagePoller(health, { fetchUsage, accountIdentity });
 
     // Same blind-start problem as the caches above: the poller's own
     // interval is 5 minutes, so without this the health tracker has no

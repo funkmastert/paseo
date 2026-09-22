@@ -13,8 +13,9 @@ Two `before("agent.create")` hooks run in order:
 They never overlap: the role router never picks an account, and the account
 router never picks a model.
 
-See [Role policy](#role-policy) for the second half — model pools, tool
-enforcement, the leader role, and the Fable budget gate.
+See [Where a spawn lands](#where-a-spawn-lands) for how the account router
+ranks accounts, and [Role policy](#role-policy) for the second half — model
+pools, tool enforcement, the leader role, and the Fable budget gate.
 
 ## Operator setup
 
@@ -61,10 +62,11 @@ In `$PASEO_HOME/config.json`:
 }
 ```
 
-`role` is `"leader"` or `"worker"`. `priority` is a positive integer; lower
-priority numbers are preferred first among workers. There must be exactly one
-`leader` entry — it is the last-resort target once every worker has been
-tried, and the anchor for pool-exhaustion notifications. Worker priorities
+`role` is `"leader"` or `"worker"`. `priority` is a positive integer; it
+breaks ties between workers with the same headroom (see [Where a spawn
+lands](#where-a-spawn-lands) — it is no longer the primary order). There must
+be exactly one `leader` entry — it is the last-resort target once no worker
+can run the request, and the anchor for pool notifications. Worker priorities
 must be unique. Malformed or missing `accountPool` config anywhere in
 `agents.providers` makes this plugin fail open: it treats the pool as empty
 and steps out of the way rather than blocking agent creation.
@@ -85,6 +87,100 @@ paseo plugin ls
 
 Plugins are unsandboxed, trusted code: this plugin's server code runs with
 the daemon user's access on the daemon host.
+
+## Where a spawn lands
+
+Keeping children off the leader's account is the point of the pool, and it is
+still the normal case. It is a **preference**, not a rule: when no worker can
+run a request, the leader account serves everything rather than nothing
+running at all. Running the whole fleet on one account is worse than
+isolation and far better than an idle machine.
+
+The ladder, for an agent-spawned claude-family child:
+
+1. a worker that is **healthy** for the requested model;
+2. a worker that is **drained but not capped**;
+3. the **leader account**, if it can run anything — isolation is gone here;
+4. nothing. The pool is exhausted and the create is **refused**.
+
+Tiers 1 and 2 stay separate rather than merging into one ranking: a drained
+account has less room than a healthy one by definition, and letting a score
+put a nearly-capped account ahead of a healthy one would trade the pool's
+purpose for a rounding difference.
+
+### Headroom, not priority order
+
+Within a tier, accounts are ranked by how much work they can still absorb.
+Fixed priority is what left a barely-used backup account idle while the two
+accounts ahead of it walked into their weekly caps: priority never changes,
+so nothing ever moved load to where the budget was.
+
+An account's score is its **tightest window**, because a window is a wall —
+95% free on the session window buys nothing when the weekly window has 2%
+left. Each window scores as what is free in it now, plus what its reset gives
+back, discounted by how long you have to wait (`server/headroom.ts`). That
+discount is what makes "20% left, resets in an hour" beat "30% left, resets
+on Friday": the first is about to be a whole fresh window, the second is all
+there is until the weekend. The horizon is a day — the span a placement
+decision actually covers.
+
+An account with no usage reading scores as empty, the same optimistic
+convention the Fable gate uses. With no readings at all every candidate ties
+and the tie-break is the configured `priority`, which is exactly the order
+this plugin used before — so a daemon whose usage polls are failing places
+the way it always did.
+
+### Weekly exhaustion
+
+A 5-hour window is back within the working day; a weekly window can be dead
+until Friday. They used to share one fallback cap duration, so a weekly-
+exhausted account with no reported reset time was handed back out five hours
+later, to fail again.
+
+They now age on their own clocks: 5 hours for the session window, 7 days for
+a weekly one. This only applies when the daemon reports no `resets_at` for
+the window — a real state, since those rows are nullish — because a known
+reset time is always used in preference to either default.
+
+### One account left
+
+When the pool comes down to a single usable account, every leader spawning
+into it is told **once**, not once per spawn. That state is the moment the
+thing the pool exists for stops being true: from there a single cap takes
+down every agent at once, and the fixes are all ones a person has to make —
+sign another account in, raise a limit, or wind the fleet down.
+
+Survivors are counted as **accounts, not entries**. Two provider entries
+signed into one Claude login report identical usage windows because they *are*
+the same windows, so counting them as two survivors is exactly how a collapse
+stays quiet. The plugin cannot ask a provider who it is logged in as, so it
+groups entries whose usage fingerprints match — percentages *and* reset
+timestamps, across at least two windows (`server/account-identity.ts`). One
+matching window is a coincidence worth having; two, down to the second, is
+not.
+
+Collapse is reversible on its own: an account recovering re-arms the notice
+and new placements go back to preferring isolation. Agents already placed on
+the shared account are the return leg's business, not this one's.
+
+### No account left
+
+Every account capped is the one case where a spawn is **refused** — the hook
+throws, and the caller sees text naming every exhausted account and the
+earliest known reset.
+
+Passing the request through instead puts the child on a dead account where it
+fails on its first turn, and a leader that reads that as "that one didn't
+work, try another" spawns the next one straight into the same wall. One clear
+error costs less than an unbounded loop. Refusal requires positive evidence —
+every pool member actually capped — so an unreadable pool still fails open,
+and human-created agents never reach this code at all (the router only acts on
+creates carrying a `callerAgentId`), so it can never lock you out of your own
+daemon.
+
+Set `refuseWhenExhausted: false` on `createRouter` to go back to passing
+through. It is a code-level option, not daemon config: an unknown key in
+`config.json` makes a running daemon reject the whole file.
 
 ## Role policy
 
@@ -572,3 +668,7 @@ or whatever model the parent happened to be running.
 The role hook never blocks agent creation. Malformed policy, an unreadable
 daemon config, a vanished provider, an unknown declared role — every one of
 them passes the request through and logs, rather than failing the create.
+
+The account router has exactly one case that does block: every pooled account
+capped, with the evidence to prove it. See [No account left](#no-account-left)
+for why that one is worth the exception.
