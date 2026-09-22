@@ -395,6 +395,26 @@ export interface DoneJanitorAgentSummary {
   sessionId: string | undefined;
 }
 
+/**
+ * Lean per-agent view for WorkspaceTitleTracker's sweep, mirroring the monitor summaries
+ * above. `title` and `lastActivitySummary` are what a workspace name is derived from: the
+ * agent title tracker already keeps `title` describing what the session is doing now, so a
+ * workspace can be named from its agents' titles instead of re-reading every timeline.
+ * `workspaceId` is the only membership signal used — a legacy agent created before ownership
+ * stamping has none, and never drives a workspace's name.
+ */
+export interface WorkspaceTitleTrackerAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  title: string | null;
+  /** Live-only, so absent until the agent's next timeline item after a daemon restart. */
+  lastActivitySummary: string | null;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -1535,7 +1555,20 @@ export class AgentManager {
     return agent ? this.toDoneJanitorSummary(agent) : null;
   }
 
-  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
+  listAgentsForWorkspaceTitleTracker(): WorkspaceTitleTrackerAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      title: agent.config.title ?? null,
+      lastActivitySummary: agent.lastActivitySummary ?? null,
+      lastActivityAt: this.computeLastActivityAt(agent),
+    }));
+  }
+
+  /** Newest of every activity timestamp the manager holds for an agent. */
+  private computeLastActivityAt(agent: ManagedAgent): string | null {
     const timestamps = [
       agent.updatedAt.getTime(),
       agent.lastUserMessageAt?.getTime(),
@@ -1544,6 +1577,10 @@ export class AgentManager {
         ? Date.parse(this.timelineStore.getLastRowTimestamp(agent.id) ?? "")
         : undefined,
     ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null;
+  }
+
+  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
     return {
       id: agent.id,
       provider: agent.provider,
@@ -1563,8 +1600,7 @@ export class AgentManager {
       runningProviderSubagentCount: this.providerSubagents
         .list(agent.id)
         .filter((subagent) => subagent.status === "running").length,
-      lastActivityAt:
-        timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null,
+      lastActivityAt: this.computeLastActivityAt(agent),
       labels: agent.labels,
       title: agent.config.title ?? null,
       sessionId: agent.persistence?.sessionId,

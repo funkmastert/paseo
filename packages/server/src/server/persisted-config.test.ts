@@ -370,6 +370,40 @@ describe("PersistedConfigSchema agent provider runtime settings", () => {
     });
   });
 
+  test("accepts workspace title tracking settings", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        metadataGeneration: {
+          workspaceTitleTracking: {
+            enabled: false,
+            refreshIntervalMinutes: 45,
+            activityWindowMinutes: 120,
+          },
+        },
+      },
+    });
+
+    expect(parsed.agents?.metadataGeneration).toEqual({
+      workspaceTitleTracking: {
+        enabled: false,
+        refreshIntervalMinutes: 45,
+        activityWindowMinutes: 120,
+      },
+    });
+  });
+
+  test("rejects an unknown workspace title tracking key", () => {
+    const result = PersistedConfigSchema.safeParse({
+      agents: {
+        metadataGeneration: {
+          workspaceTitleTracking: { intervalMinutes: 45 },
+        },
+      },
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   test("rejects a non-positive title tracking refresh interval", () => {
     const result = PersistedConfigSchema.safeParse({
       agents: {

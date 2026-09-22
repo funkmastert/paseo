@@ -142,10 +142,21 @@ const MutableTitleTrackingConfigSchema = z
   })
   .passthrough();
 
+// COMPAT(workspaceTitleTracking): added in v0.2.7, additive and optional — an older
+// daemon ignores it and keeps naming a workspace once, from its first agent's prompt.
+const MutableWorkspaceTitleTrackingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    refreshIntervalMinutes: z.number().positive().optional(),
+    activityWindowMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
 const MutableMetadataGenerationConfigSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).default([]),
     titleTracking: MutableTitleTrackingConfigSchema.optional(),
+    workspaceTitleTracking: MutableWorkspaceTitleTrackingConfigSchema.optional(),
   })
   .passthrough();
 
@@ -157,6 +168,7 @@ const MutableMetadataGenerationPatchSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).optional(),
     titleTracking: MutableTitleTrackingConfigSchema.optional(),
+    workspaceTitleTracking: MutableWorkspaceTitleTrackingConfigSchema.optional(),
   })
   .passthrough();
 

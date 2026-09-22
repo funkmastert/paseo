@@ -214,6 +214,7 @@ import {
 } from "./auth.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
@@ -501,6 +502,15 @@ export interface PaseoDaemonConfig {
       model?: string;
       thinkingOptionId?: string;
     }>;
+    // Forwarded verbatim into the mutable config below. Both tracker sections used to be
+    // dropped here, so `agents.metadataGeneration.titleTracking` in config.json only took
+    // effect on a later reload, never at boot.
+    titleTracking?: { enabled?: boolean; refreshIntervalMinutes?: number };
+    workspaceTitleTracking?: {
+      enabled?: boolean;
+      refreshIntervalMinutes?: number;
+      activityWindowMinutes?: number;
+    };
   };
   tokenBurnMonitor?: {
     enabled?: boolean;
@@ -828,7 +838,8 @@ function withMcpGatewayConfig(
   return config.mcpGateway !== undefined ? { mcpGateway: config.mcpGateway } : {};
 }
 
-function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
+/** Exported for the boot pass-through test; not part of the daemon's public surface. */
+export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
   const initialConfig: MutableDaemonConfig = {
@@ -848,6 +859,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     browserTools: { enabled: config.browserToolsEnabled ?? false },
     providers,
     metadataGeneration: {
+      ...config.metadataGeneration,
       providers: config.metadataGeneration?.providers ?? [],
     },
     ...withTokenBurnMonitorConfig(config),
@@ -1505,6 +1517,19 @@ export async function createPaseoDaemon(
   });
   handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
   agentTitleTracker.start();
+
+  const workspaceTitleTracker = new WorkspaceTitleTracker({
+    agentManager,
+    workspaceRegistry,
+    providerSnapshotManager,
+    workspaceGitService,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
+      await emitWorkspaceUpdatesExternal([workspaceId]);
+    },
+    logger,
+  });
+  workspaceTitleTracker.start();
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
@@ -2412,6 +2437,7 @@ export async function createPaseoDaemon(
     await speechService.stop();
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
+    workspaceTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
