@@ -4,6 +4,7 @@ import { access, appendFile, copyFile, mkdir, readFile, readdir } from "node:fs/
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
+  AgentAccountAuth,
   AgentCapabilityFlags,
   AgentClient,
   AgentFeature,
@@ -69,6 +70,9 @@ export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
   onStartTurn?: (prompt: AgentPromptInput) => void;
   supportsMcpServers?: boolean;
+  /** What `describeAccountAuth` answers. Absent reads as "cannot tell", the real default for a
+   * provider whose config dir has never been written. Set it to give two providers one account. */
+  accountAuth?: () => AgentAccountAuth;
 }
 
 const FAKE_HISTORY_ROOT = path.join(tmpdir(), "paseo-fake-provider-history");
@@ -1283,6 +1287,10 @@ class FakeAgentClient implements AgentClient {
 
   async canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean> {
     return (await findFakeSessionHistory(handle.sessionId)) !== null;
+  }
+
+  async describeAccountAuth(): Promise<AgentAccountAuth> {
+    return this.options.accountAuth?.() ?? { state: "unknown" };
   }
 
   async importSession(
