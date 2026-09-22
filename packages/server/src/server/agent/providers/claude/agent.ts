@@ -1527,6 +1527,7 @@ export function resolveProviderClaudeConfigDir(
 export class ClaudeAgentClient implements AgentClient {
   readonly provider = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly acceptsMcpGatewayServers = true;
 
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly logger: Logger;

@@ -1984,6 +1984,7 @@ export const ru: TranslationResources = {
       error: "Ошибка",
       disabled: "Отключено",
       sessionReported: "Проблема сессии",
+      claudeAiConnector: "Вход для каждого аккаунта Claude",
     },
     authAction: "Авторизоваться",
     reauthAction: "Повторная авторизация",

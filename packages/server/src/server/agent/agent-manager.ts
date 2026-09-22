@@ -1050,6 +1050,8 @@ export class AgentManager {
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
+  /** Per agent, the gateway servers its current launch was given (docs/mcp-gateway.md). */
+  private readonly brokeredMcpServerNames = new Map<string, ReadonlySet<string>>();
   private readonly resolvePaseoToolPolicy: (
     provider: AgentProvider,
   ) => ProviderPaseoToolsPolicy | undefined;
@@ -4635,6 +4637,7 @@ export class AgentManager {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
+    this.brokeredMcpServerNames.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
       agent.unsubscribeSession = null;
@@ -5365,9 +5368,30 @@ export class AgentManager {
   ): void {
     // Avoid an emitState storm on every turn: only broadcast (and skip persisting,
     // live-only like lastActivitySummary) when the reported statuses actually changed.
-    if (isDeepStrictEqual(agent.mcpServerStatuses, event.statuses)) return;
-    agent.mcpServerStatuses = event.statuses;
+    const statuses = this.withoutStaleBrokeredNeedsAuth(agent.id, event.statuses);
+    if (isDeepStrictEqual(agent.mcpServerStatuses, statuses)) return;
+    agent.mcpServerStatuses = statuses;
     this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Drops a session's `needs-auth` for a server its launch brokered. That entry carries the
+   * gateway's own bearer header and never runs OAuth, so the CLI only reports it needs-auth off
+   * the account's name-keyed `mcp-needs-auth-cache.json`, stamped when the same name was last
+   * loaded from per-dir config and failed. That is the account's stale login, not the server's
+   * state: the gateway's snapshot is the status for brokered servers (docs/mcp-gateway.md).
+   */
+  private withoutStaleBrokeredNeedsAuth(
+    agentId: string,
+    statuses: AgentMcpServerStatus[],
+  ): AgentMcpServerStatus[] {
+    const brokered = this.brokeredMcpServerNames.get(agentId);
+    if (!brokered || brokered.size === 0) {
+      return statuses;
+    }
+    return statuses.filter(
+      (status) => !(status.status === "needs-auth" && brokered.has(status.name)),
+    );
   }
 
   private onStreamThreadStarted(agent: ActiveManagedAgent): void {
@@ -6280,6 +6304,8 @@ export class AgentManager {
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
+    const brokersMcpServers = this.clientAcceptsMcpGatewayServers(storedConfig.provider);
+    const brokeredServerNames = brokersMcpServers ? (this.mcpGateway?.getServerNames() ?? []) : [];
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimeMcpGatewayServers({
         config: withRuntimePaseoMcpServer({
@@ -6291,16 +6317,33 @@ export class AgentManager {
               : null,
           mcpAuthToken: this.mcpAuthToken,
         }),
-        // v1 targets the Claude adapter only (Scope Boundaries) — strictMcpConfig's stdio
-        // drop only has a re-injection counterpart there today.
-        enabled: storedConfig.provider === "claude" && (this.mcpGateway?.enabled ?? false),
+        enabled: brokersMcpServers,
         gatewayBaseUrl: this.mcpGatewayBaseUrl,
-        serverNames: this.mcpGateway?.getServerNames() ?? [],
+        serverNames: brokeredServerNames,
         gatewayAuthToken: this.mcpGatewayAuthToken,
         sessionMode: this.mcpGateway?.sessionMode,
       }),
     );
+    if (launchConfig.mcpGatewayEnabled) {
+      this.brokeredMcpServerNames.set(agentId, new Set(brokeredServerNames));
+    } else {
+      this.brokeredMcpServerNames.delete(agentId);
+    }
     return { storedConfig, launchConfig, paseoToolPolicy };
+  }
+
+  /**
+   * Whether sessions on this provider get the gateway's brokered servers. Read off the client,
+   * not the provider id: an account-pool provider is `claude-personal` with `extends: "claude"`,
+   * and gating on the literal id left every one of them loading its own per-dir login instead.
+   * v1 targets the Claude adapter only — strictMcpConfig's stdio drop only has a re-injection
+   * counterpart there.
+   */
+  private clientAcceptsMcpGatewayServers(provider: AgentProvider): boolean {
+    if (!this.mcpGateway?.enabled) {
+      return false;
+    }
+    return this.clients.get(provider)?.acceptsMcpGatewayServers === true;
   }
 
   private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {

@@ -15,6 +15,7 @@ import { DemoInMemoryAuthProvider } from "@modelcontextprotocol/sdk/examples/ser
 import {
   evaluateTransitionNotification,
   McpGateway,
+  McpGatewayUpstreamUnavailableError,
   type McpGatewaySnapshotEntry,
 } from "./gateway.js";
 import { McpGatewayTokenStore } from "./token-store.js";
@@ -138,6 +139,8 @@ async function startOAuthAuthorizationServer(options?: {
   supportsRegistration?: boolean;
   /** Advertise registration and then refuse it, with a non-JSON body, exactly as Figma does. */
   registrationStatus?: number;
+  /** Scopes the authorization server advertises; the resource keeps advertising `mcp:tools`. */
+  authorizationServerScopes?: string[];
 }): Promise<{ url: string }> {
   // Bind an ephemeral port first (port 0) so `issuerUrl` can be constructed before the
   // auth router — which signs URLs from it — is mounted.
@@ -157,6 +160,21 @@ async function startOAuthAuthorizationServer(options?: {
         if (body && typeof body === "object" && "registration_endpoint" in body) {
           const { registration_endpoint: _dropped, ...rest } = body as Record<string, unknown>;
           return sendJson(rest);
+        }
+        return sendJson(body);
+      };
+      next();
+    });
+  }
+  const authorizationServerScopes = options?.authorizationServerScopes;
+  if (authorizationServerScopes) {
+    // Zeeq's shape: the protected resource names only its own scope, while the authorization
+    // server also lists `offline_access`.
+    app.use((_req, res, next) => {
+      const sendJson = res.json.bind(res);
+      res.json = (body: unknown) => {
+        if (body && typeof body === "object" && "issuer" in body) {
+          return sendJson({ ...body, scopes_supported: authorizationServerScopes });
         }
         return sendJson(body);
       };
@@ -187,6 +205,101 @@ async function startOAuthAuthorizationServer(options?: {
   fixtureServers.push(() => new Promise<void>((resolve) => httpServer.close(() => resolve())));
 
   return { url: baseUrl.toString() };
+}
+
+/**
+ * A real MCP upstream whose access token can expire under a live connection, with an optional
+ * refresh-token grant on its own authorization server. `/mcp` answers only `Bearer <accepted>`;
+ * `setAcceptedToken` is the upstream expiring the token the gateway holds. Everything else
+ * 404s, as a server without protected-resource metadata does, so the SDK falls back to the
+ * origin's `/authorize` and `/token` exactly as it would in the field.
+ */
+async function startExpiringOAuthUpstream(options: {
+  acceptedToken: string;
+  refresh?: { refreshToken: string; nextAccessToken: string };
+}): Promise<{ url: string; setAcceptedToken(token: string): void; refreshGrants: number }> {
+  const mcpServer = new McpServer({ name: "expiring-mcp-server", version: "1.0.0" });
+  mcpServer.registerTool(
+    "ping",
+    { title: "Ping", description: "Replies pong", inputSchema: {} },
+    async () => ({ content: [{ type: "text", text: "pong" }] }),
+  );
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    enableDnsRebindingProtection: false,
+  });
+  await mcpServer.connect(transport);
+
+  const state = { acceptedToken: options.acceptedToken, refreshGrants: 0 };
+  const httpServer = http.createServer((req, res) => {
+    void (async () => {
+      const pathname = new URL(req.url ?? "/", "http://fixture").pathname;
+      if (pathname === "/token" && req.method === "POST" && options.refresh) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(chunk as Buffer);
+        const form = new URLSearchParams(Buffer.concat(chunks).toString("utf8"));
+        if (
+          form.get("grant_type") !== "refresh_token" ||
+          form.get("refresh_token") !== options.refresh.refreshToken
+        ) {
+          res.writeHead(400, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "invalid_grant" }));
+          return;
+        }
+        state.refreshGrants += 1;
+        state.acceptedToken = options.refresh.nextAccessToken;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            access_token: options.refresh.nextAccessToken,
+            token_type: "Bearer",
+            expires_in: 3600,
+          }),
+        );
+        return;
+      }
+      if (pathname !== "/mcp") {
+        res.statusCode = 404;
+        res.end();
+        return;
+      }
+      if (req.headers.authorization !== `Bearer ${state.acceptedToken}`) {
+        res.statusCode = 401;
+        res.end();
+        return;
+      }
+      try {
+        const body = req.method === "POST" ? await readJsonBody(req) : undefined;
+        await transport.handleRequest(req, res, body);
+      } catch (error) {
+        res.statusCode = 500;
+        res.end(String(error));
+      }
+    })();
+  });
+
+  await new Promise<void>((resolve) => httpServer.listen(0, "127.0.0.1", resolve));
+  const { port } = httpServer.address() as AddressInfo;
+  fixtureServers.push(() => new Promise<void>((resolve) => httpServer.close(() => resolve())));
+
+  return {
+    url: `http://127.0.0.1:${port}/mcp`,
+    setAcceptedToken: (token) => {
+      state.acceptedToken = token;
+    },
+    get refreshGrants() {
+      return state.refreshGrants;
+    },
+  };
+}
+
+/** A dynamic registration as the token store holds one, for servers the SDK must not re-register. */
+function storedRegistration(scope?: string) {
+  return {
+    client_id: "registered-client",
+    redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    ...(scope === undefined ? {} : { scope }),
+  };
 }
 
 /** The typed failure a gateway action rejected with, for asserting on `reason` and `remedy`. */
@@ -630,6 +743,142 @@ describe("McpGateway", () => {
         "https://daemon.example.test/mcp/gateway/oauth/callback",
       );
     });
+  });
+});
+
+describe("token lifecycle", () => {
+  test("an expired access token is refreshed on the 401 and the new token is persisted", async () => {
+    const upstream = await startExpiringOAuthUpstream({
+      acceptedToken: "fresh-token",
+      refresh: { refreshToken: "refresh-1", nextAccessToken: "fresh-token" },
+    });
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    tokenStore.saveClientInformation("linear", storedRegistration());
+    tokenStore.saveOAuthTokens("linear", {
+      access_token: "expired-token",
+      token_type: "Bearer",
+      refresh_token: "refresh-1",
+    });
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: { linear: { url: upstream.url, transport: "http" } } },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+    });
+
+    await gateway.start();
+
+    expect(gateway.getServerState("linear")?.status).toBe("connected");
+    expect(upstream.refreshGrants).toBe(1);
+    // Persisted, and the refresh token kept when the upstream did not rotate it — the next
+    // daemon boot starts from the renewed login instead of the expired one.
+    expect(new McpGatewayTokenStore(home).getOAuthTokens("linear")).toMatchObject({
+      access_token: "fresh-token",
+      refresh_token: "refresh-1",
+    });
+  });
+
+  test("a login that expires mid-session with no refresh token moves the server to needs-auth and pushes once", async () => {
+    const upstream = await startExpiringOAuthUpstream({ acceptedToken: "hour-token" });
+    const push = createFakePushSender();
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    tokenStore.saveClientInformation("zeeq", storedRegistration("mcp:tools"));
+    tokenStore.saveOAuthTokens("zeeq", { access_token: "hour-token", token_type: "Bearer" });
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: {
+        enabled: true,
+        servers: { zeeq: { url: upstream.url, transport: "http", critical: true } },
+      },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+      notifier: { pushNotificationSender: push.sender, serverId: "server-1" },
+    });
+    await gateway.start();
+    expect(gateway.getServerState("zeeq")?.status).toBe("connected");
+
+    // Someone presses Authenticate in the strip; then an agent's call meets the expired token.
+    const inFlightState = await gateway.buildOAuthProvider("zeeq").state?.();
+    tokenStore.saveCodeVerifier("zeeq", "verifier-from-the-strip");
+    upstream.setAcceptedToken("next-hour-token");
+
+    await expect(
+      Promise.all([
+        gateway.requestUpstream("zeeq", (client) => client.listTools()),
+        gateway.requestUpstream("zeeq", (client) => client.listTools()),
+      ]),
+    ).rejects.toBeInstanceOf(McpGatewayUpstreamUnavailableError);
+
+    expect(gateway.getServerState("zeeq")?.status).toBe("needs-auth");
+    expect(push.sent.map((payload) => payload.data.name)).toEqual(["zeeq"]);
+    // The background 401 did not start a sign-in of its own over the one in the browser.
+    expect(tokenStore.getCodeVerifier("zeeq")).toBe("verifier-from-the-strip");
+    expect(inFlightState && gateway.consumeOAuthState(inFlightState)).toBe("zeeq");
+    await expect(
+      gateway.requestUpstream("zeeq", (client) => client.listTools()),
+    ).rejects.toBeInstanceOf(McpGatewayUpstreamUnavailableError);
+  });
+
+  test("a failure that is not about the login leaves the server connected", async () => {
+    const upstream = await startExpiringOAuthUpstream({ acceptedToken: "good-token" });
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    tokenStore.saveClientInformation("zeeq", storedRegistration());
+    tokenStore.saveOAuthTokens("zeeq", { access_token: "good-token", token_type: "Bearer" });
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: { zeeq: { url: upstream.url, transport: "http" } } },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+    });
+    await gateway.start();
+
+    await expect(
+      gateway.requestUpstream("zeeq", async () => {
+        throw new Error("tool blew up");
+      }),
+    ).rejects.toThrow("tool blew up");
+    expect(gateway.getServerState("zeeq")?.status).toBe("connected");
+  });
+
+  test("sign-in asks for offline_access when only the authorization server offers it", async () => {
+    const authServer = await startOAuthAuthorizationServer({
+      authorizationServerScopes: ["mcp:tools", "offline_access"],
+    });
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    // A registration made before, for the narrower scope.
+    tokenStore.saveClientInformation("zeeq", storedRegistration("mcp:tools"));
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: { zeeq: { url: authServer.url, transport: "http" } } },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+    });
+
+    const result = await gateway.startAuthorization("zeeq");
+
+    const authorizationUrl = new URL(result.authorizationUrl);
+    expect(authorizationUrl.searchParams.get("scope")).toBe("mcp:tools offline_access");
+    // Registered again for the wider scope rather than sent to the browser to be refused.
+    const registration = tokenStore.getClientInformation("zeeq");
+    expect(registration?.client_id).not.toBe("registered-client");
+    expect(authorizationUrl.searchParams.get("client_id")).toBe(registration?.client_id);
+  });
+
+  test("sign-in leaves the scope alone when offline_access is not on offer", async () => {
+    const authServer = await startOAuthAuthorizationServer();
+    const home = createTempHome();
+    const tokenStore = new McpGatewayTokenStore(home);
+    tokenStore.saveClientInformation("zeeq", storedRegistration("mcp:tools"));
+    const gateway = new McpGateway({
+      paseoHome: home,
+      config: { enabled: true, servers: { zeeq: { url: authServer.url, transport: "http" } } },
+      oauthRedirectBaseUrl: "https://daemon.example.test",
+    });
+
+    const result = await gateway.startAuthorization("zeeq");
+
+    expect(new URL(result.authorizationUrl).searchParams.get("scope")).toBe("mcp:tools");
+    expect(tokenStore.getClientInformation("zeeq")?.client_id).toBe("registered-client");
   });
 });
 

@@ -501,6 +501,9 @@ function wrapClientProvider(
   return {
     provider,
     capabilities: inner.capabilities,
+    // Dropping this left every account-pool provider launching with no brokered MCP servers,
+    // so each account fell back to its own per-dir login for servers the gateway holds.
+    acceptsMcpGatewayServers: inner.acceptsMcpGatewayServers,
     createSession: async (config, launchContext) =>
       wrapSessionProvider(
         provider,

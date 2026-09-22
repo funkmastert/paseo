@@ -3623,6 +3623,7 @@ test("createAgent injects brokered MCP gateway servers only into provider launch
   const storage = new AgentStorage(storagePath, logger);
 
   class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
     lastConfig: AgentSessionConfig | null = null;
 
     override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
@@ -3669,11 +3670,102 @@ test("createAgent injects brokered MCP gateway servers only into provider launch
   expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
 });
 
+test("createAgent injects brokered MCP gateway servers for a derived provider on a Claude client", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  // An account-pool provider: its id is not "claude", its client is.
+  const client = new CaptureClient("claude-personal");
+  const manager = new AgentManager({
+    clients: { "claude-personal": client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["zeeq"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000115",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await manager.createAgent({ provider: "claude-personal", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewayEnabled).toBe(true);
+  expect(client.lastConfig?.mcpServers).toEqual({
+    zeeq: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/zeeq",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+  });
+});
+
+test("a session's needs-auth for a server its launch brokered is dropped; other reports are kept", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const session = new TestAgentSession({ provider: "claude", cwd: workdir });
+
+  class GatewayClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { claude: new GatewayClient("claude") },
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["zeeq", "linear"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000116",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    // zeeq: the account's name-keyed needs-auth cache, not the gateway. linear: a real failure
+    // reaching the daemon route. sentry: a per-dir server the gateway does not broker.
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "claude",
+      statuses: [
+        { name: "zeeq", status: "needs-auth" },
+        { name: "linear", status: "failed" },
+        { name: "sentry", status: "needs-auth" },
+      ],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual([
+      { name: "linear", status: "failed" },
+      { name: "sentry", status: "needs-auth" },
+    ]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("createAgent forwards the gateway's strict session mode to the launch config only", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);
 
   class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
     lastConfig: AgentSessionConfig | null = null;
 
     override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
@@ -3896,6 +3988,7 @@ test("createAgent launch config is byte-identical to the pre-gateway shape when 
   const storage = new AgentStorage(join(workdir, "agents"), logger);
 
   class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
     lastConfig: AgentSessionConfig | null = null;
 
     override async createSession(config: AgentSessionConfig): Promise<AgentSession> {

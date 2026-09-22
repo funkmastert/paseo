@@ -1953,6 +1953,7 @@ export const ar: TranslationResources = {
       error: "خطأ",
       disabled: "معطل",
       sessionReported: "مشكلة في الجلسة",
+      claudeAiConnector: "سجّل الدخول لكل حساب Claude",
     },
     authAction: "المصادقة",
     reauthAction: "إعادة المصادقة",

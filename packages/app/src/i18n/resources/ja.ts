@@ -1972,6 +1972,7 @@ export const ja: TranslationResources = {
       error: "エラー",
       disabled: "無効",
       sessionReported: "セッションの問題",
+      claudeAiConnector: "Claude アカウントごとにサインイン",
     },
     authAction: "認証する",
     reauthAction: "再認証する",

@@ -92,6 +92,20 @@ describe("McpGatewayTokenStore", () => {
     expect(store.getCodeVerifier("github")).toBe("verifier-1");
   });
 
+  test("forgetClientInformation drops a dynamic registration and keeps everything else", () => {
+    const store = new McpGatewayTokenStore(createTempHome());
+    store.saveClientInformation("zeeq", {
+      client_id: "client-1",
+      redirect_uris: ["https://daemon.example.test/mcp/gateway/oauth/callback"],
+    });
+    store.saveOAuthTokens("zeeq", { access_token: "token-1", token_type: "Bearer" });
+
+    store.forgetClientInformation("zeeq");
+
+    expect(store.getClientInformation("zeeq")).toBeUndefined();
+    expect(store.getOAuthTokens("zeeq")).toEqual({ access_token: "token-1", token_type: "Bearer" });
+  });
+
   test("round-trips static auth header values, never touching config", () => {
     const paseoHome = createTempHome();
     const store = new McpGatewayTokenStore(paseoHome);

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   auth as runOAuthOrchestration,
+  discoverOAuthServerInfo,
   UnauthorizedError,
   type OAuthClientProvider,
 } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -182,6 +183,8 @@ export async function startMcpGatewayAuthorization(params: {
   /** Named in the same error: the file the operator writes the client credentials into. */
   credentialsPath: string;
   provider: OAuthClientProvider;
+  /** Overrides the SDK's own scope choice; see `resolveOfflineAccessScope`. */
+  scope?: string;
 }): Promise<StartMcpGatewayAuthResult> {
   let capturedUrl: URL | undefined;
   const provider: OAuthClientProvider = {
@@ -193,7 +196,10 @@ export async function startMcpGatewayAuthorization(params: {
 
   let result: Awaited<ReturnType<typeof runOAuthOrchestration>>;
   try {
-    result = await runOAuthOrchestration(provider, { serverUrl: params.serverUrl });
+    result = await runOAuthOrchestration(provider, {
+      serverUrl: params.serverUrl,
+      ...(params.scope === undefined ? {} : { scope: params.scope }),
+    });
   } catch (error) {
     if (isDynamicClientRegistrationUnsupported(error)) {
       throw new MissingOAuthClientError(
@@ -220,6 +226,52 @@ export async function startMcpGatewayAuthorization(params: {
     );
   }
   return { authorizationUrl: capturedUrl.toString() };
+}
+
+const OFFLINE_ACCESS_SCOPE = "offline_access";
+
+/**
+ * The scope to ask for when the SDK's own choice would cost a refresh token. The SDK requests
+ * exactly the resource's `scopes_supported`, and some authorization servers issue a refresh
+ * token only for `offline_access`, which they list in their own metadata and the resource does
+ * not. Zeeq is the worked example, measured 2026-09-21: the resource advertises `mcp:tools`,
+ * the server advertises `offline_access` and the `refresh_token` grant, and a sign-in for
+ * `mcp:tools` alone gets a one-hour token with nothing to renew it — another sign-in every
+ * hour. Undefined leaves the SDK's choice alone: discovery failed (the SDK will say why), the
+ * resource names no scopes (asking for `offline_access` alone would narrow the grant), or
+ * `offline_access` is already requested or not offered.
+ */
+export async function resolveOfflineAccessScope(serverUrl: string): Promise<string | undefined> {
+  let info: Awaited<ReturnType<typeof discoverOAuthServerInfo>>;
+  try {
+    info = await discoverOAuthServerInfo(serverUrl);
+  } catch {
+    return undefined;
+  }
+  const requested = info.resourceMetadata?.scopes_supported ?? [];
+  const offered = info.authorizationServerMetadata?.scopes_supported ?? [];
+  if (
+    requested.length === 0 ||
+    requested.includes(OFFLINE_ACCESS_SCOPE) ||
+    !offered.includes(OFFLINE_ACCESS_SCOPE)
+  ) {
+    return undefined;
+  }
+  return [...requested, OFFLINE_ACCESS_SCOPE].join(" ");
+}
+
+/** Whether a dynamic registration was made for a scope list that leaves `scope` out. */
+export function registrationExcludesScope(
+  clientInformation: OAuthClientInformationFull | undefined,
+  scope: string,
+): boolean {
+  const registered = clientInformation?.scope;
+  if (registered === undefined) {
+    // A registration that names no scopes restricts none.
+    return false;
+  }
+  const registeredScopes = new Set(registered.split(" "));
+  return scope.split(" ").some((entry) => !registeredScopes.has(entry));
 }
 
 // The SDK raises this from `registerClient()` when the authorization server's metadata has no

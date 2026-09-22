@@ -33,7 +33,8 @@ export type McpStatusRowStatusKey =
   | "needsAuth"
   | "error"
   | "disabled"
-  | "sessionReported";
+  | "sessionReported"
+  | "claudeAiConnector";
 
 /**
  * What pressing a row does. `authenticate` runs the daemon's OAuth flow for a brokered server;
@@ -323,7 +324,9 @@ export function buildMcpStatusStripModel(input: {
       key: `session:${serverName}`,
       name: serverName,
       tone: "warning",
-      statusKey: "sessionReported",
+      // A claude.ai connector is signed in per Claude account, on claude.ai. The gateway cannot
+      // broker it, so the row says whose sign-in it is rather than calling it a session fault.
+      statusKey: isClaudeAiConnectorName(serverName) ? "claudeAiConnector" : "sessionReported",
       critical: false,
       ...(action ? { action } : {}),
       annotation,

@@ -158,6 +158,16 @@ export class McpGatewayTokenStore {
     this.patchOAuthRecord(serverName, { clientInformation });
   }
 
+  /** Drops a dynamic registration so the next sign-in registers afresh. */
+  forgetClientInformation(serverName: string): void {
+    const record = this.getOAuthRecord(serverName);
+    if (!record?.clientInformation) {
+      return;
+    }
+    const { clientInformation: _dropped, ...rest } = record;
+    this.setRecord(serverName, rest);
+  }
+
   getClientCredentials(serverName: string): PreregisteredOAuthClient | undefined {
     return this.getOAuthRecord(serverName)?.clientCredentials;
   }

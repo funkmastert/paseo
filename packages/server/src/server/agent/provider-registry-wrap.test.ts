@@ -224,6 +224,19 @@ describe("wrapClientProvider", () => {
     }
   });
 
+  test("a derived claude provider's client still takes the gateway's brokered servers", () => {
+    const clients = createAllClients(createTestLogger(), {
+      providerOverrides: {
+        "claude-personal": { extends: "claude", label: "Claude Personal" },
+      },
+    });
+
+    expect(clients["claude-personal"]?.provider).toBe("claude-personal");
+    expect(clients["claude-personal"]?.acceptsMcpGatewayServers).toBe(true);
+    expect(clients.claude?.acceptsMcpGatewayServers).toBe(true);
+    expect(clients.codex?.acceptsMcpGatewayServers).toBeUndefined();
+  });
+
   test("a derived claude provider adopts from its own account's config dir, not the base provider's", () => {
     const leaderDir = createAccountDir("leader", {
       amplitude: { type: "http", url: "https://amplitude.example/leader" },

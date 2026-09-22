@@ -2,6 +2,8 @@
 
 The daemon authenticates to external MCP servers once and re-exposes them to every agent session it creates, on every configured provider account. Sessions talk to stable daemon-local routes (`/mcp/gateway/<name>`) behind a dedicated capability token; the daemon holds the upstream credentials and relays traffic. An account swap or re-login never requires MCP re-authentication, and a re-auth at the daemon takes effect for already-running sessions without a restart.
 
+It covers servers you configure by URL. It cannot cover claude.ai connectors (`claude.ai Robinhood`, `claude.ai Notion`, …): those are signed in on claude.ai, once per Claude account, and every account you run needs its own sign-in. See [claude.ai connectors](#claudeai-connectors).
+
 Server code lives in `packages/server/src/server/mcp-gateway/`. The app surface is the MCP status strip in the sidebar (`packages/app/src/mcp-status/`).
 
 ## Configuration
@@ -138,19 +140,50 @@ Agents also load MCP servers from their own Claude config (user scope in the acc
 
 Which account's `.claude.json` that is comes from the agent's own provider, not the one it extends. A derived provider (`extends: "claude"` with its own `CLAUDE_CONFIG_DIR`) is a separate account with a separate config file, and adopting from the base provider's would broker a definition the session never loaded. The provider's `env` value is `${VAR}`-expanded the same way a definition's fields are. `wrapClientProvider` rebuilds a client field by field, so anything the adopt path asks a client — `resolveMcpConfigScope`, `describeAccountAuth` — has to be forwarded there or every derived provider silently answers for the base account.
 
-claude.ai connectors (`claude.ai …`) live on the Claude account, not in any file, so their row opens claude.ai's connector settings instead. Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
+Gate the button on `server_info.features.mcpGatewayAdopt`; an older daemon shows the row with no action.
+
+### claude.ai connectors
+
+A `claude.ai …` server is a connector on the Claude account, proxied by Anthropic. Its credential is held by claude.ai for that account, never in a file the daemon can read, and no URL exists that the gateway could broker. So each Claude account signs in to each connector separately, on claude.ai, and the daemon cannot do it for you. Their strip rows say "Sign in per Claude account", name the account that reported them, and open claude.ai's connector settings; that is the whole of what Paseo can do. If a service offers both a connector and a plain MCP URL (Notion does), configure the URL in `mcpGateway.servers` and sign in once there instead.
 
 ## Tokens
 
 All upstream credentials — OAuth tokens, client registrations (dynamic or pre-registered), PKCE verifiers, static headers — live in `$PASEO_HOME/mcp-gateway/tokens.json`, written 0600 via the daemon's private-file helper. Tokens never appear in config, wire payloads, or logs. Bulk rotation beyond per-server re-auth from the strip is not implemented; delete the file and re-auth to start over.
 
+### Refresh and expiry
+
+An access token is renewed on demand. When the upstream answers 401, the SDK transport spends the stored refresh token, writes the new tokens through the token store, and retries the request, so a daemon restart starts from the renewed login. Nothing refreshes ahead of time.
+
+A login lasts only as long as the upstream lets it. A server that issues no refresh token gets a new sign-in each time its access token expires; one whose refresh is refused (`invalid_grant`, a revoked client) does too. When that happens under a proxied request, the gateway moves the server to needs-auth and pushes for a critical one, instead of reading "connected" while every call fails. Measured on 2026-09-21:
+
+| Server                           | Access token | Refresh token |
+| -------------------------------- | ------------ | ------------- |
+| `linear`                         | 24 h         | yes           |
+| `notion`, `agent-gateway`        | 8 h          | yes           |
+| `amplitude`                      | 24 h         | no            |
+| `zeeq`, without `offline_access` | 1 h          | no            |
+
+Sign-in asks for `offline_access` when the authorization server lists it and the protected resource does not, because some servers only issue a refresh token for that scope. Zeeq is the case: its resource advertises `mcp:tools`, its authorization server advertises `offline_access` and the `refresh_token` grant, and a sign-in for `mcp:tools` alone gets a one-hour token. A dynamic registration made for the narrower scope is replaced at that sign-in, since the authorization server may refuse the wider scope to it in the browser, where nothing can explain why. Amplitude advertises no `offline_access`, so it still needs a sign-in each day.
+
+A 401 on a live connection never starts an authorization of its own. The interactive start mints a `state` and saves a PKCE verifier, and doing that in the background invalidated a sign-in someone had just started from the strip, whose callback then failed as an expired link.
+
 ## Session injection
 
-Claude sessions launched while the gateway is enabled receive the brokered servers as per-launch `mcpServers` entries (never persisted, stripped from storage like the `paseo` entry). `sessionMode` decides what happens to everything else the CLI would load:
+Claude sessions launched while the gateway is enabled receive the brokered servers as per-launch `mcpServers` entries (never persisted, stripped from storage like the `paseo` entry). That includes every derived provider (`extends: "claude"`), which is every account-pool account: the manager asks the client (`acceptsMcpGatewayServers`), not the provider id, and `wrapClientProvider` forwards it. Gating on `provider === "claude"` once left `claude-personal` and `claude-backup` loading their own per-dir `zeeq`, `linear` and `notion`, each with its own login, while the gateway held working tokens for all three. `sessionMode` decides what happens to everything else the CLI would load:
 
 - `overlay` (default): the brokered entries ride `--mcp-config` next to the CLI's own user, project, and local scopes and its claude.ai connectors. A launch-time entry wins a name collision with a per-dir entry, so a brokered `github` shadows a stale user-scope `github`. Per-dir entries the gateway does not broker keep loading and keep failing on their own; remove them with `claude mcp remove <name> -s user` in that account's config dir.
 - `strict`: also sets `strictMcpConfig`, which stops every per-dir definition from loading. Per-dir stdio entries from the config dir's `.claude.json` and the project `.mcp.json` are re-read and re-injected with `${VAR}`/`${VAR:-default}` expansion; local-scope entries (`projects.<dir>.mcpServers`) are not. Strict also drops claude.ai connectors, which live on the account rather than in any file the daemon can re-inject. That is why it is not the default.
 
 Both facts (collision precedence, connector drop) were measured by launching `claude -p --output-format stream-json --verbose` and reading the init message's `mcp_servers` list, against Claude Code 2.1.270 on 2026-09-14. Re-measure the same way when the CLI's MCP loading changes.
+
+### The account's needs-auth cache
+
+Each account's config dir has `mcp-needs-auth-cache.json`, keyed by server name. When an http or sse server 401s, the CLI stamps its name there, and for the next 15 minutes any server by that name is reported needs-auth without being dialed, whatever its URL or headers. A brokered entry shadows the per-dir one by name, so it inherits a stamp the per-dir entry earned. Read from Claude Code 2.1.278.
+
+Two consequences. After an account starts getting brokered entries, a server it last failed on reads needs-auth for up to 15 minutes, then connects. And a session's needs-auth for a name its launch brokered is never about the server: the entry carries the gateway's bearer and never runs OAuth. The manager drops those reports, so a brokered server's status comes only from the gateway. Other statuses for brokered names, like `failed`, still show.
+
+The daemon never edits an account's config dir. To stop waiting out the window, remove that server's entry from the cache file yourself, or remove the per-dir definition with `claude mcp remove <name> -s user` in that account's config dir so the name is only ever the gateway's.
+
+### Session-reported statuses
 
 Per-session MCP statuses reported by the SDK at init are captured onto the agent (live-only) and surface in the strip grouped by server: one session-reported row per server name with a reporter count, no auth action, because the daemon holds no credential for that server. When the gateway has no servers of its own, those rows still drive the collapsed summary — it names them rather than reading "connected".

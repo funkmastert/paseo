@@ -1963,6 +1963,7 @@ export const en = {
       error: "Error",
       disabled: "Disabled",
       sessionReported: "Session issue",
+      claudeAiConnector: "Sign in per Claude account",
     },
     authAction: "Authenticate",
     reauthAction: "Re-authenticate",
