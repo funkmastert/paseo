@@ -340,8 +340,10 @@ describe("createRoleRouter", () => {
 
   // A restriction the agent has to discover by hitting it costs a whole turn
   // and then invites it to route around the denial. These cover the other
-  // half of enforcement: saying so up front, in the agent's own prompt.
-  describe("restriction notice in the initial prompt", () => {
+  // half of enforcement: saying so up front, via the agent's own system
+  // prompt (`providerOptions.appendSystemPrompt`) rather than `initialPrompt`
+  // — the daemon discards a hook's mutation of the latter.
+  describe("restriction notice in the system prompt", () => {
     function policyWithWorkerProfile(profile: RoleModelPolicy["roles"][number]["toolProfile"]): RoleModelPolicy {
       return {
         ...DEFAULT_POLICY,
@@ -353,22 +355,26 @@ describe("createRoleRouter", () => {
       return request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" }, ...overrides });
     }
 
+    function noticeOf(result: ReturnType<RoleCreateRouter>): string | undefined {
+      return (result?.config.providerOptions as { appendSystemPrompt?: string } | undefined)?.appendSystemPrompt;
+    }
+
     function promptOf(result: ReturnType<RoleCreateRouter>): string | undefined {
       return (result as { initialPrompt?: string } | undefined)?.initialPrompt;
     }
 
-    it("prepends the denial and the alternative, keeping the caller's task verbatim", () => {
+    it("names the denial and the alternative, and never touches initialPrompt", () => {
       const router = createRoleRouter(
         baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "read-only" })) }),
       );
 
       const result = router(declaredWorker({ initialPrompt: "Audit the auth flow." }), fakeContext);
 
-      const prompt = promptOf(result) as string;
-      expect(prompt).toContain("Edit");
-      expect(prompt).toContain("Bash");
-      expect(prompt).toMatch(/report the change/i);
-      expect(prompt.endsWith("\n\nAudit the auth flow.")).toBe(true);
+      const notice = noticeOf(result) as string;
+      expect(notice).toContain("Edit");
+      expect(notice).toContain("Bash");
+      expect(notice).toMatch(/report the change/i);
+      expect(promptOf(result)).toBe("Audit the auth flow."); // the caller's initialPrompt passes through untouched
     });
 
     it("points an orchestrator at create_agent as the way to get work done", () => {
@@ -376,9 +382,9 @@ describe("createRoleRouter", () => {
         baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "orchestrator" })) }),
       );
 
-      const prompt = promptOf(router(declaredWorker({ initialPrompt: "Ship the migration." }), fakeContext));
+      const notice = noticeOf(router(declaredWorker({ initialPrompt: "Ship the migration." }), fakeContext));
 
-      expect(prompt).toContain("mcp__paseo__create_agent");
+      expect(notice).toContain("mcp__paseo__create_agent");
     });
 
     it("adds nothing at all for an unrestricted role: byte-identical pass-through", () => {
@@ -387,14 +393,14 @@ describe("createRoleRouter", () => {
       expect(router(declaredWorker({ initialPrompt: "Ship the migration." }), fakeContext)).toBeUndefined();
     });
 
-    it("does not invent a prompt for a create that had none", () => {
+    it("fires even for a create with no initialPrompt at all — it's a system prompt, not a first turn", () => {
       const router = createRoleRouter(
         baseOptions({ policyCache: fakePolicyCache(policyWithWorkerProfile({ kind: "read-only" })) }),
       );
 
       const result = router(declaredWorker(), fakeContext);
 
-      expect(promptOf(result)).toBeUndefined();
+      expect(noticeOf(result)).toContain("[tool profile: read-only]");
       expect((result?.config.providerOptions as { disallowedTools: string[] }).disallowedTools).toContain("Write");
     });
 
@@ -414,7 +420,7 @@ describe("createRoleRouter", () => {
       const result = router(declaredWorker({ initialPrompt: "Audit the auth flow." }), fakeContext);
 
       expect(result?.config.model).toBe("gpt-5.1");
-      expect(promptOf(result)).toContain("[tool profile: read-only]");
+      expect(noticeOf(result)).toContain("[tool profile: read-only]");
     });
 
     it("survives the explicit-model-override path, which also rewrites labels", () => {
@@ -438,7 +444,7 @@ describe("createRoleRouter", () => {
 
       expect(result?.config.model).toBe("claude-haiku");
       expect(result?.labels?.[MODEL_OVERRIDDEN_LABEL]).toBe("claude/claude-opus-5");
-      expect(promptOf(result)).toContain("[tool profile: read-only]");
+      expect(noticeOf(result)).toContain("[tool profile: read-only]");
     });
 
     it("says nothing when a guessed role's profile was withheld — no restriction, no notice", () => {
@@ -571,7 +577,8 @@ describe("createRoleRouter", () => {
         fakeContext,
       );
 
-      expect((result as { initialPrompt?: string }).initialPrompt).toMatch(/came from the agent that spawned you/);
+      const notice = (result?.config.providerOptions as { appendSystemPrompt?: string })?.appendSystemPrompt;
+      expect(notice).toMatch(/came from the agent that spawned you/);
     });
 
     it("fails SAFE for a parent the directory does not know, rather than granting a clean child", () => {

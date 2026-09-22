@@ -8,7 +8,7 @@ import {
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
-import { initialPromptWithNotice } from "../shared/restriction-notice";
+import { restrictionNotice } from "../shared/restriction-notice";
 import {
   applyToolProfile,
   DEFAULT_TOOL_PROFILE,
@@ -170,15 +170,18 @@ type ProviderOptionsValue = AgentCreateConfig["providerOptions"];
  * undefined when the profile restricts nothing, so the request can pass
  * through byte-identical.
  *
- * `providerOptions` is the enforcement half — `disallowedTools` plus the
- * `--settings` deny tier. `initialPrompt` is the disclosure half: a
- * restriction the agent only discovers by hitting it costs a whole turn and
- * then invites it to route around the denial, which is the most expensive
- * failure mode this feature has (see shared/restriction-notice.ts).
+ * `providerOptions` carries both halves: `disallowedTools` plus the
+ * `--settings` deny tier are the enforcement; `providerOptions.appendSystemPrompt`
+ * is the disclosure — a restriction the agent only discovers by hitting it
+ * costs a whole turn and then invites it to route around the denial, which is
+ * the most expensive failure mode this feature has (see
+ * shared/restriction-notice.ts). There is no `initialPrompt` field here
+ * anymore: the daemon discards a hook's mutation of it (it's read-only
+ * context by the time this hook runs), so writing one was dead code that
+ * never reached the agent.
  */
 interface ToolEnforcement {
   providerOptions: ProviderOptionsValue | undefined;
-  initialPrompt: string | undefined;
   /**
    * The request's labels rewritten to record what was denied, or undefined
    * when they already say the right thing (the overwhelmingly common case:
@@ -207,13 +210,11 @@ function enforceToolProfile(
   const inheritedExtras = inherited.filter((tool) => !own.includes(tool));
   const effective = [...own, ...inheritedExtras];
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  const notice = restrictionNotice(effective, { inherited: inheritedExtras.length > 0 });
   return {
-    providerOptions: applyToolProfile(request.config.providerOptions, toolProfile, inheritedExtras) as
+    providerOptions: applyToolProfile(request.config.providerOptions, toolProfile, inheritedExtras, notice) as
       | ProviderOptionsValue
       | undefined,
-    initialPrompt: initialPromptWithNotice(extended.initialPrompt, effective, {
-      inherited: inheritedExtras.length > 0,
-    }),
     labels: toolDenialLabels(extended.labels, effective),
   };
 }
@@ -286,11 +287,7 @@ function toolProfileIsEvidenceBased(tier: ResolveRoleTier | undefined, policy: R
 
 /** True when enforcement has nothing to write and the request can pass through byte-identical. */
 function isNoOp(enforcement: ToolEnforcement): boolean {
-  return (
-    enforcement.providerOptions === undefined &&
-    enforcement.initialPrompt === undefined &&
-    enforcement.labels === undefined
-  );
+  return enforcement.providerOptions === undefined && enforcement.labels === undefined;
 }
 
 /** Applies tool enforcement alone, on the paths that skip the model rewrite. */
@@ -306,9 +303,6 @@ function withToolProfile(
     next.config = { ...request.config, providerOptions: enforcement.providerOptions };
   }
   const extended = next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
-  if (enforcement.initialPrompt !== undefined) {
-    extended.initialPrompt = enforcement.initialPrompt;
-  }
   if (enforcement.labels !== undefined) {
     extended.labels = enforcement.labels;
   }
@@ -322,12 +316,14 @@ function withToolProfile(
  * `config.provider` only when the selection crosses provider families).
  * and merges the role's tool profile into `config.providerOptions`.
  *
- * A restrictive profile also prepends a short notice to `initialPrompt`
- * naming what was denied and what to do instead. `initialPrompt` is one of
- * the mutable picked fields on this hook (see the fork's
- * `plugins/lifecycle/index.ts`), and telling an agent up front is far cheaper
- * than letting it discover the denial by hitting it — see
- * shared/restriction-notice.ts. An unrestricted profile writes neither field.
+ * A restrictive profile also carries a short notice naming what was denied
+ * and what to do instead, via `providerOptions.appendSystemPrompt` — a
+ * Paseo-owned key the fork's `buildOptions()` folds into the agent's actual
+ * system prompt (`providers/claude/agent.ts`), so it persists across every
+ * turn rather than just the first message. Telling an agent up front is far
+ * cheaper than letting it discover the denial by hitting it — see
+ * shared/restriction-notice.ts. An unrestricted profile writes neither
+ * `providerOptions` nor a label.
  *
  * Must be registered BEFORE the account-pool's own router — this hook never
  * changes *which account*; the account router (unmodified) still decides that.
@@ -615,9 +611,6 @@ function routeRoleForCreateUnguarded(
 
   const routed: PluginBeforeRequests["agent.create"] = { ...request, config: nextConfig };
   const routedExtended = routed as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
-  if (enforcement.initialPrompt !== undefined) {
-    routedExtended.initialPrompt = enforcement.initialPrompt;
-  }
   if (enforcement.labels !== undefined) {
     routedExtended.labels = enforcement.labels;
   }

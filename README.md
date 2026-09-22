@@ -319,13 +319,29 @@ denial. In the production incident that motivated this rework, one agent
 spent **1.1M tokens** working out it had been disarmed and another **387k**
 spawning helpers that turned out to be disarmed too.
 
-So when a restrictive profile is applied, the hook also prepends a short
-block to the agent's own `initialPrompt` (one of the mutable picked fields on
-`agent.create`) saying what is gone, that it is gone for good rather than one
-permission prompt away, and what to do instead — a `read-only` agent reports
-the change it would make, an `orchestrator` delegates through
-`mcp__paseo__create_agent`. The caller's task is never replaced, only pushed
-down two lines.
+So when a restrictive profile is applied, the hook also writes a short block
+into `providerOptions.appendSystemPrompt` saying what is gone, that it is gone
+for good rather than one permission prompt away, and what to do instead — a
+`read-only` agent reports the change it would make, an `orchestrator`
+delegates through `mcp__paseo__create_agent`.
+
+This is a **system-level** note, not a prompt prefix. `appendSystemPrompt` is
+a Paseo-owned key on `providerOptions` (not an SDK option — see the fork's
+`providers/claude/options.ts`), destructured out before the rest of
+`providerOptions` reaches the Claude Agent SDK and folded into the SDK's
+single `systemPrompt.append` slot by `buildOptions()`
+(`providers/claude/agent.ts`), composed in order: the agent's own
+`systemPrompt` → the daemon-wide `daemon.appendSystemPrompt` → this notice
+last. That beats the alternative this plugin shipped with first — prepending
+to `initialPrompt` — which turned out to be dead code: the daemon treats a
+hook's `initialPrompt` mutation as read-only context and discards it, since
+the actual prompt was already resolved and sent independently by the time the
+hook runs (`agent-manager.ts`'s `createAgent`). A restricted probe agent on
+this exact plugin once got no notice at all as a result, and burned five
+`ToolSearch` calls hunting for tools it never had; an earlier one lost 1.1M
+tokens the same way. The system-prompt channel also persists across every
+turn instead of only the first message, and needs no `initialPrompt` to
+attach to, so an interactive agent gets the notice too.
 
 Cost and its limits, stated plainly:
 
@@ -344,10 +360,6 @@ Cost and its limits, stated plainly:
   error rather than a lost turn. A `custom` profile's notice *is* generated
   from its deny list (the operator chose those names), capped at 12 before it
   summarizes.
-- **A create with no `initialPrompt` gets no notice.** Setting one would hand
-  the daemon a first turn to run, turning an interactive agent a human is
-  about to type into one that starts talking to itself. Interactive agents
-  learn their limits from the operator who is, by definition, present.
 
 #### A denial only holds if every tool with the same reach is denied
 

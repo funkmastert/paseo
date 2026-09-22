@@ -327,6 +327,13 @@ function union(existing: readonly string[], added: readonly string[]): string[] 
  * the profile itself — today, the ones inherited from the agent that spawned
  * this one. It unions in exactly like the profile's own denials.
  *
+ * `appendSystemPrompt`, when given, is the disclosure half (see
+ * shared/restriction-notice.ts): the text telling the restricted agent what
+ * it lost and what to do instead. It is written into `providerOptions` under
+ * that same key — Paseo-owned, not an SDK option, folded into the agent's
+ * actual system prompt by the fork's `buildOptions()` — appended after
+ * anything the caller already set there rather than replacing it.
+ *
  * Returns undefined when there is nothing to say, so the caller can
  * pass the request through byte-identical. Restrictions only ever accumulate:
  * whatever the caller already denied stays denied, because a plugin that can
@@ -337,10 +344,11 @@ export function applyToolProfile(
   providerOptions: unknown,
   profile: ToolProfile,
   additionalDenied: readonly string[] = [],
+  appendSystemPrompt?: string,
 ): Record<string, unknown> | undefined {
   const deniedTools = [...new Set([...profileDeniedTools(profile), ...additionalDenied])];
   const allowedTools = profileAllowedTools(profile);
-  if (deniedTools.length === 0 && allowedTools.length === 0) {
+  if (deniedTools.length === 0 && allowedTools.length === 0 && !appendSystemPrompt) {
     return undefined;
   }
 
@@ -368,6 +376,10 @@ export function applyToolProfile(
   };
   if (deniedTools.length > 0) {
     next.disallowedTools = union(stringArray(current.disallowedTools), deniedTools);
+  }
+  if (appendSystemPrompt) {
+    const currentAppend = typeof current.appendSystemPrompt === "string" ? current.appendSystemPrompt : undefined;
+    next.appendSystemPrompt = currentAppend ? `${currentAppend}\n\n${appendSystemPrompt}` : appendSystemPrompt;
   }
   return next;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MAX_ENUMERATED_TOOLS, initialPromptWithNotice, restrictionNotice } from "./restriction-notice";
+import { MAX_ENUMERATED_TOOLS, restrictionNotice } from "./restriction-notice";
 import { profileDeniedTools } from "./tool-profiles";
 
 /**
@@ -90,23 +90,5 @@ describe("restrictionNotice", () => {
 
     expect(notice).toContain("[tool profile: read-only]");
     expect(notice).toMatch(/came from the agent that spawned you/);
-  });
-});
-
-describe("initialPromptWithNotice", () => {
-  it("prepends rather than replaces: the caller's task survives verbatim", () => {
-    const result = initialPromptWithNotice("Audit the auth flow.", profileDeniedTools({ kind: "read-only" }));
-
-    expect(result?.endsWith("\n\nAudit the auth flow.")).toBe(true);
-    expect(result?.startsWith("[tool profile: read-only")).toBe(true);
-  });
-
-  it("leaves the prompt alone for an unrestricted profile", () => {
-    expect(initialPromptWithNotice("Ship the feature.", [])).toBeUndefined();
-  });
-
-  it("does not invent a prompt for a create that had none, which would start a turn nobody asked for", () => {
-    expect(initialPromptWithNotice(undefined, profileDeniedTools({ kind: "read-only" }))).toBeUndefined();
-    expect(initialPromptWithNotice("   ", profileDeniedTools({ kind: "read-only" }))).toBeUndefined();
   });
 });

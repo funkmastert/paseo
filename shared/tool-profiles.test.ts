@@ -247,6 +247,22 @@ describe("applyToolProfile", () => {
     expect(() => applyToolProfile("nonsense", { kind: "read-only" })).not.toThrow();
     expect(applyToolProfile("nonsense", { kind: "read-only" })?.disallowedTools).toContain("Bash");
   });
+
+  it("writes the restriction notice into providerOptions.appendSystemPrompt", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" }, [], "you lost some tools");
+
+    expect(result?.appendSystemPrompt).toBe("you lost some tools");
+  });
+
+  it("appends the notice after anything the caller already set there, rather than replacing it", () => {
+    const result = applyToolProfile({ appendSystemPrompt: "caller's own note" }, { kind: "read-only" }, [], "notice");
+
+    expect(result?.appendSystemPrompt).toBe("caller's own note\n\nnotice");
+  });
+
+  it("writes no appendSystemPrompt key at all when nothing was denied and no notice was given", () => {
+    expect(applyToolProfile(undefined, { kind: "unrestricted" })).toBeUndefined();
+  });
 });
 
 describe("ToolProfileSchema", () => {

@@ -12,10 +12,21 @@ import { profileDeniedTools, type ToolProfileId } from "./tool-profiles";
  * agent burn 1.1M tokens working out it had no Edit/Write/Bash, and another
  * spend 387k spawning helpers that turned out to be just as disarmed.
  *
- * So a restricted agent is told, in its own initial prompt, three things:
+ * So a restricted agent is told, through its own system prompt, three things:
  * what is gone, that it is gone for good (not a permission prompt away), and
- * what to do instead. The notice is PREPENDED, never substituted — the task
- * the caller wrote is still the task.
+ * what to do instead. The notice travels as `providerOptions.appendSystemPrompt`
+ * — a Paseo-owned key (see the fork's `providers/claude/options.ts`) that
+ * `buildOptions()` folds into the SDK's single `systemPrompt.append` slot,
+ * after the agent's own `systemPrompt` and the daemon-wide
+ * `daemon.appendSystemPrompt`. It is NOT prepended to `initialPrompt`: a
+ * hook's mutation of `initialPrompt` is read-only context for the hook and is
+ * discarded by the daemon before the create resolves (the prompt was already
+ * sent independently) — see `agent-manager.ts`'s `createAgent`. That channel
+ * never reached the agent at all, which is how a `read-only` probe agent once
+ * burned five `ToolSearch` calls hunting for tools it never had, with no
+ * notice in sight. The system-prompt channel is also strictly better: it
+ * persists across every turn instead of only the first message, and needs no
+ * `initialPrompt` to attach to, so an interactive agent gets the notice too.
  *
  * Budget: this is paid on every restricted spawn, so the built-in notices are
  * hand-written to land around 80 tokens rather than generated from the deny
@@ -112,30 +123,4 @@ export function restrictionNotice(
     return `${BUILT_IN_NOTICE[kind] as string}${also}${inheritedSuffix}`;
   }
   return `${generatedNotice(denied)}${inheritedSuffix}`;
-}
-
-/**
- * The `initialPrompt` a restricted request should carry, or undefined when it
- * must not be touched.
- *
- * Undefined is returned both when there is nothing to say and when there is
- * no prompt to say it in. The second case is deliberate: setting
- * `initialPrompt` on a create that had none would hand the daemon a first
- * turn to run, turning an interactive agent a human is about to type into
- * one that starts talking to itself. A restricted interactive agent learns
- * its limits from its operator instead, who is by definition present.
- */
-export function initialPromptWithNotice(
-  initialPrompt: string | undefined,
-  denied: readonly string[],
-  options: RestrictionNoticeOptions = {},
-): string | undefined {
-  if (typeof initialPrompt !== "string" || initialPrompt.trim().length === 0) {
-    return undefined;
-  }
-  const notice = restrictionNotice(denied, options);
-  if (notice === undefined) {
-    return undefined;
-  }
-  return `${notice}\n\n${initialPrompt}`;
 }
