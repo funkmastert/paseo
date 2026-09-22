@@ -557,13 +557,19 @@ function resolveAgentMonitorConfig(
   persisted: PersistedConfig,
 ): Pick<
   PaseoDaemonConfig,
-  "tokenBurnMonitor" | "resourceMonitor" | "deviceLeases" | "accountFailover" | "budgetPacing"
+  | "tokenBurnMonitor"
+  | "resourceMonitor"
+  | "deviceLeases"
+  | "artifactJanitor"
+  | "accountFailover"
+  | "budgetPacing"
 > {
   const agents = persisted.agents;
   return {
     tokenBurnMonitor: agents?.tokenBurnMonitor,
     resourceMonitor: agents?.resourceMonitor,
     deviceLeases: agents?.deviceLeases,
+    artifactJanitor: agents?.artifactJanitor,
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
   };

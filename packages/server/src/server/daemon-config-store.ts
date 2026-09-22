@@ -26,6 +26,7 @@ interface SupportedMutableConfigPatch {
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
   deviceLeases?: MutableDaemonConfig["deviceLeases"];
+  artifactJanitor?: MutableDaemonConfig["artifactJanitor"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
@@ -204,6 +205,7 @@ const RELOADABLE_PATHS = [
   "agents.tokenBurnMonitor",
   "agents.resourceMonitor",
   "agents.deviceLeases",
+  "agents.artifactJanitor",
   "agents.accountFailover",
   "agents.budgetPacing",
   "agents.skills.selection",
@@ -240,6 +242,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.resourceMonitor", "resourceMonitor"],
   ["agents.deviceLeases", "deviceLeases"],
+  ["agents.artifactJanitor", "artifactJanitor"],
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
   ["agents.skills.selection", "skills.selection"],
@@ -322,6 +325,12 @@ function pickDeviceLeasesPatch(
   return deviceLeases === undefined ? {} : { deviceLeases };
 }
 
+function pickArtifactJanitorPatch(
+  artifactJanitor: MutableDaemonConfigPatch["artifactJanitor"],
+): Pick<SupportedMutableConfigPatch, "artifactJanitor"> {
+  return artifactJanitor === undefined ? {} : { artifactJanitor };
+}
+
 function pickAccountFailoverPatch(
   accountFailover: MutableDaemonConfigPatch["accountFailover"],
 ): Pick<SupportedMutableConfigPatch, "accountFailover"> {
@@ -361,6 +370,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickResourceMonitorPatch(patch.resourceMonitor),
     ...pickDeviceLeasesPatch(patch.deviceLeases),
+    ...pickArtifactJanitorPatch(patch.artifactJanitor),
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
     ...pickDiskSweeperPatch(patch.diskSweeper),
@@ -821,6 +831,23 @@ function mergeBudgetPacingForPersist(
   ) as PersistedBudgetPacing;
 }
 
+type PersistedArtifactJanitor = NonNullable<PersistedConfig["agents"]>["artifactJanitor"];
+
+// `diskGuard` is a nested block, so a shallow spread would drop the rest of it when a patch
+// names one of its keys — deepMerge, like resourceMonitor's `reaper`, not deviceLeases' flat one.
+function mergeArtifactJanitorForPersist(
+  persisted: PersistedArtifactJanitor,
+  patch: SupportedMutableConfigPatch["artifactJanitor"],
+): PersistedArtifactJanitor {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedArtifactJanitor;
+}
+
 type PersistedAccountFailover = NonNullable<PersistedConfig["agents"]>["accountFailover"];
 
 function mergeAccountFailoverForPersist(
@@ -891,11 +918,56 @@ function touchesAgentConfig(
     patch.tokenBurnMonitor !== undefined ||
     patch.resourceMonitor !== undefined ||
     patch.deviceLeases !== undefined ||
+    patch.artifactJanitor !== undefined ||
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
+}
+
+// The agents.* monitor sections, one merge each. Split out of mergeMutableAgentPatch so a new
+// monitor costs this list a line rather than that function another branch.
+function mergeMonitorSectionsForPersist(
+  next: Record<string, unknown>,
+  persistedAgents: PersistedConfig["agents"],
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+): void {
+  const tokenBurnMonitor = mergeTokenBurnMonitorForPersist(
+    persistedAgents?.tokenBurnMonitor,
+    patch.tokenBurnMonitor,
+  );
+  if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
+
+  const resourceMonitor = mergeResourceMonitorForPersist(
+    persistedAgents?.resourceMonitor,
+    patch.resourceMonitor,
+  );
+  if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
+
+  const deviceLeases = mergeDeviceLeasesForPersist(
+    persistedAgents?.deviceLeases,
+    patch.deviceLeases,
+  );
+  if (deviceLeases !== undefined) next["deviceLeases"] = deviceLeases;
+
+  const artifactJanitor = mergeArtifactJanitorForPersist(
+    persistedAgents?.artifactJanitor,
+    patch.artifactJanitor,
+  );
+  if (artifactJanitor !== undefined) next["artifactJanitor"] = artifactJanitor;
+
+  const accountFailover = mergeAccountFailoverForPersist(
+    persistedAgents?.accountFailover,
+    patch.accountFailover,
+  );
+  if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
+
+  const budgetPacing = mergeBudgetPacingForPersist(
+    persistedAgents?.budgetPacing,
+    patch.budgetPacing,
+  );
+  if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
 }
 
 function mergeMutableAgentPatch(
@@ -926,35 +998,7 @@ function mergeMutableAgentPatch(
   );
   if (metadataGeneration !== undefined) next["metadataGeneration"] = metadataGeneration;
 
-  const tokenBurnMonitor = mergeTokenBurnMonitorForPersist(
-    persistedAgents?.tokenBurnMonitor,
-    patch.tokenBurnMonitor,
-  );
-  if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
-
-  const resourceMonitor = mergeResourceMonitorForPersist(
-    persistedAgents?.resourceMonitor,
-    patch.resourceMonitor,
-  );
-  if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
-
-  const deviceLeases = mergeDeviceLeasesForPersist(
-    persistedAgents?.deviceLeases,
-    patch.deviceLeases,
-  );
-  if (deviceLeases !== undefined) next["deviceLeases"] = deviceLeases;
-
-  const accountFailover = mergeAccountFailoverForPersist(
-    persistedAgents?.accountFailover,
-    patch.accountFailover,
-  );
-  if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
-
-  const budgetPacing = mergeBudgetPacingForPersist(
-    persistedAgents?.budgetPacing,
-    patch.budgetPacing,
-  );
-  if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
+  mergeMonitorSectionsForPersist(next, persistedAgents, patch);
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

@@ -223,6 +223,33 @@ const MutableDeviceLeasesConfigSchema = z
 
 const MutableDeviceLeasesPatchSchema = MutableDeviceLeasesConfigSchema;
 
+// Live-toggleable like deviceLeases above — same mutable/patch split, same reason, and the same
+// need: this one deletes files, so turning the dry run on and reading what it would have taken
+// must not require restarting a daemon that is running everybody's agents.
+// See docs/artifact-janitor.md.
+const MutableArtifactJanitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    minAgeHours: z.number().positive().optional(),
+    minSweeps: z.number().int().positive().optional(),
+    obligationGraceMinutes: z.number().positive().optional(),
+    obligationTtlHours: z.number().positive().optional(),
+    maxPerSweep: z.number().int().positive().optional(),
+    maxBytesPerSweep: z.number().positive().optional(),
+    diskGuard: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        minFreeBytes: z.number().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableArtifactJanitorPatchSchema = MutableArtifactJanitorConfigSchema;
+
 // Live-toggleable like tokenBurnMonitor/resourceMonitor above — same mutable/patch split, same
 // reason. See docs/account-failover.md.
 const MutableAccountFailoverConfigSchema = z
@@ -443,6 +470,8 @@ export const MutableDaemonConfigSchema = z
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
     // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
     deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
+    // COMPAT(artifactJanitor): added in v0.8.2, remove nothing — additive optional config.
+    artifactJanitor: MutableArtifactJanitorConfigSchema.optional(),
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
@@ -472,6 +501,7 @@ export const MutableDaemonConfigPatchSchema = z
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
     deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
+    artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),

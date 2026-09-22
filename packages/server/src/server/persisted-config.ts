@@ -318,6 +318,31 @@ const AgentDeviceLeasesSchema = z
   })
   .strict();
 
+// Off by default like the reaper and the device cap it is modelled on, and every key optional:
+// a daemon that has never heard of this block behaves exactly as it does today. Deletion is
+// gated on `enabled`; the disk guard is its own opt-in because refusing a launch removes
+// nothing. See docs/artifact-janitor.md.
+const AgentArtifactJanitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    minAgeHours: z.number().positive().optional(),
+    minSweeps: z.number().int().positive().optional(),
+    obligationGraceMinutes: z.number().positive().optional(),
+    obligationTtlHours: z.number().positive().optional(),
+    maxPerSweep: z.number().int().positive().optional(),
+    maxBytesPerSweep: z.number().positive().optional(),
+    diskGuard: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        minFreeBytes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 // Live-toggleable like agents.tokenBurnMonitor/resourceMonitor above — same mutable/patch
 // split, same reason. See docs/account-failover.md.
 const AgentAccountFailoverSchema = z
@@ -517,6 +542,7 @@ export const PersistedConfigSchema = z
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
         deviceLeases: AgentDeviceLeasesSchema.optional(),
+        artifactJanitor: AgentArtifactJanitorSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),

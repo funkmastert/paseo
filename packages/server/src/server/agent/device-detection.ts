@@ -174,3 +174,64 @@ export function countDevicesByPlatform(
     android: devices.filter((device) => device.platform === "android").length,
   };
 }
+
+/**
+ * Every simulator UDID mentioned by any process in the sample, and — when the process is a
+ * `launchd_sim` — the device set its data directory lives in.
+ *
+ * This exists for the artifact janitor, which has to prove a simulator directory is abandoned
+ * before it deletes it, and it is deliberately far broader than `detectRunningDevices` above.
+ * That function answers "how many devices are running", so it matches argv[0] and one shape.
+ * This one answers "could anything on this machine still care about this UDID", so anything
+ * naming it counts: the `xcodebuild` mid-run, the `testmanagerd` talking to it, a `simctl`
+ * subprocess, a shell whose cwd flag carries the path. A false positive here costs one sweep of
+ * patience. A false negative costs somebody their simulator.
+ *
+ * `detectRunningDevices` cannot answer this on its own for the case that matters most: its
+ * pattern requires the literal path segment `/Devices/`, and a test clone lives under
+ * `/XCTestDevices/`, which does not contain it. A booted clone is therefore invisible to the
+ * device cap's count — see docs/artifact-janitor.md, which says why that is left alone here.
+ */
+export interface DeviceIdReference {
+  /**
+   * Set when a `launchd_sim` process owns this UDID's data directory — the device is booted.
+   * The value is the device set root the directory sits in, so a janitor scoped to one set can
+   * tell "booted, in my set" from "booted, somewhere else".
+   */
+  bootedInSetRoot?: string;
+  /** Every pid whose command line names the UDID, booted or not. */
+  pids: number[];
+}
+
+/**
+ * A booted device's `launchd_sim` argv ends in
+ * `<set root>/<UDID>/data/var/run/launchd_bootstrap.plist`, which is the only place the set root
+ * appears in a process listing at all. Anchored on the `/data/` structure rather than on the
+ * set directory's name, because the name is `Devices` for the default set, `XCTestDevices` for
+ * test clones, and anything at all for a set created with `simctl --set`.
+ */
+const DEVICE_DATA_PATH =
+  /(\/.*?)\/([0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})\/data\/var\/run\//;
+const ANY_DEVICE_UDID = /[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}/g;
+
+export function collectDeviceIdReferences(
+  rows: readonly ProcessSampleRow[],
+): Map<string, DeviceIdReference> {
+  const references = new Map<string, DeviceIdReference>();
+  const record = (deviceId: string, pid: number, setRoot?: string) => {
+    const existing = references.get(deviceId) ?? { pids: [] };
+    if (!existing.pids.includes(pid)) existing.pids.push(pid);
+    if (setRoot !== undefined) existing.bootedInSetRoot = setRoot;
+    references.set(deviceId, existing);
+  };
+
+  for (const row of rows) {
+    for (const match of row.command.matchAll(ANY_DEVICE_UDID)) {
+      record(match[0].toUpperCase(), row.pid);
+    }
+    if (basename(row.command.split(/\s+/)[0] ?? "") !== SIMULATOR_PROCESS) continue;
+    const booted = DEVICE_DATA_PATH.exec(row.command);
+    if (booted) record(booted[2].toUpperCase(), row.pid, booted[1]);
+  }
+  return references;
+}

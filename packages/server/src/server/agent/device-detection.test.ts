@@ -1,5 +1,9 @@
 import { describe, expect, test } from "vitest";
-import { countDevicesByPlatform, detectRunningDevices } from "./device-detection.js";
+import {
+  collectDeviceIdReferences,
+  countDevicesByPlatform,
+  detectRunningDevices,
+} from "./device-detection.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
 function row(
@@ -109,5 +113,54 @@ describe("detectRunningDevices", () => {
     });
 
     expect(countDevicesByPlatform(devices)).toEqual({ ios: 2, android: 1 });
+  });
+});
+
+// A test clone lives in a second device set. Taken from CoreSimulator's own log on Tyler's
+// machine: `…/XCTestDevices/<UDID>/data`, created as "Clone 3 of iPhone 16 Pro".
+const XCTEST_CLONE_UDID = "1C56B10C-38C1-4547-ABDA-D36412FF01CA";
+const XCTEST_CLONE_ROOT = "/Users/tylerthackray/Library/Developer/XCTestDevices";
+const LAUNCHD_SIM_CLONE = `launchd_sim ${XCTEST_CLONE_ROOT}/${XCTEST_CLONE_UDID}/data/var/run/launchd_bootstrap.plist`;
+
+describe("collectDeviceIdReferences", () => {
+  test("reports the device set a booted simulator's data directory lives in", () => {
+    const references = collectDeviceIdReferences([row({ pid: 1, command: LAUNCHD_SIM_A })]);
+    expect(references.get("A0A912ED-C766-4778-957C-F9680C7309F3")).toEqual({
+      bootedInSetRoot: "/Users/tylerthackray/Library/Developer/CoreSimulator/Devices",
+      pids: [1],
+    });
+  });
+
+  test("sees a booted test clone, which detectRunningDevices cannot", () => {
+    const rows = [row({ pid: 1, command: LAUNCHD_SIM_CLONE })];
+    // The count's pattern needs the literal path segment `/Devices/`, and `/XCTestDevices/`
+    // does not contain it — see the janitor doc on why the count is left alone.
+    expect(detectRunningDevices({ rows, agentTrees: [] })).toEqual([]);
+    expect(collectDeviceIdReferences(rows).get(XCTEST_CLONE_UDID)).toEqual({
+      bootedInSetRoot: XCTEST_CLONE_ROOT,
+      pids: [1],
+    });
+  });
+
+  test("reports a UDID any process merely names, with no set root", () => {
+    const references = collectDeviceIdReferences([
+      row({
+        pid: 7,
+        command: `/usr/bin/xcodebuild test -destination platform=iOS Simulator,id=${XCTEST_CLONE_UDID}`,
+      }),
+    ]);
+    expect(references.get(XCTEST_CLONE_UDID)).toEqual({ pids: [7] });
+  });
+
+  test("normalizes case and collects every pid that names a UDID", () => {
+    const references = collectDeviceIdReferences([
+      row({ pid: 1, command: LAUNCHD_SIM_CLONE }),
+      row({ pid: 2, command: `xcrun simctl --set X launch ${XCTEST_CLONE_UDID.toLowerCase()}` }),
+    ]);
+    expect(references.get(XCTEST_CLONE_UDID)?.pids).toEqual([1, 2]);
+  });
+
+  test("reports nothing for a sample with no UDIDs in it", () => {
+    expect(collectDeviceIdReferences([row({ pid: 1, command: EMULATOR_LAUNCHER })]).size).toBe(0);
   });
 });

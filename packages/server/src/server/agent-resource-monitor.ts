@@ -2,6 +2,7 @@ import type { ResourceAlert } from "@getpaseo/protocol/agent-types";
 import {
   buildBatchedResourceNotificationPayload,
   buildResourceAgentNotificationPayload,
+  buildArtifactJanitorNotificationPayload,
   buildResourceBuildDaemonReapNotificationPayload,
   buildResourceOrphanBuildDaemonsNotificationPayload,
   buildResourceSystemMemoryNotificationPayload,
@@ -27,6 +28,7 @@ import {
 } from "./agent/build-daemon-reaper.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
 import { detectRunningDevices, type RunningDevice } from "./agent/device-detection.js";
+import type { TestArtifactSweepResult } from "./agent/test-artifact-janitor.js";
 import { withRecentCpuPercent, type CpuRateMemory } from "./agent/process-cpu-rate.js";
 import type { OrphanBuildDaemonSummary } from "./agent/process-attribution.js";
 import type {
@@ -123,6 +125,16 @@ export interface AgentResourceMonitorOptions {
     devices: RunningDevice[];
     systemMemory: SystemMemorySample | undefined;
   }) => Promise<void>;
+  /**
+   * Hands the artifact janitor (docs/artifact-janitor.md) this sweep's `ps` rows and returns
+   * whatever it reclaimed. A sibling like the device cap, not a leg: the janitor decides
+   * everything itself and only needs the scan and the cadence. Its result is pushed here rather
+   * than by the janitor, so every "something was removed automatically" report in the daemon
+   * goes out through one path.
+   */
+  sweepTestArtifacts?: (input: {
+    rows: readonly ProcessSampleRow[];
+  }) => Promise<TestArtifactSweepResult>;
 }
 
 interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
@@ -234,6 +246,7 @@ export class AgentResourceMonitor {
   private readonly ownerUid: number | undefined;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly reportDeviceSample: AgentResourceMonitorOptions["reportDeviceSample"];
+  private readonly sweepTestArtifacts: AgentResourceMonitorOptions["sweepTestArtifacts"];
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -261,6 +274,7 @@ export class AgentResourceMonitor {
     this.sleep = options.sleep ?? defaultSleep;
     this.reportDeviceSample = options.reportDeviceSample;
     this.modeLog = new MonitorModeLog(options.logger);
+    this.sweepTestArtifacts = options.sweepTestArtifacts;
   }
 
   start(): void {
@@ -349,6 +363,38 @@ export class AgentResourceMonitor {
     // Runs on its own criteria, not off the orphan alert's threshold: an abandoned daemon sitting
     // on 800 MB is worth reclaiming even though the machine-level leg only fires at 2 GiB.
     await this.reapAbandonedBuildDaemons(cpu.rows, attribution.agentTrees, config.reaper, nowMs);
+    await this.reclaimTestArtifacts(cpu.rows);
+  }
+
+  /**
+   * Never lets the janitor's bookkeeping break a sweep, for the same reason the device cap
+   * cannot: this monitor's own legs have already run by here, and a failed disk scan must not
+   * cost the next one.
+   */
+  private async reclaimTestArtifacts(rows: readonly ProcessSampleRow[]): Promise<void> {
+    if (!this.sweepTestArtifacts) return;
+    let result: TestArtifactSweepResult;
+    try {
+      result = await this.sweepTestArtifacts({ rows });
+    } catch (error) {
+      this.logger.warn({ err: error }, "Artifact janitor sweep failed");
+      return;
+    }
+    if (result.reclaimed.length === 0) return;
+    await this.sendPush(
+      buildArtifactJanitorNotificationPayload({
+        serverId: this.serverId,
+        dryRun: result.dryRun,
+        artifacts: result.reclaimed.map((artifact) => ({
+          label: artifact.label,
+          name: artifact.name,
+          path: artifact.path,
+          sizeBytes: artifact.sizeBytes,
+          ageMs: artifact.ageMs,
+          claim: artifact.claim,
+        })),
+      }),
+    );
   }
 
   /** Never lets the cap's bookkeeping break a sweep: this monitor's own legs come first. */

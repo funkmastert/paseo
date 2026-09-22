@@ -351,6 +351,7 @@ describe("paseo daemon bootstrap", () => {
       agents: {
         resourceMonitor: { reaper: { enabled: true, dryRun: true } },
         deviceLeases: { enabled: true, dryRun: true, pendingTtlMinutes: 25 },
+        artifactJanitor: { enabled: true, dryRun: true, diskGuard: { enabled: true } },
         tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
@@ -389,6 +390,7 @@ describe("paseo daemon bootstrap", () => {
       const booted = (await client.getDaemonConfig()).config;
       expect(booted.resourceMonitor).toEqual(bootPersisted.agents.resourceMonitor);
       expect(booted.deviceLeases).toEqual(bootPersisted.agents.deviceLeases);
+      expect(booted.artifactJanitor).toEqual(bootPersisted.agents.artifactJanitor);
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
@@ -406,6 +408,7 @@ describe("paseo daemon bootstrap", () => {
         agents: {
           resourceMonitor: { reaper: { enabled: true, dryRun: false } },
           deviceLeases: { enabled: false },
+          artifactJanitor: { enabled: true, dryRun: false },
           tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
@@ -416,6 +419,7 @@ describe("paseo daemon bootstrap", () => {
 
       expect(result.appliedPaths).toEqual([
         "agents.accountFailover",
+        "agents.artifactJanitor",
         "agents.budgetPacing",
         "agents.deviceLeases",
         "agents.resourceMonitor",
@@ -423,6 +427,7 @@ describe("paseo daemon bootstrap", () => {
       const reloaded = (await client.getDaemonConfig()).config;
       expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
       expect(reloaded.deviceLeases).toEqual(reloadedPersisted.agents.deviceLeases);
+      expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
       expect(monitorModes()).toMatchObject({
