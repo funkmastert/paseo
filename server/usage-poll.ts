@@ -1,3 +1,4 @@
+import type { AccountIdentity } from "./account-identity";
 import type { HealthTracker } from "./health";
 import { createIntervalPoller } from "./interval-poller";
 import { detectModelFamily, weeklyModelWindow } from "./windows";
@@ -34,6 +35,12 @@ export interface UsagePollerOptions {
   setIntervalFn?: typeof setInterval;
   /** Injectable for tests; defaults to the global clearInterval. */
   clearIntervalFn?: typeof clearInterval;
+  /**
+   * Fed the same normalized readings as the tracker, so two provider entries on one Claude
+   * login can be recognized as one account (see account-identity.ts). Optional — without it
+   * every entry counts as its own account.
+   */
+  accountIdentity?: Pick<AccountIdentity, "reportUsage">;
 }
 
 export interface UsagePoller {
@@ -94,6 +101,7 @@ export function createUsagePoller(tracker: HealthTracker, options: UsagePollerOp
           resetsAt: window.resetsAt ? new Date(window.resetsAt) : null,
         }));
         tracker.reportUsage(provider.providerId, readings);
+        options.accountIdentity?.reportUsage(provider.providerId, readings);
       }
     },
   });
