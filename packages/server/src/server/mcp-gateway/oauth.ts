@@ -100,13 +100,18 @@ export function createGatewayOAuthClientProvider(
 ): OAuthClientProvider {
   const { serverName, tokenStore, stateStore, redirectUrl, onRedirect } = options;
 
+  // A hand-registered app may name its own redirect URI; the SDK sends this one in both the
+  // authorization request and the code exchange, so the two always agree.
+  const resolveRedirectUrl = (): string =>
+    tokenStore.getClientCredentials(serverName)?.redirectUrl ?? redirectUrl;
+
   return {
     get redirectUrl(): string {
-      return redirectUrl;
+      return resolveRedirectUrl();
     },
     get clientMetadata(): OAuthClientMetadata {
       return {
-        redirect_uris: [redirectUrl],
+        redirect_uris: [resolveRedirectUrl()],
         client_name: "Paseo MCP Gateway",
         grant_types: ["authorization_code", "refresh_token"],
         response_types: ["code"],
@@ -183,7 +188,10 @@ export async function startMcpGatewayAuthorization(params: {
   /** Named in the same error: the file the operator writes the client credentials into. */
   credentialsPath: string;
   provider: OAuthClientProvider;
-  /** Overrides the SDK's own scope choice; see `resolveOfflineAccessScope`. */
+  /**
+   * Overrides the SDK's own scope choice, which is the resource's `scopes_supported`: a
+   * hand-registered app's `scope`, else `resolveOfflineAccessScope`.
+   */
   scope?: string;
 }): Promise<StartMcpGatewayAuthResult> {
   let capturedUrl: URL | undefined;

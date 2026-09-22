@@ -350,6 +350,19 @@ export const MutableMcpGatewayServerConfigSchema = z
   })
   .passthrough();
 
+// A server the daemon runs itself as a stdio subprocess and brokers like a remote one, so a
+// credential held once in the daemon's token store serves every account (docs/mcp-gateway.md
+// "Local servers"). Its env — where credentials go — lives in the token store, never here.
+// `auth: "static"` means it needs that stored env and waits in needs-auth until it exists.
+export const MutableMcpGatewayLocalServerConfigSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    critical: z.boolean().optional(),
+    auth: z.literal("static").optional(),
+  })
+  .passthrough();
+
 // How brokered servers reach Claude sessions (docs/mcp-gateway.md "Session injection").
 // `overlay` adds the brokered entries next to whatever the CLI loads itself; `strict` also sets
 // strictMcpConfig, suppressing every per-dir definition — including claude.ai connectors, which
@@ -361,6 +374,7 @@ export const MutableMcpGatewayConfigSchema = z
     enabled: z.boolean().optional(),
     sessionMode: McpGatewaySessionModeSchema.optional(),
     servers: z.record(z.string(), MutableMcpGatewayServerConfigSchema).optional(),
+    localServers: z.record(z.string(), MutableMcpGatewayLocalServerConfigSchema).optional(),
   })
   .passthrough();
 
@@ -374,6 +388,9 @@ const MutableMcpGatewayPatchSchema = z
     enabled: z.boolean().optional(),
     sessionMode: McpGatewaySessionModeSchema.optional(),
     servers: z.record(z.string(), MutableMcpGatewayServerPatchSchema).optional(),
+    localServers: z
+      .record(z.string(), MutableMcpGatewayLocalServerConfigSchema.partial())
+      .optional(),
   })
   .passthrough();
 
@@ -538,6 +555,9 @@ export type MutableDaemonConfig = z.infer<typeof MutableDaemonConfigSchema>;
 export type MutableDaemonConfigPatch = z.infer<typeof MutableDaemonConfigPatchSchema>;
 export type MutableMcpGatewayConfig = z.infer<typeof MutableMcpGatewayConfigSchema>;
 export type MutableMcpGatewayServerConfig = z.infer<typeof MutableMcpGatewayServerConfigSchema>;
+export type MutableMcpGatewayLocalServerConfig = z.infer<
+  typeof MutableMcpGatewayLocalServerConfigSchema
+>;
 export type McpGatewaySessionMode = z.infer<typeof McpGatewaySessionModeSchema>;
 import type {
   AgentCapabilityFlags,

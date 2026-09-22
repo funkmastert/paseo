@@ -42,4 +42,20 @@ describe("daemon MCP gateway config", () => {
 
     expect(loadConfig(home, { env: {} }).mcpGateway).toEqual(mcpGateway);
   });
+
+  test("carries local servers, which a stdio command defines instead of a URL", async () => {
+    const mcpGateway = {
+      enabled: true,
+      localServers: {
+        figma: {
+          command: "/usr/local/bin/node",
+          args: ["/opt/figma-mcp/bin.js", "--stdio"],
+          auth: "static",
+        },
+      },
+    };
+    const home = await createPaseoHome({ version: 1, mcpGateway });
+
+    expect(loadConfig(home, { env: {} }).mcpGateway).toEqual(mcpGateway);
+  });
 });
