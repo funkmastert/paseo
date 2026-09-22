@@ -258,6 +258,7 @@ const MutableAccountFailoverConfigSchema = z
     migrateSubagents: z.boolean().optional(),
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
+    collapseToSharedAccount: z.boolean().optional(),
   })
   .passthrough();
 
