@@ -1345,6 +1345,17 @@ export const fr: TranslationResources = {
         title: "Laisser le démon fonctionner après avoir quitté",
         hint: "Daemoncontinue de fonctionner lorsque vous quittezBozeo",
       },
+      keepAwake: {
+        title: "Garder le Mac éveillé",
+        hint: "Empêche le Mac de se mettre en veille tant que Bozeo est ouvert, pour que les agents continuent de tourner",
+      },
+      keepDisplayAwake: {
+        title: "Garder l’écran allumé",
+        hint: "Un écran allumé vide la batterie plus vite",
+        always: "Toujours",
+        onPowerAdapter: "Sur secteur",
+        never: "Jamais",
+      },
       logs: {
         title: "Fichier journal",
         modalTitle: "JournauxDaemon",

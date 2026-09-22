@@ -86,6 +86,7 @@ describe("desktop-settings", () => {
         manageBuiltInDaemon: true,
         keepRunningAfterQuit: false,
       },
+      power: DEFAULT_DESKTOP_SETTINGS.power,
     });
   });
 
@@ -108,6 +109,7 @@ describe("desktop-settings", () => {
         manageBuiltInDaemon: true,
         keepRunningAfterQuit: false,
       },
+      power: DEFAULT_DESKTOP_SETTINGS.power,
     });
     expect(files).toEqual(["desktop-settings.json"]);
   });
@@ -256,6 +258,7 @@ describe("desktop-settings", () => {
       daemon: {
         keepRunningAfterQuit: false,
       },
+      power: DEFAULT_DESKTOP_SETTINGS.power,
     });
 
     const migrated = await store.migrateLegacyRendererSettings({
@@ -275,8 +278,53 @@ describe("desktop-settings", () => {
         manageBuiltInDaemon: false,
         keepRunningAfterQuit: false,
       },
+      power: DEFAULT_DESKTOP_SETTINGS.power,
     });
     expect(ignoredSecondMigration).toEqual(migrated);
+  });
+
+  it("patches the keep-awake settings and ignores invalid display values", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.add(userDataPath);
+    const store = createDesktopSettingsStore({ userDataPath });
+
+    const next = await store.patch({
+      power: { keepAwake: false, keepDisplayAwake: "on-power-adapter" },
+    });
+    const ignored = await store.patch({ power: { keepDisplayAwake: "sometimes" } });
+
+    expect(next.power).toEqual({ keepAwake: false, keepDisplayAwake: "on-power-adapter" });
+    expect(ignored.power).toEqual(next.power);
+  });
+
+  it("coerces an invalid persisted keep-awake setting back to its default", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.add(userDataPath);
+    await writeFile(
+      settingsFilePath(userDataPath),
+      JSON.stringify({
+        version: 1,
+        settings: { power: { keepAwake: false, keepDisplayAwake: "dim" } },
+        migrations: { legacyRendererSettingsImported: true, daemonStopOnQuitDefaultApplied: true },
+      }),
+    );
+    const store = createDesktopSettingsStore({ userDataPath });
+
+    expect((await store.get()).power).toEqual({ keepAwake: false, keepDisplayAwake: "always" });
+  });
+
+  it("tells subscribers about each patch until they unsubscribe", async () => {
+    const userDataPath = await createTempUserDataDir();
+    directories.add(userDataPath);
+    const store = createDesktopSettingsStore({ userDataPath });
+    const seen: DesktopSettings[] = [];
+
+    const unsubscribe = store.subscribe((settings) => seen.push(settings));
+    await store.patch({ power: { keepAwake: false } });
+    unsubscribe();
+    await store.patch({ power: { keepAwake: true } });
+
+    expect(seen.map((settings) => settings.power.keepAwake)).toEqual([false]);
   });
 
   it("keeps keys written by another build across a patch", async () => {
@@ -317,6 +365,7 @@ describe("desktop-settings", () => {
       releaseChannel: "beta",
       notifications: { playSound: false },
       daemon: { manageBuiltInDaemon: true, keepRunningAfterQuit: false },
+      power: DEFAULT_DESKTOP_SETTINGS.power,
     });
   });
 

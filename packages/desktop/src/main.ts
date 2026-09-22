@@ -86,6 +86,7 @@ import {
   type OwnedDesktopWindow,
 } from "./window/desktop-window-owner.js";
 import { getDesktopSettingsStore } from "./settings/desktop-settings-electron.js";
+import { startKeepAwake } from "./system/keep-awake-electron.js";
 import { clampWindowStateToWorkAreas, createWindowStateStore } from "./settings/window-state.js";
 import {
   isDesktopManagedDaemonRunningSync,
@@ -959,6 +960,9 @@ async function bootstrap(): Promise<void> {
   });
   ensureNotificationCenterRegistration();
   registerDaemonManager();
+  if (process.platform === "darwin") {
+    startKeepAwake({ settingsStore: getDesktopSettingsStore() });
+  }
   registerWindowManager({ mode: DESKTOP_WINDOW_CHROME_MODE });
   registerDialogHandlers();
   registerNotificationHandlers();

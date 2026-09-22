@@ -1311,6 +1311,17 @@ export const ar: TranslationResources = {
         title: "استمر في تشغيل البرنامج الخفي بعد الإقلاع عن التدخين",
         hint: "يستمر تشغيل Daemon عند إنهاء Bozeo",
       },
+      keepAwake: {
+        title: "إبقاء جهاز Mac مستيقظًا",
+        hint: "يمنع جهاز Mac من السكون أثناء فتح Bozeo حتى يستمر عمل الوكلاء",
+      },
+      keepDisplayAwake: {
+        title: "إبقاء الشاشة مضاءة",
+        hint: "الشاشة المضاءة تستنزف البطارية أسرع",
+        always: "دائمًا",
+        onPowerAdapter: "عند الشحن",
+        never: "أبدًا",
+      },
       logs: {
         title: "ملف السجل",
         modalTitle: "سجلات Daemon",

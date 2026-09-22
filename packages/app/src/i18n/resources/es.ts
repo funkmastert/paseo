@@ -1345,6 +1345,17 @@ export const es: TranslationResources = {
         title: "Mantener el demonio en ejecución después de salir",
         hint: "Daemonsigue ejecutándose cuando sales deBozeo",
       },
+      keepAwake: {
+        title: "Mantener el Mac despierto",
+        hint: "Evita que el Mac entre en reposo mientras Bozeo está abierto, para que los agentes sigan funcionando",
+      },
+      keepDisplayAwake: {
+        title: "Mantener la pantalla encendida",
+        hint: "Una pantalla encendida agota la batería más rápido",
+        always: "Siempre",
+        onPowerAdapter: "Con corriente",
+        never: "Nunca",
+      },
       logs: {
         title: "Archivo de registro",
         modalTitle: "RegistrosDaemon",

@@ -1328,6 +1328,17 @@ export const ru: TranslationResources = {
         title: "Продолжать работу демона после выхода",
         hint: "Демон продолжит работать после выхода из Bozeo",
       },
+      keepAwake: {
+        title: "Не давать Mac засыпать",
+        hint: "Mac не уходит в сон, пока открыт Bozeo, и агенты продолжают работать",
+      },
+      keepDisplayAwake: {
+        title: "Не выключать дисплей",
+        hint: "Включённый дисплей быстрее разряжает батарею",
+        always: "Всегда",
+        onPowerAdapter: "От сети",
+        never: "Никогда",
+      },
       logs: {
         title: "Файл журнала",
         modalTitle: "Журналы демона",
