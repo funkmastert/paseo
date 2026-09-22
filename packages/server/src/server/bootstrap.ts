@@ -1418,6 +1418,8 @@ export async function createPaseoDaemon(
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       resolveFirstAgentPromptTitle(firstAgentContext),
+      undefined,
+      { titleSource: "auto" },
     );
     if (firstAgentContext) {
       workspaceAutoName.scheduleForDirectory({
@@ -1691,6 +1693,8 @@ export async function createPaseoDaemon(
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       input.cwd,
       resolveFirstAgentPromptTitle(input.firstAgentContext),
+      undefined,
+      { titleSource: "auto" },
     );
     workspaceAutoName.scheduleForDirectory({
       workspaceId: workspace.workspaceId,
@@ -1800,6 +1804,8 @@ export async function createPaseoDaemon(
         cwd,
         title,
         projectId,
+        // The caller named it deliberately; the tracker leaves it alone.
+        title ? { titleSource: "manual" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;

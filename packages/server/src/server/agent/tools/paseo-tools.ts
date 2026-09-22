@@ -2262,6 +2262,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       await options.workspaceRegistry.upsert({
         ...existing,
         title,
+        // A deliberate rename, so the workspace-title tracker stops touching it.
+        titleSource: "manual",
         updatedAt: new Date().toISOString(),
       });
       await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);

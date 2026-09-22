@@ -62,6 +62,12 @@ const PersistedWorkspaceRecordSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  // COMPAT(workspaceTitleSource): added in v0.2.7, remove optional parsing after 2027-03-31.
+  // Who last named this workspace. "auto" means Paseo generated the title and may
+  // regenerate it; "manual" means a human (or an agent acting for one) chose it.
+  // Absent is a record written before provenance was tracked — see isAutoTitledWorkspace,
+  // which reads it as hand-set.
+  titleSource: z.enum(["auto", "manual"]).optional(),
   // The worktree's git branch. Decoupled from displayName/title by construction:
   // displayName holds the human name (title), branch holds the git branch. Only
   // worktree workspaces carry a branch; directory/local_checkout leave it null.
@@ -106,6 +112,19 @@ const PersistedWorkspaceRecordSchema = z.object({
 
 export type PersistedProjectRecord = z.infer<typeof PersistedProjectRecordSchema>;
 export type PersistedWorkspaceRecord = z.infer<typeof PersistedWorkspaceRecordSchema>;
+export type WorkspaceTitleSource = NonNullable<PersistedWorkspaceRecord["titleSource"]>;
+
+/**
+ * Whether Paseo may rewrite this workspace's title. Only a title Paseo itself
+ * generated is fair game. An absent titleSource is a record written before
+ * provenance existed, and silently renaming something the user named is worse
+ * than leaving a stale name, so unknown reads as hand-set.
+ */
+export function isAutoTitledWorkspace(
+  record: Pick<PersistedWorkspaceRecord, "titleSource">,
+): boolean {
+  return record.titleSource === "auto";
+}
 
 export interface WorkspaceMutation {
   kind: "upsert" | "archive" | "remove";
@@ -672,6 +691,7 @@ export function createPersistedWorkspaceRecord(input: {
   kind: PersistedWorkspaceKind;
   displayName: string;
   title?: string | null;
+  titleSource?: WorkspaceTitleSource;
   branch?: string | null;
   worktreeRoot?: string | null;
   baseBranch?: string | null;
