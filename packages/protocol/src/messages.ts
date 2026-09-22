@@ -258,6 +258,13 @@ const MutableAccountFailoverConfigSchema = z
     migrateSubagents: z.boolean().optional(),
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
+    // COMPAT(accountFailoverReturn): added in v0.8.3 — additive optional config, nothing to remove.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
   })
   .passthrough();
 
