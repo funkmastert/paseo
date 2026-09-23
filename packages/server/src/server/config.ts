@@ -564,6 +564,7 @@ function resolveAgentMonitorConfig(
   | "accountFailover"
   | "budgetPacing"
   | "doneJanitor"
+  | "daemonVitals"
 > {
   const agents = persisted.agents;
   return {
@@ -574,6 +575,7 @@ function resolveAgentMonitorConfig(
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
     doneJanitor: agents?.doneJanitor,
+    daemonVitals: agents?.daemonVitals,
   };
 }
 

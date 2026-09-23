@@ -420,6 +420,22 @@ const AgentDoneJanitorSchema = z
   })
   .strict();
 
+// Read once at boot; relaunch to change it. Off unless `enabled` says otherwise, and a dry run
+// unless `dryRun` is false. `shutdownReceipt` is the exception: on unless it is false. See
+// docs/daemon-vitals.md.
+const AgentDaemonVitalsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    tickMs: z.number().int().positive().optional(),
+    slowStallMs: z.number().int().positive().optional(),
+    wedgeMs: z.number().int().positive().optional(),
+    suspendMs: z.number().int().positive().optional(),
+    slowOpThresholdMs: z.number().int().positive().optional(),
+    shutdownReceipt: z.boolean().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -574,6 +590,7 @@ export const PersistedConfigSchema = z
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
+        daemonVitals: AgentDaemonVitalsSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
