@@ -283,6 +283,7 @@ export const ptBR: TranslationResources = {
       failed: "Com erro",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muito alto",
+      modelDiverged: "Modelo diferente",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {

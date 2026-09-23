@@ -280,6 +280,7 @@ export const zhCN: TranslationResources = {
       failed: "失败",
       tokenBurnWarning: "消耗较高",
       tokenBurnDanger: "消耗过高",
+      modelDiverged: "模型不符",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 共 {{total}}",
     archiveSheet: {

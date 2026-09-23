@@ -171,6 +171,15 @@ const MutableTokenBurnMonitorConfigSchema = z
     totalTokens: z.number().positive().optional(),
     scope: z.enum(["all", "topLevelOnly"]).optional(),
     breachBatchThreshold: z.number().int().positive().optional(),
+    // Additive, optional: read by the daemon's model-divergence monitor, off unless `enabled`.
+    modelDivergence: z
+      .object({
+        enabled: z.boolean().optional(),
+        persistResponses: z.number().int().positive().optional(),
+        persistSeconds: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
@@ -579,6 +588,7 @@ import type {
   AgentTokenRate,
   AgentUsage,
   JsonValue,
+  ModelDivergenceAlert,
   TokenBurnAlert,
   ResourceAlert,
 } from "./agent-types.js";
@@ -738,6 +748,14 @@ const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
   budgetTokens: z.number().optional(),
   spentTokens: z.number().optional(),
   governorStage: z.string().optional(),
+});
+
+const ModelDivergenceAlertSchema: z.ZodType<ModelDivergenceAlert> = z.object({
+  configuredModel: z.string(),
+  observedModel: z.string(),
+  firstObservedAt: z.string(),
+  responses: z.number(),
+  persisted: z.boolean(),
 });
 
 const ResourceAlertSchema: z.ZodType<ResourceAlert> = z.object({
@@ -1208,6 +1226,7 @@ export const AgentSnapshotPayloadSchema = z.object({
   providerUnavailable: z.boolean().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
   resourceAlert: ResourceAlertSchema.optional(),
+  modelDivergence: ModelDivergenceAlertSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1237,6 +1256,7 @@ export const AgentListItemPayloadSchema = z.object({
   totalTokens: z.number().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
   resourceAlert: ResourceAlertSchema.optional(),
+  modelDivergence: ModelDivergenceAlertSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

@@ -283,6 +283,7 @@ export const es: TranslationResources = {
       failed: "Con error",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muy alto",
+      modelDiverged: "Modelo distinto",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {

@@ -283,6 +283,7 @@ export const ja: TranslationResources = {
       failed: "失敗",
       tokenBurnWarning: "高消費",
       tokenBurnDanger: "非常に高い消費",
+      modelDiverged: "想定外のモデル",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 合計 {{total}}",
     archiveSheet: {

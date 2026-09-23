@@ -21,6 +21,7 @@ import type { Logger } from "pino";
 import type {
   ProviderOptions,
   ToolPolicy,
+  ModelDivergenceAlert,
   TokenBurnAlert,
   ResourceAlert,
 } from "@getpaseo/protocol/agent-types";
@@ -107,6 +108,12 @@ import {
 import { withTimeout } from "../../utils/promise-timeout.js";
 import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
 import type { TokenBurnMonitorState } from "./token-burn-detector.js";
+import {
+  noteConfiguredModelChange,
+  recordModelObservation,
+  type ModelDivergence,
+  type ModelDivergenceState,
+} from "./model-divergence.js";
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
@@ -317,6 +324,20 @@ export interface TokenBurnMonitorAgentSummary {
   model: string | undefined;
   /** So the governor can check its target model against the right provider's catalog. */
   provider: string;
+}
+
+/**
+ * Lean per-agent view for AgentModelDivergenceMonitor's sweep, mirroring the summaries around it.
+ * `divergence` is the state's verdict for the agent right now; `shownAlert` is what the monitor
+ * last put on the wire, so a sweep can tell a new finding from one it already raised.
+ */
+export interface ModelDivergenceMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  title: string | null;
+  divergence: ModelDivergence | undefined;
+  shownAlert: ModelDivergenceAlert | undefined;
 }
 
 /**
@@ -655,6 +676,18 @@ interface ManagedAgentBase {
    * resource-monitor-detector.ts.
    */
   resourceMonitorState?: AgentResourceMonitorState;
+  /**
+   * Live-only comparison of the model this agent's responses report with the model it was
+   * configured with (model-divergence.ts). Tracked whether or not anyone is watching, since it
+   * is a string compare per response; only its surfacing is opt-in. Never projected or persisted,
+   * and not carried across a session reload: the new session's responses are the evidence.
+   */
+  modelDivergenceState?: ModelDivergenceState;
+  /**
+   * The finding as shown to a client, set and cleared by AgentModelDivergenceMonitor. Kept apart
+   * from the state above so a daemon that has the monitor off never puts it on the wire.
+   */
+  modelDivergenceAlert?: ModelDivergenceAlert;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -799,6 +832,12 @@ interface CarriedSpendLedger {
   tokenBurnAlert?: TokenBurnAlert;
   tokenBurnMonitorState?: TokenBurnMonitorState;
   spendGovernorState?: SpendGovernorState;
+}
+
+/** The CLI's own resolution of the configured model, reported at session init. */
+function readRuntimeModel(runtimeInfo: AgentRuntimeInfo | undefined): string | null {
+  const runtimeModel = runtimeInfo?.extra?.["runtimeModel"];
+  return typeof runtimeModel === "string" ? runtimeModel : null;
 }
 
 function carrySpendLedger(existing: ActiveManagedAgent): CarriedSpendLedger {
@@ -1551,6 +1590,32 @@ export class AgentManager {
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
     }));
+  }
+
+  listAgentsForModelDivergenceMonitor(): ModelDivergenceMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      title: agent.config.title ?? null,
+      divergence: agent.modelDivergenceState?.divergence,
+      shownAlert: agent.modelDivergenceAlert,
+    }));
+  }
+
+  /** Sets the live finding badge and broadcasts the new snapshot. Mirrors setTokenBurnAlert. */
+  setModelDivergenceAlert(agentId: string, alert: ModelDivergenceAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.modelDivergenceAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearModelDivergenceAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.modelDivergenceAlert) return;
+    delete agent.modelDivergenceAlert;
+    this.emitState(agent, { persist: false });
   }
 
   listAgentsForAccountFailover(): AccountFailoverAgentSummary[] {
@@ -2879,6 +2944,14 @@ export class AgentManager {
     }
     await this.drainSessionEvents(agentId);
 
+    // An intentional change: the response already in flight still comes from the old model, and
+    // a finding raised against it is moot (model-divergence.ts).
+    agent.modelDivergenceState = noteConfiguredModelChange(agent.modelDivergenceState ?? {}, {
+      fromModel: agent.config.model,
+      fromInitModel: readRuntimeModel(agent.runtimeInfo),
+      toModel: normalizedModelId,
+      at: Date.now(),
+    });
     agent.config.model = normalizedModelId ?? undefined;
     if (agent.runtimeInfo) {
       agent.runtimeInfo = { ...agent.runtimeInfo, model: normalizedModelId };
@@ -5384,6 +5457,17 @@ export class AgentManager {
         if (isDeepStrictEqual(agent.lastUsage, event.usage)) return;
         agent.lastUsage = event.usage;
         this.emitState(agent, { persist: false });
+        return;
+      case "model_observed":
+        // Daemon-internal, like token_burn_delta below: one compare per response, no state emit.
+        // The monitor surfaces a finding on its own sweep, so nothing here repaints a client.
+        agent.modelDivergenceState = recordModelObservation(agent.modelDivergenceState ?? {}, {
+          observedModel: event.model,
+          at: Date.now(),
+          configuredModel: agent.config.model,
+          initModel: readRuntimeModel(agent.runtimeInfo),
+        });
+        flags.shouldDispatchEvent = false;
         return;
       case "token_burn_delta":
         // Daemon-internal: feeds the burn ring the monitor reads straight off ManagedAgent.

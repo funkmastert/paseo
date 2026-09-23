@@ -33,6 +33,7 @@ import type {
   AgentTokenRate,
   AgentUsage,
   AgentPersistenceHandle,
+  ModelDivergenceAlert,
   TokenBurnAlert,
 } from "@getpaseo/protocol/agent-types";
 import type {
@@ -119,6 +120,11 @@ export interface Agent {
    * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
    */
   tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * Live finding from the daemon-side model-divergence monitor: the responses report a model the
+   * agent was not configured with. Absent when the monitor is off and on old daemons.
+   */
+  modelDivergence?: ModelDivergenceAlert;
   title: string | null;
   cwd: string;
   workspaceId?: string;

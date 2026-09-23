@@ -101,6 +101,19 @@ export function toStoredAgentRecord(
   } satisfies StoredAgentRecord;
 }
 
+/** The live-only monitor findings, each present only while the monitor has one standing. */
+function projectLiveAlerts(
+  agent: ManagedAgent,
+): Pick<AgentSnapshotPayload, "tokenBurnAlert" | "resourceAlert" | "modelDivergence"> {
+  return {
+    ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
+    ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
+    ...(agent.modelDivergenceAlert !== undefined
+      ? { modelDivergence: agent.modelDivergenceAlert }
+      : {}),
+  };
+}
+
 export function toAgentPayload(
   agent: ManagedAgent,
   options?: ProjectionOptions,
@@ -167,13 +180,7 @@ export function toAgentPayload(
     payload.totalTokens = agent.totalTokens;
   }
 
-  if (agent.tokenBurnAlert !== undefined) {
-    payload.tokenBurnAlert = agent.tokenBurnAlert;
-  }
-
-  if (agent.resourceAlert !== undefined) {
-    payload.resourceAlert = agent.resourceAlert;
-  }
+  Object.assign(payload, projectLiveAlerts(agent));
 
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
@@ -328,6 +335,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
     ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
     ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
+    ...(agent.modelDivergence !== undefined ? { modelDivergence: agent.modelDivergence } : {}),
   };
 }
 

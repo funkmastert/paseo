@@ -280,6 +280,7 @@ export const ar: TranslationResources = {
       failed: "فشل",
       tokenBurnWarning: "استهلاك مرتفع",
       tokenBurnDanger: "استهلاك مرتفع جدًا",
+      modelDiverged: "نموذج غير متوقع",
     },
     tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
     archiveSheet: {
