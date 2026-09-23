@@ -353,7 +353,10 @@ describe("paseo daemon bootstrap", () => {
         resourceMonitor: { reaper: { enabled: true, dryRun: true } },
         deviceLeases: { enabled: true, dryRun: true, pendingTtlMinutes: 25 },
         artifactJanitor: { enabled: true, dryRun: true, diskGuard: { enabled: true } },
-        tokenBurnMonitor: { governor: { enabled: true, dryRun: true } },
+        tokenBurnMonitor: {
+          governor: { enabled: true, dryRun: true },
+          modelDivergence: { enabled: true },
+        },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
@@ -407,6 +410,7 @@ describe("paseo daemon bootstrap", () => {
         "spend-governor": { enabled: true, dryRun: true },
         "account-pressure": { enabled: false, dryRun: undefined },
         refocus: { enabled: true, dryRun: true },
+        "model-divergence": { enabled: true, dryRun: undefined },
       });
 
       const reloadedPersisted = {
@@ -449,6 +453,7 @@ describe("paseo daemon bootstrap", () => {
         "device-cap": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
+        "model-divergence": { enabled: false },
       });
     } finally {
       await client?.close().catch(() => undefined);
