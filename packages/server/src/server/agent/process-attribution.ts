@@ -23,7 +23,7 @@ export interface AgentProcessTree {
  * agent's process tree above. Keep this list small and additive: a marker that's too broad
  * risks folding an unrelated process into "orphan build daemon" accounting.
  */
-const ORPHAN_BUILD_DAEMON_MARKERS = ["GradleDaemon", "KotlinCompileDaemon"] as const;
+export const ORPHAN_BUILD_DAEMON_MARKERS = ["GradleDaemon", "KotlinCompileDaemon"] as const;
 
 export interface OrphanBuildDaemonSummary {
   count: number;

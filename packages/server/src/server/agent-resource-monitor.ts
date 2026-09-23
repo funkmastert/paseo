@@ -21,6 +21,7 @@ import {
   type BuildDaemonReapCandidate,
   type BuildDaemonReaperConfig,
   type BuildDaemonReaperMemory,
+  type BuildDaemonSighting,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
   markBuildDaemonHandled,
@@ -255,6 +256,8 @@ export class AgentResourceMonitor {
   private cpuRateMemory: CpuRateMemory | undefined;
   /** How long each reap candidate has been idle, accumulated across sweeps (build-daemon-reaper.ts). */
   private reapMemory: BuildDaemonReaperMemory | undefined;
+  /** The last verdict set logged for the reaper, so the log line appears on change and not every minute. */
+  private lastReaperWatch = "";
   private sweepInFlight = false;
   private readonly modeLog: MonitorModeLog;
 
@@ -577,11 +580,12 @@ export class AgentResourceMonitor {
       // Turning the reaper on starts the evidence over. Sweeps observed while it was off were
       // never checked against the abandonment rules, and acting on them would skip the wait.
       this.reapMemory = undefined;
+      this.lastReaperWatch = "";
       return;
     }
 
     const attributedPids = new Set(agentTrees.flatMap((tree) => tree.pids));
-    const { candidates, memory } = evaluateBuildDaemonReapCandidates({
+    const { candidates, memory, sightings } = evaluateBuildDaemonReapCandidates({
       rows,
       attributedPids,
       ownerUid: this.ownerUid,
@@ -590,6 +594,7 @@ export class AgentResourceMonitor {
       nowMs,
     });
     this.reapMemory = memory;
+    this.reportReaperSightings(sightings);
     if (candidates.length === 0) {
       return;
     }
@@ -623,6 +628,39 @@ export class AgentResourceMonitor {
         dryRun: false,
         daemons: reaped,
       }),
+    );
+  }
+
+  /**
+   * Says what the reaper is looking at and why it is sparing each daemon. Without it a dry run
+   * that never selects anything is unfalsifiable: no candidate looks the same whether no orphan
+   * daemon existed, the allowlist rejected a real one, or a busy build was correctly spared.
+   * Logged when a pid's verdict changes, not on every sweep, so a daemon that stays busy for a
+   * day costs one line.
+   */
+  private reportReaperSightings(sightings: readonly BuildDaemonSighting[]): void {
+    const key = sightings
+      .map((sighting) => `${sighting.pid}:${sighting.verdict}`)
+      .sort()
+      .join(",");
+    if (key === this.lastReaperWatch) {
+      return;
+    }
+    this.lastReaperWatch = key;
+    this.logger.info(
+      {
+        daemons: sightings.map((sighting) => ({
+          pid: sighting.pid,
+          verdict: sighting.verdict,
+          kind: sighting.kind,
+          rssBytes: sighting.rssBytes,
+          cpuPercent: Math.round(sighting.cpuPercent),
+          idleSweeps: sighting.idleSweeps,
+        })),
+      },
+      sightings.length === 0
+        ? "Reaper: no orphaned build daemons in view"
+        : "Reaper: orphaned build daemons in view",
     );
   }
 

@@ -612,6 +612,71 @@ describe("AgentResourceMonitor reaper", () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
   });
 
+  test("a live build on a ppid-1 daemon is spared, and the log says why", async () => {
+    // Recorded from Tyler's machine: two JVMs reparented to init, 3.4 GB and 2.9 GB, burning
+    // ~32% CPU, genuinely mid-build. The reaper must spare them for as long as they are busy,
+    // and the dry-run log must show it did rather than say nothing.
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    let cpuSeconds = 5_000;
+    const sampler = createFakeSampler();
+    sampler.sampleProcesses.mockImplementation(async () => {
+      cpuSeconds += 19.2; // 32% of a 60s sweep
+      return [gradleDaemonRow({ cpuPercent: 32, cpuSeconds, etime: "3:00:00" })];
+    });
+    const { monitor, push, logger } = createMonitor({
+      agents: [],
+      sampler,
+      config: { reaper: { enabled: true, dryRun: true } },
+      signaller,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 40, clock);
+
+    expect(sent).toEqual([]);
+    expect(reapPushes(push.sent)).toHaveLength(0);
+    const watched = logger.info.mock.calls.filter(
+      ([, message]) => message === "Reaper: orphaned build daemons in view",
+    );
+    // One line per verdict change: first sighting, then busy for the next thirty-nine sweeps.
+    expect(
+      watched.map(
+        ([fields]) => (fields as { daemons: Array<{ verdict: string }> }).daemons[0]?.verdict,
+      ),
+    ).toEqual(["first-sighting", "busy"]);
+    expect(
+      watched.map(
+        ([fields]) => (fields as { daemons: Array<{ cpuPercent: number }> }).daemons[0]?.cpuPercent,
+      )[1],
+    ).toBe(32);
+  });
+
+  test("a ppid-1 process that only mentions GradleDaemon is reported as off the allowlist", async () => {
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    const { monitor, logger } = createMonitor({
+      agents: [],
+      processRows: [
+        gradleDaemonRow({
+          pid: 301,
+          command: "grep -r org.gradle.launcher.daemon.bootstrap.GradleDaemon .",
+        }),
+      ],
+      config: { reaper: { enabled: true, dryRun: true } },
+      signaller,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 40, clock);
+
+    expect(sent).toEqual([]);
+    expect(logger.info).toHaveBeenCalledWith(
+      { daemons: [expect.objectContaining({ pid: 301, verdict: "not-on-allowlist" })] },
+      "Reaper: orphaned build daemons in view",
+    );
+  });
+
   test("turning the reaper off discards the idle evidence it had gathered", async () => {
     const clock = { ms: 1_000_000 };
     const { signaller, sent } = createFakeSignaller();

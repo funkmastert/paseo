@@ -15,7 +15,7 @@ Raw counting is what made the monitor cry wolf. A Claude agent re-reads its whol
 - **OpenCode and ACP** diff cumulative totals and have no cache breakdown, so they stay raw. Their agents do not re-read a cached context per step, so the distortion above does not apply to them.
 - **OMP and Pi** report nothing; the rate leg never fires for them.
 
-`agent-manager.ts` folds both event kinds into the same 30-second ring and lifetime total. Both are live-only: cleared on rewind, never persisted.
+`agent-manager.ts` folds both event kinds into the same 30-second ring and lifetime total. Both are live-only: cleared on rewind, never persisted. A reload (`reloadAgentSession`, which a stale provider session or a provider move triggers) carries the counter, the alert and the governor's fired stages across to the new session; an agent that is closed and loaded again from disk, or replaced by an account-failover successor, starts from zero. Before the carry existed a reload zeroed the counter: one agent had spent 51M against a 40M budget and read 26.7M, so the governor never told it.
 
 ## Monitor legs
 
@@ -111,6 +111,6 @@ Off by default (`agents.tokenBurnMonitor.accountPressure`), and **report-only on
 
 Acting here would fight two things that already own the decision. The account pool plugin routes new agents away from a hot account, so refusing a caller's `create_agent` on account pressure would block a child the plugin would have placed somewhere healthy anyway. And `AccountFailoverMonitor` already migrates agents off an account at 100% ([docs/account-failover.md](account-failover.md)). Warning before the wall is the gap neither fills.
 
-It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt`, so a window that resets warns afresh and one sitting at 94% all week does not warn every 60 seconds.
+It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt` rounded to the minute, so a window that resets warns afresh and one sitting at 94% all week does not warn again. The rounding is load-bearing: the API's `resets_at` carries microsecond noise that changes on every fetch, and keying on the raw string produced a push every five minutes. The push names the account; the daemon log line `Account pressure: usage window is over the warning threshold` carries provider, window and percentage for attributing it afterwards.
 
 This is a threshold on one number. [Budget pacing](budget-pacing.md) reads the same rows as a rate against the clock and advises running leaders on how hard to fan out; it is the third reader of the usage windows and, like this leg, acts on none of them.

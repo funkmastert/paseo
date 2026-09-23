@@ -47,6 +47,8 @@ The same sweep also drives [the artifact janitor](artifact-janitor.md), which re
 
 Reaping runs on its own criteria, not off `orphanBuildDaemonBytes` — an abandoned daemon sitting on 800 MB is worth reclaiming even though the machine-level alert only fires at 2 GiB. Turning the reaper off discards the idle evidence it had gathered, so turning it back on starts the wait over.
 
+While the reaper is enabled, dry run or not, it logs `Reaper: orphaned build daemons in view` whenever a ppid-1 build daemon's verdict changes: `first-sighting`, `busy`, `idle-accumulating`, `candidate`, `not-abandoned`, or `not-on-allowlist` (a process carrying a marker that the allowlist rejects), with RSS and CPU rate. A dry run that only logs when it would kill cannot be evaluated: a week without a line looked the same whether no daemon existed, the allowlist rejected every real command line, or busy builds were spared. `Reaper: no orphaned build daemons in view` marks the set going empty.
+
 Every reap is reported through the same push path as the alerts (`resource_daemons_reaped`), naming each pid, kind, RSS reclaimed and how long it had been idle, and logged at info to `daemon.log` with the sweep count behind the decision.
 
 | Key              | Default | What it does                                  |

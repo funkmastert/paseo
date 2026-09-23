@@ -10,6 +10,7 @@
  * one on its own is enough to spare a process.
  */
 
+import { ORPHAN_BUILD_DAEMON_MARKERS } from "./process-attribution.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
 export type ReapableBuildDaemonKind = "gradle" | "kotlin";
@@ -110,10 +111,42 @@ export interface EvaluateBuildDaemonReapCandidatesInput {
   nowMs: number;
 }
 
+/**
+ * Why a ppid-1 build daemon was or was not selected this sweep. The reaper used to say nothing
+ * unless it would kill, which made "never fired" identical to "never saw a daemon" and to "the
+ * matcher rejects every real command line": a week of dry run proved none of the three apart.
+ */
+export type BuildDaemonVerdict =
+  /** Carries a build-daemon marker but is not on the allowlist, so it is never signalled. */
+  | "not-on-allowlist"
+  /** A live agent, an agent launch marker, or another user owns it. */
+  | "not-abandoned"
+  /** First sighting carries no idle evidence. */
+  | "first-sighting"
+  /** Above the idle CPU threshold this sweep: somebody is building. Spared. */
+  | "busy"
+  /** Idle, but not for long enough or across enough sweeps yet. */
+  | "idle-accumulating"
+  /** Would be (or was) selected. */
+  | "candidate"
+  /** Already acted on, or reported, in an earlier sweep. */
+  | "handled";
+
+export interface BuildDaemonSighting {
+  pid: number;
+  verdict: BuildDaemonVerdict;
+  kind: ReapableBuildDaemonKind | undefined;
+  rssBytes: number;
+  cpuPercent: number;
+  idleSweeps: number;
+}
+
 export interface EvaluateBuildDaemonReapCandidatesResult {
   /** Already capped at `maxPerSweep`, largest first — the cap should reclaim the most memory. */
   candidates: BuildDaemonReapCandidate[];
   memory: BuildDaemonReaperMemory;
+  /** Every ppid-1 process carrying a build-daemon marker, with the reason it was spared or picked. */
+  sightings: BuildDaemonSighting[];
 }
 
 function matchSignature(command: string): ReapableBuildDaemonSignature | undefined {
@@ -155,20 +188,43 @@ export function evaluateBuildDaemonReapCandidates(
 ): EvaluateBuildDaemonReapCandidatesResult {
   const memory: BuildDaemonReaperMemory = new Map();
   const candidates: BuildDaemonReapCandidate[] = [];
+  const sightings: BuildDaemonSighting[] = [];
   const idleThresholdMs = input.config.idleMinutes * 60_000;
 
   for (const row of input.rows) {
     const signature = matchSignature(row.command);
-    if (!signature) continue;
+    const sight = (verdict: BuildDaemonVerdict, idleSweeps = 0): void => {
+      sightings.push({
+        pid: row.pid,
+        verdict,
+        kind: signature?.kind,
+        rssBytes: row.rssKb * 1024,
+        cpuPercent: row.cpuPercent,
+        idleSweeps,
+      });
+    };
+    if (!signature) {
+      if (
+        row.ppid === 1 &&
+        ORPHAN_BUILD_DAEMON_MARKERS.some((marker) => row.command.includes(marker))
+      ) {
+        sight("not-on-allowlist");
+      }
+      continue;
+    }
 
     const previous = input.previous?.get(row.pid);
     if (previous?.handled !== undefined) {
       memory.set(row.pid, previous);
+      sight("handled");
       continue;
     }
     // Dropping the pid from memory rather than resetting it in place is deliberate: a daemon
     // that stops looking abandoned has to re-earn its evidence from a first sighting.
-    if (!isAbandoned(row, input.attributedPids, input.ownerUid)) continue;
+    if (!isAbandoned(row, input.attributedPids, input.ownerUid)) {
+      if (row.ppid === 1) sight("not-abandoned");
+      continue;
+    }
 
     if (!previous) {
       // First sighting carries no idle evidence at all: `cpuPercent` is still `ps`'s decayed
@@ -181,6 +237,7 @@ export function evaluateBuildDaemonReapCandidates(
         idleSinceMs: undefined,
         idleSweeps: 0,
       });
+      sight("first-sighting");
       continue;
     }
 
@@ -192,6 +249,7 @@ export function evaluateBuildDaemonReapCandidates(
         idleSinceMs: undefined,
         idleSweeps: 0,
       });
+      sight("busy");
       continue;
     }
 
@@ -206,10 +264,13 @@ export function evaluateBuildDaemonReapCandidates(
 
     // Both gates, not either: the sweep count is what makes this evidence rather than one
     // sample, and the wall-clock duration is what a stalled or restarted sweep loop can't fake.
-    if (idleSweeps < input.config.minIdleSweeps) continue;
     const idleMs = input.nowMs - idleSinceMs;
-    if (idleMs < idleThresholdMs) continue;
+    if (idleSweeps < input.config.minIdleSweeps || idleMs < idleThresholdMs) {
+      sight("idle-accumulating", idleSweeps);
+      continue;
+    }
 
+    sight("candidate", idleSweeps);
     candidates.push({
       pid: row.pid,
       kind: signature.kind,
@@ -221,7 +282,7 @@ export function evaluateBuildDaemonReapCandidates(
   }
 
   candidates.sort((a, b) => b.rssBytes - a.rssBytes);
-  return { candidates: candidates.slice(0, input.config.maxPerSweep), memory };
+  return { candidates: candidates.slice(0, input.config.maxPerSweep), memory, sightings };
 }
 
 /**
