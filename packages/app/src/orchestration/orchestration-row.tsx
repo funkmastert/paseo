@@ -56,6 +56,14 @@ const MAX_INDENT_LEVELS = 4;
  * single icon column. The panel header reuses it for its own inline glyph. */
 export const ROW_ICON_SIZE = 14;
 
+// Module-level so the menu items receive a stable `leading` element on every render.
+const DETACH_MENU_ICON = (
+  <ThemedUnlink size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />
+);
+const ARCHIVE_MENU_ICON = (
+  <ThemedArchive size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />
+);
+
 // Plain react-native StyleSheet, not Unistyles: these widths are static (not theme-dependent), and
 // a raw per-row inline `{ width }` object would each hash into its own persisted web CSS class —
 // see docs/unistyles.md "Dynamic Pixel Styles On Web". A fixed, small set of depth styles avoids
@@ -111,12 +119,13 @@ function WideOrchestrationRow({
   onDetach,
 }: OrchestrationRowProps): ReactElement {
   const { t } = useTranslation();
-  const isCompact = useIsCompactFormFactor();
   const { agent } = row;
   const relativeTime = useCompactTimeAgo(agent.updatedAt);
   const indentStyle = INDENT_STYLE_LIST[Math.min(row.depth, MAX_INDENT_LEVELS)];
   const displayTitle = agent.title?.trim() || t("agentList.fallbackTitle");
-  const actionsAlwaysVisible = isNative || isCompact;
+  // A compact form factor renders CompactOrchestrationRow, so only a touch tablet reaches here
+  // without hover.
+  const actionsAlwaysVisible = isNative;
   const presentation = resolveOrchestrationRowPresentation(agent);
 
   // Hover on a plain View, press on a separate inner Pressable — per docs/hover.md. The row
@@ -334,15 +343,11 @@ function CompactOrchestrationRow({
           </View>
         </View>
       </ContextMenuTrigger>
-      <ContextMenuContent
-        align="start"
-        width={240}
-        testID={`orchestration-row-menu-${agent.id}`}
-      >
+      <ContextMenuContent align="start" width={240} testID={`orchestration-row-menu-${agent.id}`}>
         {showDetach ? (
           <ContextMenuItem
             testID={`orchestration-detach-${agent.id}`}
-            leading={<ThemedUnlink size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />}
+            leading={DETACH_MENU_ICON}
             onSelect={handleDetach}
           >
             {t("subagents.detachTooltip")}
@@ -350,7 +355,7 @@ function CompactOrchestrationRow({
         ) : null}
         <ContextMenuItem
           testID={`orchestration-archive-${agent.id}`}
-          leading={<ThemedArchive size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />}
+          leading={ARCHIVE_MENU_ICON}
           onSelect={handleArchive}
         >
           {t("subagents.archiveTooltip")}
