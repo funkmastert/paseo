@@ -19,6 +19,7 @@ import {
 } from "./agent/spend-governor.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
+import type { ModelDivergenceMonitorSettings } from "./agent-model-divergence-monitor.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 // Measured, not chosen: a healthy Opus agent doing ordinary tool work on this machine sustains
@@ -79,6 +80,8 @@ export interface TokenBurnMonitorConfig {
   governor?: SpendGovernorSettings;
   /** Opt-in report-only account usage leg. Off unless this says otherwise. */
   accountPressure?: AccountPressureSettings;
+  /** Read by AgentModelDivergenceMonitor, which shares this config block. */
+  modelDivergence?: ModelDivergenceMonitorSettings;
 }
 
 interface AgentTokenBurnMonitorLogger {

@@ -2270,6 +2270,7 @@ class ClaudeAgentSession implements AgentSession {
   private nextTurnOrdinal = 1;
   private cancelCurrentTurn: (() => void) | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
+  private lastObservedModelMessageId: string | null = null;
   private lastOptionsModel: string | null = null;
   private lastRuntimeModel: string | null = null;
   private compacting = false;
@@ -4333,6 +4334,7 @@ class ClaudeAgentSession implements AgentSession {
         this.appendSidechainResultEvents(message, events);
         break;
       case "assistant": {
+        this.appendObservedModelEvent(message.message.model, message.message.id, events);
         const timelineItems = this.mapBlocksToTimeline(message.message.content, {
           suppressAssistantText: options?.suppressAssistantText ?? false,
           suppressReasoning: options?.suppressReasoning ?? false,
@@ -4667,11 +4669,39 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Reports the model a response says it came from, once per response. `message_start` and the
+   * assistant frames of the same response both carry it; the message id keeps one response from
+   * counting twice. Only frames that reach here, which are the agent's own: a subagent's frames
+   * are routed away before, and it is allowed a model of its own.
+   */
+  private appendObservedModelEvent(
+    model: unknown,
+    messageId: unknown,
+    events: AgentStreamEvent[],
+  ): void {
+    const observed = typeof model === "string" ? model.trim() : "";
+    if (!observed || observed === "<synthetic>") {
+      return;
+    }
+    const id = typeof messageId === "string" && messageId.length > 0 ? messageId : null;
+    if (id !== null) {
+      if (id === this.lastObservedModelMessageId) {
+        return;
+      }
+      this.lastObservedModelMessageId = id;
+    }
+    events.push({ type: "model_observed", provider: "claude", model: observed });
+  }
+
   private appendStreamEventEvents(
     message: Extract<SDKMessage, { type: "stream_event" }>,
     events: AgentStreamEvent[],
     options: { suppressAssistantText?: boolean; suppressReasoning?: boolean } | undefined,
   ): void {
+    if (message.event.type === "message_start") {
+      this.appendObservedModelEvent(message.event.message.model, message.event.message.id, events);
+    }
     const usageUpdatedEvent = this.contextUsage.buildStreamUsageEvent(message.event);
     if (usageUpdatedEvent) {
       events.push(usageUpdatedEvent);

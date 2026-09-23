@@ -283,6 +283,7 @@ export const ko: TranslationResources = {
       reportUndelivered: "보고 미전달",
       tokenBurnWarning: "높은 소비량",
       tokenBurnDanger: "매우 높은 소비량",
+      modelDiverged: "예상 외 모델",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 총 {{total}}",
     archiveSheet: {

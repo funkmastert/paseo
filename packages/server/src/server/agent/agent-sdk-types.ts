@@ -455,6 +455,18 @@ export type AgentStreamEvent =
       provider: AgentProvider;
       tokens: number;
     }
+  | {
+      /**
+       * The model one API response reported for itself, once per response. Compared with the
+       * configured model to catch an agent quietly served by a different one. Daemon-internal:
+       * agent-manager folds it into its divergence state and never forwards it. Only the agent's
+       * own frames raise it, never a subagent's, which is allowed a model of its own. See
+       * docs/model-divergence.md.
+       */
+      type: "model_observed";
+      provider: AgentProvider;
+      model: string;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

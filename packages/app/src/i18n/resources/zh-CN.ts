@@ -282,6 +282,7 @@ export const zhCN: TranslationResources = {
       reportUndelivered: "报告未送达",
       tokenBurnWarning: "消耗较高",
       tokenBurnDanger: "消耗过高",
+      modelDiverged: "模型不符",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 共 {{total}}",
     archiveSheet: {

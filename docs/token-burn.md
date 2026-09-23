@@ -114,3 +114,7 @@ Acting here would fight two things that already own the decision. The account po
 It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt` rounded to the minute, so a window that resets warns afresh and one sitting at 94% all week does not warn again. The rounding is load-bearing: the API's `resets_at` carries microsecond noise that changes on every fetch, and keying on the raw string produced a push every five minutes. The push names the account; the daemon log line `Account pressure: usage window is over the warning threshold` carries provider, window and percentage for attributing it afterwards.
 
 This is a threshold on one number. [Budget pacing](budget-pacing.md) reads the same rows as a rate against the clock and advises running leaders on how hard to fan out; it is the third reader of the usage windows and, like this leg, acts on none of them.
+
+## Model divergence
+
+Whether an agent's responses come from the model it was configured with is a separate question from what it spends: [model divergence](model-divergence.md). It shares this config block (`agents.tokenBurnMonitor.modelDivergence`) and nothing else.

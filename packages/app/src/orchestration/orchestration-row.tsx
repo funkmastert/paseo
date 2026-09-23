@@ -16,7 +16,10 @@ import type { Theme } from "@/styles/theme";
 import { getStatusDotColor } from "@/utils/status-dot-color";
 import type { TokenBurnTone } from "@/utils/token-burn-tone-model";
 import type { OrchestrationFlatRow } from "./orchestration-panel-model";
-import { resolveOrchestrationRowPresentation } from "./orchestration-row-presentation";
+import {
+  resolveOrchestrationRowPresentation,
+  type OrchestrationRowBadge,
+} from "./orchestration-row-presentation";
 
 const ThemedArchive = withUnistyles(Archive);
 const ThemedUnlink = withUnistyles(Unlink);
@@ -68,6 +71,39 @@ const INDENT_STYLE_LIST = [
   INDENT_STYLES.depth3,
   INDENT_STYLES.depth4,
 ];
+
+const ROW_BADGES = {
+  "needs-input": { labelKey: "agentList.badges.needsInput", variant: "warning" },
+  failed: { labelKey: "agentList.badges.failed", variant: "error" },
+  "owes-report": { labelKey: "agentList.badges.owesReport", variant: "warning" },
+  "report-undelivered": { labelKey: "agentList.badges.reportUndelivered", variant: "error" },
+} as const satisfies Record<
+  OrchestrationRowBadge,
+  { labelKey: string; variant: "warning" | "error" }
+>;
+
+/** The row's act-on-this badge, then the wrong-model badge beside it when both apply. */
+function OrchestrationRowStatusBadges({
+  badge,
+  modelDivergence,
+}: {
+  badge: OrchestrationRowBadge | null;
+  modelDivergence: Agent["modelDivergence"];
+}): ReactElement {
+  const { t } = useTranslation();
+  const rowBadge = badge ? ROW_BADGES[badge] : null;
+  return (
+    <>
+      {rowBadge ? <StatusBadge label={t(rowBadge.labelKey)} variant={rowBadge.variant} /> : null}
+      {modelDivergence ? (
+        <StatusBadge
+          label={t("agentList.badges.modelDiverged")}
+          variant={modelDivergence.persisted ? "error" : "warning"}
+        />
+      ) : null}
+    </>
+  );
+}
 
 export interface OrchestrationRowProps {
   row: OrchestrationFlatRow;
@@ -156,18 +192,10 @@ export function OrchestrationRow({
         <Text style={presentation.isClosed ? styles.titleClosed : styles.title} numberOfLines={1}>
           {displayTitle}
         </Text>
-        {presentation.badge === "needs-input" ? (
-          <StatusBadge label={t("agentList.badges.needsInput")} variant="warning" />
-        ) : null}
-        {presentation.badge === "failed" ? (
-          <StatusBadge label={t("agentList.badges.failed")} variant="error" />
-        ) : null}
-        {presentation.badge === "owes-report" ? (
-          <StatusBadge label={t("agentList.badges.owesReport")} variant="warning" />
-        ) : null}
-        {presentation.badge === "report-undelivered" ? (
-          <StatusBadge label={t("agentList.badges.reportUndelivered")} variant="error" />
-        ) : null}
+        <OrchestrationRowStatusBadges
+          badge={presentation.badge}
+          modelDivergence={agent.modelDivergence}
+        />
         {tokenBurnTone ? (
           <TokenBurnBadge
             tone={tokenBurnTone}

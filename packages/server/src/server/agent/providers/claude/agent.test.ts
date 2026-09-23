@@ -3241,6 +3241,95 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
+  function createModelMessageStart(model: string, id: string, parentToolUseId?: string) {
+    return {
+      type: "stream_event",
+      event: {
+        type: "message_start",
+        message: { id, model, usage: { input_tokens: 1 } },
+      },
+      ...(parentToolUseId ? { parent_tool_use_id: parentToolUseId } : {}),
+      session_id: "session-1",
+    };
+  }
+
+  function createModelAssistant(model: string, id: string, parentToolUseId?: string) {
+    return {
+      type: "assistant",
+      message: { id, model, role: "assistant", content: [{ type: "text", text: "hi" }] },
+      ...(parentToolUseId ? { parent_tool_use_id: parentToolUseId } : {}),
+      uuid: `assistant-${id}`,
+      session_id: "session-1",
+    };
+  }
+
+  function observedModels(events: Array<{ type: string }>): string[] {
+    return events
+      .filter((event) => event.type === "model_observed")
+      .map((event) => (event as unknown as { model: string }).model);
+  }
+
+  test("reports the model each response says it came from, once per response", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // The streamed request, then the assistant frames of the same response (one per block).
+        createModelMessageStart("claude-opus-5-5", "msg_1"),
+        createModelAssistant("claude-opus-5-5", "msg_1"),
+        createModelAssistant("claude-opus-5-5", "msg_1"),
+        // The next request in the same turn is its own response.
+        createModelMessageStart("claude-opus-5", "msg_2"),
+        createModelAssistant("claude-opus-5", "msg_2"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      // The init message's own model (claude-sonnet-4-6) is the request echoed back, never
+      // reported; only responses are.
+      expect(observedModels(events)).toEqual(["claude-opus-5-5", "claude-opus-5"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("reports the model from assistant frames when no partial messages stream", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createModelAssistant("claude-sonnet-5", "msg_1"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      expect(observedModels(await collectStreamEvents(session))).toEqual(["claude-sonnet-5"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("never reports a placeholder frame or a subagent's model", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createModelAssistant("<synthetic>", "msg_synthetic"),
+        // A subagent is allowed a model of its own; its frames carry parent_tool_use_id.
+        createModelMessageStart("claude-haiku-4-5", "msg_child", "toolu-agent-1"),
+        createModelAssistant("claude-haiku-4-5", "msg_child", "toolu-agent-1"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      expect(observedModels(await collectStreamEvents(session))).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
   test("a request that never streams message_delta still records its input side", async () => {
     const session = await createSessionForTurns([
       [

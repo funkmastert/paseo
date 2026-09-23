@@ -217,6 +217,7 @@ import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
+import { AgentModelDivergenceMonitor } from "./agent-model-divergence-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
@@ -511,6 +512,11 @@ export interface PaseoDaemonConfig {
     totalTokens?: number;
     scope?: "all" | "topLevelOnly";
     breachBatchThreshold?: number;
+    modelDivergence?: {
+      enabled?: boolean;
+      persistResponses?: number;
+      persistSeconds?: number;
+    };
   };
   resourceMonitor?: {
     enabled?: boolean;
@@ -1026,6 +1032,7 @@ export async function createPaseoDaemon(
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
+  let agentModelDivergenceMonitor: AgentModelDivergenceMonitor | null = null;
   let agentResourceMonitor: AgentResourceMonitor | null = null;
   let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
@@ -2286,6 +2293,16 @@ export async function createPaseoDaemon(
               logger,
             });
             agentTokenBurnMonitor.start();
+            // Same push sender as the token-burn monitor above. Reads its settings from the same
+            // config block but is switched on by its own flag, off unless set.
+            agentModelDivergenceMonitor = new AgentModelDivergenceMonitor({
+              agentManager,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readSettings: () => daemonConfigStore.get().tokenBurnMonitor?.modelDivergence,
+              logger,
+            });
+            agentModelDivergenceMonitor.start();
             // Wired here for the same reason as the token-burn monitor above — needs the push
             // sender wsServer resolved. sendSystemMessageToAgent reuses the same steer path
             // chat mentions and notify-on-finish use (agent-prompt.ts's sendPromptToAgent).
@@ -2322,8 +2339,10 @@ export async function createPaseoDaemon(
             // sweep, a minute later — the moment someone is most likely to be checking.
             const tokenBurnMonitorForModeLog = agentTokenBurnMonitor;
             const resourceMonitorForModeLog = agentResourceMonitor;
+            const modelDivergenceMonitorForModeLog = agentModelDivergenceMonitor;
             daemonConfigStore.onChange(() => {
               tokenBurnMonitorForModeLog.reportMode();
+              modelDivergenceMonitorForModeLog.reportMode();
               resourceMonitorForModeLog.reportMode();
               deviceLeaseManager.reportMode();
             });
@@ -2461,6 +2480,7 @@ export async function createPaseoDaemon(
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
     agentTokenBurnMonitor?.stop();
+    agentModelDivergenceMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
     pluginConnectionMonitor?.stop();

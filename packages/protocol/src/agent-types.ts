@@ -222,6 +222,23 @@ export interface TokenBurnAlert {
 }
 
 /**
+ * Live finding set by the daemon-side AgentModelDivergenceMonitor when an agent's responses keep
+ * reporting a model other than the one it was configured with, with no intentional change to
+ * explain it (docs/model-divergence.md). Additive-optional on the wire and, like TokenBurnAlert,
+ * not a member of the closed `attentionReason` enum. `configuredModel` is the model the agent was
+ * asked for as compared (an alias arrives resolved); `observedModel` is what the provider said.
+ * `persisted` is false for the first stray responses and true once the mismatch has held.
+ */
+export interface ModelDivergenceAlert {
+  configuredModel: string;
+  observedModel: string;
+  firstObservedAt: string;
+  /** Consecutive responses on this pair so far. */
+  responses: number;
+  persisted: boolean;
+}
+
+/**
  * Live breach state set by the daemon-side AgentResourceMonitor when an agent's attributed
  * process tree trips the configured memory or CPU threshold. Additive-optional on the wire and
  * deliberately NOT a member of the closed `attentionReason` enum, mirroring TokenBurnAlert
@@ -453,6 +470,7 @@ export type AgentStreamEvent =
       turnTokenDelta?: number;
     }
   | { type: "token_burn_delta"; provider: AgentProvider; tokens: number }
+  | { type: "model_observed"; provider: AgentProvider; model: string }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";

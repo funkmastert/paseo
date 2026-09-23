@@ -33,6 +33,7 @@ import type {
   AgentTokenRate,
   AgentUsage,
   AgentPersistenceHandle,
+  ModelDivergenceAlert,
   TokenBurnAlert,
   OwedFinishReport,
 } from "@getpaseo/protocol/agent-types";
@@ -126,6 +127,11 @@ export interface Agent {
    * daemons that predate it. See docs/finish-reports.md.
    */
   owedFinishReport?: OwedFinishReport;
+  /**
+   * Live finding from the daemon-side model-divergence monitor: the responses report a model the
+   * agent was not configured with. Absent when the monitor is off and on old daemons.
+   */
+  modelDivergence?: ModelDivergenceAlert;
   title: string | null;
   cwd: string;
   workspaceId?: string;

@@ -279,6 +279,17 @@ const AgentTokenBurnMonitorSchema = z
       })
       .strict()
       .optional(),
+    // Opt-in: surfaces agents whose responses report a model other than the configured one.
+    // Read by AgentModelDivergenceMonitor, independent of `enabled` above. See
+    // docs/model-divergence.md.
+    modelDivergence: z
+      .object({
+        enabled: z.boolean().optional(),
+        persistResponses: z.number().int().positive().optional(),
+        persistSeconds: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

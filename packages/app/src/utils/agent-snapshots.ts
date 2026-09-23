@@ -59,10 +59,11 @@ export function derivePendingPermissionKey(
 
 function projectAgentAlerts(
   agent: Agent,
-): Pick<AgentSnapshotPayload, "tokenBurnAlert" | "owedFinishReport"> {
+): Pick<AgentSnapshotPayload, "tokenBurnAlert" | "owedFinishReport" | "modelDivergence"> {
   return {
     ...(agent.tokenBurnAlert ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
     ...(agent.owedFinishReport ? { owedFinishReport: agent.owedFinishReport } : {}),
+    ...(agent.modelDivergence ? { modelDivergence: agent.modelDivergence } : {}),
   };
 }
 
@@ -142,6 +143,7 @@ export function normalizeAgentSnapshot(snapshot: AgentSnapshotPayload, serverId:
     totalTokens: snapshot.totalTokens,
     tokenBurnAlert: snapshot.tokenBurnAlert,
     owedFinishReport: snapshot.owedFinishReport,
+    modelDivergence: snapshot.modelDivergence,
     title: snapshot.title ?? null,
     cwd: snapshot.cwd,
     workspaceId: snapshot.workspaceId,

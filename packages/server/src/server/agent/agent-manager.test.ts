@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -1095,7 +1095,10 @@ test("rewind clears the stale mcp_server_statuses from the emitted state (KTD8)"
   }
 });
 
-async function createLiveEventAgent(workdir: string): Promise<{
+async function createLiveEventAgent(
+  workdir: string,
+  agentConfig: { model?: string } = {},
+): Promise<{
   manager: AgentManager;
   agentId: string;
   session: TestAgentSession;
@@ -1113,11 +1116,135 @@ async function createLiveEventAgent(workdir: string): Promise<{
     registry: storage,
     logger,
   });
-  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
-    workspaceId: undefined,
-  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, ...agentConfig },
+    undefined,
+    { workspaceId: undefined },
+  );
   return { manager, agentId: snapshot.id, session: capturedSession! };
 }
+
+describe("model divergence tracking", () => {
+  async function withAgent(
+    run: (agent: Awaited<ReturnType<typeof createLiveEventAgent>>) => Promise<void>,
+  ): Promise<void> {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-model-divergence-"));
+    const agent = await createLiveEventAgent(workdir, { model: "claude-sonnet-5" });
+    try {
+      await run(agent);
+    } finally {
+      // setAgentModel persists; let the write land before the directory goes.
+      await agent.manager.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  }
+
+  function observe(session: TestAgentSession, model: string): void {
+    session.pushEvent({ type: "model_observed", provider: "codex", model });
+  }
+
+  /** What a subscriber to one agent sees: the stream event types, and how many state emits. */
+  function watchAgent(manager: AgentManager, agentId: string) {
+    const watch = { seen: [] as string[], emits: 0, stop: () => {} };
+    watch.stop = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) watch.emits += 1;
+        if (event.type === "agent_stream") watch.seen.push(event.event.type);
+      },
+      { agentId, replayState: false },
+    );
+    return watch;
+  }
+
+  function divergenceOf(manager: AgentManager, agentId: string) {
+    return manager.listAgentsForModelDivergenceMonitor().find((entry) => entry.id === agentId)
+      ?.divergence;
+  }
+
+  test("a response on the configured model leaves no finding", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+    });
+  });
+
+  test("responses on another model are a finding, counted, and never forwarded or emitted", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      const watch = watchAgent(manager, agentId);
+
+      observe(session, "claude-opus-5");
+      observe(session, "claude-opus-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      watch.stop();
+      const { seen, emits } = watch;
+
+      expect(divergenceOf(manager, agentId)).toMatchObject({
+        configuredModel: "claude-sonnet-5",
+        observedModel: "claude-opus-5",
+        responses: 2,
+      });
+      expect(seen).not.toContain("model_observed");
+      expect(emits).toBe(0);
+    });
+  });
+
+  test("setAgentModel explains the response already in flight, then holds the old model to account", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-sonnet-5");
+      await manager.setAgentModel(agentId, "claude-haiku-4-5");
+
+      // The request that was streaming when the model changed still reports the old one.
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+
+      // The next request runs on the new model, which ends the transition.
+      observe(session, "claude-haiku-4-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+
+      // From here the old model is unexplained.
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toMatchObject({
+        configuredModel: "claude-haiku-4-5",
+        observedModel: "claude-sonnet-5",
+      });
+    });
+  });
+
+  test("setAgentModel drops a finding raised against the model it replaced", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-opus-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeDefined();
+
+      await manager.setAgentModel(agentId, "claude-opus-5");
+
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+    });
+  });
+
+  test("a finding put on the wire appears in the snapshot and list projections, and clears", async () => {
+    await withAgent(async ({ manager, agentId }) => {
+      const alert = {
+        configuredModel: "claude-sonnet-5",
+        observedModel: "claude-opus-5",
+        firstObservedAt: "2026-09-23T12:00:00.000Z",
+        responses: 3,
+        persisted: true,
+      };
+      manager.setModelDivergenceAlert(agentId, alert);
+      const shown = manager.getAgent(agentId);
+      expect(shown && toAgentPayload(shown).modelDivergence).toEqual(alert);
+
+      manager.clearModelDivergenceAlert(agentId);
+      const cleared = manager.getAgent(agentId);
+      expect(cleared && toAgentPayload(cleared).modelDivergence).toBeUndefined();
+    });
+  });
+});
 
 test("usage_updated emits once per distinct usage and skips the snapshot write", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-usage-updated-"));

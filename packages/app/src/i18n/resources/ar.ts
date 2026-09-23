@@ -282,6 +282,7 @@ export const ar: TranslationResources = {
       reportUndelivered: "لم يُسلَّم التقرير",
       tokenBurnWarning: "استهلاك مرتفع",
       tokenBurnDanger: "استهلاك مرتفع جدًا",
+      modelDiverged: "نموذج غير متوقع",
     },
     tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
     archiveSheet: {

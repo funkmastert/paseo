@@ -183,7 +183,10 @@ export function toAgentPayload(
   return payload;
 }
 
-/** The badges a live agent carries beside its status: over budget, over resources, owing a report. */
+/**
+ * The badges a live agent carries beside its status: over budget, over resources, owing a report,
+ * answering from a model it was not configured with.
+ */
 function applyAgentAlerts(payload: AgentSnapshotPayload, agent: ManagedAgent): void {
   if (agent.tokenBurnAlert !== undefined) {
     payload.tokenBurnAlert = agent.tokenBurnAlert;
@@ -193,6 +196,9 @@ function applyAgentAlerts(payload: AgentSnapshotPayload, agent: ManagedAgent): v
   }
   if (agent.owedFinishReport !== undefined) {
     payload.owedFinishReport = agent.owedFinishReport;
+  }
+  if (agent.modelDivergenceAlert !== undefined) {
+    payload.modelDivergence = agent.modelDivergenceAlert;
   }
 }
 
@@ -339,6 +345,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
     ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
     ...(agent.owedFinishReport !== undefined ? { owedFinishReport: agent.owedFinishReport } : {}),
+    ...(agent.modelDivergence !== undefined ? { modelDivergence: agent.modelDivergence } : {}),
   };
 }
 

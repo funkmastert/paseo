@@ -280,6 +280,7 @@ export const en = {
       reportUndelivered: "Report undelivered",
       tokenBurnWarning: "High burn",
       tokenBurnDanger: "Very high burn",
+      modelDiverged: "Wrong model",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {

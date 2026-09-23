@@ -285,6 +285,7 @@ export const ptBR: TranslationResources = {
       reportUndelivered: "Relatório não entregue",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muito alto",
+      modelDiverged: "Modelo diferente",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
