@@ -156,6 +156,7 @@ describe("contribute (index.server)", () => {
         agentTypeMappings: { reviewer: "reviewer" },
         modelBudgetThresholdPct: 80,
         enforceToolsOnClassifiedRoles: false,
+        exposeClassifierTool: false,
         revision: "test",
       },
     });

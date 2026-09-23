@@ -196,6 +196,17 @@ export const RoleModelPolicySchema = z
      * router's tool-profile gating in server/role-router.ts.
      */
     enforceToolsOnClassifiedRoles: z.boolean().default(false),
+    /**
+     * Default OFF: when true, every agent this daemon creates is given the
+     * `agent_model_policy` MCP tool, so a caller can ask what a task WOULD
+     * run as before it spawns anything (see server/classifier-tool.ts).
+     *
+     * Off by default because turning it on changes the `mcpServers` of every
+     * agent on the fleet, which is not something an upgrade should do
+     * quietly. It exposes the operator's routing policy to agents that
+     * already run on the operator's machine, and nothing else.
+     */
+    exposeClassifierTool: z.boolean().default(false),
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -303,6 +314,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
+  exposeClassifierTool: false,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",

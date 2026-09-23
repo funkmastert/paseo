@@ -1,32 +1,22 @@
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
-import { TASK_CLASS_IDS, type RoleRecord, type TaskClassId } from "../../shared/role-policy-schema";
 
 /**
  * Turns a `role-model-policy.explain` result into the lines the "Test This
- * Name" panel prints. Pure and RN-free on purpose: this is the only part of
- * that panel worth asserting on, and importing the component itself would
- * drag react-native into a node test environment.
+ * Name" panel prints.
+ *
+ * This file states no rule. Every sentence about WHY a decision came out the
+ * way it did is `result.reasons.*`, written by the classifier that made the
+ * decision (server/classifier.ts). It used to re-derive some of them here —
+ * it re-implemented `classModels`'s "this class's pool is empty, so the
+ * standard pool decided" fallback, and printed the role's CONFIGURED tool
+ * profile even where the create hook would have withheld it — and both
+ * drifted from the hook. What's left below is formatting: labels, ordering,
+ * and the target spelling.
+ *
+ * Pure and RN-free on purpose: this is the only part of that panel worth
+ * asserting on, and importing the component itself would drag react-native
+ * into a node test environment.
  */
-
-/** The pool labels used on the role card, so the two screens name the same thing the same way. */
-const POOL_LABEL: Record<TaskClassId, string> = {
-  mechanical: "Mechanical",
-  standard: "Standard",
-  hard: "Hard",
-};
-
-const TIER_LABEL: Record<RoleModelPolicyExplainResult["tier"], string> = {
-  1: "exact mapping",
-  2: "declared role label",
-  3: "automatic classification",
-  4: "default",
-};
-
-const SOURCE_LABEL: Record<RoleModelPolicyExplainResult["taskClassSource"], string> = {
-  declared: "declared by the caller",
-  classified: "guessed from the text",
-  default: "neither declared nor recognized",
-};
 
 /** A bare ref has no provider: say which one, rather than printing "undefined/model". */
 export function describeTarget(result: RoleModelPolicyExplainResult): string {
@@ -35,71 +25,40 @@ export function describeTarget(result: RoleModelPolicyExplainResult): string {
     : `${result.provider}/${result.model}`;
 }
 
-function describeTools(result: RoleModelPolicyExplainResult): string {
-  return result.deniedTools.length === 0 ? "" : ` Tools denied: ${result.deniedTools.join(", ")}.`;
+export function describeRole(result: RoleModelPolicyExplainResult): string {
+  return `Role: ${result.reasons.role}`;
 }
 
+export function describeTaskClass(result: RoleModelPolicyExplainResult): string {
+  return `Task class: ${result.reasons.taskClass}`;
+}
+
+/** The model line: what would run, then the classifier's own sentence for why. */
 export function describeOutcome(result: RoleModelPolicyExplainResult): string {
-  const tierLabel = TIER_LABEL[result.tier];
-  const tools = describeTools(result);
-  switch (result.outcome) {
-    case "unconfigured":
-      return `→ ${result.roleName} (via ${tierLabel}), no model configured: the model is left as requested.${tools}`;
-    case "selected":
-      return `→ ${result.roleName} (via ${tierLabel}): would route to ${describeTarget(result)}.${tools}`;
-    case "unavailable":
-      return `→ ${result.roleName} (via ${tierLabel}): no eligible model right now; falls back to ${describeTarget(result)}.${tools}`;
-  }
-}
-
-/** The models array backing a class's own override pool — empty means "falls back to Standard". */
-function overridePool(role: RoleRecord, taskClass: TaskClassId): readonly string[] {
-  if (taskClass === "mechanical") return role.mechanicalModels;
-  if (taskClass === "hard") return role.hardModels;
-  return role.models;
+  const target =
+    result.outcome === "unconfigured" ? "the model is left as requested" : `would route to ${describeTarget(result)}`;
+  return `Model: ${target} — ${result.reasons.model}`;
 }
 
 /**
- * Which pool actually decided the model. `classModels()` silently falls back
- * to the standard pool when a class's own override pool is empty, and that
- * fallback is exactly the thing an operator misreads as "my Hard pool is
- * being ignored" — so name it when we can see it. `role` is undefined when
- * the caller has no policy loaded to look the role up in; the sentence then
- * states the class without claiming which pool served it.
+ * The tools line. `deniedTools` is what would ACTUALLY be removed; a withheld
+ * profile is named separately, because "this role is configured read-only but
+ * the hook won't enforce it here" is a different fact from either one alone,
+ * and showing only the configured profile is what made the preview lie.
  */
-function describePool(result: RoleModelPolicyExplainResult, role: RoleRecord | undefined): string {
-  const taskClass = result.taskClass;
-  if (taskClass === undefined || taskClass === "standard") {
-    return "the Standard pool decided";
-  }
-  if (role === undefined) {
-    return `the ${POOL_LABEL[taskClass]} pool decided (or the Standard pool, if that one is empty)`;
-  }
-  return overridePool(role, taskClass).length > 0
-    ? `the ${POOL_LABEL[taskClass]} pool decided`
-    : `the ${POOL_LABEL[taskClass]} pool is empty, so the Standard pool decided`;
+export function describeTools(result: RoleModelPolicyExplainResult): string {
+  const applied =
+    result.deniedTools.length === 0 ? "Tools: nothing denied" : `Tools denied: ${result.deniedTools.join(", ")}`;
+  const withheld = result.toolsWithheld
+    ? ` Withheld: the ${result.toolsWithheld.profileKind} profile (${result.toolsWithheld.deniedTools.join(", ")}) would apply if the agent were labelled.`
+    : "";
+  return `${applied} — ${result.reasons.tools}${withheld}`;
 }
 
-/**
- * The task-class line. Always printed, including for the no-class case —
- * "nothing classified this, so it got the everyday pool" is the answer to
- * the question the panel is most often opened to ask, and leaving it out is
- * what made the dimension invisible in the first place.
- */
-export function describeTaskClass(
-  result: RoleModelPolicyExplainResult,
-  role: RoleRecord | undefined,
-): string {
-  const source = SOURCE_LABEL[result.taskClassSource];
-  const pool = describePool(result, role);
-  const ignored =
-    result.unknownDeclaredTaskClass !== undefined
-      ? ` Ignored "${result.unknownDeclaredTaskClass}": not one of ${TASK_CLASS_IDS.join(", ")}.`
-      : "";
-  if (result.taskClass === undefined) {
-    return `Task class: none (${source}) — ${pool}.${ignored}`;
-  }
-  return `Task class: ${result.taskClass} (${source}) — ${pool}.${ignored}`;
+/** The account line — which pooled account serves it, from the same ladder the account router walks. */
+export function describeAccount(result: RoleModelPolicyExplainResult): string {
+  const target = result.account.providerId ? `${result.account.providerId} — ` : "";
+  return `Account: ${target}${result.reasons.account}`;
 }
 
 /**
@@ -123,10 +82,14 @@ export function describeRequestedModel(result: RoleModelPolicyExplainResult): st
 }
 
 /** Every line the panel prints, in order. */
-export function explainSummaryLines(
-  result: RoleModelPolicyExplainResult,
-  role: RoleRecord | undefined,
-): string[] {
+export function explainSummaryLines(result: RoleModelPolicyExplainResult): string[] {
   const requested = describeRequestedModel(result);
-  return [describeOutcome(result), describeTaskClass(result, role), ...(requested ? [requested] : [])];
+  return [
+    describeRole(result),
+    describeTaskClass(result),
+    describeOutcome(result),
+    describeTools(result),
+    describeAccount(result),
+    ...(requested ? [requested] : []),
+  ];
 }

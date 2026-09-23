@@ -28,6 +28,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         agentTypeMappings: input.patch.agentTypeMappings,
         modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
         enforceToolsOnClassifiedRoles: false,
+        exposeClassifierTool: false,
         revision: `rev-${counter}`,
       },
     };

@@ -199,6 +199,44 @@ mappings, and their precedence) is ported from
 [pi-roles](https://github.com/wonderlydotcom/pi-roles); see its
 `docs/roles-protocol.md`. What follows is only what differs or is new here.
 
+### One classifier decides all of it
+
+`classifyAgent` in `server/classifier.ts` is the single authority. It takes
+everything known at `agent.create` — labels, title, initial prompt, whether
+there is a calling agent and what that caller was itself denied, any requested
+provider/model, the policy document, the live catalog, the pool and its health
+— and returns one `AgentDecision`: role, task class, model, account, tool
+profile, **and a sentence per part saying why**.
+
+Everything that needs the answer calls that one function:
+
+| Consumer | What it does with the decision |
+| --- | --- |
+| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, the tool profile into `config.providerOptions`, the labels recording what happened. |
+| `role-model-policy.explain` (`server/role-policy-rpc-handlers.ts`) | Projects it onto the wire for the settings preview. |
+| `agent_model_policy` (MCP tool, below) | Renders it as text for an agent asking before it spawns. |
+
+The properties it holds to, each one bought with an incident:
+
+- **Deterministic.** No clock, no randomness, no I/O, no model call. Everything
+  time-dependent is an argument — including `nowMs`, the instant the account
+  ladder scores headroom against — so a decision replays exactly from its
+  inputs. An LLM classifier was evaluated and rejected: this runs on every
+  create and may add neither latency nor cost.
+- **Explicit beats inferred**, at every level.
+- **Inference may choose a model; it may never remove capability.** A role
+  guessed from text can pick the model. It cannot take Edit/Write/Bash away.
+  See ["A guessed role may pick a model. It may not take tools away."](#a-guessed-role-may-pick-a-model-it-may-not-take-tools-away).
+- **Nothing silent.** Every part carries its reason, and those reasons are
+  what the explain RPC and the settings preview print — the rendering side
+  states no rule of its own.
+
+The account half of the decision comes from `server/account-select.ts`, the
+same ladder the account router walks. Extracting it is what lets a preview
+answer "which account would this land on" without running the create hook.
+The create hook itself deliberately supplies no `nowMs`: the account router
+runs next and owns that decision, episodes and all.
+
 ### Model refs are account-agnostic by default
 
 A role's model entries take one of two forms:
@@ -407,14 +445,23 @@ an empty class pool falls back to Standard. Same compare-and-swap `revision`
 flow as every other edit: the three pools are just three fields of the same
 document, saved through the same validated write.
 
-**Agent Model Policy → Test This Name.** The resolution preview takes a task
-class (the fixed vocabulary plus *not declared*, which is what a create with
-no label actually looks like) and an optional explicit model request, and
-answers in three lines: the role and tools as before, the resolved class and
-**which pool actually decided** — including "the Hard pool is empty, so the
-Standard pool decided", the fallback most easily misread as the class being
-ignored — and, when a request was simulated, whether policy honored it or
-overrode it and why.
+**Agent Model Policy → Test This Name.** The resolution preview runs the real
+classifier over a hypothetical create and prints one line per part of the
+decision: role, task class, model (with **which pool actually decided**,
+including "that class's own pool is empty, so the standard pool decided"),
+tools, account, and — when a model request was simulated — whether policy
+honored or overrode it.
+
+It takes the same inputs a create carries: agent type, title, **initial
+prompt**, declared task class, an explicit model request, and whether the
+agent would be started by another agent or by you. The prompt and the
+root-agent switch are new, and they are not conveniences: the preview used to
+classify from the title alone while the hook classified from title *and*
+prompt, and a root agent — the one that resolves to `leader` — could not be
+previewed at all. It also used to print the role's **configured** tool profile
+even where the hook would have withheld it, so a guessed `reviewer` read as
+read-only on screen while the real agent kept every tool. Both are gone: the
+panel renders `reasons.*` from the classifier and states nothing itself.
 
 #### Migration from schema v3
 
@@ -808,15 +855,18 @@ nothing until you set it up.
 
 ### A guessed role may pick a model. It may not take tools away.
 
-`resolveRole` resolves every non-root create in one of four tiers, most to
-least direct:
+The classifier resolves every non-root create's role in one of four tiers,
+most to least direct:
 
 1. An explicit `paseo.agent-type` label mapped in `agentTypeMappings`.
 2. An explicit `paseo.agent-role` label naming a role by name/alias.
 3. Automatic classification: the title + initial prompt matched against
    configured role names/aliases, then against the built-in `reviewer`/
    `advisor` seed vocabulary (words like "review", "verify", "check",
-   "research", "investigate").
+   "research", "investigate"). The decision reports which of the two matched
+   — `classified-vocabulary` or `classified-seed` — because "your own alias
+   caught this" and "a built-in keyword did" are the first thing asked when
+   a classification surprises someone.
 4. The bare default (`worker`), when there's no title/prompt text to
    classify at all.
 
@@ -854,7 +904,41 @@ no distinction from an explicit label. It isn't exposed on the settings
 screen yet — set it directly on the stored `agentModelPolicy` document if you
 need it.
 
+### Asking before you spawn
+
+A caller can ask the classifier what a task *should* run as, before it creates
+anything, through an MCP tool named `agent_model_policy`. It takes the labels,
+title, prompt and model you would use, and answers with the whole decision
+plus the labels that would make it explicit rather than guessed.
+
+`@getpaseo/plugin` has no "register an agent tool" API. What a plugin *can* do
+is rewrite `config.mcpServers` on `before("agent.create")`, which the daemon
+honors end to end, so this plugin contributes an agent tool by injecting an
+MCP server it ships itself.
+
+The MCP server runs **in the plugin process**, on a unix socket
+(`server/classifier-tool.ts`); the child the daemon spawns
+(`mcp/agent-model-policy.mjs`) is a byte pipe with no logic in it. That is
+the fork's own pattern for a daemon-hosted MCP server — see
+`packages/server/scripts/mcp-stdio-socket-bridge-cli.mjs` — and it is what
+makes the tool's answer and the create hook's behaviour literally the same
+call, against the same catalog, pool and health, rather than two things that
+agree for now.
+
+**Off by default.** Set `exposeClassifierTool: true` on the stored
+`agentModelPolicy` document to turn it on. Enabling it changes the
+`mcpServers` of every agent the daemon creates, which is not something an
+upgrade should do quietly. It exposes the operator's routing policy to agents
+already running on the operator's machine, and nothing else — the socket
+carries no credentials and answers only this one question.
+
 ### Fable budget gate
+
+> Fable is currently retired from every pool — Opus 5.5 supersedes it, so
+> nothing routes there. The gate below stays in the code because the decision
+> is an operator's to make, not a schema change: put a Fable entry back in a
+> pool and it starts applying again. `server/classifier.test.ts` asserts that
+> no configured pool names it.
 
 Fable is the expensive escalation model. When every pooled account is at or
 above a threshold share of its weekly Fable window, roles skip their Fable

@@ -18,6 +18,7 @@ const VALID_POLICY: RoleModelPolicy = {
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
+  exposeClassifierTool: false,
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };
@@ -292,14 +293,21 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "scout" }, context(fakePaseo({})));
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         roleId: "worker",
         roleName: "worker",
+        roleSource: "agent-type-mapping",
         tier: 1,
         outcome: "unconfigured",
+        pool: [],
+        poolSlot: "standard",
         deniedTools: [],
         taskClassSource: "default",
       });
+      // Every part of the decision explains itself; the settings preview
+      // prints these verbatim rather than re-deriving them.
+      expect(result.reasons.model).toContain("no models configured");
+      expect(result.reasons.role).toContain("agent-type mapping");
     });
 
     it("reports SELECTED with the chosen provider/model when the role is configured and catalog-eligible", async () => {
@@ -314,16 +322,19 @@ describe("role-model-policy RPC handlers", () => {
 
       const result = await handlers.explain({ agentType: "worker" }, context(fakePaseo({})));
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         roleId: "worker",
         roleName: "worker",
         tier: 1,
         outcome: "selected",
         provider: "codex",
         model: "gpt-5.1",
+        pool: ["codex/gpt-5.1"],
         deniedTools: [],
         taskClassSource: "default",
       });
+      // A non-pool-family request is not the account pool's business.
+      expect(result.account.kind).toBe("no-pool");
     });
 
     it("falls through to tier-3 classification on an unmapped agentType, using title text", async () => {

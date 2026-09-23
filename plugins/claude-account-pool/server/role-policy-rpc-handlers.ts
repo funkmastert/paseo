@@ -8,16 +8,28 @@ import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
-import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
-import { resolveRole, resolveTaskClass } from "./role-resolve";
-import { AGENT_TYPE_LABEL, POOL_FAMILY, TASK_CLASS_LABEL, classModels } from "../shared/role-policy-schema";
+import { classifyAgent } from "./classifier";
+import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
   policyCache: PolicyCache;
   catalogCache: ModelCatalogCache;
   poolCache: PoolCache;
-  health: Pick<HealthTracker, "isHealthyFor" | "isLastResortEligible" | "windowUtilization">;
+  /**
+   * Wider than the create hook's: `explain` reports which pooled ACCOUNT
+   * would serve the agent, and the account ladder scores headroom across
+   * every window (server/account-select.ts).
+   */
+  health: Pick<
+    HealthTracker,
+    | "isHealthyFor"
+    | "isLastResortEligible"
+    | "windowUtilization"
+    | "isHealthyForAllWindows"
+    | "describeWindow"
+    | "windowIds"
+  >;
   recentAgentTypes: RecentAgentTypes;
 }
 
@@ -115,9 +127,10 @@ async function performWrite(
     schemaVersion: CURRENT_SCHEMA_VERSION,
     ...candidateDoc,
     // Not part of the settings screen's editable surface yet — carry the
-    // stored value through untouched so saving any other field can't
-    // silently reset this escape hatch back to its default.
+    // stored values through untouched so saving any other field can't
+    // silently reset one of these escape hatches back to its default.
     enforceToolsOnClassifiedRoles: current.policy.enforceToolsOnClassifiedRoles,
+    exposeClassifierTool: current.policy.exposeClassifierTool,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -208,81 +221,96 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       return { values: deps.recentAgentTypes.list() };
     },
 
+    /**
+     * The settings preview, answered by the SAME function the
+     * `before("agent.create")` hook calls — see server/classifier.ts. Nothing
+     * here re-derives a rule; it maps one `AgentDecision` onto the wire.
+     *
+     * `Date.now()` is read HERE, not in the classifier: the account ladder
+     * scores headroom against an instant, and keeping the clock on the
+     * consumer's side is what keeps the classifier replayable.
+     */
     async explain(input) {
       const policy = deps.policyCache.get();
-      const resolution = resolveRole(policy, {
-        labels: input.agentType !== undefined ? { [AGENT_TYPE_LABEL]: input.agentType } : undefined,
-        title: input.title,
-      });
-      // Independent of role resolution — same fixed-vocabulary resolution
-      // routeRoleForCreateUnguarded runs at create time. `initialPrompt`
-      // isn't simulated, matching the existing gap in role resolution above.
-      const taskClassResolution = resolveTaskClass({
-        labels: input.taskClass !== undefined ? { [TASK_CLASS_LABEL]: input.taskClass } : undefined,
-        title: input.title,
-      });
-      const taskClass = taskClassResolution.taskClass;
-      const catalog = deps.catalogCache.get();
       const { pool } = deps.poolCache.get();
-      const outcome = selectModel(resolution.role, catalog, pool, deps.health, {
-        modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
-        taskClass,
-      });
+      const labels: Record<string, string> = {};
+      if (input.agentType !== undefined) labels[AGENT_TYPE_LABEL] = input.agentType;
+      if (input.declaredRole !== undefined) labels[AGENT_ROLE_LABEL] = input.declaredRole;
+      if (input.taskClass !== undefined) labels[TASK_CLASS_LABEL] = input.taskClass;
 
-      // Mirrors role-router.ts's precedence exactly: an explicit request
-      // wins when it's a member of the resolved role's own pool AND
-      // currently selectable (or the role has no pool configured at all, so
-      // there's nothing to override); otherwise policy's own selection runs
-      // instead, and the reason distinguishes "never approved" from
-      // "approved but not selectable right now".
-      let requestedModelOverride:
-        | { requestedRef: string; honored: boolean; effectiveRef?: string; reason?: "not-approved" | "not-currently-selectable" }
-        | undefined;
-      if (input.requestedModel) {
-        const requestedProvider = input.requestedProvider ?? POOL_FAMILY;
-        const requestedRef = `${requestedProvider}/${input.requestedModel}`;
-        const requestedFamily = familyOfProvider(pool, requestedProvider);
-        const evaluation = evaluateRequestedModel(
-          resolution.role,
-          requestedFamily,
-          input.requestedModel,
-          catalog,
+      const decision = classifyAgent(
+        {
+          labels: Object.keys(labels).length > 0 ? labels : undefined,
+          title: input.title,
+          initialPrompt: input.prompt,
+          // A root agent has no caller; anything else is simulated as a child
+          // of a synthetic caller, which is what makes the leader tier
+          // reachable from this screen at all.
+          callerAgentId: input.root === true ? undefined : "(preview)",
+          requestedProvider: input.requestedProvider,
+          requestedModel: input.requestedModel,
+        },
+        {
+          policy,
+          catalog: deps.catalogCache.get(),
           pool,
-          deps.health,
-          { modelBudgetThresholdPct: policy.modelBudgetThresholdPct, taskClass },
-        );
-        const honored = classModels(resolution.role, taskClass).length === 0 || evaluation.eligible;
-        requestedModelOverride = honored
-          ? { requestedRef, honored: true }
-          : {
-              requestedRef,
-              honored: false,
-              // outcome can't actually be "unconfigured" here: that only
-              // happens when the resolved class's pool (classModels) is
-              // empty, which already forces honored=true above. requestedRef
-              // is a type-safe fallback.
-              effectiveRef: outcome.outcome === "unconfigured" ? requestedRef : formatModelRef(outcome),
-              reason: evaluation.configured ? "not-currently-selectable" : "not-approved",
-            };
-      }
+          health: deps.health,
+          nowMs: Date.now(),
+        },
+      );
+
+      const { role, taskClass, model, tools, account } = decision;
+      const requestedModelOverride = model.override
+        ? {
+            requestedRef: model.override.requestedRef,
+            honored: false,
+            effectiveRef: model.override.effectiveRef,
+            reason: model.override.reason,
+          }
+        : model.requestedRef !== undefined
+          ? { requestedRef: model.requestedRef, honored: true }
+          : undefined;
 
       return {
-        roleId: resolution.role.id,
-        roleName: resolution.role.name,
-        tier: resolution.tier,
-        outcome: outcome.outcome,
-        deniedTools: profileDeniedTools(resolution.role.toolProfile),
-        ...(outcome.outcome !== "unconfigured" ? { model: outcome.model } : {}),
+        roleId: role.role.id,
+        roleName: role.role.name,
+        roleSource: role.source,
+        ...(role.tier !== undefined ? { tier: role.tier } : {}),
+        ...(role.unknownDeclaredValue !== undefined ? { unknownDeclaredRole: role.unknownDeclaredValue } : {}),
+        outcome: model.outcome,
+        ...(model.model !== undefined ? { model: model.model } : {}),
         // Omitted for a bare ref: no provider was chosen, so the account
         // router is still free to pick any healthy pooled account.
-        ...(outcome.outcome !== "unconfigured" && outcome.provider !== null
-          ? { provider: outcome.provider }
+        ...(model.provider !== null ? { provider: model.provider } : {}),
+        pool: [...model.pool],
+        poolSlot: model.poolSlot,
+        fellBackToStandardPool: model.fellBackToStandardPool,
+        deniedTools: tools.deniedTools,
+        ...(tools.withheld
+          ? {
+              toolsWithheld: {
+                profileKind: tools.withheld.profile.kind,
+                deniedTools: tools.withheld.deniedTools,
+              },
+            }
           : {}),
-        ...(taskClass !== undefined ? { taskClass } : {}),
-        taskClassSource: taskClassResolution.source,
-        ...(taskClassResolution.unknownDeclaredValue !== undefined
-          ? { unknownDeclaredTaskClass: taskClassResolution.unknownDeclaredValue }
+        ...(taskClass.taskClass !== undefined ? { taskClass: taskClass.taskClass } : {}),
+        taskClassSource: taskClass.source,
+        ...(taskClass.unknownDeclaredValue !== undefined
+          ? { unknownDeclaredTaskClass: taskClass.unknownDeclaredValue }
           : {}),
+        account: {
+          kind: account.kind,
+          ...(account.providerId !== undefined ? { providerId: account.providerId } : {}),
+          ...(account.usableProviderIds !== undefined ? { usableProviderIds: account.usableProviderIds } : {}),
+        },
+        reasons: {
+          role: role.reason,
+          taskClass: taskClass.reason,
+          model: model.reason,
+          tools: tools.reason,
+          account: account.reason,
+        },
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
       };
     },

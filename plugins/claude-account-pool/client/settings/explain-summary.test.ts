@@ -1,118 +1,114 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
-import type { RoleRecord } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
-import { describeRequestedModel, describeTaskClass, explainSummaryLines } from "./explain-summary";
+import { describeRequestedModel, describeTools, explainSummaryLines } from "./explain-summary";
 
+/**
+ * These assert FORMATTING only. The sentences explaining a decision come from
+ * the classifier (`result.reasons.*`) and are asserted in
+ * server/classifier.test.ts — asserting them again here is exactly the
+ * duplication this panel used to carry.
+ */
 function result(overrides: Partial<RoleModelPolicyExplainResult> = {}): RoleModelPolicyExplainResult {
   return {
     roleId: "worker",
     roleName: "worker",
+    roleSource: "agent-type-mapping",
     tier: 1,
     outcome: "selected",
     model: "claude-sonnet-5",
+    pool: ["claude-sonnet-5"],
+    poolSlot: "standard",
+    fellBackToStandardPool: false,
     deniedTools: [],
     taskClassSource: "default",
+    account: { kind: "worker", providerId: "claude-work", usableProviderIds: ["claude-work", "claude-personal"] },
+    reasons: {
+      role: "worker, from the agent-type mapping.",
+      taskClass: "none — nothing declared one.",
+      model: "claude-sonnet-5 is the first selectable entry in the standard pool.",
+      tools: "Nothing is denied.",
+      account: "claude-work has the most headroom.",
+    },
     ...overrides,
   };
 }
 
-function role(overrides: Partial<RoleRecord> = {}): RoleRecord {
-  return {
-    id: "worker",
-    name: "worker",
-    standard: true,
-    aliases: [],
-    models: ["claude-sonnet-5"],
-    mechanicalModels: [],
-    hardModels: [],
-    toolProfile: DEFAULT_TOOL_PROFILE,
-    ...overrides,
-  };
-}
-
-describe("describeTaskClass", () => {
-  it("names the standard pool when nothing classified the task", () => {
-    expect(describeTaskClass(result(), role())).toBe(
-      "Task class: none (neither declared nor recognized) — the Standard pool decided.",
-    );
+describe("explainSummaryLines", () => {
+  it("prints one line per part of the decision, each carrying the classifier's own reason", () => {
+    expect(explainSummaryLines(result())).toEqual([
+      "Role: worker, from the agent-type mapping.",
+      "Task class: none — nothing declared one.",
+      "Model: would route to claude-sonnet-5 on whichever pooled account is healthy — claude-sonnet-5 is the first selectable entry in the standard pool.",
+      "Tools: nothing denied — Nothing is denied.",
+      "Account: claude-work — claude-work has the most headroom.",
+    ]);
   });
 
-  it("distinguishes a declared class from a guessed one", () => {
-    const declared = describeTaskClass(
-      result({ taskClass: "hard", taskClassSource: "declared" }),
-      role({ hardModels: ["claude-opus-5"] }),
-    );
-    expect(declared).toBe("Task class: hard (declared by the caller) — the Hard pool decided.");
-
-    const guessed = describeTaskClass(
-      result({ taskClass: "hard", taskClassSource: "classified" }),
-      role({ hardModels: ["claude-opus-5"] }),
-    );
-    expect(guessed).toBe("Task class: hard (guessed from the text) — the Hard pool decided.");
+  it("says the model is left alone when the role has no pool", () => {
+    const lines = explainSummaryLines(result({ outcome: "unconfigured", model: undefined, pool: [] }));
+    expect(lines[2]).toContain("the model is left as requested");
   });
 
-  // The fallback operators misread as "my Hard pool is being ignored".
-  it("says so when the class pool is empty and the standard pool served the request", () => {
-    expect(describeTaskClass(result({ taskClass: "mechanical", taskClassSource: "declared" }), role())).toBe(
-      "Task class: mechanical (declared by the caller) — the Mechanical pool is empty, so the Standard pool decided.",
-    );
+  it("spells a pinned ref as provider/model", () => {
+    const lines = explainSummaryLines(result({ provider: "codex", model: "gpt-5" }));
+    expect(lines[2]).toContain("would route to codex/gpt-5");
   });
 
-  it("reports an unrecognized declared value instead of swallowing it", () => {
-    const line = describeTaskClass(
-      result({ taskClassSource: "default", unknownDeclaredTaskClass: "trivial" }),
-      role(),
-    );
-    expect(line).toContain('Ignored "trivial": not one of mechanical, standard, hard.');
+  it("adds the explicit-request line only when one was simulated", () => {
+    expect(explainSummaryLines(result())).toHaveLength(5);
+    expect(
+      explainSummaryLines(result({ requestedModelOverride: { requestedRef: "claude/claude-opus-5", honored: true } })),
+    ).toHaveLength(6);
+  });
+});
+
+describe("describeTools", () => {
+  it("reports what would actually be denied", () => {
+    expect(describeTools(result({ deniedTools: ["Bash", "Write"] }))).toContain("Tools denied: Bash, Write");
   });
 
-  it("hedges on which pool served it when no role record is available", () => {
-    expect(describeTaskClass(result({ taskClass: "hard", taskClassSource: "declared" }), undefined)).toBe(
-      "Task class: hard (declared by the caller) — the Hard pool decided (or the Standard pool, if that one is empty).",
+  /**
+   * The preview's old bug: it printed the ROLE's configured profile, so a
+   * guessed `reviewer` looked read-only here while the create hook would have
+   * withheld that profile entirely and denied nothing.
+   */
+  it("separates what applies from what was withheld", () => {
+    const line = describeTools(
+      result({
+        deniedTools: [],
+        toolsWithheld: { profileKind: "read-only", deniedTools: ["Bash", "Write"] },
+      }),
     );
-  });
-
-  it("treats an explicitly-declared standard class as the standard pool", () => {
-    expect(describeTaskClass(result({ taskClass: "standard", taskClassSource: "declared" }), role())).toBe(
-      "Task class: standard (declared by the caller) — the Standard pool decided.",
-    );
+    expect(line).toContain("Tools: nothing denied");
+    expect(line).toContain("Withheld: the read-only profile (Bash, Write) would apply if the agent were labelled.");
   });
 });
 
 describe("describeRequestedModel", () => {
-  it("is omitted when no explicit request was simulated", () => {
+  it("is absent when no explicit request was simulated", () => {
     expect(describeRequestedModel(result())).toBeUndefined();
   });
 
-  it("reports an honored request", () => {
-    const line = describeRequestedModel(
-      result({ requestedModelOverride: { requestedRef: "claude/claude-opus-5", honored: true } }),
-    );
-    expect(line).toBe("Explicit request claude/claude-opus-5: honored.");
-  });
-
-  it("names the override label so it matches what a real agent carries", () => {
+  it("names the label a real overridden agent would carry", () => {
     const line = describeRequestedModel(
       result({
         requestedModelOverride: {
           requestedRef: "claude/claude-opus-5",
           honored: false,
-          effectiveRef: "claude-haiku-5",
+          effectiveRef: "claude-sonnet-5",
           reason: "not-approved",
         },
       }),
     );
-    expect(line).toContain("overridden by policy → claude-haiku-5");
-    expect(line).toContain("not a member of the pool this task class resolves to");
+    expect(line).toContain("overridden by policy → claude-sonnet-5");
     expect(line).toContain("paseo.model-overridden-by-policy=claude/claude-opus-5");
   });
 
-  it("distinguishes an approved-but-unselectable request from an unapproved one", () => {
+  it("distinguishes approved-but-unavailable from never-approved", () => {
     const line = describeRequestedModel(
       result({
         requestedModelOverride: {
-          requestedRef: "claude/claude-fable-5-1",
+          requestedRef: "claude/claude-opus-5",
           honored: false,
           effectiveRef: "claude-sonnet-5",
           reason: "not-currently-selectable",
@@ -120,24 +116,5 @@ describe("describeRequestedModel", () => {
       }),
     );
     expect(line).toContain("approved for this role, but not selectable right now");
-  });
-});
-
-describe("explainSummaryLines", () => {
-  it("always prints the role line and the task-class line, request line only when present", () => {
-    expect(explainSummaryLines(result(), role())).toHaveLength(2);
-    expect(
-      explainSummaryLines(
-        result({ requestedModelOverride: { requestedRef: "claude/claude-opus-5", honored: true } }),
-        role(),
-      ),
-    ).toHaveLength(3);
-  });
-
-  it("keeps the existing role/tool sentence intact", () => {
-    const [roleLine] = explainSummaryLines(result({ deniedTools: ["Edit", "Write"] }), role());
-    expect(roleLine).toBe(
-      "→ worker (via exact mapping): would route to claude-sonnet-5 on whichever pooled account is healthy. Tools denied: Edit, Write.",
-    );
   });
 });

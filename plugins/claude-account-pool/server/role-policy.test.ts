@@ -23,6 +23,7 @@ const VALID_STORED_POLICY: RoleModelPolicy = {
   ],
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
+  exposeClassifierTool: false,
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",
 };

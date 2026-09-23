@@ -12,6 +12,20 @@ import {
 
 export type ResolveRoleTier = 1 | 2 | 3 | 4;
 
+/**
+ * Which kind of text match produced a tier-3 role.
+ *
+ * `vocabulary` is one of the operator's OWN configured role names/aliases
+ * appearing in the text; `seed` is one of the two built-in seed patterns
+ * below. The distinction is only ever reported, never acted on — but it is
+ * the difference between "your alias caught this" and "a built-in keyword
+ * did", which is the first question asked when a classification surprises
+ * someone. Absent on tiers 1, 2 and 4, where no text matching happened — and
+ * absent on a tier-3 result too when the text matched nothing and the worker
+ * default is simply what was left.
+ */
+export type ClassificationMatch = "vocabulary" | "seed";
+
 export interface ResolveRoleInput {
   labels?: Record<string, string>;
   title?: string | null;
@@ -27,6 +41,8 @@ export interface ResolveRoleResult {
    * (never blocks); the router uses this to notify once per (caller, value).
    */
   unknownDeclaredValue?: string;
+  /** Which kind of text match produced a tier-3 role. Absent on every other tier. */
+  match?: ClassificationMatch;
 }
 
 // Tier-3 built-in seed vocabulary. Checked only after every configured role
@@ -94,7 +110,10 @@ function findRoleByWordInText(policy: RoleModelPolicy, text: string): RoleRecord
 }
 
 /** Tier 3/4: deterministic keyword classification over lowercase(title + " " + initialPrompt). */
-function classify(policy: RoleModelPolicy, text: string): { role: RoleRecord; tier: 3 | 4 } {
+function classify(
+  policy: RoleModelPolicy,
+  text: string,
+): { role: RoleRecord; tier: 3 | 4; match?: ClassificationMatch } {
   const trimmed = text.trim();
   if (trimmed.length === 0) {
     return { role: requireStandardRole(policy, "worker"), tier: 4 };
@@ -102,22 +121,24 @@ function classify(policy: RoleModelPolicy, text: string): { role: RoleRecord; ti
 
   const configuredMatch = findRoleByWordInText(policy, trimmed);
   if (configuredMatch) {
-    return { role: configuredMatch, tier: 3 };
+    return { role: configuredMatch, tier: 3, match: "vocabulary" };
   }
   if (REVIEWER_SEED_RE.test(trimmed)) {
-    return { role: requireStandardRole(policy, "reviewer"), tier: 3 };
+    return { role: requireStandardRole(policy, "reviewer"), tier: 3, match: "seed" };
   }
   if (ADVISOR_SEED_RE.test(trimmed)) {
-    return { role: requireStandardRole(policy, "advisor"), tier: 3 };
+    return { role: requireStandardRole(policy, "advisor"), tier: 3, match: "seed" };
   }
+  // Text existed but nothing in it matched: `match` stays unset, which is
+  // how a caller tells "a keyword chose worker" from "worker is what's left".
   return { role: requireStandardRole(policy, "worker"), tier: 3 };
 }
 
 /**
- * Pure role resolution — no I/O, no callerAgentId, no dedup state. See
- * role-router.ts for the callerAgentId gate (same one the account router
- * uses) and the once-per-(caller, value) notification for unknown declared
- * roles.
+ * Pure role resolution: one step of server/classifier.ts, which is the only
+ * caller. Nothing else should call this directly — the classifier is the
+ * single authority, and a second caller here is a second place the role
+ * answer can be derived (see classifier.ts's header).
  *
  * Precedence:
  *   1. Explicit exact-name mapping: labels[AGENT_TYPE_LABEL] in

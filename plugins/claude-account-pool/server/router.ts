@@ -1,7 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import type { AccountIdentity } from "./account-identity";
 import type { HealthTracker } from "./health";
-import { rankByHeadroom } from "./headroom";
+import { isAccountHealthy, poolMemberIds, selectPoolAccount, usablePoolMembers } from "./account-select";
 import { createIntervalPoller } from "./interval-poller";
 import { createLogThrottle } from "./log-throttle";
 import type { PoolCache } from "./pool";
@@ -179,15 +179,6 @@ export interface RouterOptions {
 
 type LadderHealth = RouterOptions["health"];
 
-/** Every pool entry id, workers then leader, in a stable order. */
-function poolMemberIds(pool: { workers: readonly { providerId: string }[]; leader: { providerId: string } | null }): string[] {
-  const ids = pool.workers.map((worker) => worker.providerId);
-  if (pool.leader) {
-    ids.push(pool.leader.providerId);
-  }
-  return ids;
-}
-
 /**
  * The soonest any of these accounts gets budget back, across every capped window. Null when
  * nothing reported a reset time — an account can be capped with no known
@@ -286,56 +277,29 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
       return;
     }
 
-    // Selection ladder. Tiers rank isolation and health; headroom ranks within a tier, so the
-    // account with the most room left absorbs the next spawn instead of whichever one the
-    // operator happened to number first:
-    //   1. a worker healthy for the requested model — or, when no model was requested, healthy
-    //      on every window we've observed (a model-scoped cap can't be matched against an
-    //      unknown model, so it must disqualify);
-    //   2. a worker that is drained but not capped — still isolation, still no pool-dry episode;
-    //   3. the leader, if it can run anything. Isolation is gone at this point, so this raises a
-    //      pool-dry episode, and a collapse episode when the pool is down to one account;
-    //   4. nothing. The pool is exhausted and the create is refused.
-    //
-    // 1 is kept above 2 rather than merged into one headroom ranking: a drained worker has less
-    // room than a healthy one by definition, and letting a score put a nearly-capped account
-    // ahead of a healthy one would trade the pool's purpose for a rounding difference.
+    // The ladder itself lives in server/account-select.ts, so the same answer
+    // can be explained without running this hook — see server/classifier.ts.
+    // What stays here is everything the ladder deliberately doesn't do:
+    // raising the episodes, refusing an exhausted pool, and validating the
+    // target against the provider registry.
     const modelId = request.config.model ?? "";
     const nowMs = now();
-    const isHealthy = (providerId: string): boolean =>
-      modelId
-        ? options.health.isHealthyFor(providerId, modelId)
-        : options.health.isHealthyForAllWindows(providerId);
-    const rank = <T extends { providerId: string; priority: number }>(candidates: readonly T[]): T[] =>
-      rankByHeadroom(candidates, options.health, modelId, nowMs);
-
-    const healthyWorkers = rank(pool.workers.filter((worker) => isHealthy(worker.providerId)));
-    const drainedWorkers = rank(
-      pool.workers.filter(
-        (worker) =>
-          !isHealthy(worker.providerId) && options.health.isLastResortEligible(worker.providerId),
-      ),
-    );
-    const worker = healthyWorkers[0] ?? drainedWorkers[0];
-    // The leader carries no configured priority; it is a tier of one, so any number does.
-    const leaderUsable =
-      pool.leader !== null &&
-      (isHealthy(pool.leader.providerId) || options.health.isLastResortEligible(pool.leader.providerId));
+    const selection = selectPoolAccount(pool, options.health, modelId, nowMs);
 
     let targetProviderId: string;
     let poolDry: PoolDryEpisode | undefined;
-    if (worker) {
-      targetProviderId = worker.providerId;
-    } else if (pool.leader && leaderUsable) {
-      targetProviderId = pool.leader.providerId;
+    if (selection.kind === "worker") {
+      targetProviderId = selection.providerId;
+    } else if (selection.kind === "leader") {
+      targetProviderId = selection.providerId;
       poolDry = { callerAgentId, requestedModel: modelId, leaderProviderId: targetProviderId };
-    } else if (!pool.leader) {
+    } else if (selection.kind === "no-leader") {
       // A pool with no leader entry and no usable worker isn't exhausted so much as unfinished:
       // there is no configured last resort to fall to. Fail open as before rather than refuse.
       options.onFailOpen?.({ callerAgentId, reason: "no-healthy-worker-and-no-leader" });
       return;
     } else {
-      const poolProviderIds = poolMemberIds(pool);
+      const poolProviderIds = selection.providerIds;
       options.onPoolExhausted?.({
         callerAgentId,
         requestedModel: modelId,
@@ -373,9 +337,7 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
     // collapse stays quiet. Reported wherever the target landed, leader or worker — a leader
     // account that died and left one worker holding everything is the same loss of isolation as
     // the other way round.
-    const usable = poolMemberIds(pool).filter(
-      (providerId) => isHealthy(providerId) || options.health.isLastResortEligible(providerId),
-    );
+    const usable = usablePoolMembers(pool, options.health, modelId);
     const identity = options.accountIdentity;
     const usableAccounts = identity ? identity.countAccounts(usable) : new Set(usable).size;
     if (usableAccounts === 1) {

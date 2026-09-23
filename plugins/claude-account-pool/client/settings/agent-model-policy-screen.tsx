@@ -64,7 +64,7 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
 
       <AgentRoleMappingsSection model={model} state={state} recentAgentTypes={recentAgentTypes} theme={theme} />
 
-      <TestRoleName theme={theme} state={state} />
+      <TestRoleName theme={theme} />
     </>
   );
 }

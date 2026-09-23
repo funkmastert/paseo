@@ -1,5 +1,7 @@
-import type { PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
+import { fileURLToPath } from "node:url";
+import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
+import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { createHealthTracker } from "./server/health";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
 import { createNotifier, type Notifier } from "./server/notify";
@@ -30,6 +32,16 @@ function isPoolProvider(pool: PoolCache, providerId: string): boolean {
  */
 const STARTUP_WARM_TIMEOUT_MS = 5000;
 
+/**
+ * The MCP server name the classifier tool is injected under. Namespaced so
+ * an operator reading an agent's config can tell where it came from, and so
+ * it can never collide with a server the caller configured itself.
+ */
+const CLASSIFIER_MCP_SERVER = "paseo-agent-policy";
+
+/** The stdio shim the daemon spawns per agent. See server/classifier-tool.ts for why it is a separate process. */
+const CLASSIFIER_MCP_ENTRY = fileURLToPath(new URL("./mcp/agent-model-policy.mjs", import.meta.url));
+
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
   // Long-lived alongside the health tracker: both are fed by the same usage poll, and both
@@ -47,6 +59,7 @@ export default function contribute(server: PluginServerContext) {
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
+  let classifierTool: ClassifierToolServer | null = null;
   // Resolves once the post-reload warm-up (below) has settled or timed out.
   // Non-null only while a warm-up is in flight; `poolCache` truthy is the
   // steady-state fast path once it's done. Shared so a create dispatched
@@ -134,6 +147,20 @@ export default function contribute(server: PluginServerContext) {
         );
       },
     });
+    // The agent-facing half of the classifier. The socket opens whether or
+    // not the policy exposes the tool — it is unref'd, answers one question,
+    // and costs nothing idle, whereas opening it lazily would mean an agent
+    // created in the seconds after a policy change found nothing listening.
+    classifierTool = startClassifierToolServer({
+      world: () => ({
+        policy: startedPolicyCache.get(),
+        catalog: startedCatalogCache.get(),
+        pool: startedPoolCache.get().pool,
+        health,
+        nowMs: Date.now(),
+      }),
+    });
+
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({
       policyCache,
       catalogCache,
@@ -254,6 +281,31 @@ export default function contribute(server: PluginServerContext) {
     return router?.(input, context) ?? undefined;
   });
 
+  // Third registration, and deliberately not folded into the role hook: WHICH
+  // tools an agent gets is a different question from what the agent should
+  // be, and the role hook returns early on half a dozen paths that must not
+  // also mean "no policy tool". Off unless the operator turns it on.
+  const unregisterClassifierTool = server.before("agent.create", async (input, context) => {
+    await ensureStarted(context.paseo);
+    if (!classifierTool || policyCache?.get().exposeClassifierTool !== true) {
+      return undefined;
+    }
+    const { request } = input;
+    const mcpServers = {
+      ...(request.config.mcpServers ?? {}),
+      [CLASSIFIER_MCP_SERVER]: {
+        type: "stdio" as const,
+        command: process.execPath,
+        args: [CLASSIFIER_MCP_ENTRY],
+        env: { PASEO_CLASSIFIER_SOCKET: classifierTool.socketPath },
+      },
+    };
+    return {
+      ...request,
+      config: { ...request.config, mcpServers },
+    } as PluginBeforeRequests["agent.create"];
+  });
+
   const unregisterTurnEnded = server.on("agent.turn_ended", (event, context) => {
     ensureStarted(context.paseo);
     if (poolCache && isPoolProvider(poolCache, event.agent.provider)) {
@@ -324,6 +376,7 @@ export default function contribute(server: PluginServerContext) {
   return () => {
     unregisterRoleCreate();
     unregisterCreate();
+    unregisterClassifierTool();
     unregisterTurnEnded();
     unregisterPermissionRequested();
     unregisterPermissionResolved();
@@ -336,5 +389,6 @@ export default function contribute(server: PluginServerContext) {
     policyCache?.stop();
     catalogCache?.stop();
     parentProfiles?.stop();
+    classifierTool?.close();
   };
 }
