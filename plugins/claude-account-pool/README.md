@@ -191,7 +191,8 @@ through. It is a code-level option, not daemon config: an unknown key in
 Stored under the top-level `agentModelPolicy` key in daemon config, edited
 from the **Agent Model Policy** settings screen. A role is resolved for every
 `agent.create`, and decides two things: which model the agent runs, and which
-tools it may use.
+tools it may use. The model half is further split by **task class** — how much
+model the work is worth — described below.
 
 The policy model (roles, aliases, ordered model pools, explicit agent-type
 mappings, and their precedence) is ported from
@@ -232,16 +233,210 @@ before the upgrade can still save. The migrated document only lands on disk
 when you make some other change and save — which is also when the leader role
 below is persisted.
 
+### Task class: what the work is worth, not who does it
+
+A role says what an agent **is**; it says nothing about what the work it was
+handed is **worth**. The same `worker` gets a two-line rename and a
+race-condition hunt, and with role alone both land on the same model — so
+agents pick by habit, and the habit is "ask for the best model". A leader
+requesting Opus for everything because nothing told it otherwise is what
+burned an entire weekly account budget here.
+
+A **task class** is the second, orthogonal dimension: the role picks WHO runs
+the work, the task class picks HOW MUCH MODEL it's worth. Roles are still
+where tool enforcement lives; classes touch model selection and nothing else.
+
+Why orthogonal rather than replacing roles: they answer different questions
+and are resolved from different evidence. A reviewer stays a reviewer whether
+it's reviewing a typo fix or a migration, and it stays read-only either way —
+folding the two into one axis would either multiply the role list by three or
+make "read-only" depend on how hard the task sounded. It also keeps the
+settings screen comprehensible: one card per role, three pools inside it,
+instead of a role list that grows combinatorially.
+
+#### The vocabulary is fixed, and deliberately small
+
+| Class | For | Wrong answer costs |
+| --- | --- | --- |
+| `mechanical` | Rote, low-risk, narrowly scoped: a rename, a typo, a formatting pass, a changelog line, a version bump. | Cheap — obvious on sight, cheap to redo. |
+| `standard` | Everyday work of ordinary, unestablished difficulty. **The default.** | The usual. |
+| `hard` | Real correctness or design risk: concurrency, migrations, security, architecture, cross-cutting refactors. | Expensive — a subtly wrong answer found much later. |
+
+Three levels, not five, and not operator-definable the way role names are. A
+caller has to pick correctly without thinking hard, and a vocabulary nobody
+applies consistently is worse than none: three levels are exactly enough to
+separate "cheaper than usual", "the default", and "reach for the best model".
+
+#### What a caller does differently
+
+Set a `paseo.task-class` label on the create, alongside the
+`paseo.agent-type` label the role ladder already reads:
+
+```jsonc
+{ "labels": { "paseo.agent-type": "worker", "paseo.task-class": "hard" } }
+```
+
+Matched case-insensitively against the three ids. **Nothing else changes for
+an existing caller** — a create with no such label behaves exactly as it did
+before the dimension existed.
+
+Root agents included: unlike the role ladder, where a root agent is
+deterministically the `leader` and isn't classified at all, task class is
+resolved the same way for every create. A leader's own work has a difficulty
+like anything else, and a leader asking for the best model for a two-line
+change is the case that started all of this.
+
+Resolution precedence mirrors `resolveRole`'s "declared beats guessed" shape,
+with fewer tiers because there is no per-policy class vocabulary to configure:
+
+1. **Declared** — `labels["paseo.task-class"]` naming one of the three ids.
+   The cheapest and most trustworthy signal there is: the caller is stating
+   what it's asking for rather than leaving it to be guessed.
+2. **Unknown declared value** — never blocks. Falls through to classification
+   with the value reported once per (caller, value) so the caller can be
+   told, the same way an unknown `paseo.agent-role` is handled.
+3. **Classified** — keyword seeds over the title + initial prompt (below).
+4. **Default** — no class at all, which resolves to the role's standard pool.
+
+#### Three pools per role
+
+A role carries `models` (the standard pool, unchanged), plus optional
+`mechanicalModels` and `hardModels` override pools. A class's pool is used
+when it's non-empty; an empty one **falls back to `models`**. So a role that
+never configures the new pools behaves exactly as it always did, and there is
+no such thing as a class that strands a role with nothing to run.
+
+`classModels(role, taskClass)` is the single function that makes that choice,
+and both the router and the `explain` RPC go through it — there's one place
+where "which pool" is decided, not two that can drift.
+
+#### Cheap by default, and the expensive model is opt-in
+
+An unclassified task resolves to **no class**, which means the standard pool:
+the model you told the role to use for everyday work. The expensive entry is
+reachable only from the `hard` pool, which means reaching it takes either an
+explicit `paseo.task-class: hard` or a hard-seed keyword match — never the
+mere *absence* of information.
+
+That is the whole point of the default. The failure being designed against is
+not "someone picked the wrong class", it's "nobody picked anything and the
+spawn silently landed on Opus". Under this default, not deciding gets you the
+everyday model; getting the expensive one requires saying so.
+
+The corollary is an operator instruction, not a plugin behaviour: **put your
+everyday model first in the Standard pool and keep the expensive one in the
+Hard pool.** The plugin has no cost ranking for models and won't invent one —
+it can't tell you your Standard pool starts with an expensive model, so that
+part is on you.
+
+#### How an unlabelled task is classified, and what it honestly costs
+
+Deterministic keyword seeds over `lowercase(title + " " + initialPrompt)`.
+No LLM call, no network, no tokens: a handful of regex tests on a string the
+hook already has in hand, on a code path that runs once per `agent.create`.
+
+An LLM classifier was rejected on its own arithmetic rather than on taste. It
+would spend tokens on **every spawn** to save tokens on **some** of them, and
+the saving is capped by how often a spawn would actually have been
+misclassified into a more expensive pool — while the cost is paid
+unconditionally, adds a network round trip to the create path (which the hook
+cannot fail or stall), and makes the model an agent gets depend on a second
+model's mood. For a feature whose justification is saving budget, a
+per-spawn spend with an unmeasured hit rate is the wrong trade. If that
+arithmetic ever gets measured and comes out the other way, the seam is
+`classifyTaskClass` in `server/role-resolve.ts` and nothing else has to move.
+
+What the seeds actually look for:
+
+- `hard` — race condition, deadlock, concurrency, distributed, migration,
+  security, vulnerability, architecture, redesign, cross-cutting, consensus,
+  data loss, corruption.
+- `mechanical` — typo, rename, formatting, whitespace, changelog, lint, dead
+  code, unused import, one-liner, trivial, version bump.
+
+`hard` is tested first on purpose: "fix the typo that's causing the race
+condition" must not be under-classified by the word "typo".
+
+Be honest about what this is: **a narrow filter, not a classifier.** It
+recognizes the unambiguous cases and returns "no class" for everything else,
+which is most real prompts. It can never move a task *to* `standard` — that
+is already the default — so its only effect is to shift the clearly-cheap and
+the clearly-risky off the everyday pool. If you want a class reliably, declare
+it. The guess is a convenience for callers that haven't been taught the label
+yet, not the mechanism.
+
+#### A guess may pick a model. It may never remove a tool.
+
+The same rule the role ladder follows, for the same reason. Task class feeds
+**model selection only** — it is never consulted for tool-profile
+enforcement, which stays role-based and evidence-gated on its own terms (see
+[A guessed role may pick a model. It may not take tools away.](#a-guessed-role-may-pick-a-model-it-may-not-take-tools-away)).
+
+This is not an oversight to be fixed later. A guessed role once stripped
+`Edit`/`Write`/`Bash` from implementation agents and cost 1.1M tokens in a
+single incident. A wrong model guess costs a little quality on one task; a
+wrong capability guess breaks an agent mid-task, invisibly. Because task
+class cannot gate tools at all, there is no `enforceToolsOnClassifiedRoles`
+equivalent for it — no escape hatch, because there's nothing to escape.
+
+#### Nothing about it is silent
+
+- `role-model-policy.explain` accepts an optional `taskClass` (simulating
+  the label) and returns `taskClass`, `taskClassSource`
+  (`declared` | `classified` | `default`), and `unknownDeclaredTaskClass`
+  when a declared value wasn't recognized. `requestedModelOverride` is
+  evaluated against the **resolved class's** pool, not always the standard
+  one — so "why was my Opus request overridden?" has a one-step answer.
+- An unrecognized declared value never blocks, and is logged to the daemon
+  log once per (caller, value) naming the three ids it expected.
+- The "no eligible model" and "explicit model overridden" notifications
+  dedupe per **(role, class)** rather than per role: a mechanical-pool
+  exhaustion and a hard-pool exhaustion on the same role are different,
+  actionable facts.
+- An overridden explicit request still gets the
+  `paseo.model-overridden-by-policy` label carrying the ref that was asked
+  for, exactly as before — the class changes which pool decided, not whether
+  you're told.
+
+#### On the settings screen
+
+**Agent Model Policy → Roles.** Each role card now shows three labeled model
+pools instead of one — *Standard*, *Mechanical*, *Hard* — each with its own
+add / reorder / remove controls, and each hinting at what it's for and that
+an empty class pool falls back to Standard. Same compare-and-swap `revision`
+flow as every other edit: the three pools are just three fields of the same
+document, saved through the same validated write.
+
+**Agent Model Policy → Test This Name.** The resolution preview takes a task
+class (the fixed vocabulary plus *not declared*, which is what a create with
+no label actually looks like) and an optional explicit model request, and
+answers in three lines: the role and tools as before, the resolved class and
+**which pool actually decided** — including "the Hard pool is empty, so the
+Standard pool decided", the fallback most easily misread as the class being
+ignored — and, when a request was simulated, whether policy honored it or
+overrode it and why.
+
+#### Migration from schema v3
+
+There is no data migration. `mechanicalModels` and `hardModels` default to
+`[]` at the schema level, so every existing role's `models` pool round-trips
+byte-identical and an empty class pool means "use the standard pool". The
+version bump is the entire v3 → v4 step. As with every migration here it runs
+**in memory on every read**, never writes settings on its own, and preserves
+the CAS `revision` so a settings screen opened before the upgrade can still
+save.
+
 ### An explicit model request wins, but only when it's currently selectable
 
 A caller can ask for a specific model directly (`mcp__paseo__create_agent`'s
 `provider` field as `provider/model`, or `config.model` on a session create).
 The role router's precedence:
 
-1. **The explicit request wins when it's a member of the resolved role's own
-   pool AND currently selectable** — the same eligibility bar ordered
-   selection holds every other candidate to: present in the live catalog, a
-   viable pool member, and (for Fable) under the budget threshold. The
+1. **The explicit request wins when it's a member of the pool the resolved
+   (role, task class) selects AND currently selectable** — the same
+   eligibility bar ordered selection holds every other candidate to: present
+   in the live catalog, a viable pool member, and (for Fable) under the
+   budget threshold. The
    request passes through untouched: model, provider, and account all stay
    exactly what was asked for.
 2. **Policy wins otherwise**, whether the model was never approved for this
@@ -269,12 +464,13 @@ The override reason distinguishes two different situations:
   selection instead, with a message that says so — not the same message as
   a caller who asked for a model the role forbids.
 
-"Member of the pool" means the requested `(provider, model)` matches one of
-the role's own configured entries by family — an account-agnostic entry
-matches any pooled account's provider id, the same way normal selection
-does. A role with no configured pool at all has nothing to override, so
-every explicit request passes through untouched, matching the "unconfigured"
-pass-through behaviour above.
+"Member of the pool" means the requested `(provider, model)` matches, by
+family, one of the entries in the pool `classModels(role, taskClass)` picked
+— the class's own pool when it's configured, the standard pool otherwise. An
+account-agnostic entry matches any pooled account's provider id, the same way
+normal selection does. A role whose resolved pool is empty has nothing to
+override, so every explicit request passes through untouched, matching the
+"unconfigured" pass-through behaviour above.
 
 This only applies when the daemon can actually tell a real request apart
 from "nothing was asked for": `config.model` arrives at this hook as
