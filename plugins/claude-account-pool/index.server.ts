@@ -127,10 +127,20 @@ export default function contribute(server: PluginServerContext) {
       },
       onExplicitModelOverridden: (episode) => {
         const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;
-        console.error(
+        const why =
           episode.reason === "not-approved"
-            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in ${pool}; policy overrode it to "${episode.effectiveRef}"`
-            : `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which ${pool} approves but isn't currently selectable (catalog-missing, no viable pool member, or budget-gated); policy overrode it to "${episode.effectiveRef}"`,
+            ? `which is not in ${pool}`
+            : episode.missingFromCatalog
+              ? `which ${pool} approves but the provider's model catalog doesn't list, and it isn't in agentModelPolicy.allowUnlistedModels (add "${episode.requestedRef.slice(episode.requestedRef.indexOf("/") + 1)}" there if the provider does accept it)`
+              : `which ${pool} approves but isn't currently selectable (no viable pool member, or budget-gated)`;
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", ${why}; policy overrode it to "${episode.effectiveRef}"`,
+        );
+      },
+      onUnadvertisedModelAllowed: (episode) => {
+        const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;
+        console.error(
+          `[claude-account-pool] role-router: UNVERIFIED MODEL — caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which the provider's model catalog does not list; letting it through because ${pool} approves it and agentModelPolicy.allowUnlistedModels names it. If the agent fails at launch, the provider rejected the id; remove it from allowUnlistedModels`,
         );
       },
     });

@@ -455,14 +455,65 @@ The override reason distinguishes two different situations:
 - `not-approved` — the requested ref was never one of the role's configured
   entries; the role forbids it outright.
 - `not-currently-selectable` — the requested ref IS one of the role's
-  configured entries, but isn't selectable right now (catalog-missing, no
-  viable pool member, or gated by the Fable budget threshold). This is
+  configured entries, but isn't selectable right now (catalog-missing and
+  not in `allowUnlistedModels`, no viable pool member, or gated by the Fable
+  budget threshold). This is
   deliberately treated as an override rather than honored as-is: the
   failure this exists to prevent is an agent spawned onto an account/model
   with no budget left, dying on its first turn. A caller who asked for an
   approved model that's temporarily unavailable gets policy's live
   selection instead, with a message that says so — not the same message as
   a caller who asked for a model the role forbids.
+
+#### Models the CLI accepts but doesn't advertise: `allowUnlistedModels`
+
+The catalog check exists so nothing lands on a nonexistent model, but it
+can't tell "absent because it isn't real" from "absent because the provider
+doesn't advertise it". Claude Code 2.1.280 runs `claude-opus-5-5` yet omits
+it from its model list, so without an escape a caller could never reach it.
+
+`agentModelPolicy.allowUnlistedModels` is an operator-set list of model refs
+(same `model` / `provider/model` spelling as a pool). It waives the **catalog
+half** of the eligibility bar, for an **explicit request** only:
+
+```json
+"agentModelPolicy": {
+  "allowUnlistedModels": ["claude-opus-5-5"],
+  "roles": [ { "id": "leader", "hardModels": ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5"], ... } ]
+}
+```
+
+What stays exactly as it was:
+
+- **Capped, drained, or budget-gated is still refused.** Only the catalog
+  check is waived; pool viability and the Fable budget gate still apply.
+- **Pools never route to an unverified id.** Ordered selection doesn't see
+  the list, so an unadvertised pool entry is skipped when nobody named it.
+  It only runs when a caller types it at spawn time.
+- **The role must still approve it.** The requested id has to be in the
+  resolved (role, task class) pool; the allowlist adds no approval.
+- **Per id, not a switch.** A typo (`claude-opus-5-6`) matches no entry, so
+  it's refused at validation and overridden to a real model rather than
+  dying at launch. That is the reason this is a list and not a boolean, and
+  the reason the default is empty: nothing changes until an operator names
+  an id.
+
+It is loud, not silent:
+
+- The daemon log gets a `UNVERIFIED MODEL` line (once per caller, role,
+  class, and ref) saying the catalog doesn't list the model and which config
+  let it through.
+- The created agent carries `paseo.model-unadvertised=<ref>`. If an agent
+  dies at launch, this label tells you the provider rejected an id nobody
+  verified: remove it from the list.
+- `role-model-policy.explain` reports `requestedModelOverride.unadvertised:
+  true` when honored, and `missingFromCatalog: true` on a refusal, meaning
+  the catalog is the reason and adding the id to the list would lift it
+  (a capped model never carries this flag). It also returns
+  `unadvertisedPoolEntries`, the pool entries ordered selection skips, so an
+  entry that is "in the pool" but never picked isn't a mystery. `explain`
+  accepts an optional `role` (simulating `paseo.agent-role`) so the `leader`
+  role, which no agent-type mapping reaches, can be queried.
 
 "Member of the pool" means the requested `(provider, model)` matches, by
 family, one of the entries in the pool `classModels(role, taskClass)` picked
