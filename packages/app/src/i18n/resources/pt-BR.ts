@@ -246,6 +246,13 @@ export const ptBR: TranslationResources = {
       unarchive: "Desarquivar",
     },
   },
+  pinnedGrid: {
+    title: "Fixados ({{count}})",
+    close: "Fechar grade",
+    openWorkspace: "Abrir espaço de trabalho",
+    noChat: "Ainda não há chat neste espaço de trabalho",
+    empty: "Nenhum chat fixado",
+  },
   sessions: {
     title: "Histórico de agentes",
     empty: "Nenhuma sessão ainda",
@@ -1138,6 +1145,7 @@ export const ptBR: TranslationResources = {
     },
     pinned: {
       title: "Fixados",
+      openGrid: "Abrir os chats fixados em uma grade",
     },
     host: {
       noHost: "Nenhum host",

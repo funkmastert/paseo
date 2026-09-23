@@ -241,6 +241,13 @@ export const en = {
       unarchive: "Unarchive",
     },
   },
+  pinnedGrid: {
+    title: "Pinned ({{count}})",
+    close: "Close grid",
+    openWorkspace: "Open workspace",
+    noChat: "No chat in this workspace yet",
+    empty: "No pinned chats",
+  },
   sessions: {
     title: "History",
     empty: "No sessions yet",
@@ -1122,6 +1129,7 @@ export const en = {
     },
     pinned: {
       title: "Pinned",
+      openGrid: "Open pinned chats in a grid",
     },
     host: {
       noHost: "No host",

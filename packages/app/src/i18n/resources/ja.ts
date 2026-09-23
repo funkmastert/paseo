@@ -246,6 +246,13 @@ export const ja: TranslationResources = {
       unarchive: "アーカイブ解除",
     },
   },
+  pinnedGrid: {
+    title: "固定済み ({{count}})",
+    close: "グリッドを閉じる",
+    openWorkspace: "ワークスペースを開く",
+    noChat: "このワークスペースにはまだチャットがありません",
+    empty: "固定したチャットはありません",
+  },
   sessions: {
     title: "履歴",
     empty: "セッションがまだありません",
@@ -1125,6 +1132,7 @@ export const ja: TranslationResources = {
     },
     pinned: {
       title: "固定済み",
+      openGrid: "固定したチャットをグリッドで開く",
     },
     host: {
       noHost: "ホストなし",
