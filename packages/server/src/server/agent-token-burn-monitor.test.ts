@@ -611,6 +611,54 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     );
   });
 
+  test("microsecond noise in resetsAt is not a new cycle", async () => {
+    // Recorded from the live daemon: the same window, three fetches, three different strings.
+    const resets = [
+      "2026-09-26T05:59:59.961514+00:00",
+      "2026-09-26T06:00:00.027709+00:00",
+      "2026-09-26T05:59:59.961495+00:00",
+    ];
+    let call = 0;
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager: createFakeAgentManager([]),
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readProviderUsage: async () => usage(91, resets[call++ % resets.length]),
+      readDaemonConfig: () => ({ tokenBurnMonitor: { accountPressure: { enabled: true } } }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(1);
+  });
+
+  test("a window that resets is warned about again", async () => {
+    const resets = ["2026-09-26T06:00:00.000Z", "2026-10-03T06:00:00.000Z"];
+    let call = 0;
+    const push = createFakePushSender();
+    const monitor = new AgentTokenBurnMonitor({
+      agentManager: createFakeAgentManager([]),
+      agentStorage: createFakeAgentStorage(),
+      pushNotificationSender: push.sender,
+      serverId: "server-1",
+      sendSystemMessageToAgent: async () => {},
+      readProviderUsage: async () => usage(91, resets[call++]),
+      readDaemonConfig: () => ({ tokenBurnMonitor: { accountPressure: { enabled: true } } }),
+      logger: createLogger(),
+    });
+
+    await monitor.tick();
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(2);
+  });
+
   test("a healthy window says nothing", async () => {
     const { push, monitor } = createUsageMonitor({ usage: usage(60) });
     await monitor.tick();

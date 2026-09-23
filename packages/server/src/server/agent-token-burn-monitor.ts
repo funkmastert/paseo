@@ -193,6 +193,23 @@ function resolveConfig(config: TokenBurnMonitorConfig | undefined): ResolvedToke
   };
 }
 
+const MINUTE_MS = 60_000;
+
+/**
+ * Identifies one usage cycle by its reset time, to the minute. Anthropic's `resets_at` carries
+ * microsecond noise that changes on every fetch (`...:59.961495`, then `...:59.961514`, then
+ * `...:00.027709` for the same window), so keying on the raw string made every 5-minute usage
+ * refresh look like a new cycle: the 2026-09-22 daemon log has 14 consecutive "nearly exhausted"
+ * pushes, five minutes apart, for windows that had not reset. Rounding to the nearest minute
+ * absorbs the noise and still tells a 5-hour or 7-day cycle from the next one.
+ */
+function usageCycleKey(resetsAt: string | null | undefined): string {
+  if (!resetsAt) return "";
+  const ms = Date.parse(resetsAt);
+  if (!Number.isFinite(ms)) return resetsAt;
+  return new Date(Math.round(ms / MINUTE_MS) * MINUTE_MS).toISOString();
+}
+
 /** The threshold the breach crossed, for the badge. `total` only fires when one is configured. */
 function buildTokenBurnAlert(
   trigger: "rate" | "total",
@@ -703,11 +720,23 @@ export class AgentTokenBurnMonitor {
           continue;
         }
         const key = `${provider.providerId}:${window.id}`;
-        const cycle = window.resetsAt ?? "";
+        const cycle = usageCycleKey(window.resetsAt);
         stillHot.set(key, cycle);
         if (this.reportedAccountWindows.get(key) === cycle) {
           continue;
         }
+        // The push names the account; the log did not, which left a week of warnings
+        // unattributable after the fact.
+        this.logger.info(
+          {
+            providerId: provider.providerId,
+            windowId: window.id,
+            usedPct,
+            thresholdPct: config.usedPct,
+            resetsAt: window.resetsAt,
+          },
+          "Account pressure: usage window is over the warning threshold",
+        );
         await this.sendPush(
           buildAccountUsagePressureNotificationPayload({
             serverId: this.serverId,
