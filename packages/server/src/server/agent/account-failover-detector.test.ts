@@ -91,6 +91,31 @@ describe("isLimitShapedError", () => {
     expect(isLimitShapedError("you are out of credits")).toBe(true);
   });
 
+  it("matches every distinct cap message the CLI wrote into real transcripts", () => {
+    // The weekly cap is the one that stranded agents on 2026-09-18, and it names neither "hit your
+    // limit" nor "usage limit" nor "session limit": it is "hit your weekly limit".
+    expect(
+      isLimitShapedError("You've hit your weekly limit · resets 7am (America/Los_Angeles)"),
+    ).toBe(true);
+    expect(
+      isLimitShapedError("You've hit your session limit · resets 5:20pm (America/Los_Angeles)"),
+    ).toBe(true);
+    expect(
+      isLimitShapedError(
+        "You've hit your monthly spend limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+      ),
+    ).toBe(true);
+    expect(isLimitShapedError("You've hit your Opus limit · resets 9pm")).toBe(true);
+  });
+
+  it("does not match the other API errors that now end a turn as a failure", () => {
+    expect(isLimitShapedError("API Error: 529 Overloaded. This is a server-side issue.")).toBe(
+      false,
+    );
+    expect(isLimitShapedError("Not logged in · Please run /login")).toBe(false);
+    expect(isLimitShapedError("Prompt is too long")).toBe(false);
+  });
+
   it("does not match unrelated turn failures or absent text", () => {
     expect(isLimitShapedError("ENOTFOUND: could not resolve host")).toBe(false);
     expect(isLimitShapedError("Permission denied for tool call")).toBe(false);

@@ -20,6 +20,9 @@ const REAL_LIMIT_MESSAGE =
   "You've hit your monthly spend limit · raise it at " +
   "claude.ai/settings/usage?from=cc_cli_limit_message · your session limit resets " +
   "3:10pm (America/Los_Angeles)";
+// The weekly cap that stranded claude-personal's agents on 2026-09-18, verbatim from a transcript.
+// It shares no phrase with the message above.
+const REAL_WEEKLY_LIMIT_MESSAGE = "You've hit your weekly limit · resets 7am (America/Los_Angeles)";
 const REACTIVE_TTL_MS = 5 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
@@ -248,11 +251,13 @@ async function converse(harness: Harness, agentId: string, reply: string): Promi
   await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("idle");
 }
 
-async function failOnLimit(harness: Harness, agentId: string): Promise<void> {
-  await harness.client.sendMessage(agentId, `emit a turn failure: ${REAL_LIMIT_MESSAGE}`);
-  await expect
-    .poll(() => managed(harness, agentId).lastError, { timeout: 10_000 })
-    .toBe(REAL_LIMIT_MESSAGE);
+async function failOnLimit(
+  harness: Harness,
+  agentId: string,
+  message: string = REAL_LIMIT_MESSAGE,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `emit a turn failure: ${message}`);
+  await expect.poll(() => managed(harness, agentId).lastError, { timeout: 10_000 }).toBe(message);
   await expect
     .poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 })
     .not.toBe("running");
@@ -340,6 +345,34 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(agentCount(harness)).toBe(agentsBeforeSweep);
     expect(failoverPushes(harness)).toHaveLength(1);
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("moves an agent capped by the weekly limit, the cap that stranded agents on 2026-09-18", async () => {
+    const worker = await createAgent(harness, { provider: "claude-personal", title: "Weekly" });
+    await converse(harness, worker, "WEEKLY-MARKER");
+    await failOnLimit(harness, worker, REAL_WEEKLY_LIMIT_MESSAGE);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+    expect(assistantText(harness, worker)).toContain("WEEKLY-MARKER");
+  }, 60_000);
+
+  test("does not move an idle agent on a capped account until it has failed a turn", async () => {
+    // The gap: the cap is known from usage, and the agent is sitting on it, but a candidate needs
+    // its own limit-shaped failure. Nothing has asked it to do anything, so nothing has failed.
+    harness.setUsage([usageRow("claude-personal", [100]), usageRow("claude-backup", [10])]);
+    const idle = await createAgent(harness, { provider: "claude-personal", title: "Idle leader" });
+    await converse(harness, idle, "IDLE-MARKER");
+
+    await harness.sweep();
+    expect(providerOf(harness, idle)).toBe("claude-personal");
+    expect(failoverPushes(harness)).toEqual([]);
+
+    // Someone prompts it. Only now does it qualify, so the rescue arrives after the turn died.
+    await failOnLimit(harness, idle);
+    await harness.sweep();
+    expect(providerOf(harness, idle)).toBe("claude-backup");
   }, 60_000);
 
   test("retries a resume the target refused, and says nothing extra once it lands", async () => {

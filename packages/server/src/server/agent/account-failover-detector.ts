@@ -14,8 +14,10 @@ import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 // `hit your limit|rate limit|quota|credits`), `spend limit` and `session limit` are required:
 // the real CLI message is "You've hit your monthly spend limit · … · your session limit resets
 // 3:10pm (America/Los_Angeles)", which contains neither "hit your limit" nor "usage limit".
+// `hit your <words> limit` is required too: the weekly cap is "You've hit your weekly limit ·
+// resets 7am", which matched none of the above and is what capped `claude-personal` on 2026-09-18.
 const LIMIT_TEXT_PATTERN =
-  /hit your limit|spend limit|session limit|usage limit|rate limit|quota|credits/i;
+  /hit your (?:[\w-]+ ){0,3}limit|spend limit|session limit|usage limit|rate limit|quota|credits/i;
 
 export function isLimitShapedError(text: string | undefined | null): text is string {
   return typeof text === "string" && LIMIT_TEXT_PATTERN.test(text);

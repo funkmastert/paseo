@@ -1228,6 +1228,55 @@ test("turn_completed ignores a zero or negative turnTokenDelta", async () => {
   }
 });
 
+test("reloading an agent keeps its spend and the governor's fired stages", async () => {
+  // A reload closes one session and opens another for the same agent. The budget is for the
+  // task, so zeroing the ledger here hid a 51M-token agent from a 40M governor on the live daemon.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-spend-"));
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+        override async resumeSession(): Promise<AgentSession> {
+          return new TestAgentSession({ provider: "codex", cwd: workdir });
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 40,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const governorState = {
+      budgetTokens: 1_000,
+      firedStages: ["notify"],
+    } as unknown as NonNullable<ReturnType<typeof manager.getSpendGovernorState>>;
+    manager.setSpendGovernorState(agent.id, governorState);
+
+    await manager.reloadAgentSession(agent.id);
+
+    const reloaded = manager.getAgent(agent.id);
+    expect(reloaded?.totalTokens).toBe(40);
+    expect(reloaded?.tokenRateBuckets).toBeDefined();
+    expect(manager.getSpendGovernorState(agent.id)).toBe(governorState);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("rewind clears the token-rate buckets and total from the emitted state", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-token-rate-"));
   class RewindableSession extends TestAgentSession {

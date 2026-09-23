@@ -786,6 +786,35 @@ export interface ReloadAgentSessionOptions {
   moveToProvider?: AgentProvider;
 }
 
+/**
+ * The live-only spend ledger (docs/token-burn.md). It belongs to the agent, not to the session
+ * carrying it: a reload closes one session and opens another for the same agent, and the
+ * governor's budget is for the task, so the spend and the ladder's fired stages have to come
+ * across. Without this a reload zeroed the counter — on the live daemon, an agent that had spent
+ * 51M against a 40M budget read 26.7M and was never told, because it had been reloaded mid-life.
+ */
+interface CarriedSpendLedger {
+  tokenRateBuckets?: AgentTokenRateBucket[];
+  totalTokens?: number;
+  tokenBurnAlert?: TokenBurnAlert;
+  tokenBurnMonitorState?: TokenBurnMonitorState;
+  spendGovernorState?: SpendGovernorState;
+}
+
+function carrySpendLedger(existing: ActiveManagedAgent): CarriedSpendLedger {
+  const ledger: CarriedSpendLedger = {};
+  if (existing.tokenRateBuckets !== undefined) ledger.tokenRateBuckets = existing.tokenRateBuckets;
+  if (existing.totalTokens !== undefined) ledger.totalTokens = existing.totalTokens;
+  if (existing.tokenBurnAlert !== undefined) ledger.tokenBurnAlert = existing.tokenBurnAlert;
+  if (existing.tokenBurnMonitorState !== undefined) {
+    ledger.tokenBurnMonitorState = existing.tokenBurnMonitorState;
+  }
+  if (existing.spendGovernorState !== undefined) {
+    ledger.spendGovernorState = existing.spendGovernorState;
+  }
+  return ledger;
+}
+
 interface CarriedAgentState {
   handle: AgentPersistenceHandle | null;
   provider: AgentProvider;
@@ -793,6 +822,7 @@ interface CarriedAgentState {
   lastUsage: AgentUsage | undefined;
   lastError: string | undefined;
   attention: AttentionState;
+  spend: CarriedSpendLedger;
 }
 
 /**
@@ -814,6 +844,7 @@ function carryAgentStateAcrossRefresh(
     lastUsage: existing.lastUsage,
     lastError: moveToProvider ? undefined : existing.lastError,
     attention: existing.attention,
+    spend: carrySpendLedger(existing),
   };
 }
 
@@ -2291,6 +2322,7 @@ export class AgentManager {
         lastUsage: carried.lastUsage,
         ...(carried.lastError === undefined ? {} : { lastError: carried.lastError }),
         attention: carried.attention,
+        spend: carried.spend,
         // The record's provider is what a later load resumes with, and it reads the handle
         // first (persistence-hooks.ts). A move has to land on both, so it is stated here.
         ...(handle ? { persistence: handle } : {}),
@@ -4419,6 +4451,7 @@ export class AgentManager {
       lastUsage?: AgentUsage;
       lastError?: string;
       attention?: AttentionState;
+      spend?: CarriedSpendLedger;
       initialTitle?: string | null;
       publishWhenReady?: boolean;
       workspaceId?: string;
@@ -4571,6 +4604,7 @@ export class AgentManager {
           lastUsage?: AgentUsage;
           lastError?: string;
           attention?: AttentionState;
+          spend?: CarriedSpendLedger;
           persistence?: AgentPersistenceHandle;
           workspaceId?: string;
           owner?: AgentOwner;
@@ -4614,6 +4648,7 @@ export class AgentManager {
       attention: resolveInitialAttention(options?.attention),
       internal: config.internal ?? false,
       labels: options?.labels ?? {},
+      ...options?.spend,
     } as ActiveManagedAgent;
   }
 

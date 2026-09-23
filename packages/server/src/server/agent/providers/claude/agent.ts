@@ -4694,6 +4694,16 @@ class ClaudeAgentSession implements AgentSession {
     events: AgentStreamEvent[],
   ): void {
     const usage = this.convertUsage(message, message.modelUsage);
+    if (message.subtype === "success" && message.is_error === true) {
+      // A turn that ended on an API error (a capped account, an overloaded API) still arrives as
+      // `subtype: "success"`; `is_error` is the only thing that says it failed, and `result` is the
+      // error text. Completing it left the agent idle with no `lastError`, so an account outage
+      // looked like a turn that finished, and account failover had nothing to detect.
+      const resultText = typeof message.result === "string" ? message.result : "";
+      events.push(...this.sidechainTracker.finishAll("failed"));
+      events.push(this.buildTurnFailedEvent(resultText));
+      return;
+    }
     if (message.subtype === "success") {
       events.push(...this.sidechainTracker.finishAll("completed"));
       // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")

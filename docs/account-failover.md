@@ -44,7 +44,10 @@ A migration target is the enabled worker with the lowest `priority` number that 
 
 Two independent signals, either one sufficient (`account-failover-detector.ts`):
 
-- **Reactive.** An agent on the account has a limit-shaped `lastError`. One failure condemns the whole account, since every agent on it shares the cap. The match is loose on purpose and includes `spend limit` and `session limit`, because the real CLI message ("You've hit your monthly spend limit · … · your session limit resets 3:10pm") contains neither "hit your limit" nor "usage limit". The evidence expires 5 hours after the failure, the Claude session window, so one stale error can't keep a recovered account out of rotation forever.
+- **Reactive.** An agent on the account has a limit-shaped `lastError`. One failure condemns the whole account, since every agent on it shares the cap. The match is loose on purpose (`isLimitShapedError`). It has to cover every cap message the CLI writes: "You've hit your monthly spend limit · … · your session limit resets 3:10pm" contains neither "hit your limit" nor "usage limit", and "You've hit your weekly limit · resets 7am" contains none of the older phrases. When a new cap message appears in a transcript, check it against the pattern. The evidence expires 5 hours after the failure, the Claude session window, so one stale error can't keep a recovered account out of rotation forever.
+
+  `lastError` only exists if the provider reports the turn as failed. The Claude CLI reports a capped turn as a synthetic assistant message (`isApiErrorMessage`, `error: "rate_limit"`) followed by a `result` with `subtype: "success"` and `is_error: true`. `appendResultEvents` in the Claude provider turns that into `turn_failed`; before it did, a capped turn completed, the agent went idle with no error, and this monitor had nothing to read. Any provider added to the pool has to report a capped turn the same way. The e2e suite injects failures as `turn_failed` directly, so it cannot catch a provider that doesn't.
+
 - **Proactive.** A usage window at or above 100%, read from the daemon's cached `ProviderUsageService` (the same rows the Host Usage screen shows). An account reporting `unavailable` with no windows is never dead on that basis: an account can serve traffic fine while its usage is unreadable.
 
 A healthy usage reading does not clear a reactive signal. A monthly spend cap does not appear in the utilization windows at all.
@@ -59,7 +62,7 @@ A failure is dated by the agent's newest timeline row (its own error row), not b
 
 ## Which agents move
 
-An agent is migrated when its own last turn failed on the cap, its account is dead, it is not running, closed, or initializing, it has a provider session, and it has not already been retired by an import. Leaders and subagents both move. An idle agent that merely lives on a dead account does not: it has nothing to resume, and becomes a candidate only if someone asks it to do something and that fails.
+An agent is migrated when its own last turn failed on the cap, its account is dead, it is not running, closed, or initializing, it has a provider session, and it has not already been retired by an import. Leaders and subagents both move. An idle agent that merely lives on a dead account does not: it has nothing to resume, and becomes a candidate only if someone asks it to do something and that fails. The failed message is not lost, since the resume prompt tells the agent to answer it, but the rescue lands after a failed turn and up to one sweep later.
 
 The sweep covers agents loaded in the daemon. After a restart, a stuck agent is picked up once something loads it (opening it in the app, or sending it a message).
 

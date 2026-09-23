@@ -3352,6 +3352,57 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
+  // What the CLI writes when an account is capped: a synthetic assistant message flagged
+  // `isApiErrorMessage`, then a result that is `subtype: "success"` with `is_error: true` (the SDK
+  // documents that pairing for a turn that ended on an API error). Copied from a real 2026-09-18
+  // transcript. Reporting it as a completed turn left the agent idle with no error, so nothing
+  // downstream, account failover included, could tell it had failed.
+  function createApiErrorTurn(text: string, error: string): Array<Record<string, unknown>> {
+    return [
+      createInitMessage(),
+      {
+        type: "assistant",
+        uuid: "api-error-1",
+        session_id: "session-1",
+        parent_tool_use_id: null,
+        isApiErrorMessage: true,
+        error,
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          content: [{ type: "text", text }],
+        },
+      },
+      createSuccessResult({ is_error: true, result: text, usage: undefined }),
+    ];
+  }
+
+  test.each([
+    ["weekly cap", "You've hit your weekly limit · resets 7am (America/Los_Angeles)", "rate_limit"],
+    [
+      "monthly spend cap",
+      "You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message · your session limit resets 5:20pm (America/Los_Angeles)",
+      "rate_limit",
+    ],
+    ["overloaded", "API Error: 529 Overloaded. This is a server-side issue.", "server_error"],
+  ])(
+    "a turn that ends on an API error (%s) fails instead of completing",
+    async (_name, text, error) => {
+      const session = await createSessionForTurns([createApiErrorTurn(text, error)]);
+
+      try {
+        const events = await collectStreamEvents(session);
+
+        expect(events).toContainEqual(
+          expect.objectContaining({ type: "turn_failed", provider: "claude", error: text }),
+        );
+        expect(events.some((event) => event.type === "turn_completed")).toBe(false);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
   test("repeated compacting statuses open a single compaction marker", async () => {
     const session = await createSessionForTurns([
       [
