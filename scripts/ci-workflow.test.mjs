@@ -9,7 +9,83 @@ const dockerWorkflowPath = new URL(".github/workflows/docker.yml", repoRoot);
 const nixWorkflowPath = new URL(".github/workflows/nix.yml", repoRoot);
 const filtersPath = new URL(".github/ci-paths.yml", repoRoot);
 const serverTsconfigPath = new URL("packages/server/tsconfig.server.json", repoRoot);
+const serverPackagePath = new URL("packages/server/package.json", repoRoot);
 const desktopPackagePath = new URL("packages/desktop/package.json", repoRoot);
+
+// Frozen pre-CI backlog: these files existed before anything in CI ever ran
+// `test:integration` or `test:e2e` for packages/server, so none of them are
+// known-green. This set may only shrink (a file leaves it once it is wired
+// into test:integration, or deleted) — see "no new e2e file goes untested"
+// below. New e2e files must never be added here; add them to
+// packages/server/package.json's test:integration script, or suffix them
+// .real.e2e.test.ts / .local.e2e.test.ts if they need live provider
+// credentials or a local-only resource (docs/testing.md's naming table).
+const UNWIRED_SERVER_E2E_BACKLOG = new Set([
+  "packages/server/src/server/agent-account-failover-monitor.e2e.test.ts",
+  "packages/server/src/server/agent-done-janitor.e2e.test.ts",
+  "packages/server/src/server/agent/activity-summary-recovery.e2e.test.ts",
+  "packages/server/src/server/agent/agent-mcp.e2e.test.ts",
+  "packages/server/src/server/agent/mcp-parity.e2e.test.ts",
+  "packages/server/src/server/agent/opencode-reasoning.e2e.test.ts",
+  "packages/server/src/server/agent/provider-move.e2e.test.ts",
+  "packages/server/src/server/agent/providers/claude/agent-commands.e2e.test.ts",
+  "packages/server/src/server/agent/providers/codex-mcp-agent-commands.e2e.test.ts",
+  "packages/server/src/server/agent/providers/opencode-agent-commands.e2e.test.ts",
+  "packages/server/src/server/cli-run-workspace-precedence.e2e.test.ts",
+  "packages/server/src/server/client-activity.e2e.test.ts",
+  "packages/server/src/server/daemon-client.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/agent-basics.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/agent-operations.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/agent-refresh-rehydrates-timeline.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/agent-rpc-durability.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/checkout-diff-subscription.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/checkout-pr-merge.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/checkout-ship.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/claude-live-usage.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/connection-offer.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/daemon-restart-resume.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/empty-project-persists.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/file-download.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/filesystem.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/git-operations.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/images.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/mode-switch-propagation.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/open-project-missing-directory.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/open-project-worktree-reclassification.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/orchestration.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/permissions-claude.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/permissions-codex.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/persistence.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/project-becomes-git.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/relay-transport.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/streaming.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/terminal-byte-headless-parity.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/terminal.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/timeline-reconnect-contract.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/timeline-window.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/tool-calls.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/two-cycle-resume.e2e.test.ts",
+  "packages/server/src/server/daemon-e2e/wait-for-idle.e2e.test.ts",
+  "packages/server/src/server/plugins/agent-configuration.e2e.test.ts",
+  "packages/server/src/server/plugins/connection-demand.e2e.test.ts",
+  "packages/server/src/server/plugins/lifecycle-archive.e2e.test.ts",
+  "packages/server/src/server/plugins/lifecycle.e2e.test.ts",
+  "packages/server/src/server/plugins/plugin-paseo-api.e2e.test.ts",
+  "packages/server/src/server/plugins/plugin-session-drop-recovery.e2e.test.ts",
+  "packages/server/src/server/plugins/settings.e2e.test.ts",
+  "packages/server/src/server/schedule-run-lifecycle.e2e.test.ts",
+  "packages/server/src/server/selective-timeline-delivery.e2e.test.ts",
+  "packages/server/src/server/speech/providers/local/sherpa/speech-download.e2e.test.ts",
+  "packages/server/src/server/voice-local-agent.e2e.test.ts",
+  "packages/server/src/server/voice-roundtrip.e2e.test.ts",
+  "packages/server/src/server/websocket-server.file-transfer.e2e.test.ts",
+  "packages/server/src/server/websocket-server.liveness.e2e.test.ts",
+  "packages/server/src/server/workspace-archive-record-scoped.e2e.test.ts",
+  "packages/server/src/server/workspace-create-errors.e2e.test.ts",
+  "packages/server/src/server/workspace-create-worktree-source.e2e.test.ts",
+  "packages/server/src/server/workspace-same-cwd-isolation.e2e.test.ts",
+]);
+const UNWIRED_SERVER_E2E_BACKLOG_FROZEN_SIZE = 63;
 
 const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
@@ -210,6 +286,58 @@ test("PR routing declares stable behavior ownership", () => {
     plugin: ["plugins/claude-account-pool/**", "packages/plugin/**"],
     cli: ["packages/cli/**"],
   });
+});
+
+test("no server e2e file goes untested without a deliberate decision", () => {
+  const files = filesUnder(
+    "packages/server/src",
+    (path) => path.endsWith(".e2e.test.ts") && !/\.(real|local)\.e2e\.test\.ts$/.test(path),
+  );
+  assert.ok(files.length > 0);
+
+  const serverPackage = JSON.parse(readFileSync(serverPackagePath, "utf8"));
+  const integrationScript = serverPackage.scripts["test:integration"];
+  assert.ok(integrationScript, "packages/server/package.json is missing a test:integration script");
+
+  const unwired = files.filter((path) => {
+    const scriptRelativePath = path.replace(/^packages\/server\//, "");
+    return !integrationScript.includes(scriptRelativePath);
+  });
+
+  const newlyUnwired = unwired.filter((path) => !UNWIRED_SERVER_E2E_BACKLOG.has(path));
+  assert.deepEqual(
+    newlyUnwired,
+    [],
+    "New e2e file(s) exist on disk but nothing in CI runs them: " +
+      newlyUnwired.join(", ") +
+      ". Add each file to packages/server/package.json's test:integration " +
+      "script so it runs on every PR, or rename it with a .real.e2e.test.ts " +
+      "/ .local.e2e.test.ts suffix if it needs live provider credentials or " +
+      "a local-only resource (see docs/testing.md's naming table). Do not " +
+      "add it to UNWIRED_SERVER_E2E_BACKLOG in scripts/ci-workflow.test.mjs " +
+      "— that set is a frozen pre-CI backlog, not a place to park new debt.",
+  );
+
+  const staleBacklogEntries = [...UNWIRED_SERVER_E2E_BACKLOG].filter(
+    (path) => !unwired.includes(path),
+  );
+  assert.deepEqual(
+    staleBacklogEntries,
+    [],
+    "UNWIRED_SERVER_E2E_BACKLOG in scripts/ci-workflow.test.mjs lists file(s) " +
+      "that are already wired into test:integration or no longer exist on " +
+      "disk: " +
+      staleBacklogEntries.join(", ") +
+      ". Remove them from the set — it may only shrink.",
+  );
+
+  assert.ok(
+    UNWIRED_SERVER_E2E_BACKLOG.size <= UNWIRED_SERVER_E2E_BACKLOG_FROZEN_SIZE,
+    "UNWIRED_SERVER_E2E_BACKLOG grew past its frozen pre-CI size. A new e2e " +
+      "file must be wired into test:integration (or tagged .real./.local.), " +
+      "not parked in the backlog — the backlog only ever shrinks as entries " +
+      "get triaged.",
+  );
 });
 
 test("cross-package invariants live in the suite that owns them", () => {
