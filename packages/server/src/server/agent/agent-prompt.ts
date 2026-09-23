@@ -11,6 +11,7 @@ import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
+import type { FinishOutcomeReason } from "./finish-obligation.js";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
 
@@ -375,28 +376,44 @@ export interface SetupFinishNotificationParams {
   callerAgentId: string;
   requireParentOwnership?: boolean;
   logger: Logger;
+  /**
+   * Set when the durable ledger re-attaches a watcher to an obligation it already holds — after a
+   * restart, or for a successor — so this call watches that generation instead of arming anew.
+   */
+  rearmedGeneration?: number;
 }
 
-type FinishNotificationReason =
-  | "finished"
-  | "errored"
-  | "needs permission"
-  | "was closed"
-  | "was canceled";
+type FinishNotificationReason = FinishOutcomeReason | "needs permission";
 
 const FINISH_NOTIFICATION_MESSAGE_LIMIT = 4000;
 
-interface FinishNotificationBodyInput {
+export interface FinishNotificationBodyInput {
   childAgentId: string;
   title: string;
   reason: FinishNotificationReason;
   lastAssistantMessage: string | null;
   permissionRequest?: AgentPermissionRequest;
+  /** The predecessor this agent took the work over from, named so the owner can match it up. */
+  inheritedFrom?: string;
+  /** Extra paragraphs the ledger adds after the status line. */
+  notes?: readonly string[];
 }
 
-function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
-  const statusLine = `Agent ${params.childAgentId} (${params.title}) ${params.reason}.`;
-  const sections = [statusLine];
+export function formatFinishNotificationBody(params: FinishNotificationBodyInput): string {
+  const successor = params.inheritedFrom ? `, which took over from ${params.inheritedFrom},` : "";
+  const statusLine = `Agent ${params.childAgentId} (${params.title})${successor} ${params.reason}.`;
+  const sections = [statusLine, ...(params.notes ?? [])];
+  if (params.reason === "stopped before reporting") {
+    // Sent by the daemon's sweep, not the agent: its turn ended without reaching an outcome,
+    // almost always because the daemon restarted under it. Without this the parent reads the
+    // silence as a result, or never hears anything at all.
+    sections.push(
+      "It stopped before finishing its turn — the daemon restarted or its runtime exited — so " +
+        "this report comes from the daemon, not from the agent. Its conversation is intact. " +
+        "Read get_agent_activity to see how far it got, then send it a message with " +
+        "send_agent_prompt to have it continue. Do not create another agent for the same task.",
+    );
+  }
   if (params.reason === "was canceled") {
     // A cancelled delegation produced no answer. Told it "finished" with an empty response, a
     // parent reads the silence as a result it did not understand and creates the agent again —
@@ -454,12 +471,34 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   // Tells the manager someone is watching this child, so a permission it blocks on is answered
   // here rather than escalated to a person. Released the moment this observer stops.
   const releaseObserver = agentManager.noteFinishObserver(childAgentId);
+  // The durable ledger (docs/finish-reports.md). When it is wired, the terminal report is
+  // recorded on the child's record and delivered through its retry/escalation ladder, so it
+  // survives a restart; this closure stays the fast path that notices the outcome.
+  const obligations = agentManager.getFinishObligations();
+  const generation = obligations
+    ? (params.rearmedGeneration ??
+      obligations.arm({ childAgentId, ownerAgentId: callerAgentId, requireParentOwnership }))
+    : null;
+  const releaseWatcher =
+    obligations && generation !== null
+      ? obligations.noteWatcher(childAgentId, callerAgentId, generation)
+      : () => {};
 
   function stop(): void {
     if (stopped) return;
     stopped = true;
     releaseObserver();
+    releaseWatcher();
     unsubscribe?.();
+  }
+
+  /** A newer arm for the same child and owner supersedes this watcher; only one may report. */
+  function isSuperseded(): boolean {
+    return (
+      obligations !== null &&
+      generation !== null &&
+      !obligations.isCurrent(childAgentId, callerAgentId, generation)
+    );
   }
 
   async function notify(
@@ -502,7 +541,26 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
 
   function notifySafely(reason: FinishNotificationReason, options: NotifySafelyOptions = {}): void {
     if (stopped) return;
-    if (options.terminal ?? true) stop();
+    const terminal = options.terminal ?? true;
+    if (terminal) stop();
+    if (obligations && generation !== null && terminal && reason !== "needs permission") {
+      if (reason === "was closed" && obligations.isShuttingDown()) {
+        // Every agent is closed on the way down. That is not this child's outcome: its report
+        // stays owed on the record, and the restarted daemon picks it up.
+        return;
+      }
+      notificationQueue = notificationQueue
+        .then(() =>
+          obligations.settle({ childAgentId, ownerAgentId: callerAgentId, generation, reason }),
+        )
+        .catch((error) => {
+          logger.error(
+            { err: error, childAgentId, callerAgentId, reason },
+            "Failed to record a finish report",
+          );
+        });
+      return;
+    }
     notificationQueue = notificationQueue
       .then(() => notify(reason, options.permissionRequest))
       .catch((error) => {
@@ -522,6 +580,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   unsubscribe = agentManager.subscribe(
     (event) => {
       if (stopped) {
+        return;
+      }
+      if (isSuperseded()) {
+        stop();
         return;
       }
 

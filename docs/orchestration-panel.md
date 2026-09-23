@@ -52,7 +52,9 @@ A row is in the default view when any of these holds (`orchestration-visibility.
 
 - it moved inside `ORCHESTRATION_RECENT_WINDOW_MS` — six hours, one working session;
 - it is **alive** (`running`, `initializing`), **blocked** (a pending permission), **failed**
-  (`error` status or attention), or **over budget** (`tokenBurnAlert`) — at any age;
+  (`error` status or attention), **over budget** (`tokenBurnAlert`), or **owes its parent a
+  report** (`owedFinishReport`, [finish-reports.md](finish-reports.md#what-the-panel-shows)) — at
+  any age;
 - it is an ancestor of a row that is kept, or it is the agent the tab is scoped to.
 
 Ancestors are kept so a running subagent never renders at a depth with nothing above it, and so

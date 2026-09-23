@@ -1,6 +1,6 @@
 import type { Agent } from "@/stores/session-store";
 
-export type OrchestrationRowBadge = "needs-input" | "failed";
+export type OrchestrationRowBadge = "needs-input" | "failed" | "owes-report" | "report-undelivered";
 
 export interface OrchestrationRowPresentation {
   /** The one row state that is happening now rather than having happened. */
@@ -19,24 +19,24 @@ export interface OrchestrationRowPresentation {
   showActivity: boolean;
 }
 
-function resolveBadge(
-  hasPendingPermission: boolean,
-  hasFailed: boolean,
-): OrchestrationRowBadge | null {
-  if (hasPendingPermission) return "needs-input";
-  if (hasFailed) return "failed";
-  return null;
+function resolveBadge(agent: Agent): OrchestrationRowBadge | null {
+  if (agent.pendingPermissions.length > 0 || agent.attentionReason === "permission") {
+    return "needs-input";
+  }
+  if (agent.status === "error" || agent.attentionReason === "error") return "failed";
+  const owed = agent.owedFinishReport;
+  if (!owed) return null;
+  // `state` is open on the wire; anything but "parked" means the report is stuck in delivery.
+  return owed.state === "parked" ? "owes-report" : "report-undelivered";
 }
 
 /** What a row shows, given the agent's state. Pure so the rules are testable without rendering. */
 export function resolveOrchestrationRowPresentation(agent: Agent): OrchestrationRowPresentation {
   const isRunning = agent.status === "running";
-  const hasPendingPermission =
-    agent.pendingPermissions.length > 0 || agent.attentionReason === "permission";
-  const hasFailed = agent.status === "error" || agent.attentionReason === "error";
   // "finished" attention deliberately gets no badge: it is the ordinary end state of most of the
-  // fleet, the status dot already carries it, and a badge on thirty rows is not a signal.
-  const badge: OrchestrationRowBadge | null = resolveBadge(hasPendingPermission, hasFailed);
+  // fleet, the status dot already carries it, and a badge on thirty rows is not a signal. An
+  // owed report does: a parent is waiting on it, and nothing else on the row says so.
+  const badge = resolveBadge(agent);
   return {
     isRunning,
     isClosed: agent.status === "closed",

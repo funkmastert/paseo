@@ -162,6 +162,12 @@ export function OrchestrationRow({
         {presentation.badge === "failed" ? (
           <StatusBadge label={t("agentList.badges.failed")} variant="error" />
         ) : null}
+        {presentation.badge === "owes-report" ? (
+          <StatusBadge label={t("agentList.badges.owesReport")} variant="warning" />
+        ) : null}
+        {presentation.badge === "report-undelivered" ? (
+          <StatusBadge label={t("agentList.badges.reportUndelivered")} variant="error" />
+        ) : null}
         {tokenBurnTone ? (
           <TokenBurnBadge
             tone={tokenBurnTone}

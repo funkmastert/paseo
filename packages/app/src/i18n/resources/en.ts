@@ -276,6 +276,8 @@ export const en = {
       attention: "Attention",
       needsInput: "Needs input",
       failed: "Failed",
+      owesReport: "Owes report",
+      reportUndelivered: "Report undelivered",
       tokenBurnWarning: "High burn",
       tokenBurnDanger: "Very high burn",
     },

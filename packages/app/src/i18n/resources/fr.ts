@@ -282,6 +282,8 @@ export const fr: TranslationResources = {
       attention: "Attention",
       needsInput: "Attente de réponse",
       failed: "En échec",
+      owesReport: "Rapport dû",
+      reportUndelivered: "Rapport non remis",
       tokenBurnWarning: "Consommation élevée",
       tokenBurnDanger: "Consommation très élevée",
     },

@@ -281,6 +281,8 @@ export const ptBR: TranslationResources = {
       attention: "Atenção",
       needsInput: "Precisa de resposta",
       failed: "Com erro",
+      owesReport: "Deve relatório",
+      reportUndelivered: "Relatório não entregue",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muito alto",
     },

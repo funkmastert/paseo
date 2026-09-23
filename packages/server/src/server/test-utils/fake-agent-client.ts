@@ -62,12 +62,15 @@ interface FakeAgentSessionOptions {
   sessionId?: string;
   memoryMarker?: string | null;
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  onStartTurn?: (prompt: AgentPromptInput, sessionId: string) => void;
 }
 
 export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  /** `sessionId` names the provider session, so a test can tell which agent was prompted. */
+  onStartTurn?: (prompt: AgentPromptInput, sessionId: string) => void;
+  /** Runs before a persisted session is resumed; throw to make the resume fail. */
+  onResumeSession?: (handle: AgentPersistenceHandle) => void;
   supportsMcpServers?: boolean;
 }
 
@@ -382,7 +385,7 @@ class FakeAgentSession implements AgentSession {
   private activeForegroundTurnId: string | null = null;
 
   private readonly closeSession: (() => Promise<void>) | undefined;
-  private readonly onStartTurn: ((prompt: AgentPromptInput) => void) | undefined;
+  private readonly onStartTurn: ((prompt: AgentPromptInput, sessionId: string) => void) | undefined;
 
   constructor(options: FakeAgentSessionOptions) {
     this.capabilities = {
@@ -481,7 +484,7 @@ class FakeAgentSession implements AgentSession {
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
     // Ahead of recording the turn as active: a hook that throws is a turn that never started,
     // and leaving `activeForegroundTurnId` set would wedge every later turn on this client.
-    this.onStartTurn?.(prompt);
+    this.onStartTurn?.(prompt, this.id);
     this.activeForegroundTurnId = turnId;
 
     void this.emitTurnEvents(prompt);
@@ -792,6 +795,12 @@ class FakeAgentSession implements AgentSession {
         return;
       }
 
+      if (/keep working until interrupted/i.test(textPrompt)) {
+        // A long task: no outcome until someone interrupts it or its runtime closes.
+        await this.interruptSignal.promise;
+        return;
+      }
+
       const stress = parseAgentStreamStressPrompt(textPrompt);
       if (stress !== null) {
         await this.emitStressTurn(stress);
@@ -920,6 +929,8 @@ class FakeAgentSession implements AgentSession {
   }
 
   async close(): Promise<void> {
+    // A turn that keeps working until interrupted ends with its process, as a real one would.
+    this.interruptSignal.resolve();
     await this.closeSession?.();
   }
 
@@ -1260,6 +1271,7 @@ class FakeAgentClient implements AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     _launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
+    this.options.onResumeSession?.(handle);
     await copyFakeSessionHistory(this.provider, handle.sessionId);
     const cfg: AgentSessionConfig = {
       provider: this.provider,

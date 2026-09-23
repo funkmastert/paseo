@@ -23,6 +23,7 @@ import type {
   ToolPolicy,
   TokenBurnAlert,
   ResourceAlert,
+  OwedFinishReport,
 } from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { z } from "zod";
@@ -108,6 +109,8 @@ import { withTimeout } from "../../utils/promise-timeout.js";
 import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
 import type { TokenBurnMonitorState } from "./token-burn-detector.js";
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
+import { summarizeOwedFinishReport } from "./finish-obligation.js";
+import type { FinishObligationService } from "./finish-obligation-service.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
   isUnresponsiveCancelReason,
@@ -655,6 +658,12 @@ interface ManagedAgentBase {
    * resource-monitor-detector.ts.
    */
   resourceMonitorState?: AgentResourceMonitorState;
+  /**
+   * Mirror of the finish report this agent still owes, kept by FinishObligationService from the
+   * stored obligation so the snapshot can carry it (docs/finish-reports.md). Never persisted
+   * from here: the obligation itself lives on the record.
+   */
+  owedFinishReport?: OwedFinishReport;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -1078,6 +1087,7 @@ export class AgentManager {
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
+  private finishObligations: FinishObligationService | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -1266,6 +1276,43 @@ export class AgentManager {
    */
   setDeviceLeaseStatusSource(source: DeviceLeaseStatusSource | null): void {
     this.deviceLeaseStatusSource = source;
+  }
+
+  /**
+   * The durable finish-report ledger (docs/finish-reports.md), set by bootstrap. Hung off the
+   * manager so `setupFinishNotification` reaches it from every call site without a new
+   * parameter; unset in unit tests, which keeps the in-memory-only behavior they cover.
+   */
+  setFinishObligations(service: FinishObligationService | null): void {
+    this.finishObligations = service;
+  }
+
+  getFinishObligations(): FinishObligationService | null {
+    return this.finishObligations;
+  }
+
+  /** Sets the owed-report mirror and broadcasts the snapshot when it changed. */
+  setOwedFinishReport(agentId: string, report: OwedFinishReport | undefined): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (isSameOwedFinishReport(agent.owedFinishReport, report)) return;
+    if (report) {
+      agent.owedFinishReport = report;
+    } else {
+      delete agent.owedFinishReport;
+    }
+    this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Re-broadcast an agent that is not loaded, from its stored record. A live agent broadcasts
+   * through its own state changes; a closed one has nothing else that would tell clients.
+   */
+  async broadcastStoredAgentState(agentId: string): Promise<void> {
+    if (this.agents.has(agentId) || !this.registry) return;
+    const record = await this.registry.get(agentId);
+    if (!record || record.internal) return;
+    this.dispatchStoredAgentState(record);
   }
 
   /** Current device-cap snapshot, or null when no cap is wired. */
@@ -2849,6 +2896,7 @@ export class AgentManager {
         attention,
         internal: record.internal,
         labels: record.labels,
+        ...optionalOwedFinishReport(summarizeOwedFinishReport(record.finishObligations)),
       },
     });
   }
@@ -6138,7 +6186,11 @@ export class AgentManager {
    * stranded, on a permission the child never runs again. Only a person can act, so this bypasses
    * both suppressions rather than routing through them.
    */
-  flagUndeliveredDelegatedOutcome(agentId: string, reason: "finished" | "permission"): void {
+  flagUndeliveredDelegatedOutcome(
+    agentId: string,
+    reason: "finished" | "permission",
+    options?: { push?: boolean },
+  ): void {
     const agent = this.agents.get(agentId);
     if (!agent || agent.internal || agent.attention.requiresAttention) {
       return;
@@ -6148,7 +6200,11 @@ export class AgentManager {
       attentionReason: reason,
       attentionTimestamp: new Date(),
     };
-    this.onAgentAttention?.({ agentId: agent.id, provider: agent.provider, reason });
+    // The finish-report ladder sends its own push, which says what went wrong; a second,
+    // generic "finished" push for the same event would only be noise.
+    if (options?.push !== false) {
+      this.onAgentAttention?.({ agentId: agent.id, provider: agent.provider, reason });
+    }
     this.emitState(agent);
   }
 
@@ -6574,4 +6630,23 @@ export function commandMayHaveChangedExternalState(command: string): boolean {
     // ahead/behind counts can drift stale until the next refresh.
     /\bgit\s+fetch\b/.test(normalized)
   );
+}
+
+function isSameOwedFinishReport(
+  a: OwedFinishReport | undefined,
+  b: OwedFinishReport | undefined,
+): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.ownerAgentId === b.ownerAgentId &&
+    a.state === b.state &&
+    a.since === b.since &&
+    a.attempts === b.attempts
+  );
+}
+
+function optionalOwedFinishReport(report: OwedFinishReport | undefined): {
+  owedFinishReport?: OwedFinishReport;
+} {
+  return report ? { owedFinishReport: report } : {};
 }

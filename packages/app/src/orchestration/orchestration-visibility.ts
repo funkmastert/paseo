@@ -29,6 +29,8 @@ export function isPinnedOrchestrationAgent(agent: Agent): boolean {
   if (agent.status === "running" || agent.status === "initializing") return true;
   if (agent.status === "error" || agent.attentionReason === "error") return true;
   if (agent.pendingPermissions.length > 0 || agent.attentionReason === "permission") return true;
+  // A report its parent is still owed: the parent is waiting on something that has not come.
+  if (agent.owedFinishReport) return true;
   return Boolean(agent.tokenBurnAlert);
 }
 

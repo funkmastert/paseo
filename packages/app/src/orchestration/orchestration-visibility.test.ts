@@ -19,6 +19,7 @@ interface RowSpec {
   attentionReason?: Agent["attentionReason"];
   pendingPermission?: boolean;
   tokenBurnAlert?: boolean;
+  owedFinishReport?: boolean;
 }
 
 function row(spec: RowSpec): OrchestrationFlatRow {
@@ -30,6 +31,9 @@ function row(spec: RowSpec): OrchestrationFlatRow {
     requiresAttention: Boolean(spec.attentionReason),
     attentionReason: spec.attentionReason ?? null,
     ...(spec.tokenBurnAlert ? { tokenBurnAlert: { level: "critical" } } : {}),
+    ...(spec.owedFinishReport
+      ? { owedFinishReport: { ownerAgentId: "leader", state: "parked", since: "x" } }
+      : {}),
   } as unknown as Agent;
   return { agent, depth: spec.depth ?? 0, descendantRequiresAttention: false };
 }
@@ -51,6 +55,10 @@ describe("isPinnedOrchestrationAgent", () => {
       true,
     );
     expect(isPinnedOrchestrationAgent(row({ id: "a", tokenBurnAlert: true }).agent)).toBe(true);
+    // Its parent is waiting on a report that has not come — however old the row is.
+    expect(
+      isPinnedOrchestrationAgent(row({ id: "a", status: "closed", owedFinishReport: true }).agent),
+    ).toBe(true);
   });
 
   it("does not pin an unread finish, which is set on every completed agent", () => {

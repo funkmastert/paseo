@@ -34,6 +34,7 @@ import type {
   AgentUsage,
   AgentPersistenceHandle,
   TokenBurnAlert,
+  OwedFinishReport,
 } from "@getpaseo/protocol/agent-types";
 import type {
   AgentMcpServerStatus,
@@ -119,6 +120,12 @@ export interface Agent {
    * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
    */
   tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * A finish report this subagent owes its parent that has not arrived: it stopped without
+   * reporting, or the report could not be delivered. Absent while it is simply working, and on
+   * daemons that predate it. See docs/finish-reports.md.
+   */
+  owedFinishReport?: OwedFinishReport;
   title: string | null;
   cwd: string;
   workspaceId?: string;

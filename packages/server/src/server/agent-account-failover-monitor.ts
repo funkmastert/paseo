@@ -358,6 +358,9 @@ export class AccountFailoverMonitor {
           newAgentId: outcome.agentId,
           targetProviderId: outcome.targetProviderId,
         });
+        // Its owner was already told "errored" when it hit the cap. The resume prompt restarts
+        // that work, so the owner is owed a second report when it actually finishes.
+        this.options.agentManager.getFinishObligations()?.carryOver(outcome.agentId);
         // No parent message: the subagent kept its id, so the parent's finish notification and
         // every existing handle to it still work.
         return;
@@ -454,8 +457,8 @@ export class AccountFailoverMonitor {
       `Your subagent ${outcome.oldAgentId} hit the usage limit on "${outcome.oldProviderId}" and ` +
       `now continues as ${outcome.newAgentId} on "${outcome.targetProviderId}" with the same ` +
       `conversation. Do not relaunch ${outcome.oldAgentId}; if you already did, cancel one of the ` +
-      `two. No finish notification will arrive for ${outcome.newAgentId}, so follow it with ` +
-      `wait_for_agent or get_agent_activity. Create new subagents with provider "${providerRef}".`;
+      `two. Its finish notification arrives from ${outcome.newAgentId}. Create new subagents with ` +
+      `provider "${providerRef}".`;
     try {
       await sendPromptToAgent({
         agentManager: this.options.agentManager,

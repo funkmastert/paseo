@@ -279,6 +279,8 @@ export const ko: TranslationResources = {
       attention: "주의",
       needsInput: "입력 필요",
       failed: "실패",
+      owesReport: "보고 필요",
+      reportUndelivered: "보고 미전달",
       tokenBurnWarning: "높은 소비량",
       tokenBurnDanger: "매우 높은 소비량",
     },

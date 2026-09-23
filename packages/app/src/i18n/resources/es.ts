@@ -281,6 +281,8 @@ export const es: TranslationResources = {
       attention: "Atención",
       needsInput: "Necesita respuesta",
       failed: "Con error",
+      owesReport: "Debe informe",
+      reportUndelivered: "Informe no entregado",
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muy alto",
     },

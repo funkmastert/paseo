@@ -57,6 +57,15 @@ export function derivePendingPermissionKey(
   return `${agentId}:${fallbackId}`;
 }
 
+function projectAgentAlerts(
+  agent: Agent,
+): Pick<AgentSnapshotPayload, "tokenBurnAlert" | "owedFinishReport"> {
+  return {
+    ...(agent.tokenBurnAlert ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
+    ...(agent.owedFinishReport ? { owedFinishReport: agent.owedFinishReport } : {}),
+  };
+}
+
 export function projectAgentSnapshot(agent: Agent): AgentSnapshotPayload {
   return {
     id: agent.id,
@@ -83,7 +92,7 @@ export function projectAgentSnapshot(agent: Agent): AgentSnapshotPayload {
     ...(agent.mcpServerStatuses ? { mcpServerStatuses: agent.mcpServerStatuses } : {}),
     ...(agent.recentTokenRate ? { recentTokenRate: agent.recentTokenRate } : {}),
     ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
-    ...(agent.tokenBurnAlert ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
+    ...projectAgentAlerts(agent),
     title: agent.title,
     labels: agent.labels,
     requiresAttention: agent.requiresAttention ?? false,
@@ -132,6 +141,7 @@ export function normalizeAgentSnapshot(snapshot: AgentSnapshotPayload, serverId:
     recentTokenRate: snapshot.recentTokenRate,
     totalTokens: snapshot.totalTokens,
     tokenBurnAlert: snapshot.tokenBurnAlert,
+    owedFinishReport: snapshot.owedFinishReport,
     title: snapshot.title ?? null,
     cwd: snapshot.cwd,
     workspaceId: snapshot.workspaceId,
