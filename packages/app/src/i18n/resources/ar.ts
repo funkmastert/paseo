@@ -2017,6 +2017,8 @@ export const ar: TranslationResources = {
     tokens: "رموز{{used}}/{{max}}",
     sessionCost: "تكلفة الجلسة{{cost}}",
     accessibility: "تم استخدام نافذة السياق{{percentage}}%",
+    spendTitle: "الإنفاق",
+    spendSummary: "{{total}} رمز مرجّح خلال {{span}}",
   },
   review: {
     comment: {

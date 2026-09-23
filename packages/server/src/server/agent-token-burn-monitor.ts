@@ -20,6 +20,10 @@ import {
 import type { PushNotificationSender } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { ModelDivergenceMonitorSettings } from "./agent-model-divergence-monitor.js";
+import type {
+  UsageHistorySampler,
+  UsageHistorySettings,
+} from "./usage-history/usage-history-sampler.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 // Measured, not chosen: a healthy Opus agent doing ordinary tool work on this machine sustains
@@ -82,6 +86,8 @@ export interface TokenBurnMonitorConfig {
   accountPressure?: AccountPressureSettings;
   /** Read by AgentModelDivergenceMonitor, which shares this config block. */
   modelDivergence?: ModelDivergenceMonitorSettings;
+  /** Read by the usage-history sampler this monitor calls; recording is on unless disabled. */
+  usageHistory?: UsageHistorySettings;
 }
 
 interface AgentTokenBurnMonitorLogger {
@@ -117,6 +123,12 @@ export interface AgentTokenBurnMonitorOptions {
   sendSystemMessageToAgent: (agentId: string, body: string) => Promise<void>;
   /** Provider usage windows for the report-only account-pressure leg. Null when unreadable. */
   readProviderUsage?: () => Promise<readonly ProviderUsage[] | null>;
+  /**
+   * Records account usage windows and per-agent weighted spend once per sweep, so the daemon can
+   * say how fast a window is filling (docs/usage-history.md). Rides this loop rather than adding
+   * one. Absent, nothing is recorded.
+   */
+  usageHistory?: Pick<UsageHistorySampler, "sample">;
   /**
    * Model ids an agent's provider can actually be set to, so `downgrade` never moves an agent
    * onto a model that provider has never heard of. `downgradeToModel` is one global string and
@@ -304,6 +316,7 @@ export class AgentTokenBurnMonitor {
   private readonly serverId: string;
   private readonly sendSystemMessageToAgent: AgentTokenBurnMonitorOptions["sendSystemMessageToAgent"];
   private readonly readProviderUsage: AgentTokenBurnMonitorOptions["readProviderUsage"];
+  private readonly usageHistory: AgentTokenBurnMonitorOptions["usageHistory"];
   private readonly listProviderModels: AgentTokenBurnMonitorOptions["listProviderModels"];
   private readonly readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
   private readonly logger: AgentTokenBurnMonitorLogger;
@@ -326,6 +339,7 @@ export class AgentTokenBurnMonitor {
     this.serverId = options.serverId;
     this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
     this.readProviderUsage = options.readProviderUsage;
+    this.usageHistory = options.usageHistory;
     this.listProviderModels = options.listProviderModels;
     this.readDaemonConfig = options.readDaemonConfig;
     this.logger = options.logger;
@@ -395,6 +409,7 @@ export class AgentTokenBurnMonitor {
     const config = resolveConfig(rawConfig);
     const nowMs = this.now();
     const agents = this.agentManager.listAgentsForTokenBurnMonitor(nowMs);
+    await this.usageHistory?.sample({ nowMs, agents });
     // Account pressure is a machine-level leg: it matters with zero live agents, so it runs
     // before the per-agent early return, the way AgentResourceMonitor's swap leg does.
     await this.reportAccountPressure(config.accountPressure);

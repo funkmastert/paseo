@@ -60,6 +60,9 @@ $PASEO_HOME/
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
+├── usage-history/
+│   ├── accounts.json                    # Account usage-window readings, bounded (docs/usage-history.md)
+│   └── agents/{agentId}.json            # One agent's cost-weighted spend over time
 ├── runtime/
 │   └── managed-processes/
 │       └── {recordId}.json              # Helper processes owned by Paseo; reconciled on daemon bootstrap

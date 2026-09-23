@@ -5,6 +5,7 @@ import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
+import { AgentSpendSparkline } from "@/usage-history/agent-spend-sparkline";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
 import { formatTokenCount } from "./context-window-meter.utils";
 
@@ -14,6 +15,8 @@ interface ContextWindowMeterProps {
   totalCostUsd?: number | null;
   showPercentage?: boolean;
   serverId?: string;
+  /** The agent this meter describes; its weighted-token spend history draws in the tooltip. */
+  agentId?: string | null;
   /** The Paseo provider key, e.g. "claude", "gemini", "codex" */
   provider?: string | null;
   /** Reserve the meter footprint and show a loading ring while usage is pending. */
@@ -102,6 +105,7 @@ export function ContextWindowMeter({
   totalCostUsd,
   showPercentage = false,
   serverId,
+  agentId,
   provider,
   pending = false,
   glyphSize,
@@ -234,6 +238,7 @@ export function ContextWindowMeter({
             </Text>
           ) : null}
           <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+          <AgentSpendSparkline serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
         </View>
       </TooltipContent>
     </Tooltip>

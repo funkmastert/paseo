@@ -61,6 +61,10 @@ import {
 } from "./browser-automation/rpc-schemas.js";
 import { BrowserAutomationHostCapabilitySchema } from "./browser-automation/capabilities.js";
 import {
+  UsageHistoryGetRequestSchema,
+  UsageHistoryGetResponseSchema,
+} from "./usage-history/rpc-schemas.js";
+import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
   PaseoMetadataGenerationEntrySchema,
@@ -171,6 +175,13 @@ const MutableTokenBurnMonitorConfigSchema = z
     totalTokens: z.number().positive().optional(),
     scope: z.enum(["all", "topLevelOnly"]).optional(),
     breachBatchThreshold: z.number().int().positive().optional(),
+    // Additive, optional: read by the daemon's usage-history recorder. See docs/usage-history.md.
+    usageHistory: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
     // Additive, optional: read by the daemon's model-divergence monitor, off unless `enabled`.
     modelDivergence: z
       .object({
@@ -3585,6 +3596,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   RefreshProvidersSnapshotRequestMessageSchema,
   ProviderDiagnosticRequestMessageSchema,
   ProviderUsageListRequestMessageSchema,
+  UsageHistoryGetRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4040,6 +4052,8 @@ export const ServerInfoStatusPayloadSchema = z
         mcpGatewayAdopt: z.boolean().optional(),
         // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
         deviceLeases: z.boolean().optional(),
+        // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
+        usageHistory: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7254,6 +7268,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   McpGatewayServerAdoptResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
+  UsageHistoryGetResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,
