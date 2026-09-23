@@ -1116,6 +1116,47 @@ describe("createRoleRouter", () => {
       expect(result).toBeUndefined(); // byte-identical pass-through: nothing needed rewriting
     });
 
+    it("REGRESSION: still enforces a restricted role's tool profile when an explicit in-pool model is honored", () => {
+      // Reproduces the production failure exactly: labels[paseo.agent-type] =
+      // "reviewer" (tier 1, agentTypeMappings), role toolProfile read-only,
+      // caller explicitly requests the role's only (and thus approved,
+      // selectable) model. The "honored, untouched" precedence above only
+      // ever exercised an UNRESTRICTED role, so it never caught a restricted
+      // role losing its tool profile on this exact path.
+      const policy: RoleModelPolicy = {
+        ...DEFAULT_POLICY,
+        roles: DEFAULT_POLICY.roles.map((role) =>
+          role.id === "reviewer"
+            ? { ...role, models: ["claude-sonnet-5"], toolProfile: { kind: "read-only" } }
+            : role,
+        ),
+      };
+      const singleAccountPool: ResolvedPool = { workers: [], leader: { providerId: "claude-personal" } };
+      const router = createRoleRouter(
+        baseOptions({
+          policyCache: fakePolicyCache(policy),
+          catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+          poolCache: fakePoolCache(singleAccountPool),
+        }),
+      );
+
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          labels: { [AGENT_TYPE_LABEL]: "reviewer" },
+          config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+
+      expect(result).toBeDefined();
+      const options = result?.config.providerOptions as { disallowedTools?: string[]; appendSystemPrompt?: string };
+      expect(options?.disallowedTools).toBeDefined();
+      expect(options?.disallowedTools?.length).toBeGreaterThan(0);
+      expect(options?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit"]));
+      expect(options?.appendSystemPrompt).toContain("read-only");
+    });
+
     it("overrides an explicit request that is NOT a member of the role's pool at all (reason: not-approved)", () => {
       const onExplicitModelOverridden = vi.fn();
       const router = createRoleRouter(
@@ -1534,5 +1575,49 @@ describe("role-router + account router composition", () => {
     const afterAccount = accountRouter({ request: initial.request }, fakeContext);
     expect(afterAccount?.config.provider).toBe("worker-a");
     expect(afterAccount?.config.model).toBe("claude-sonnet"); // the caller's original model choice, untouched by the role hook
+  });
+
+  it("REGRESSION: tool enforcement from the explicit-model-honored path survives the account router, single-account (collapsed) pool", () => {
+    // Full production shape: reviewer role via tier-1 agentTypeMappings,
+    // read-only profile, explicit request for the role's only pool model,
+    // pool collapsed onto a single account (leader only, no workers) — the
+    // exact combination the live failure reported.
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((role) =>
+        role.id === "reviewer" ? { ...role, models: ["claude-sonnet-5"], toolProfile: { kind: "read-only" } } : role,
+      ),
+    };
+    const pool: ResolvedPool = { workers: [], leader: { providerId: "claude-personal" } };
+    const health = createHealthTracker();
+    const poolCache = fakePoolCache(pool);
+    const roleRouter = createRoleRouter({
+      policyCache: fakePolicyCache(policy),
+      catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+      poolCache,
+      health,
+      recentAgentTypes: createRecentAgentTypes(),
+    });
+    const providerIds = { get: () => new Set(["claude-personal"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const accountRouter = createRouter({ poolCache, health, providerIds });
+
+    const initial = request({
+      callerAgentId: "c1",
+      labels: { [AGENT_TYPE_LABEL]: "reviewer" },
+      config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+    });
+
+    const afterRole = roleRouter(initial, fakeContext);
+    const roleOptions = afterRole?.config.providerOptions as { disallowedTools?: string[] } | undefined;
+    expect(roleOptions?.disallowedTools?.length).toBeGreaterThan(0); // role hook alone: confirmed above too
+
+    const afterAccount = accountRouter({ request: afterRole ?? initial.request }, fakeContext);
+    const finalOptions = afterAccount?.config.providerOptions as { disallowedTools?: string[] } | undefined;
+    // afterAccount may be undefined (account router no-op, single-account
+    // pool never needs a provider rewrite) — either way the tool
+    // enforcement the role hook wrote must not have been lost.
+    const effectiveOptions = finalOptions ?? roleOptions;
+    expect(effectiveOptions?.disallowedTools?.length).toBeGreaterThan(0);
+    expect(effectiveOptions?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit"]));
   });
 });

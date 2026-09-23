@@ -22,6 +22,14 @@ function isPoolProvider(pool: PoolCache, providerId: string): boolean {
   );
 }
 
+/**
+ * Upper bound on how long an `agent.create` dispatch will wait for the
+ * post-reload cache warm-up before proceeding anyway. Bounded so a stuck
+ * daemon RPC can't block agent creation forever — after this, routing falls
+ * back to whatever state loaded (the previous fire-and-forget behavior).
+ */
+const STARTUP_WARM_TIMEOUT_MS = 5000;
+
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
   // Long-lived alongside the health tracker: both are fed by the same usage poll, and both
@@ -39,14 +47,32 @@ export default function contribute(server: PluginServerContext) {
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
+  // Resolves once the post-reload warm-up (below) has settled or timed out.
+  // Non-null only while a warm-up is in flight; `poolCache` truthy is the
+  // steady-state fast path once it's done. Shared so a create dispatched
+  // while a turn_ended/RPC-triggered warm-up is already running waits on
+  // that SAME warm-up instead of starting a second one.
+  let startingPromise: Promise<void> | null = null;
 
   // The server contribution itself has no `paseo` handle (see
   // PluginServerContext); every hook/observer callback receives one through
   // its PluginHookContext, so the pool cache, usage poller, and notifier are
   // started lazily from whichever hook fires first.
-  function ensureStarted(paseo: PluginHookContext["paseo"]): void {
+  //
+  // Returns a promise that resolves once the initial warm-up has settled (or
+  // timed out) so a `before("agent.create")` dispatch can await it: the
+  // caches below all start at fail-open defaults (DEFAULT_POLICY, an empty
+  // pool, a cold catalog) immediately after every plugin reload or daemon
+  // restart, and nothing else populates them before the warm-up below runs.
+  // A caller that only needs the cache OBJECTS to exist (they're assigned
+  // synchronously, before any awaiting) can ignore the return value, exactly
+  // as before.
+  function ensureStarted(paseo: PluginHookContext["paseo"]): Promise<void> {
     if (poolCache) {
-      return;
+      return Promise.resolve();
+    }
+    if (startingPromise) {
+      return startingPromise;
     }
 
     poolCache = createPoolCache(paseo);
@@ -61,26 +87,10 @@ export default function contribute(server: PluginServerContext) {
     // Both caches start empty/fail-open and otherwise wait for their 60s
     // interval tick. Without this, every create in the window after a
     // daemon restart or plugin reload fails open (routes unprotected).
-    // Fire-and-forget on a microtask so this hook dispatch never awaits
-    // the refresh; the very first create can still race it, but the
-    // fail-open window shrinks from ~60s to one RPC round-trip.
     const startedPoolCache = poolCache;
     const startedProviderIds = providerIds;
     const startedCatalogCache = catalogCache;
     const startedParentProfiles = parentProfiles;
-    queueMicrotask(() => {
-      void startedPoolCache.forceRefresh();
-      void startedProviderIds.forceRefresh();
-      // Warmed unconditionally, before any role is known to be restricted:
-      // the agents whose restrictions matter most are the ones already
-      // running when the operator activates a policy change, and a plugin
-      // reload is exactly what activating one does.
-      void startedParentProfiles.warm();
-      // The catalog's families depend on the policy, so warm the policy
-      // first — otherwise the very first catalog refresh sees no families
-      // and every role starts UNAVAILABLE until the next 60s tick.
-      void startedPolicyCache.forceRefresh().then(() => startedCatalogCache.forceRefresh());
-    });
     roleRouter = createRoleRouter({
       policyCache,
       catalogCache,
@@ -173,9 +183,47 @@ export default function contribute(server: PluginServerContext) {
     // usage readings at all — every account looks healthy — for up to 5
     // minutes after every plugin start or reload.
     const startedUsagePoller = usagePoller;
-    queueMicrotask(() => {
-      void startedUsagePoller.pollOnce();
+
+    // Deferred onto a microtask so THIS dispatch (whichever hook happened to
+    // be first) never synchronously calls into `paseo` — callers that don't
+    // await the returned promise (the `on(...)` event handlers below) see
+    // exactly the same fire-and-forget timing as before. `before("agent.create")`
+    // dispatches, unlike those, DO await this: see the registration below for
+    // why a create can no longer outrun the warm-up the way an event observer
+    // safely can.
+    startingPromise = new Promise<void>((resolve) => {
+      queueMicrotask(() => {
+        const warmed = Promise.all([
+          startedPoolCache.forceRefresh().catch(() => undefined),
+          startedProviderIds.forceRefresh().catch(() => undefined),
+          // Warmed unconditionally, before any role is known to be restricted:
+          // the agents whose restrictions matter most are the ones already
+          // running when the operator activates a policy change, and a plugin
+          // reload is exactly what activating one does.
+          startedParentProfiles.warm().catch(() => undefined),
+          // The catalog's families depend on the policy, so warm the policy
+          // first — otherwise the very first catalog refresh sees no families
+          // and every role starts UNAVAILABLE until the next 60s tick.
+          startedPolicyCache
+            .forceRefresh()
+            .then(() => startedCatalogCache.forceRefresh())
+            .catch(() => undefined),
+          startedUsagePoller.pollOnce().catch(() => undefined),
+        ]).then(() => undefined);
+        const timedOut = new Promise<void>((resolveTimeout) => {
+          const timer = setTimeout(resolveTimeout, STARTUP_WARM_TIMEOUT_MS);
+          // Never the reason the process stays alive.
+          (timer as unknown as { unref?: () => void }).unref?.();
+        });
+        void Promise.race([warmed, timedOut]).then(() => {
+          // Once settled, `poolCache` truthy already short-circuits every
+          // future call; clearing this just drops the now-pointless reference.
+          startingPromise = null;
+          resolve();
+        });
+      });
     });
+    return startingPromise;
   }
 
   // Two separate registrations, not one handler calling both: `before`
@@ -185,12 +233,24 @@ export default function contribute(server: PluginServerContext) {
   // config.model/config.provider; the account router still runs second,
   // unmodified, and picks the account for whatever model the role hook left
   // in place.
-  const unregisterRoleCreate = server.before("agent.create", (input, context) => {
-    ensureStarted(context.paseo);
+  //
+  // Both AWAIT ensureStarted(), unlike the `on(...)` observers below: an
+  // observer only needs the cache OBJECTS to exist (assigned synchronously),
+  // but these two decide enforcement and routing from what the caches
+  // CONTAIN. Without awaiting, the very first `agent.create` dispatched
+  // after every plugin reload or daemon restart is GUARANTEED to run against
+  // still-default state — not a race that can go either way, but a certainty,
+  // since forceRefresh() is only even scheduled (onto a microtask) by this
+  // same call to ensureStarted(). A restrictive role's tool profile silently
+  // stops applying for exactly that one request. Bounded by
+  // STARTUP_WARM_TIMEOUT_MS so a stuck daemon RPC still can't block agent
+  // creation forever.
+  const unregisterRoleCreate = server.before("agent.create", async (input, context) => {
+    await ensureStarted(context.paseo);
     return roleRouter?.(input, context) ?? undefined;
   });
-  const unregisterCreate = server.before("agent.create", (input, context) => {
-    ensureStarted(context.paseo);
+  const unregisterCreate = server.before("agent.create", async (input, context) => {
+    await ensureStarted(context.paseo);
     return router?.(input, context) ?? undefined;
   });
 

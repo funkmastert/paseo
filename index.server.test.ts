@@ -11,14 +11,25 @@ type OnHandler = (event: unknown, context: PluginHookContext) => void;
 /**
  * Minimal fake of the plugin server harness: captures registered hooks so
  * the test can dispatch them directly, the way the daemon would.
+ *
+ * `before` supports multiple registrations per event name (the real daemon
+ * does — index.server.ts registers TWO separate "agent.create" handlers, the
+ * role hook and the account hook, run in registration order with each
+ * output feeding the next input; see PluginHookHandlers.invoke in
+ * packages/server/.../plugins/lifecycle/index.ts).
  */
 function fakeServer() {
-  const beforeHandlers = new Map<string, BeforeHandler>();
+  const beforeHandlers = new Map<string, BeforeHandler[]>();
   const onHandlers = new Map<string, OnHandler>();
   const server = {
     before: ((name: string, handler: BeforeHandler) => {
-      beforeHandlers.set(name, handler);
-      return () => beforeHandlers.delete(name);
+      const list = beforeHandlers.get(name) ?? [];
+      list.push(handler);
+      beforeHandlers.set(name, list);
+      return () => {
+        const remaining = (beforeHandlers.get(name) ?? []).filter((h) => h !== handler);
+        beforeHandlers.set(name, remaining);
+      };
     }) as PluginServerContext["before"],
     on: ((name: string, handler: OnHandler) => {
       onHandlers.set(name, handler);
@@ -28,12 +39,37 @@ function fakeServer() {
     // no-op is enough to let contribute() finish wiring without throwing.
     handle: vi.fn(),
   } as unknown as PluginServerContext;
-  return { server, beforeHandlers, onHandlers };
+
+  /**
+   * Runs every registered "before" handler for `name` in order, each
+   * output feeding the next input — mirroring the real dispatcher's
+   * `if (result !== undefined) { request = validateBeforeResult(...) }`
+   * accumulation (minus the schema validation, irrelevant here).
+   */
+  async function dispatchBefore(
+    name: string,
+    request: PluginBeforeRequests["agent.create"],
+    context: PluginHookContext,
+  ): Promise<PluginBeforeRequests["agent.create"]> {
+    let current = request;
+    for (const handler of beforeHandlers.get(name) ?? []) {
+      const result = await handler({ request: current }, context);
+      if (result !== undefined) {
+        current = result;
+      }
+    }
+    return current;
+  }
+
+  return { server, beforeHandlers, onHandlers, dispatchBefore };
 }
 
-function fakePaseo() {
-  const configGet = vi.fn().mockResolvedValue({ requestId: "r1", config: { providers: {} } });
-  const providersSnapshot = vi.fn().mockResolvedValue({ entries: [], generatedAt: "now", requestId: "r1" });
+function fakePaseo(config: Record<string, unknown> = { providers: {} }) {
+  const configGet = vi.fn().mockResolvedValue({ requestId: "r1", config });
+  const providerEntries = Object.keys((config.providers as Record<string, unknown>) ?? {}).map((provider) => ({
+    provider,
+  }));
+  const providersSnapshot = vi.fn().mockResolvedValue({ entries: providerEntries, generatedAt: "now", requestId: "r1" });
   const listUsage = vi.fn().mockResolvedValue({ providers: [] });
   const agentsList = vi.fn().mockResolvedValue({ entries: [] });
   const paseo = {
@@ -81,6 +117,62 @@ describe("contribute (index.server)", () => {
     // otherwise every account looks healthy (no usage reading at all) for up
     // to 5 minutes after every plugin start or reload.
     expect(listUsage).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("REGRESSION: the FIRST agent.create dispatched right after activation still enforces a restrictive role's tool profile", async () => {
+    // Reproduces the production incident exactly: a fully-configured policy
+    // (reviewer -> read-only, one model) sitting in daemon config, and an
+    // agent.create landing before ensureStarted()'s warm-up has resolved —
+    // which, for the FIRST dispatch after every plugin reload/daemon
+    // restart, isn't a race that can go either way: forceRefresh() is only
+    // even SCHEDULED (onto a microtask) by this same dispatch's call to
+    // ensureStarted(), so without an await, `policyCache.get()` is
+    // GUARANTEED to still return DEFAULT_POLICY (every role unconfigured,
+    // unrestricted) at the moment the role hook reads it.
+    const { server, dispatchBefore } = fakeServer();
+    const cleanup = contribute(server);
+    const { paseo } = fakePaseo({
+      providers: {
+        claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+        "claude-personal": { params: { accountPool: { role: "worker", priority: 1 } } },
+      },
+      agentModelPolicy: {
+        schemaVersion: 3,
+        roles: [
+          { id: "worker", name: "Worker", standard: true, aliases: [], models: [], toolProfile: { kind: "unrestricted" } },
+          {
+            id: "reviewer",
+            name: "Reviewer",
+            standard: true,
+            aliases: [],
+            models: ["claude-sonnet-5"],
+            toolProfile: { kind: "read-only" },
+          },
+          { id: "advisor", name: "Advisor", standard: true, aliases: [], models: [], toolProfile: { kind: "unrestricted" } },
+          { id: "leader", name: "leader", standard: true, aliases: [], models: [], toolProfile: { kind: "unrestricted" } },
+        ],
+        agentTypeMappings: { reviewer: "reviewer" },
+        modelBudgetThresholdPct: 80,
+        enforceToolsOnClassifiedRoles: false,
+        revision: "test",
+      },
+    });
+
+    const request: PluginBeforeRequests["agent.create"] = {
+      config: { provider: "claude-personal", model: "claude-sonnet-5", cwd: "/tmp" },
+      callerAgentId: "c1",
+      labels: { "paseo.agent-type": "reviewer" },
+    } as unknown as PluginBeforeRequests["agent.create"];
+
+    // No prior hook/RPC dispatch of any kind — this IS the first one, exactly
+    // like the very first agent.create after a fresh plugin reload.
+    const result = await dispatchBefore("agent.create", request, fakeContext(paseo));
+
+    const options = result.config.providerOptions as { disallowedTools?: string[] } | undefined;
+    expect(options?.disallowedTools?.length).toBeGreaterThan(0);
+    expect(options?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit"]));
 
     cleanup();
   });
