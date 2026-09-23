@@ -288,6 +288,17 @@ describe("countAccountUsage", () => {
     expect(counts.get("claude-backup")).toEqual({ leaders: 0, workers: 1 });
   });
 
+  it("counts an idle leader while a worker under it is running, not once the work stops", () => {
+    const counts = countAccountUsage([
+      row("claude", "idle", 0),
+      row("claude-personal", "running", 1),
+      row("claude", "idle", 0),
+      row("claude-personal", "idle", 1),
+    ]);
+    expect(counts.get("claude")).toEqual({ leaders: 1, workers: 0 });
+    expect(counts.get("claude-personal")).toEqual({ leaders: 0, workers: 1 });
+  });
+
   it("does not count agents that are not running", () => {
     const counts = countAccountUsage([
       row("claude", "idle", 0),

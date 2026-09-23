@@ -112,21 +112,38 @@ export function resolveBudgetProviderIds(
 }
 
 /**
- * Leaders and workers currently running on each account. "Running" is the panel's own notion of
- * alive (running or initializing): a finished agent no longer draws on the account, and counting
- * the idle majority of a real fleet would make every account look busy.
+ * Leaders and workers currently on each account. Workers count while running or initializing —
+ * the panel's own notion of alive: a finished agent no longer draws on the account, and counting
+ * the idle majority of a real fleet would make every account look busy. A leader is idle between
+ * turns while its workers run, and it is still the session those workers report to, so it counts
+ * when it is alive itself or has any live agent below it. `rows` is the depth-first flatten, so a
+ * root's subtree is the rows that follow it until the next root.
  */
 export function countAccountUsage(
   rows: readonly Pick<OrchestrationFlatRow, "agent" | "depth">[],
 ): Map<string, AccountUsageCount> {
   const counts = new Map<string, AccountUsageCount>();
+  const bump = (provider: string, field: keyof AccountUsageCount) => {
+    const current = counts.get(provider) ?? { leaders: 0, workers: 0 };
+    current[field] += 1;
+    counts.set(provider, current);
+  };
+  let leader: { provider: string; engaged: boolean } | null = null;
+  const closeLeader = () => {
+    if (leader?.engaged) bump(leader.provider, "leaders");
+  };
   for (const { agent, depth } of rows) {
-    if (agent.status !== "running" && agent.status !== "initializing") continue;
-    const current = counts.get(agent.provider) ?? { leaders: 0, workers: 0 };
-    if (depth === 0) current.leaders += 1;
-    else current.workers += 1;
-    counts.set(agent.provider, current);
+    const alive = agent.status === "running" || agent.status === "initializing";
+    if (depth === 0) {
+      closeLeader();
+      leader = { provider: agent.provider, engaged: alive };
+      continue;
+    }
+    if (!alive) continue;
+    bump(agent.provider, "workers");
+    if (leader) leader.engaged = true;
   }
+  closeLeader();
   return counts;
 }
 
