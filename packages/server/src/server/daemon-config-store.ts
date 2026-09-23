@@ -30,6 +30,7 @@ interface SupportedMutableConfigPatch {
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
+  refocus?: MutableDaemonConfig["refocus"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -210,6 +211,7 @@ const RELOADABLE_PATHS = [
   "agents.accountFailover",
   "agents.budgetPacing",
   "agents.doneJanitor",
+  "agents.refocus",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -248,6 +250,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
   ["agents.doneJanitor", "doneJanitor"],
+  ["agents.refocus", "refocus"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -352,6 +355,12 @@ function pickDoneJanitorPatch(
   return doneJanitor === undefined ? {} : { doneJanitor };
 }
 
+function pickRefocusPatch(
+  refocus: MutableDaemonConfigPatch["refocus"],
+): Pick<SupportedMutableConfigPatch, "refocus"> {
+  return refocus === undefined ? {} : { refocus };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -383,6 +392,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
     ...pickDoneJanitorPatch(patch.doneJanitor),
+    ...pickRefocusPatch(patch.refocus),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -882,6 +892,18 @@ function mergeDoneJanitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedRefocus = NonNullable<PersistedConfig["agents"]>["refocus"];
+
+function mergeRefocusForPersist(
+  persisted: PersistedRefocus,
+  patch: SupportedMutableConfigPatch["refocus"],
+): PersistedRefocus {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedRefocus;
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -944,6 +966,7 @@ function touchesAgentConfig(
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
     patch.doneJanitor !== undefined ||
+    patch.refocus !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
@@ -994,6 +1017,9 @@ function mergeMonitorSectionsForPersist(
 
   const doneJanitor = mergeDoneJanitorForPersist(persistedAgents?.doneJanitor, patch.doneJanitor);
   if (doneJanitor !== undefined) next["doneJanitor"] = doneJanitor;
+
+  const refocus = mergeRefocusForPersist(persistedAgents?.refocus, patch.refocus);
+  if (refocus !== undefined) next["refocus"] = refocus;
 }
 
 function mergeMutableAgentPatch(

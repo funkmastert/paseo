@@ -357,6 +357,7 @@ describe("paseo daemon bootstrap", () => {
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
+        refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
       },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
@@ -397,6 +398,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
+      expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
       expect(monitorModes()).toEqual({
         "resource-monitor": { enabled: true, dryRun: undefined },
         reaper: { enabled: true, dryRun: true },
@@ -404,6 +406,7 @@ describe("paseo daemon bootstrap", () => {
         "token-burn": { enabled: true, dryRun: undefined },
         "spend-governor": { enabled: true, dryRun: true },
         "account-pressure": { enabled: false, dryRun: undefined },
+        refocus: { enabled: true, dryRun: true },
       });
 
       const reloadedPersisted = {
@@ -416,6 +419,7 @@ describe("paseo daemon bootstrap", () => {
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
+          refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
         },
       };
       await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
@@ -427,6 +431,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.budgetPacing",
         "agents.deviceLeases",
         "agents.doneJanitor",
+        "agents.refocus",
         "agents.resourceMonitor",
         "agents.tokenBurnMonitor",
       ]);
@@ -438,10 +443,12 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
+      expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
       expect(monitorModes()).toMatchObject({
         reaper: { enabled: true, dryRun: false },
         "device-cap": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
+        refocus: { enabled: true, dryRun: false },
       });
     } finally {
       await client?.close().catch(() => undefined);

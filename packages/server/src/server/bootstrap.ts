@@ -227,6 +227,7 @@ import {
   type DoneJanitorConfig,
 } from "./agent-done-janitor.js";
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -550,6 +551,7 @@ export interface PaseoDaemonConfig {
     now?: () => number;
   };
   doneJanitor?: DoneJanitorConfig;
+  refocus?: RefocusConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
    * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
@@ -686,6 +688,13 @@ function withDoneJanitorConfig(
 ): Pick<MutableDaemonConfig, "doneJanitor"> {
   // Spread: an interface carries no index signature, and the wire schema is passthrough.
   return config.doneJanitor !== undefined ? { doneJanitor: { ...config.doneJanitor } } : {};
+}
+
+function withRefocusConfig(
+  config: Pick<PaseoDaemonConfig, "refocus">,
+): Pick<MutableDaemonConfig, "refocus"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.refocus !== undefined ? { refocus: { ...config.refocus } } : {};
 }
 
 // Wired once the WebSocket server exists, like AccountFailoverMonitor below: it owns the push
@@ -857,6 +866,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...withAccountFailoverConfig(config),
     ...withBudgetPacingConfig(config),
     ...withDoneJanitorConfig(config),
+    ...withRefocusConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
@@ -1503,6 +1513,19 @@ export async function createPaseoDaemon(
   });
   handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
   agentTitleTracker.start();
+
+  // Refocus (docs/refocus.md). Needs nothing but the manager and live config, so it is watching
+  // before the first prompt can be dispatched.
+  const agentRefocus = new AgentRefocus({
+    agentManager,
+    readDaemonConfig: () => ({ refocus: daemonConfigStore.get().refocus }),
+    logger: logger.child({ module: "refocus" }),
+  });
+  agentManager.setPromptDispatchInterceptor((agentId, prompt) =>
+    agentRefocus.interceptPrompt(agentId, prompt),
+  );
+  agentRefocus.start();
+  daemonConfigStore.onChange(() => agentRefocus.reportMode());
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
@@ -2406,6 +2429,8 @@ export async function createPaseoDaemon(
     await speechService.stop();
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
+    agentManager.setPromptDispatchInterceptor(null);
+    agentRefocus.stop();
     agentTokenBurnMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();

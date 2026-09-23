@@ -420,6 +420,18 @@ const AgentDoneJanitorSchema = z
   })
   .strict();
 
+// Off unless `enabled` says otherwise. See docs/refocus.md.
+const AgentRefocusSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    growthTokens: z.number().int().positive().optional(),
+    onCompaction: z.boolean().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    excerptChars: z.number().int().positive().optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -574,6 +586,7 @@ export const PersistedConfigSchema = z
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
+        refocus: AgentRefocusSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
