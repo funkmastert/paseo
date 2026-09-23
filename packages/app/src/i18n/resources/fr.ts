@@ -247,6 +247,13 @@ export const fr: TranslationResources = {
       unarchive: "Désarchiver",
     },
   },
+  pinnedGrid: {
+    title: "Épinglés ({{count}})",
+    close: "Fermer la grille",
+    openWorkspace: "Ouvrir l'espace de travail",
+    noChat: "Pas encore de discussion dans cet espace de travail",
+    empty: "Aucune discussion épinglée",
+  },
   sessions: {
     title: "Historique",
     empty: "Aucune séance pour l'instant",
@@ -1150,6 +1157,7 @@ export const fr: TranslationResources = {
     },
     pinned: {
       title: "Épinglés",
+      openGrid: "Ouvrir les discussions épinglées dans une grille",
     },
     host: {
       noHost: "Aucun hôte",

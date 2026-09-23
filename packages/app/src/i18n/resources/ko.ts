@@ -244,6 +244,13 @@ export const ko: TranslationResources = {
       unarchive: "보관 해제",
     },
   },
+  pinnedGrid: {
+    title: "고정됨 ({{count}})",
+    close: "그리드 닫기",
+    openWorkspace: "작업 공간 열기",
+    noChat: "이 작업 공간에는 아직 채팅이 없습니다",
+    empty: "고정된 채팅 없음",
+  },
   sessions: {
     title: "기록",
     empty: "아직 세션이 없습니다",
@@ -1123,6 +1130,7 @@ export const ko: TranslationResources = {
     },
     pinned: {
       title: "고정됨",
+      openGrid: "고정된 채팅을 그리드로 열기",
     },
     host: {
       noHost: "호스트 없음",

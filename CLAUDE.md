@@ -65,6 +65,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/qa.md](docs/qa.md)                                             | QA evidence bar for pull requests — platform matrix, version drift, performance, UI proof                                        |
 | [docs/mobile-testing.md](docs/mobile-testing.md)                     | Maestro and mobile test workflows                                                                                                |
 | [docs/mobile-panels.md](docs/mobile-panels.md)                       | Compact left/center/right panel ownership, worklet motion, gesture revisions, and Fabric constraints                             |
+| [docs/pinned-grid.md](docs/pinned-grid.md)                           | Pinned grid — what pinned means, cells as real agent panels, focus and attention, layout at each width, live capture             |
 | [docs/explorer-sidebar.md](docs/explorer-sidebar.md)                 | Explorer sidebar and ordinary side-pane host contracts, lifecycle, placement, and routing preferences                            |
 | [docs/orchestration-panel.md](docs/orchestration-panel.md)           | Orchestration panel — per-field freshness, directory demand, row rules at fleet scale, screenshot harness                        |
 | [docs/ad-hoc-daemon-testing.md](docs/ad-hoc-daemon-testing.md)       | Isolated in-process daemon test harness                                                                                          |

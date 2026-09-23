@@ -243,6 +243,13 @@ export const zhCN: TranslationResources = {
       unarchive: "取消归档",
     },
   },
+  pinnedGrid: {
+    title: "已置顶 ({{count}})",
+    close: "关闭网格",
+    openWorkspace: "打开工作区",
+    noChat: "此工作区还没有聊天",
+    empty: "没有置顶聊天",
+  },
   sessions: {
     title: "历史",
     empty: "还没有会话",
@@ -1108,6 +1115,7 @@ export const zhCN: TranslationResources = {
     },
     pinned: {
       title: "已置顶",
+      openGrid: "以网格打开置顶聊天",
     },
     host: {
       noHost: "没有 Host",

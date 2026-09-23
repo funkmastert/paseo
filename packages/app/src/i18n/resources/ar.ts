@@ -243,6 +243,13 @@ export const ar: TranslationResources = {
       unarchive: "إلغاء الأرشفة",
     },
   },
+  pinnedGrid: {
+    title: "المثبتة ({{count}})",
+    close: "إغلاق الشبكة",
+    openWorkspace: "فتح مساحة العمل",
+    noChat: "لا توجد محادثة في مساحة العمل هذه بعد",
+    empty: "لا توجد محادثات مثبتة",
+  },
   sessions: {
     title: "السجل",
     empty: "لا توجد جلسات بعد",
@@ -1116,6 +1123,7 @@ export const ar: TranslationResources = {
     },
     pinned: {
       title: "المثبتة",
+      openGrid: "فتح المحادثات المثبتة في شبكة",
     },
     host: {
       noHost: "لا مضيف",

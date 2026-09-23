@@ -246,6 +246,13 @@ export const es: TranslationResources = {
       unarchive: "Desarchivar",
     },
   },
+  pinnedGrid: {
+    title: "Anclados ({{count}})",
+    close: "Cerrar cuadrícula",
+    openWorkspace: "Abrir espacio de trabajo",
+    noChat: "Aún no hay chat en este espacio de trabajo",
+    empty: "No hay chats anclados",
+  },
   sessions: {
     title: "Historial",
     empty: "Aún no hay sesiones",
@@ -1150,6 +1157,7 @@ export const es: TranslationResources = {
     },
     pinned: {
       title: "Anclados",
+      openGrid: "Abrir los chats anclados en una cuadrícula",
     },
     host: {
       noHost: "Sin anfitrión",

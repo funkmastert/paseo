@@ -245,6 +245,13 @@ export const ru: TranslationResources = {
       unarchive: "Разархивировать",
     },
   },
+  pinnedGrid: {
+    title: "Закреплённые ({{count}})",
+    close: "Закрыть сетку",
+    openWorkspace: "Открыть рабочее пространство",
+    noChat: "В этом рабочем пространстве пока нет чата",
+    empty: "Нет закреплённых чатов",
+  },
   sessions: {
     title: "История",
     empty: "Сессий пока нет",
@@ -1132,6 +1139,7 @@ export const ru: TranslationResources = {
     },
     pinned: {
       title: "Закреплённые",
+      openGrid: "Открыть закреплённые чаты в виде сетки",
     },
     host: {
       noHost: "Нет хоста",
