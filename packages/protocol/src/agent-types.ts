@@ -115,6 +115,10 @@ export interface ProviderSnapshotEntry {
   description?: string;
   iconSvg?: string;
   defaultModeId?: string | null;
+  /** The registered provider id this one extends, e.g. a claude-account-pool
+   * entry extending "claude". Lets clients render the base provider's icon
+   * for a custom entry instead of a generic fallback. */
+  derivedFromProviderId?: string | null;
 }
 
 export interface AgentFeatureToggle {

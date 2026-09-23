@@ -26,6 +26,48 @@ describe("resolveProviderIconName", () => {
     expect(resolveProviderIconName("custom-claude-profile")).toEqual({ kind: "bot" });
   });
 
+  it("renders the base provider's built-in icon for a derived custom provider", () => {
+    replaceProviderSnapshotIcons("server-1", [
+      { provider: "claude-work", derivedFromProviderId: "claude" },
+    ]);
+
+    expect(resolveProviderIconName("claude-work", "server-1")).toEqual({
+      kind: "builtin",
+      id: "claude",
+    });
+  });
+
+  it("renders the base provider's catalog icon for a derived custom provider", () => {
+    replaceProviderSnapshotIcons("server-1", [
+      { provider: "gemini-work", derivedFromProviderId: "gemini" },
+    ]);
+
+    expect(resolveProviderIconName("gemini-work", "server-1")).toEqual({
+      kind: "catalog",
+      id: "gemini",
+    });
+  });
+
+  it("falls back to the bot icon when the base provider id is itself unknown", () => {
+    replaceProviderSnapshotIcons("server-1", [
+      { provider: "mystery-work", derivedFromProviderId: "mystery-base" },
+    ]);
+
+    expect(resolveProviderIconName("mystery-work", "server-1")).toEqual({ kind: "bot" });
+  });
+
+  it("prefers an explicit snapshot SVG over the derived base provider's icon", () => {
+    const svg = "<svg id='override' />";
+    replaceProviderSnapshotIcons("server-1", [
+      { provider: "claude-custom-icon", iconSvg: svg, derivedFromProviderId: "claude" },
+    ]);
+
+    expect(resolveProviderIconName("claude-custom-icon", "server-1")).toEqual({
+      kind: "svg",
+      svg,
+    });
+  });
+
   it("resolves a snapshot SVG for a custom provider", () => {
     const svg = '<svg viewBox="0 0 24 24"><path d="M4 4h16v16H4z" /></svg>';
 
