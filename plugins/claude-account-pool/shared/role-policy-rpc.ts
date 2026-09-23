@@ -53,6 +53,12 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   /** Absent for an account-agnostic model ref: the account router still picks the account. */
   provider: z.string().optional(),
   model: z.string().optional(),
+  /**
+   * True when `model` was selected from the pool although the provider's
+   * catalog doesn't list it — the operator's `allowUnlistedModels` vouches
+   * for it. Absent for a listed model.
+   */
+  modelUnadvertised: z.boolean().optional(),
   /** The tools this role removes. Applies even when `outcome` is "unconfigured". */
   deniedTools: z.array(z.string()),
   /**
@@ -101,10 +107,10 @@ export const RoleModelPolicyExplainResultSchema = z.object({
     })
     .optional(),
   /**
-   * Refs in the resolved pool that ordered selection skips because the
-   * catalog doesn't list them. An unadvertised entry only ever runs via an
-   * explicit request (see `allowUnlistedModels`), so it would otherwise sit in
-   * the pool looking live and never be chosen.
+   * Refs in the resolved pool that ordered selection SKIPS because the
+   * catalog doesn't list them and `allowUnlistedModels` doesn't name them.
+   * Without this an entry that is "in the pool" but never chosen looks live.
+   * An allowlisted entry is selectable, so it does not appear here.
    */
   unadvertisedPoolEntries: z.array(z.string()).optional(),
 });

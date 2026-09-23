@@ -46,7 +46,7 @@ export function describeOutcome(result: RoleModelPolicyExplainResult): string {
     case "unconfigured":
       return `→ ${result.roleName} (via ${tierLabel}), no model configured: the model is left as requested.${tools}`;
     case "selected":
-      return `→ ${result.roleName} (via ${tierLabel}): would route to ${describeTarget(result)}.${tools}`;
+      return `→ ${result.roleName} (via ${tierLabel}): would route to ${describeTarget(result)}${result.modelUnadvertised ? " (UNVERIFIED: the provider's catalog doesn't list it; allowUnlistedModels vouches for it)" : ""}.${tools}`;
     case "unavailable":
       return `→ ${result.roleName} (via ${tierLabel}): no eligible model right now; falls back to ${describeTarget(result)}.${tools}`;
   }
@@ -127,16 +127,17 @@ export function describeRequestedModel(result: RoleModelPolicyExplainResult): st
 }
 
 /**
- * Pool entries the catalog doesn't list. Ordered selection skips them, so
- * without this line an entry that is "in the pool" but never picked looks
- * like a bug in the policy rather than the catalog check working.
+ * Pool entries the catalog doesn't list and the operator hasn't allowlisted.
+ * Ordered selection skips them, so without this line an entry that is "in the
+ * pool" but never picked looks like a bug in the policy rather than the
+ * catalog check working.
  */
 export function describeUnadvertisedEntries(result: RoleModelPolicyExplainResult): string | undefined {
   const entries = result.unadvertisedPoolEntries;
   if (entries === undefined || entries.length === 0) {
     return undefined;
   }
-  return `Not in the provider's catalog: ${entries.join(", ")}. Ordered selection skips these; only an explicit request for one listed in allowUnlistedModels can run it.`;
+  return `Skipped, not in the provider's catalog and not in allowUnlistedModels: ${entries.join(", ")}. Add an id to allowUnlistedModels if the provider does accept it.`;
 }
 
 /** Every line the panel prints, in order. */

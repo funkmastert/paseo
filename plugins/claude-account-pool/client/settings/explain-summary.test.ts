@@ -3,6 +3,7 @@ import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 import type { RoleRecord } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
 import {
+  describeOutcome,
   describeRequestedModel,
   describeTaskClass,
   describeUnadvertisedEntries,
@@ -150,6 +151,17 @@ describe("describeRequestedModel", () => {
     );
     expect(line).toContain("catalog doesn't list it and allowUnlistedModels doesn't name it");
     expect(line).not.toContain("capped");
+  });
+});
+
+describe("describeOutcome — unverified pool default", () => {
+  it("says so when the selected model is one the catalog doesn't list", () => {
+    const line = describeOutcome(result({ model: "claude-opus-5-5", modelUnadvertised: true }));
+    expect(line).toContain("would route to claude-opus-5-5 on whichever pooled account is healthy (UNVERIFIED");
+  });
+
+  it("stays quiet for a listed model", () => {
+    expect(describeOutcome(result())).not.toContain("UNVERIFIED");
   });
 });
 

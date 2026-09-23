@@ -219,6 +219,12 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
     },
 
     async explain(input) {
+      // Re-read first: `explain` is what an operator runs right after editing
+      // the config, and answering from a cache up to 60s old made a correct
+      // edit look ignored (read() bypasses the cache; explain() did not).
+      // forceRefresh keeps the last good policy on any failure, so this cannot
+      // throw.
+      await deps.policyCache.forceRefresh();
       const policy = deps.policyCache.get();
       const resolution = resolveRole(policy, {
         labels: {
@@ -237,9 +243,10 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       const taskClass = taskClassResolution.taskClass;
       const catalog = deps.catalogCache.get();
       const { pool } = deps.poolCache.get();
-      const unadvertised = unadvertisedPoolEntries(resolution.role, catalog, taskClass);
+      const unadvertised = unadvertisedPoolEntries(resolution.role, catalog, taskClass, policy.allowUnlistedModels);
       const outcome = selectModel(resolution.role, catalog, pool, deps.health, {
         modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+        allowUnlistedModels: policy.allowUnlistedModels,
         taskClass,
       });
 
@@ -297,6 +304,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         outcome: outcome.outcome,
         deniedTools: profileDeniedTools(resolution.role.toolProfile),
         ...(outcome.outcome !== "unconfigured" ? { model: outcome.model } : {}),
+        // Selected as the pool default even though the catalog doesn't list it:
+        // running on the operator's say-so, so the panel can say "unverified".
+        ...(outcome.outcome !== "unconfigured" && outcome.unadvertised ? { modelUnadvertised: true } : {}),
         // Omitted for a bare ref: no provider was chosen, so the account
         // router is still free to pick any healthy pooled account.
         ...(outcome.outcome !== "unconfigured" && outcome.provider !== null

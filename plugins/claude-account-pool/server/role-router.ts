@@ -113,8 +113,14 @@ export interface ExplicitModelOverriddenEpisode {
 export interface UnadvertisedModelAllowedEpisode {
   callerAgentId: string;
   roleId: string;
-  /** The `provider/model` the caller explicitly asked for, which the catalog doesn't list. */
-  requestedRef: string;
+  /**
+   * "explicit": the caller named a model the catalog doesn't list.
+   * "pool": ordered selection picked an unlisted pool entry as the role's
+   * default. Both are honored only because `allowUnlistedModels` names the id.
+   */
+  source: "explicit" | "pool";
+  /** The `provider/model` (or bare model) that will run and that the catalog doesn't list. */
+  ref: string;
   /** The task class the request was evaluated against — undefined ("standard") means role.models. */
   taskClass?: TaskClassId;
 }
@@ -151,10 +157,11 @@ export interface RoleRouterOptions {
   /** Called (deduplicated per caller+role+requestedRef) when an explicitly requested model wasn't in the resolved role's pool and policy overrode it. */
   onExplicitModelOverridden?: (episode: ExplicitModelOverriddenEpisode) => void;
   /**
-   * Called (deduplicated per caller+role+class+requestedRef) when an explicitly
-   * requested model absent from the advertised catalog was let through because
-   * the operator listed it in `allowUnlistedModels`. The model is unverified;
-   * this is the only record, beyond the label on the agent, that it was.
+   * Called (deduplicated per caller+role+class+ref+source) when a model absent
+   * from the advertised catalog is going to run because the operator listed it
+   * in `allowUnlistedModels` — an explicit request or a pool default. The
+   * provider never confirmed it; this is the only record, beyond the label on
+   * the agent, that it was let through.
    */
   onUnadvertisedModelAllowed?: (episode: UnadvertisedModelAllowedEpisode) => void;
   /**
@@ -561,6 +568,17 @@ function routeRoleForCreateUnguarded(
   // a label), never just quietly let through, and only on this explicit path —
   // selectModel below never sees the allowlist.
 
+  // One dedupe + notify for both routes an unlisted model can take (explicit
+  // request, pool default), so neither can run unannounced.
+  const noteUnadvertised = (source: "explicit" | "pool", ref: string): void => {
+    const dedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${source} ${ref}`;
+    if (unadvertisedSeen.has(dedupeKey)) {
+      return;
+    }
+    unadvertisedSeen.add(dedupeKey);
+    options.onUnadvertisedModelAllowed?.({ callerAgentId: episodeCaller, roleId: role.id, source, ref, taskClass });
+  };
+
   const requestedModel = request.config.model;
   const requestedRef = requestedModel ? `${request.config.provider}/${requestedModel}` : undefined;
   let explicitOverrideReason: ExplicitModelOverriddenEpisode["reason"] | undefined;
@@ -576,16 +594,7 @@ function routeRoleForCreateUnguarded(
       if (!evaluation.unadvertised) {
         return honored;
       }
-      const unadvertisedDedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${requestedRef}`;
-      if (!unadvertisedSeen.has(unadvertisedDedupeKey)) {
-        unadvertisedSeen.add(unadvertisedDedupeKey);
-        options.onUnadvertisedModelAllowed?.({
-          callerAgentId: episodeCaller,
-          roleId: role.id,
-          requestedRef: requestedRef as string,
-          taskClass,
-        });
-      }
+      noteUnadvertised("explicit", requestedRef as string);
       const base = (honored ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
       return { ...base, labels: { ...base.labels, [UNADVERTISED_MODEL_LABEL]: requestedRef as string } };
     }
@@ -595,6 +604,7 @@ function routeRoleForCreateUnguarded(
 
   const outcome = selectModel(role, catalog, pool, options.health, {
     modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+    allowUnlistedModels: policy.allowUnlistedModels,
     taskClass,
   });
 
@@ -666,33 +676,42 @@ function routeRoleForCreateUnguarded(
     routedExtended.labels = enforcement.labels;
   }
 
-  if (!explicitOverrideReason) {
-    return routed;
+  // An unlisted pool entry ran as the role's default: same disclosure as an
+  // explicit one. It runs for every spawn of this role/class, so it must be
+  // impossible to miss that the provider never confirmed it.
+  const extraLabels: Record<string, string> = {};
+  if (outcome.unadvertised) {
+    noteUnadvertised("pool", formatModelRef(outcome));
+    extraLabels[UNADVERTISED_MODEL_LABEL] = formatModelRef(outcome);
   }
 
-  // The caller's explicit request didn't win — either it was never approved
-  // for this role's resolved task class, or it was approved but isn't
-  // selectable right now — and policy ran instead. Visible, not silent:
-  // logged once per (caller, role, task class, requested ref), and recorded
-  // on the agent itself so the UI can show "model chosen by policy" instead
-  // of a quiet swap. This is exactly the "asked for Opus, got Sonnet" case —
-  // role-model-policy.explain (queried with the same taskClass) reports the
-  // same reason on demand.
-  const overriddenDedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${requestedRef}`;
-  if (!overriddenSeen.has(overriddenDedupeKey)) {
-    overriddenSeen.add(overriddenDedupeKey);
-    options.onExplicitModelOverridden?.({
-      callerAgentId: episodeCaller,
-      roleId: role.id,
-      requestedRef: requestedRef as string,
-      effectiveRef: formatModelRef(outcome),
-      taskClass,
-      reason: explicitOverrideReason,
-      ...(explicitMissingFromCatalog ? { missingFromCatalog: true } : {}),
-    });
+  if (explicitOverrideReason) {
+    // The caller's explicit request didn't win — either it was never approved
+    // for this role's resolved task class, or it was approved but isn't
+    // selectable right now — and policy ran instead. Visible, not silent:
+    // logged once per (caller, role, task class, requested ref), and recorded
+    // on the agent itself so the UI can show "model chosen by policy" instead
+    // of a quiet swap. This is exactly the "asked for Opus, got Sonnet" case —
+    // role-model-policy.explain (queried with the same taskClass) reports the
+    // same reason on demand.
+    const overriddenDedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${requestedRef}`;
+    if (!overriddenSeen.has(overriddenDedupeKey)) {
+      overriddenSeen.add(overriddenDedupeKey);
+      options.onExplicitModelOverridden?.({
+        callerAgentId: episodeCaller,
+        roleId: role.id,
+        requestedRef: requestedRef as string,
+        effectiveRef: formatModelRef(outcome),
+        taskClass,
+        reason: explicitOverrideReason,
+        ...(explicitMissingFromCatalog ? { missingFromCatalog: true } : {}),
+      });
+    }
+    extraLabels[MODEL_OVERRIDDEN_LABEL] = requestedRef as string;
   }
-  return {
-    ...routed,
-    labels: { ...(enforcement.labels ?? extended.labels), [MODEL_OVERRIDDEN_LABEL]: requestedRef as string },
-  };
+
+  if (Object.keys(extraLabels).length === 0) {
+    return routed;
+  }
+  return { ...routed, labels: { ...(enforcement.labels ?? extended.labels), ...extraLabels } };
 }

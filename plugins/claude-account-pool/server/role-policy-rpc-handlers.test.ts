@@ -697,10 +697,18 @@ describe("explain — an explicit request for a model the catalog doesn't list",
   });
 
   it("names the pool entries ordered selection skips, so a never-chosen entry isn't a mystery", async () => {
-    const result = await explainLeaderHard(policyWith([OPUS_5_5]));
+    const result = await explainLeaderHard(policyWith([]));
 
     expect(result.unadvertisedPoolEntries).toEqual([OPUS_5_5]);
-    expect(result).toMatchObject({ outcome: "selected", model: FABLE }); // unprompted selection still never picks it
+    expect(result).toMatchObject({ outcome: "selected", model: FABLE }); // not allowlisted: skipped
+    expect(result).not.toHaveProperty("modelUnadvertised");
+  });
+
+  it("selects an allowlisted unadvertised entry as the pool default and flags the selection unverified", async () => {
+    const result = await explainLeaderHard(policyWith([OPUS_5_5]));
+
+    expect(result).toMatchObject({ outcome: "selected", model: OPUS_5_5, modelUnadvertised: true });
+    expect(result).not.toHaveProperty("unadvertisedPoolEntries"); // nothing is being skipped any more
   });
 
   it("omits unadvertisedPoolEntries when every pool entry is advertised", async () => {
