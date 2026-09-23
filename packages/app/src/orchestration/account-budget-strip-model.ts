@@ -1,5 +1,6 @@
 import type { ProviderSnapshotEntry } from "@getpaseo/protocol/agent-types";
 import { getProviderIcon, type ProviderIconComponent } from "@/components/provider-icons";
+import { resolveUsedPct } from "@/provider-usage/format";
 import type { ProviderUsage, ProviderUsageWindow } from "@/provider-usage/types";
 
 // The budget strip only ever composes these two windows (session + weekly). Any other
@@ -77,4 +78,29 @@ export function buildAccountBudgetRows(
       windows: selectBudgetWindows(usage),
     };
   });
+}
+
+export interface WorstBudgetWindow {
+  row: Extract<AccountBudgetRowViewModel, { kind: "available" }>;
+  window: ProviderUsageWindow;
+  usedPct: number;
+}
+
+/**
+ * The one window a collapsed strip has room for: the fullest across every account. It is the
+ * number that decides whether to hand more work to that account, so it is the one to show when
+ * there is space for a single line. Ties keep account order; a window with no reading cannot be
+ * the worst.
+ */
+export function selectWorstBudgetWindow(rows: AccountBudgetRowViewModel[]): WorstBudgetWindow | null {
+  let worst: WorstBudgetWindow | null = null;
+  for (const row of rows) {
+    if (row.kind !== "available") continue;
+    for (const window of row.windows) {
+      const usedPct = resolveUsedPct(window);
+      if (usedPct == null) continue;
+      if (worst === null || usedPct > worst.usedPct) worst = { row, window, usedPct };
+    }
+  }
+  return worst;
 }

@@ -1,15 +1,19 @@
-import { useMemo } from "react";
-import { Text, View } from "react-native";
+import { useCallback, useMemo, useState } from "react";
+import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
+import { ChevronDown, ChevronUp } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useIsCompactFormFactor } from "@/constants/layout";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
-import { ProviderUsageWindowBar } from "@/provider-usage/window-bar";
+import { formatPct, formatResetLabel } from "@/provider-usage/format";
+import { ProviderUsageMeter, ProviderUsageWindowBar } from "@/provider-usage/window-bar";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
 import type { Theme } from "@/styles/theme";
 import {
   buildAccountBudgetRows,
   resolveAccountIcon,
+  selectWorstBudgetWindow,
   type AccountBudgetRowViewModel,
 } from "./account-budget-strip-model";
 
@@ -41,16 +45,121 @@ export function AccountBudgetStrip({
     [view],
   );
 
+  return <AccountBudgetStripView rows={rows} serverId={serverId} fetchedAt={fetchedAt} />;
+}
+
+/**
+ * The strip without its data source, so a capture can hand it rows directly — the poll behind
+ * AccountBudgetStrip needs a live host.
+ */
+export function AccountBudgetStripView({
+  rows,
+  serverId,
+  fetchedAt,
+}: {
+  rows: AccountBudgetRowViewModel[];
+  serverId: string;
+  fetchedAt: Date | null;
+}) {
+  const isCompact = useIsCompactFormFactor();
   if (rows.length === 0) return null;
+  if (isCompact) return <CompactBudgetStrip rows={rows} serverId={serverId} fetchedAt={fetchedAt} />;
+  return (
+    <View style={styles.strip}>
+      <AccountBudgetRows rows={rows} serverId={serverId} />
+      <UsageFreshness fetchedAt={fetchedAt} />
+    </View>
+  );
+}
+
+function AccountBudgetRows({
+  rows,
+  serverId,
+}: {
+  rows: AccountBudgetRowViewModel[];
+  serverId: string;
+}) {
+  return (
+    <View style={styles.container}>
+      {rows.map((row) => (
+        <AccountBudgetRow key={row.providerId} row={row} serverId={serverId} />
+      ))}
+    </View>
+  );
+}
+
+/**
+ * Three accounts at two windows each is six full-width bars — most of a phone's screen before a
+ * single agent row. The collapsed strip is the one window that matters (the fullest, across every
+ * account) and a tap opens the rest. It keeps the read time in view: the number is polled from a
+ * cached endpoint and must not pass for live.
+ */
+function CompactBudgetStrip({
+  rows,
+  serverId,
+  fetchedAt,
+}: {
+  rows: AccountBudgetRowViewModel[];
+  serverId: string;
+  fetchedAt: Date | null;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const handleToggle = useCallback(() => setExpanded((previous) => !previous), []);
+  const worst = useMemo(() => selectWorstBudgetWindow(rows), [rows]);
+  const label = useCompactTimeAgo(fetchedAt);
+  const Chevron = expanded ? ThemedChevronUp : ThemedChevronDown;
+
+  const summaryRow = worst?.row ?? rows[0];
+  const reset = worst ? formatResetLabel(worst.window.resetsAt) : null;
+  const accessibilityLabel = worst
+    ? `${worst.row.label}, ${worst.window.label} ${formatPct(worst.usedPct)}${reset ? `, ${reset}` : ""}`
+    : summaryRow.label;
 
   return (
     <View style={styles.strip}>
-      <View style={styles.container}>
-        {rows.map((row) => (
-          <AccountBudgetRow key={row.providerId} row={row} serverId={serverId} />
-        ))}
-      </View>
-      <UsageFreshness fetchedAt={fetchedAt} />
+      <Pressable
+        testID="orchestration-budget-summary"
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityState={{ expanded }}
+        onPress={handleToggle}
+        style={styles.summary}
+      >
+        <View style={styles.summaryTop}>
+          <ThemedAccountUsageIcon
+            providerId={summaryRow.providerId}
+            serverId={serverId}
+            size={14}
+            uniProps={mutedIconColor}
+          />
+          <Text style={styles.summaryLabel} numberOfLines={1}>
+            {summaryRow.label}
+          </Text>
+          {worst ? (
+            <Text style={styles.summaryValue} numberOfLines={1}>
+              {`${worst.window.label} ${formatPct(worst.usedPct)}`}
+              {reset ? <Text style={styles.summaryReset}>{` · ${reset}`}</Text> : null}
+            </Text>
+          ) : (
+            <Text style={styles.muted}>{t("panels.orchestration.usageUnavailable")}</Text>
+          )}
+          <Chevron size={14} uniProps={mutedIconColor} />
+        </View>
+        {worst ? (
+          <View style={styles.summaryMeter}>
+            <View style={styles.summaryMeterTrack}>
+              <ProviderUsageMeter window={worst.window} />
+            </View>
+            {label ? (
+              <Text style={styles.freshness} numberOfLines={1} testID="orchestration-usage-freshness">
+                {t("panels.orchestration.usageAsOf", { time: label })}
+              </Text>
+            ) : null}
+          </View>
+        ) : null}
+      </Pressable>
+      {expanded ? <AccountBudgetRows rows={rows} serverId={serverId} /> : null}
     </View>
   );
 }
@@ -84,6 +193,9 @@ function AccountUsageIcon({ providerId, serverId, size, color = "" }: AccountUsa
 }
 
 const ThemedAccountUsageIcon = withUnistyles(AccountUsageIcon);
+
+const ThemedChevronDown = withUnistyles(ChevronDown);
+const ThemedChevronUp = withUnistyles(ChevronUp);
 
 const mutedIconColor = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 
@@ -127,6 +239,41 @@ const styles = StyleSheet.create((theme) => ({
   freshness: {
     color: theme.colors.foregroundMuted,
     fontSize: theme.fontSize.sm,
+  },
+  // 44pt is Apple's minimum; the summary is the whole tap target for the expand.
+  summary: {
+    minHeight: 44,
+    justifyContent: "center",
+    gap: theme.spacing[2],
+  },
+  summaryTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  summaryLabel: {
+    flexGrow: 1,
+    flexShrink: 1,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+  },
+  summaryValue: {
+    flexShrink: 0,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  summaryReset: {
+    color: theme.colors.foregroundMuted,
+    fontWeight: theme.fontWeight.normal,
+  },
+  summaryMeter: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[3],
+  },
+  summaryMeterTrack: {
+    flex: 1,
   },
   row: {
     flexGrow: 1,

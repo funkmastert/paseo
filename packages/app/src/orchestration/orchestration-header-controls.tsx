@@ -4,6 +4,7 @@ import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, ChevronDown, ChevronUp } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { useIsCompactFormFactor } from "@/constants/layout";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import type { ArchiveFinishedStatus } from "@/subagents/archive-finished";
 import type { Theme } from "@/styles/theme";
@@ -15,6 +16,11 @@ const ThemedChevronUp = withUnistyles(ChevronUp);
 
 const foregroundColorMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const foregroundMutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+
+// The header buttons are 28pt of text and padding. On a phone the touch area grows outward to
+// Apple's 44pt minimum without moving the label (docs/design.md §8); horizontal slop is left off
+// so the two buttons side by side never overlap.
+const COMPACT_HEADER_BUTTON_HIT_SLOP = { top: 8, bottom: 8 } as const;
 
 export type OrchestrationScopeValue = "leader" | "all";
 
@@ -54,6 +60,8 @@ export function OrchestrationHeaderControls({
   onToggleOlder,
 }: OrchestrationHeaderControlsProps): ReactElement | null {
   const { t } = useTranslation();
+  const isCompact = useIsCompactFormFactor();
+  const buttonHitSlop = isCompact ? COMPACT_HEADER_BUTTON_HIT_SLOP : undefined;
   const isArchiving = archiveFinishedStatus.kind === "archiving";
   const isFailed = archiveFinishedStatus.kind === "failed";
   const showArchiveFinished = eligibleFinishedCount > 0 || isArchiving || isFailed;
@@ -85,7 +93,7 @@ export function OrchestrationHeaderControls({
     <View style={styles.container}>
       {canScopeToLeader ? (
         <SegmentedControl
-          size="xs"
+          size={isCompact ? "sm" : "xs"}
           testID="orchestration-scope-control"
           options={scopeOptions}
           value={scope}
@@ -101,6 +109,7 @@ export function OrchestrationHeaderControls({
               accessibilityLabel={t("subagents.archiveFinishedAction")}
               disabled={isArchiving}
               onPress={onArchiveFinished}
+              hitSlop={buttonHitSlop}
               style={styles.headerButton}
             >
               {({ hovered, pressed }) => (
@@ -144,6 +153,7 @@ export function OrchestrationHeaderControls({
                   : t("panels.orchestration.showOlder", { count: hiddenCount })
               }
               onPress={onToggleOlder}
+              hitSlop={buttonHitSlop}
               style={styles.headerButton}
             >
               {({ hovered, pressed }) => {

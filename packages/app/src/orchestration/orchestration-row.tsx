@@ -6,6 +6,12 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { getProviderIcon } from "@/components/provider-icons";
 import { RowActionButton } from "@/components/row-action-button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { TokenBurnBadge } from "@/components/token-burn-badge";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -85,7 +91,16 @@ export interface OrchestrationRowProps {
   onDetach: (agentId: string) => void;
 }
 
-export function OrchestrationRow({
+/**
+ * One row per agent, in the layout the form factor can afford. A phone gets two lines with the
+ * actions behind a long press; anything wider gets the single line with inline actions.
+ */
+export function OrchestrationRow(props: OrchestrationRowProps): ReactElement {
+  const isCompact = useIsCompactFormFactor();
+  return isCompact ? <CompactOrchestrationRow {...props} /> : <WideOrchestrationRow {...props} />;
+}
+
+function WideOrchestrationRow({
   row,
   serverId,
   canDetach,
@@ -218,10 +233,198 @@ export function OrchestrationRow({
   );
 }
 
+/**
+ * The phone row: title and badge on the first line, what the agent is doing and how long ago on
+ * the second. The second line is always there — the activity while running, otherwise the state
+ * in words — so a row's height never depends on what the agent is doing (docs/design.md §11), and
+ * the time no longer competes with the title for the first line.
+ *
+ * Archive and detach are behind a long press rather than beside the title. Two small icons next
+ * to each other under a thumb is how the wrong agent gets archived, and they cost the title its
+ * width; the whole row is one target instead, at least 44pt tall.
+ */
+function CompactOrchestrationRow({
+  row,
+  serverId,
+  canDetach,
+  tokenBurnTone,
+  onPress,
+  onArchive,
+  onDetach,
+}: OrchestrationRowProps): ReactElement {
+  const { t } = useTranslation();
+  const { agent } = row;
+  const relativeTime = useCompactTimeAgo(agent.updatedAt);
+  const indentStyle = INDENT_STYLE_LIST[Math.min(row.depth, MAX_INDENT_LEVELS)];
+  const displayTitle = agent.title?.trim() || t("agentList.fallbackTitle");
+  const presentation = resolveOrchestrationRowPresentation(agent);
+  const showDetach = canDetach && row.depth > 0;
+  const secondary =
+    presentation.showActivity && agent.lastActivitySummary
+      ? agent.lastActivitySummary
+      : t(`agentList.status.${presentation.statusKey}`);
+
+  const handlePress = useCallback(() => onPress(agent), [agent, onPress]);
+  const handleArchive = useCallback(() => onArchive(agent.id), [agent.id, onArchive]);
+  const handleDetach = useCallback(() => onDetach(agent.id), [agent.id, onDetach]);
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger
+        testID={`orchestration-row-${agent.id}`}
+        accessibilityRole="button"
+        accessibilityLabel={displayTitle}
+        onPress={handlePress}
+        style={styles.compactRow}
+      >
+        <View style={indentStyle} />
+        <View style={styles.compactLead}>
+          <AgentStatusDot
+            status={agent.status}
+            requiresAttention={agent.requiresAttention}
+            attentionReason={agent.attentionReason}
+            pendingPermissionCount={agent.pendingPermissions.length}
+            showInactive
+            animated
+          />
+          {row.descendantRequiresAttention ? (
+            <View
+              style={styles.rollupDot}
+              testID={`orchestration-rollup-${agent.id}`}
+              accessibilityLabel={t("agentList.badges.attention")}
+            />
+          ) : null}
+          <ThemedOrchestrationRowProviderIcon
+            provider={agent.provider}
+            serverId={serverId}
+            size={ROW_ICON_SIZE}
+            uniProps={foregroundMutedColorMapping}
+          />
+        </View>
+        <View style={styles.compactBody}>
+          <View style={styles.compactTitleLine}>
+            <Text
+              style={presentation.isClosed ? styles.compactTitleClosed : styles.compactTitle}
+              numberOfLines={1}
+            >
+              {displayTitle}
+            </Text>
+            {tokenBurnTone ? (
+              <TokenBurnBadge
+                tone={tokenBurnTone}
+                tokensPerMinute={agent.recentTokenRate?.tokensPerMinute ?? 0}
+                totalTokens={agent.totalTokens}
+                testID={`orchestration-token-burn-${agent.id}`}
+              />
+            ) : null}
+            {presentation.badge === "needs-input" ? (
+              <StatusBadge label={t("agentList.badges.needsInput")} variant="warning" />
+            ) : null}
+            {presentation.badge === "failed" ? (
+              <StatusBadge label={t("agentList.badges.failed")} variant="error" />
+            ) : null}
+          </View>
+          <View style={styles.compactDetailLine}>
+            <Text style={styles.compactDetail} numberOfLines={1}>
+              {secondary}
+            </Text>
+            <Text style={styles.time} numberOfLines={1}>
+              {relativeTime}
+            </Text>
+          </View>
+        </View>
+      </ContextMenuTrigger>
+      <ContextMenuContent
+        align="start"
+        width={240}
+        testID={`orchestration-row-menu-${agent.id}`}
+      >
+        {showDetach ? (
+          <ContextMenuItem
+            testID={`orchestration-detach-${agent.id}`}
+            leading={<ThemedUnlink size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />}
+            onSelect={handleDetach}
+          >
+            {t("subagents.detachTooltip")}
+          </ContextMenuItem>
+        ) : null}
+        <ContextMenuItem
+          testID={`orchestration-archive-${agent.id}`}
+          leading={<ThemedArchive size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />}
+          onSelect={handleArchive}
+        >
+          {t("subagents.archiveTooltip")}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
 const styles = StyleSheet.create((theme) => {
   const attentionDotColor =
     getStatusDotColor({ theme, bucket: "attention" }) ?? theme.colors.statusDotSuccess;
+  // Tied to the font so a larger Interface size grows the line instead of clipping it, and so the
+  // leading cluster can be exactly one title line tall — that is what centres the dot on the title
+  // rather than on the two-line block.
+  const compactTitleLineHeight = Math.round(theme.fontSize.base * 1.4);
+  const compactBadgeLineHeight = Math.round(theme.fontSize.sm * 1.4) + 8;
+  const compactDetailLineHeight = Math.round(theme.fontSize.sm * 1.4);
   return {
+    compactRow: {
+      flexDirection: "row",
+      alignItems: "flex-start",
+      gap: theme.spacing[2],
+      paddingHorizontal: theme.spacing[3],
+      paddingVertical: theme.spacing[2],
+    },
+    compactLead: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+      height: compactBadgeLineHeight,
+    },
+    compactBody: {
+      flex: 1,
+      minWidth: 0,
+    },
+    // The title line is always as tall as a badge. A badge arriving or leaving must not change the
+    // row's height and reflow the list (docs/design.md §11), and a line shorter than its badge
+    // makes iOS clip the badge's text instead of letting it overflow.
+    compactTitleLine: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+      height: compactBadgeLineHeight,
+    },
+    compactTitle: {
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 96,
+      fontSize: theme.fontSize.base,
+      lineHeight: compactTitleLineHeight,
+      color: theme.colors.foreground,
+    },
+    compactTitleClosed: {
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 96,
+      fontSize: theme.fontSize.base,
+      lineHeight: compactTitleLineHeight,
+      color: theme.colors.foregroundMuted,
+    },
+    compactDetailLine: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: theme.spacing[2],
+      height: compactDetailLineHeight,
+    },
+    compactDetail: {
+      flexGrow: 1,
+      flexShrink: 1,
+      minWidth: 0,
+      fontSize: theme.fontSize.sm,
+      color: theme.colors.foregroundMuted,
+    },
     row: {
       flexDirection: "row",
       alignItems: "center",

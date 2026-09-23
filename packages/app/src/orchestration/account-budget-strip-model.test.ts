@@ -7,6 +7,7 @@ import {
   resolveAccountIcon,
   resolveAccountLabel,
   selectBudgetWindows,
+  selectWorstBudgetWindow,
 } from "./account-budget-strip-model";
 
 const getProviderIconMock = vi.hoisted(() => vi.fn(() => () => null));
@@ -141,5 +142,48 @@ describe("buildAccountBudgetRows", () => {
     const rows = buildAccountBudgetRows(providers, ["claude"], entries);
 
     expect(rows[0]).toMatchObject({ label: "Work Claude" });
+  });
+});
+
+describe("selectWorstBudgetWindow", () => {
+  const rowsFor = (...usages: ProviderUsage[]) =>
+    buildAccountBudgetRows(
+      usages,
+      usages.map((u) => u.providerId),
+      undefined,
+    );
+
+  it("picks the fullest window across every account, not the fullest account's first", () => {
+    const worst = selectWorstBudgetWindow(
+      rowsFor(
+        usage({ providerId: "a", windows: [{ id: "five_hour", label: "Session", usedPct: 40 }] }),
+        usage({
+          providerId: "b",
+          windows: [
+            { id: "five_hour", label: "Session", usedPct: 4 },
+            { id: "weekly", label: "Weekly", usedPct: 85 },
+          ],
+        }),
+      ),
+    );
+    expect(worst).toMatchObject({ usedPct: 85, window: { id: "weekly" }, row: { providerId: "b" } });
+  });
+
+  it("reads remaining as used when a window has no used figure", () => {
+    const worst = selectWorstBudgetWindow(
+      rowsFor(usage({ windows: [{ id: "weekly", label: "Weekly", remainingPct: 10 }] })),
+    );
+    expect(worst?.usedPct).toBe(90);
+  });
+
+  it("skips unavailable accounts and windows with no reading", () => {
+    expect(
+      selectWorstBudgetWindow(
+        rowsFor(
+          usage({ providerId: "a", status: "unavailable", windows: [] }),
+          usage({ providerId: "b", windows: [{ id: "weekly", label: "Weekly" }] }),
+        ),
+      ),
+    ).toBeNull();
   });
 });
