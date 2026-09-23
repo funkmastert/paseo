@@ -22,6 +22,15 @@ import { createTestPaseoDaemon } from "../test-utils/paseo-daemon.js";
 // adapter finally spreads it into the SDK options in `buildOptions()`. Tighten the
 // schema, narrow the type, or drop a field from the picked set and the restriction
 // stops applying without a single error anywhere. These tests are the alarm.
+//
+// One test covers every way an agent gets created, because they all converge: the app,
+// the desktop wrapper (it ships the same app; packages/desktop has no agent-creation
+// code), the CLI and this file's DaemonClient send the same `create_agent_request`
+// (`@getpaseo/client`), which Session hands to `createAgentCommand`. MCP `create_agent`,
+// schedules and hub executions call that same command. Everything then meets in
+// `AgentManager.createAgent`, where the `agent.create` hook runs. The wire schema cannot
+// smuggle `internal: true` (the hook skip) past `AgentSessionConfigSchema`, and resumed
+// agents get the hook's result back from the stored config (`buildConfigOverrides`).
 
 const RESTRICTIONS_DISARMED = [
   "TOOL RESTRICTIONS SET BY A PLUGIN NO LONGER REACH THE AGENT.",
@@ -31,8 +40,8 @@ const RESTRICTIONS_DISARMED = [
   "agent a plugin was restricting has just silently regained Write, Edit and Bash.",
   "Nothing else in this repo fails when that happens, which is why this test exists.",
   "",
-  "Known dependant: the claude-account-pool plugin (out of tree, ~/paseo-plugins/",
-  "claude-account-pool) enforces per-role tool restrictions exactly this way.",
+  "Known dependant: the claude-account-pool plugin (plugins/claude-account-pool)",
+  "enforces per-role tool restrictions exactly this way.",
   "",
   'If you got here by tightening `beforeSchemas["agent.create"]`, narrowing',
   "ProviderOptions, changing the fields picked from CreateAgentRequestMessageSchema,",

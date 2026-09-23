@@ -8,6 +8,12 @@
 // every request routed as if no role/type label was ever declared. Run
 // before test/typecheck so that degradation fails loudly instead of
 // silently. Dependency-free: only node's own fs/module/path.
+//
+// CI runs this only in the ubuntu `plugin-tests` job (through the plugin's
+// pretest/pretypecheck); server-tests-windows never reaches it. It is
+// platform-neutral anyway: require.resolve returns the real path of the
+// workspace link (a junction on Windows) and every path here goes through
+// node:path, which is separator-aware on both platforms.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
