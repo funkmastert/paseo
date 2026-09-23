@@ -15,8 +15,14 @@ const gatedCiJobs = new Map([
   ["format", { name: "format", contract: "format" }],
   ["lint", { name: "lint", contract: "quality" }],
   ["typecheck", { name: "typecheck", contract: "quality" }],
-  ["server-tests-ubuntu", { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub"] }],
-  ["server-tests-windows", { name: "server-tests (windows-latest)", contracts: ["server", "hub"] }],
+  [
+    "server-tests-ubuntu",
+    { name: "server-tests (ubuntu-latest)", contracts: ["server", "hub", "plugin"] },
+  ],
+  [
+    "server-tests-windows",
+    { name: "server-tests (windows-latest)", contracts: ["server", "hub", "plugin"] },
+  ],
   ["desktop-tests-ubuntu", { name: "desktop-tests (ubuntu-latest)", contract: "desktop" }],
   ["desktop-tests-windows", { name: "desktop-tests (windows-latest)", contract: "desktop" }],
   ["app-tests", { name: "app-tests", contract: "app" }],
