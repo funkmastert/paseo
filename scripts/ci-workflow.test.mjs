@@ -26,6 +26,7 @@ const gatedCiJobs = new Map([
   ["playwright-3", { name: "playwright (shard 3/4)", contract: "browser" }],
   ["playwright-4", { name: "playwright (shard 4/4)", contract: "browser" }],
   ["relay-tests", { name: "relay-tests", contract: "relay" }],
+  ["plugin-tests", { name: "plugin-tests", contract: "plugin" }],
   ["cli-tests-1", { name: "cli-tests (shard 1/3)", contract: "cli" }],
   ["cli-tests-2", { name: "cli-tests (shard 2/3)", contract: "cli" }],
   ["cli-tests-3", { name: "cli-tests (shard 3/3)", contract: "cli" }],
@@ -200,6 +201,7 @@ test("PR routing declares stable behavior ownership", () => {
       "packages/app/package.json",
     ],
     relay: ["packages/relay/**"],
+    plugin: ["plugins/claude-account-pool/**", "packages/plugin/**"],
     cli: ["packages/cli/**"],
   });
 });
