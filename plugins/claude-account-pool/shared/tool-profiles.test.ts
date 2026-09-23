@@ -1,0 +1,297 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_TOOL_PROFILE,
+  ToolProfileSchema,
+  applyToolProfile,
+  parseDeniedTools,
+  profileDeniedTools,
+  serializeDeniedTools,
+  type ToolProfile,
+} from "./tool-profiles";
+
+function denied(profile: ToolProfile): string[] {
+  return profileDeniedTools(profile).sort();
+}
+
+describe("profileDeniedTools", () => {
+  it("unrestricted denies nothing (today's behaviour, the default)", () => {
+    expect(denied({ kind: "unrestricted" })).toEqual([]);
+    expect(DEFAULT_TOOL_PROFILE).toEqual({ kind: "unrestricted" });
+  });
+
+  it("orchestrator denies every file and shell tool", () => {
+    const tools = denied({ kind: "orchestrator" });
+    for (const tool of ["Read", "Glob", "Grep", "Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]) {
+      expect(tools, `${tool} must be denied`).toContain(tool);
+    }
+  });
+
+  it("orchestrator denies native subagent launchers, which spend the parent's own budget", () => {
+    const tools = denied({ kind: "orchestrator" });
+    expect(tools).toContain("Task");
+    expect(tools).toContain("Agent");
+  });
+
+  it("read-only keeps the read tools and denies every mutation path", () => {
+    const tools = denied({ kind: "read-only" });
+    expect(tools).not.toContain("Read");
+    expect(tools).not.toContain("Grep");
+    expect(tools).not.toContain("Glob");
+    for (const tool of ["Edit", "MultiEdit", "Write", "NotebookEdit", "Bash"]) {
+      expect(tools, `${tool} must be denied`).toContain(tool);
+    }
+  });
+
+  it("read-only denies Bash, because a shell redirect writes files too", () => {
+    expect(denied({ kind: "read-only" })).toContain("Bash");
+  });
+
+  it("read-only and orchestrator deny the Paseo MCP terminal and workspace-script tools, not just Bash", () => {
+    for (const kind of ["read-only", "orchestrator"] as const) {
+      const tools = denied({ kind });
+      for (const tool of [
+        "mcp__paseo__create_terminal",
+        "mcp__paseo__send_terminal_keys",
+        "mcp__paseo__kill_terminal",
+        "mcp__paseo__capture_terminal",
+        "mcp__paseo__start_workspace_script",
+        "mcp__paseo__stop_workspace_script",
+      ]) {
+        expect(tools, `${kind} must deny ${tool}`).toContain(tool);
+      }
+    }
+  });
+
+  it("read-only keeps the read-only members of the terminal/workspace-script families", () => {
+    const tools = denied({ kind: "read-only" });
+    expect(tools).not.toContain("mcp__paseo__list_terminals");
+    expect(tools).not.toContain("mcp__paseo__list_workspace_scripts");
+  });
+
+  it("read-only and orchestrator deny update_agent, which could rewrite the label a child inherits from", () => {
+    for (const kind of ["read-only", "orchestrator"] as const) {
+      expect(denied({ kind })).toContain("mcp__paseo__update_agent");
+    }
+  });
+
+  it("read-only denies every browser tool that acts on a page", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__browser_click",
+      "mcp__paseo__browser_fill",
+      "mcp__paseo__browser_type",
+      "mcp__paseo__browser_keypress",
+      "mcp__paseo__browser_select",
+      "mcp__paseo__browser_drag",
+      "mcp__paseo__browser_hover",
+      "mcp__paseo__browser_upload",
+      "mcp__paseo__browser_evaluate",
+    ]) {
+      expect(tools, `read-only must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("read-only keeps the observation half of the browser: a reviewer still has to be able to look", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__browser_snapshot",
+      "mcp__paseo__browser_screenshot",
+      "mcp__paseo__browser_list_tabs",
+      "mcp__paseo__browser_logs",
+      "mcp__paseo__browser_navigate",
+    ]) {
+      expect(tools, `read-only must keep ${tool}`).not.toContain(tool);
+    }
+  });
+
+  it("orchestrator denies the whole browser family: it cannot Read a file either", () => {
+    const tools = denied({ kind: "orchestrator" });
+    for (const tool of [
+      "mcp__paseo__browser_click",
+      "mcp__paseo__browser_evaluate",
+      "mcp__paseo__browser_navigate",
+      "mcp__paseo__browser_snapshot",
+      "mcp__paseo__browser_screenshot",
+      "mcp__paseo__browser_list_tabs",
+    ]) {
+      expect(tools, `orchestrator must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("still keeps create_agent for orchestrator: delegation is the whole point of the profile", () => {
+    expect(denied({ kind: "orchestrator" })).not.toContain("mcp__paseo__create_agent");
+  });
+
+  it("read-only keeps create_agent: inheritance keeps whatever it spawns at least as restricted", () => {
+    expect(denied({ kind: "read-only" })).not.toContain("mcp__paseo__create_agent");
+  });
+
+  it("read-only denies the destructive and escalation-shaped agent-lifecycle tools", () => {
+    const tools = denied({ kind: "read-only" });
+    for (const tool of [
+      "mcp__paseo__cancel_agent",
+      "mcp__paseo__archive_agent",
+      "mcp__paseo__kill_agent",
+      "mcp__paseo__set_agent_mode",
+      "mcp__paseo__respond_to_permission",
+    ]) {
+      expect(tools, `read-only must deny ${tool}`).toContain(tool);
+    }
+  });
+
+  it("read-only denies send_agent_prompt: it can reach an unrestricted peer inheritance doesn't cover", () => {
+    expect(denied({ kind: "read-only" })).toContain("mcp__paseo__send_agent_prompt");
+  });
+
+  it("orchestrator keeps the agent-lifecycle and prompt tools: coordinating agents is its job", () => {
+    const tools = denied({ kind: "orchestrator" });
+    for (const tool of [
+      "mcp__paseo__cancel_agent",
+      "mcp__paseo__archive_agent",
+      "mcp__paseo__kill_agent",
+      "mcp__paseo__set_agent_mode",
+      "mcp__paseo__respond_to_permission",
+      "mcp__paseo__send_agent_prompt",
+    ]) {
+      expect(tools, `orchestrator must keep ${tool}`).not.toContain(tool);
+    }
+  });
+
+  it("write denies nothing: file and shell tools are the point of the profile", () => {
+    expect(denied({ kind: "write" })).toEqual([]);
+  });
+
+  it("custom uses the role's own deny list", () => {
+    expect(denied({ kind: "custom", deny: ["Bash", "WebFetch"] })).toEqual(["Bash", "WebFetch"]);
+  });
+});
+
+describe("applyToolProfile", () => {
+  it("returns undefined for a profile that restricts nothing, so the request stays byte-identical", () => {
+    expect(applyToolProfile(undefined, { kind: "unrestricted" })).toBeUndefined();
+    expect(applyToolProfile({ additionalDirectories: ["/tmp"] }, { kind: "write" })).toBeUndefined();
+  });
+
+  it("writes both enforcement layers: disallowedTools and settings.permissions.deny", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" });
+
+    expect(result?.disallowedTools).toContain("Write");
+    const permissions = (result?.settings as { permissions: { deny: string[] } }).permissions;
+    expect(permissions.deny).toContain("Write(*)");
+  });
+
+  it("unions with a deny list the caller already set, never dropping it", () => {
+    const result = applyToolProfile(
+      {
+        disallowedTools: ["WebFetch"],
+        settings: { permissions: { deny: ["WebFetch(*)"] } },
+      },
+      { kind: "read-only" },
+    );
+
+    expect(result?.disallowedTools).toContain("WebFetch");
+    expect(result?.disallowedTools).toContain("Bash");
+    const permissions = (result?.settings as { permissions: { deny: string[] } }).permissions;
+    expect(permissions.deny).toContain("WebFetch(*)");
+    expect(permissions.deny).toContain("Bash(*)");
+  });
+
+  it("cannot weaken a caller restriction the profile itself allows", () => {
+    // `write` denies nothing, but the caller denied Bash. Bash stays denied.
+    const result = applyToolProfile({ disallowedTools: ["Bash"] }, { kind: "custom", deny: ["Write"] });
+
+    expect(result?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write"]));
+  });
+
+  it("preserves unrelated providerOptions and unrelated settings keys", () => {
+    const result = applyToolProfile(
+      {
+        additionalDirectories: ["/srv"],
+        sandbox: { enabled: true },
+        settings: { permissions: { allow: ["Read(*)"] }, sandbox: { enabled: true } },
+      },
+      { kind: "orchestrator" },
+    );
+
+    expect(result?.additionalDirectories).toEqual(["/srv"]);
+    expect(result?.sandbox).toEqual({ enabled: true });
+    const settings = result?.settings as { permissions: { allow: string[] }; sandbox: unknown };
+    expect(settings.sandbox).toEqual({ enabled: true });
+    expect(settings.permissions.allow).toEqual(["Read(*)"]);
+  });
+
+  it("does not duplicate a tool the caller already denied", () => {
+    const result = applyToolProfile({ disallowedTools: ["Bash"] }, { kind: "read-only" });
+
+    const bashEntries = (result?.disallowedTools as string[]).filter((tool) => tool === "Bash");
+    expect(bashEntries).toHaveLength(1);
+  });
+
+  it("a custom profile's allow list pre-approves tools without re-enabling denied ones", () => {
+    const result = applyToolProfile(undefined, { kind: "custom", deny: ["Bash"], allow: ["Read"] });
+
+    const permissions = (result?.settings as { permissions: { allow: string[]; deny: string[] } }).permissions;
+    expect(permissions.allow).toEqual(["Read(*)"]);
+    expect(result?.disallowedTools).toEqual(["Bash"]);
+  });
+
+  it("unions inherited denials in exactly like the profile's own", () => {
+    const result = applyToolProfile(undefined, { kind: "unrestricted" }, ["Bash", "Write"]);
+
+    expect(result?.disallowedTools).toEqual(["Bash", "Write"]);
+    const permissions = (result?.settings as { permissions: { deny: string[] } }).permissions;
+    expect(permissions.deny).toEqual(["Bash(*)", "Write(*)"]);
+  });
+
+  it("tolerates a malformed providerOptions value rather than throwing", () => {
+    expect(() => applyToolProfile("nonsense", { kind: "read-only" })).not.toThrow();
+    expect(applyToolProfile("nonsense", { kind: "read-only" })?.disallowedTools).toContain("Bash");
+  });
+
+  it("writes the restriction notice into providerOptions.appendSystemPrompt", () => {
+    const result = applyToolProfile(undefined, { kind: "read-only" }, [], "you lost some tools");
+
+    expect(result?.appendSystemPrompt).toBe("you lost some tools");
+  });
+
+  it("appends the notice after anything the caller already set there, rather than replacing it", () => {
+    const result = applyToolProfile({ appendSystemPrompt: "caller's own note" }, { kind: "read-only" }, [], "notice");
+
+    expect(result?.appendSystemPrompt).toBe("caller's own note\n\nnotice");
+  });
+
+  it("writes no appendSystemPrompt key at all when nothing was denied and no notice was given", () => {
+    expect(applyToolProfile(undefined, { kind: "unrestricted" })).toBeUndefined();
+  });
+});
+
+describe("ToolProfileSchema", () => {
+  it("rejects an unknown profile kind", () => {
+    expect(ToolProfileSchema.safeParse({ kind: "god-mode" }).success).toBe(false);
+  });
+
+  it("rejects a tool name that isn't a plain identifier", () => {
+    expect(ToolProfileSchema.safeParse({ kind: "custom", deny: ["Bash(rm -rf /)"] }).success).toBe(false);
+  });
+
+  it("accepts an MCP tool name", () => {
+    expect(ToolProfileSchema.safeParse({ kind: "custom", deny: ["mcp__paseo__create_agent"] }).success).toBe(true);
+  });
+});
+
+describe("denied-tool label round trip", () => {
+  it("round trips a deny list through a label value", () => {
+    const denied = profileDeniedTools({ kind: "read-only" });
+
+    expect(parseDeniedTools(serializeDeniedTools(denied))).toEqual(denied);
+  });
+
+  it("reads an absent or empty label as no restrictions at all", () => {
+    expect(parseDeniedTools(undefined)).toEqual([]);
+    expect(parseDeniedTools("")).toEqual([]);
+  });
+
+  it("drops entries that are not well-formed tool names", () => {
+    expect(parseDeniedTools("Bash, ,Write(*),Edit")).toEqual(["Bash", "Edit"]);
+  });
+});
