@@ -55,6 +55,7 @@ import {
   LoopLogsResponseSchema,
   LoopStopResponseSchema,
 } from "./loop/rpc-schemas.js";
+import { DaemonDoctorRequestSchema, DaemonDoctorResponseSchema } from "./doctor/rpc-schemas.js";
 import {
   BrowserAutomationExecuteRequestSchema,
   BrowserAutomationExecuteResponseSchema,
@@ -3544,6 +3545,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusRequestSchema,
   DaemonGetPairingOfferRequestSchema,
   DaemonConfigReloadRequestSchema,
+  DaemonDoctorRequestSchema,
   HubManagementDaemonConnectRequestSchema,
   HubManagementDaemonGetStatusRequestSchema,
   HubManagementDaemonDisconnectRequestSchema,
@@ -3913,6 +3915,8 @@ export const ServerInfoStatusPayloadSchema = z
         daemonStatusRpc: z.boolean().optional(),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: z.boolean().optional(),
+        // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+        daemonDoctor: z.boolean().optional(),
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
         relayConfig: z.boolean().optional(),
         // COMPAT(pushTokenRevocation): added in v0.3.2, remove gate after 2027-02-10.
@@ -7163,6 +7167,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusResponseSchema,
   DaemonGetPairingOfferResponseSchema,
   DaemonConfigReloadResponseSchema,
+  DaemonDoctorResponseSchema,
   HubManagementDaemonConnectResponseSchema,
   HubManagementDaemonGetStatusResponseSchema,
   HubManagementDaemonDisconnectResponseSchema,
@@ -7423,6 +7428,7 @@ export type ListAvailableProvidersResponse = z.infer<typeof ListAvailableProvide
 export type DaemonGetStatusResponse = z.infer<typeof DaemonGetStatusResponseSchema>;
 export type DaemonGetPairingOfferResponse = z.infer<typeof DaemonGetPairingOfferResponseSchema>;
 export type DaemonConfigReloadResponse = z.infer<typeof DaemonConfigReloadResponseSchema>;
+export type DaemonDoctorResponse = z.infer<typeof DaemonDoctorResponseSchema>;
 export type DiagnosticsResponse = z.infer<typeof DiagnosticsResponseSchema>;
 export type GetProvidersSnapshotResponseMessage = z.infer<
   typeof GetProvidersSnapshotResponseMessageSchema

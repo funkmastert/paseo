@@ -657,7 +657,7 @@ function getLogger(logger: LoggerLike | undefined): LoggerLike | undefined {
 // reject a config written by an older release. The stripped values are discarded,
 // not migrated — there is no back-compat for the removed `providers.openai.voice`
 // block (use `providers.openai.stt` / `providers.openai.tts`).
-function stripRemovedConfigFields(parsed: unknown): unknown {
+export function stripRemovedConfigFields(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return parsed;
   }
