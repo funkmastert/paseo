@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
 import type { RoleRecord } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
-import { describeRequestedModel, describeTaskClass, explainSummaryLines } from "./explain-summary";
+import {
+  describeRequestedModel,
+  describeTaskClass,
+  describeUnadvertisedEntries,
+  explainSummaryLines,
+} from "./explain-summary";
 
 function result(overrides: Partial<RoleModelPolicyExplainResult> = {}): RoleModelPolicyExplainResult {
   return {
@@ -120,6 +125,44 @@ describe("describeRequestedModel", () => {
       }),
     );
     expect(line).toContain("approved for this role, but not selectable right now");
+  });
+
+  it("flags an allowlisted, unadvertised request as honored but UNVERIFIED, naming the label a real agent carries", () => {
+    const line = describeRequestedModel(
+      result({ requestedModelOverride: { requestedRef: "claude/claude-opus-5-5", honored: true, unadvertised: true } }),
+    );
+    expect(line).toContain("honored, UNVERIFIED");
+    expect(line).toContain("allowUnlistedModels");
+    expect(line).toContain("paseo.model-unadvertised=claude/claude-opus-5-5");
+  });
+
+  it("says a catalog-missing refusal is liftable, instead of blaming capacity", () => {
+    const line = describeRequestedModel(
+      result({
+        requestedModelOverride: {
+          requestedRef: "claude/claude-opus-5-5",
+          honored: false,
+          effectiveRef: "claude-sonnet-5",
+          reason: "not-currently-selectable",
+          missingFromCatalog: true,
+        },
+      }),
+    );
+    expect(line).toContain("catalog doesn't list it and allowUnlistedModels doesn't name it");
+    expect(line).not.toContain("capped");
+  });
+});
+
+describe("describeUnadvertisedEntries", () => {
+  it("is omitted when every pool entry is advertised", () => {
+    expect(describeUnadvertisedEntries(result())).toBeUndefined();
+    expect(describeUnadvertisedEntries(result({ unadvertisedPoolEntries: [] }))).toBeUndefined();
+  });
+
+  it("names the skipped entries and how one can still run", () => {
+    const line = describeUnadvertisedEntries(result({ unadvertisedPoolEntries: ["claude-opus-5-5"] }));
+    expect(line).toContain("claude-opus-5-5");
+    expect(line).toContain("allowUnlistedModels");
   });
 });
 

@@ -113,13 +113,30 @@ export function describeRequestedModel(result: RoleModelPolicyExplainResult): st
     return undefined;
   }
   if (override.honored) {
-    return `Explicit request ${override.requestedRef}: honored.`;
+    return override.unadvertised
+      ? `Explicit request ${override.requestedRef}: honored, UNVERIFIED — the provider's catalog doesn't list it; allowed by allowUnlistedModels. A real agent would carry paseo.model-unadvertised=${override.requestedRef}.`
+      : `Explicit request ${override.requestedRef}: honored.`;
   }
   const why =
     override.reason === "not-currently-selectable"
-      ? "approved for this role, but not selectable right now (capped, budget-gated, or missing from the catalog)"
+      ? override.missingFromCatalog
+        ? "approved for this role, but the provider's catalog doesn't list it and allowUnlistedModels doesn't name it"
+        : "approved for this role, but not selectable right now (capped, budget-gated, or no viable account)"
       : "not a member of the pool this task class resolves to";
   return `Explicit request ${override.requestedRef}: overridden by policy → ${override.effectiveRef} (${why}). A real agent would carry paseo.model-overridden-by-policy=${override.requestedRef}.`;
+}
+
+/**
+ * Pool entries the catalog doesn't list. Ordered selection skips them, so
+ * without this line an entry that is "in the pool" but never picked looks
+ * like a bug in the policy rather than the catalog check working.
+ */
+export function describeUnadvertisedEntries(result: RoleModelPolicyExplainResult): string | undefined {
+  const entries = result.unadvertisedPoolEntries;
+  if (entries === undefined || entries.length === 0) {
+    return undefined;
+  }
+  return `Not in the provider's catalog: ${entries.join(", ")}. Ordered selection skips these; only an explicit request for one listed in allowUnlistedModels can run it.`;
 }
 
 /** Every line the panel prints, in order. */
@@ -128,5 +145,11 @@ export function explainSummaryLines(
   role: RoleRecord | undefined,
 ): string[] {
   const requested = describeRequestedModel(result);
-  return [describeOutcome(result), describeTaskClass(result, role), ...(requested ? [requested] : [])];
+  const unadvertised = describeUnadvertisedEntries(result);
+  return [
+    describeOutcome(result),
+    describeTaskClass(result, role),
+    ...(requested ? [requested] : []),
+    ...(unadvertised ? [unadvertised] : []),
+  ];
 }

@@ -100,6 +100,31 @@ export interface SelectModelOptions {
   taskClass?: TaskClassId;
 }
 
+/** Whether the provider's advertised catalog lists this model. */
+function isListedInCatalog(family: string, model: string, catalog: ModelCatalog): boolean {
+  return catalog.get(family)?.has(model) === true;
+}
+
+/**
+ * The half of eligibility that is about capacity, not existence: for
+ * pool-family refs, a viable pool member and the Fable budget gate. Kept
+ * apart from the catalog check so an explicit request can waive the catalog
+ * half alone (see `evaluateRequestedModel`) without ever waiving this one —
+ * a capped or drained model must stay refused whether or not it is listed.
+ */
+function isRefUsable(
+  family: string,
+  model: string,
+  pool: AvailabilityPool,
+  health: AvailabilityHealth,
+  thresholdPct: number,
+): boolean {
+  if (family !== POOL_FAMILY) {
+    return true;
+  }
+  return poolHasViableMember(pool, health, model) && poolHasMemberWithinModelBudget(pool, health, model, thresholdPct);
+}
+
 /**
  * Per-ref eligibility check: catalog presence, plus (for pool-family refs)
  * pool viability and the Fable budget gate. Shared by `selectModel`'s
@@ -114,18 +139,7 @@ function isRefCurrentlySelectable(
   health: AvailabilityHealth,
   thresholdPct: number,
 ): boolean {
-  if (!catalog.get(family)?.has(model)) {
-    return false;
-  }
-  if (family === POOL_FAMILY) {
-    if (!poolHasViableMember(pool, health, model)) {
-      return false;
-    }
-    if (!poolHasMemberWithinModelBudget(pool, health, model, thresholdPct)) {
-      return false;
-    }
-  }
-  return true;
+  return isListedInCatalog(family, model, catalog) && isRefUsable(family, model, pool, health, thresholdPct);
 }
 
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
@@ -171,8 +185,40 @@ export function isRequestedModelApproved(
 export interface RequestedModelEvaluation {
   /** Whether the (family, model) pair is literally one of the role's configured entries. */
   configured: boolean;
-  /** Whether it's configured AND currently selectable — catalog present, pool viable, budget gate open. */
+  /** Whether it's configured AND currently selectable — catalog present (or waived, see `unadvertised`), pool viable, budget gate open. */
   eligible: boolean;
+  /**
+   * Set only when `eligible` is true BECAUSE the catalog check was waived: the
+   * model is absent from the advertised catalog and the operator listed it in
+   * `allowUnlistedModels`. The caller must surface this — an unverified model
+   * running is exactly the case that must never be silent.
+   */
+  unadvertised?: true;
+  /**
+   * Set only when the request is configured and usable but was refused for
+   * being absent from the catalog and not in `allowUnlistedModels`. Lets the
+   * override message say "add it to allowUnlistedModels if it's real" instead
+   * of the generic not-currently-selectable text, which also covers capped.
+   */
+  missingFromCatalog?: true;
+}
+
+export interface EvaluateRequestedModelOptions extends SelectModelOptions {
+  /**
+   * `RoleModelPolicy.allowUnlistedModels`. Exists on THIS options type only,
+   * never on `SelectModelOptions`: ordered selection must not be able to
+   * route to an unverified id, and keeping the input off its signature makes
+   * that a type error rather than a convention.
+   */
+  allowUnlistedModels?: readonly string[];
+}
+
+/** Whether `(family, model)` matches an entry of an allowlist of model refs, by family the same way pool membership does. */
+function isAllowlisted(allowlist: readonly string[], family: string, model: string): boolean {
+  return allowlist.some((ref) => {
+    const parsed = splitModelRef(ref);
+    return parsed !== null && parsed.model === model && modelRefFamily(parsed) === family;
+  });
 }
 
 /**
@@ -186,6 +232,13 @@ export interface RequestedModelEvaluation {
  * distinguish "not approved for this role at all" from "approved, but not
  * selectable right now" — two different situations that deserve different
  * messages.
+ *
+ * The one exception to "same bar": an approved model absent from the
+ * advertised catalog passes when the operator listed it in
+ * `allowUnlistedModels`, because a provider can accept an id it doesn't
+ * advertise. Only the catalog check is waived — pool viability and the budget
+ * gate still apply, so a capped model stays refused — and the result says so
+ * via `unadvertised`.
  */
 export function evaluateRequestedModel(
   role: RoleRecord,
@@ -194,15 +247,42 @@ export function evaluateRequestedModel(
   catalog: ModelCatalog,
   pool: AvailabilityPool,
   health: AvailabilityHealth,
-  options: SelectModelOptions = {},
+  options: EvaluateRequestedModelOptions = {},
 ): RequestedModelEvaluation {
   const configured = isRequestedModelApproved(role, requestedFamily, requestedModel, options.taskClass);
   if (!configured) {
     return { configured: false, eligible: false };
   }
   const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
-  const eligible = isRefCurrentlySelectable(requestedFamily, requestedModel, catalog, pool, health, thresholdPct);
-  return { configured: true, eligible };
+  if (isListedInCatalog(requestedFamily, requestedModel, catalog)) {
+    return { configured: true, eligible: isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct) };
+  }
+  if (!isAllowlisted(options.allowUnlistedModels ?? [], requestedFamily, requestedModel)) {
+    // Not usable-checked: it is refused either way, and `missingFromCatalog`
+    // is only a hint that the catalog is the reason.
+    return { configured: true, eligible: false, missingFromCatalog: true };
+  }
+  if (!isRefUsable(requestedFamily, requestedModel, pool, health, thresholdPct)) {
+    return { configured: true, eligible: false };
+  }
+  return { configured: true, eligible: true, unadvertised: true };
+}
+
+/**
+ * The refs in the (role, task class) pool that ordered selection will skip
+ * because the catalog doesn't list them. Reported by `explain` so a pool
+ * entry that never gets picked without an explicit request is visible rather
+ * than a silent no-op.
+ */
+export function unadvertisedPoolEntries(
+  role: RoleRecord,
+  catalog: ModelCatalog,
+  taskClass?: TaskClassId,
+): string[] {
+  return classModels(role, taskClass).filter((ref) => {
+    const parsed = splitModelRef(ref);
+    return parsed !== null && !isListedInCatalog(modelRefFamily(parsed), parsed.model, catalog);
+  });
 }
 
 /**

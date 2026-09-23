@@ -3,6 +3,7 @@ import {
   AGENT_TYPE_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
+  UNADVERTISED_MODEL_LABEL,
   classModels,
   type RoleModelPolicy,
   type RoleRecord,
@@ -100,6 +101,22 @@ export interface ExplicitModelOverriddenEpisode {
    * caller asked for something approved that just isn't available.
    */
   reason: "not-approved" | "not-currently-selectable";
+  /**
+   * True when the refusal is specifically that the model is absent from the
+   * advertised catalog and not in `allowUnlistedModels` — the one refusal an
+   * operator can lift. Lets the log say how, instead of leaving them to
+   * guess whether the model is capped or merely unadvertised.
+   */
+  missingFromCatalog?: boolean;
+}
+
+export interface UnadvertisedModelAllowedEpisode {
+  callerAgentId: string;
+  roleId: string;
+  /** The `provider/model` the caller explicitly asked for, which the catalog doesn't list. */
+  requestedRef: string;
+  /** The task class the request was evaluated against — undefined ("standard") means role.models. */
+  taskClass?: TaskClassId;
 }
 
 export interface RoleRouterOptions {
@@ -133,6 +150,13 @@ export interface RoleRouterOptions {
   onRoleUnavailable?: (episode: RoleUnavailableEpisode) => void;
   /** Called (deduplicated per caller+role+requestedRef) when an explicitly requested model wasn't in the resolved role's pool and policy overrode it. */
   onExplicitModelOverridden?: (episode: ExplicitModelOverriddenEpisode) => void;
+  /**
+   * Called (deduplicated per caller+role+class+requestedRef) when an explicitly
+   * requested model absent from the advertised catalog was let through because
+   * the operator listed it in `allowUnlistedModels`. The model is unverified;
+   * this is the only record, beyond the label on the agent, that it was.
+   */
+  onUnadvertisedModelAllowed?: (episode: UnadvertisedModelAllowedEpisode) => void;
   /**
    * The parent-restriction map that makes profile inheritance possible.
    * Optional: without it the router behaves exactly as it did before
@@ -346,6 +370,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const declaredTaskClassUnknownSeen = new Set<string>();
   const unavailableRoleIds = new Set<string>();
   const overriddenSeen = new Set<string>();
+  const unadvertisedSeen = new Set<string>();
   const toolProfileWithheldSeen = new Set<string>();
   const parentUnresolvedSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
@@ -359,6 +384,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         declaredTaskClassUnknownSeen,
         unavailableRoleIds,
         overriddenSeen,
+        unadvertisedSeen,
         toolProfileWithheldSeen,
         parentUnresolvedSeen,
       );
@@ -387,6 +413,7 @@ function routeRoleForCreateUnguarded(
   declaredTaskClassUnknownSeen: Set<string>,
   unavailableRoleIds: Set<string>,
   overriddenSeen: Set<string>,
+  unadvertisedSeen: Set<string>,
   toolProfileWithheldSeen: Set<string>,
   parentUnresolvedSeen: Set<string>,
 ): PluginBeforeRequests["agent.create"] | void {
@@ -527,18 +554,42 @@ function routeRoleForCreateUnguarded(
   // means overriding a real request, the override must be visible rather
   // than silent (onExplicitModelOverridden + a label on the created agent),
   // never just a silent model swap.
+  //
+  // One exception to the catalog half of that bar: an approved model the
+  // catalog doesn't list is honored when the operator put it in
+  // `allowUnlistedModels`. It is honored loudly (onUnadvertisedModelAllowed +
+  // a label), never just quietly let through, and only on this explicit path —
+  // selectModel below never sees the allowlist.
 
   const requestedModel = request.config.model;
   const requestedRef = requestedModel ? `${request.config.provider}/${requestedModel}` : undefined;
   let explicitOverrideReason: ExplicitModelOverriddenEpisode["reason"] | undefined;
+  let explicitMissingFromCatalog = false;
   if (requestedModel && classModels(role, taskClass).length > 0) {
     const evaluation = evaluateRequestedModel(role, requestedFamily, requestedModel, catalog, pool, options.health, {
       modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+      allowUnlistedModels: policy.allowUnlistedModels,
       taskClass,
     });
     if (evaluation.eligible) {
-      return withToolProfile(request, enforcement);
+      const honored = withToolProfile(request, enforcement);
+      if (!evaluation.unadvertised) {
+        return honored;
+      }
+      const unadvertisedDedupeKey = `${episodeCaller} ${role.id} ${taskClass ?? "standard"} ${requestedRef}`;
+      if (!unadvertisedSeen.has(unadvertisedDedupeKey)) {
+        unadvertisedSeen.add(unadvertisedDedupeKey);
+        options.onUnadvertisedModelAllowed?.({
+          callerAgentId: episodeCaller,
+          roleId: role.id,
+          requestedRef: requestedRef as string,
+          taskClass,
+        });
+      }
+      const base = (honored ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+      return { ...base, labels: { ...base.labels, [UNADVERTISED_MODEL_LABEL]: requestedRef as string } };
     }
+    explicitMissingFromCatalog = evaluation.missingFromCatalog === true;
     explicitOverrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
   }
 
@@ -637,6 +688,7 @@ function routeRoleForCreateUnguarded(
       effectiveRef: formatModelRef(outcome),
       taskClass,
       reason: explicitOverrideReason,
+      ...(explicitMissingFromCatalog ? { missingFromCatalog: true } : {}),
     });
   }
   return {

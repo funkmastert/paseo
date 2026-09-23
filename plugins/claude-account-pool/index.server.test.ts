@@ -176,4 +176,72 @@ describe("contribute (index.server)", () => {
 
     cleanup();
   });
+
+  it("END TO END: the leader's hard class holds claude-opus-5-5 and an explicit request runs it, loudly, though Claude Code doesn't advertise it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { server, dispatchBefore } = fakeServer();
+    const cleanup = contribute(server);
+    const policy = (allowUnlistedModels: string[]) => ({
+      schemaVersion: 4,
+      roles: [
+        { id: "worker", name: "worker", standard: true, aliases: [], models: [] },
+        { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [] },
+        { id: "advisor", name: "advisor", standard: true, aliases: [], models: [] },
+        {
+          id: "leader",
+          name: "leader",
+          standard: true,
+          aliases: [],
+          models: ["claude-opus-5", "claude-sonnet-5"],
+          // Mirrors Tyler's live leader pools, plus the model his CLI accepts but doesn't advertise.
+          hardModels: ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5"],
+        },
+      ],
+      agentTypeMappings: {},
+      modelBudgetThresholdPct: 80,
+      enforceToolsOnClassifiedRoles: false,
+      allowUnlistedModels,
+      revision: "test",
+    });
+    const providers = {
+      claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+      "claude-personal": { params: { accountPool: { role: "worker", priority: 1 } } },
+    };
+    const request = (): PluginBeforeRequests["agent.create"] =>
+      ({
+        config: { provider: "claude-personal", model: "claude-opus-5-5", cwd: "/tmp" },
+        labels: { "paseo.task-class": "hard" },
+      }) as unknown as PluginBeforeRequests["agent.create"];
+    // What `list_models` really returned: no opus-5-5.
+    const advertise = (paseo: PluginHookContext["paseo"]) => {
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi.fn().mockResolvedValue({
+        models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"].map((id) => ({ id })),
+      });
+    };
+
+    const allowed = fakePaseo({ providers, agentModelPolicy: policy(["claude-opus-5-5"]) });
+    advertise(allowed.paseo);
+    const honored = await dispatchBefore("agent.create", request(), fakeContext(allowed.paseo));
+
+    expect(honored.config.model).toBe("claude-opus-5-5");
+    expect((honored as { labels?: Record<string, string> }).labels).toMatchObject({
+      "paseo.model-unadvertised": "claude-personal/claude-opus-5-5",
+    });
+    const logged = errors.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("UNVERIFIED MODEL");
+    expect(logged).toContain("claude-personal/claude-opus-5-5");
+    cleanup();
+
+    // Same request, no allowlist: the catalog check holds, as it did before this feature.
+    const second = fakeServer();
+    const cleanupSecond = contribute(second.server);
+    const refused = fakePaseo({ providers, agentModelPolicy: policy([]) });
+    advertise(refused.paseo);
+    const overridden = await second.dispatchBefore("agent.create", request(), fakeContext(refused.paseo));
+
+    expect(overridden.config.model).toBe("claude-fable-5-1");
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toContain("allowUnlistedModels");
+    cleanupSecond();
+    errors.mockRestore();
+  });
 });

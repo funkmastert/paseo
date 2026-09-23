@@ -85,8 +85,28 @@ export const RoleModelPolicyExplainResultSchema = z.object({
        * but catalog-missing, no viable pool member, or budget-gated.
        */
       reason: z.union([z.literal("not-approved"), z.literal("not-currently-selectable")]).optional(),
+      /**
+       * Present (true) only when `honored` is true because the catalog check
+       * was waived: the model isn't in the provider's advertised catalog and
+       * the policy's `allowUnlistedModels` names it. It is unverified — a real
+       * agent would carry `paseo.model-unadvertised`.
+       */
+      unadvertised: z.boolean().optional(),
+      /**
+       * Present (true) only when refused because the model is absent from the
+       * advertised catalog and not in `allowUnlistedModels` — the one refusal
+       * an operator can lift, unlike a capped or budget-gated model.
+       */
+      missingFromCatalog: z.boolean().optional(),
     })
     .optional(),
+  /**
+   * Refs in the resolved pool that ordered selection skips because the
+   * catalog doesn't list them. An unadvertised entry only ever runs via an
+   * explicit request (see `allowUnlistedModels`), so it would otherwise sit in
+   * the pool looking live and never be chosen.
+   */
+  unadvertisedPoolEntries: z.array(z.string()).optional(),
 });
 export type RoleModelPolicyExplainResult = z.infer<typeof RoleModelPolicyExplainResultSchema>;
 
@@ -120,6 +140,13 @@ export const roleModelPolicyRpc = {
     name: "role-model-policy.explain",
     input: z.object({
       agentType: z.string().optional(),
+      /**
+       * Simulates labels[paseo.agent-role] (tier-2 resolution: a declared role
+       * name or alias). The only way to ask about a role no agent-type mapping
+       * points at — notably `leader`, which real root agents reach
+       * deterministically rather than through any label.
+       */
+      role: z.string().optional(),
       title: z.string().optional(),
       /**
        * Simulates labels[paseo.task-class] — same declared/unknown/default

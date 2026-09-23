@@ -2,15 +2,21 @@ import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
-import { roleModelPolicyRpc } from "../shared/role-policy-rpc";
+import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
 import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
-import { evaluateRequestedModel, familyOfProvider, formatModelRef, selectModel } from "./role-availability";
+import {
+  evaluateRequestedModel,
+  familyOfProvider,
+  formatModelRef,
+  selectModel,
+  unadvertisedPoolEntries,
+} from "./role-availability";
 import { resolveRole, resolveTaskClass } from "./role-resolve";
-import { AGENT_TYPE_LABEL, POOL_FAMILY, TASK_CLASS_LABEL, classModels } from "../shared/role-policy-schema";
+import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, POOL_FAMILY, TASK_CLASS_LABEL, classModels } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
@@ -118,6 +124,10 @@ async function performWrite(
     // stored value through untouched so saving any other field can't
     // silently reset this escape hatch back to its default.
     enforceToolsOnClassifiedRoles: current.policy.enforceToolsOnClassifiedRoles,
+    // Same reason: `allowUnlistedModels` is operator-only config, and dropping it
+    // on an unrelated save would silently re-arm the catalog check for a model
+    // the operator had opted in.
+    allowUnlistedModels: current.policy.allowUnlistedModels,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -211,7 +221,10 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
     async explain(input) {
       const policy = deps.policyCache.get();
       const resolution = resolveRole(policy, {
-        labels: input.agentType !== undefined ? { [AGENT_TYPE_LABEL]: input.agentType } : undefined,
+        labels: {
+          ...(input.agentType !== undefined ? { [AGENT_TYPE_LABEL]: input.agentType } : {}),
+          ...(input.role !== undefined ? { [AGENT_ROLE_LABEL]: input.role } : {}),
+        },
         title: input.title,
       });
       // Independent of role resolution — same fixed-vocabulary resolution
@@ -224,6 +237,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       const taskClass = taskClassResolution.taskClass;
       const catalog = deps.catalogCache.get();
       const { pool } = deps.poolCache.get();
+      const unadvertised = unadvertisedPoolEntries(resolution.role, catalog, taskClass);
       const outcome = selectModel(resolution.role, catalog, pool, deps.health, {
         modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
         taskClass,
@@ -235,9 +249,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       // there's nothing to override); otherwise policy's own selection runs
       // instead, and the reason distinguishes "never approved" from
       // "approved but not selectable right now".
-      let requestedModelOverride:
-        | { requestedRef: string; honored: boolean; effectiveRef?: string; reason?: "not-approved" | "not-currently-selectable" }
-        | undefined;
+      let requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"];
       if (input.requestedModel) {
         const requestedProvider = input.requestedProvider ?? POOL_FAMILY;
         const requestedRef = `${requestedProvider}/${input.requestedModel}`;
@@ -249,11 +261,22 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           catalog,
           pool,
           deps.health,
-          { modelBudgetThresholdPct: policy.modelBudgetThresholdPct, taskClass },
+          {
+            modelBudgetThresholdPct: policy.modelBudgetThresholdPct,
+            allowUnlistedModels: policy.allowUnlistedModels,
+            taskClass,
+          },
         );
         const honored = classModels(resolution.role, taskClass).length === 0 || evaluation.eligible;
         requestedModelOverride = honored
-          ? { requestedRef, honored: true }
+          ? {
+              requestedRef,
+              honored: true,
+              // Honored, but only because the catalog check was waived: the
+              // model is unverified, and a real agent would carry
+              // paseo.model-unadvertised.
+              ...(evaluation.unadvertised ? { unadvertised: true } : {}),
+            }
           : {
               requestedRef,
               honored: false,
@@ -263,6 +286,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
               // is a type-safe fallback.
               effectiveRef: outcome.outcome === "unconfigured" ? requestedRef : formatModelRef(outcome),
               reason: evaluation.configured ? "not-currently-selectable" : "not-approved",
+              ...(evaluation.missingFromCatalog ? { missingFromCatalog: true } : {}),
             };
       }
 
@@ -284,6 +308,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           ? { unknownDeclaredTaskClass: taskClassResolution.unknownDeclaredValue }
           : {}),
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
+        ...(unadvertised.length > 0 ? { unadvertisedPoolEntries: unadvertised } : {}),
       };
     },
   };
