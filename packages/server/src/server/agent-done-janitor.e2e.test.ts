@@ -181,3 +181,48 @@ test("the primary checkout is never touched, even with every agent in it archive
   expect(existsSync(path.join(repoDir, ".git"))).toBe(true);
   expect((await activeWorkspaceIds()).has(workspaceId)).toBe(true);
 });
+
+test("a closed agent archives itself and frees its clean worktree; a pinned workspace keeps both", async () => {
+  const repoDir = createGitRepo();
+  const dead = await createWorktreeWithAgent(repoDir, "dead");
+  const pinned = await createWorktreeWithAgent(repoDir, "pinned");
+  const dirty = await createWorktreeWithAgent(repoDir, "dirty");
+  writeFileSync(path.join(dirty.dir, "notes.txt"), "unsaved thoughts\n");
+  // A daemon restart closes every agent; closing them here is the same state.
+  const { agentManager } = ctx.daemon.daemon;
+  for (const agent of [dead, pinned, dirty]) await agentManager.closeAgent(agent.agentId);
+  await ctx.client.setWorkspacePinned(pinned.workspaceId, true);
+  clockMs += 4 * DAY_MS;
+
+  await ctx.client.patchDaemonConfig({ doneJanitor: { enabled: true, dryRun: true } });
+  const dryRun = await sweep();
+
+  expect(dryRun?.entries).toContainEqual(
+    expect.objectContaining({ action: "would-archive", agentId: dead.agentId }),
+  );
+  expect(dryRun?.entries).toContainEqual(
+    expect.objectContaining({ action: "would-delete", workspaceId: dead.workspaceId }),
+  );
+  expect(dryRun?.entries).toContainEqual(
+    expect.objectContaining({
+      action: "kept-agent",
+      agentId: pinned.agentId,
+      reason: "its workspace is pinned",
+    }),
+  );
+  expect(await isArchived(dead.agentId)).toBe(false);
+  expect(existsSync(dead.dir)).toBe(true);
+
+  await ctx.client.patchDaemonConfig({ doneJanitor: { dryRun: false } });
+  await sweep();
+
+  expect(await isArchived(dead.agentId)).toBe(true);
+  expect(existsSync(dead.dir)).toBe(false);
+  expect(await isArchived(pinned.agentId)).toBe(false);
+  expect(existsSync(pinned.dir)).toBe(true);
+  // Archived, but the unsaved file keeps its worktree.
+  expect(await isArchived(dirty.agentId)).toBe(true);
+  expect(existsSync(path.join(dirty.dir, "notes.txt"))).toBe(true);
+  expect((await activeWorkspaceIds()).has(dirty.workspaceId)).toBe(true);
+  expect(pushes[0]?.body).toMatch(/^Archived 2 dead sessions and deleted 1 worktree, freeing/);
+});

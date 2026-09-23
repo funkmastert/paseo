@@ -21,6 +21,8 @@ export interface DoneJanitorNotificationPayload {
 export interface BuildDoneJanitorNotificationPayloadInput {
   serverId: string;
   archivedAgentCount: number;
+  /** Agents archived because they were closed or errored and unpinned, not because they answered. */
+  archivedDeadAgentCount?: number;
   deletedWorktreeCount: number;
   /** Total freed, summed over worktrees whose size was sampled before deletion. */
   reclaimedBytes: number;
@@ -43,13 +45,18 @@ export function buildDoneJanitorNotificationPayload(
   if (input.archivedAgentCount > 0) {
     parts.push(`Archived ${plural(input.archivedAgentCount, "finished agent")}`);
   }
+  const dead = input.archivedDeadAgentCount ?? 0;
+  if (dead > 0) {
+    parts.push(`${parts.length > 0 ? "archived" : "Archived"} ${plural(dead, "dead session")}`);
+  }
   if (input.deletedWorktreeCount > 0) {
     const verb = parts.length > 0 ? "deleted" : "Deleted";
     parts.push(
       `${verb} ${plural(input.deletedWorktreeCount, "worktree")}, freeing ${formatGigabytes(input.reclaimedBytes)}`,
     );
   }
-  const sentences = [`${parts.join(" and ")}.`];
+  const head = parts.slice(0, -1).join(", ");
+  const sentences = [`${head ? `${head} and ` : ""}${parts[parts.length - 1]}.`];
   const [firstKept, ...otherKept] = input.keptWorktrees;
   if (firstKept) {
     const more = otherKept.length > 0 ? ` (+${otherKept.length} more)` : "";

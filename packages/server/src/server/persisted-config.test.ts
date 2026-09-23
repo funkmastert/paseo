@@ -50,6 +50,10 @@ describe("PersistedConfigSchema agents.doneJanitor config", () => {
       maxArchivesPerSweep: 4,
       answerTimeoutMinutes: 5,
       reclaimWorkspaces: false,
+      archiveDead: true,
+      deadQuietHours: 48,
+      maxDeadArchivesPerSweep: 20,
+      askFinished: false,
     };
     expect(PersistedConfigSchema.parse({ agents: { doneJanitor } }).agents?.doneJanitor).toEqual(
       doneJanitor,
