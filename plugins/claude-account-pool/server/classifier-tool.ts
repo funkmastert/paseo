@@ -1,5 +1,5 @@
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeDecision } from "./decision-summary";
@@ -23,14 +23,29 @@ import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./cla
  * come from the SAME classifier the create hook uses, against the same live
  * catalog, pool and health — a child recomputing it from config on disk would
  * be the second implementation this whole change exists to delete. So the MCP
- * server lives HERE, on a unix socket, and the spawned child
- * (`mcp/agent-model-policy.mjs`) is a byte pipe with no logic in it.
+ * server lives HERE, on a unix socket, and the spawned child is a byte pipe
+ * with no logic in it.
  *
  * That split is the fork's own pattern for a daemon-hosted MCP server, not an
  * invention: see `packages/server/scripts/mcp-stdio-socket-bridge-cli.mjs`,
  * which does the identical thing for the daemon's built-in servers. Keeping
  * the protocol on this side also keeps it typed and unit-testable in
  * process, which a hand-written JS child would not be.
+ *
+ * ## Why the bridge is written out rather than shipped as a file
+ *
+ * A plugin cannot find its own files. The daemon compiles a plugin to one CJS
+ * bundle and evaluates it with `globalThis.eval` (plugin-process.ts), so there
+ * is no module URL, no `__dirname`, and `import.meta.url` is `undefined` —
+ * `new URL("./mcp/bridge.mjs", import.meta.url)` throws `TypeError: Invalid
+ * URL` while the bundle loads, which is exactly how this took the plugin down
+ * in production. `initialize` carries `pluginId`, `bundle`, `appVersion` and
+ * `settingsDirectory`, and nothing that locates the plugin on disk.
+ *
+ * So the bridge travels as a string in the bundle and is written into the same
+ * private temp directory as the socket when the tool is switched on. Nothing
+ * to resolve, nothing to get wrong, and the bridge can never be a stale copy
+ * left by an older install.
  *
  * The socket lives in a private 0700 temp directory, carries no credentials,
  * and answers only this one question — it reveals the operator's routing
@@ -108,10 +123,56 @@ export interface ClassifierToolServerOptions {
 }
 
 export interface ClassifierToolServer {
-  /** Absolute path of the listening socket — handed to the pipe as `PASEO_CLASSIFIER_SOCKET`. */
+  /** Absolute path of the listening socket — handed to the bridge as `PASEO_CLASSIFIER_SOCKET`. */
   socketPath: string;
+  /** Absolute path of the bridge script the daemon spawns as the MCP server's `command` argument. */
+  bridgePath: string;
   close(): void;
 }
+
+/**
+ * The spawned child, in full. stdin goes to the socket, the socket comes back
+ * to stdout; it parses nothing and decides nothing.
+ *
+ * Plain node with no dependencies, and no imports beyond `node:net`: the
+ * daemon spawns it with bare `process.execPath` in a temp directory, where no
+ * package resolution exists.
+ *
+ * Deliberately free of backslash escapes, backticks and `${}`: this source
+ * lives inside a TypeScript template literal, where every one of those needs
+ * doubling, and getting that wrong produces a file that is a syntax error at
+ * spawn time rather than a compile error here. `console.error` supplies its
+ * own newline, and concatenation avoids interpolation, so what is written
+ * below is exactly what lands on disk.
+ */
+const BRIDGE_SOURCE = `#!/usr/bin/env node
+// Written at runtime by the claude-account-pool plugin. Do not edit: this file
+// is recreated whenever the classifier tool is switched on, and deleted with
+// the plugin's temp directory on teardown.
+import { createConnection } from "node:net";
+
+const socketPath = process.env.PASEO_CLASSIFIER_SOCKET;
+if (!socketPath) {
+  console.error("PASEO_CLASSIFIER_SOCKET is not set; the agent model policy is unreachable.");
+  process.exit(1);
+}
+
+const socket = createConnection(socketPath);
+
+socket.on("error", (error) => {
+  console.error("agent model policy bridge error: " + error.message);
+  process.exitCode = 1;
+  process.stdin.destroy();
+});
+
+socket.on("connect", () => {
+  process.stdin.pipe(socket);
+  socket.pipe(process.stdout);
+});
+
+socket.on("close", () => process.exit(process.exitCode ?? 0));
+process.stdin.on("end", () => socket.end());
+`;
 
 /** Everything the query carries, as classifier input. */
 export function queryToInput(query: ClassifierToolQuery): ClassifierInput {
@@ -189,8 +250,12 @@ export function handleMcpMessage(
  * caller on the other end is a language model improvising JSON.
  */
 export function startClassifierToolServer(options: ClassifierToolServerOptions): ClassifierToolServer {
-  const directory = options.socketPath ? undefined : mkdtempSync(join(tmpdir(), "paseo-classifier-"));
-  const socketPath = options.socketPath ?? join(directory as string, "classifier.sock");
+  // 0700 by default, so the bridge and the socket are readable only by the
+  // account the daemon runs as.
+  const directory = mkdtempSync(join(tmpdir(), "paseo-classifier-"));
+  const socketPath = options.socketPath ?? join(directory, "classifier.sock");
+  const bridgePath = join(directory, "agent-model-policy.mjs");
+  writeFileSync(bridgePath, BRIDGE_SOURCE, { mode: 0o700 });
 
   const server: Server = createServer((socket: Socket) => {
     socket.setEncoding("utf8");
@@ -220,11 +285,10 @@ export function startClassifierToolServer(options: ClassifierToolServerOptions):
 
   return {
     socketPath,
+    bridgePath,
     close() {
       server.close();
-      if (directory) {
-        rmSync(directory, { recursive: true, force: true });
-      }
+      rmSync(directory, { recursive: true, force: true });
     },
   };
 }

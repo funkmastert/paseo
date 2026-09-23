@@ -1023,13 +1023,25 @@ honors end to end, so this plugin contributes an agent tool by injecting an
 MCP server it ships itself.
 
 The MCP server runs **in the plugin process**, on a unix socket
-(`server/classifier-tool.ts`); the child the daemon spawns
-(`mcp/agent-model-policy.mjs`) is a byte pipe with no logic in it. That is
-the fork's own pattern for a daemon-hosted MCP server — see
-`packages/server/scripts/mcp-stdio-socket-bridge-cli.mjs` — and it is what
-makes the tool's answer and the create hook's behaviour literally the same
-call, against the same catalog, pool and health, rather than two things that
-agree for now.
+(`server/classifier-tool.ts`); the child the daemon spawns is a byte pipe with
+no logic in it. That is the fork's own pattern for a daemon-hosted MCP server
+— see `packages/server/scripts/mcp-stdio-socket-bridge-cli.mjs` — and it is
+what makes the tool's answer and the create hook's behaviour literally the
+same call, against the same catalog, pool and health, rather than two things
+that agree for now.
+
+**A plugin cannot ship that child as a file.** The daemon compiles a plugin to
+one CJS bundle and evaluates it with `globalThis.eval`, so there is no module
+URL, no `__dirname`, and `import.meta.url` is `undefined` — a top-level
+`new URL("./mcp/bridge.mjs", import.meta.url)` throws `TypeError: Invalid URL`
+while the bundle loads and takes the entire plugin down, which is exactly what
+happened the first time this shipped. The `initialize` message carries
+`pluginId`, `bundle`, `appVersion` and `settingsDirectory`, and nothing that
+locates the plugin on disk. So the bridge travels as a string in the bundle
+and is written into the socket's own private temp directory when the tool is
+switched on. `packages/server/src/server/plugins/account-pool-plugin-load.test.ts`
+compiles and evaluates this plugin the way the daemon does, so a module-scope
+mistake of that shape fails a test instead of a fleet.
 
 **Off by default.** Set `exposeClassifierTool: true` on the stored
 `agentModelPolicy` document to turn it on. Enabling it changes the
@@ -1037,6 +1049,13 @@ agree for now.
 upgrade should do quietly. It exposes the operator's routing policy to agents
 already running on the operator's machine, and nothing else — the socket
 carries no credentials and answers only this one question.
+
+While it is off, **none of this code runs**: no socket is opened, no temp
+directory is made, no bridge is written. The feature starts on the first
+create that sees the flag set, and policy is re-read on every create, so
+switching it on takes effect on the next spawn. That is load-bearing rather
+than tidy — the version that ran one line of it unconditionally is the version
+that took the plugin down.
 
 ### Fable budget gate
 

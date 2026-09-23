@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "./index.server";
@@ -312,6 +313,46 @@ describe("contribute (index.server)", () => {
         },
       };
     }
+
+    /**
+     * `exposeClassifierTool` defaults OFF, and while it is off the feature
+     * must run NO code at all — no socket, no temp directory, no bridge
+     * written to disk.
+     *
+     * This is the shape of the outage, not a tidiness preference: the first
+     * version resolved the bridge's path at module scope, so it ran while the
+     * flag was false, threw `TypeError: Invalid URL` inside the daemon's
+     * eval'd bundle, and took account routing, model policy and tool
+     * enforcement down with it. A disabled feature that can do that is a
+     * disabled feature with a live blast radius.
+     */
+    it("adds no MCP server while the classifier tool is switched off (the default)", async () => {
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+
+      const created = await h.create(undefined);
+
+      expect(created.config).not.toHaveProperty("mcpServers");
+      h.done();
+    });
+
+    it("adds it, pointed at a bridge it wrote itself, once the operator switches it on", async () => {
+      const h = harness({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, exposeClassifierTool: true },
+      });
+
+      const created = await h.create(undefined);
+
+      const servers = (created.config as { mcpServers?: Record<string, { command: string; args: string[]; env: Record<string, string> }> }).mcpServers;
+      const entry = servers?.["paseo-agent-policy"];
+      expect(entry).toBeDefined();
+      // The path is one the plugin created at runtime, never one resolved
+      // relative to the bundle — which it cannot do.
+      expect(existsSync(entry?.args[0] as string)).toBe(true);
+      expect(entry?.command).toBe(process.execPath);
+      expect(entry?.env.PASEO_CLASSIFIER_SOCKET).toBeTruthy();
+      h.done();
+    });
 
     it("REGRESSION: an allowlist written AFTER the plugin started applies to the very next create, with no reload and no 60s wait", async () => {
       // This is the live failure: the config was patched at 19:25:10 and the

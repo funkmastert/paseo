@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
@@ -38,9 +37,6 @@ const STARTUP_WARM_TIMEOUT_MS = 5000;
  * it can never collide with a server the caller configured itself.
  */
 const CLASSIFIER_MCP_SERVER = "paseo-agent-policy";
-
-/** The stdio shim the daemon spawns per agent. See server/classifier-tool.ts for why it is a separate process. */
-const CLASSIFIER_MCP_ENTRY = fileURLToPath(new URL("./mcp/agent-model-policy.mjs", import.meta.url));
 
 export default function contribute(server: PluginServerContext) {
   const health = createHealthTracker();
@@ -161,20 +157,6 @@ export default function contribute(server: PluginServerContext) {
         );
       },
     });
-    // The agent-facing half of the classifier. The socket opens whether or
-    // not the policy exposes the tool — it is unref'd, answers one question,
-    // and costs nothing idle, whereas opening it lazily would mean an agent
-    // created in the seconds after a policy change found nothing listening.
-    classifierTool = startClassifierToolServer({
-      world: () => ({
-        policy: startedPolicyCache.get(),
-        catalog: startedCatalogCache.get(),
-        pool: startedPoolCache.get().pool,
-        health,
-        nowMs: Date.now(),
-      }),
-    });
-
     roleModelPolicyRpcHandlers = createRoleModelPolicyRpcHandlers({
       policyCache,
       catalogCache,
@@ -319,13 +301,51 @@ export default function contribute(server: PluginServerContext) {
     return router?.(input, context) ?? undefined;
   });
 
+  /**
+   * Starts the agent-facing classifier tool the first time a create sees it
+   * enabled, and not before.
+   *
+   * Nothing about this feature runs while it is off — no socket, no temp
+   * directory, no bridge written to disk. That is not tidiness: the previous
+   * version resolved the bridge's path at MODULE scope, which threw
+   * `TypeError: Invalid URL` in the daemon's eval'd bundle and took the whole
+   * plugin down — account routing, model policy and tool enforcement with it
+   * — while the feature itself was switched off. A disabled feature must not
+   * be able to do that, so its code only runs once it is on.
+   *
+   * Policy is refreshed on every create (see the role hook below), so
+   * switching the flag on takes effect on the next spawn.
+   */
+  function ensureClassifierTool(): ClassifierToolServer | null {
+    if (classifierTool) {
+      return classifierTool;
+    }
+    if (!policyCache || !catalogCache || !poolCache || policyCache.get().exposeClassifierTool !== true) {
+      return null;
+    }
+    const startedPolicyCache = policyCache;
+    const startedCatalogCache = catalogCache;
+    const startedPoolCache = poolCache;
+    classifierTool = startClassifierToolServer({
+      world: () => ({
+        policy: startedPolicyCache.get(),
+        catalog: startedCatalogCache.get(),
+        pool: startedPoolCache.get().pool,
+        health,
+        nowMs: Date.now(),
+      }),
+    });
+    return classifierTool;
+  }
+
   // Third registration, and deliberately not folded into the role hook: WHICH
   // tools an agent gets is a different question from what the agent should
   // be, and the role hook returns early on half a dozen paths that must not
   // also mean "no policy tool". Off unless the operator turns it on.
   const unregisterClassifierTool = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
-    if (!classifierTool || policyCache?.get().exposeClassifierTool !== true) {
+    const tool = ensureClassifierTool();
+    if (!tool) {
       return undefined;
     }
     const { request } = input;
@@ -334,8 +354,8 @@ export default function contribute(server: PluginServerContext) {
       [CLASSIFIER_MCP_SERVER]: {
         type: "stdio" as const,
         command: process.execPath,
-        args: [CLASSIFIER_MCP_ENTRY],
-        env: { PASEO_CLASSIFIER_SOCKET: classifierTool.socketPath },
+        args: [tool.bridgePath],
+        env: { PASEO_CLASSIFIER_SOCKET: tool.socketPath },
       },
     };
     return {

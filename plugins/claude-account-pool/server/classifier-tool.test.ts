@@ -1,22 +1,23 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { startClassifierToolServer, type ClassifierToolServer } from "./classifier-tool";
 import type { ClassifierWorld } from "./classifier";
 
 /**
- * End-to-end over the real transport: the MCP shim is spawned as the daemon
- * would spawn it, speaks JSON-RPC on stdio, and its answers come back from a
- * live classifier over the socket. Asserting the shim's own JSON output is
- * the only way to know the MCP surface works — nothing else in this repo
- * speaks that protocol.
+ * End-to-end over the real transport: the bridge is spawned exactly as the
+ * daemon spawns it — `process.execPath` against the path the server itself
+ * materialized — it speaks JSON-RPC on stdio, and its answers come back from
+ * a live classifier over the socket. Asserting that output is the only way to
+ * know the MCP surface works; nothing else in this repo speaks the protocol.
+ *
+ * Spawning the server's OWN `bridgePath` rather than a file checked into the
+ * plugin is the point: the plugin ships no such file, because a plugin
+ * evaluated from a bundle cannot locate one (see classifier-tool.ts).
  */
-
-const SHIM = fileURLToPath(new URL("../mcp/agent-model-policy.mjs", import.meta.url));
 
 const POLICY: RoleModelPolicy = {
   ...DEFAULT_POLICY,
@@ -63,7 +64,7 @@ afterEach(() => {
 function startShim(): (message: Record<string, unknown>) => Promise<Record<string, unknown>> {
   directory = mkdtempSync(join(tmpdir(), "classifier-tool-test-"));
   server = startClassifierToolServer({ world, socketPath: join(directory, "s.sock") });
-  shim = spawn(process.execPath, [SHIM], {
+  shim = spawn(process.execPath, [server.bridgePath], {
     env: { ...process.env, PASEO_CLASSIFIER_SOCKET: server.socketPath },
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -95,6 +96,11 @@ function startShim(): (message: Record<string, unknown>) => Promise<Record<strin
 }
 
 describe("the agent_model_policy MCP tool", () => {
+  it("writes its own bridge, so nothing has to resolve a path inside the bundle", () => {
+    startShim();
+    expect(existsSync(server?.bridgePath as string)).toBe(true);
+  });
+
   it("completes an MCP handshake and advertises exactly one tool", async () => {
     const send = startShim();
     const initialized = (await send({
