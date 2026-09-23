@@ -143,6 +143,42 @@ failure retain the tail; removing the plugin clears it. Daemon restarts do not r
 structured copies remain in `$PASEO_HOME/daemon.log`. Plugin output can contain secrets, so do not
 log credentials or tokens.
 
+## Vendor a first-party plugin
+
+A plugin can live inside this repo instead of its own repo, so it is not a single-copy project
+with no remote. It belongs at `plugins/<id>`, not `packages/` (npm-workspace source for Paseo
+itself) or `plugin-examples/` (throwaway reference plugins for this doc).
+
+Bring an existing plugin's history in with `git subtree`, not a file copy — a copy throws the
+history away:
+
+```bash
+git subtree add --prefix=plugins/<id> /path/to/original/repo master
+```
+
+Add `plugins/<id>` to the root `package.json` `workspaces` array. This replaces a hand-maintained
+`node_modules/@getpaseo/plugin` symlink with npm's own workspace linking: any workspace package the
+plugin depends on (`@getpaseo/plugin` first) resolves through a plain `npm install` at the repo
+root, the same way every other workspace resolves its siblings. A hand-made symlink does not
+survive a fresh clone; npm's does. The plugin keeps its own `tsconfig.json` and its own
+`typecheck`/`test` scripts — `npm run typecheck` and `npm run test` at the root run every
+workspace's script, so the vendored plugin's checks ride along automatically.
+
+`npm run lint` and `npm run format:check` are not workspace-scoped; both walk the whole tree by
+default. A plugin developed to its own standalone conventions will not match this repo's oxlint
+ruleset without a real refactor, so exclude its directory in `.oxlintrc.json` and `.oxfmtrc.json`
+(`ignorePatterns`) instead of reformatting or relaxing rules underneath it. The plugin's own bar —
+TypeScript strict plus its test suite — is what actually gates it; the monorepo sweep should not
+pretend to.
+
+Develop it in place: edit files under `plugins/<id>`, then run `paseo plugin reload <id>` against a
+running daemon (see "Source changes are explicit" above). Run its tests with
+`npm run test --workspace=plugins/<id>`, or `cd plugins/<id> && npm test`.
+
+Point the daemon at the vendored copy like any other directory source (see "Install a directory
+source" above) — `path` in its `plugins.<id>` config entry is the absolute path to `plugins/<id>`
+inside your checkout.
+
 ## Contribute behavior and UI
 
 Default export one contribution function from each runtime entry. Keep the entries to registration

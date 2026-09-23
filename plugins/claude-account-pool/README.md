@@ -80,8 +80,12 @@ daemon. A full daemon restart is not required.
 
 ### 3. Install the plugin
 
+This plugin is vendored inside the Paseo fork at `plugins/claude-account-pool`
+(see [docs/plugins.md](../../docs/plugins.md#vendor-a-first-party-plugin)).
+Point the daemon at your checkout of that directory:
+
 ```bash
-paseo plugin install /Users/tylerthackray/paseo-plugins/claude-account-pool
+paseo plugin install /path/to/your/paseo-fork-checkout/plugins/claude-account-pool
 paseo plugin ls
 ```
 

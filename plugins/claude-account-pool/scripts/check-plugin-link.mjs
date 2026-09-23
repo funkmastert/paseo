@@ -1,21 +1,21 @@
 #!/usr/bin/env node
-// Guards against node_modules/@getpaseo/plugin silently degrading from the
-// dev symlink (packages/plugin build, in the fork) to the published 0.8.0
-// package. 0.8.0 predates role-labels/initialPrompt support on
-// PluginBeforeRequests["agent.create"], so a plain `npm install` replacing
-// the symlink leaves the role router inert with a clean typecheck — no
-// error, just every request routed as if no role/type label was ever
-// declared. Run before test/typecheck so that degradation fails loudly
-// instead of silently. Dependency-free: only node's own fs/module/path.
+// Guards against @getpaseo/plugin silently degrading from this workspace's
+// own dev build (packages/plugin, linked automatically by npm workspaces
+// since this plugin was vendored into the fork at plugins/claude-account-pool)
+// to the published 0.8.0 package. 0.8.0 predates role-labels/initialPrompt
+// support on PluginBeforeRequests["agent.create"], so losing the workspace
+// link leaves the role router inert with a clean typecheck — no error, just
+// every request routed as if no role/type label was ever declared. Run
+// before test/typecheck so that degradation fails loudly instead of
+// silently. Dependency-free: only node's own fs/module/path.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 
-const RELINK_COMMAND =
-  "ln -sfn /Users/tylerthackray/.paseo/worktrees/3jvw4yw6/scrawny-goat/packages/plugin node_modules/@getpaseo/plugin";
+const RELINK_COMMAND = "npm install (from the fork root, paseo-worktrees/bozeo or your checkout)";
 
 function fail(message) {
-  console.error(`[claude-account-pool] ${message}\nRe-link the dev build:\n  ${RELINK_COMMAND}`);
+  console.error(`[claude-account-pool] ${message}\nRestore the workspace link:\n  ${RELINK_COMMAND}`);
   process.exit(1);
 }
 
