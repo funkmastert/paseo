@@ -413,6 +413,10 @@ const AgentDoneJanitorSchema = z
     maxArchivesPerSweep: z.number().int().positive().optional(),
     answerTimeoutMinutes: z.number().positive().optional(),
     reclaimWorkspaces: z.boolean().optional(),
+    archiveDead: z.boolean().optional(),
+    deadQuietHours: z.number().positive().optional(),
+    maxDeadArchivesPerSweep: z.number().int().positive().optional(),
+    askFinished: z.boolean().optional(),
   })
   .strict();
 

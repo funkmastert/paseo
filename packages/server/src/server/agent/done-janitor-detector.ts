@@ -16,6 +16,9 @@ import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "./account-failover-detector.
  * Any value pins: an agent carrying this label is never asked, archived or reclaimed, and neither
  * is any tree or workspace it belongs to. Presence is the whole test, so `"false"` pins too — a
  * pin that one typo could undo is not a pin.
+ *
+ * A pinned workspace (`pinnedAt`, the sidebar pin) pins every agent in it the same way. There is
+ * no other pin the daemon can see: a pinned tab is per-client layout state.
  */
 export const DONE_JANITOR_KEEP_LABEL = "paseo.keep";
 
@@ -42,12 +45,22 @@ export interface DoneJanitorAgentView {
   hasSession: boolean;
   /** A schedule or heartbeat that is not completed still targets it. */
   hasSchedule: boolean;
+  /** Whether the daemon holds a runtime for it. False is `closed`, whatever the record last said. */
+  live: boolean;
+  /** Its workspace is pinned in the sidebar. */
+  workspacePinned: boolean;
 }
 
 export type NotDoneReason = string;
 
-export function isPinned(view: Pick<DoneJanitorAgentView, "labels">): boolean {
-  return Object.prototype.hasOwnProperty.call(view.labels, DONE_JANITOR_KEEP_LABEL);
+/** What pins this agent, or null when nothing does. */
+export function pinReason(
+  view: Pick<DoneJanitorAgentView, "labels" | "workspacePinned">,
+): string | null {
+  if (Object.prototype.hasOwnProperty.call(view.labels, DONE_JANITOR_KEEP_LABEL)) {
+    return `pinned with ${DONE_JANITOR_KEEP_LABEL}`;
+  }
+  return view.workspacePinned ? "its workspace is pinned" : null;
 }
 
 export function parentOf(view: Pick<DoneJanitorAgentView, "labels">): string | null {
@@ -64,7 +77,8 @@ export function agentNotDoneReason(
   nowMs: number,
   quietMs: number | null,
 ): NotDoneReason | null {
-  if (isPinned(view)) return `pinned with ${DONE_JANITOR_KEEP_LABEL}`;
+  const pinned = pinReason(view);
+  if (pinned) return pinned;
   if (view.lifecycle === "running" || view.lifecycle === "initializing") {
     return `is ${view.lifecycle}`;
   }
@@ -142,6 +156,71 @@ export function treeNotDoneReason(
     if (reason) return `subagent ${descendant.id} ${reason}`;
   }
   return null;
+}
+
+// ─── Dead agents ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Why this one agent is not dead, ignoring its tree; null when it is. Dead means no runtime
+ * holds it (`closed`) or its runtime is in `error`, and nobody has touched it for `quietMs`.
+ * An idle live agent is never dead: a leader waiting on its children or on a person looks the
+ * same as a forgotten one, and only the agent can say which. That question is the done check.
+ *
+ * Unread attention flags do not spare a dead agent. A failed agent is flagged the moment it
+ * fails, so sparing the flag would spare every one of them until someone opened each. The flag
+ * is reported instead, and the quiet period is the time to read it.
+ */
+export function agentNotDeadReason(
+  view: DoneJanitorAgentView,
+  nowMs: number,
+  quietMs: number,
+): NotDoneReason | null {
+  const pinned = pinReason(view);
+  if (pinned) return pinned;
+  if (view.live) {
+    if (view.lifecycle !== "error") return `is ${view.lifecycle}, not dead`;
+    // An errored runtime can still be mid-turn or holding work.
+    if (view.busy) return "has a turn in flight";
+    if (view.pendingPermissionCount > 0) return "is waiting on a permission";
+    if (view.runningProviderSubagentCount > 0) {
+      return `has ${view.runningProviderSubagentCount} provider subagent(s) still running`;
+    }
+  }
+  if (view.hasSchedule) return "has a schedule or heartbeat that will wake it";
+  if (view.lastActivityAtMs === null) return "has no readable last-activity time";
+  const quietForMs = nowMs - view.lastActivityAtMs;
+  if (quietForMs < quietMs) {
+    return `quiet for ${formatDuration(quietForMs)} of the ${formatDuration(quietMs)} required`;
+  }
+  return null;
+}
+
+/**
+ * Why the tree rooted at `root` is not dead. Archive cascades, so one live, pinned or recently
+ * touched descendant spares the whole tree: an idle leader with a dead child is left to the
+ * done check, and a dead leader with a working child is not archived out from under it.
+ */
+export function treeNotDeadReason(
+  root: DoneJanitorAgentView,
+  views: readonly DoneJanitorAgentView[],
+  nowMs: number,
+  quietMs: number,
+): NotDoneReason | null {
+  const own = agentNotDeadReason(root, nowMs, quietMs);
+  if (own) return own;
+  for (const descendant of listDescendants(root.id, views)) {
+    const reason = agentNotDeadReason(descendant, nowMs, quietMs);
+    if (reason) return `subagent ${descendant.id} ${reason}`;
+  }
+  return null;
+}
+
+/** What the dry run says about an archive candidate that a person has not read yet. */
+export function describeUnread(views: readonly DoneJanitorAgentView[]): string | null {
+  const unread = views.filter((view) => view.requiresAttention);
+  if (unread.length === 0) return null;
+  const reasons = [...new Set(unread.map((view) => view.attentionReason ?? "unread"))];
+  return `${unread.length} unread flag(s) (${reasons.join(", ")}) will be cleared`;
 }
 
 /** The roots a sweep considers: unarchived, not internal, and with no parent. */

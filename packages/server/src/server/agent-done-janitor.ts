@@ -17,6 +17,8 @@ import {
   listRootCandidates,
   nextAskAllowedAtMs,
   recordProbeOutcome,
+  describeUnread,
+  treeNotDeadReason,
   treeNotDoneReason,
   type DoneJanitorAgentView,
   type DoneJanitorMemory,
@@ -37,6 +39,15 @@ const DEFAULT_QUIET_HOURS = 72;
 const DEFAULT_MAX_QUESTIONS_PER_SWEEP = 1;
 const DEFAULT_MAX_ARCHIVES_PER_SWEEP = 3;
 const DEFAULT_ANSWER_TIMEOUT_MINUTES = 10;
+/**
+ * A dead agent waits as long as an idle one does, for the same reason: a daemon restart closes
+ * every agent, so `closed` on Friday evening is not a session Tyler has given up on by Monday
+ * morning. Its own timer, because nothing is asked and nothing is resumed, so it can be
+ * shortened once a dry run has shown what it would take.
+ */
+const DEFAULT_DEAD_QUIET_HOURS = 72;
+/** Archiving is a soft delete and cheap, so this is generous next to the question budget. */
+const DEFAULT_MAX_DEAD_ARCHIVES_PER_SWEEP = 10;
 
 export interface DoneJanitorConfig {
   enabled?: boolean;
@@ -46,6 +57,12 @@ export interface DoneJanitorConfig {
   maxArchivesPerSweep?: number;
   answerTimeoutMinutes?: number;
   reclaimWorkspaces?: boolean;
+  /** Archive agents that are dead and unpinned. Default true. */
+  archiveDead?: boolean;
+  deadQuietHours?: number;
+  maxDeadArchivesPerSweep?: number;
+  /** Ask idle live agents whether they are finished. Default true. */
+  askFinished?: boolean;
 }
 
 interface ResolvedDoneJanitorConfig {
@@ -55,6 +72,10 @@ interface ResolvedDoneJanitorConfig {
   maxArchivesPerSweep: number;
   answerTimeoutMs: number;
   reclaimWorkspaces: boolean;
+  archiveDead: boolean;
+  deadQuietMs: number;
+  maxDeadArchivesPerSweep: number;
+  askFinished: boolean;
 }
 
 function resolveConfig(config: DoneJanitorConfig): ResolvedDoneJanitorConfig {
@@ -65,6 +86,10 @@ function resolveConfig(config: DoneJanitorConfig): ResolvedDoneJanitorConfig {
     maxArchivesPerSweep: config.maxArchivesPerSweep ?? DEFAULT_MAX_ARCHIVES_PER_SWEEP,
     answerTimeoutMs: (config.answerTimeoutMinutes ?? DEFAULT_ANSWER_TIMEOUT_MINUTES) * 60_000,
     reclaimWorkspaces: config.reclaimWorkspaces ?? true,
+    archiveDead: config.archiveDead ?? true,
+    deadQuietMs: (config.deadQuietHours ?? DEFAULT_DEAD_QUIET_HOURS) * 60 * 60_000,
+    maxDeadArchivesPerSweep: config.maxDeadArchivesPerSweep ?? DEFAULT_MAX_DEAD_ARCHIVES_PER_SWEEP,
+    askFinished: config.askFinished ?? true,
   };
 }
 
@@ -82,6 +107,7 @@ export type DoneJanitorWorkspace = Pick<
   | "createdAt"
   | "updatedAt"
   | "archivedAt"
+  | "pinnedAt"
 >;
 
 export type AskAgentResult =
@@ -141,7 +167,8 @@ export interface DoneJanitorReportEntry {
     | "archived"
     | "would-delete"
     | "deleted"
-    | "kept-workspace";
+    | "kept-workspace"
+    | "kept-agent";
   agentId?: string;
   title?: string | null;
   workspaceId?: string;
@@ -223,9 +250,22 @@ export class AgentDoneJanitor {
     let views = await this.loadViews();
     let workspaces = await this.deps.listWorkspaces();
 
+    // Dead agents first: they are archived without being asked, and they are not the ones the
+    // question budget is for.
+    const dead = config.archiveDead
+      ? await this.sweepDeadAgents(report, views, workspaces, config, nowMs)
+      : { archivedAgentCount: 0, deletedWorkspaceIds: new Set<string>() };
+    if (dead.archivedAgentCount > 0) {
+      views = await this.loadViews();
+      workspaces = await this.deps.listWorkspaces();
+    }
+
     const askable: Array<{ root: DoneJanitorAgentView; plan: WorkspacePlan; quietForMs: number }> =
       [];
-    for (const root of listRootCandidates(views)) {
+    for (const root of config.askFinished ? listRootCandidates(views) : []) {
+      // Asking a closed agent resumes it at cache-cold prices. With the dead pass on, a closed
+      // agent is the dead pass's to archive or spare, never the question's.
+      if (config.archiveDead && !root.live) continue;
       const verdict = await this.evaluateRoot(root, views, workspaces, config, nowMs);
       if (verdict.kind !== "ask") {
         report.entries.push({
@@ -245,7 +285,7 @@ export class AgentDoneJanitor {
         b.quietForMs - a.quietForMs,
     );
     const budget = Math.min(config.maxQuestionsPerSweep, config.maxArchivesPerSweep);
-    const reclaimedWorkspaceIds = new Set<string>();
+    const reclaimedWorkspaceIds = new Set<string>(dead.deletedWorkspaceIds);
     let archivedCount = 0;
     for (const [index, candidate] of askable.entries()) {
       const { root } = candidate;
@@ -281,12 +321,173 @@ export class AgentDoneJanitor {
       config,
       nowMs,
       reclaimedWorkspaceIds,
-      config.maxArchivesPerSweep - archivedCount,
+      config.maxArchivesPerSweep - archivedCount - dead.deletedWorkspaceIds.size,
     );
 
     this.logReport(report);
-    if (!config.dryRun) await this.notify(report, archivedCount);
+    if (!config.dryRun) await this.notify(report, archivedCount, dead.archivedAgentCount);
     return report;
+  }
+
+  /**
+   * Archives every root whose whole tree is dead, then reclaims the worktrees they leave empty.
+   * Roots first, worktrees second: a workspace shared by several dead roots is planned once,
+   * after the last of them is archived, so it is judged on what is true then. A dry run reports
+   * the same two steps against the archives it would make.
+   */
+  private async sweepDeadAgents(
+    report: DoneJanitorSweepReport,
+    views: readonly DoneJanitorAgentView[],
+    workspaces: readonly DoneJanitorWorkspace[],
+    config: ResolvedDoneJanitorConfig,
+    nowMs: number,
+  ): Promise<{ archivedAgentCount: number; deletedWorkspaceIds: Set<string> }> {
+    const eligible = this.listDeadRoots(report, views, config, nowMs);
+    const archivedRoots: DoneJanitorAgentView[] = [];
+    const archivingIds = new Set<string>();
+    let archivedAgentCount = 0;
+    for (const [index, root] of eligible.entries()) {
+      if (index >= config.maxDeadArchivesPerSweep) {
+        report.entries.push({
+          ...describeAgent(root),
+          action: "kept-agent",
+          reason: "dead, but this sweep's archive budget is spent; next sweep",
+        });
+        continue;
+      }
+      const tree = [root, ...listDescendants(root.id, views)];
+      const detail = describeDeadRoot(root, tree, nowMs);
+      if (config.dryRun) {
+        report.entries.push({ ...describeAgent(root), action: "would-archive", reason: detail });
+        for (const view of tree) archivingIds.add(view.id);
+      } else if (!(await this.archiveDeadRoot(report, root, detail, config))) {
+        continue;
+      }
+      archivedRoots.push(root);
+      archivedAgentCount += tree.length;
+    }
+
+    const deletedWorkspaceIds = await this.reclaimDeadWorkspaces(
+      report,
+      archivedRoots,
+      { views, workspaces, archivingIds },
+      config,
+    );
+    return { archivedAgentCount, deletedWorkspaceIds };
+  }
+
+  /** The roots whose whole tree is dead, longest dead first; a dead-looking root that is spared is reported. */
+  private listDeadRoots(
+    report: DoneJanitorSweepReport,
+    views: readonly DoneJanitorAgentView[],
+    config: ResolvedDoneJanitorConfig,
+    nowMs: number,
+  ): DoneJanitorAgentView[] {
+    const eligible: DoneJanitorAgentView[] = [];
+    for (const root of listRootCandidates(views)) {
+      // A live agent that is not in error is not a candidate at all, and is not reported: the
+      // fleet is mostly those, and the done check is what decides them.
+      if (root.live && root.lifecycle !== "error") continue;
+      const reason = treeNotDeadReason(root, views, nowMs, config.deadQuietMs);
+      if (reason) {
+        report.entries.push({ ...describeAgent(root), action: "kept-agent", reason });
+      } else {
+        eligible.push(root);
+      }
+    }
+    return eligible.sort((a, b) => (a.lastActivityAtMs ?? 0) - (b.lastActivityAtMs ?? 0));
+  }
+
+  /** Archives one dead root against freshly read state; false when it was spared or the archive failed. */
+  private async archiveDeadRoot(
+    report: DoneJanitorSweepReport,
+    root: DoneJanitorAgentView,
+    detail: string,
+    config: ResolvedDoneJanitorConfig,
+  ): Promise<boolean> {
+    const { logger } = this.options;
+    // A person may have opened it since the views were read; the archive is decided on now.
+    const fresh = await this.loadViews();
+    const freshRoot = fresh.find((view) => view.id === root.id);
+    const changed = freshRoot
+      ? treeNotDeadReason(freshRoot, fresh, this.now(), config.deadQuietMs)
+      : "disappeared";
+    if (changed) {
+      report.entries.push({
+        ...describeAgent(root),
+        action: "kept-agent",
+        reason: `dead, but then ${changed}`,
+      });
+      return false;
+    }
+    try {
+      await this.deps.archiveAgent(root.id);
+    } catch (error) {
+      logger.warn({ err: error, agentId: root.id }, "Done janitor: archive of a dead agent failed");
+      report.entries.push({
+        ...describeAgent(root),
+        action: "kept-agent",
+        reason: `archive failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return false;
+    }
+    report.entries.push({ ...describeAgent(root), action: "archived", reason: detail });
+    logger.info(
+      { agentId: root.id, title: root.title, workspaceId: root.workspaceId },
+      "Done janitor: archived a dead agent",
+    );
+    return true;
+  }
+
+  /**
+   * Plans each archived root's workspace once. A live sweep plans against fresh state; a dry run
+   * against the state as it is, with `archivingIds` standing in for the archives it did not make.
+   */
+  private async reclaimDeadWorkspaces(
+    report: DoneJanitorSweepReport,
+    archivedRoots: readonly DoneJanitorAgentView[],
+    dryRunState: {
+      views: readonly DoneJanitorAgentView[];
+      workspaces: readonly DoneJanitorWorkspace[];
+      archivingIds: ReadonlySet<string>;
+    },
+    config: ResolvedDoneJanitorConfig,
+  ): Promise<Set<string>> {
+    const deletedWorkspaceIds = new Set<string>();
+    if (archivedRoots.length === 0) return deletedWorkspaceIds;
+    const views = config.dryRun ? dryRunState.views : await this.loadViews();
+    const workspaces = config.dryRun ? dryRunState.workspaces : await this.deps.listWorkspaces();
+    const why = "every agent in it is dead or archived";
+    let deletions = 0;
+    const planned = new Set<string>();
+    for (const root of archivedRoots) {
+      const workspaceId = root.workspaceId;
+      if (!workspaceId || planned.has(workspaceId)) continue;
+      planned.add(workspaceId);
+      const plan = await this.planWorkspace(
+        workspaceId,
+        views,
+        workspaces,
+        dryRunState.archivingIds,
+        config,
+      );
+      if (plan.kind === "reclaim" && deletions >= config.maxArchivesPerSweep) {
+        // Left for the orphan sweep, which sees it next sweep with a fresh budget.
+        report.entries.push({
+          action: "kept-workspace",
+          workspaceId,
+          path: plan.path,
+          reason: "its agents are archived, but this sweep's deletion budget is spent; next sweep",
+        });
+      } else if (config.dryRun) {
+        report.entries.push(this.describePlan(plan, true, why));
+        if (plan.kind === "reclaim") deletions += 1;
+      } else if (await this.reclaim(report, plan, why)) {
+        deletedWorkspaceIds.add(workspaceId);
+        deletions += 1;
+      }
+    }
+    return deletedWorkspaceIds;
   }
 
   private async evaluateRoot(
@@ -468,6 +669,7 @@ export class AgentDoneJanitor {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === workspaceId) ?? null;
     const keep = (reason: string): WorkspacePlan => ({ kind: "keep", workspace, reason });
     if (!config.reclaimWorkspaces) return keep("workspace reclamation is off");
+    if (workspace?.pinnedAt) return keep("its workspace is pinned");
     const recordProblem = workspaceRecordProblem(workspace);
     if (recordProblem || !workspace?.worktreeRoot) {
       return keep(recordProblem ?? "the workspace record is missing");
@@ -564,11 +766,17 @@ export class AgentDoneJanitor {
   }
 
   private async loadViews(): Promise<DoneJanitorAgentView[]> {
-    const [stored, scheduled] = await Promise.all([
+    const [stored, scheduled, workspaces] = await Promise.all([
       this.deps.listStoredAgents(),
       this.deps.listScheduledAgentIds(),
+      this.deps.listWorkspaces(),
     ]);
-    return buildAgentViews(this.deps.listLiveAgents(), stored, scheduled);
+    const pinnedWorkspaceIds = new Set(
+      workspaces
+        .filter((workspace) => workspace.pinnedAt)
+        .map((workspace) => workspace.workspaceId),
+    );
+    return buildAgentViews(this.deps.listLiveAgents(), stored, scheduled, pinnedWorkspaceIds);
   }
 
   /** Logs each subject's line only when it changed since the last sweep. */
@@ -592,9 +800,13 @@ export class AgentDoneJanitor {
     }
   }
 
-  private async notify(report: DoneJanitorSweepReport, archivedAgentCount: number): Promise<void> {
+  private async notify(
+    report: DoneJanitorSweepReport,
+    archivedAgentCount: number,
+    archivedDeadAgentCount: number,
+  ): Promise<void> {
     const deleted = report.entries.filter((entry) => entry.action === "deleted");
-    if (archivedAgentCount === 0 && deleted.length === 0) return;
+    if (archivedAgentCount === 0 && archivedDeadAgentCount === 0 && deleted.length === 0) return;
     const sender = this.options.getPushNotificationSender();
     if (!sender) return;
     try {
@@ -602,6 +814,7 @@ export class AgentDoneJanitor {
         buildDoneJanitorNotificationPayload({
           serverId: this.options.serverId,
           archivedAgentCount,
+          archivedDeadAgentCount,
           deletedWorktreeCount: deleted.length,
           reclaimedBytes: deleted.reduce((sum, entry) => sum + (entry.bytes ?? 0), 0),
           keptWorktrees: report.entries
@@ -616,6 +829,20 @@ export class AgentDoneJanitor {
       this.options.logger.warn({ err: error }, "Done janitor: push notification failed");
     }
   }
+}
+
+function describeDeadRoot(
+  root: DoneJanitorAgentView,
+  tree: readonly DoneJanitorAgentView[],
+  nowMs: number,
+): string {
+  return [
+    `dead: ${root.live ? "in error" : "closed"}, quiet for ${formatDuration(nowMs - (root.lastActivityAtMs ?? nowMs))}`,
+    tree.length > 1 ? `with ${tree.length - 1} subagent(s) by cascade` : null,
+    describeUnread(tree),
+  ]
+    .filter(Boolean)
+    .join("; ");
 }
 
 function describeAgent(
@@ -713,6 +940,7 @@ export function buildAgentViews(
   live: readonly DoneJanitorAgentSummary[],
   stored: readonly StoredAgentRecord[],
   scheduledAgentIds: ReadonlySet<string>,
+  pinnedWorkspaceIds: ReadonlySet<string>,
 ): DoneJanitorAgentView[] {
   const liveById = new Map(live.map((agent) => [agent.id, agent]));
   const views: DoneJanitorAgentView[] = [];
@@ -721,7 +949,7 @@ export function buildAgentViews(
     storedIds.add(record.id);
     const agent = liveById.get(record.id);
     if (agent && !record.archivedAt) {
-      views.push(fromLive(agent, record, scheduledAgentIds));
+      views.push(fromLive(agent, record, scheduledAgentIds, pinnedWorkspaceIds));
       continue;
     }
     const activity = [record.updatedAt, record.lastActivityAt, record.lastUserMessageAt]
@@ -747,10 +975,14 @@ export function buildAgentViews(
       labels: record.labels,
       hasSession: Boolean(record.persistence?.sessionId),
       hasSchedule: scheduledAgentIds.has(record.id),
+      live: false,
+      workspacePinned: pinnedWorkspaceIds.has(record.workspaceId ?? ""),
     });
   }
   for (const agent of live) {
-    if (!storedIds.has(agent.id)) views.push(fromLive(agent, null, scheduledAgentIds));
+    if (!storedIds.has(agent.id)) {
+      views.push(fromLive(agent, null, scheduledAgentIds, pinnedWorkspaceIds));
+    }
   }
   return views;
 }
@@ -759,6 +991,7 @@ function fromLive(
   agent: DoneJanitorAgentSummary,
   record: StoredAgentRecord | null,
   scheduledAgentIds: ReadonlySet<string>,
+  pinnedWorkspaceIds: ReadonlySet<string>,
 ): DoneJanitorAgentView {
   const lastActivityAtMs = agent.lastActivityAt ? Date.parse(agent.lastActivityAt) : Number.NaN;
   return {
@@ -780,6 +1013,8 @@ function fromLive(
     labels: agent.labels,
     hasSession: Boolean(agent.sessionId),
     hasSchedule: scheduledAgentIds.has(agent.id),
+    live: agent.lifecycle !== "closed",
+    workspacePinned: pinnedWorkspaceIds.has(agent.workspaceId ?? ""),
   };
 }
 

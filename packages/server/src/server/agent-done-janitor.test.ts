@@ -56,6 +56,7 @@ function workspace(overrides: Partial<DoneJanitorWorkspace> = {}): DoneJanitorWo
     createdAt: FOUR_DAYS_AGO,
     updatedAt: FOUR_DAYS_AGO,
     archivedAt: null,
+    pinnedAt: null,
     ...overrides,
   };
 }
@@ -84,6 +85,8 @@ function harness(input: {
   terminals?: number;
   /** Runs after an answer and before the janitor's re-check. */
   afterAnswer?: (stored: StoredAgentRecord[]) => void;
+  /** Runs as each read of the stored agents is served; `call` counts from 1. */
+  onListStored?: (call: number, stored: StoredAgentRecord[]) => void;
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -92,10 +95,15 @@ function harness(input: {
   const archived: string[] = [];
   const reclaimed: string[] = [];
   const pushes: PushPayload[] = [];
+  let listCalls = 0;
   const config = input.config;
   const deps: DoneJanitorDependencies = {
     listLiveAgents: () => input.live ?? [],
-    listStoredAgents: async () => stored,
+    listStoredAgents: async () => {
+      listCalls += 1;
+      input.onListStored?.(listCalls, stored);
+      return stored;
+    },
     listWorkspaces: async () => workspaces,
     listScheduledAgentIds: async () => new Set(input.scheduled ?? []),
     getProviderHealth: async () => input.health ?? { askable: true },
@@ -156,7 +164,8 @@ function harness(input: {
   };
 }
 
-const ON: DoneJanitorConfig = { enabled: true };
+// The ask path, on its own: the dead pass would archive these stored (closed) records unasked.
+const ON: DoneJanitorConfig = { enabled: true, archiveDead: false };
 
 describe("AgentDoneJanitor", () => {
   test("absent config does nothing at all — today's behaviour", async () => {
@@ -509,6 +518,404 @@ describe("AgentDoneJanitor", () => {
         reason: "clean tree and branch feature is merged or pushed",
       }),
     ]);
+  });
+});
+
+const DEAD_ON: DoneJanitorConfig = { enabled: true };
+const PARENT = "paseo.parent-agent-id";
+
+describe("AgentDoneJanitor dead pass", () => {
+  test("a closed, unpinned agent is archived without being asked, and its worktree reclaimed", async () => {
+    const h = harness({ config: DEAD_ON });
+
+    const report = await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual(["ws-1"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "archived",
+        agentId: "agent-1",
+        reason: "dead: closed, quiet for 4d",
+      }),
+    );
+    expect(h.pushes).toEqual([
+      expect.objectContaining({
+        body: "Archived 1 dead session and deleted 1 worktree, freeing 3.0 GB.",
+      }),
+    ]);
+  });
+
+  test("a stored record that still says running is dead once no runtime holds it", async () => {
+    const h = harness({ config: DEAD_ON, stored: [record({ lastStatus: "running" })] });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+  });
+
+  test("a live agent in error is dead", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      live: [
+        liveSummary({ lifecycle: "error", requiresAttention: true, attentionReason: "error" }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "archived",
+        reason: "dead: in error, quiet for 4d; 1 unread flag(s) (error) will be cleared",
+      }),
+    );
+  });
+
+  test("a live idle agent is not dead: it goes to the done check like before", async () => {
+    const h = harness({ config: DEAD_ON, live: [liveSummary({})] });
+
+    const report = await h.janitor.tick();
+
+    expect(h.asked).toEqual(["agent-1"]);
+    expect(report?.entries.filter((entry) => entry.action === "kept-agent")).toEqual([]);
+  });
+
+  test("with the question off, a live idle agent is left entirely alone", async () => {
+    const h = harness({ config: { ...DEAD_ON, askFinished: false }, live: [liveSummary({})] });
+
+    await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(h.archived).toEqual([]);
+  });
+
+  test("a closed agent is never asked, even when the dead pass spares it", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record({ labels: { "paseo.keep": "true" } })],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(h.archived).toEqual([]);
+  });
+
+  test("an agent gone quiet only overnight is spared, reported with how long is left", async () => {
+    const lastNight = new Date(NOW - 14 * HOUR).toISOString();
+    const h = harness({ config: DEAD_ON, stored: [record({ updatedAt: lastNight })] });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-agent",
+        reason: "quiet for 14h of the 3d required",
+      }),
+    );
+  });
+
+  test("deadQuietHours shortens the wait", async () => {
+    const yesterday = new Date(NOW - 30 * HOUR).toISOString();
+    const h = harness({
+      config: { ...DEAD_ON, deadQuietHours: 24 },
+      stored: [record({ updatedAt: yesterday })],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+  });
+
+  test.each<[string, Partial<StoredAgentRecord>, string]>([
+    ["a paseo.keep label", { labels: { "paseo.keep": "" } }, "pinned with paseo.keep"],
+  ])("%s pins a dead agent", async (_name, overrides, reason) => {
+    const h = harness({ config: DEAD_ON, stored: [record(overrides)] });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason }),
+    );
+  });
+
+  test("a pinned workspace pins every agent in it, and its worktree", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("a pinned workspace is not reclaimed even when every agent in it is already archived", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-workspace", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("an agent a schedule will wake is not dead", async () => {
+    const h = harness({ config: DEAD_ON, scheduled: ["agent-1"] });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+  });
+
+  test("a dead leader with a live child is not archived out from under it", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record(), record({ id: "child", labels: { [PARENT]: "agent-1" } })],
+      live: [liveSummary({ id: "child", labels: { [PARENT]: "agent-1" } })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-agent",
+        agentId: "agent-1",
+        reason: "subagent child is idle, not dead",
+      }),
+    );
+  });
+
+  test("a dead leader is archived with its dead children by cascade", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [
+        record(),
+        record({ id: "child-1", labels: { [PARENT]: "agent-1" } }),
+        record({ id: "child-2", labels: { [PARENT]: "agent-1" } }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "archived",
+        reason: "dead: closed, quiet for 4d; with 2 subagent(s) by cascade",
+      }),
+    );
+    expect(h.pushes[0]?.body).toContain("Archived 3 dead sessions");
+  });
+
+  test("an agent a person opened between the read and the archive is left alone", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      onListStored: (call, stored) => {
+        if (call === 2) stored[0] = { ...stored[0], updatedAt: new Date(NOW).toISOString() };
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-agent",
+        reason: "dead, but then quiet for 0m of the 3d required",
+      }),
+    );
+  });
+
+  test("a dirty worktree is kept and says why; the agent is still archived", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      safety: { safe: false, reason: "it has 2 uncommitted or untracked file(s)" },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "it has 2 uncommitted or untracked file(s)",
+      }),
+    );
+  });
+
+  test("a worktree another live agent works in is kept", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record(), record({ id: "other", workspaceId: "ws-1" })],
+      live: [liveSummary({ id: "other", workspaceId: "ws-1", lifecycle: "running", busy: true })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "agent other in it is not archived",
+      }),
+    );
+  });
+
+  test("reclaimWorkspaces off archives the agent and keeps every worktree", async () => {
+    const h = harness({ config: { ...DEAD_ON, reclaimWorkspaces: false } });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+  });
+
+  test("two dead agents in one workspace: it is reclaimed once, after both are archived", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record(), record({ id: "agent-2" })],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.archived.sort()).toEqual(["agent-1", "agent-2"]);
+    expect(h.reclaimed).toEqual(["ws-1"]);
+  });
+
+  test("the archive budget bounds a backlog, oldest dead first", async () => {
+    const older = new Date(NOW - 200 * HOUR).toISOString();
+    const h = harness({
+      config: { ...DEAD_ON, maxDeadArchivesPerSweep: 1 },
+      stored: [
+        record({ id: "newer", workspaceId: "ws-1" }),
+        record({ id: "older", workspaceId: "ws-2", updatedAt: older }),
+      ],
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-2",
+          cwd: "/home/t/.paseo/worktrees/h/other",
+          worktreeRoot: "/home/t/.paseo/worktrees/h/other",
+        }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["older"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-agent",
+        agentId: "newer",
+        reason: "dead, but this sweep's archive budget is spent; next sweep",
+      }),
+    );
+  });
+
+  test("the deletion budget leaves the rest of the worktrees for the next sweep", async () => {
+    const h = harness({
+      config: { ...DEAD_ON, maxArchivesPerSweep: 1 },
+      stored: [record({ id: "a", workspaceId: "ws-1" }), record({ id: "b", workspaceId: "ws-2" })],
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-2",
+          cwd: "/home/t/.paseo/worktrees/h/other",
+          worktreeRoot: "/home/t/.paseo/worktrees/h/other",
+        }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived.sort()).toEqual(["a", "b"]);
+    expect(h.reclaimed).toHaveLength(1);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "its agents are archived, but this sweep's deletion budget is spent; next sweep",
+      }),
+    );
+  });
+
+  test("a dry run archives and deletes nothing and reports exactly what a live sweep would do", async () => {
+    const h = harness({
+      config: { ...DEAD_ON, dryRun: true },
+      stored: [
+        record({ requiresAttention: true, attentionReason: "finished" }),
+        record({ id: "child", labels: { [PARENT]: "agent-1" } }),
+        record({
+          id: "pinned",
+          workspaceId: "ws-2",
+          cwd: "/home/t/.paseo/worktrees/h/other",
+          labels: { "paseo.keep": "true" },
+        }),
+      ],
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-2",
+          cwd: "/home/t/.paseo/worktrees/h/other",
+          worktreeRoot: "/home/t/.paseo/worktrees/h/other",
+        }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(h.archived).toEqual([]);
+    expect(h.reclaimed).toEqual([]);
+    expect(h.pushes).toEqual([]);
+    expect(report?.entries).toEqual([
+      expect.objectContaining({
+        action: "kept-agent",
+        agentId: "pinned",
+        reason: "pinned with paseo.keep",
+      }),
+      expect.objectContaining({
+        action: "would-archive",
+        agentId: "agent-1",
+        reason:
+          "dead: closed, quiet for 4d; with 1 subagent(s) by cascade; 1 unread flag(s) (finished) will be cleared",
+      }),
+      expect.objectContaining({
+        action: "would-delete",
+        workspaceId: "ws-1",
+        path: "/home/t/.paseo/worktrees/h/feature",
+        reason:
+          "every agent in it is dead or archived; clean tree and branch feature is merged or pushed",
+      }),
+    ]);
+  });
+
+  test("archiveDead off leaves closed agents to the question, as before", async () => {
+    const h = harness({ config: { enabled: true, archiveDead: false } });
+
+    await h.janitor.tick();
+
+    expect(h.asked).toEqual(["agent-1"]);
   });
 });
 
