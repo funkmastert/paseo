@@ -207,7 +207,7 @@ export const RoleModelPolicySchema = z
     enforceToolsOnClassifiedRoles: z.boolean().default(false),
     /**
      * Model refs (same `model` / `provider/model` spelling as a role's pool)
-     * that an EXPLICIT request may run even though the provider's advertised
+     * that the operator vouches for even though the provider's advertised
      * catalog doesn't list them. Default empty: the catalog check stays
      * absolute, exactly as before this field existed.
      *
@@ -215,17 +215,18 @@ export const RoleModelPolicySchema = z
      * doesn't advertise (Claude Code 2.1.280 runs `claude-opus-5-5` but omits
      * it). The catalog check can't tell "absent because unreal" from "absent
      * because unadvertised", so the operator says which ids are the second
-     * kind.
+     * kind. Naming an id here makes it count as present for the catalog check,
+     * for BOTH an explicit request and ordered pool selection — an id the
+     * operator wrote here is operator-verified, so it may be a pool default.
      *
-     * Deliberately narrow, on three axes:
+     * Deliberately narrow:
      * - Per id, not a boolean: a typo'd request (`claude-opus-5-6`) matches no
-     *   entry and is still refused at validation rather than dying at launch.
-     * - Explicit requests only: ordered pool selection never consults it, so
-     *   a pool entry nobody has verified is still skipped.
+     *   entry and is still refused at validation rather than dying at launch,
+     *   and a non-allowlisted unlisted pool entry is still skipped.
      * - Only the catalog check is waived. A model that is capped, drained or
-     *   budget-gated is refused exactly as before, and a request must still
-     *   name a model in the resolved role's own pool — this list adds no
-     *   approval, it only waives catalog verification for approved ids.
+     *   budget-gated is refused exactly as before, and an explicit request must
+     *   still name a model in the resolved role's own pool — this list adds no
+     *   approval, it only stands in for catalog verification.
      */
     allowUnlistedModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
     /** Opaque compare-and-swap token, bumped on every accepted write. */

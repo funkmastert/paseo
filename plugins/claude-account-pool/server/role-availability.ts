@@ -46,8 +46,24 @@ export const BUDGET_GATED_FAMILIES: readonly ModelFamily[] = ["fable"];
  */
 export type SelectModelResult =
   | { outcome: "unconfigured" }
-  | { outcome: "selected"; provider: string | null; model: string }
-  | { outcome: "unavailable"; provider: string | null; model: string };
+  | {
+      outcome: "selected";
+      provider: string | null;
+      model: string;
+      /**
+       * Set only when the catalog doesn't list the model and it was selected
+       * because the operator named it in `allowUnlistedModels`. Unverified by
+       * the provider, verified by the operator; callers surface it.
+       */
+      unadvertised?: true;
+    }
+  | {
+      outcome: "unavailable";
+      provider: string | null;
+      model: string;
+      /** Same meaning as on "selected", for the fallback entry: unlisted by the catalog, vouched for by the operator. */
+      unadvertised?: true;
+    };
 
 /**
  * Viable-anywhere check: looser than the account router's own selection
@@ -92,6 +108,14 @@ export interface SelectModelOptions {
   /** Percent at/above which a budget-gated family stops being selectable. */
   modelBudgetThresholdPct?: number;
   /**
+   * `RoleModelPolicy.allowUnlistedModels`: refs the operator has verified
+   * even though the provider's catalog doesn't list them. An allowlisted
+   * entry counts as present for the catalog check — both for a pool entry in
+   * ordered selection and for an explicit request. Every other gate (pool
+   * viability, the budget gate, role approval) still applies to it.
+   */
+  allowUnlistedModels?: readonly string[];
+  /**
    * Which of the role's model pools to use — see `classModels` in
    * shared/role-policy-schema.ts. Omitted (or "standard") means
    * `role.models`, the same pool every role has always used; this makes the
@@ -126,10 +150,11 @@ function isRefUsable(
 }
 
 /**
- * Per-ref eligibility check: catalog presence, plus (for pool-family refs)
- * pool viability and the Fable budget gate. Shared by `selectModel`'s
- * ordered walk and `evaluateRequestedModel`'s single-ref check, so an
- * explicit request is held to the exact same bar as ordered selection.
+ * Per-ref eligibility check: catalog presence (or an operator allowlist
+ * entry standing in for it), plus (for pool-family refs) pool viability and
+ * the Fable budget gate. Shared by `selectModel`'s ordered walk and
+ * `evaluateRequestedModel`'s single-ref check, so an explicit request is held
+ * to the exact same bar as ordered selection.
  */
 function isRefCurrentlySelectable(
   family: string,
@@ -138,8 +163,10 @@ function isRefCurrentlySelectable(
   pool: AvailabilityPool,
   health: AvailabilityHealth,
   thresholdPct: number,
+  allowUnlisted: readonly string[],
 ): boolean {
-  return isListedInCatalog(family, model, catalog) && isRefUsable(family, model, pool, health, thresholdPct);
+  const present = isListedInCatalog(family, model, catalog) || isAllowlisted(allowUnlisted, family, model);
+  return present && isRefUsable(family, model, pool, health, thresholdPct);
 }
 
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
@@ -203,16 +230,6 @@ export interface RequestedModelEvaluation {
   missingFromCatalog?: true;
 }
 
-export interface EvaluateRequestedModelOptions extends SelectModelOptions {
-  /**
-   * `RoleModelPolicy.allowUnlistedModels`. Exists on THIS options type only,
-   * never on `SelectModelOptions`: ordered selection must not be able to
-   * route to an unverified id, and keeping the input off its signature makes
-   * that a type error rather than a convention.
-   */
-  allowUnlistedModels?: readonly string[];
-}
-
 /** Whether `(family, model)` matches an entry of an allowlist of model refs, by family the same way pool membership does. */
 function isAllowlisted(allowlist: readonly string[], family: string, model: string): boolean {
   return allowlist.some((ref) => {
@@ -247,7 +264,7 @@ export function evaluateRequestedModel(
   catalog: ModelCatalog,
   pool: AvailabilityPool,
   health: AvailabilityHealth,
-  options: EvaluateRequestedModelOptions = {},
+  options: SelectModelOptions = {},
 ): RequestedModelEvaluation {
   const configured = isRequestedModelApproved(role, requestedFamily, requestedModel, options.taskClass);
   if (!configured) {
@@ -269,19 +286,24 @@ export function evaluateRequestedModel(
 }
 
 /**
- * The refs in the (role, task class) pool that ordered selection will skip
- * because the catalog doesn't list them. Reported by `explain` so a pool
- * entry that never gets picked without an explicit request is visible rather
- * than a silent no-op.
+ * The refs in the (role, task class) pool that ordered selection SKIPS: the
+ * catalog doesn't list them and the operator hasn't allowlisted them. Reported
+ * by `explain` so a pool entry that is never chosen is visible rather than a
+ * silent no-op. An allowlisted entry is not skipped, so it isn't listed here.
  */
 export function unadvertisedPoolEntries(
   role: RoleRecord,
   catalog: ModelCatalog,
   taskClass?: TaskClassId,
+  allowUnlisted: readonly string[] = [],
 ): string[] {
   return classModels(role, taskClass).filter((ref) => {
     const parsed = splitModelRef(ref);
-    return parsed !== null && !isListedInCatalog(modelRefFamily(parsed), parsed.model, catalog);
+    if (parsed === null) {
+      return false;
+    }
+    const family = modelRefFamily(parsed);
+    return !isListedInCatalog(family, parsed.model, catalog) && !isAllowlisted(allowUnlisted, family, parsed.model);
   });
 }
 
@@ -309,6 +331,7 @@ export function selectModel(
     return { outcome: "unconfigured" };
   }
   const thresholdPct = options.modelBudgetThresholdPct ?? DEFAULT_MODEL_BUDGET_THRESHOLD_PCT;
+  const allowUnlisted = options.allowUnlistedModels ?? [];
 
   for (const ref of models) {
     const parsed = splitModelRef(ref);
@@ -317,15 +340,29 @@ export function selectModel(
     }
     const family = modelRefFamily(parsed);
     const { model } = parsed;
-    if (!isRefCurrentlySelectable(family, model, catalog, pool, health, thresholdPct)) {
+    if (!isRefCurrentlySelectable(family, model, catalog, pool, health, thresholdPct, allowUnlisted)) {
       continue;
     }
-    return { outcome: "selected", provider: parsed.provider, model };
+    return {
+      outcome: "selected",
+      provider: parsed.provider,
+      model,
+      ...(isListedInCatalog(family, model, catalog) ? {} : { unadvertised: true as const }),
+    };
   }
 
   const fallback = splitModelRef(models[0]);
   if (!fallback) {
     return { outcome: "unconfigured" }; // Defensive: same guarantee as above.
   }
-  return { outcome: "unavailable", provider: fallback.provider, model: fallback.model };
+  const fallbackFamily = modelRefFamily(fallback);
+  const fallbackUnadvertised =
+    !isListedInCatalog(fallbackFamily, fallback.model, catalog) &&
+    isAllowlisted(allowUnlisted, fallbackFamily, fallback.model);
+  return {
+    outcome: "unavailable",
+    provider: fallback.provider,
+    model: fallback.model,
+    ...(fallbackUnadvertised ? { unadvertised: true as const } : {}),
+  };
 }

@@ -1572,7 +1572,8 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
     expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith({
       callerAgentId: "(root agent)",
       roleId: "leader",
-      requestedRef: `claude-personal/${OPUS_5_5}`,
+      source: "explicit",
+      ref: `claude-personal/${OPUS_5_5}`,
       taskClass: "hard",
     });
     expect(onExplicitModelOverridden).not.toHaveBeenCalled();
@@ -1591,8 +1592,9 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
     );
   });
 
-  it("REQUIREMENT 1: with no explicit request, ordered selection never picks the unadvertised pool entry, allowlist or not", () => {
-    const router = routerFor({ policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }) });
+  it("DESIGN CHANGE: with no explicit request, ordered selection picks an ALLOWLISTED unadvertised pool entry as the default, loudly", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({ policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }), onUnadvertisedModelAllowed });
 
     // No config.model => the daemon hands the hook no explicit-request signal.
     const result = router(
@@ -1600,8 +1602,69 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
       fakeContext,
     );
 
-    expect(result?.config.model).toBe(FABLE);
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: OPUS_5_5 });
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith({
+      callerAgentId: "(root agent)",
+      roleId: "leader",
+      source: "pool",
+      ref: OPUS_5_5,
+      taskClass: "hard",
+    });
+  });
+
+  it("a NON-allowlisted unadvertised pool entry is still skipped by ordered selection", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({ policy: leaderPolicy({ allowUnlistedModels: [] }), onUnadvertisedModelAllowed });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(FABLE); // opus-5-5 skipped, next advertised entry
     expect(result?.labels).not.toHaveProperty(UNADVERTISED_MODEL_LABEL);
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
+  });
+
+  it("allowlisting one id does not unlock another unadvertised pool entry ahead of it", () => {
+    const policy = leaderPolicy({ allowUnlistedModels: [OPUS_5_5] });
+    const withTypoFirst: RoleModelPolicy = {
+      ...policy,
+      roles: policy.roles.map((role) =>
+        role.id === "leader" ? { ...role, hardModels: ["claude-opus-5-6", OPUS_5_5, FABLE] } : role,
+      ),
+    };
+    const router = routerFor({ policy: withTypoFirst });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(OPUS_5_5); // skipped the unlisted, non-allowlisted 5-6
+  });
+
+  it("an allowlisted pool default on a drained pool is not selected, and the fallback to models[0] is still disclosed", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const health = createHealthTracker();
+    health.reportTurnFailure("claude-personal", "hit your limit");
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      health,
+      onUnadvertisedModelAllowed,
+    });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    // Nothing is eligible, so it falls back to models[0] (existing behavior).
+    // That fallback IS the unverified id here, so it must not run silently.
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: OPUS_5_5 });
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith(expect.objectContaining({ source: "pool" }));
   });
 
   it("REQUIREMENT 3: a typo'd id matches no allowlist entry, so it is refused at validation rather than dying at launch", () => {
@@ -1615,8 +1678,10 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
 
     const result = router(rootHardRequest("claude-opus-5-6"), fakeContext);
 
-    expect(result?.config.model).toBe(FABLE);
-    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
+    // The typo is refused as an EXPLICIT request; policy then runs its own
+    // default (the allowlisted opus-5-5) — a real model, not the typo.
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalledWith(expect.objectContaining({ source: "explicit" }));
     expect(onExplicitModelOverridden).toHaveBeenCalledWith(expect.objectContaining({ reason: "not-approved" }));
   });
 
@@ -1634,7 +1699,9 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
 
     router(rootHardRequest(), fakeContext);
 
-    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
+    // The explicit request was refused. (The pool fallback to models[0] is a
+    // separate, disclosed event with source "pool" — covered above.)
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalledWith(expect.objectContaining({ source: "explicit" }));
     const episode = onExplicitModelOverridden.mock.calls[0][0];
     expect(episode.reason).toBe("not-currently-selectable");
     expect(episode.missingFromCatalog).toBeUndefined(); // the allowlist isn't the lever here, so don't point at it
@@ -1653,6 +1720,8 @@ describe("createRoleRouter — explicit request for a model the catalog doesn't 
       fakeContext,
     );
 
+    // Not approved in the standard pool, so refused as an explicit request;
+    // policy's own standard default is the advertised opus-5.
     expect(result?.config.model).toBe("claude-opus-5");
     expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
   });
