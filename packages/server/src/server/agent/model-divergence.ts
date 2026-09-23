@@ -36,9 +36,10 @@ const PLACEHOLDER_MODEL_IDS = new Set(["<synthetic>"]);
  * `4-8`.
  *
  * Deliberately not `normalizeClaudeRuntimeModelId`: that one maps a display id onto the manifest
- * and its fallback regex is unanchored, so `claude-opus-5-5` collapses onto `claude-opus-5`. It
- * is right for choosing a label and wrong for asking whether two ids are the same model — it
- * would hide exactly the Opus 5.5 → Opus 5 substitution this feature exists to catch.
+ * and returns null for any id the manifest lacks, so two different unknown models would compare
+ * equal (and before its fallback was anchored it collapsed `claude-opus-5-5` onto
+ * `claude-opus-5`). It is right for choosing a label and wrong for asking whether two ids are the
+ * same model.
  */
 export function canonicalModelId(value: string | null | undefined): string | null {
   const trimmed = typeof value === "string" ? value.trim().toLowerCase() : "";

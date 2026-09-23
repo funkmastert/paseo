@@ -13,7 +13,12 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
-import { findClaudeModel, getClaudeModels, normalizeClaudeRuntimeModelId } from "./models.js";
+import {
+  findClaudeModel,
+  getClaudeModels,
+  normalizeClaudeRuntimeModelId,
+  resolveObservedClaudeModelId,
+} from "./models.js";
 
 const createdClaudeConfigDirs: string[] = [];
 
@@ -404,6 +409,38 @@ describe("normalizeClaudeRuntimeModelId", () => {
   it("returns null for unrecognized strings", () => {
     expect(normalizeClaudeRuntimeModelId("gpt-5")).toBeNull();
     expect(normalizeClaudeRuntimeModelId("random")).toBeNull();
+  });
+
+  // Opus 5.5 is not in the manifest, so it must not normalize to Opus 5, which is: an unknown id
+  // stays unknown (null) and callers show the raw id instead.
+  it("keeps a minor version from collapsing onto its major", () => {
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5[1m]")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5-20260901")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-5-20260901[1m]")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-5")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-5-v1:0")).toBeNull();
+    expect(normalizeClaudeRuntimeModelId("openrouter/anthropic/claude-opus-5-5[1m]")).toBeNull();
+
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5[1m]")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-20260724")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("claude-opus-5-20260724[1m]")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5")).toBe("claude-opus-5");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-opus-5-20260724-v1:0")).toBe(
+      "claude-opus-5",
+    );
+
+    expect(normalizeClaudeRuntimeModelId("claude-fable-5-1")).toBe("claude-fable-5-1");
+    expect(normalizeClaudeRuntimeModelId("us.anthropic.claude-fable-5-1[1m]")).toBe(
+      "claude-fable-5-1",
+    );
+  });
+
+  it("shows Opus 5.5 as itself, not as Opus 5", () => {
+    expect(resolveObservedClaudeModelId("claude-opus-5-5")).toBe("claude-opus-5-5");
+    expect(resolveObservedClaudeModelId("claude-opus-5-5[1m]")).toBe("claude-opus-5-5[1m]");
+    expect(resolveObservedClaudeModelId("claude-opus-5-20260724")).toBe("claude-opus-5");
   });
 
   it("normalizes provider-form runtime model strings", () => {

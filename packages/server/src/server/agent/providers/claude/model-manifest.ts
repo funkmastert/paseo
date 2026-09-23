@@ -363,34 +363,27 @@ export function normalizeClaudeRuntimeModelId(value: string | null | undefined):
     return null;
   }
 
-  const singleSegmentMatch = trimmed.match(
-    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)(\[1m\])?/i,
-  );
-  if (singleSegmentMatch) {
-    const normalizedModelId = normalizeSingleSegmentClaudeModelId(
-      singleSegmentMatch[1],
-      singleSegmentMatch[2],
-      trimmed.toLowerCase().includes("[1m]"),
-    );
-    if (normalizedModelId) {
-      return normalizedModelId;
-    }
-  }
-
-  const runtimeMatch = trimmed.match(
-    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)[-.](\d+)(\[1m\])?/i,
-  );
-  if (!runtimeMatch) {
+  const embeddedMatch = trimmed.match(EMBEDDED_CLAUDE_MODEL_PATTERN);
+  if (!embeddedMatch) {
     return null;
   }
 
-  return normalizeMajorMinorClaudeModelId(
-    runtimeMatch[1],
-    runtimeMatch[2],
-    runtimeMatch[3],
-    trimmed.toLowerCase().includes("[1m]"),
-  );
+  const [, family, major, minor] = embeddedMatch;
+  const hasOneMillionContext = trimmed.toLowerCase().includes("[1m]");
+  return minor === undefined
+    ? normalizeSingleSegmentClaudeModelId(family, major, hasOneMillionContext)
+    : normalizeMajorMinorClaudeModelId(family, major, minor, hasOneMillionContext);
 }
+
+/**
+ * A first-party id inside a provider-form one (`us.anthropic.…`, `openrouter/anthropic/…`,
+ * Bedrock's trailing `-v1:0`), read whole: family, major, optional minor, `[1m]`, date. The
+ * lookahead refuses a match that stops short of the next version segment. Without it
+ * `claude-opus-5-5` matched as its own prefix `claude-opus-5`, a different manifest model, and
+ * Opus 5.5 agents were shown as Opus 5.
+ */
+const EMBEDDED_CLAUDE_MODEL_PATTERN =
+  /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)(?:[-.](\d{1,2}))?(?:\[1m\])?(?:[-_ ]+\d{8})?(?:\[1m\])?(?![\w.]|[-_ ]\d)/i;
 
 export function getClaudeCustomModelThinkingOptions(): AgentSelectOption[] {
   return CLAUDE_EFFORT_LEVELS.standard.map((id) => {
