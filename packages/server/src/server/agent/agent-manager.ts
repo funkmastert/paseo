@@ -1,5 +1,6 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { PromptInterception } from "./agent-refocus.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
@@ -264,6 +265,11 @@ export type AgentManagerEvent =
     };
 
 export type AgentSubscriber = (event: AgentManagerEvent) => void;
+
+export type PromptDispatchInterceptor = (
+  agentId: string,
+  prompt: AgentPromptInput,
+) => PromptInterception | null;
 
 export interface SubscribeOptions {
   agentId?: string;
@@ -1127,6 +1133,7 @@ export class AgentManager {
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
+  private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
@@ -1352,6 +1359,18 @@ export class AgentManager {
     const record = await this.registry.get(agentId);
     if (!record || record.internal) return;
     this.dispatchStoredAgentState(record);
+  }
+
+  /**
+   * Refocus (agent-refocus.ts, docs/refocus.md) adds to prompts other surfaces are already
+   * sending. Set by bootstrap; `startAgentRun` consults it for every prompt it dispatches.
+   */
+  setPromptDispatchInterceptor(interceptor: PromptDispatchInterceptor | null): void {
+    this.promptDispatchInterceptor = interceptor;
+  }
+
+  interceptPromptForDispatch(agentId: string, prompt: AgentPromptInput): PromptInterception | null {
+    return this.promptDispatchInterceptor?.(agentId, prompt) ?? null;
   }
 
   /** Current device-cap snapshot, or null when no cap is wired. */

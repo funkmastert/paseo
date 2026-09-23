@@ -23,9 +23,10 @@ export type AgentRunController = Pick<
   | "replaceAgentRun"
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
-> & {
-  reloadAgentSession(agentId: string): Promise<unknown>;
-};
+> &
+  Partial<Pick<AgentManager, "interceptPromptForDispatch">> & {
+    reloadAgentSession(agentId: string): Promise<unknown>;
+  };
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
@@ -116,6 +117,33 @@ export async function startAgentRun(
   if (agentManager.tryRunOutOfBand(agentId, prompt, options?.runOptions)) {
     return { disposition: "out_of_band" };
   }
+  // Refocus rides on this prompt when one is due (agent-refocus.ts). It only ever adds to a
+  // prompt that is being sent anyway, so every surface gets it without ever starting a turn.
+  const interception = agentManager.interceptPromptForDispatch?.(agentId, prompt) ?? null;
+  const dispatchPrompt = interception?.prompt ?? prompt;
+  try {
+    const result = await startAgentRunWithStaleRetry(
+      agentManager,
+      agentId,
+      dispatchPrompt,
+      logger,
+      options,
+    );
+    interception?.settle(true);
+    return result;
+  } catch (error) {
+    interception?.settle(false);
+    throw error;
+  }
+}
+
+async function startAgentRunWithStaleRetry(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  logger: Logger,
+  options?: StartAgentRunOptions,
+): Promise<{ disposition: PromptDispatchDisposition }> {
   try {
     return await startAgentRunInner(agentManager, agentId, prompt, logger, options);
   } catch (error) {

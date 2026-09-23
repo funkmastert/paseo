@@ -328,6 +328,20 @@ const MutableDoneJanitorConfigSchema = z
   .passthrough();
 
 const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/refocus.md.
+const MutableRefocusConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    growthTokens: z.number().int().positive().optional(),
+    onCompaction: z.boolean().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    excerptChars: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableRefocusPatchSchema = MutableRefocusConfigSchema;
 
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
@@ -521,6 +535,8 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
+    // COMPAT(refocus): additive optional config, nothing to remove.
+    refocus: MutableRefocusConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -551,6 +567,7 @@ export const MutableDaemonConfigPatchSchema = z
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
+    refocus: MutableRefocusPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
