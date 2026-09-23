@@ -9,6 +9,7 @@ import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { FINISH_OBLIGATION_SCHEMA, type FinishObligation } from "./finish-obligation.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -80,6 +81,11 @@ const STORED_AGENT_SCHEMA = z.object({
   // human- or tool-renamed title from being overwritten by the background
   // title tracker; unset for creation-time titles, which stay refreshable.
   titleManuallySet: z.boolean().optional(),
+  // Finish reports this agent owes (docs/finish-reports.md). Written only through
+  // updateFinishObligations; every other write carries the stored value forward. A list this
+  // daemon cannot read is dropped rather than failing the whole record, which would hide the
+  // agent: that is a daemon older than the one that wrote it, and it simply owes nothing.
+  finishObligations: z.array(FINISH_OBLIGATION_SCHEMA).optional().catch(undefined),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -160,13 +166,38 @@ export class AgentStorage {
     await this.queueRecordWrite(record);
   }
 
+  /**
+   * The only write that changes an agent's finish obligations. Runs in the agent's write queue,
+   * so it cannot interleave with a snapshot or metadata write. Resolves false when the agent has
+   * no record.
+   */
+  async updateFinishObligations(
+    agentId: string,
+    mutate: (current: readonly FinishObligation[]) => FinishObligation[],
+  ): Promise<boolean> {
+    await this.load();
+    let written = false;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) return null;
+      written = true;
+      const next = mutate(existing.finishObligations ?? []);
+      const { finishObligations: _previous, ...rest } = existing;
+      return next.length > 0 ? { ...rest, finishObligations: next } : rest;
+    });
+    return written;
+  }
+
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    return this.queueRecordMutation(record.id, () => record);
+    // Callers build records by spreading one they read earlier, so their copy of the obligations
+    // can be stale by the time this write runs. The stored value wins.
+    return this.queueRecordMutation(record.id, (existing) =>
+      carryFinishObligations(record, existing),
+    );
   }
 
   private queueRecordMutation(
     agentId: string,
-    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
+    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord | null,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
@@ -176,7 +207,7 @@ export class AgentStorage {
 
       const existing = this.cache.get(agentId) ?? null;
       const record = mutate(existing);
-      if (record === existing) {
+      if (record === null || record === existing) {
         // Mutation declined to change anything (e.g. a generated-title write
         // that lost the race to a manual rename); skip the redundant disk
         // write and cache update.
@@ -292,7 +323,7 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      return record;
+      return carryFinishObligations(record, existing);
     });
     return applied;
   }
@@ -459,6 +490,17 @@ export class AgentStorage {
   private async waitForPendingWrite(agentId: string): Promise<void> {
     await (this.pendingWrites.get(agentId) ?? Promise.resolve()).catch(() => undefined);
   }
+}
+
+function carryFinishObligations(
+  record: StoredAgentRecord,
+  existing: StoredAgentRecord | null,
+): StoredAgentRecord {
+  if (!existing) return record;
+  const { finishObligations: _incoming, ...rest } = record;
+  return existing.finishObligations
+    ? { ...rest, finishObligations: existing.finishObligations }
+    : rest;
 }
 
 function projectDirNameFromCwd(cwd: string): string {

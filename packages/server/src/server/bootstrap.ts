@@ -220,6 +220,8 @@ import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
+import { FinishObligationService } from "./agent/finish-obligation-service.js";
+import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
 import {
   AgentDoneJanitor,
   askAgentWhetherDone,
@@ -549,6 +551,16 @@ export interface PaseoDaemonConfig {
     sweepIntervalMs?: number;
     now?: () => number;
   };
+  /**
+   * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
+   * past their own runtime, drive sweeps with `getFinishObligations().tick()`, shorten the ladder
+   * and advance `now`.
+   */
+  finishReportOverrides?: {
+    sweepIntervalMs?: number;
+    ladder?: Partial<FinishReportLadderConfig>;
+    now?: () => number;
+  };
   doneJanitor?: DoneJanitorConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
@@ -597,6 +609,8 @@ export interface PaseoDaemon {
   getAccountFailoverMonitor(): AccountFailoverMonitor | null;
   /** Null until start() has constructed it, like the account-failover monitor. */
   getDoneJanitor(): AgentDoneJanitor | null;
+  /** The durable finish-report ledger (docs/finish-reports.md). */
+  getFinishObligations(): FinishObligationService;
 }
 
 export interface PaseoDaemonDependencies {
@@ -774,6 +788,28 @@ function createDoneJanitor(input: {
     readDaemonConfig: () => ({ doneJanitor: input.daemonConfigStore.get().doneJanitor }),
     logger,
     sweepIntervalMs: overrides?.sweepIntervalMs,
+    now: overrides?.now,
+  });
+}
+
+function createFinishObligationService(input: {
+  config: Pick<PaseoDaemonConfig, "finishReportOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  serverId: string;
+  logger: Logger;
+}): FinishObligationService {
+  const overrides = input.config.finishReportOverrides;
+  return new FinishObligationService({
+    agentManager: input.agentManager,
+    agentStorage: input.agentStorage,
+    serverId: input.serverId,
+    logger: input.logger,
+    isAccountFailoverEnabled: () =>
+      input.daemonConfigStore.get().accountFailover?.enabled !== false,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    ladder: overrides?.ladder,
     now: overrides?.now,
   });
 }
@@ -1354,6 +1390,18 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
+  // the records, so a restart still knows who is waiting to hear back.
+  const finishObligations = createFinishObligationService({
+    config,
+    agentManager,
+    agentStorage,
+    daemonConfigStore,
+    serverId,
+    logger,
+  });
+  await finishObligations.initialize();
+  agentManager.setFinishObligations(finishObligations);
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -2297,6 +2345,9 @@ export async function createPaseoDaemon(
               logger,
             });
             accountFailoverMonitor.start();
+            finishObligations.start({
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+            });
             // Advice-only sibling of the two monitors above: it reads the same cached usage rows
             // the failover monitor does and the same steer path, and never acts on either.
             budgetPacingMonitor = new AgentBudgetPacingMonitor({
@@ -2397,8 +2448,11 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    // Before the closures below: each one would otherwise read as its child's outcome.
+    finishObligations.prepareForShutdown();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
+    await finishObligations.stop().catch(() => undefined);
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();
@@ -2455,6 +2509,7 @@ export async function createPaseoDaemon(
     getListenTarget: () => boundListenTarget,
     getAccountFailoverMonitor: () => accountFailoverMonitor,
     getDoneJanitor: () => doneJanitor,
+    getFinishObligations: () => finishObligations,
   };
 }
 

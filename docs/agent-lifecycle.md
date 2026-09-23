@@ -76,7 +76,7 @@ Users can also detach an existing subagent from the subagents track. Detach is d
 `notifyOnFinish` defaults to `true` for agent-scoped creation and background prompt follow-ups because most delegated work needs to report back to the creating agent. Set it to `false` only for truly fire-and-forget agents or prompts.
 Permission requests are notification checkpoints, not the end of that subscription. The caller is notified again after a permission response when the child finishes, errors, or requests another permission.
 The permission notification includes the normalized request plus the child and request IDs, so the caller can inspect it and respond without fetching agent status.
-A watched child that closes before its finish event also notifies the caller so delegated work cannot disappear silently during archive or workspace teardown.
+A watched child that closes before its finish event also notifies the caller so delegated work cannot disappear silently during archive or workspace teardown. A daemon shutdown is not such a close: the report stays owed on the child's record, and the restarted daemon delivers it. [finish-reports.md](finish-reports.md) covers the durable ledger, its retry and escalation ladder, and how the report follows a successor.
 
 ## Provider-managed child agents
 
@@ -179,9 +179,9 @@ if its parent is waiting on it, the parent waits forever. So a delegated agent's
 request escalates to a person, but only when nothing else can answer it. `AgentManager` tracks
 which children have a live notify-on-finish observer (`noteFinishObserver`, set by
 `setupFinishNotification`); while one exists, the request goes to the caller, which answers with
-`respond_to_permission`, and no push is sent. With none — after a daemon restart, which is when
-those in-memory observers are lost, with `notifyOnFinish: false`, or once an archived caller
-releases its own observer — the push is the only way anyone learns.
+`respond_to_permission`, and no push is sent. With none — after a daemon restart, until the
+child runs again and its watcher is re-attached, with `notifyOnFinish: false`, or once an archived
+caller releases its own observer — the push is the only way anyone learns.
 
 Most subagents run `bypassPermissions` and never prompt: 27 of 28 live delegated agents on one
 machine, and 844 of 1007 across its history. The other 163 ran in `auto`, `acceptEdits`, `plan`

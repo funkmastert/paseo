@@ -264,9 +264,10 @@ export function buildResumePrompt(input: {
     `2. Create every new subagent with provider "${providerRef}" explicitly. ` +
       `"${input.oldProviderId}" is out of budget, and the default provider or a role/model ` +
       "policy can still place an unqualified spawn there, where it dies immediately.",
-    `3. Your existing subagents are still parented to ${input.oldAgentId}, so their finish ` +
-      "notifications will not reach you. Check them with list_agents / get_agent_activity and " +
-      `relaunch only the ones that died on the limit, with provider "${providerRef}".`,
+    `3. Your existing subagents are still parented to ${input.oldAgentId}. Their finish ` +
+      "reports are forwarded to you, but list_agents lists them under the old id. Check them " +
+      "with get_agent_activity and relaunch only the ones that died on the limit, with " +
+      `provider "${providerRef}".`,
   ].join("\n");
 }
 

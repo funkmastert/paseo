@@ -278,6 +278,8 @@ export const zhCN: TranslationResources = {
       attention: "需要注意",
       needsInput: "需要输入",
       failed: "失败",
+      owesReport: "待报告",
+      reportUndelivered: "报告未送达",
       tokenBurnWarning: "消耗较高",
       tokenBurnDanger: "消耗过高",
     },

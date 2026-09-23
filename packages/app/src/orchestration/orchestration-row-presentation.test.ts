@@ -47,6 +47,21 @@ describe("resolveOrchestrationRowPresentation", () => {
     expect(resolveOrchestrationRowPresentation(attention).badge).toBeNull();
   });
 
+  it("badges a subagent whose parent is still owed its finish report", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    const report = { ownerAgentId: "leader", since: "2026-09-23T12:00:00.000Z" };
+    const parked: Agent = { ...finished, owedFinishReport: { ...report, state: "parked" } };
+    expect(resolveOrchestrationRowPresentation(parked).badge).toBe("owes-report");
+    const undelivered: Agent = {
+      ...finished,
+      owedFinishReport: { ...report, state: "undelivered", attempts: 2 },
+    };
+    expect(resolveOrchestrationRowPresentation(undelivered).badge).toBe("report-undelivered");
+    // A state a newer daemon adds reads as the stuck one, not as nothing.
+    const unknown: Agent = { ...finished, owedFinishReport: { ...report, state: "someday" } };
+    expect(resolveOrchestrationRowPresentation(unknown).badge).toBe("report-undelivered");
+  });
+
   it("separates a closed agent from an idle one", () => {
     expect(
       resolveOrchestrationRowPresentation(byTitle("Reap leases whose holder went away")).isClosed,

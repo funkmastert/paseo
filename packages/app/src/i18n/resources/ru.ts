@@ -280,6 +280,8 @@ export const ru: TranslationResources = {
       attention: "Внимание",
       needsInput: "Нужен ответ",
       failed: "Ошибка",
+      owesReport: "Должен отчёт",
+      reportUndelivered: "Отчёт не доставлен",
       tokenBurnWarning: "Высокий расход",
       tokenBurnDanger: "Очень высокий расход",
     },

@@ -73,7 +73,7 @@ The sweep covers agents loaded in the daemon. After a restart, a stuck agent is 
 3. **Send a resume prompt.** It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
 4. **Push** the agent id → account.
 
-A moved agent needs nothing else: it keeps the parent label and the id its parent holds, so the parent's finish notification still arrives and nobody has to be told anything.
+A moved agent keeps the parent label and the id its parent holds, so nobody has to be told where it went. Its parent was already told "errored" when the cap hit, so after the resume prompt the monitor re-arms the finish report and the parent hears again when the work finishes ([finish-reports.md](finish-reports.md#successors)).
 
 ### When it falls back to importing
 
@@ -84,7 +84,7 @@ The import path costs more, which is why it is second:
 1. **Import the session** onto the target account through the same path as `paseo import`. The successor keeps the full conversation and the same Claude session id, and gets the predecessor's labels plus `handoff-from=<oldId>`.
 2. **Retire the predecessor**: title `[MOVED → <newId>, out of budget] <title>` and label `paseo.account-failover.migrated-to=<newId>`. It is never archived. It may hold watchdogs, and archival is your call.
 3. **Restore model, thinking option, and mode.** Import resets all three to provider defaults.
-4. **Send a resume prompt** stating what actually got restored. It adds a third instruction a move does not need: the agent's existing subagents are still parented to the old id, so their finish notifications will not arrive.
+4. **Send a resume prompt** stating what actually got restored. It adds a third instruction a move does not need: the agent's existing subagents are still parented to the old id. Their finish reports follow `migrated-to` to the successor, but `list_agents` shows them under the old id.
 5. **Push** old id → new id → account.
 6. **Tell a running parent.** For an imported subagent, the parent gets a steered system message naming the new id, but only while the parent is running. Steering an idle agent starts a new turn nobody is driving, the same trap [resource-monitor.md](resource-monitor.md) describes. An idle parent gets no message; the successor keeps the parent label, so it shows up under the parent in `list_agents`, and you get the push.
 
@@ -132,6 +132,6 @@ It is live-toggleable like `tokenBurnMonitor` and `resourceMonitor`: the monitor
 
 - **Caps that outlast five hours.** A monthly spend cap can outlive its evidence. The account then looks healthy again, and one migration lands there, fails, and marks it dead for another five hours. So a capped worker is re-probed at most once per five hours.
 - **Loaded agents only**, as described under [Which agents move](#which-agents-move).
-- **The import fallback still orphans.** Everything under [When it falls back to importing](#when-it-falls-back-to-importing) applies when it runs: a second agent id, a parent that may relaunch the subagent before the sweep reaches it (leaving two copies), and no finish notification for the successor. If duplicates become a pattern there, set `migrateSubagents: false`.
+- **The import fallback mints a second id.** Everything under [When it falls back to importing](#when-it-falls-back-to-importing) applies when it runs, including a parent that may relaunch the subagent before the sweep reaches it (leaving two copies). The successor inherits the predecessor's finish report ([finish-reports.md](finish-reports.md#successors)). If duplicates become a pattern there, set `migrateSubagents: false`.
 
 For the shared monitor shape (unref'd timer, per-sweep config read, push payloads outside the closed `attentionReason` enum), see [resource-monitor.md](resource-monitor.md) and [token-burn.md](token-burn.md).

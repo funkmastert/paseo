@@ -22,6 +22,7 @@ import type { JsonValue } from "../json-utils.js";
 import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
 import { computeTokenRate } from "./token-rate-tracker.js";
 import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
+import { summarizeOwedFinishReport } from "./finish-obligation.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
@@ -167,13 +168,7 @@ export function toAgentPayload(
     payload.totalTokens = agent.totalTokens;
   }
 
-  if (agent.tokenBurnAlert !== undefined) {
-    payload.tokenBurnAlert = agent.tokenBurnAlert;
-  }
-
-  if (agent.resourceAlert !== undefined) {
-    payload.resourceAlert = agent.resourceAlert;
-  }
+  applyAgentAlerts(payload, agent);
 
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
@@ -186,6 +181,19 @@ export function toAgentPayload(
   }
 
   return payload;
+}
+
+/** The badges a live agent carries beside its status: over budget, over resources, owing a report. */
+function applyAgentAlerts(payload: AgentSnapshotPayload, agent: ManagedAgent): void {
+  if (agent.tokenBurnAlert !== undefined) {
+    payload.tokenBurnAlert = agent.tokenBurnAlert;
+  }
+  if (agent.resourceAlert !== undefined) {
+    payload.resourceAlert = agent.resourceAlert;
+  }
+  if (agent.owedFinishReport !== undefined) {
+    payload.owedFinishReport = agent.owedFinishReport;
+  }
 }
 
 function buildStoredRuntimeInfo(record: StoredAgentRecord): AgentRuntimeInfo | undefined {
@@ -245,6 +253,7 @@ export function buildStoredAgentPayload(
   const persistence = projectPersistenceHandleForWire(
     buildStoredPersistenceHandle(record, validProviders),
   );
+  const owedFinishReport = summarizeOwedFinishReport(record.finishObligations);
 
   return {
     id: record.id,
@@ -272,6 +281,7 @@ export function buildStoredAgentPayload(
     archivedAt: record.archivedAt ?? null,
     labels: normalizeLabels(record.labels),
     ...(providerAvailable ? {} : { providerUnavailable: true }),
+    ...(owedFinishReport ? { owedFinishReport } : {}),
   };
 }
 
@@ -328,6 +338,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
     ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
     ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
+    ...(agent.owedFinishReport !== undefined ? { owedFinishReport: agent.owedFinishReport } : {}),
   };
 }
 

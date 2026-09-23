@@ -236,6 +236,24 @@ export interface ResourceAlert {
   firstBreachedAt: string;
 }
 
+/**
+ * A delegated agent that still owes its parent a finish report the parent has not received —
+ * see docs/finish-reports.md. Present only while that is true and worth an orchestrator's eye:
+ * the child stopped without reporting (`"parked"`), or its report could not be delivered and is
+ * being retried or escalated (`"undelivered"`). A child that is simply still working carries
+ * nothing. `state` is an open string, not an enum, so a later state parses on every shipped app;
+ * an app treats a value it does not know as `"undelivered"`.
+ */
+export interface OwedFinishReport {
+  /** The agent the report is owed to — the parent, or whoever prompted with notifyOnFinish. */
+  ownerAgentId: string;
+  state: string;
+  /** When the current state began (ISO 8601). */
+  since: string;
+  /** Delivery attempts made so far, the failed ones included. */
+  attempts?: number;
+}
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",

@@ -278,6 +278,8 @@ export const ar: TranslationResources = {
       attention: "انتباه",
       needsInput: "بحاجة إلى إدخال",
       failed: "فشل",
+      owesReport: "مدين بتقرير",
+      reportUndelivered: "لم يُسلَّم التقرير",
       tokenBurnWarning: "استهلاك مرتفع",
       tokenBurnDanger: "استهلاك مرتفع جدًا",
     },

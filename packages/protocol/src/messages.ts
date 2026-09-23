@@ -581,6 +581,7 @@ import type {
   JsonValue,
   TokenBurnAlert,
   ResourceAlert,
+  OwedFinishReport,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -745,6 +746,14 @@ const ResourceAlertSchema: z.ZodType<ResourceAlert> = z.object({
   memoryBytes: z.number(),
   cpuPercent: z.number(),
   firstBreachedAt: z.string(),
+});
+
+// `state` is a string rather than an enum so a state added later still parses on old apps.
+const OwedFinishReportSchema: z.ZodType<OwedFinishReport> = z.object({
+  ownerAgentId: z.string(),
+  state: z.string(),
+  since: z.string(),
+  attempts: z.number().optional(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -1208,6 +1217,9 @@ export const AgentSnapshotPayloadSchema = z.object({
   providerUnavailable: z.boolean().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
   resourceAlert: ResourceAlertSchema.optional(),
+  // COMPAT(owedFinishReport): added in v0.8.1. Optional because older daemons never send it, and
+  // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
+  owedFinishReport: OwedFinishReportSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1237,6 +1249,9 @@ export const AgentListItemPayloadSchema = z.object({
   totalTokens: z.number().optional(),
   tokenBurnAlert: TokenBurnAlertSchema.optional(),
   resourceAlert: ResourceAlertSchema.optional(),
+  // COMPAT(owedFinishReport): added in v0.8.1. Optional because older daemons never send it, and
+  // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
+  owedFinishReport: OwedFinishReportSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
