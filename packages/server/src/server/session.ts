@@ -181,6 +181,7 @@ import {
   createAgentStructuredTextGeneration,
   createGitMetadataGenerator,
 } from "./session/checkout/git-metadata-generator.js";
+import { NotifyPolicySession } from "./session/notify-policy/notify-policy-session.js";
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
@@ -803,6 +804,7 @@ export class Session {
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
   private readonly scheduleSession: ScheduleSession;
+  private readonly notifyPolicySession: NotifyPolicySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
@@ -974,6 +976,11 @@ export class Session {
         this.emitWorkspaceUpdateForWorkspaceId(workspaceId),
       emitStatusUpdate: (cwd, snapshot) => this.checkoutSession.emitStatusUpdate(cwd, snapshot),
       onBranchChanged,
+      logger: this.sessionLogger,
+    });
+    this.notifyPolicySession = new NotifyPolicySession({
+      host: { emit: (msg) => this.emit(msg) },
+      getNotifyPolicy: () => this.pushNotifications.policy,
       logger: this.sessionLogger,
     });
     this.scheduleSession = new ScheduleSession({
@@ -2885,6 +2892,13 @@ export class Session {
         return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
+        return;
+      case "notifications.policy.get.request":
+      case "notifications.policy.set.request":
+        await this.notifyPolicySession.handlePolicyRequest(msg);
+        return;
+      case "notifications.ledger.list.request":
+        this.notifyPolicySession.handleLedgerListRequest(msg);
         return;
       case "push.unregister.request":
         this.pushNotifications.revoke(msg.token);

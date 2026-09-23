@@ -5,6 +5,7 @@ import {
   buildBatchedTokenBurnNotificationPayload,
   buildSpendGovernorNotificationPayload,
   buildTokenBurnNotificationPayload,
+  type SpendGovernorStage,
 } from "@getpaseo/protocol/token-burn-notification";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
@@ -17,7 +18,8 @@ import {
   type SpendGovernorAction,
   type SpendGovernorConfig as GovernorDecisionConfig,
 } from "./agent/spend-governor.js";
-import type { PushNotificationSender } from "./push/index.js";
+import type { NotifyLevel } from "./notify-policy/levels.js";
+import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { ModelDivergenceMonitorSettings } from "./agent-model-divergence-monitor.js";
 
@@ -47,6 +49,15 @@ const DEFAULT_DOWNGRADE_AT_FRACTION = 1;
 const DEFAULT_STOP_FAN_OUT_AT_FRACTION = 1;
 const DEFAULT_PAUSE_AT_FRACTION = 1.5;
 const DEFAULT_ACCOUNT_PRESSURE_USED_PCT = 90;
+
+/**
+ * A warning or a model downgrade is news; a pause or a fan-out block leaves an agent stopped until
+ * a person acts. A dry run changed nothing, so it is only recorded.
+ */
+function governorNotifyLevel(stage: SpendGovernorStage, dryRun: boolean): NotifyLevel {
+  if (dryRun) return "record";
+  return stage === "pause" || stage === "stopFanOut" ? "alert" : "notice";
+}
 
 export interface SpendGovernorStageSettings {
   enabled?: boolean;
@@ -480,6 +491,7 @@ export class AgentTokenBurnMonitor {
             workspaceId: breach.workspaceId,
           })),
         }),
+        { level: "notice" },
       );
       return;
     }
@@ -496,6 +508,8 @@ export class AgentTokenBurnMonitor {
           ratePerMinute: breach.tokenRate,
           totalTokens: breach.totalTokens,
         }),
+        // A fast agent is usually a busy one. The per-agent alert on the row still shows it.
+        { level: "notice" },
       );
     }
   }
@@ -580,6 +594,7 @@ export class AgentTokenBurnMonitor {
           dryRun,
           ...(action.targetModel ? { detail: action.targetModel } : {}),
         }),
+        { level: governorNotifyLevel(action.stage, dryRun) },
       );
     }
   }
@@ -749,6 +764,10 @@ export class AgentTokenBurnMonitor {
             usedPct,
             resetsAt: window.resetsAt,
           }),
+          // The one alert here that costs work if ignored: the account pool is about to cap and
+          // every agent on it stops. It interrupts, and a repeat of the same window inside the
+          // policy's cooldown is counted rather than re-announced.
+          { level: "urgent", dedupeKey: `account-pressure:${key}` },
         );
       }
     }
@@ -757,13 +776,16 @@ export class AgentTokenBurnMonitor {
     this.reportedAccountWindows = stillHot;
   }
 
-  private async sendPush(payload: {
-    title: string;
-    body: string;
-    data: Record<string, unknown>;
-  }): Promise<void> {
+  private async sendPush(
+    payload: {
+      title: string;
+      body: string;
+      data: Record<string, unknown>;
+    },
+    meta: PushSendMeta,
+  ): Promise<void> {
     try {
-      await this.pushNotificationSender.send(payload);
+      await this.pushNotificationSender.send(payload, meta);
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to send token-burn push notification");
     }

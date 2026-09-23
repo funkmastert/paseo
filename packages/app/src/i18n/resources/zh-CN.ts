@@ -2372,6 +2372,67 @@ export const zhCN: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "通知",
+        info: "选择哪些通知立即送达此设备，哪些等待汇总。警报需要你处理；提示值得了解，但可以稍后再看。",
+        loadError: "无法加载通知设置",
+        unsupported: "请更新此主机以更改通知设置",
+        availability: {
+          label: "可用状态",
+          options: {
+            available: "可用",
+            focus: "专注",
+            away: "离开",
+            off: "关闭",
+          },
+          hints: {
+            available: "警报会打断你，提示以汇总形式送达",
+            focus: "只有紧急警报会发出声音，提示会等待",
+            away: "警报仍会打断你，提示会等到你回来",
+            off: "不发出任何声音，所有通知静默送达",
+          },
+        },
+        duration: {
+          label: "持续",
+          options: {
+            oneHour: "1 小时",
+            fourHours: "4 小时",
+            untilChanged: "直到我更改",
+          },
+          endsAt: "直到 {{time}}",
+        },
+        interrupt: {
+          label: "以下情况打断我",
+          hint: "其余内容等待汇总",
+          options: {
+            urgent: "仅紧急",
+            alert: "警报和紧急",
+            notice: "全部",
+          },
+        },
+        notices: {
+          label: "提示",
+          hint: "值得了解，但现在不需要处理",
+          options: {
+            digest: "汇总",
+            off: "关闭",
+          },
+        },
+        digestInterval: {
+          label: "汇总发送间隔",
+          options: {
+            m15: "15 分钟",
+            m30: "30 分钟",
+            m60: "1 小时",
+            m180: "3 小时",
+          },
+        },
+        status: {
+          held: "等待下一次汇总",
+          unreached: "未送达（{{count}}）",
+          unreachedHint: "被推送服务拒绝，或在没有已注册设备时发出的通知",
+        },
+      },
       appearance: {
         title: "外观",
         name: {

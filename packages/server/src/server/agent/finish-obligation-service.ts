@@ -569,6 +569,7 @@ export class FinishObligationService {
             ownerTitle: owner?.title,
             outcome: obligation.outcome?.reason ?? "finished",
           }),
+          { level: "urgent", dedupeKey: `finish-report:${childAgentId}` },
         );
       } catch (caught) {
         error = caught instanceof Error ? caught.message : String(caught);

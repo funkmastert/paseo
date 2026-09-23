@@ -204,6 +204,7 @@ export class AgentModelDivergenceMonitor {
           observedModel: divergence.observedModel,
           responses: divergence.responses,
         }),
+        { level: "notice", dedupeKey: `model-divergence:${agentId}` },
       );
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to send model-divergence push notification");

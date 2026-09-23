@@ -68,6 +68,7 @@ import {
   computeNotificationPlan,
   isPushEligibleAttentionReason,
   type ClientPresenceState,
+  attentionPushLevel,
 } from "./agent-attention-policy.js";
 import {
   buildAgentAttentionNotificationPayload,
@@ -739,6 +740,9 @@ export class VoiceAssistantWebSocketServer {
       filePath: join(paseoHome, "push-tokens.json"),
     });
     this.pushNotificationSender = pushNotificationSender ?? this.pushNotifications;
+    void this.pushNotifications.start().catch((err) => {
+      pushLogger.warn({ err }, "Failed to start push notifications");
+    });
 
     this.agentManager.setAgentAttentionCallback((params) => {
       void this.broadcastAgentAttention(params).catch((err) => {
@@ -1058,6 +1062,7 @@ export class VoiceAssistantWebSocketServer {
     this.unsubscribeDaemonConfigChange = null;
     this.unsubscribeTerminalActivity?.();
     this.unsubscribeTerminalActivity = null;
+    this.pushNotifications.stop();
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
       this.runtimeMetricsInterval = null;
@@ -1769,6 +1774,8 @@ export class VoiceAssistantWebSocketServer {
         workspacePinning: true,
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
         workspaceMarkUnread: true,
+        // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+        notificationPolicy: true,
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
         hubRelationship: true,
         // COMPAT(projectGithubClone): added in v0.1.108, remove gate after 2027-01-15.
@@ -2599,7 +2606,8 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      void this.pushNotificationSender.send(notification).catch((err) => {
+      const level = attentionPushLevel(params.reason, agent.labels);
+      void this.pushNotificationSender.send(notification, { level }).catch((err) => {
         this.logger.warn({ err, agentId: params.agentId }, "Failed to send push notification");
       });
     }
@@ -2685,16 +2693,19 @@ export class VoiceAssistantWebSocketServer {
 
     if (plan.shouldPush) {
       void this.pushNotificationSender
-        .send({
-          title,
-          body,
-          data: {
-            serverId: this.serverId,
-            terminalId: params.terminalId,
-            cwd: params.cwd,
-            ...(workspaceId ? { workspaceId } : {}),
+        .send(
+          {
+            title,
+            body,
+            data: {
+              serverId: this.serverId,
+              terminalId: params.terminalId,
+              cwd: params.cwd,
+              ...(workspaceId ? { workspaceId } : {}),
+            },
           },
-        })
+          { level: "alert" },
+        )
         .catch((err) => {
           this.logger.warn(
             { err, terminalId: params.terminalId },

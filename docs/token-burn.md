@@ -24,7 +24,7 @@ Config lives under `agents.tokenBurnMonitor` (`persisted-config.ts`). The rate d
 - **Rate** is evaluated only for agents that are mid-turn. The trailing-window average stays flat for up to five minutes after the last request, so an idle agent can never be "burning"; `sustainedMinutes` alone filters nothing.
 - **Total** is evaluated only for agents that are mid-turn too, for a different reason: an agent that has stopped cannot spend any more, so an alert naming what it already spent is a receipt. It is also off by default — see below.
 
-Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a threshold breach; the push log's `Sending push notification` lines carry the title and `data.reason` of whatever went out, which is how you attribute a day's notifications to a subsystem after the fact.
+Push copy distinguishes the two ("burning tokens fast" versus "has used a lot of tokens", `packages/protocol/src/token-burn-notification.ts`). The monitor logs nothing on a threshold breach; the push log's `Sending push notification` lines carry the title, `reason` and notify level of whatever went out, which is how you attribute a day's notifications to a subsystem after the fact. These pushes are `notice`s and arrive in the digest ([notification-policy.md](notification-policy.md)); account pressure is the one `urgent` here.
 
 ### Why the total leg is off
 

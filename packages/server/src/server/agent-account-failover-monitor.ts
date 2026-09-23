@@ -435,6 +435,11 @@ export class AccountFailoverMonitor {
           newAgentId: input.newAgentId,
           targetProviderId: input.targetProviderId,
         }),
+        {
+          // A move that carried on is news. One that could not restart the agent needs a person.
+          level: input.resumed === false ? "alert" : "notice",
+          dedupeKey: `account-failover:${input.oldAgentId}:${input.resumed === false ? "stuck" : "moved"}`,
+        },
       );
     } catch (error) {
       this.options.logger.warn({ err: error }, "Account failover: push notification failed");
