@@ -231,6 +231,36 @@ The properties it holds to, each one bought with an incident:
   what the explain RPC and the settings preview print — the rendering side
   states no rule of its own.
 
+#### Keeping the prose from becoming a fifth authority
+
+The rules used to be restated in English in two more places — the
+`agent-orchestration` skill and the daemon's fleet-wide
+`daemon.appendSystemPrompt` — and both drifted. The fix is not to keep them in
+sync; it is for them to stop stating rules. They should name the **vocabulary**
+and point here.
+
+The paragraph a fleet prompt should carry, in full:
+
+> **MODEL POLICY.** You do not choose models for Paseo agents — the
+> account-pool classifier does, deterministically, on every `agent.create`. You
+> choose LABELS. On `create_agent` set `paseo.task-class` to `mechanical` (rote,
+> low-risk), `standard` (the default; omit it) or `hard` (concurrency,
+> migrations, security, architecture), and set `paseo.agent-type` or
+> `paseo.agent-role` whenever the agent's role matters — an unlabelled role is
+> guessed from your prompt text, and a guessed role may pick a model but is
+> never allowed to apply a restrictive tool profile, so the reviewer you meant
+> to sandbox will not be sandboxed. Do not set `config.model` to force a better
+> model: policy overrides a request the resolved pool doesn't approve, and
+> labels the agent `paseo.model-overridden-by-policy`. To see what a create
+> would actually produce before you make it, call the `agent_model_policy` tool
+> or open Agent Model Policy → Test This Name. Fable is retired from every pool;
+> Opus 5.5 leads. The pools themselves are operator config, not prose to
+> memorise — this paragraph names the vocabulary, the classifier holds the
+> rules.
+
+That is the whole contract. Anything longer is a copy of the code, and a copy
+of the code is a thing that goes stale while still sounding authoritative.
+
 The account half of the decision comes from `server/account-select.ts`, the
 same ladder the account router walks. Extracting it is what lets a preview
 answer "which account would this land on" without running the create hook.
