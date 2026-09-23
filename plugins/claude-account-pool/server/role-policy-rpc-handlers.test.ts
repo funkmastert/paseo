@@ -19,6 +19,7 @@ const VALID_POLICY: RoleModelPolicy = {
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
   exposeClassifierTool: false,
+  allowUnlistedModels: [],
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };
@@ -142,6 +143,26 @@ describe("role-model-policy RPC handlers", () => {
       expect(result.policy.revision).not.toBe(VALID_POLICY.revision);
       expect(result.policy.agentTypeMappings).toEqual({ worker: "worker", scout: "worker" });
       expect(patch).toHaveBeenCalledTimes(1);
+    });
+
+    it("carries allowUnlistedModels through an unrelated save instead of resetting it to []", async () => {
+      const stored: RoleModelPolicy = { ...VALID_POLICY, allowUnlistedModels: ["claude-opus-5-5"] };
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(stored) }));
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ config: { agentModelPolicy: stored }, patch });
+
+      const result = await handlers.write(
+        {
+          revision: stored.revision,
+          patch: { roles: stored.roles, agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      expect(patch).toHaveBeenCalledWith({
+        agentModelPolicy: expect.objectContaining({ allowUnlistedModels: ["claude-opus-5-5"] }),
+      });
     });
 
     it("stale-revision conflict leaves storage untouched", async () => {
@@ -426,6 +447,7 @@ describe("role-model-policy RPC handlers", () => {
           honored: false,
           effectiveRef: "claude-sonnet-5",
           reason: "not-currently-selectable",
+          missingFromCatalog: true,
         });
       });
 
@@ -633,5 +655,97 @@ describe("explain — account-agnostic refs and tool profiles", () => {
 
     expect(result.outcome).toBe("unconfigured");
     expect(result.deniedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit", "NotebookEdit"]));
+  });
+});
+
+describe("explain — an explicit request for a model the catalog doesn't list", () => {
+  const OPUS_5_5 = "claude-opus-5-5";
+  const FABLE = "claude-fable-5-1";
+  // The live shape: the leader's `hard` pool holds opus-5-5, which Claude Code doesn't advertise.
+  const policyWith = (allowUnlistedModels: string[]): RoleModelPolicy => ({
+    ...DEFAULT_POLICY,
+    allowUnlistedModels,
+    roles: DEFAULT_POLICY.roles.map((r) =>
+      r.id === "leader" ? { ...r, models: ["claude-opus-5"], hardModels: [OPUS_5_5, FABLE, "claude-opus-5"] } : r,
+    ),
+  });
+  const catalog: ModelCatalog = new Map([["claude", new Set([FABLE, "claude-opus-5", "claude-sonnet-5"])]]);
+  const poolCache = {
+    get: () => ({ pool: { workers: [], leader: { providerId: "claude-personal" } }, failOpen: false }),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+  };
+  const explainLeader = (policy: RoleModelPolicy, extra: Record<string, unknown> = {}) =>
+    createRoleModelPolicyRpcHandlers(
+      baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog), poolCache }),
+    ).explain({ role: "leader", taskClass: "hard", ...extra }, context(fakePaseo({})));
+  /** With an explicit request for the unadvertised id — the caller-asked-for-it route. */
+  const explainLeaderHard = (policy: RoleModelPolicy) =>
+    explainLeader(policy, { requestedModel: OPUS_5_5, requestedProvider: "claude-personal" });
+
+  it("reports honored + unadvertised when the operator allowlisted the id", async () => {
+    const result = await explainLeaderHard(policyWith([OPUS_5_5]));
+
+    expect(result.roleId).toBe("leader");
+    expect(result.taskClass).toBe("hard");
+    expect(result.requestedModelOverride).toEqual({
+      requestedRef: `claude-personal/${OPUS_5_5}`,
+      honored: true,
+      unadvertised: true,
+    });
+  });
+
+  it("reports the refusal as liftable (missingFromCatalog) when the id is not allowlisted", async () => {
+    const result = await explainLeaderHard(policyWith([]));
+
+    expect(result.requestedModelOverride).toEqual({
+      requestedRef: `claude-personal/${OPUS_5_5}`,
+      honored: false,
+      effectiveRef: FABLE, // ordered selection skips the unadvertised entry
+      reason: "not-currently-selectable",
+      missingFromCatalog: true,
+    });
+  });
+
+  it("names the pool entries ordered selection skips, so a never-chosen entry isn't a mystery", async () => {
+    const result = await explainLeaderHard(policyWith([]));
+
+    expect(result.unadvertisedPoolEntries).toEqual([OPUS_5_5]);
+    expect(result).toMatchObject({ outcome: "selected", model: FABLE }); // not allowlisted: skipped
+    expect(result).not.toHaveProperty("modelUnadvertised");
+  });
+
+  it("selects an allowlisted unadvertised entry as the pool default and flags the selection unverified", async () => {
+    // Asked WITHOUT an explicit request: this is the pool-default route, and
+    // it has to be asked as such. An honored explicit request short-circuits
+    // selection in the create hook — no pool default is ever computed — so
+    // the classifier reports that as its own outcome (below) rather than
+    // pretending ordered selection ran.
+    const result = await explainLeader(policyWith([OPUS_5_5]));
+
+    expect(result).toMatchObject({ outcome: "selected", model: OPUS_5_5, modelUnadvertised: true });
+    expect(result).not.toHaveProperty("unadvertisedPoolEntries"); // nothing is being skipped any more
+  });
+
+  it("reports an honored explicit request as honored-request, not as a pool selection", async () => {
+    const result = await explainLeaderHard(policyWith([OPUS_5_5]));
+
+    expect(result).toMatchObject({ outcome: "honored-request", model: OPUS_5_5 });
+    // The unverified fact still lands, on the field that describes the request.
+    expect(result.requestedModelOverride).toMatchObject({ honored: true, unadvertised: true });
+  });
+
+  it("omits unadvertisedPoolEntries when every pool entry is advertised", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(DEFAULT_POLICY),
+        catalogCache: fakeCatalogCache(catalog),
+        poolCache,
+      }),
+    );
+
+    const result = await handlers.explain({ role: "leader" }, context(fakePaseo({})));
+
+    expect(result).not.toHaveProperty("unadvertisedPoolEntries");
   });
 });

@@ -80,6 +80,19 @@ export const RoleModelPolicyExplainResultSchema = z.object({
   /** True when `poolSlot` is "standard" only because the resolved class's own pool is empty. */
   fellBackToStandardPool: z.boolean(),
   /**
+   * True when `model` was selected from the pool although the provider's
+   * catalog doesn't list it — the operator's `allowUnlistedModels` vouches
+   * for it. Absent for a listed model.
+   */
+  modelUnadvertised: z.boolean().optional(),
+  /**
+   * Refs in the resolved pool that ordered selection SKIPS because the
+   * catalog doesn't list them and `allowUnlistedModels` doesn't name them.
+   * Without this an entry that is "in the pool" but never chosen looks live.
+   * An allowlisted entry is selectable, so it does not appear here.
+   */
+  unadvertisedPoolEntries: z.array(z.string()).optional(),
+  /**
    * The tools actually removed at launch — the APPLIED profile plus anything
    * inherited, not the role's configured profile. Those differ whenever a
    * guessed role's profile is withheld, which is exactly what the preview
@@ -144,6 +157,19 @@ export const RoleModelPolicyExplainResultSchema = z.object({
        * but catalog-missing, no viable pool member, or budget-gated.
        */
       reason: z.union([z.literal("not-approved"), z.literal("not-currently-selectable")]).optional(),
+      /**
+       * Present (true) only when `honored` is true because the catalog check
+       * was waived: the model isn't in the provider's advertised catalog and
+       * the policy's `allowUnlistedModels` names it. It is unverified — a real
+       * agent would carry `paseo.model-unadvertised`.
+       */
+      unadvertised: z.boolean().optional(),
+      /**
+       * Present (true) only when refused because the model is absent from the
+       * advertised catalog and not in `allowUnlistedModels` — the one refusal
+       * an operator can lift, unlike a capped or budget-gated model.
+       */
+      missingFromCatalog: z.boolean().optional(),
     })
     .optional(),
 });
@@ -180,6 +206,15 @@ export const roleModelPolicyRpc = {
     input: z.object({
       /** Simulates labels[paseo.agent-type] (tier 1's exact-mapping key). */
       agentType: z.string().optional(),
+      /**
+       * Simulates labels[paseo.agent-role] (tier-2 resolution: a declared role
+       * name or alias). Unknown values fall through exactly as they do at
+       * create time. It is the only way to ask about a role no agent-type
+       * mapping points at — though for `leader`, `root` below is the accurate
+       * question, since a real root agent reaches that role structurally
+       * rather than through any label.
+       */
+      role: z.string().optional(),
       title: z.string().optional(),
       /**
        * Simulates the create's `initialPrompt`. The create hook classifies
@@ -187,8 +222,6 @@ export const roleModelPolicyRpc = {
        * different question than the hook did, which is how the two drifted.
        */
       prompt: z.string().optional(),
-      /** Simulates labels[paseo.agent-role] (tier 2). Unknown values fall through exactly as they do at create time. */
-      declaredRole: z.string().optional(),
       /**
        * Simulates labels[paseo.task-class] — same declared/unknown/default
        * fallthrough the classifier applies at create time. Omitted means

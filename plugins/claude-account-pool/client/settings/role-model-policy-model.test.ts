@@ -29,6 +29,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
         enforceToolsOnClassifiedRoles: false,
         exposeClassifierTool: false,
+        allowUnlistedModels: [],
         revision: `rev-${counter}`,
       },
     };

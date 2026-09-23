@@ -43,6 +43,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
     modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
     enforceToolsOnClassifiedRoles: false,
     exposeClassifierTool: false,
+    allowUnlistedModels: [],
     revision: "r1",
     ...overrides,
   };
@@ -52,6 +53,21 @@ describe("RoleModelPolicySchema", () => {
   it("round-trips the default policy", () => {
     const result = RoleModelPolicySchema.safeParse(DEFAULT_POLICY);
     expect(result.success).toBe(true);
+  });
+
+  describe("allowUnlistedModels", () => {
+    it("defaults to empty for a stored v4 document that predates the field, so nothing changes until an operator opts in", () => {
+      const { allowUnlistedModels: _omitted, ...stored } = policy({});
+      const result = RoleModelPolicySchema.safeParse(stored);
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.allowUnlistedModels).toEqual([]);
+    });
+
+    it("accepts bare and pinned refs and rejects a malformed one", () => {
+      expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["claude-opus-5-5", "codex/gpt-9"] })).success).toBe(true);
+      expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["claude-opus-*"] })).success).toBe(false);
+      expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["has space"] })).success).toBe(false);
+    });
   });
 
   it("accepts a valid custom role with aliases and models", () => {

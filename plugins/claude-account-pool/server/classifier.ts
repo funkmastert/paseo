@@ -20,6 +20,7 @@ import {
   familyOfProvider,
   formatModelRef,
   selectModel,
+  unadvertisedPoolEntries,
   type AvailabilityHealth,
   type ModelCatalog,
 } from "./role-availability";
@@ -199,6 +200,23 @@ export interface ModelDecision {
   /** True when `poolSlot` is `standard` because the class's own pool is empty. */
   fellBackToStandardPool: boolean;
   /**
+   * Set when the model that will run is absent from the provider's advertised
+   * catalog and is running only because `allowUnlistedModels` names it. The
+   * provider never confirmed the id, so no consumer may treat this as
+   * ordinary: the create hook logs it and labels the agent
+   * `paseo.model-unadvertised`, and the preview says UNVERIFIED. `source`
+   * distinguishes the caller asking for it from the pool defaulting to it —
+   * a pool default runs for every spawn of that (role, class), which is the
+   * louder of the two.
+   */
+  unadvertised?: { source: "explicit" | "pool"; ref: string };
+  /**
+   * Refs in this pool that ordered selection SKIPS because the catalog
+   * doesn't list them and `allowUnlistedModels` doesn't name them. Without
+   * this, a pool entry that is never chosen looks live.
+   */
+  unadvertisedPoolEntries: string[];
+  /**
    * True when acting on this decision would move the request to a different
    * provider FAMILY than it asked for. Reported rather than left to each
    * consumer to recompute: a cross-family rewrite is the one that has to be
@@ -224,6 +242,12 @@ export interface ModelDecision {
     effectiveRef: string;
     /** `not-approved`: never one of this (role, class)'s entries. `not-currently-selectable`: approved, but catalog-missing / no viable pool member / budget-gated. */
     reason: "not-approved" | "not-currently-selectable";
+    /**
+     * Set when the refusal is specifically "the catalog doesn't list it and
+     * `allowUnlistedModels` doesn't name it" — the one refusal an operator can
+     * lift, unlike a capped or budget-gated model.
+     */
+    missingFromCatalog?: true;
   };
 }
 
@@ -380,11 +404,20 @@ function decideModel(
   const requestedRef = input.requestedModel
     ? `${input.requestedProvider ?? POOL_FAMILY}/${input.requestedModel}`
     : undefined;
+  // One options object for both eligibility calls below, so an explicit
+  // request and ordered selection are held to the same bar by construction —
+  // including `allowUnlistedModels`, which either path can act on.
+  const selectionOptions = {
+    modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct,
+    allowUnlistedModels: world.policy.allowUnlistedModels,
+    taskClass,
+  };
   const base = {
     pool,
     poolSlot: slot,
     fellBackToStandardPool: fellBack,
     crossesRequestedFamily: false,
+    unadvertisedPoolEntries: unadvertisedPoolEntries(role, world.catalog, taskClass, world.policy.allowUnlistedModels),
     ...(requestedRef !== undefined ? { requestedRef } : {}),
   } as const;
 
@@ -397,8 +430,8 @@ function decideModel(
     };
   }
 
-  const thresholdOptions = { modelBudgetThresholdPct: world.policy.modelBudgetThresholdPct, taskClass };
   let overrideReason: "not-approved" | "not-currently-selectable" | undefined;
+  let missingFromCatalog = false;
   if (input.requestedModel) {
     const evaluation = evaluateRequestedModel(
       role,
@@ -407,21 +440,26 @@ function decideModel(
       world.catalog,
       world.pool,
       world.health,
-      thresholdOptions,
+      selectionOptions,
     );
     if (evaluation.eligible) {
+      const unverified = evaluation.unadvertised === true;
       return {
         ...base,
         outcome: "honored-request",
         provider: input.requestedProvider ?? null,
         model: input.requestedModel,
-        reason: `${requestedRef} was asked for, ${poolPhrase(slot, fellBack)} approves it, and it is selectable right now — so it runs as requested.`,
+        ...(unverified ? { unadvertised: { source: "explicit" as const, ref: requestedRef as string } } : {}),
+        reason: unverified
+          ? `${requestedRef} was asked for and ${poolPhrase(slot, fellBack)} approves it. The provider's catalog does not list it, so it is UNVERIFIED — it runs only because allowUnlistedModels names it.`
+          : `${requestedRef} was asked for, ${poolPhrase(slot, fellBack)} approves it, and it is selectable right now — so it runs as requested.`,
       };
     }
     overrideReason = evaluation.configured ? "not-currently-selectable" : "not-approved";
+    missingFromCatalog = evaluation.missingFromCatalog === true;
   }
 
-  const outcome = selectModel(role, world.catalog, world.pool, world.health, thresholdOptions);
+  const outcome = selectModel(role, world.catalog, world.pool, world.health, selectionOptions);
   if (outcome.outcome === "unconfigured") {
     // Unreachable: pool.length > 0 above. Kept because selectModel's type says
     // it can, and inventing a model here would be worse than passing through.
@@ -436,37 +474,52 @@ function decideModel(
   const effectiveRef = formatModelRef(outcome);
   const override =
     overrideReason && requestedRef
-      ? { requestedRef, effectiveRef, reason: overrideReason }
+      ? { requestedRef, effectiveRef, reason: overrideReason, ...(missingFromCatalog ? { missingFromCatalog: true as const } : {}) }
       : undefined;
 
+  // Three different sentences, because they call for three different actions:
+  // fix the pool, wait for capacity, or add the id to allowUnlistedModels.
   const overrideNote = override
     ? override.reason === "not-approved"
       ? ` ${requestedRef} was asked for, but ${poolPhrase(slot, fellBack)} does not approve it, so policy chose instead.`
-      : ` ${requestedRef} was asked for and is approved, but is not selectable right now (capped, budget-gated, or missing from the catalog), so policy chose instead.`
+      : missingFromCatalog
+        ? ` ${requestedRef} was asked for and is approved, but the provider's catalog does not list it and allowUnlistedModels does not name it, so policy chose instead. Add it there if the provider does accept the id.`
+        : ` ${requestedRef} was asked for and is approved, but is not selectable right now (capped or budget-gated), so policy chose instead.`
     : "";
 
   const crossesRequestedFamily = outcome.provider !== null && outcome.provider !== requestedFamily;
+  // A pool default the catalog doesn't list runs for EVERY spawn of this
+  // (role, class), not just the one that asked — the louder of the two ways
+  // an unverified id gets used.
+  const unadvertised = outcome.unadvertised
+    ? { unadvertised: { source: "pool" as const, ref: effectiveRef } }
+    : {};
+  const unverifiedNote = outcome.unadvertised
+    ? " The provider's catalog does not list it, so it is UNVERIFIED — it is selectable only because allowUnlistedModels names it."
+    : "";
 
   if (outcome.outcome === "unavailable") {
     return {
       ...base,
       crossesRequestedFamily,
+      ...unadvertised,
       outcome: "unavailable",
       provider: outcome.provider,
       model: outcome.model,
       ...(override ? { override } : {}),
-      reason: `No entry in ${poolPhrase(slot, fellBack)} is selectable right now, so its first entry ${effectiveRef} is used anyway rather than dropping the spawn.${overrideNote}`,
+      reason: `No entry in ${poolPhrase(slot, fellBack)} is selectable right now, so its first entry ${effectiveRef} is used anyway rather than dropping the spawn.${unverifiedNote}${overrideNote}`,
     };
   }
 
   return {
     ...base,
     crossesRequestedFamily,
+    ...unadvertised,
     outcome: "selected",
     provider: outcome.provider,
     model: outcome.model,
     ...(override ? { override } : {}),
-    reason: `${effectiveRef} is the first selectable entry in ${poolPhrase(slot, fellBack)}.${overrideNote}`,
+    reason: `${effectiveRef} is the first selectable entry in ${poolPhrase(slot, fellBack)}.${unverifiedNote}${overrideNote}`,
   };
 }
 

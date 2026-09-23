@@ -118,6 +118,9 @@ const LIVE_POLICY: RoleModelPolicy = {
   modelBudgetThresholdPct: 80,
   enforceToolsOnClassifiedRoles: false,
   exposeClassifierTool: false,
+  // The live value: Claude Code doesn't advertise claude-opus-5-5, and this
+  // is what makes the leader's own top entry selectable at all.
+  allowUnlistedModels: ["claude-opus-5-5"],
   revision: "live-fixture",
 };
 
@@ -321,6 +324,87 @@ describe("classifyAgent — the live policy", () => {
     expect(decision.model.poolSlot).toBe("standard");
     expect(decision.model.fellBackToStandardPool).toBe(true);
     expect(decision.model.reason).toContain("that class's own pool is empty");
+  });
+});
+
+/**
+ * The case that has failed silently in production twice: Claude Code accepts
+ * `claude-opus-5-5` but does not advertise it, so the catalog check skipped
+ * the leader's own top entry and the whole fleet quietly led on opus-5. The
+ * catalog here is the real one — everything EXCEPT opus-5-5 — and the policy
+ * is the live document, allowlist included.
+ */
+describe("classifyAgent — the live config, against a catalog that omits opus-5-5", () => {
+  /** What Claude Code actually advertises: no opus-5-5. */
+  const advertised = catalog(["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]);
+  const live = (overrides: Partial<ClassifierWorld> = {}) =>
+    world({ policy: LIVE_POLICY, catalog: advertised, ...overrides } as Partial<ClassifierWorld>);
+
+  it("leads a root agent on claude-opus-5-5, flagged unverified", () => {
+    const decision = classifyAgent({ title: "orchestrate the fleet" }, live());
+
+    expect(decision.role.role.id).toBe("leader");
+    expect(decision.model.outcome).toBe("selected");
+    expect(decision.model.model).toBe("claude-opus-5-5");
+    expect(decision.model.unadvertised).toEqual({ source: "pool", ref: "claude-opus-5-5" });
+    expect(decision.model.reason).toContain("UNVERIFIED");
+    // Allowlisted means selectable, so it is not among the skipped entries.
+    expect(decision.model.unadvertisedPoolEntries).toEqual([]);
+  });
+
+  it("does the same for a hard worker, whose hard pool leads with the same id", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" } }),
+      live(),
+    );
+    expect(decision.model.model).toBe("claude-opus-5-5");
+    expect(decision.model.poolSlot).toBe("hard");
+    expect(decision.model.unadvertised?.source).toBe("pool");
+  });
+
+  it("WITHOUT the allowlist, the same pool silently falls to opus-5 — the regression itself", () => {
+    const decision = classifyAgent(
+      { title: "orchestrate the fleet" },
+      live({ policy: { ...LIVE_POLICY, allowUnlistedModels: [] } }),
+    );
+    expect(decision.model.model).toBe("claude-opus-5");
+    expect(decision.model.unadvertised).toBeUndefined();
+    // Not silent any more: the entry that was skipped is named.
+    expect(decision.model.unadvertisedPoolEntries).toEqual(["claude-opus-5-5"]);
+  });
+
+  it("honors an explicit request for the unadvertised id, and says it is unverified", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" }, requestedModel: "claude-opus-5-5" }),
+      live(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.unadvertised).toEqual({ source: "explicit", ref: "claude/claude-opus-5-5" });
+  });
+
+  it("still refuses a typo the operator never allowlisted, and says how to lift it", () => {
+    const policy = {
+      ...LIVE_POLICY,
+      roles: LIVE_POLICY.roles.map((r) =>
+        r.id === "worker" ? { ...r, hardModels: ["claude-opus-5-6", "claude-opus-5"] } : r,
+      ),
+    };
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" }, requestedModel: "claude-opus-5-6" }),
+      live({ policy }),
+    );
+    expect(decision.model.outcome).toBe("selected");
+    expect(decision.model.model).toBe("claude-opus-5");
+    expect(decision.model.override?.missingFromCatalog).toBe(true);
+    expect(decision.model.reason).toContain("allowUnlistedModels");
+  });
+
+  it("the allowlist waives the catalog check and nothing else: a capped model is still refused", () => {
+    const decision = classifyAgent(
+      { title: "orchestrate the fleet" },
+      live({ health: healthyHealth({ isHealthyFor: () => false, isLastResortEligible: () => false }) }),
+    );
+    expect(decision.model.outcome).toBe("unavailable");
   });
 });
 

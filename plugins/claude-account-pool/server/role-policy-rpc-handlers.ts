@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
-import { roleModelPolicyRpc } from "../shared/role-policy-rpc";
+import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
 import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
@@ -131,6 +131,10 @@ async function performWrite(
     // silently reset one of these escape hatches back to its default.
     enforceToolsOnClassifiedRoles: current.policy.enforceToolsOnClassifiedRoles,
     exposeClassifierTool: current.policy.exposeClassifierTool,
+    // Same reason: `allowUnlistedModels` is operator-only config, and dropping it
+    // on an unrelated save would silently re-arm the catalog check for a model
+    // the operator had opted in.
+    allowUnlistedModels: current.policy.allowUnlistedModels,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -231,11 +235,25 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
      * consumer's side is what keeps the classifier replayable.
      */
     async explain(input) {
+      // Re-read first: `explain` is what an operator runs right after editing
+      // the config, and answering from a cache up to 60s old made a correct
+      // edit look ignored (read() bypasses the cache; explain() did not).
+      // forceRefresh keeps the last good policy on any failure, so this cannot
+      // throw.
+      await deps.policyCache.forceRefresh();
       const policy = deps.policyCache.get();
+      // Re-read first: `explain` is what an operator runs right after editing
+      // the config, and answering from a cache up to 60s old made a correct
+      // edit look ignored (read() bypasses the cache; explain() did not).
+      // forceRefresh keeps the last good policy on any failure, so this cannot
+      // throw. Done here rather than inside the classifier, which takes the
+      // policy as data and never fetches anything.
+      await deps.policyCache.forceRefresh();
+      const freshPolicy = deps.policyCache.get();
       const { pool } = deps.poolCache.get();
       const labels: Record<string, string> = {};
       if (input.agentType !== undefined) labels[AGENT_TYPE_LABEL] = input.agentType;
-      if (input.declaredRole !== undefined) labels[AGENT_ROLE_LABEL] = input.declaredRole;
+      if (input.role !== undefined) labels[AGENT_ROLE_LABEL] = input.role;
       if (input.taskClass !== undefined) labels[TASK_CLASS_LABEL] = input.taskClass;
 
       const decision = classifyAgent(
@@ -251,7 +269,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           requestedModel: input.requestedModel,
         },
         {
-          policy,
+          policy: freshPolicy,
           catalog: deps.catalogCache.get(),
           pool,
           health: deps.health,
@@ -260,15 +278,23 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       );
 
       const { role, taskClass, model, tools, account } = decision;
-      const requestedModelOverride = model.override
+      const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
             requestedRef: model.override.requestedRef,
             honored: false,
             effectiveRef: model.override.effectiveRef,
             reason: model.override.reason,
+            ...(model.override.missingFromCatalog ? { missingFromCatalog: true } : {}),
           }
         : model.requestedRef !== undefined
-          ? { requestedRef: model.requestedRef, honored: true }
+          ? {
+              requestedRef: model.requestedRef,
+              honored: true,
+              // Honored, but only because the catalog check was waived: the
+              // model is unverified, and a real agent would carry
+              // paseo.model-unadvertised.
+              ...(model.unadvertised?.source === "explicit" ? { unadvertised: true } : {}),
+            }
           : undefined;
 
       return {
@@ -279,6 +305,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         ...(role.unknownDeclaredValue !== undefined ? { unknownDeclaredRole: role.unknownDeclaredValue } : {}),
         outcome: model.outcome,
         ...(model.model !== undefined ? { model: model.model } : {}),
+        // Selected as the pool default even though the catalog doesn't list it:
+        // running on the operator's say-so, so the panel can say "unverified".
+        ...(model.unadvertised?.source === "pool" ? { modelUnadvertised: true } : {}),
         // Omitted for a bare ref: no provider was chosen, so the account
         // router is still free to pick any healthy pooled account.
         ...(model.provider !== null ? { provider: model.provider } : {}),
@@ -312,6 +341,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           account: account.reason,
         },
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
+        ...(model.unadvertisedPoolEntries.length > 0
+          ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries }
+          : {}),
       };
     },
   };

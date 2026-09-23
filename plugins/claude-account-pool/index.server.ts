@@ -140,10 +140,24 @@ export default function contribute(server: PluginServerContext) {
       },
       onExplicitModelOverridden: (episode) => {
         const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;
-        console.error(
+        const why =
           episode.reason === "not-approved"
-            ? `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which is not in ${pool}; policy overrode it to "${episode.effectiveRef}"`
-            : `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", which ${pool} approves but isn't currently selectable (catalog-missing, no viable pool member, or budget-gated); policy overrode it to "${episode.effectiveRef}"`,
+            ? `which is not in ${pool}`
+            : episode.missingFromCatalog
+              ? `which ${pool} approves but the provider's model catalog doesn't list, and it isn't in agentModelPolicy.allowUnlistedModels (add "${episode.requestedRef.slice(episode.requestedRef.indexOf("/") + 1)}" there if the provider does accept it)`
+              : `which ${pool} approves but isn't currently selectable (no viable pool member, or budget-gated)`;
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested "${episode.requestedRef}", ${why}; policy overrode it to "${episode.effectiveRef}"`,
+        );
+      },
+      onUnadvertisedModelAllowed: (episode) => {
+        const pool = episode.taskClass ? `role "${episode.roleId}"'s ${episode.taskClass} pool` : `role "${episode.roleId}"'s pool`;
+        const how =
+          episode.source === "explicit"
+            ? `caller "${episode.callerAgentId}" explicitly requested "${episode.ref}"; ${pool} approves it`
+            : `${pool} selected "${episode.ref}" as its default for caller "${episode.callerAgentId}"`;
+        console.error(
+          `[claude-account-pool] role-router: UNVERIFIED MODEL — ${how}, and the provider's model catalog does not list it. Letting it run because agentModelPolicy.allowUnlistedModels names it. If the agent fails at launch, the provider rejected the id; remove it from allowUnlistedModels`,
         );
       },
     });
@@ -253,6 +267,22 @@ export default function contribute(server: PluginServerContext) {
     return startingPromise;
   }
 
+  async function refreshPolicyForCreate(): Promise<void> {
+    if (!policyCache) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bound = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, STARTUP_WARM_TIMEOUT_MS);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    });
+    try {
+      await Promise.race([policyCache.forceRefresh().then(() => undefined, () => undefined), bound]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // Two separate registrations, not one handler calling both: `before`
   // handlers for one event run sequentially in registration order, each
   // output feeding the next input (packages/server/.../plugins/lifecycle/index.ts).
@@ -274,6 +304,14 @@ export default function contribute(server: PluginServerContext) {
   // creation forever.
   const unregisterRoleCreate = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
+    // Re-read the policy on every create rather than trusting the 60s tick: an
+    // operator who edits agentModelPolicy expects the NEXT spawn to see it, and
+    // a create landing seconds after the edit was routed by the stale policy
+    // (the allowlist looked ignored while `role-model-policy.read`, which
+    // bypasses the cache, showed it). Creates are rare and the read is a local
+    // RPC. It cannot throw (loadRolePolicy keeps the last good policy on any
+    // failure) and is bounded so a stuck daemon can't stall spawning.
+    await refreshPolicyForCreate();
     return roleRouter?.(input, context) ?? undefined;
   });
   const unregisterCreate = server.before("agent.create", async (input, context) => {

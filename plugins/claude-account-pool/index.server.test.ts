@@ -177,4 +177,192 @@ describe("contribute (index.server)", () => {
 
     cleanup();
   });
+
+  it("END TO END: the leader's hard class holds claude-opus-5-5 and an explicit request runs it, loudly, though Claude Code doesn't advertise it", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { server, dispatchBefore } = fakeServer();
+    const cleanup = contribute(server);
+    const policy = (allowUnlistedModels: string[]) => ({
+      schemaVersion: 4,
+      roles: [
+        { id: "worker", name: "worker", standard: true, aliases: [], models: [] },
+        { id: "reviewer", name: "reviewer", standard: true, aliases: [], models: [] },
+        { id: "advisor", name: "advisor", standard: true, aliases: [], models: [] },
+        {
+          id: "leader",
+          name: "leader",
+          standard: true,
+          aliases: [],
+          models: ["claude-opus-5", "claude-sonnet-5"],
+          // Mirrors Tyler's live leader pools, plus the model his CLI accepts but doesn't advertise.
+          hardModels: ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5"],
+        },
+      ],
+      agentTypeMappings: {},
+      modelBudgetThresholdPct: 80,
+      enforceToolsOnClassifiedRoles: false,
+      allowUnlistedModels,
+      revision: "test",
+    });
+    const providers = {
+      claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+      "claude-personal": { params: { accountPool: { role: "worker", priority: 1 } } },
+    };
+    const request = (): PluginBeforeRequests["agent.create"] =>
+      ({
+        config: { provider: "claude-personal", model: "claude-opus-5-5", cwd: "/tmp" },
+        labels: { "paseo.task-class": "hard" },
+      }) as unknown as PluginBeforeRequests["agent.create"];
+    // What `list_models` really returned: no opus-5-5.
+    const advertise = (paseo: PluginHookContext["paseo"]) => {
+      (paseo.providers as unknown as { listModels: unknown }).listModels = vi.fn().mockResolvedValue({
+        models: ["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"].map((id) => ({ id })),
+      });
+    };
+
+    const allowed = fakePaseo({ providers, agentModelPolicy: policy(["claude-opus-5-5"]) });
+    advertise(allowed.paseo);
+    const honored = await dispatchBefore("agent.create", request(), fakeContext(allowed.paseo));
+
+    expect(honored.config.model).toBe("claude-opus-5-5");
+    expect((honored as { labels?: Record<string, string> }).labels).toMatchObject({
+      "paseo.model-unadvertised": "claude-personal/claude-opus-5-5",
+    });
+    const logged = errors.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(logged).toContain("UNVERIFIED MODEL");
+    expect(logged).toContain("claude-personal/claude-opus-5-5");
+    cleanup();
+
+    // Same request, no allowlist: the catalog check holds, as it did before this feature.
+    const second = fakeServer();
+    const cleanupSecond = contribute(second.server);
+    const refused = fakePaseo({ providers, agentModelPolicy: policy([]) });
+    advertise(refused.paseo);
+    const overridden = await second.dispatchBefore("agent.create", request(), fakeContext(refused.paseo));
+
+    expect(overridden.config.model).toBe("claude-fable-5-1");
+    expect(errors.mock.calls.map((call) => String(call[0])).join("\n")).toContain("allowUnlistedModels");
+    cleanupSecond();
+    errors.mockRestore();
+  });
+
+  describe("against the live config shape (agentModelPolicy exactly as `~/.paseo/config.json` stores it)", () => {
+    // Copied from Tyler's live config on 2026-09-23: the shape the daemon's
+    // config.get really returns, including field order and `revision`. Nothing
+    // here is built through the plugin's own types.
+    const LIVE_POLICY = {
+      schemaVersion: 4,
+      roles: [
+        {
+          id: "worker",
+          name: "Worker",
+          standard: true,
+          aliases: [],
+          models: ["claude-sonnet-5", "claude-haiku-4-5-20251001"],
+          mechanicalModels: ["claude-haiku-4-5-20251001"],
+          hardModels: ["claude-opus-5-5", "claude-opus-5"],
+          toolProfile: { kind: "unrestricted" },
+        },
+        { id: "reviewer", name: "Reviewer", standard: true, aliases: ["check"], models: ["claude-sonnet-5"], mechanicalModels: [], hardModels: ["claude-opus-5-5", "claude-opus-5"], toolProfile: { kind: "read-only" } },
+        { id: "advisor", name: "Advisor", standard: true, aliases: ["oracle"], models: ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"], mechanicalModels: [], hardModels: [], toolProfile: { kind: "unrestricted" } },
+        {
+          id: "leader",
+          name: "leader",
+          standard: true,
+          aliases: [],
+          models: ["claude-opus-5-5", "claude-opus-5"],
+          mechanicalModels: [],
+          hardModels: ["claude-opus-5-5", "claude-opus-5"],
+          toolProfile: { kind: "unrestricted" },
+        },
+      ],
+      agentTypeMappings: { worker: "worker", scout: "worker", researcher: "worker", delegate: "worker", reviewer: "reviewer", oracle: "advisor", advisor: "advisor" },
+      modelBudgetThresholdPct: 80,
+      enforceToolsOnClassifiedRoles: false,
+      revision: "fe14369d-b38d-4d23-9208-217782f447ff",
+    };
+    const PROVIDERS = {
+      claude: { params: { accountPool: { role: "leader", priority: 1 } } },
+      "claude-personal": { params: { accountPool: { role: "worker", priority: 1 } } },
+    };
+    // What list_models returned live: no claude-opus-5-5.
+    const ADVERTISED = ["claude-opus-5", "claude-fable-5-1", "claude-sonnet-5", "claude-haiku-4-5"];
+
+    function harness(config: Record<string, unknown>) {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { server, dispatchBefore } = fakeServer();
+      const cleanup = contribute(server);
+      const live = fakePaseo(config);
+      (live.paseo.providers as unknown as { listModels: unknown }).listModels = vi
+        .fn()
+        .mockResolvedValue({ models: ADVERTISED.map((id) => ({ id })) });
+      const logged = () => errors.mock.calls.map((call) => String(call[0])).join("\n");
+      return {
+        live,
+        logged,
+        create: (model: string | undefined, extra: Record<string, unknown> = {}) =>
+          dispatchBefore(
+            "agent.create",
+            { config: { provider: "claude-personal", ...(model ? { model } : {}), cwd: "/tmp" }, ...extra } as unknown as PluginBeforeRequests["agent.create"],
+            fakeContext(live.paseo),
+          ),
+        done: () => {
+          cleanup();
+          errors.mockRestore();
+        },
+      };
+    }
+
+    it("REGRESSION: an allowlist written AFTER the plugin started applies to the very next create, with no reload and no 60s wait", async () => {
+      // This is the live failure: the config was patched at 19:25:10 and the
+      // create at 19:25:14 was still routed by the policy cached at startup.
+      // `role-model-policy.read` bypasses the cache, so it showed the
+      // allowlist while the router and `explain` did not. Every earlier test
+      // built its policy BEFORE activation, so none could see a stale cache.
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+      const hard = { labels: { "paseo.task-class": "hard" } };
+
+      const before = await h.create("claude-opus-5-5", hard); // plugin warmed with NO allowlist
+      expect(before.config.model).toBe("claude-opus-5"); // refused: the state the operator saw
+
+      h.live.configGet.mockResolvedValue({
+        requestId: "r2",
+        config: { providers: PROVIDERS, agentModelPolicy: { ...LIVE_POLICY, allowUnlistedModels: ["claude-opus-5-5"] } },
+      });
+      const after = await h.create("claude-opus-5-5", hard); // dispatched immediately, no timers advanced
+
+      expect(after.config.model).toBe("claude-opus-5-5");
+      expect((after as { labels?: Record<string, string> }).labels).toMatchObject({
+        "paseo.model-unadvertised": "claude-personal/claude-opus-5-5",
+      });
+      expect(h.logged()).toContain("UNVERIFIED MODEL");
+      h.done();
+    });
+
+    it("makes claude-opus-5-5 the leader's DEFAULT: a root create with no model, or with the UI's own pick, lands on it", async () => {
+      const h = harness({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, allowUnlistedModels: ["claude-opus-5-5"] },
+      });
+
+      const noModel = await h.create(undefined); // no explicit signal: ordered selection decides
+      expect(noModel.config.model).toBe("claude-opus-5-5");
+
+      const uiPick = await h.create("claude-sonnet-5"); // not in the leader pool: policy default wins
+      expect(uiPick.config.model).toBe("claude-opus-5-5");
+
+      expect(h.logged()).toContain("selected \"claude-opus-5-5\" as its default");
+      h.done();
+    });
+
+    it("without the allowlist the leader default falls to the advertised opus-5, unchanged from before", async () => {
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+
+      const result = await h.create(undefined);
+
+      expect(result.config.model).toBe("claude-opus-5");
+      expect(h.logged()).not.toContain("UNVERIFIED MODEL");
+      h.done();
+    });
+  });
 });

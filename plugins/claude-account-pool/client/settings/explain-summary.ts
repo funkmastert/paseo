@@ -36,7 +36,9 @@ export function describeTaskClass(result: RoleModelPolicyExplainResult): string 
 /** The model line: what would run, then the classifier's own sentence for why. */
 export function describeOutcome(result: RoleModelPolicyExplainResult): string {
   const target =
-    result.outcome === "unconfigured" ? "the model is left as requested" : `would route to ${describeTarget(result)}`;
+    result.outcome === "unconfigured"
+      ? "the model is left as requested"
+      : `would route to ${describeTarget(result)}${result.modelUnadvertised ? " (UNVERIFIED: the provider's catalog doesn't list it; allowUnlistedModels vouches for it)" : ""}`;
   return `Model: ${target} — ${result.reasons.model}`;
 }
 
@@ -72,18 +74,38 @@ export function describeRequestedModel(result: RoleModelPolicyExplainResult): st
     return undefined;
   }
   if (override.honored) {
-    return `Explicit request ${override.requestedRef}: honored.`;
+    return override.unadvertised
+      ? `Explicit request ${override.requestedRef}: honored, UNVERIFIED — the provider's catalog doesn't list it; allowed by allowUnlistedModels. A real agent would carry paseo.model-unadvertised=${override.requestedRef}.`
+      : `Explicit request ${override.requestedRef}: honored.`;
   }
   const why =
     override.reason === "not-currently-selectable"
-      ? "approved for this role, but not selectable right now (capped, budget-gated, or missing from the catalog)"
+      ? override.missingFromCatalog
+        ? "approved for this role, but the provider's catalog doesn't list it and allowUnlistedModels doesn't name it"
+        : "approved for this role, but not selectable right now (capped, budget-gated, or no viable account)"
       : "not a member of the pool this task class resolves to";
   return `Explicit request ${override.requestedRef}: overridden by policy → ${override.effectiveRef} (${why}). A real agent would carry paseo.model-overridden-by-policy=${override.requestedRef}.`;
 }
 
+/**
+ * Pool entries the catalog doesn't list and the operator hasn't allowlisted.
+ * Ordered selection skips them, so without this line an entry that is "in the
+ * pool" but never picked looks like a bug in the policy rather than the
+ * catalog check working.
+ */
+export function describeUnadvertisedEntries(result: RoleModelPolicyExplainResult): string | undefined {
+  const entries = result.unadvertisedPoolEntries;
+  if (entries === undefined || entries.length === 0) {
+    return undefined;
+  }
+  return `Skipped, not in the provider's catalog and not in allowUnlistedModels: ${entries.join(", ")}. Add an id to allowUnlistedModels if the provider does accept it.`;
+}
+
+
 /** Every line the panel prints, in order. */
 export function explainSummaryLines(result: RoleModelPolicyExplainResult): string[] {
   const requested = describeRequestedModel(result);
+  const unadvertised = describeUnadvertisedEntries(result);
   return [
     describeRole(result),
     describeTaskClass(result),
@@ -91,5 +113,6 @@ export function explainSummaryLines(result: RoleModelPolicyExplainResult): strin
     describeTools(result),
     describeAccount(result),
     ...(requested ? [requested] : []),
+    ...(unadvertised ? [unadvertised] : []),
   ];
 }

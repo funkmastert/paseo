@@ -8,6 +8,7 @@ import {
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_LABEL,
   TOOLS_DENIED_LABEL,
+  UNADVERTISED_MODEL_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
@@ -1210,6 +1211,7 @@ describe("createRoleRouter", () => {
         requestedRef: "claude-backup/claude-opus-5",
         effectiveRef: "claude-sonnet-5",
         reason: "not-currently-selectable",
+        missingFromCatalog: true, // the refusal an operator can lift, unlike the capped/budget-gated ones below
       });
     });
 
@@ -1510,6 +1512,272 @@ describe("createRoleRouter — task class", () => {
       expect.objectContaining({ callerAgentId: "c1", taskClass: undefined }),
     );
     expect(onRoleUnavailable).toHaveBeenCalledWith(expect.objectContaining({ callerAgentId: "c2", taskClass: "hard" }));
+  });
+});
+
+describe("createRoleRouter — explicit request for a model the catalog doesn't list", () => {
+  // The real case: Claude Code 2.1.280 accepts claude-opus-5-5 but its
+  // advertised catalog omits it. The leader's `hard` pool holds it.
+  const OPUS_5_5 = "claude-opus-5-5";
+  const FABLE = "claude-fable-5-1";
+  const advertised = catalog({ claude: [FABLE, "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"] });
+  const pool: ResolvedPool = { workers: [], leader: { providerId: "claude-personal" } };
+
+  function leaderPolicy(overrides: Partial<RoleModelPolicy> = {}): RoleModelPolicy {
+    return {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((role) =>
+        role.id === "leader"
+          ? { ...role, models: ["claude-opus-5", "claude-sonnet-5"], hardModels: [OPUS_5_5, FABLE, "claude-opus-5"] }
+          : role,
+      ),
+      ...overrides,
+    };
+  }
+
+  function routerFor(overrides: Partial<RoleRouterOptions> & { policy?: RoleModelPolicy } = {}) {
+    const { policy = leaderPolicy(), ...rest } = overrides;
+    return createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policy),
+        catalogCache: fakeCatalogCache(advertised),
+        poolCache: fakePoolCache(pool),
+        ...rest,
+      }),
+    );
+  }
+
+  // A root agent (no callerAgentId) -> the leader role, declaring the hard class.
+  const rootHardRequest = (model = OPUS_5_5) =>
+    request({
+      labels: { [TASK_CLASS_LABEL]: "hard" },
+      config: { provider: "claude-personal", model, cwd: "/tmp" },
+    });
+
+  it("routes the leader's hard class to an allowlisted, unadvertised model, and says so", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const onExplicitModelOverridden = vi.fn();
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      onUnadvertisedModelAllowed,
+      onExplicitModelOverridden,
+    });
+
+    const result = router(rootHardRequest(), fakeContext);
+
+    expect(result?.config.model).toBe(OPUS_5_5); // not rewritten to fable/sonnet
+    expect(result?.config.provider).toBe("claude-personal");
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: `claude-personal/${OPUS_5_5}` });
+    expect(result?.labels).not.toHaveProperty(MODEL_OVERRIDDEN_LABEL);
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith({
+      callerAgentId: "(root agent)",
+      roleId: "leader",
+      source: "explicit",
+      ref: `claude-personal/${OPUS_5_5}`,
+      taskClass: "hard",
+    });
+    expect(onExplicitModelOverridden).not.toHaveBeenCalled();
+  });
+
+  it("without the allowlist the same request is overridden, and the override says the catalog is why and that it is liftable", () => {
+    const onExplicitModelOverridden = vi.fn();
+    const router = routerFor({ onExplicitModelOverridden });
+
+    const result = router(rootHardRequest(), fakeContext);
+
+    expect(result?.config.model).toBe(FABLE); // first ADVERTISED entry of the hard pool
+    expect(result?.labels).toMatchObject({ [MODEL_OVERRIDDEN_LABEL]: `claude-personal/${OPUS_5_5}` });
+    expect(onExplicitModelOverridden).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "not-currently-selectable", missingFromCatalog: true }),
+    );
+  });
+
+  it("DESIGN CHANGE: with no explicit request, ordered selection picks an ALLOWLISTED unadvertised pool entry as the default, loudly", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({ policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }), onUnadvertisedModelAllowed });
+
+    // No config.model => the daemon hands the hook no explicit-request signal.
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: OPUS_5_5 });
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith({
+      callerAgentId: "(root agent)",
+      roleId: "leader",
+      source: "pool",
+      ref: OPUS_5_5,
+      taskClass: "hard",
+    });
+  });
+
+  it("a NON-allowlisted unadvertised pool entry is still skipped by ordered selection", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({ policy: leaderPolicy({ allowUnlistedModels: [] }), onUnadvertisedModelAllowed });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(FABLE); // opus-5-5 skipped, next advertised entry
+    expect(result?.labels).not.toHaveProperty(UNADVERTISED_MODEL_LABEL);
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
+  });
+
+  it("allowlisting one id does not unlock another unadvertised pool entry ahead of it", () => {
+    const policy = leaderPolicy({ allowUnlistedModels: [OPUS_5_5] });
+    const withTypoFirst: RoleModelPolicy = {
+      ...policy,
+      roles: policy.roles.map((role) =>
+        role.id === "leader" ? { ...role, hardModels: ["claude-opus-5-6", OPUS_5_5, FABLE] } : role,
+      ),
+    };
+    const router = routerFor({ policy: withTypoFirst });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(OPUS_5_5); // skipped the unlisted, non-allowlisted 5-6
+  });
+
+  it("an allowlisted pool default on a drained pool is not selected, and the fallback to models[0] is still disclosed", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const health = createHealthTracker();
+    health.reportTurnFailure("claude-personal", "hit your limit");
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      health,
+      onUnadvertisedModelAllowed,
+    });
+
+    const result = router(
+      request({ labels: { [TASK_CLASS_LABEL]: "hard" }, config: { provider: "claude-personal", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    // Nothing is eligible, so it falls back to models[0] (existing behavior).
+    // That fallback IS the unverified id here, so it must not run silently.
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: OPUS_5_5 });
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledWith(expect.objectContaining({ source: "pool" }));
+  });
+
+  it("REQUIREMENT 3: a typo'd id matches no allowlist entry, so it is refused at validation rather than dying at launch", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const onExplicitModelOverridden = vi.fn();
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      onUnadvertisedModelAllowed,
+      onExplicitModelOverridden,
+    });
+
+    const result = router(rootHardRequest("claude-opus-5-6"), fakeContext);
+
+    // The typo is refused as an EXPLICIT request; policy then runs its own
+    // default (the allowlisted opus-5-5) — a real model, not the typo.
+    expect(result?.config.model).toBe(OPUS_5_5);
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalledWith(expect.objectContaining({ source: "explicit" }));
+    expect(onExplicitModelOverridden).toHaveBeenCalledWith(expect.objectContaining({ reason: "not-approved" }));
+  });
+
+  it("capped stays refused: an allowlisted, unadvertised model on a drained pool is overridden, not honored", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const onExplicitModelOverridden = vi.fn();
+    const health = createHealthTracker();
+    health.reportTurnFailure("claude-personal", "hit your limit");
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      health,
+      onUnadvertisedModelAllowed,
+      onExplicitModelOverridden,
+    });
+
+    router(rootHardRequest(), fakeContext);
+
+    // The explicit request was refused. (The pool fallback to models[0] is a
+    // separate, disclosed event with source "pool" — covered above.)
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalledWith(expect.objectContaining({ source: "explicit" }));
+    const episode = onExplicitModelOverridden.mock.calls[0][0];
+    expect(episode.reason).toBe("not-currently-selectable");
+    expect(episode.missingFromCatalog).toBeUndefined(); // the allowlist isn't the lever here, so don't point at it
+  });
+
+  it("does not waive the catalog for a different task class's request (the id must be in THAT class's pool)", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      onUnadvertisedModelAllowed,
+    });
+
+    // Standard pool is [opus-5, sonnet-5]: opus-5-5 was never approved there.
+    const result = router(
+      request({ config: { provider: "claude-personal", model: OPUS_5_5, cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    // Not approved in the standard pool, so refused as an explicit request;
+    // policy's own standard default is the advertised opus-5.
+    expect(result?.config.model).toBe("claude-opus-5");
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
+  });
+
+  it("dedupes the unadvertised notification per (caller, role, class, ref) but labels every agent", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      onUnadvertisedModelAllowed,
+    });
+
+    const first = router(rootHardRequest(), fakeContext);
+    const second = router(rootHardRequest(), fakeContext);
+
+    expect(onUnadvertisedModelAllowed).toHaveBeenCalledTimes(1);
+    expect(first?.labels).toHaveProperty(UNADVERTISED_MODEL_LABEL);
+    expect(second?.labels).toHaveProperty(UNADVERTISED_MODEL_LABEL);
+  });
+
+  it("keeps enforcing a restricted role's tool profile, and both labels survive, on the unadvertised path", () => {
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      allowUnlistedModels: [OPUS_5_5],
+      roles: DEFAULT_POLICY.roles.map((role) =>
+        role.id === "reviewer" ? { ...role, models: [OPUS_5_5], toolProfile: { kind: "read-only" } } : role,
+      ),
+    };
+    const router = routerFor({ policy });
+
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        labels: { [AGENT_TYPE_LABEL]: "reviewer" },
+        config: { provider: "claude-personal", model: OPUS_5_5, cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe(OPUS_5_5);
+    const options = result?.config.providerOptions as { disallowedTools?: string[] };
+    expect(options?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit"]));
+    expect(result?.labels).toHaveProperty(TOOLS_DENIED_LABEL);
+    expect(result?.labels).toMatchObject({ [UNADVERTISED_MODEL_LABEL]: `claude-personal/${OPUS_5_5}` });
+  });
+
+  it("leaves an ordinary, catalog-listed explicit request byte-identical (no label, no notification)", () => {
+    const onUnadvertisedModelAllowed = vi.fn();
+    const router = routerFor({
+      policy: leaderPolicy({ allowUnlistedModels: [OPUS_5_5] }),
+      onUnadvertisedModelAllowed,
+    });
+
+    const result = router(rootHardRequest(FABLE), fakeContext);
+
+    expect(result).toBeUndefined();
+    expect(onUnadvertisedModelAllowed).not.toHaveBeenCalled();
   });
 });
 

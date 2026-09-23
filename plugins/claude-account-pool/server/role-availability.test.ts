@@ -6,6 +6,7 @@ import {
   evaluateRequestedModel,
   isRequestedModelApproved,
   selectModel,
+  unadvertisedPoolEntries,
   type AvailabilityPool,
   type ModelCatalog,
 } from "./role-availability";
@@ -333,5 +334,144 @@ describe("selectModel", () => {
       );
       expect(result).toEqual({ outcome: "selected", provider: "codex", model: "gpt-4" });
     });
+  });
+});
+
+describe("evaluateRequestedModel — an explicit request for a model the catalog doesn't list", () => {
+  // Claude Code 2.1.280 runs claude-opus-5-5 but does not advertise it.
+  const OPUS_5_5 = "claude-opus-5-5";
+  const r = role({ models: ["claude-sonnet-5", OPUS_5_5] });
+  const advertised = catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] }); // no opus-5-5
+  const evaluate = (
+    options: Parameters<typeof evaluateRequestedModel>[6] = {},
+    model = OPUS_5_5,
+    health = createHealthTracker(),
+    subject = r,
+  ) => evaluateRequestedModel(subject, "claude", model, advertised, ONE_WORKER_POOL, health, options);
+
+  it("stays refused by default — the catalog check is unchanged for an operator who opts into nothing", () => {
+    expect(evaluate()).toEqual({ configured: true, eligible: false, missingFromCatalog: true });
+    expect(evaluate({ allowUnlistedModels: [] })).toEqual({ configured: true, eligible: false, missingFromCatalog: true });
+  });
+
+  it("is eligible, and says it is unverified, when the operator allowlisted the exact id", () => {
+    expect(evaluate({ allowUnlistedModels: [OPUS_5_5] })).toEqual({ configured: true, eligible: true, unadvertised: true });
+  });
+
+  it("does not flag a model the catalog DOES list as unadvertised, even if it is also allowlisted", () => {
+    expect(evaluate({ allowUnlistedModels: ["claude-sonnet-5"] }, "claude-sonnet-5")).toEqual({ configured: true, eligible: true });
+  });
+
+  it("matches per id: an allowlisted claude-opus-5-5 does not unlock a typo'd claude-opus-5-6", () => {
+    const withTypoInPool = role({ models: [OPUS_5_5, "claude-opus-5-6"] });
+    const result = evaluate({ allowUnlistedModels: [OPUS_5_5] }, "claude-opus-5-6", createHealthTracker(), withTypoInPool);
+    expect(result).toEqual({ configured: true, eligible: false, missingFromCatalog: true });
+  });
+
+  it("adds no approval: an allowlisted id the role's pool never named is still not-approved", () => {
+    const unapproved = role({ models: ["claude-sonnet-5"] });
+    const result = evaluate({ allowUnlistedModels: [OPUS_5_5] }, OPUS_5_5, createHealthTracker(), unapproved);
+    expect(result).toEqual({ configured: false, eligible: false });
+  });
+
+  it("matches by family: an allowlist entry for another provider's model id does not unlock the claude one", () => {
+    expect(evaluate({ allowUnlistedModels: [`codex/${OPUS_5_5}`] })).toMatchObject({ eligible: false, missingFromCatalog: true });
+  });
+
+  it("stays refused when the pool is drained, even though the id is allowlisted (capped is not the same as unadvertised)", () => {
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit");
+    health.reportTurnFailure("leader", "hit your limit");
+    const result = evaluate({ allowUnlistedModels: [OPUS_5_5] }, OPUS_5_5, health);
+    expect(result).toEqual({ configured: true, eligible: false }); // not tagged missingFromCatalog: the lever isn't the allowlist
+  });
+
+  it("stays refused when the model's family is over its weekly budget, even though the id is allowlisted", () => {
+    const fable = role({ models: ["claude-fable-6"] });
+    const health = createHealthTracker();
+    health.reportUsage("worker-a", [{ window: "weekly_model_fable", usedPct: 100 }]);
+    health.reportUsage("leader", [{ window: "weekly_model_fable", usedPct: 100 }]);
+    const result = evaluate({ allowUnlistedModels: ["claude-fable-6"] }, "claude-fable-6", health, fable);
+    expect(result).toEqual({ configured: true, eligible: false });
+  });
+
+  it("honors the allowlist for a task class's own pool, not just the standard one", () => {
+    const classed = role({ models: ["claude-sonnet-5"], hardModels: [OPUS_5_5] });
+    const standard = evaluate({ allowUnlistedModels: [OPUS_5_5] }, OPUS_5_5, createHealthTracker(), classed);
+    const hard = evaluate({ allowUnlistedModels: [OPUS_5_5], taskClass: "hard" }, OPUS_5_5, createHealthTracker(), classed);
+    expect(standard).toEqual({ configured: false, eligible: false });
+    expect(hard).toEqual({ configured: true, eligible: true, unadvertised: true });
+  });
+});
+
+describe("selectModel — unadvertised pool entries", () => {
+  const OPUS_5_5 = "claude-opus-5-5";
+  const advertised = catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] });
+  const r = role({ models: [OPUS_5_5, "claude-opus-5"] });
+
+  it("skips an unadvertised entry the operator has NOT allowlisted and takes the next advertised one", () => {
+    const result = selectModel(r, advertised, ONE_WORKER_POOL, createHealthTracker());
+    expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-opus-5" });
+  });
+
+  it("selects an ALLOWLISTED unadvertised entry as the pool default, flagged unadvertised", () => {
+    const result = selectModel(r, advertised, ONE_WORKER_POOL, createHealthTracker(), {
+      allowUnlistedModels: [OPUS_5_5],
+    });
+    expect(result).toEqual({ outcome: "selected", provider: null, model: OPUS_5_5, unadvertised: true });
+  });
+
+  it("does not flag an entry the catalog lists, even when it is also allowlisted", () => {
+    const result = selectModel(r, advertised, ONE_WORKER_POOL, createHealthTracker(), {
+      allowUnlistedModels: ["claude-opus-5"],
+    });
+    expect(result).toEqual({ outcome: "selected", provider: null, model: "claude-opus-5" });
+  });
+
+  it("allowlisting one id leaves an earlier, different unadvertised entry skipped", () => {
+    const result = selectModel(role({ models: ["claude-opus-5-6", OPUS_5_5] }), advertised, ONE_WORKER_POOL, createHealthTracker(), {
+      allowUnlistedModels: [OPUS_5_5],
+    });
+    expect(result).toMatchObject({ outcome: "selected", model: OPUS_5_5, unadvertised: true });
+  });
+
+  it("keeps an allowlisted entry behind the capacity gates: a drained pool skips it", () => {
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit");
+    health.reportTurnFailure("leader", "hit your limit");
+    const result = selectModel(role({ models: [OPUS_5_5, "claude-sonnet-5"] }), advertised, ONE_WORKER_POOL, health, {
+      allowUnlistedModels: [OPUS_5_5],
+    });
+    // Every entry is capped: falls back to models[0], which is the unverified id, and says so.
+    expect(result).toEqual({ outcome: "unavailable", provider: null, model: OPUS_5_5, unadvertised: true });
+  });
+
+  it("matches the allowlist by family: a codex-pinned allowlist entry does not unlock the claude id", () => {
+    const result = selectModel(r, advertised, ONE_WORKER_POOL, createHealthTracker(), {
+      allowUnlistedModels: [`codex/${OPUS_5_5}`],
+    });
+    expect(result).toMatchObject({ model: "claude-opus-5" });
+  });
+
+  it("does not flag an unavailable fallback that is not allowlisted", () => {
+    const health = createHealthTracker();
+    health.reportTurnFailure("worker-a", "hit your limit");
+    health.reportTurnFailure("leader", "hit your limit");
+    const result = selectModel(r, advertised, ONE_WORKER_POOL, health);
+    expect(result).toEqual({ outcome: "unavailable", provider: null, model: OPUS_5_5 });
+  });
+});
+
+describe("unadvertisedPoolEntries", () => {
+  it("lists the entries of the resolved class's pool that the catalog doesn't carry, in pool order", () => {
+    const r = role({ models: ["claude-sonnet-5"], hardModels: ["claude-opus-5-5", "claude-opus-5", "codex/gpt-9"] });
+    const advertised = catalog({ claude: ["claude-opus-5", "claude-sonnet-5"], codex: ["gpt-5"] });
+    expect(unadvertisedPoolEntries(r, advertised, "hard")).toEqual(["claude-opus-5-5", "codex/gpt-9"]);
+    expect(unadvertisedPoolEntries(r, advertised)).toEqual([]);
+  });
+
+  it("leaves out entries the operator allowlisted, since ordered selection no longer skips them", () => {
+    const r = role({ hardModels: ["claude-opus-5-5", "codex/gpt-9"] });
+    expect(unadvertisedPoolEntries(r, catalog({ claude: [], codex: [] }), "hard", ["claude-opus-5-5"])).toEqual(["codex/gpt-9"]);
   });
 });

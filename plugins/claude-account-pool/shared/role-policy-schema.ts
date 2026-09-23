@@ -24,6 +24,15 @@ export const TASK_CLASS_LABEL = "paseo.task-class";
 export const MODEL_OVERRIDDEN_LABEL = "paseo.model-overridden-by-policy";
 
 /**
+ * Set by the role router when an explicitly requested model was honored even
+ * though the provider's advertised catalog doesn't list it (see
+ * `allowUnlistedModels`). Value is the ref the caller asked for. The model was
+ * never verified, so if the agent dies at launch this label is the first thing
+ * to look at.
+ */
+export const UNADVERTISED_MODEL_LABEL = "paseo.model-unadvertised";
+
+/**
  * Set by the role router on every agent it restricts: the comma-separated
  * tool names that were actually denied at launch.
  *
@@ -207,6 +216,30 @@ export const RoleModelPolicySchema = z
      * already run on the operator's machine, and nothing else.
      */
     exposeClassifierTool: z.boolean().default(false),
+    /**
+     * Model refs (same `model` / `provider/model` spelling as a role's pool)
+     * that the operator vouches for even though the provider's advertised
+     * catalog doesn't list them. Default empty: the catalog check stays
+     * absolute, exactly as before this field existed.
+     *
+     * Why it exists: a CLI can accept a model id its `supportedModels()` list
+     * doesn't advertise (Claude Code 2.1.280 runs `claude-opus-5-5` but omits
+     * it). The catalog check can't tell "absent because unreal" from "absent
+     * because unadvertised", so the operator says which ids are the second
+     * kind. Naming an id here makes it count as present for the catalog check,
+     * for BOTH an explicit request and ordered pool selection — an id the
+     * operator wrote here is operator-verified, so it may be a pool default.
+     *
+     * Deliberately narrow:
+     * - Per id, not a boolean: a typo'd request (`claude-opus-5-6`) matches no
+     *   entry and is still refused at validation rather than dying at launch,
+     *   and a non-allowlisted unlisted pool entry is still skipped.
+     * - Only the catalog check is waived. A model that is capped, drained or
+     *   budget-gated is refused exactly as before, and an explicit request must
+     *   still name a model in the resolved role's own pool — this list adds no
+     *   approval, it only stands in for catalog verification.
+     */
+    allowUnlistedModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -315,6 +348,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   enforceToolsOnClassifiedRoles: false,
   exposeClassifierTool: false,
+  allowUnlistedModels: [],
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",
