@@ -470,6 +470,8 @@ export type AgentCancelReason =
   | "hub"
   /** The stalled-agent sweep, handing a turn stuck on a capped account to account failover. */
   | "account-capped"
+  /** The remediation ladder, cancelling a timed-out or over-budget escalation agent. */
+  | "remediation"
   | "unspecified";
 
 interface ProviderEnabledFlag {

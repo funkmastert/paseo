@@ -843,7 +843,7 @@ function createRemediationLadder(input: {
         return { status: "running", totalTokens: live.totalTokens };
       },
       cancelAgent: async (agentId) => {
-        await agentManager.cancelAgentRun(agentId, "unspecified");
+        await agentManager.cancelAgentRun(agentId, "remediation");
       },
       archiveAgent: async (agentId) => {
         await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
