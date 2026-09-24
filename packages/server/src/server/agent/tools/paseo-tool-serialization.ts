@@ -21,7 +21,7 @@ function formatStructuredContentForModel(structuredContent: unknown): string {
     typeof structuredContent !== "object" ||
     Array.isArray(structuredContent)
   ) {
-    return JSON.stringify(structuredContent, null, 2);
+    return JSON.stringify(structuredContent);
   }
 
   const record = structuredContent as Record<string, unknown>;
@@ -43,7 +43,9 @@ function formatStructuredContentForModel(structuredContent: unknown): string {
     }
   }
 
-  const json = JSON.stringify(structuredContent, null, 2);
+  // Not indented: the model reads this, and indentation was a third of a 46-agent list_agents
+  // result (see tool-output-projection.ts).
+  const json = JSON.stringify(structuredContent);
   return summary.length > 0 ? `${summary.join("\n")}\n\n${json}` : json;
 }
 

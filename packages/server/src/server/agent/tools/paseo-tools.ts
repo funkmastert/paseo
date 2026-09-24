@@ -86,6 +86,12 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { registerCoordinationTools } from "./coordination-tools.js";
+import {
+  COMPACT_ACTIVITY_LIMIT,
+  toCompactAgentListItem,
+  toCompactAgentSnapshot,
+} from "./tool-output-projection.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
 import type { DeviceLeaseManager } from "../device-lease-manager.js";
 import type {
@@ -1235,6 +1241,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     });
   }
 
+  registerCoordinationTools({
+    registerTool,
+    agentManager,
+    agentStorage,
+    callerAgentId,
+    logger: childLogger,
+  });
+
   registerTool(
     "create_workspace",
     {
@@ -1997,16 +2011,28 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     {
       title: "Get agent status",
       description:
-        "Return the latest snapshot for an agent, including lifecycle state, capabilities, and pending permissions.",
+        "Return the latest snapshot for an agent: lifecycle state, model, mode, pending permissions, " +
+        "labels and activity. Compact by default; full=true adds the provider resume handle, " +
+        "capabilities, the mode catalogue and MCP server status.",
       inputSchema: {
         agentId: z.string(),
+        full: z
+          .boolean()
+          .optional()
+          .describe("Include persistence, capabilities, availableModes and MCP status."),
       },
       outputSchema: {
         status: AgentStatusEnum,
-        snapshot: AgentSnapshotPayloadSchema,
+        snapshot: AgentSnapshotPayloadSchema.partial({
+          persistence: true,
+          capabilities: true,
+          availableModes: true,
+        }),
       },
     },
-    async ({ agentId }) => {
+    async ({ agentId, full = false }) => {
+      const shapeSnapshot = <T extends z.infer<typeof AgentSnapshotPayloadSchema>>(snapshot: T) =>
+        full ? snapshot : toCompactAgentSnapshot(snapshot);
       const snapshot = agentManager.getAgent(agentId);
       if (snapshot) {
         const structuredSnapshot = await serializeSnapshotWithMetadata(
@@ -2018,7 +2044,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           content: [],
           structuredContent: ensureValidJson({
             status: snapshot.lifecycle,
-            snapshot: structuredSnapshot,
+            snapshot: shapeSnapshot(structuredSnapshot),
           }),
         };
       }
@@ -2036,7 +2062,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: [],
         structuredContent: ensureValidJson({
           status: structuredSnapshot.status,
-          snapshot: structuredSnapshot,
+          snapshot: shapeSnapshot(structuredSnapshot),
         }),
       };
     },
@@ -2046,8 +2072,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "list_agents",
     {
       title: "List agents",
-      description: "List recent agents as compact metadata.",
+      description:
+        "List recent agents as compact metadata. Rows carry id, title, provider, model, status, cwd, " +
+        "labels and live activity; full=true adds ids' short form, timestamps and thinking options.",
       inputSchema: {
+        full: z
+          .boolean()
+          .optional()
+          .describe(
+            "Include createdAt, lastUserMessageAt, shortId, thinking options and UI labels.",
+          ),
         includeArchived: z.boolean().optional().default(false),
         cwd: z.string().optional(),
         sinceHours: z
@@ -2061,10 +2095,23 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         limit: z.number().int().positive().max(200).optional().default(50),
       },
       outputSchema: {
-        agents: z.array(AgentListItemPayloadSchema),
+        agents: z.array(
+          AgentListItemPayloadSchema.partial({
+            shortId: true,
+            createdAt: true,
+            lastUserMessageAt: true,
+          }),
+        ),
       },
     },
-    async ({ includeArchived = false, cwd, sinceHours = 48, statuses, limit = 50 }) => {
+    async ({
+      full = false,
+      includeArchived = false,
+      cwd,
+      sinceHours = 48,
+      statuses,
+      limit = 50,
+    }) => {
       const callerCwd = callerAgentId ? resolveCallerAgent()?.cwd : undefined;
       const requestedCwd = cwd?.trim() ? expandUserPath(cwd) : callerCwd;
       const statusFilter = statuses && statuses.length > 0 ? new Set(statuses) : null;
@@ -2096,7 +2143,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
       return {
         content: [],
-        structuredContent: ensureValidJson({ agents }),
+        structuredContent: ensureValidJson({
+          agents: full ? agents : agents.map(toCompactAgentListItem),
+        }),
       };
     },
   );
@@ -3056,13 +3105,19 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "get_agent_activity",
     {
       title: "Get agent activity",
-      description: "Return recent agent timeline entries as a curated summary.",
+      description:
+        `Return recent agent timeline entries as a curated summary. Shows the last ${COMPACT_ACTIVITY_LIMIT} ` +
+        "entries unless you pass limit or full=true.",
       inputSchema: {
         agentId: z.string(),
         limit: z
           .number()
           .optional()
           .describe("Optional limit for number of activities to include (most recent first)."),
+        full: z
+          .boolean()
+          .optional()
+          .describe("Return the whole timeline instead of the last entries."),
       },
       outputSchema: {
         agentId: z.string(),
@@ -3071,7 +3126,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         content: z.string(),
       },
     },
-    async ({ agentId, limit }) => {
+    async ({ agentId, limit: requestedLimit, full = false }) => {
+      const limit = requestedLimit ?? (full ? undefined : COMPACT_ACTIVITY_LIMIT);
       await ensureAgentLoaded(agentId, {
         agentManager,
         agentStorage,
@@ -3091,7 +3147,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       const noun = totalProjected === 1 ? "activity" : "activities";
       const countHeader =
         limit && shownProjected < totalProjected
-          ? `Showing ${shownProjected} of ${totalProjected} ${noun} (limited to ${limit})`
+          ? `Showing ${shownProjected} of ${totalProjected} ${noun} (limited to ${limit}${requestedLimit === undefined ? "; pass full=true for all" : ""})`
           : `Showing all ${totalProjected} ${noun}`;
 
       const contentWithCount = `${countHeader}\n\n${curatedContent}`;
