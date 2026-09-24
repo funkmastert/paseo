@@ -120,6 +120,7 @@ import {
   resolveProviderSessionFamily,
 } from "./provider-move.js";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
+import { RunMarkerTracker } from "./restart-recovery/run-marker.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
@@ -1095,6 +1096,8 @@ export class AgentManager {
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  /** Restart recovery's mid-turn marker; see docs/restart-recovery.md. */
+  private readonly runMarkers: RunMarkerTracker;
   private readonly staleProviderSubagentSweepIntervalMs: number;
   private readonly staleProviderSubagentLivenessMs: number;
   private staleProviderSubagentSweepTimer: ReturnType<typeof setInterval> | null = null;
@@ -1114,6 +1117,11 @@ export class AgentManager {
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
+    this.runMarkers = new RunMarkerTracker({
+      store: this.registry,
+      logger: this.logger,
+      track: (task) => this.trackBackgroundTask(task),
+    });
     this.rescueTimeouts = {
       reloadSessionCloseMs:
         options.rescueTimeouts?.reloadSessionCloseMs ?? RELOAD_SESSION_CLOSE_TIMEOUT_MS,
@@ -1764,6 +1772,19 @@ export class AgentManager {
         error: message,
       };
     }
+  }
+
+  /**
+   * Whether `provider` can read this session from its own account. Null when the client cannot
+   * tell. A read-only probe: restart recovery's plan asks it before anything is resumed.
+   */
+  async canProviderResumeSession(
+    provider: AgentProvider,
+    handle: AgentPersistenceHandle,
+  ): Promise<boolean | null> {
+    const client = this.clients.get(provider);
+    if (!client?.canResumeHandle) return null;
+    return await client.canResumeHandle(handle);
   }
 
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
@@ -5886,6 +5907,7 @@ export class AgentManager {
   }
 
   private emitState(agent: ManagedAgent, options?: { persist?: boolean }): void {
+    this.runMarkers.observe(agent, { shuttingDown: !this.acceptingAgentRegistrations });
     // Capture the pre-transition status independently of checkAndSetAttention:
     // that method early-returns once attention is already unread, which would
     // otherwise swallow a turn-2 finish while turn 1's attention is uncleared.

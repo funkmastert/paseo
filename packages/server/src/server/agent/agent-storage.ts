@@ -9,6 +9,7 @@ import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
+import { RUN_MARKER_SCHEMA, type RunMarker } from "./restart-recovery/run-marker.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -80,6 +81,10 @@ const STORED_AGENT_SCHEMA = z.object({
   // human- or tool-renamed title from being overwritten by the background
   // title tracker; unset for creation-time titles, which stay refreshable.
   titleManuallySet: z.boolean().optional(),
+  // Whether the agent was mid-turn (docs/restart-recovery.md). Written only through
+  // updateRunMarker; every other write carries the stored value forward. A marker this daemon
+  // cannot read is dropped rather than failing the whole record, which would hide the agent.
+  runMarker: RUN_MARKER_SCHEMA.optional().catch(undefined),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -160,13 +165,37 @@ export class AgentStorage {
     await this.queueRecordWrite(record);
   }
 
+  /**
+   * The only write that changes an agent's run marker. Runs in the agent's write queue, so it
+   * cannot interleave with a snapshot or metadata write. Resolves false when the agent has no
+   * record.
+   */
+  async updateRunMarker(
+    agentId: string,
+    mutate: (current: RunMarker | undefined) => RunMarker | undefined,
+  ): Promise<boolean> {
+    await this.load();
+    let written = false;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) return existing;
+      written = true;
+      const next = mutate(existing.runMarker);
+      if (next === existing.runMarker) return existing;
+      const { runMarker: _previous, ...rest } = existing;
+      return next ? { ...rest, runMarker: next } : rest;
+    });
+    return written;
+  }
+
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    return this.queueRecordMutation(record.id, () => record);
+    // Callers build records by spreading one they read earlier, so their copy of the run marker
+    // can be stale by the time this write runs. The stored value wins.
+    return this.queueRecordMutation(record.id, (existing) => carryRunMarker(record, existing));
   }
 
   private queueRecordMutation(
     agentId: string,
-    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord,
+    mutate: (existing: StoredAgentRecord | null) => StoredAgentRecord | null,
   ): Promise<void> {
     const prev = this.pendingWrites.get(agentId) ?? Promise.resolve();
     const next = prev.then(async () => {
@@ -176,7 +205,7 @@ export class AgentStorage {
 
       const existing = this.cache.get(agentId) ?? null;
       const record = mutate(existing);
-      if (record === existing) {
+      if (record === null || record === existing) {
         // Mutation declined to change anything (e.g. a generated-title write
         // that lost the race to a manual rename); skip the redundant disk
         // write and cache update.
@@ -292,7 +321,7 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      return record;
+      return carryRunMarker(record, existing);
     });
     return applied;
   }
@@ -459,6 +488,15 @@ export class AgentStorage {
   private async waitForPendingWrite(agentId: string): Promise<void> {
     await (this.pendingWrites.get(agentId) ?? Promise.resolve()).catch(() => undefined);
   }
+}
+
+function carryRunMarker(
+  record: StoredAgentRecord,
+  existing: StoredAgentRecord | null,
+): StoredAgentRecord {
+  if (!existing) return record;
+  const { runMarker: _incoming, ...rest } = record;
+  return existing.runMarker ? { ...rest, runMarker: existing.runMarker } : rest;
 }
 
 function projectDirNameFromCwd(cwd: string): string {
