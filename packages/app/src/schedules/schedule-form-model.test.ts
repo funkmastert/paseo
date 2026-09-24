@@ -356,6 +356,7 @@ describe("schedule form model", () => {
       showModeField: false,
       showIsolationField: false,
       showArchiveOnFinishField: false,
+      showWakeField: false,
     });
 
     form.setProject(buildProjectOptionId("host-a", "project-a"), { label: "Project A" });
@@ -367,6 +368,7 @@ describe("schedule form model", () => {
       showModeField: false,
       showIsolationField: true,
       showArchiveOnFinishField: true,
+      showWakeField: false,
     });
 
     form.applyProviderSnapshot("host-a", providerSnapshot(HOST_B_MODELS));
@@ -379,6 +381,7 @@ describe("schedule form model", () => {
       showModeField: true,
       showIsolationField: true,
       showArchiveOnFinishField: true,
+      showWakeField: false,
     });
   });
 
@@ -400,6 +403,7 @@ describe("schedule form model", () => {
     expect(nonGit.getState().disclosure).toMatchObject({
       showIsolationField: false,
       showArchiveOnFinishField: true,
+      showWakeField: false,
     });
 
     const gitTarget = target({
@@ -420,6 +424,7 @@ describe("schedule form model", () => {
     expect(unsupportedHost.getState().disclosure).toMatchObject({
       showIsolationField: false,
       showArchiveOnFinishField: false,
+      showWakeField: false,
     });
     expect(
       Object.prototype.hasOwnProperty.call(unsupportedHost.getState(), "submitIsolation"),
@@ -582,6 +587,51 @@ describe("schedule form model", () => {
       submitCadence: { type: "cron", expression: "0 9 * * *", timezone: "Europe/Madrid" },
       canSubmit: true,
     });
+  });
+
+  it("offers the wake choice on a heartbeat only when the host supports conditions", () => {
+    const edit = (supportsScheduleConditions: boolean) =>
+      openWithHosts({
+        mode: "edit",
+        schedule: heartbeatOnHost({ type: "cron", expression: "0 9 * * *" }),
+        hosts: [{ serverId: "host-a", label: "Host A", supportsScheduleConditions }],
+        defaults: { serverId: "host-a", projectTargets: PROJECT_TARGETS, preferences: {} },
+      });
+
+    expect(edit(false).getState().disclosure.showWakeField).toBe(false);
+    expect(edit(true).getState().disclosure.showWakeField).toBe(true);
+  });
+
+  it("seeds the wake choice from the heartbeat and submits only what changed", () => {
+    const schedule = {
+      ...heartbeatOnHost({ type: "cron", expression: "0 9 * * *" }),
+      condition: { type: "childFinishedSince" as const },
+    };
+    const form = openWithHosts({
+      mode: "edit",
+      schedule,
+      hosts: [{ serverId: "host-a", label: "Host A", supportsScheduleConditions: true }],
+      defaults: { serverId: "host-a", projectTargets: PROJECT_TARGETS, preferences: {} },
+    });
+
+    expect(form.getState()).toMatchObject({
+      wake: "childFinished",
+      submitCondition: undefined,
+      canSubmit: false,
+    });
+
+    form.setWake("either");
+    expect(form.getState()).toMatchObject({
+      wake: "either",
+      submitCondition: {
+        type: "any",
+        conditions: [{ type: "hasActiveChildren" }, { type: "childFinishedSince" }],
+      },
+      canSubmit: true,
+    });
+
+    form.setWake("always");
+    expect(form.getState()).toMatchObject({ submitCondition: null, canSubmit: true });
   });
 
   it("clears provider selection while resolving a different project", () => {

@@ -36,6 +36,10 @@ import { SPEND_BUDGET_LABEL } from "../spend-governor.js";
 import type { VoiceCallerContext, VoiceSpeakHandler } from "../../voice-types.js";
 import type { FirstAgentContext } from "../../messages.js";
 import { everyMsToFiveFieldCron } from "@getpaseo/protocol/schedule/cadence";
+import {
+  SCHEDULE_CONDITION_NAMES,
+  conditionFromNames,
+} from "@getpaseo/protocol/schedule/condition";
 import { expandUserPath, isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
 import type { TerminalManager } from "../../../terminal/terminal-manager.js";
 import type { CreatePaseoWorktreeWorkflowFn } from "../../worktree-session.js";
@@ -2655,7 +2659,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     "create_heartbeat",
     {
       title: "Create heartbeat",
-      description: "Create a recurring heartbeat that sends you a prompt on a cron cadence.",
+      description:
+        "Create a recurring heartbeat that sends you a prompt on a cron cadence. Every tick is a full turn for you, re-reading your whole context, so set `when` unless you need to be woken regardless. With `when`, a tick that does not qualify sends nothing and costs no turn.",
       inputSchema: {
         prompt: z.string().trim().min(1, "prompt is required"),
         cron: z.string().trim().min(1, "cron is required"),
@@ -2668,10 +2673,17 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         name: z.string().optional(),
         maxRuns: z.number().int().positive().optional(),
         expiresIn: z.string().optional(),
+        when: z
+          .array(z.enum(SCHEDULE_CONDITION_NAMES))
+          .min(1)
+          .optional()
+          .describe(
+            "Fire only when one of these holds; omit to fire on every tick. hasActiveChildren: an agent you spawned is still running. childFinishedSince: an agent you spawned finished after you last acted. always: fire on every tick. A busy caller is never woken.",
+          ),
       },
       outputSchema: ScheduleSummarySchema.shape,
     },
-    async ({ prompt, cron, timezone, name, maxRuns, expiresIn }) => {
+    async ({ prompt, cron, timezone, name, maxRuns, expiresIn, when }) => {
       if (!scheduleService) {
         throw new Error("Schedule service is not configured");
       }
@@ -2691,6 +2703,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...(name?.trim() ? { name: name.trim() } : {}),
         ...(maxRuns === undefined ? {} : { maxRuns }),
         ...(expiresAt === undefined ? {} : { expiresAt }),
+        ...(when === undefined ? {} : { condition: conditionFromNames(when) }),
       });
 
       return {

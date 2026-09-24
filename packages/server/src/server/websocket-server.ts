@@ -1775,6 +1775,8 @@ export class VoiceAssistantWebSocketServer {
         agentThinkingUpdate: true,
         // COMPAT(agentProviderMove): added in v0.8.0, remove gate after 2027-09-18.
         agentProviderMove: true,
+        // COMPAT(scheduleConditions): added in v0.8.0, remove gate after 2027-09-23.
+        scheduleConditions: true,
         // COMPAT(daemonDiagnostics): added in v0.1.100, remove gate after 2026-12-25 once daemon floor >= v0.1.100.
         daemonDiagnostics: true,
         // COMPAT(daemonSelfUpdate): added in v0.1.93, remove gate after 2026-12-13.

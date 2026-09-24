@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AgentProviderSchema } from "../provider-manifest.js";
+import { ScheduleConditionSchema, type ScheduleCondition } from "./condition.js";
 
 export const ScheduleStatusSchema = z.enum(["active", "paused", "completed"]);
 export type ScheduleStatus = z.infer<typeof ScheduleStatusSchema>;
@@ -69,6 +70,7 @@ export const StoredScheduleSchema = z.object({
   pausedAt: z.string().nullable(),
   expiresAt: z.string().nullable(),
   maxRuns: z.number().int().positive().nullable(),
+  condition: ScheduleConditionSchema.optional(),
   runs: z.array(ScheduleRunSchema),
 });
 export type StoredSchedule = z.infer<typeof StoredScheduleSchema>;
@@ -86,6 +88,7 @@ export interface CreateScheduleInput {
   maxRuns?: number | null;
   expiresAt?: string | null;
   runOnCreate?: boolean | null;
+  condition?: ScheduleCondition | null;
 }
 
 export interface UpdateScheduleNewAgentConfig {
@@ -106,6 +109,8 @@ export interface UpdateScheduleInput {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  /** Null clears the condition. */
+  condition?: ScheduleCondition | null;
 }
 
 export interface ScheduleExecutionResult {
