@@ -50,6 +50,7 @@ interface TestPaseoDaemonOptions {
   autoArchiveAfterMerge?: boolean;
   doneJanitor?: PaseoDaemonConfig["doneJanitor"];
   doneJanitorOverrides?: PaseoDaemonConfig["doneJanitorOverrides"];
+  restartRecovery?: PaseoDaemonConfig["restartRecovery"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
 }
@@ -205,6 +206,7 @@ async function prepareTestDaemonConfig(
     autoArchiveAfterMerge: options.autoArchiveAfterMerge,
     doneJanitor: options.doneJanitor,
     doneJanitorOverrides: options.doneJanitorOverrides,
+    restartRecovery: options.restartRecovery,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
   };
