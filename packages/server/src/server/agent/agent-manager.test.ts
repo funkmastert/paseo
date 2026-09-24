@@ -18,7 +18,11 @@ import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
+import {
+  formatSystemNotificationPrompt,
+  sendPromptToAgent,
+  startAgentRun,
+} from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
@@ -678,7 +682,13 @@ class UnsupportedSteeringSession extends TestAgentSession {
 async function startAndSteerThroughManager(
   session: AgentSession,
   behavior: "steer" | "interrupt" = "steer",
-): Promise<{ manager: AgentManager; agentId: string; workdir: string }> {
+  prompt = "replacement",
+): Promise<{
+  manager: AgentManager;
+  agentId: string;
+  workdir: string;
+  dispatch: { disposition: string };
+}> {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-steer-dispatch-"));
   const client = new (class extends TestAgentClient {
     override async createSession(): Promise<AgentSession> {
@@ -695,12 +705,12 @@ async function startAndSteerThroughManager(
     }
   })();
   await manager.waitForAgentRunStart(agent.id);
-  await startAgentRun(manager, agent.id, "replacement", logger, {
+  const dispatch = await startAgentRun(manager, agent.id, prompt, logger, {
     replaceRunning: true,
     activeTurnBehavior: behavior,
     runOptions: { clientMessageId: "replacement-client" },
   });
-  return { manager, agentId: agent.id, workdir };
+  return { manager, agentId: agent.id, workdir, dispatch };
 }
 
 test("uses an injected timeline store without making it a production requirement", async () => {
@@ -1636,16 +1646,82 @@ test("retries provider history hydration after a stream failure", async () => {
   }
 });
 
-test("unavailable steer interrupts once and starts one replacement turn", async () => {
+// A message never cancels in-flight work. Replacing the turn here is what killed Tyler's running
+// workflow agents: in Claude Code, interrupting a turn also aborts its background tasks.
+test("a steer the turn cannot take waits for it instead of interrupting it", async () => {
   const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
   session.steerResult = "unavailable";
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(session);
   try {
-    expect(session.interruptCount).toBe(1);
-    expect(session.startCount).toBe(2);
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startCount).toBe(1);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+
+    await vi.waitFor(() => expect(session.startCount).toBe(2));
+    expect(session.startPrompts).toEqual(["initial", "replacement"]);
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
+  } finally {
+    await manager.closeAgent(agentId);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// MCP send_agent_prompt, the CLI and clients older than steering send no behavior at all. That
+// used to mean "interrupt"; nothing but an explicit stop may cancel in-flight work.
+test("a message sent with no behavior steers into the running turn", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-default-steer-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const result = await sendPromptToAgent({
+      agentManager: manager,
+      agentStorage: new AgentStorage(join(workdir, "agents"), logger),
+      agentId: agent.id,
+      prompt: "follow-up",
+      logger,
+    });
+
+    expect(result).toEqual({ disposition: "steered" });
+    expect(session.steerCount).toBe(1);
+    expect(session.interruptCount).toBe(0);
+    expect(session.startPrompts).toEqual(["initial"]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("an explicit interrupt still replaces the running turn", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  const { manager, agentId, workdir } = await startAndSteerThroughManager(session, "interrupt");
+  try {
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "replacement"]));
+    expect(session.steerCount).toBe(0);
+    expect(session.interruptCount).toBe(1);
   } finally {
     await manager.closeAgent(agentId);
     rmSync(workdir, { recursive: true, force: true });
@@ -1866,7 +1942,7 @@ test("orders a concurrent replacement after a pending accepted steer", async () 
   }
 });
 
-test("does not replace a newer foreground turn after unavailable steer fallback is admitted", async () => {
+test("a waiting message never replaces a newer turn that started while it waited", async () => {
   const entered = deferred<void>();
   const release = deferred<void>();
   const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
@@ -1903,9 +1979,6 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
       activeTurnBehavior: "steer",
       runOptions: { clientMessageId: "hello-client" },
     });
-    const rejected = expect(send).rejects.toThrow(
-      "Active turn changed before steering could be delivered",
-    );
     await entered.promise;
     session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
     await consumeA;
@@ -1916,15 +1989,15 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
     })();
     await manager.waitForAgentRunStart(agent.id);
     release.resolve();
-    await rejected;
+    await expect(send).resolves.toEqual({ disposition: "queued" });
     expect(manager.getAgent(agent.id)?.activeForegroundTurnId).toBe("active-turn-2");
     expect(session.interruptCount).toBe(0);
-    expect(session.startPrompts).not.toContain("hello");
-    expect(
-      manager
-        .getTimeline(agent.id)
-        .some((item) => item.type === "user_message" && item.clientMessageId === "hello-client"),
-    ).toBe(false);
+    expect(session.startPrompts).toEqual(["A", "B"]);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-2" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["A", "B", "hello"]));
+    expect(session.interruptCount).toBe(0);
   } finally {
     release.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
@@ -1932,6 +2005,129 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
       consumeB ?? Promise.resolve(),
       new Promise((resolve) => setTimeout(resolve, 100)),
     ]);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// Case A in the incident: the leader was idle but a background workflow kept an autonomous turn
+// open. A message that turn could not take replaced it, and the interrupt killed the workflow.
+test("an autonomous turn that cannot take a steer is never interrupted by it", async () => {
+  const session = new SteeringTestSession({ provider: "claude", cwd: process.cwd() });
+  session.steerResult = "unavailable";
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-autonomous-wait-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { claude: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    session.pushEvent({ type: "turn_started", provider: "claude", turnId: "active-turn-0" });
+    await vi.waitFor(() => expect(manager.getAgent(agent.id)?.activeTurnId).toBe("active-turn-0"));
+
+    const result = await startAgentRun(manager, agent.id, "while the workflow runs", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "workflow-client" },
+    });
+
+    expect(result).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startPrompts).toEqual([]);
+
+    session.pushEvent({ type: "turn_completed", provider: "claude", turnId: "active-turn-0" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["while the workflow runs"]));
+    expect(session.interruptCount).toBe(0);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// The 20:42 kill: two reports landed together. The first had started a run that had no turn yet,
+// so the second could not steer, fell through to a replacement, and cancelled it.
+test("a message sent while another message's turn is still starting joins it", async () => {
+  const startGate = deferred<void>();
+  class GatedStartSession extends SteeringTestSession {
+    override async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+      await startGate.promise;
+      return await super.startTurn(prompt);
+    }
+  }
+  const session = new GatedStartSession({ provider: "claude", cwd: process.cwd() });
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-pending-start-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { claude: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const first = await startAgentRun(manager, agent.id, "first report", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+    });
+    const second = await startAgentRun(manager, agent.id, "second report", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "second-client" },
+    });
+
+    expect(first).toEqual({ disposition: "turn_started" });
+    expect(second).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+
+    startGate.resolve();
+
+    await vi.waitFor(() => expect(session.steerCount).toBe(1));
+    expect(session.startPrompts).toEqual(["first report"]);
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agent.id)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "second-client" }),
+      ),
+    );
+  } finally {
+    startGate.resolve();
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("messages waiting on a busy agent are delivered in the order they were sent", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  session.steerResult = "unavailable";
+  const { manager, agentId, workdir } = await startAndSteerThroughManager(
+    session,
+    "steer",
+    "first",
+  );
+  try {
+    await startAgentRun(manager, agentId, "second", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+    });
+    expect(session.interruptCount).toBe(0);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "first"]));
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-2" });
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "first", "second"]));
+    expect(session.interruptCount).toBe(0);
+  } finally {
+    await manager.closeAgent(agentId);
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -1978,21 +2174,28 @@ test("steers a tracked autonomous turn without creating a replacement run", asyn
   }
 });
 
-test("isolated rewind falls back from steering to the normal replacement path", async () => {
+test("a slash command sent into a running turn waits for it instead of interrupting it", async () => {
   const session = new SteeringTestSession({ provider: "claude", cwd: process.cwd() });
   session.steerResult = "unavailable";
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(
+    session,
+    "steer",
+    "/rewind submitted-message-id",
+  );
   try {
-    await startAgentRun(manager, agentId, "/rewind submitted-message-id", logger, {
-      replaceRunning: true,
-      activeTurnBehavior: "steer",
-      runOptions: { clientMessageId: "rewind-client" },
-    });
-    await manager.waitForAgentRunStart(agentId);
-    expect(session.interruptCount).toBe(2);
-    expect(session.startPrompts).toContain("/rewind submitted-message-id");
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "rewind-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+
+    session.pushEvent({ type: "turn_completed", provider: "claude", turnId: "active-turn-1" });
+
+    await vi.waitFor(() =>
+      expect(session.startPrompts).toEqual(["initial", "/rewind submitted-message-id"]),
+    );
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
   } finally {
     await manager.closeAgent(agentId);
@@ -2000,14 +2203,22 @@ test("isolated rewind falls back from steering to the normal replacement path", 
   }
 });
 
-test("missing steer operation interrupts once and starts one replacement turn", async () => {
+test("a provider that cannot steer gets the message after its turn, not an interrupt", async () => {
   const session = new UnsupportedSteeringSession({ provider: "codex", cwd: process.cwd() });
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(session);
   try {
-    expect(session.interruptCount).toBe(1);
-    expect(session.startCount).toBe(2);
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startCount).toBe(1);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "unsupported-turn-1" });
+
+    await vi.waitFor(() => expect(session.startCount).toBe(2));
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
   } finally {
     await manager.closeAgent(agentId);

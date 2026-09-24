@@ -4,6 +4,7 @@ import type {
   AgentPermissionRequest,
   AgentPromptInput,
   AgentRunOptions,
+  AgentSteerOptions,
 } from "./agent-sdk-types.js";
 import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
@@ -21,7 +22,7 @@ export type AgentRunController = Pick<
   | "tryRunOutOfBand"
   | "hasInFlightRun"
   | "replaceAgentRun"
-  | "steerOrReplaceActiveTurn"
+  | "steerIntoActiveTurn"
   | "streamAgent"
 > &
   Partial<Pick<AgentManager, "interceptPromptForDispatch">> & {
@@ -30,21 +31,53 @@ export type AgentRunController = Pick<
 
 export interface StartAgentRunOptions {
   replaceRunning?: boolean;
+  /**
+   * "steer" joins the running turn, or waits for it and runs next; it never cancels anything.
+   * Only an explicit "interrupt" (with `replaceRunning`) replaces a running turn.
+   */
   activeTurnBehavior?: ActiveTurnBehavior;
   runOptions?: AgentRunOptions;
   /** Ask the provider to deny permissions blocking this steer. */
   clearPendingPermissions?: boolean;
 }
 
-export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
+/**
+ * `queued`: the agent is busy with a run the prompt could not join. It is delivered, in order, as
+ * soon as that run takes a steer or ends.
+ */
+export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started" | "queued";
 
-async function steerOrReplaceActiveRun(
+/** Per manager, per agent: the tail of the prompts waiting for that agent, so they keep order. */
+const waitingDeliveries = new WeakMap<AgentRunController, Map<string, Promise<void>>>();
+
+function waitingDeliveriesFor(agentManager: AgentRunController): Map<string, Promise<void>> {
+  let deliveries = waitingDeliveries.get(agentManager);
+  if (!deliveries) {
+    deliveries = new Map();
+    waitingDeliveries.set(agentManager, deliveries);
+  }
+  return deliveries;
+}
+
+function steerOptionsFor(options: StartAgentRunOptions | undefined): AgentSteerOptions | undefined {
+  return options?.clearPendingPermissions
+    ? { ...options.runOptions, clearPendingPermissions: true }
+    : options?.runOptions;
+}
+
+/**
+ * A message is never a stop. It joins the running turn; when the turn cannot take it, it waits
+ * behind the run instead of replacing it, because replacing interrupts the provider, and in
+ * Claude Code that aborts every background Workflow and Agent task the session has running.
+ */
+async function steerOrWaitForActiveRun(
   agentManager: AgentRunController,
   agentId: string,
   prompt: AgentPromptInput,
+  logger: Logger,
   options: StartAgentRunOptions | undefined,
 ): Promise<
-  | { disposition: "steered" }
+  | { disposition: "steered" | "queued" }
   | {
       disposition: "turn_started";
       iterator: AsyncGenerator<import("./agent-sdk-types.js").AgentStreamEvent>;
@@ -54,17 +87,74 @@ async function steerOrReplaceActiveRun(
   if (options?.activeTurnBehavior !== "steer") {
     return null;
   }
-  const steerOptions = options.clearPendingPermissions
-    ? { ...options.runOptions, clearPendingPermissions: true }
-    : options.runOptions;
-  const result = await agentManager.steerOrReplaceActiveTurn(agentId, prompt, steerOptions);
-  if (result.status === "steered") {
-    return { disposition: "steered" };
+  const deliveries = waitingDeliveriesFor(agentManager);
+  let firstWait: Promise<void> | null = null;
+  // Anything already waiting goes first; a later message must not overtake it.
+  if (!deliveries.has(agentId)) {
+    const result = await agentManager.steerIntoActiveTurn(
+      agentId,
+      prompt,
+      steerOptionsFor(options),
+    );
+    if (result.status === "steered") {
+      return { disposition: "steered" };
+    }
+    if (result.status === "busy") {
+      firstWait = result.nextOpportunity;
+    } else if (!agentManager.hasInFlightRun(agentId)) {
+      // Checked and started in one tick, so no other dispatch can start a run in between.
+      return {
+        disposition: "turn_started",
+        iterator: agentManager.streamAgent(agentId, prompt, options.runOptions),
+      };
+    }
   }
-  if (result.status === "replaced") {
-    return { disposition: "turn_started", iterator: result.iterator };
+
+  const previous = deliveries.get(agentId) ?? Promise.resolve();
+  const delivery = previous
+    .then(() => deliverWhenPossible(agentManager, agentId, prompt, logger, options, firstWait))
+    .catch((error: unknown) => {
+      logger.error({ err: error, agentId }, "A message waiting for a busy agent was not delivered");
+    });
+  deliveries.set(agentId, delivery);
+  void delivery.finally(() => {
+    if (deliveries.get(agentId) === delivery) deliveries.delete(agentId);
+  });
+  return { disposition: "queued" };
+}
+
+async function deliverWhenPossible(
+  agentManager: AgentRunController,
+  agentId: string,
+  prompt: AgentPromptInput,
+  logger: Logger,
+  options: StartAgentRunOptions,
+  firstWait: Promise<void> | null,
+): Promise<void> {
+  if (firstWait) await firstWait;
+  for (;;) {
+    const result = await agentManager.steerIntoActiveTurn(
+      agentId,
+      prompt,
+      steerOptionsFor(options),
+    );
+    if (result.status === "steered") return;
+    if (result.status === "busy") {
+      await result.nextOpportunity;
+      continue;
+    }
+    if (agentManager.hasInFlightRun(agentId)) continue;
+    try {
+      // Idle: start the turn through the ordinary path, which never replaces without
+      // `replaceRunning`, so a run that appears in the meantime is refused, not interrupted.
+      await startAgentRunWithStaleRetry(agentManager, agentId, prompt, logger, {
+        runOptions: options.runOptions,
+      });
+      return;
+    } catch (error) {
+      if (!agentManager.hasInFlightRun(agentId)) throw error;
+    }
   }
-  return null;
 }
 
 async function startOrReplaceRun(
@@ -164,12 +254,12 @@ async function startAgentRunInner(
   options?: StartAgentRunOptions,
 ): Promise<{ disposition: PromptDispatchDisposition }> {
   const snapshot = agentManager.getAgent(agentId);
-  const steered = await steerOrReplaceActiveRun(agentManager, agentId, prompt, options);
-  if (steered?.disposition === "steered") {
-    return steered;
+  const steered = await steerOrWaitForActiveRun(agentManager, agentId, prompt, logger, options);
+  if (steered && steered.disposition !== "turn_started") {
+    return { disposition: steered.disposition };
   }
   const { iterator, replaced } = steered
-    ? { iterator: steered.iterator, replaced: true }
+    ? { iterator: steered.iterator, replaced: false }
     : await startOrReplaceRun(agentManager, agentId, prompt, options);
   logger.trace(
     {
@@ -257,6 +347,10 @@ export interface SendPromptToAgentParams {
   /** Prompt to dispatch to the provider (may include image blocks or wrapped text). */
   prompt: AgentPromptInput;
   messageId?: string;
+  /**
+   * Defaults to "steer". A message never cancels in-flight work unless the sender explicitly asks
+   * for "interrupt"; MCP, the CLI and clients older than steering send nothing.
+   */
   activeTurnBehavior?: ActiveTurnBehavior;
   runOptions?: AgentRunOptions;
   /** Optional mode to set on the agent before the run starts. */
@@ -358,7 +452,7 @@ export async function sendPromptToAgent(
 
   return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
     replaceRunning: true,
-    activeTurnBehavior: params.activeTurnBehavior,
+    activeTurnBehavior: params.activeTurnBehavior ?? "steer",
     clearPendingPermissions: params.clearPendingPermissions,
     runOptions,
   });

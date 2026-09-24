@@ -620,8 +620,11 @@ describe("daemon E2E (real claude) - send message during tool call", () => {
 
       collector.clear();
 
-      // Step 4: Send a second message while the tool call is still running
-      await client.sendMessage(agent.id, "Reply with exactly: INTERRUPT_RECEIVED");
+      // Step 4: Send a second message while the tool call is still running. Only an explicit
+      // interrupt replaces the turn; the default steers into it.
+      await client.sendMessage(agent.id, "Reply with exactly: INTERRUPT_RECEIVED", {
+        activeTurnBehavior: "interrupt",
+      });
 
       // Step 5: Wait for the agent to finish — this is the critical assertion.
       // If the bug is present, the agent will stop and never start a new turn.
