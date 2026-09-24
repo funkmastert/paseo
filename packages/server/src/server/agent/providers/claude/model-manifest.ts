@@ -1,6 +1,7 @@
 import type { AgentModelDefinition, AgentSelectOption } from "../../agent-sdk-types.js";
 
 type ClaudeEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+type ClaudeThinkingOptionId = ClaudeEffortLevel | "ultracode";
 
 interface ClaudeModelManifestEntry {
   id: string;
@@ -11,6 +12,11 @@ interface ClaudeModelManifestEntry {
   minimumClaudeCodeVersion?: string;
   contextWindowMaxTokens?: number;
   effortLevels?: readonly ClaudeEffortLevel[];
+  // Preselected thinking option for a new session on this model. Defaults to
+  // CLAUDE_DEFAULT_THINKING_OPTION_ID when omitted; must name an option the entry actually
+  // advertises (an effort level, "off" when supportsThinkingDisabled, or "ultracode" when xhigh
+  // is in effortLevels) — see the models.test.ts invariant test.
+  defaultThinkingOptionId?: ClaudeThinkingOptionId;
   supportsThinkingDisabled?: boolean;
   supportsFastMode?: boolean;
 }
@@ -44,6 +50,10 @@ export const CLAUDE_MODEL_MANIFEST = [
     minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 1_000_000,
     effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    // A new session from the app is a root agent, a leader, and leaders run Ultra Code. This is
+    // only the selector's preselection: the account-pool classifier gives every subagent an
+    // explicit level, and metadata generation caps it (structured-generation-providers.ts).
+    defaultThinkingOptionId: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
   },
   {
     id: "claude-opus-5",
@@ -171,6 +181,7 @@ export const CLAUDE_MODEL_MANIFEST = [
 function buildThinkingOptions(
   effortLevels: readonly ClaudeEffortLevel[] | undefined,
   supportsThinkingDisabled: boolean,
+  defaultThinkingOptionId: string,
 ): AgentSelectOption[] | undefined {
   if (!effortLevels) {
     return undefined;
@@ -181,12 +192,18 @@ function buildThinkingOptions(
     ...effortLevels.map((id) => ({
       id,
       label: CLAUDE_EFFORT_LABELS[id],
-      ...(id === CLAUDE_DEFAULT_THINKING_OPTION_ID ? { isDefault: true } : {}),
+      ...(id === defaultThinkingOptionId ? { isDefault: true } : {}),
     })),
   ];
 
   if (effortLevels.includes("xhigh")) {
-    options.push({ id: CLAUDE_ULTRACODE_THINKING_OPTION_ID, label: "Ultra Code" });
+    options.push({
+      id: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+      label: "Ultra Code",
+      ...(CLAUDE_ULTRACODE_THINKING_OPTION_ID === defaultThinkingOptionId
+        ? { isDefault: true }
+        : {}),
+    });
   }
 
   return options;
@@ -204,9 +221,12 @@ export function getClaudeManifestModels(claudeCodeVersion?: string): AgentModelD
 
   const definitions: AgentModelDefinition[] = [];
   for (const model of availableModels) {
+    const defaultThinkingOptionId =
+      model.defaultThinkingOptionId ?? CLAUDE_DEFAULT_THINKING_OPTION_ID;
     const thinkingOptions = buildThinkingOptions(
       model.effortLevels,
       model.supportsThinkingDisabled === true,
+      defaultThinkingOptionId,
     );
     const definition: AgentModelDefinition = {
       provider: "claude",
@@ -225,7 +245,7 @@ export function getClaudeManifestModels(claudeCodeVersion?: string): AgentModelD
     }
     if (thinkingOptions) {
       definition.thinkingOptions = thinkingOptions;
-      definition.defaultThinkingOptionId = CLAUDE_DEFAULT_THINKING_OPTION_ID;
+      definition.defaultThinkingOptionId = defaultThinkingOptionId;
     }
     definitions.push(definition);
     if (!("aliases" in model) || !model.aliases) {
@@ -296,6 +316,8 @@ export function resolveClaudeDisabledThinkingForModel(
   return {
     supported:
       !!model && "supportsThinkingDisabled" in model && model.supportsThinkingDisabled === true,
+    // Not the entry's own default: this runs mid-session for any agent, subagents included, and
+    // Opus 5.5's default is Ultra Code, which only a leader may run.
     fallbackThinkingOptionId:
       model && "effortLevels" in model ? CLAUDE_DEFAULT_THINKING_OPTION_ID : undefined,
   };

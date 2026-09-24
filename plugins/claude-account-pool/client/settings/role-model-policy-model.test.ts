@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
-import { DEFAULT_POLICY, MAX_ALIASES_PER_ROLE, MAX_MAPPINGS, MAX_MODELS_PER_ROLE, MAX_ROLES, type RoleModelPolicy } from "../../shared/role-policy-schema";
+import {
+  DEFAULT_POLICY,
+  DEFAULT_THINKING_POLICY,
+  MAX_ALIASES_PER_ROLE,
+  MAX_MAPPINGS,
+  MAX_MODELS_PER_ROLE,
+  MAX_ROLES,
+  type RoleModelPolicy,
+} from "../../shared/role-policy-schema";
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
 import {
   formatAliasesText,
@@ -30,6 +38,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         enforceToolsOnClassifiedRoles: false,
         exposeClassifierTool: false,
         allowUnlistedModels: [],
+        thinking: input.patch.thinking,
         revision: `rev-${counter}`,
       },
     };
@@ -468,5 +477,63 @@ describe("openRoleModelPolicyModel — model budget threshold", () => {
     expect(calls).toHaveLength(1);
     expect((calls[0] as { patch: { modelBudgetThresholdPct: number } }).patch.modelBudgetThresholdPct).toBe(55);
     expect(model.getState().policy.modelBudgetThresholdPct).toBe(55);
+  });
+});
+
+describe("openRoleModelPolicyModel — thinking policy", () => {
+  it("an unrelated mutation echoes the configured thinking policy back unchanged", async () => {
+    const configured = {
+      ...policyWith(),
+      thinking: { leader: "high", byTaskClass: { mechanical: "off", standard: "medium", hard: "max" } },
+    };
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: configured, malformed: false }, { write });
+
+    await model.addModel("worker", "claude-sonnet-5");
+
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { patch: { thinking: unknown } }).patch.thinking).toEqual(configured.thinking);
+  });
+
+  it("setLeaderThinking commits the new leader level", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.setLeaderThinking("high")).toBe(true);
+    expect(model.getState().policy.thinking.leader).toBe("high");
+  });
+
+  it("setLeaderThinking(null) switches the leader rule off", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.setLeaderThinking(null)).toBe(true);
+    expect(model.getState().policy.thinking.leader).toBeNull();
+  });
+
+  it("setLeaderThinking rejects a malformed option id locally, without calling write", async () => {
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: policyWith(), malformed: false }, { write });
+
+    expect(await model.setLeaderThinking("not a valid id!")).toBe(false);
+    expect(model.getState().saveError).toMatch(/thinking/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("setTaskClassThinking commits the new level for the given task class only", async () => {
+    const model = openModel(policyWith());
+
+    expect(await model.setTaskClassThinking("mechanical", "medium")).toBe(true);
+    const thinking = model.getState().policy.thinking;
+    expect(thinking.byTaskClass.mechanical).toBe("medium");
+    expect(thinking.byTaskClass.standard).toBe(DEFAULT_THINKING_POLICY.byTaskClass.standard);
+    expect(thinking.byTaskClass.hard).toBe(DEFAULT_THINKING_POLICY.byTaskClass.hard);
+  });
+
+  it("setTaskClassThinking rejects a malformed option id locally, without calling write", async () => {
+    const { write, calls } = fakeSavingWrite();
+    const model = openRoleModelPolicyModel({ policy: policyWith(), malformed: false }, { write });
+
+    expect(await model.setTaskClassThinking("hard", "not a valid id!")).toBe(false);
+    expect(model.getState().saveError).toMatch(/thinking/);
+    expect(calls).toHaveLength(0);
   });
 });

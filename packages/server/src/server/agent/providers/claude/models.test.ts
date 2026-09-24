@@ -131,6 +131,30 @@ describe("getClaudeModels", () => {
     ]);
   });
 
+  it("preselects Ultra Code as Opus 5.5's default thinking option", () => {
+    const opus55 = getClaudeModels().find((model) => model.id === "claude-opus-5-5");
+    expect(opus55?.defaultThinkingOptionId).toBe(CLAUDE_ULTRACODE_THINKING_OPTION_ID);
+    expect(opus55?.thinkingOptions?.filter((option) => option.isDefault)).toEqual([
+      { id: CLAUDE_ULTRACODE_THINKING_OPTION_ID, label: "Ultra Code", isDefault: true },
+    ]);
+  });
+
+  it("keeps every model's default thinking option among its own advertised options", () => {
+    // A manifest entry could name a defaultThinkingOptionId that its own effortLevels/
+    // supportsThinkingDisabled never advertise (e.g. "ultracode" without xhigh) — the type alone
+    // permits that. buildThinkingOptions only sets isDefault on an option it actually built, so
+    // catching zero (or more than one) isDefault option catches the mistake here.
+    for (const model of getClaudeModels()) {
+      if (!model.thinkingOptions) {
+        expect(model.defaultThinkingOptionId).toBeUndefined();
+        continue;
+      }
+      const defaults = model.thinkingOptions.filter((option) => option.isDefault);
+      expect(defaults).toHaveLength(1);
+      expect(defaults[0]?.id).toBe(model.defaultThinkingOptionId);
+    }
+  });
+
   it("derives thinking options from model effort capabilities", () => {
     const models = new Map(getClaudeModels().map((model) => [model.id, model]));
 
@@ -189,6 +213,7 @@ describe("getClaudeModels", () => {
   });
 
   it.each([
+    // Never Opus 5.5's Ultra Code default: this fallback also runs for subagents.
     ["claude-opus-5-5", false, "high"],
     ["claude-opus-5", true, "high"],
     ["claude-opus-5-20260724", true, "high"],

@@ -5,6 +5,10 @@ import type {
 } from "./agent-sdk-types.js";
 import type { StructuredGenerationProvider } from "./agent-response-loop.js";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
+import { CLAUDE_ULTRACODE_THINKING_OPTION_ID } from "./providers/claude/model-manifest.js";
+
+/** The effort Ultra Code runs at: what a non-leader gets in its place. */
+const ULTRACODE_EFFORT_OPTION_ID = "xhigh";
 
 export interface StructuredGenerationDaemonConfig {
   metadataGeneration?: {
@@ -270,6 +274,14 @@ function resolveThinkingOptionId(
     model.thinkingOptions?.some((option) => option.id === preferredThinkingOptionId)
   ) {
     return preferredThinkingOptionId;
+  }
+  // A model's default can be Ultra Code (Opus 5.5 preselects it for a new session, which is a
+  // leader). A one-shot metadata generation is not a leader, so it gets the effort Ultra Code
+  // implies, without the orchestration, or the provider's own level when that isn't offered.
+  if (model.defaultThinkingOptionId === CLAUDE_ULTRACODE_THINKING_OPTION_ID) {
+    return model.thinkingOptions?.some((option) => option.id === ULTRACODE_EFFORT_OPTION_ID)
+      ? ULTRACODE_EFFORT_OPTION_ID
+      : undefined;
   }
   return model.defaultThinkingOptionId;
 }

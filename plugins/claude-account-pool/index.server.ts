@@ -13,7 +13,7 @@ import { createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
-import { AGENT_TYPE_LABEL, rolePolicyFamilies } from "./shared/role-policy-schema";
+import { AGENT_TYPE_LABEL, catalogFamilies } from "./shared/role-policy-schema";
 
 function isPoolProvider(pool: PoolCache, providerId: string): boolean {
   const { pool: resolved } = pool.get();
@@ -89,7 +89,7 @@ export default function contribute(server: PluginServerContext) {
     notifier = createNotifier({ paseo, health });
     policyCache = createPolicyCache(paseo);
     const startedPolicyCache = policyCache;
-    catalogCache = createModelCatalogCache(paseo, () => rolePolicyFamilies(startedPolicyCache.get()));
+    catalogCache = createModelCatalogCache(paseo, () => catalogFamilies(startedPolicyCache.get()));
     recentAgentTypes = createRecentAgentTypes();
     parentProfiles = createParentToolProfiles(paseo);
 
@@ -154,6 +154,20 @@ export default function contribute(server: PluginServerContext) {
             : `${pool} selected "${episode.ref}" as its default for caller "${episode.callerAgentId}"`;
         console.error(
           `[claude-account-pool] role-router: UNVERIFIED MODEL — ${how}, and the provider's model catalog does not list it. Letting it run because agentModelPolicy.allowUnlistedModels names it. If the agent fails at launch, the provider rejected the id; remove it from allowUnlistedModels`,
+        );
+      },
+      onThinkingOverridden: (episode) => {
+        const model = episode.modelRef !== undefined ? `"${episode.modelRef}"` : "the model";
+        const why =
+          episode.reason === "leader-rule"
+            ? "agentModelPolicy.thinking.leader outranks a requested level for a leader"
+            : episode.reason === "subagent-no-ultracode"
+              ? "a subagent never runs Ultra Code"
+              : episode.reason === "no-thinking-options"
+                ? `${model} offers no thinking options at all`
+                : `${model} does not offer it`;
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested thinking level "${episode.requested}", but ${why}; policy applied ${episode.applied === null ? "none" : `"${episode.applied}"`} instead`,
         );
       },
     });
@@ -334,6 +348,7 @@ export default function contribute(server: PluginServerContext) {
       world: () => ({
         policy: startedPolicyCache.get(),
         catalog: startedCatalogCache.get(),
+        thinkingCatalog: startedCatalogCache.getThinking(),
         pool: startedPoolCache.get().pool,
         health,
         nowMs: Date.now(),

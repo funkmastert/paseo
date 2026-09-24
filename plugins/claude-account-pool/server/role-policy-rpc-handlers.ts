@@ -56,14 +56,15 @@ export interface RoleModelPolicyRpcHandlers {
   ): Promise<RpcOutput<typeof roleModelPolicyRpc.explain>>;
 }
 
-type EditableDocument = Pick<RoleModelPolicy, "roles" | "agentTypeMappings" | "modelBudgetThresholdPct">;
+type EditableDocument = Pick<RoleModelPolicy, "roles" | "agentTypeMappings" | "modelBudgetThresholdPct" | "thinking">;
 
 /** Two documents are semantically equal when their editable fields serialize identically (order-sensitive: array order is meaningful). */
 function sameDocument(a: EditableDocument, b: EditableDocument): boolean {
   return (
     JSON.stringify(a.roles) === JSON.stringify(b.roles) &&
     JSON.stringify(a.agentTypeMappings) === JSON.stringify(b.agentTypeMappings) &&
-    a.modelBudgetThresholdPct === b.modelBudgetThresholdPct
+    a.modelBudgetThresholdPct === b.modelBudgetThresholdPct &&
+    JSON.stringify(a.thinking) === JSON.stringify(b.thinking)
   );
 }
 
@@ -117,6 +118,11 @@ async function performWrite(
     roles: input.patch.roles,
     agentTypeMappings: input.patch.agentTypeMappings,
     modelBudgetThresholdPct: input.patch.modelBudgetThresholdPct,
+    // OPTIONAL on the patch, unlike the fields above: an app build that
+    // predates this field never sends it, and the stored value carries
+    // through untouched rather than resetting to the schema's default —
+    // mirroring how allowUnlistedModels survives an unrelated save below.
+    thinking: input.patch.thinking ?? current.policy.thinking,
   };
   if (sameDocument(candidateDoc, current.policy)) {
     // Semantic no-op: nothing to persist, revision stays put.
@@ -267,17 +273,19 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           callerAgentId: input.root === true ? undefined : "(preview)",
           requestedProvider: input.requestedProvider,
           requestedModel: input.requestedModel,
+          requestedThinkingOptionId: input.requestedThinkingOptionId,
         },
         {
           policy: freshPolicy,
           catalog: deps.catalogCache.get(),
+          thinkingCatalog: deps.catalogCache.getThinking(),
           pool,
           health: deps.health,
           nowMs: Date.now(),
         },
       );
 
-      const { role, taskClass, model, tools, account } = decision;
+      const { role, taskClass, model, tools, account, thinking } = decision;
       const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
             requestedRef: model.override.requestedRef,
@@ -340,6 +348,25 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           model: model.reason,
           tools: tools.reason,
           account: account.reason,
+          thinking: thinking.reason,
+        },
+        thinking: {
+          outcome: thinking.outcome,
+          ...(thinking.optionId !== null ? { optionId: thinking.optionId } : {}),
+          ...(thinking.modelRef !== undefined ? { modelRef: thinking.modelRef } : {}),
+          ...(thinking.wanted !== undefined ? { wanted: thinking.wanted } : {}),
+          ...(thinking.subagentCapped ? { subagentCapped: true } : {}),
+          ...(thinking.clamped ? { clamped: thinking.clamped } : {}),
+          ...(thinking.requested !== undefined ? { requested: thinking.requested } : {}),
+          ...(thinking.override
+            ? {
+                override: {
+                  requested: thinking.override.requested,
+                  ...(thinking.override.applied !== null ? { applied: thinking.override.applied } : {}),
+                  reason: thinking.override.reason,
+                },
+              }
+            : {}),
         },
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
         ...(model.unadvertisedPoolEntries.length > 0

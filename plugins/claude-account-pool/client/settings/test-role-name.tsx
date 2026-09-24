@@ -40,6 +40,7 @@ export function TestRoleName({ theme }: { theme: PluginSurfaceProps["theme"] }) 
   const [startedBy, setStartedBy] = useState<StartedBy>("agent");
   const [requestedModel, setRequestedModel] = useState("");
   const [requestedProvider, setRequestedProvider] = useState("");
+  const [requestedThinking, setRequestedThinking] = useState("");
   const [result, setResult] = useState<RoleModelPolicyExplainResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -84,6 +85,13 @@ export function TestRoleName({ theme }: { theme: PluginSurfaceProps["theme"] }) 
         placeholder="e.g. claude-backup"
         testID="test-role-name-requested-provider"
       />
+      <SettingsInput
+        label="Explicit thinking request (optional)"
+        hint="What the caller would put in its thinking option. Shows whether policy keeps it: a subagent never runs Ultra Code."
+        onChangeText={setRequestedThinking}
+        placeholder="e.g. ultracode"
+        testID="test-role-name-requested-thinking"
+      />
       <SettingsAction
         label="Resolution preview"
         actionLabel="Test"
@@ -97,6 +105,7 @@ export function TestRoleName({ theme }: { theme: PluginSurfaceProps["theme"] }) 
             root: startedBy === "root" ? true : undefined,
             requestedModel: requestedModel.trim().length > 0 ? requestedModel.trim() : undefined,
             requestedProvider: requestedProvider.trim().length > 0 ? requestedProvider.trim() : undefined,
+            requestedThinkingOptionId: requestedThinking.trim().length > 0 ? requestedThinking.trim() : undefined,
           })
             .then(setResult)
             .catch((err) => setError(err instanceof Error ? err.message : String(err)));

@@ -1,5 +1,5 @@
 import type { AgentDecision } from "./classifier";
-import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL } from "../shared/role-policy-schema";
+import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL, THINKING_OVERRIDDEN_LABEL } from "../shared/role-policy-schema";
 
 /**
  * One `AgentDecision` rendered as plain text, for a caller asking what a task
@@ -12,7 +12,7 @@ import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL } from "../shared/
  * helped if it also learns which label to set instead.
  */
 export function describeDecision(decision: AgentDecision): string {
-  const { role, taskClass, model, tools, account } = decision;
+  const { role, taskClass, model, tools, account, thinking } = decision;
   const lines: string[] = [];
 
   lines.push(`Role: ${role.role.name} (${role.source}) — ${role.reason}`);
@@ -26,6 +26,9 @@ export function describeDecision(decision: AgentDecision): string {
         : `${model.provider}/${model.model}`;
   lines.push(`Model: ${target} — ${model.reason}`);
   lines.push(`Pool (${model.poolSlot}): ${model.pool.length > 0 ? model.pool.join(", ") : "empty"}`);
+  lines.push(
+    `Thinking: ${thinking.reason}${thinking.override ? ` The create would be labelled ${THINKING_OVERRIDDEN_LABEL}=${thinking.override.requested}.` : ""}`,
+  );
 
   lines.push(
     tools.deniedTools.length === 0

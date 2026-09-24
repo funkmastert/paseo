@@ -1,4 +1,6 @@
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
+import { THINKING_OVERRIDDEN_LABEL } from "../../shared/role-policy-schema";
+import { THINKING_LEVEL_LABELS, type ThinkingLevelId } from "../../shared/thinking-levels";
 
 /**
  * Turns a `role-model-policy.explain` result into the lines the "Test This
@@ -40,6 +42,37 @@ export function describeOutcome(result: RoleModelPolicyExplainResult): string {
       ? "the model is left as requested"
       : `would route to ${describeTarget(result)}${result.modelUnadvertised ? " (UNVERIFIED: the provider's catalog doesn't list it; allowUnlistedModels vouches for it)" : ""}`;
   return `Model: ${target} — ${result.reasons.model}`;
+}
+
+/** A level's display name, or the raw id for one this plugin doesn't know (another provider's own token). */
+function thinkingLabel(optionId: string): string {
+  return THINKING_LEVEL_LABELS[optionId as ThinkingLevelId] ?? optionId;
+}
+
+/**
+ * The thinking line, the classifier's own sentence. Absent when the plugin
+ * predates the thinking decision and sent no reason for it.
+ */
+export function describeThinking(result: RoleModelPolicyExplainResult): string | undefined {
+  return result.reasons.thinking === undefined ? undefined : `Thinking: ${result.reasons.thinking}`;
+}
+
+/**
+ * The explicit-thinking line, printed only when a requested level was
+ * simulated. Names `paseo.thinking-overridden-by-policy` for the same reason
+ * `describeRequestedModel` names its label.
+ */
+export function describeRequestedThinking(result: RoleModelPolicyExplainResult): string | undefined {
+  const requested = result.thinking?.requested;
+  if (requested === undefined) {
+    return undefined;
+  }
+  const override = result.thinking?.override;
+  if (override === undefined) {
+    return `Explicit thinking request ${thinkingLabel(requested)}: honored.`;
+  }
+  const outcome = override.applied === undefined ? "removed by policy" : `overridden by policy → ${thinkingLabel(override.applied)}`;
+  return `Explicit thinking request ${thinkingLabel(requested)}: ${outcome}. A real agent would carry ${THINKING_OVERRIDDEN_LABEL}=${requested}.`;
 }
 
 /**
@@ -101,18 +134,21 @@ export function describeUnadvertisedEntries(result: RoleModelPolicyExplainResult
   return `Skipped, not in the provider's catalog and not in allowUnlistedModels: ${entries.join(", ")}. Add an id to allowUnlistedModels if the provider does accept it.`;
 }
 
-
 /** Every line the panel prints, in order. */
 export function explainSummaryLines(result: RoleModelPolicyExplainResult): string[] {
+  const thinking = describeThinking(result);
   const requested = describeRequestedModel(result);
+  const requestedThinking = describeRequestedThinking(result);
   const unadvertised = describeUnadvertisedEntries(result);
   return [
     describeRole(result),
     describeTaskClass(result),
     describeOutcome(result),
+    ...(thinking ? [thinking] : []),
     describeTools(result),
     describeAccount(result),
     ...(requested ? [requested] : []),
+    ...(requestedThinking ? [requestedThinking] : []),
     ...(unadvertised ? [unadvertised] : []),
   ];
 }

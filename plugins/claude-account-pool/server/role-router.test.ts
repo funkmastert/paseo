@@ -7,12 +7,13 @@ import {
   DEFAULT_POLICY,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_LABEL,
+  THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
   type RoleModelPolicy,
 } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
-import type { ModelCatalog } from "./model-catalog";
+import type { ModelCatalog, ThinkingCatalog } from "./model-catalog";
 import { createRouter } from "./router";
 import { createRecentAgentTypes } from "./recent-agent-types";
 import { createRoleRouter, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
@@ -34,8 +35,14 @@ function fakePolicyCache(policy: RoleModelPolicy) {
   return { get: () => policy, isMalformed: () => false, lastError: () => undefined, forceRefresh: vi.fn(), stop: vi.fn() };
 }
 
-function fakeCatalogCache(catalog: ModelCatalog) {
-  return { get: () => catalog, forceRefresh: vi.fn(), stop: vi.fn() };
+function fakeCatalogCache(catalog: ModelCatalog, thinking: ThinkingCatalog = new Map()) {
+  return { get: () => catalog, getThinking: () => thinking, forceRefresh: vi.fn(), stop: vi.fn() };
+}
+
+function thinkingCatalog(
+  entries: Record<string, Record<string, { optionIds: string[]; defaultOptionId?: string }>>,
+): ThinkingCatalog {
+  return new Map(Object.entries(entries).map(([family, models]) => [family, new Map(Object.entries(models))]));
 }
 
 function fakePoolCache(pool: ResolvedPool, failOpen = false) {
@@ -962,7 +969,7 @@ describe("createRoleRouter", () => {
     const health = createHealthTracker();
     const policy = policyWithWorkerModels(["claude/claude-opus-4"]);
     let currentCatalog: ModelCatalog = new Map(); // starts catalog-missing -> unavailable
-    const catalogCache = { get: () => currentCatalog, forceRefresh: vi.fn(), stop: vi.fn() };
+    const catalogCache = { get: () => currentCatalog, getThinking: () => new Map(), forceRefresh: vi.fn(), stop: vi.fn() };
     const router = createRoleRouter({
       ...baseOptions({ poolCache: fakePoolCache(pool), health, onRoleUnavailable }),
       policyCache: fakePolicyCache(policy),
@@ -1887,5 +1894,360 @@ describe("role-router + account router composition", () => {
     const effectiveOptions = finalOptions ?? roleOptions;
     expect(effectiveOptions?.disallowedTools?.length).toBeGreaterThan(0);
     expect(effectiveOptions?.disallowedTools).toEqual(expect.arrayContaining(["Bash", "Write", "Edit"]));
+  });
+});
+
+/**
+ * Tyler's rule, at the hook: `config.thinkingOptionId` gets written (or
+ * removed, or left alone) on every path a model decision can take, except the
+ * one path where the model itself never runs — and a subagent never leaves
+ * this hook with Ultra Code, on any path.
+ */
+describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
+  const pool: ResolvedPool = { workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } };
+
+  it("writes config.thinkingOptionId on the SELECTED path (the class default, no request)", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-sonnet-5"] }),
+          thinkingCatalog({ claude: { "claude-sonnet-5": { optionIds: ["off", "low", "high"], defaultOptionId: "high" } } }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    const result = router(request({ callerAgentId: "c1" }), fakeContext);
+
+    expect(result?.config.model).toBe("claude-sonnet-5");
+    expect(result?.config.thinkingOptionId).toBe("high"); // standard task class's default
+  });
+
+  it("writes config.thinkingOptionId on the UNCONFIGURED path, deciding against the request's own model", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        catalogCache: fakeCatalogCache(
+          new Map(), // catalog is irrelevant here: the role has no models, so nothing is selected
+          thinkingCatalog({ claude: { "claude-sonnet-5": { optionIds: ["off", "low", "high"], defaultOptionId: "high" } } }),
+        ),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet-5", cwd: "/tmp/work" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-sonnet-5"); // unconfigured: the request's own model stands
+    expect(result?.config.thinkingOptionId).toBe("high");
+  });
+
+  it("writes config.thinkingOptionId on the HONORED-REQUEST path", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5", "claude-opus-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-sonnet-5", "claude-opus-5"] }),
+          thinkingCatalog({ claude: { "claude-opus-5": { optionIds: ["low", "high", "max"], defaultOptionId: "high" } } }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude-backup", model: "claude-opus-5", cwd: "/tmp" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-opus-5"); // honored, untouched by the model rewrite
+    expect(result?.config.thinkingOptionId).toBe("high");
+  });
+
+  it("removes a requested thinkingOptionId when the effective model has no thinking options", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-haiku-4-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-haiku-4-5"] }),
+          thinkingCatalog({ claude: { "claude-haiku-4-5": { optionIds: [] } } }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", cwd: "/tmp/work", thinkingOptionId: "max" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-haiku-4-5");
+    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+    expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "max" });
+  });
+
+  it("leaves config.thinkingOptionId untouched when the effective model is missing from the thinking catalog (model-unknown)", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+        // catalog lists the model (so it's SELECTED); the thinking catalog does not.
+        catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    const result = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", cwd: "/tmp/work", thinkingOptionId: "max" } }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-sonnet-5"); // the model rewrite still happens
+    expect(result?.config.thinkingOptionId).toBe("max"); // but the request's own thinking option is left alone
+    expect(result?.labels?.[THINKING_OVERRIDDEN_LABEL]).toBeUndefined();
+  });
+
+  it("leaves config.thinkingOptionId untouched on the provider-not-registered path, even though a level was decided for the skipped model", () => {
+    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const router = createRoleRouter({
+      ...baseOptions({ poolCache: fakePoolCache(pool) }),
+      policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
+      // The catalog never lists "deadfamily" either, but the THINKING catalog
+      // does — proving the skip isn't just "there was nothing to decide".
+      catalogCache: fakeCatalogCache(
+        new Map(),
+        thinkingCatalog({ deadfamily: { "some-model": { optionIds: ["low", "high"], defaultOptionId: "high" } } }),
+      ),
+      providerIds,
+    });
+
+    const initial = request({
+      callerAgentId: "c1",
+      config: { provider: "claude", model: "claude-sonnet", thinkingOptionId: "max", cwd: "/tmp" },
+    });
+    const result = router(initial, fakeContext);
+
+    // Recovered pass-through: a level decided for a model this create will
+    // never run must not land on the request anyway.
+    expect(result).toBeUndefined();
+  });
+
+  it("still removes a subagent's Ultra Code on the provider-not-registered path", () => {
+    const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const onThinkingOverridden = vi.fn();
+    const router = createRoleRouter({
+      ...baseOptions({ poolCache: fakePoolCache(pool) }),
+      policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
+      catalogCache: fakeCatalogCache(new Map()),
+      providerIds,
+      onThinkingOverridden,
+    });
+
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude", model: "claude-sonnet", thinkingOptionId: "ultracode", cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+
+    expect(result?.config.model).toBe("claude-sonnet"); // the rewrite is still skipped
+    expect(result?.config).not.toHaveProperty("thinkingOptionId");
+    expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "ultracode" });
+    // Reported against the model that runs, not the one the rewrite gave up on.
+    expect(onThinkingOverridden).toHaveBeenCalledWith(
+      expect.objectContaining({ modelRef: "claude/claude-sonnet", requested: "ultracode", applied: null }),
+    );
+  });
+
+  it("still removes a subagent's Ultra Code when classification throws and the request otherwise passes through", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: {
+          get: () => {
+            throw new Error("corrupt policy");
+          },
+          isMalformed: () => false,
+          lastError: () => undefined,
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        },
+      }),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const child = router(
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "ultracode", cwd: "/tmp" } }),
+      fakeContext,
+    );
+    expect(child?.config).not.toHaveProperty("thinkingOptionId");
+    expect(child?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "ultracode" });
+
+    // A root agent is a leader: its Ultra Code is not this guard's business.
+    const root = router(
+      request({ config: { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "ultracode", cwd: "/tmp" } }),
+      fakeContext,
+    );
+    expect(root).toBeUndefined();
+    errorSpy.mockRestore();
+  });
+
+  it("gives a subagent on Opus 5.5 an explicit level, so the model's Ultra Code default never applies", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-opus-5-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-opus-5-5"] }),
+          thinkingCatalog({
+            claude: {
+              "claude-opus-5-5": { optionIds: ["low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "ultracode" },
+            },
+          }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    // No thinkingOptionId on the request: without the classifier this child
+    // would fall back to whatever its model defaults to.
+    for (const [taskClass, expected] of [
+      [undefined, "high"],
+      ["mechanical", "low"],
+      ["standard", "high"],
+      ["hard", "xhigh"],
+    ] as const) {
+      const result = router(
+        request({
+          callerAgentId: "c1",
+          labels: taskClass ? { "paseo.task-class": taskClass } : {},
+          config: { provider: "claude", cwd: "/tmp" },
+        }),
+        fakeContext,
+      );
+      expect(result?.config.model, taskClass).toBe("claude-opus-5-5");
+      expect(result?.config.thinkingOptionId, taskClass).toBe(expected);
+    }
+  });
+
+  it("a subagent asking for Ultra Code comes out Extra High, labelled — alongside MODEL_OVERRIDDEN_LABEL", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-sonnet-5"] }),
+          thinkingCatalog({
+            claude: { "claude-sonnet-5": { optionIds: ["off", "low", "high", "xhigh", "max", "ultracode"], defaultOptionId: "high" } },
+          }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    // Asks for a model the pool doesn't approve (MODEL_OVERRIDDEN_LABEL) AND
+    // Ultra Code, which no subagent runs (THINKING_OVERRIDDEN_LABEL).
+    const overridden = router(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude-backup", model: "claude-opus-5", thinkingOptionId: "ultracode", cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+
+    expect(overridden?.config.model).toBe("claude-sonnet-5");
+    expect(overridden?.config.thinkingOptionId).toBe("xhigh");
+    expect(overridden?.labels).toMatchObject({
+      [MODEL_OVERRIDDEN_LABEL]: "claude-backup/claude-opus-5",
+      [THINKING_OVERRIDDEN_LABEL]: "ultracode",
+    });
+
+    // Same policy, a level the model offers: honored, nothing labelled.
+    const notOverridden = router(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude", model: "claude-sonnet-5", thinkingOptionId: "max", cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+    expect(notOverridden).toBeUndefined(); // byte-identical: nothing needed changing
+  });
+
+  it("reports an override once per (caller, model, requested, applied)", () => {
+    const onThinkingOverridden = vi.fn();
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-sonnet-5"] }),
+          thinkingCatalog({
+            claude: { "claude-sonnet-5": { optionIds: ["off", "low", "high", "xhigh", "max", "ultracode"], defaultOptionId: "high" } },
+          }),
+        ),
+        poolCache: fakePoolCache(pool),
+        onThinkingOverridden,
+      }),
+    );
+    const ask = () =>
+      router(
+        request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet-5", thinkingOptionId: "ultracode", cwd: "/tmp" } }),
+        fakeContext,
+      );
+    ask();
+    ask();
+    expect(onThinkingOverridden).toHaveBeenCalledTimes(1);
+    expect(onThinkingOverridden).toHaveBeenCalledWith(
+      expect.objectContaining({ callerAgentId: "c1", requested: "ultracode", applied: "xhigh", reason: "subagent-no-ultracode" }),
+    );
+  });
+
+  it("a no-change request passes through as undefined", () => {
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache(policyWithWorkerModels(["claude-sonnet-5"])),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-sonnet-5"] }),
+          thinkingCatalog({ claude: { "claude-sonnet-5": { optionIds: ["off", "low", "high"], defaultOptionId: "high" } } }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    // Already exactly what the classifier would decide: the standard
+    // default, on the pool's own top model.
+    const result = router(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude-backup", model: "claude-sonnet-5", thinkingOptionId: "high", cwd: "/tmp" },
+      }),
+      fakeContext,
+    );
+
+    expect(result).toBeUndefined();
+  });
+
+  it("a root create on claude-opus-5-5 asking for High comes out Ultra Code, labelled — a root agent is a leader", () => {
+    // DEFAULT_POLICY.thinking is already DEFAULT_THINKING_POLICY — nothing
+    // configured beyond the shipped default.
+    const router = createRoleRouter(
+      baseOptions({
+        policyCache: fakePolicyCache({
+          ...DEFAULT_POLICY,
+          roles: DEFAULT_POLICY.roles.map((role) => (role.id === "leader" ? { ...role, models: ["claude-opus-5-5"] } : role)),
+        }),
+        catalogCache: fakeCatalogCache(
+          catalog({ claude: ["claude-opus-5-5"] }),
+          thinkingCatalog({
+            claude: { "claude-opus-5-5": { optionIds: ["low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "ultracode" } },
+          }),
+        ),
+        poolCache: fakePoolCache(pool),
+      }),
+    );
+
+    // No callerAgentId at all: a root create, exactly like a human, the CLI
+    // or the app starting one.
+    const result = router(request({ config: { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "high", cwd: "/tmp" } }), fakeContext);
+
+    expect(result?.config.model).toBe("claude-opus-5-5");
+    expect(result?.config.thinkingOptionId).toBe("ultracode");
+    expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "high" });
   });
 });

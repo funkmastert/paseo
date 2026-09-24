@@ -7,8 +7,11 @@ import {
   MAX_ROLES,
   MODEL_REF_RE,
   ROLE_WORD_RE,
+  THINKING_OPTION_ID_RE,
   type RoleModelPolicy,
   type RoleRecord,
+  type TaskClassId,
+  type ThinkingPolicy,
 } from "../../shared/role-policy-schema";
 
 /**
@@ -45,7 +48,12 @@ import { DEFAULT_TOOL_PROFILE, ToolProfileSchema, type ToolProfile } from "../..
 export interface RoleModelPolicyModelDeps {
   write(input: {
     revision: string;
-    patch: { roles: RoleRecord[]; agentTypeMappings: Record<string, string>; modelBudgetThresholdPct: number };
+    patch: {
+      roles: RoleRecord[];
+      agentTypeMappings: Record<string, string>;
+      modelBudgetThresholdPct: number;
+      thinking: ThinkingPolicy;
+    };
   }): Promise<RoleModelPolicyWriteResult>;
   /** Injectable for tests; defaults to a timestamp+random id (uniqueness, not cryptographic strength, is all a role id needs). */
   generateRoleId?: () => string;
@@ -105,6 +113,10 @@ export interface RoleModelPolicyModel {
   setModelBudgetThreshold(thresholdPct: number): Promise<boolean>;
   /** Replaces a role's tool profile. Commits immediately, like the model/mapping mutations. */
   setToolProfile(roleId: string, profile: ToolProfile): Promise<boolean>;
+  /** Sets the leader tier's thinking level. `null` switches the leader rule off. */
+  setLeaderThinking(optionId: string | null): Promise<boolean>;
+  /** Sets a task class's thinking level for a subagent that didn't ask for one. */
+  setTaskClassThinking(taskClass: TaskClassId, optionId: string): Promise<boolean>;
 }
 
 function defaultGenerateRoleId(): string {
@@ -230,6 +242,7 @@ export function openRoleModelPolicyModel(
     nextRoles: RoleRecord[],
     nextMappings: Record<string, string>,
     nextThresholdPct: number = policy.modelBudgetThresholdPct,
+    nextThinking: ThinkingPolicy = policy.thinking,
   ): Promise<boolean> {
     saving = true;
     saveError = null;
@@ -237,7 +250,12 @@ export function openRoleModelPolicyModel(
 
     const result = await deps.write({
       revision: policy.revision,
-      patch: { roles: nextRoles, agentTypeMappings: nextMappings, modelBudgetThresholdPct: nextThresholdPct },
+      patch: {
+        roles: nextRoles,
+        agentTypeMappings: nextMappings,
+        modelBudgetThresholdPct: nextThresholdPct,
+        thinking: nextThinking,
+      },
     });
 
     saving = false;
@@ -530,6 +548,31 @@ export function openRoleModelPolicyModel(
         return false;
       }
       return commit(policy.roles, policy.agentTypeMappings, thresholdPct);
+    },
+
+    async setLeaderThinking(optionId) {
+      if (!guardEditable()) return false;
+      if (optionId !== null && !THINKING_OPTION_ID_RE.test(optionId)) {
+        saveError = `"${optionId}" isn't a valid thinking option id`;
+        publish();
+        return false;
+      }
+      const nextThinking: ThinkingPolicy = { ...policy.thinking, leader: optionId };
+      return commit(policy.roles, policy.agentTypeMappings, policy.modelBudgetThresholdPct, nextThinking);
+    },
+
+    async setTaskClassThinking(taskClass, optionId) {
+      if (!guardEditable()) return false;
+      if (!THINKING_OPTION_ID_RE.test(optionId)) {
+        saveError = `"${optionId}" isn't a valid thinking option id`;
+        publish();
+        return false;
+      }
+      const nextThinking: ThinkingPolicy = {
+        ...policy.thinking,
+        byTaskClass: { ...policy.thinking.byTaskClass, [taskClass]: optionId },
+      };
+      return commit(policy.roles, policy.agentTypeMappings, policy.modelBudgetThresholdPct, nextThinking);
     },
   };
 }

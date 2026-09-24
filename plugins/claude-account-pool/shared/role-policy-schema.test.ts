@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "./tool-profiles";
 import {
   DEFAULT_POLICY,
+  DEFAULT_THINKING_BY_TASK_CLASS,
+  DEFAULT_THINKING_POLICY,
   MAX_ALIASES_PER_ROLE,
   MAX_MAPPINGS,
   MAX_MODELS_PER_ROLE,
   MAX_ROLES,
   DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
   RoleModelPolicySchema,
+  ThinkingPolicySchema,
+  catalogFamilies,
   classModels,
   migrateRoleModelPolicy,
   rolePolicyFamilies,
@@ -44,6 +48,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
     enforceToolsOnClassifiedRoles: false,
     exposeClassifierTool: false,
     allowUnlistedModels: [],
+    thinking: DEFAULT_THINKING_POLICY,
     revision: "r1",
     ...overrides,
   };
@@ -67,6 +72,62 @@ describe("RoleModelPolicySchema", () => {
       expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["claude-opus-5-5", "codex/gpt-9"] })).success).toBe(true);
       expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["claude-opus-*"] })).success).toBe(false);
       expect(RoleModelPolicySchema.safeParse(policy({ allowUnlistedModels: ["has space"] })).success).toBe(false);
+    });
+  });
+
+  describe("thinking", () => {
+    it("defaults the whole block — leaders at Ultra Code, the three task-class levels — for a stored document that predates the field", () => {
+      // Tyler's live v4 document, shaped exactly as `~/.paseo/config.json`
+      // stores it: roles with models/mechanicalModels/hardModels,
+      // allowUnlistedModels naming opus-5-5, and NO "thinking" key at all.
+      const { thinking: _omitted, ...stored } = policy({
+        allowUnlistedModels: ["claude-opus-5-5"],
+        roles: [
+          role({ id: "worker", name: "worker", models: ["claude-sonnet-5"], hardModels: ["claude-opus-5-5"] }),
+          role({ id: "reviewer", name: "reviewer", models: ["claude-sonnet-5"] }),
+          role({ id: "advisor", name: "advisor", models: ["claude-opus-5-5"] }),
+          role({ id: "leader", name: "leader", models: ["claude-opus-5-5"] }),
+        ],
+      });
+      const result = RoleModelPolicySchema.safeParse(stored);
+      expect(result.success).toBe(true);
+      expect(result.success && result.data.thinking).toEqual(DEFAULT_THINKING_POLICY);
+      expect(result.success && result.data.schemaVersion).toBe(4);
+    });
+
+    it("ships leaders at Ultra Code and subagents at low / high / xhigh by task class", () => {
+      expect(ThinkingPolicySchema.parse(undefined)).toEqual(DEFAULT_THINKING_POLICY);
+      expect(DEFAULT_THINKING_POLICY).toEqual({
+        leader: "ultracode",
+        byTaskClass: { mechanical: "low", standard: "high", hard: "xhigh" },
+      });
+      expect(DEFAULT_THINKING_POLICY.byTaskClass).toEqual(DEFAULT_THINKING_BY_TASK_CLASS);
+    });
+
+    it("fills in each missing key independently", () => {
+      expect(ThinkingPolicySchema.parse({ leader: "max" })).toEqual({ leader: "max", byTaskClass: DEFAULT_THINKING_BY_TASK_CLASS });
+      expect(ThinkingPolicySchema.parse({ byTaskClass: { hard: "max" } })).toEqual({
+        leader: "ultracode",
+        byTaskClass: { mechanical: "low", standard: "high", hard: "max" },
+      });
+    });
+
+    it("allows a null leader level, meaning leaders are decided like anyone else", () => {
+      expect(ThinkingPolicySchema.parse({ leader: null }).leader).toBeNull();
+    });
+
+    it("refuses a null task-class level: every subagent must get an explicit one", () => {
+      expect(ThinkingPolicySchema.safeParse({ byTaskClass: { mechanical: null } }).success).toBe(false);
+    });
+
+    it("rejects an option id outside the token format", () => {
+      expect(ThinkingPolicySchema.safeParse({ leader: "has space" }).success).toBe(false);
+      expect(ThinkingPolicySchema.safeParse({ leader: "" }).success).toBe(false);
+      expect(ThinkingPolicySchema.safeParse({ byTaskClass: { hard: "not valid!" } }).success).toBe(false);
+    });
+
+    it("is not restricted to Claude ids — another provider's own token is accepted", () => {
+      expect(ThinkingPolicySchema.safeParse({ byTaskClass: { hard: "thinking-budget-high" } }).success).toBe(true);
     });
   });
 
@@ -430,6 +491,25 @@ describe("rolePolicyFamilies", () => {
       ],
     });
     expect(rolePolicyFamilies(withClassPools).sort()).toEqual(["claude", "gemini"]);
+  });
+});
+
+describe("catalogFamilies", () => {
+  it("always includes the pool family, even when no role pool names it — a root agent's model still needs a catalog", () => {
+    // DEFAULT_POLICY: every role unconfigured, no models anywhere.
+    expect(rolePolicyFamilies(DEFAULT_POLICY)).toEqual([]); // the property this helper exists to fix
+    expect(catalogFamilies(DEFAULT_POLICY).sort()).toEqual(["claude"]);
+  });
+
+  it("includes rolePolicyFamilies' own families alongside the pool family", () => {
+    const withModels = policy({
+      roles: [
+        role({ id: "worker", name: "worker", models: ["codex/gpt-5.1"] }),
+        role({ id: "reviewer", name: "reviewer" }),
+        role({ id: "advisor", name: "advisor" }),
+      ],
+    });
+    expect(catalogFamilies(withModels).sort()).toEqual(["claude", "codex"]);
   });
 });
 

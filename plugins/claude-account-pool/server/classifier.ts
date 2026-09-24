@@ -2,12 +2,21 @@ import {
   AGENT_TYPE_LABEL,
   POOL_FAMILY,
   TASK_CLASS_LABEL,
+  LEADER_ROLE_ID,
   classModels,
   type RoleModelPolicy,
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
+import {
+  clampThinkingOption,
+  THINKING_LEVEL_LABELS,
+  ULTRACODE_EFFORT_OPTION_ID,
+  ULTRACODE_OPTION_ID,
+  type ThinkingClampHow,
+  type ThinkingLevelId,
+} from "../shared/thinking-levels";
 import {
   describeRootSelection,
   selectPoolAccount,
@@ -17,6 +26,7 @@ import {
   type AccountSelectHealth,
   type AccountSelection,
 } from "./account-select";
+import type { ThinkingCatalog } from "./model-catalog";
 import {
   evaluateRequestedModel,
   familyOfProvider,
@@ -37,8 +47,8 @@ import {
 
 /**
  * THE classifier. One deterministic function answering the whole of "what
- * should this agent be" — role, task class, model, account, tools — from
- * everything known at `agent.create`.
+ * should this agent be" — role, task class, model, thinking level, account,
+ * tools — from everything known at `agent.create`.
  *
  * Every consumer calls this and only this: the `before("agent.create")` hook
  * (server/role-router.ts), the `role-model-policy.explain` RPC
@@ -99,6 +109,8 @@ export interface ClassifierInput {
   requestedProvider?: string;
   /** `config.model` as requested, when the caller named one. */
   requestedModel?: string;
+  /** `config.thinkingOptionId` as requested, when the caller named one. */
+  requestedThinkingOptionId?: string;
 }
 
 /**
@@ -108,6 +120,13 @@ export interface ClassifierInput {
 interface ClassifierWorldBase {
   policy: RoleModelPolicy;
   catalog: ModelCatalog;
+  /**
+   * Every model's advertised thinking options, from the same `listModels`
+   * poll that builds `catalog` (server/model-catalog.ts). Required, so a
+   * consumer that forgets to wire it up is a type error rather than a silent
+   * `model-unknown` on every decision.
+   */
+  thinkingCatalog: ThinkingCatalog;
   pool: AccountPool;
   /**
    * What the CALLER was itself denied, so a child is never less restricted
@@ -289,12 +308,66 @@ export interface AccountDecision {
   reason: string;
 }
 
+/**
+ * Which thinking-effort level the effective model runs at, decided AFTER the
+ * model (`decideThinking` takes the already-decided `ModelDecision`). Tyler:
+ * "the leader probably needs ultracode because it DOES work with multiple
+ * agents.. but no sub agent would ever need it, the classifier can decide
+ * that". See `decideThinking` for the order the rules apply in.
+ */
+export interface ThinkingDecision {
+  /**
+   * - `leader-rule` — the leader tier's level (`policy.thinking.leader`), which
+   *   outranks a requested one.
+   * - `requested` — the caller named a level, and nothing outranks it.
+   * - `task-class-default` — nothing was requested, so the task class's level.
+   * - `no-thinking-options` — the effective model offers none; `optionId` is null.
+   * - `model-unknown` — the catalog doesn't list the model's options, so no
+   *   level can be verified and the request stands (minus Ultra Code, for a subagent).
+   */
+  outcome: "leader-rule" | "requested" | "task-class-default" | "no-thinking-options" | "model-unknown";
+  /**
+   * What `config.thinkingOptionId` becomes. `null` means none: the model
+   * offers no thinking options, or nothing is known and nothing was asked for.
+   * When `override` is also set, a null here means the requested id is removed.
+   */
+  optionId: string | null;
+  /** The effective model this was decided for, spelled like `formatModelRef`. Absent only when no model is known at all. */
+  modelRef?: string;
+  /** What the leader rule, the request or the class named, before any cap or clamp. */
+  wanted?: string;
+  /**
+   * True when this is a subagent and Ultra Code was replaced — wanted by the
+   * rule or request, or reached through the model's own default. A subagent
+   * never runs Ultra Code; it gets `xhigh`, the effort Ultra Code implies.
+   */
+  subagentCapped?: true;
+  /** Set when the level (after any subagent cap) isn't one the model offers and something it does offer is used instead. */
+  clamped?: { wanted: string; applied: string; how: Exclude<ThinkingClampHow, "unclamped"> };
+  /** The caller's own `requestedThinkingOptionId`, when it named one — whichever outcome fired. */
+  requested?: string;
+  /**
+   * Set when the caller's own request is not what runs: the leader rule
+   * outranked it (`leader-rule`), a subagent asked for Ultra Code
+   * (`subagent-no-ultracode`), the model doesn't offer it (`not-advertised`),
+   * or the model offers no thinking options at all (`no-thinking-options`).
+   * The create hook labels the agent `paseo.thinking-overridden-by-policy`.
+   */
+  override?: {
+    requested: string;
+    applied: string | null;
+    reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+  };
+  reason: string;
+}
+
 export interface AgentDecision {
   role: RoleDecision;
   taskClass: TaskClassDecision;
   model: ModelDecision;
   tools: ToolDecision;
   account: AccountDecision;
+  thinking: ThinkingDecision;
 }
 
 /** The read-only floor a child falls to when its parent's restrictions are unknowable. */
@@ -687,6 +760,291 @@ function decideAccount(
   }
 }
 
+/** Display label for a thinking option id, falling back to the raw id for one this plugin doesn't recognize (a non-Claude provider's own token). */
+function thinkingLabel(optionId: string): string {
+  return THINKING_LEVEL_LABELS[optionId as ThinkingLevelId] ?? optionId;
+}
+
+/** The model the thinking decision is made against. */
+interface EffectiveThinkingModel {
+  modelId: string;
+  family: string;
+  /** Spelled like `formatModelRef`: bare when the underlying provider is null/unspecified, `provider/model` otherwise. */
+  modelRef: string;
+}
+
+/**
+ * The model that will actually run: the model decision's, or the request's
+ * own when policy left the model alone. Same `provider ?? requestedProvider
+ * ?? POOL_FAMILY` fallback `decideAccount` uses to find a family, because the
+ * thinking catalog is keyed the way the account pool is.
+ */
+function effectiveThinkingModel(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  model: ModelDecision,
+): EffectiveThinkingModel | undefined {
+  if (model.outcome === "selected" || model.outcome === "unavailable" || model.outcome === "honored-request") {
+    const modelId = model.model as string; // always present for these outcomes
+    return {
+      modelId,
+      family: familyOfProvider(world.pool, model.provider ?? input.requestedProvider ?? POOL_FAMILY),
+      modelRef: formatModelRef({ provider: model.provider, model: modelId }),
+    };
+  }
+  // `unconfigured`: no model was decided, so the request's own (if it named
+  // one) is what runs.
+  if (input.requestedModel) {
+    return {
+      modelId: input.requestedModel,
+      family: familyOfProvider(world.pool, input.requestedProvider ?? POOL_FAMILY),
+      modelRef: formatModelRef({ provider: input.requestedProvider ?? null, model: input.requestedModel }),
+    };
+  }
+  return undefined;
+}
+
+/** Prose for how a level got clamped to what the model actually offers — appended to whichever outcome's reason chose it. */
+function clampSentence(modelRef: string, clamp: NonNullable<ThinkingDecision["clamped"]>): string {
+  const wantedLabel = thinkingLabel(clamp.wanted);
+  const appliedLabel = thinkingLabel(clamp.applied);
+  switch (clamp.how) {
+    case "nearest-lower":
+      return ` ${modelRef} does not offer ${wantedLabel}, so ${appliedLabel}, the nearest lower level it offers, is used.`;
+    case "nearest-higher":
+      return ` ${modelRef} does not offer ${wantedLabel}, so ${appliedLabel}, the nearest higher level it offers, is used.`;
+    case "highest-effort":
+      return ` ${modelRef} does not offer ${wantedLabel}, so ${appliedLabel}, the highest effort it offers, is used.`;
+    case "model-default":
+      return ` ${modelRef} does not recognize ${wantedLabel}, so ${appliedLabel}, its own default, is used.`;
+  }
+}
+
+/**
+ * One wanted level, made safe to apply: a subagent's Ultra Code becomes
+ * `xhigh` first, then the result is clamped to what the model offers.
+ *
+ * The cap runs on both sides of the clamp. Before, because Ultra Code is what
+ * was wanted; after, because the clamp's last resort is the model's own
+ * default, and Opus 5.5's default is Ultra Code. A subagent is clamped
+ * against the model's options WITHOUT Ultra Code and against a default that
+ * has already been capped, so no path through here can hand one back.
+ */
+function resolveThinkingLevel(
+  wanted: string,
+  optionIds: readonly string[],
+  defaultOptionId: string | undefined,
+  isSubagent: boolean,
+): { optionId: string; subagentCapped: boolean; clamped?: NonNullable<ThinkingDecision["clamped"]> } {
+  if (!isSubagent) {
+    const clamp = clampThinkingOption(wanted, optionIds, defaultOptionId);
+    return {
+      optionId: clamp.optionId,
+      subagentCapped: false,
+      ...(clamp.how !== "unclamped" ? { clamped: { wanted, applied: clamp.optionId, how: clamp.how } } : {}),
+    };
+  }
+
+  const allowed = optionIds.filter((id) => id !== ULTRACODE_OPTION_ID);
+  const capDefault = defaultOptionId === ULTRACODE_OPTION_ID;
+  const subagentDefault = capDefault
+    ? clampThinkingOption(ULTRACODE_EFFORT_OPTION_ID, allowed, undefined).optionId
+    : defaultOptionId;
+  const capWanted = wanted === ULTRACODE_OPTION_ID;
+  const target = capWanted ? ULTRACODE_EFFORT_OPTION_ID : wanted;
+  const clamp = clampThinkingOption(target, allowed, subagentDefault);
+  const usedCappedDefault = capDefault && clamp.how === "model-default";
+  return {
+    optionId: clamp.optionId,
+    subagentCapped: capWanted || usedCappedDefault,
+    ...(clamp.how !== "unclamped" ? { clamped: { wanted: target, applied: clamp.optionId, how: clamp.how } } : {}),
+  };
+}
+
+/**
+ * The thinking half: which effort level `config.thinkingOptionId` becomes.
+ * Decided AFTER the model, because every rung below reads the EFFECTIVE
+ * model, not the one the caller asked for.
+ *
+ * Order, most specific first:
+ *  a. The effective model isn't in `world.thinkingCatalog`: `model-unknown`.
+ *     Nothing can be verified, so the request's own level stands — except
+ *     Ultra Code for a subagent, which is removed.
+ *  b. The model offers no thinking options (Haiku): `no-thinking-options`.
+ *     `optionId` is null, and a requested level is removed.
+ *  c. The leader tier — a root agent, or one resolved to the leader role —
+ *     with `policy.thinking.leader` set: `leader-rule`. It outranks a request.
+ *     Ultra Code on a model that doesn't offer it becomes the highest effort
+ *     that model does offer.
+ *  d. A requested level: `requested`. Explicit beats inferred, so a class
+ *     level never overrides it.
+ *  e. The task class's level (`standard`'s when no class resolved):
+ *     `task-class-default`. Always set, so every subagent whose model offers
+ *     thinking leaves here with an explicit level and never falls back to
+ *     the model's own default.
+ *
+ * A subagent never runs Ultra Code. That is an invariant, not policy: no
+ * rule, policy entry or request can give a child `ultracode`
+ * (`resolveThinkingLevel`). Every level from c-e is clamped to what the
+ * model offers — never an id it doesn't.
+ */
+function decideThinking(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  model: ModelDecision,
+  taskClass: TaskClassId | undefined,
+  role: RoleDecision,
+  hasCaller: boolean,
+): ThinkingDecision {
+  const requested = input.requestedThinkingOptionId;
+  const requestedField = requested !== undefined ? { requested } : {};
+  const isSubagent = hasCaller;
+  const effective = effectiveThinkingModel(input, world, model);
+  const entry = effective ? world.thinkingCatalog.get(effective.family)?.get(effective.modelId) : undefined;
+
+  if (!effective || !entry) {
+    const unverified = effective
+      ? `the provider's catalog does not list ${effective.modelRef}'s thinking options`
+      : "no model was decided for this create";
+    const modelRefField = effective ? { modelRef: effective.modelRef } : {};
+    if (isSubagent && requested === ULTRACODE_OPTION_ID) {
+      return {
+        outcome: "model-unknown",
+        optionId: null,
+        ...modelRefField,
+        requested,
+        override: { requested, applied: null, reason: "subagent-no-ultracode" },
+        reason: `Removed, because ${thinkingLabel(requested)} was asked for, a subagent never runs it, and ${unverified}, so no lower level can be verified in its place.`,
+      };
+    }
+    return {
+      outcome: "model-unknown",
+      optionId: requested ?? null,
+      ...modelRefField,
+      ...requestedField,
+      reason: `${requested !== undefined ? "Left as requested" : "Left unset"}, because ${unverified}, so no level can be verified for it.`,
+    };
+  }
+
+  const { modelRef } = effective;
+  // What this agent may run: a subagent may not run Ultra Code, so a model
+  // offering nothing else offers a subagent nothing at all.
+  const usable = isSubagent ? entry.optionIds.filter((id) => id !== ULTRACODE_OPTION_ID) : entry.optionIds;
+  if (usable.length === 0) {
+    const why =
+      entry.optionIds.length === 0
+        ? `${modelRef} offers no thinking options`
+        : `${modelRef} offers only ${thinkingLabel(ULTRACODE_OPTION_ID)}, which a subagent never runs`;
+    return {
+      outcome: "no-thinking-options",
+      optionId: null,
+      modelRef,
+      ...requestedField,
+      ...(requested !== undefined
+        ? { override: { requested, applied: null, reason: "no-thinking-options" as const } }
+        : {}),
+      reason: `None, because ${why}.${requested !== undefined ? ` ${thinkingLabel(requested)} was asked for and is removed.` : ""}`,
+    };
+  }
+
+  const isLeaderTier = !hasCaller || role.role.id === LEADER_ROLE_ID;
+  const leaderLevel = world.policy.thinking.leader;
+
+  let outcome: "leader-rule" | "requested" | "task-class-default";
+  let wanted: string;
+  if (isLeaderTier && leaderLevel !== null) {
+    outcome = "leader-rule";
+    wanted = leaderLevel;
+  } else if (requested !== undefined) {
+    outcome = "requested";
+    wanted = requested;
+  } else {
+    outcome = "task-class-default";
+    wanted = world.policy.thinking.byTaskClass[taskClass ?? "standard"];
+  }
+
+  const level = resolveThinkingLevel(wanted, entry.optionIds, entry.defaultOptionId, isSubagent);
+  const override: ThinkingDecision["override"] =
+    requested !== undefined && requested !== level.optionId
+      ? {
+          requested,
+          applied: level.optionId,
+          reason:
+            isSubagent && requested === ULTRACODE_OPTION_ID
+              ? "subagent-no-ultracode"
+              : outcome === "leader-rule"
+                ? "leader-rule"
+                : "not-advertised",
+        }
+      : undefined;
+
+  return {
+    outcome,
+    optionId: level.optionId,
+    modelRef,
+    wanted,
+    ...(level.subagentCapped ? { subagentCapped: true as const } : {}),
+    ...(level.clamped ? { clamped: level.clamped } : {}),
+    ...requestedField,
+    ...(override ? { override } : {}),
+    reason: describeThinking({ outcome, wanted, level, modelRef, taskClass, hasCaller, isSubagent, override }),
+  };
+}
+
+/** The reason sentence for a decided level: what applies, why, then each thing that changed it on the way. */
+function describeThinking(decision: {
+  outcome: "leader-rule" | "requested" | "task-class-default";
+  wanted: string;
+  level: ReturnType<typeof resolveThinkingLevel>;
+  modelRef: string;
+  taskClass: TaskClassId | undefined;
+  hasCaller: boolean;
+  isSubagent: boolean;
+  override: ThinkingDecision["override"];
+}): string {
+  const { outcome, wanted, level, modelRef, taskClass, override } = decision;
+  const applied = thinkingLabel(level.optionId);
+  const wantedLabel = thinkingLabel(wanted);
+  const changed = level.optionId !== wanted;
+
+  let basis: string;
+  switch (outcome) {
+    case "leader-rule":
+      basis = `${applied}, because ${decision.hasCaller ? "this agent resolved to the leader role" : "this is a root agent, the leader by definition,"} and the policy runs leaders at ${wantedLabel}.`;
+      break;
+    case "requested":
+      basis = changed
+        ? `${applied}, because ${wantedLabel} was asked for and a requested level outranks the task class's.`
+        : `${applied}, as requested: a requested level outranks the task class's.`;
+      break;
+    case "task-class-default": {
+      const which =
+        taskClass === undefined
+          ? "nothing was requested and no task class resolved, so the standard task class's level"
+          : `nothing was requested, so the ${taskClass} task class's level`;
+      basis = `${applied}, because ${which}${changed ? `, ${wantedLabel},` : ""} applies.`;
+      break;
+    }
+  }
+
+  const cappedWanted = decision.isSubagent && wanted === ULTRACODE_OPTION_ID;
+  const capNote = cappedWanted
+    ? ` A subagent never runs ${thinkingLabel(ULTRACODE_OPTION_ID)} — only a leader orchestrates — so it gets ${thinkingLabel(ULTRACODE_EFFORT_OPTION_ID)}, the effort ${thinkingLabel(ULTRACODE_OPTION_ID)} implies.`
+    : "";
+  // The one cap that isn't about what was wanted: the clamp fell back to the
+  // model's own default, and that default is Ultra Code.
+  const clampNote = !level.clamped
+    ? ""
+    : level.subagentCapped && !cappedWanted
+      ? ` ${modelRef} does not recognize ${thinkingLabel(level.clamped.wanted)}, and its own default, ${thinkingLabel(ULTRACODE_OPTION_ID)}, is never a subagent's, so ${applied} is used.`
+      : clampSentence(modelRef, level.clamped);
+  const outrankNote =
+    override?.reason === "leader-rule"
+      ? ` ${thinkingLabel(override.requested)} was asked for, but the leader rule outranks a requested level.`
+      : "";
+  return basis + capNote + clampNote + outrankNote;
+}
+
 /**
  * Classify one `agent.create`. The only entry point; see the file header for
  * the properties it guarantees.
@@ -742,6 +1100,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
   const tools = decideTools(world, roleDecision, hasCaller);
   const account = decideAccount(input, world, model, hasCaller);
+  const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, hasCaller);
 
-  return { role: roleDecision, taskClass, model, tools, account };
+  return { role: roleDecision, taskClass, model, tools, account, thinking };
 }
