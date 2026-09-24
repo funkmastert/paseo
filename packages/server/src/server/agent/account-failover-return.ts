@@ -11,6 +11,7 @@
  * rescue leg — a worker whose usage is unreadable is still a valid rescue target, but an unreadable
  * home account is never returned to.
  */
+import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
@@ -19,6 +20,7 @@ import {
   getMigratedToFromLabels,
   isLimitShapedError,
 } from "./account-failover-detector.js";
+import { NEUTRAL_HEADROOM } from "./account-pool-headroom.js";
 import type { AccountPoolProviderEntry } from "./account-pool-providers.js";
 
 /**
@@ -113,7 +115,11 @@ export type HomeDropReason =
   | "not-in-pool"
   | "provider-disabled"
   | "signed-out"
-  | "same-account";
+  | "same-account"
+  /** A root whose home is a worker. Roots belong on the leader account and are not sent back. */
+  | "root-belongs-on-leader"
+  /** A child already on a worker whose home is the leader account. Isolation holds already. */
+  | "child-belongs-on-worker";
 
 export interface HomeDrop {
   agentId: string;
@@ -128,6 +134,12 @@ export interface ReturnCandidate {
   /** The rescuer it has been spending on. */
   fromProviderId: string;
   homeProviderId: string;
+  /**
+   * Where it may go, best first; the monitor takes the first that passes the fresh usage read.
+   * Just home, except for a child on the leader account: home first, then every other worker
+   * with budget, since any worker gives it back its isolation.
+   */
+  targetProviderIds: string[];
 }
 
 export interface PlanAccountFailoverReturnsInput {
@@ -139,6 +151,8 @@ export interface PlanAccountFailoverReturnsInput {
   accounts: ReadonlyMap<string, AgentAccountAuth | null>;
   /** Per-agent earliest next attempt, carried between sweeps. */
   cooldowns: ReadonlyMap<string, number>;
+  /** Budget left per provider, from headroomByProvider; orders a child's other workers. */
+  headroom?: ReadonlyMap<string, number>;
   nowMs: number;
   config: ResolvedReturnConfig;
 }
@@ -215,43 +229,99 @@ export function planAccountFailoverReturns(
     // may want back, so it is left alone entirely — label included, since that is history now.
     if (getMigratedToFromLabels(agent.labels)) continue;
 
-    // Drops are decided for any agent, busy or not: the label is wrong, and leaving a wrong
-    // pointer in place so a busy agent can be re-examined next sweep only defers the same answer.
-    if (homeProviderId === agent.provider) {
-      drops.push({ agentId: agent.id, homeProviderId, reason: "already-home" });
-      continue;
+    const decision = decideReturn({ agent, homeProviderId, poolById, input });
+    if (decision.kind === "drop") {
+      drops.push({ agentId: agent.id, homeProviderId, reason: decision.reason });
+    } else if (decision.kind === "return") {
+      candidates.push(candidateOf(agent, homeProviderId, decision.targetProviderIds));
     }
-    const home = poolById.get(homeProviderId);
-    if (!home) {
-      drops.push({ agentId: agent.id, homeProviderId, reason: "not-in-pool" });
-      continue;
-    }
-    if (!home.enabled) {
-      drops.push({ agentId: agent.id, homeProviderId, reason: "provider-disabled" });
-      continue;
-    }
-    const homeAccount = input.accounts.get(homeProviderId);
-    if (homeAccount?.state === "signed-out") {
-      drops.push({ agentId: agent.id, homeProviderId, reason: "signed-out" });
-      continue;
-    }
-    if (providersShareAccount(homeAccount, input.accounts.get(agent.provider))) {
-      drops.push({ agentId: agent.id, homeProviderId, reason: "same-account" });
-      continue;
-    }
-
-    if (input.deadProviderIds.has(homeProviderId)) continue;
-    if (returnBlockedReason(agent, input) !== null) continue;
-
-    candidates.push({
-      agentId: agent.id,
-      title: agent.title,
-      workspaceId: agent.workspaceId,
-      fromProviderId: agent.provider,
-      homeProviderId,
-    });
   }
   return { drops, candidates };
+}
+
+type ReturnDecision =
+  | { kind: "drop"; reason: HomeDropReason }
+  | { kind: "return"; targetProviderIds: string[] }
+  /** Not now; the label stays and the agent is reconsidered next sweep. */
+  | { kind: "wait" };
+
+function decideReturn(params: {
+  agent: AccountFailoverAgentSummary;
+  homeProviderId: string;
+  poolById: ReadonlyMap<string, AccountPoolProviderEntry>;
+  input: PlanAccountFailoverReturnsInput;
+}): ReturnDecision {
+  const { agent, homeProviderId, poolById, input } = params;
+  const drop = (reason: HomeDropReason): ReturnDecision => ({ kind: "drop", reason });
+  // Drops are decided for any agent, busy or not: the label is wrong, and leaving a wrong
+  // pointer in place so a busy agent can be re-examined next sweep only defers the same answer.
+  if (homeProviderId === agent.provider) return drop("already-home");
+  const home = poolById.get(homeProviderId);
+  if (!home) return drop("not-in-pool");
+  const isRoot = getParentAgentIdFromLabels(agent.labels) === null;
+  if (isRoot && home.role !== "leader") return drop("root-belongs-on-leader");
+  if (!isRoot && poolById.get(agent.provider)?.role === "leader") {
+    // A child failover collapsed onto the leader account. Any worker with budget restores the
+    // isolation, so it does not wait for its own; with none, it waits here, label kept.
+    const targetProviderIds = workerTargetsFor(agent, homeProviderId, input);
+    if (targetProviderIds.length === 0 || returnBlockedReason(agent, input) !== null) {
+      return { kind: "wait" };
+    }
+    return { kind: "return", targetProviderIds };
+  }
+  if (!isRoot && home.role === "leader") return drop("child-belongs-on-worker");
+  if (!home.enabled) return drop("provider-disabled");
+  const homeAccount = input.accounts.get(homeProviderId);
+  if (homeAccount?.state === "signed-out") return drop("signed-out");
+  if (providersShareAccount(homeAccount, input.accounts.get(agent.provider))) {
+    return drop("same-account");
+  }
+  if (input.deadProviderIds.has(homeProviderId) || returnBlockedReason(agent, input) !== null) {
+    return { kind: "wait" };
+  }
+  return { kind: "return", targetProviderIds: [homeProviderId] };
+}
+
+function candidateOf(
+  agent: AccountFailoverAgentSummary,
+  homeProviderId: string,
+  targetProviderIds: string[],
+): ReturnCandidate {
+  return {
+    agentId: agent.id,
+    title: agent.title,
+    workspaceId: agent.workspaceId,
+    fromProviderId: agent.provider,
+    homeProviderId,
+    targetProviderIds,
+  };
+}
+
+/** Every worker a child on the leader account could go to now: home first, then most budget. */
+function workerTargetsFor(
+  agent: AccountFailoverAgentSummary,
+  homeProviderId: string,
+  input: PlanAccountFailoverReturnsInput,
+): string[] {
+  const current = input.accounts.get(agent.provider);
+  const headroomOf = (providerId: string) => input.headroom?.get(providerId) ?? NEUTRAL_HEADROOM;
+  return input.poolEntries
+    .filter(
+      (entry) =>
+        entry.role === "worker" &&
+        entry.enabled &&
+        !input.deadProviderIds.has(entry.providerId) &&
+        input.accounts.get(entry.providerId)?.state !== "signed-out" &&
+        !providersShareAccount(current, input.accounts.get(entry.providerId)),
+    )
+    .sort(
+      (a, b) =>
+        Number(b.providerId === homeProviderId) - Number(a.providerId === homeProviderId) ||
+        headroomOf(b.providerId) - headroomOf(a.providerId) ||
+        a.priority - b.priority ||
+        a.providerId.localeCompare(b.providerId),
+    )
+    .map((entry) => entry.providerId);
 }
 
 export interface HomeReturnHealthInput {

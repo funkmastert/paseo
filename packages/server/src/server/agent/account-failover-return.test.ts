@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import type { AgentAccountAuth } from "./agent-sdk-types.js";
@@ -150,6 +151,7 @@ describe("planAccountFailoverReturns", () => {
         workspaceId: "ws-1",
         fromProviderId: "claude-personal",
         homeProviderId: "claude",
+        targetProviderIds: ["claude"],
       },
     ]);
   });
@@ -260,6 +262,88 @@ describe("planAccountFailoverReturns", () => {
     // A wrong pointer is wrong whatever the agent is doing, and nothing is moved to fix it.
     const busy = rescued({ lifecycle: "running", busy: true });
     expect(plan([busy], { poolEntries: POOL.slice(1) }).drops).toHaveLength(1);
+  });
+
+  it("never returns a root to a worker: roots stay on the leader account", () => {
+    // Tyler's own sessions belong on the leader account. A root that was moved there off an
+    // exhausted worker has nothing to go back for, so the label goes.
+    const root = rescued({
+      provider: "claude",
+      labels: { [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: "claude-backup" },
+    });
+    expect(plan([root])).toEqual({
+      drops: [
+        { agentId: "leader-1", homeProviderId: "claude-backup", reason: "root-belongs-on-leader" },
+      ],
+      candidates: [],
+    });
+  });
+
+  it("returns a child on the leader account to its own worker first, then any worker", () => {
+    const child = rescued({
+      id: "child-1",
+      provider: "claude",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: "leader-1",
+        [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: "claude-backup",
+      },
+    });
+
+    expect(plan([child]).candidates).toEqual([
+      expect.objectContaining({
+        agentId: "child-1",
+        fromProviderId: "claude",
+        homeProviderId: "claude-backup",
+        targetProviderIds: ["claude-backup", "claude-personal"],
+      }),
+    ]);
+    // Home is still out for the week, but claude-personal has budget: isolation comes back now.
+    expect(
+      plan([child], { deadProviderIds: new Set(["claude-backup"]) }).candidates[0]
+        ?.targetProviderIds,
+    ).toEqual(["claude-personal"]);
+    // No worker can take it yet: it waits on the leader account, label kept.
+    expect(
+      plan([child], { deadProviderIds: new Set(["claude-backup", "claude-personal"]) }),
+    ).toEqual({ drops: [], candidates: [] });
+  });
+
+  it("orders the other workers by budget left", () => {
+    const pool: AccountPoolProviderEntry[] = [
+      ...POOL,
+      { providerId: "claude-spare", role: "worker", priority: 3, enabled: true },
+    ];
+    const child = rescued({
+      id: "child-1",
+      provider: "claude",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: "leader-1",
+        [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: "claude-backup",
+      },
+    });
+    const headroom = new Map([
+      ["claude-personal", 10],
+      ["claude-spare", 80],
+    ]);
+    expect(
+      plan([child], { poolEntries: pool, headroom, deadProviderIds: new Set(["claude-backup"]) })
+        .candidates[0]?.targetProviderIds,
+    ).toEqual(["claude-spare", "claude-personal"]);
+  });
+
+  it("keeps a child that is already on a worker off the leader account", () => {
+    const child = rescued({
+      id: "child-1",
+      provider: "claude-personal",
+      labels: {
+        [PARENT_AGENT_ID_LABEL]: "leader-1",
+        [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: "claude",
+      },
+    });
+    expect(plan([child])).toEqual({
+      drops: [{ agentId: "child-1", homeProviderId: "claude", reason: "child-belongs-on-worker" }],
+      candidates: [],
+    });
   });
 
   it("does nothing at all when the return leg is switched off", () => {
