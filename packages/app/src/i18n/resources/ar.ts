@@ -243,6 +243,9 @@ export const ar: TranslationResources = {
       unarchive: "إلغاء الأرشفة",
     },
   },
+  agentIdChip: {
+    copiedLabel: "معرف الوكيل",
+  },
   pinnedGrid: {
     title: "المثبتة ({{count}})",
     close: "إغلاق الشبكة",

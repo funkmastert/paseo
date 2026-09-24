@@ -244,6 +244,9 @@ export const ko: TranslationResources = {
       unarchive: "보관 해제",
     },
   },
+  agentIdChip: {
+    copiedLabel: "에이전트 ID",
+  },
   pinnedGrid: {
     title: "고정됨 ({{count}})",
     close: "그리드 닫기",

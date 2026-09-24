@@ -243,6 +243,9 @@ export const zhCN: TranslationResources = {
       unarchive: "取消归档",
     },
   },
+  agentIdChip: {
+    copiedLabel: "代理 ID",
+  },
   pinnedGrid: {
     title: "已置顶 ({{count}})",
     close: "关闭网格",

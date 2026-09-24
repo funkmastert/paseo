@@ -247,6 +247,9 @@ export const fr: TranslationResources = {
       unarchive: "Désarchiver",
     },
   },
+  agentIdChip: {
+    copiedLabel: "ID de l'agent",
+  },
   pinnedGrid: {
     title: "Épinglés ({{count}})",
     close: "Fermer la grille",
