@@ -188,6 +188,11 @@ import {
   type UsageHistorySession,
 } from "./session/usage-history/usage-history-session.js";
 import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
+import {
+  createContextUsageSession,
+  type ContextUsageSession,
+} from "./session/context-usage/context-usage-session.js";
+import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
@@ -559,6 +564,7 @@ export interface SessionOptions {
   providerSnapshotManager: ProviderSnapshotManager;
   providerUsageService: ProviderUsageService;
   usageHistory?: UsageHistoryStore;
+  contextUsage?: AgentContextUsageService;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -816,6 +822,7 @@ export class Session {
   private readonly restartRecoverySession: RestartRecoverySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
+  private readonly contextUsageSession: ContextUsageSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -869,6 +876,7 @@ export class Session {
       providerSnapshotManager,
       providerUsageService,
       usageHistory,
+      contextUsage,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -1024,6 +1032,18 @@ export class Session {
     this.usageHistorySession = createUsageHistorySession({
       host: { emit: (msg) => this.emit(msg) },
       store: usageHistory,
+      logger: this.sessionLogger,
+    });
+    this.contextUsageSession = createContextUsageSession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: contextUsage,
+      loadAgent: async (agentId) => {
+        await ensureUnarchivedAgentLoaded(agentId, {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.sessionLogger,
+        });
+      },
       logger: this.sessionLogger,
     });
     this.agentConfigSession = new AgentConfigSession({
@@ -2182,6 +2202,7 @@ export class Session {
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
       this.dispatchUsageHistoryMessage(msg) ??
+      this.dispatchContextUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
@@ -2199,6 +2220,13 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "agent.context_usage.read.request" || !this.contextUsageSession) {
+      return undefined;
+    }
+    return this.contextUsageSession.handleReadRequest(msg);
   }
 
   private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {

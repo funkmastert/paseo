@@ -2098,6 +2098,23 @@ export const fr: TranslationResources = {
     accessibility: "Fenêtre contextuelle{{percentage}}% utilisé",
     spendTitle: "Dépense",
     spendSummary: "{{total}} tokens pondérés sur {{span}}",
+    breakdownLoading: "Lecture du contexte…",
+    breakdownPending: "Le détail apparaît à la fin de ce tour.",
+    breakdownUnsupported: "Ce fournisseur ne peut pas fournir le détail du contexte.",
+    breakdownError: "Impossible de lire le détail du contexte.",
+    breakdownAsOf: "Au {{time}}",
+    breakdownBarAccessibility: "Détail de la fenêtre contextuelle",
+    deferredTitle: "Hors de la fenêtre",
+    messageToolResults: "Résultats d'outils",
+    messageAttachments: "Pièces jointes",
+    messageAssistant: "Assistant",
+    messageToolCalls: "Appels d'outils",
+    messageUser: "Messages de l'utilisateur",
+    memoryTotalWarning:
+      "Les fichiers de mémoire utilisent {{tokens}} tokens, au-dessus de la limite conseillée de {{limit}}.",
+    memoryFileWarning: "{{path}} fait {{tokens}} tokens, au-dessus de {{limit}}.",
+    reReadAdvice:
+      "Cette session relit ~{{tokens}} tokens à chaque tour. Une nouvelle session avec un court récapitulatif coûte moins cher.",
   },
   review: {
     comment: {

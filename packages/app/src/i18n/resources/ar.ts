@@ -2045,6 +2045,23 @@ export const ar: TranslationResources = {
     accessibility: "تم استخدام نافذة السياق{{percentage}}%",
     spendTitle: "الإنفاق",
     spendSummary: "{{total}} رمز مرجّح خلال {{span}}",
+    breakdownLoading: "جارٍ قراءة السياق…",
+    breakdownPending: "يظهر التفصيل عند انتهاء هذه الجولة.",
+    breakdownUnsupported: "لا يستطيع هذا المزوّد الإبلاغ عن تفصيل السياق.",
+    breakdownError: "تعذّرت قراءة تفصيل السياق.",
+    breakdownAsOf: "حتى {{time}}",
+    breakdownBarAccessibility: "تفصيل نافذة السياق",
+    deferredTitle: "خارج النافذة",
+    messageToolResults: "نتائج الأدوات",
+    messageAttachments: "المرفقات",
+    messageAssistant: "المساعد",
+    messageToolCalls: "استدعاءات الأدوات",
+    messageUser: "رسائل المستخدم",
+    memoryTotalWarning:
+      "تستخدم ملفات الذاكرة {{tokens}} رمزًا، أي أكثر من الحد الموصى به {{limit}}.",
+    memoryFileWarning: "يبلغ حجم {{path}} {{tokens}} رمزًا، أي أكثر من {{limit}}.",
+    reReadAdvice:
+      "تعيد هذه الجلسة قراءة نحو {{tokens}} رمز في كل جولة. جلسة جديدة مع ملخص تسليم قصير أرخص.",
   },
   review: {
     comment: {

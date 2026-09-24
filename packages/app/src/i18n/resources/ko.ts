@@ -2057,6 +2057,22 @@ export const ko: TranslationResources = {
     accessibility: "컨텍스트 윈도우 {{percentage}}% 사용됨",
     spendTitle: "사용량",
     spendSummary: "{{span}} 동안 가중 토큰 {{total}}",
+    breakdownLoading: "컨텍스트를 읽는 중…",
+    breakdownPending: "이 턴이 끝나면 세부 내역이 표시됩니다.",
+    breakdownUnsupported: "이 제공자는 컨텍스트 세부 내역을 제공할 수 없습니다.",
+    breakdownError: "컨텍스트 세부 내역을 읽지 못했습니다.",
+    breakdownAsOf: "{{time}} 기준",
+    breakdownBarAccessibility: "컨텍스트 윈도우 세부 내역",
+    deferredTitle: "윈도우 밖",
+    messageToolResults: "도구 결과",
+    messageAttachments: "첨부 파일",
+    messageAssistant: "어시스턴트",
+    messageToolCalls: "도구 호출",
+    messageUser: "사용자 메시지",
+    memoryTotalWarning: "메모리 파일이 {{tokens}} 토큰으로 권장 {{limit}}을(를) 넘습니다.",
+    memoryFileWarning: "{{path}}은(는) {{tokens}} 토큰으로 {{limit}}을(를) 넘습니다.",
+    reReadAdvice:
+      "이 세션은 매 턴 약 {{tokens}} 토큰을 다시 읽습니다. 짧은 인수인계와 함께 새 세션을 시작하는 편이 더 저렴합니다.",
   },
   review: {
     comment: {

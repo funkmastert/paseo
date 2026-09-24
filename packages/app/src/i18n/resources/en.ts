@@ -2054,6 +2054,22 @@ export const en = {
     accessibility: "Context window {{percentage}}% used",
     spendTitle: "Spend",
     spendSummary: "{{total}} weighted tokens over {{span}}",
+    breakdownLoading: "Reading context…",
+    breakdownPending: "Breakdown appears when this turn ends.",
+    breakdownUnsupported: "This provider can't report a context breakdown.",
+    breakdownError: "Couldn't read the context breakdown.",
+    breakdownAsOf: "As of {{time}}",
+    breakdownBarAccessibility: "Context window breakdown",
+    deferredTitle: "Outside the window",
+    messageToolResults: "Tool results",
+    messageAttachments: "Attachments",
+    messageAssistant: "Assistant",
+    messageToolCalls: "Tool calls",
+    messageUser: "User messages",
+    memoryTotalWarning: "Memory files use {{tokens}} tokens, over the {{limit}} guideline.",
+    memoryFileWarning: "{{path}} is {{tokens}} tokens, over {{limit}}.",
+    reReadAdvice:
+      "This session re-reads ~{{tokens}} tokens every turn. A fresh session with a short handoff is cheaper.",
   },
   review: {
     comment: {

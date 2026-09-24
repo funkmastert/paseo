@@ -565,6 +565,7 @@ function resolveAgentMonitorConfig(
   | "accountFailover"
   | "budgetPacing"
   | "leaderCompaction"
+  | "contextMeter"
   | "doneJanitor"
   | "admission"
   | "refocus"
@@ -582,6 +583,7 @@ function resolveAgentMonitorConfig(
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
     leaderCompaction: agents?.leaderCompaction,
+    contextMeter: agents?.contextMeter,
     doneJanitor: agents?.doneJanitor,
     admission: agents?.admission,
     refocus: agents?.refocus,

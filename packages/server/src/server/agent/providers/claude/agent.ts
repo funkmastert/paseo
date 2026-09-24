@@ -79,6 +79,8 @@ import {
 import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
 import { realClaudeRewindSdk, revertClaudeConversation, revertClaudeFiles } from "./rewind.js";
+import { normalizeClaudeContextUsage } from "./context-usage.js";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
 import { readClaudeAccountAuth } from "./account-auth.js";
 import {
@@ -2944,6 +2946,19 @@ class ClaudeAgentSession implements AgentSession {
       commandMap.set(REWIND_COMMAND_NAME, REWIND_COMMAND);
     }
     return Array.from(commandMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async getContextUsage(options: { allowStart: boolean }): Promise<AgentContextUsage | null> {
+    // A control request, not a prompt: the CLI answers it beside the conversation, so it never
+    // becomes a turn. Ask whatever process is live, even one flagged for restart, and spawn one
+    // only when none is and the session is idle. ensureQuery() retires a live query flagged for
+    // restart, which mid-turn would kill the turn, so it is reached only with no live query.
+    const turnRunning = this.activeForegroundTurnId !== null || this.autonomousTurn !== null;
+    const query =
+      this.query ?? (options.allowStart && !turnRunning ? await this.ensureQuery() : null);
+    if (!query) return null;
+    const raw = await query.getContextUsage();
+    return normalizeClaudeContextUsage(raw, new Date().toISOString());
   }
 
   async revertConversation(input: { messageId: string }): Promise<void> {

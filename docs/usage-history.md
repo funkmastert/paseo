@@ -60,7 +60,7 @@ Windows reset, so it accounts for the reset:
 
 One RPC, `usage.history.get.request` / `.response` (gated on `server_info.features.usageHistory`, permission `daemon.read`, controller in `session/usage-history/`). It returns every account window's latest reading and projection, and when the request names an `agentId`, that agent's spend downsampled to 96 points.
 
-- **Agent detail:** a spend sparkline in the composer's context-meter tooltip (`packages/app/src/usage-history/agent-spend-sparkline.tsx`). It fetches only while the tooltip is open, and draws nothing without two points or on a daemon that predates the RPC.
+- **Agent detail:** a spend sparkline in the composer's context-meter tooltip (the same tooltip that shows the [context breakdown](context-usage.md)) (`packages/app/src/usage-history/agent-spend-sparkline.tsx`). It fetches only while the tooltip is open, and draws nothing without two points or on a daemon that predates the RPC.
 - **Budget strip:** `earliestProjectedCap` (`usage-history/account-cap-projection.ts`) is the read: the tightest window is what caps an account, so the earliest cap across its windows is the account's time-to-cap. The strip's rendering is not changed here. Unknown is not treated as safe, so it reads `windows[].projection.status` when it needs the difference.
 
 `runsOutAt` and `shortfallPct` on `ProviderUsageWindow` are still unpopulated, for the reason [budget pacing](budget-pacing.md#what-it-does-not-do) gives. Filling them would light up the Host Usage screen's at-risk state and is a client feature with its own design.

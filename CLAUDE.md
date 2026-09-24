@@ -54,6 +54,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/model-divergence.md](docs/model-divergence.md)                 | Model divergence — responses vs configured model, what counts as intentional, surfaces, the `normalizeClaudeRuntimeModelId` trap |
 | [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds            |
 | [docs/leader-compaction.md](docs/leader-compaction.md)               | Leader compaction — the CLI auto-compact window, prepare → /compact → restore, never interrupting a turn, Opus 5.5 thinking      |
+| [docs/context-usage.md](docs/context-usage.md)                       | Context usage — the per-agent `/context` breakdown, the out-of-band read, what a capture costs, the meter's thresholds           |
 | [docs/usage-history.md](docs/usage-history.md)                       | Usage history — what is sampled and from where, bounded storage, projection rules, the RPC and where it surfaces                 |
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — agent priority, child admission, process-tree attribution, CPU saturation and its ledger, build-daemon reaper |
 | [docs/doctor.md](docs/doctor.md)                                     | `paseo doctor` — read-only diagnosis of this fork's known failures, where checks run, credential and deadline gotchas            |

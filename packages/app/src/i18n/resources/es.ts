@@ -2094,6 +2094,23 @@ export const es: TranslationResources = {
     accessibility: "Ventana de contexto{{percentage}}% utilizada",
     spendTitle: "Gasto",
     spendSummary: "{{total}} tokens ponderados en {{span}}",
+    breakdownLoading: "Leyendo el contexto…",
+    breakdownPending: "El desglose aparece cuando termina este turno.",
+    breakdownUnsupported: "Este proveedor no puede informar un desglose del contexto.",
+    breakdownError: "No se pudo leer el desglose del contexto.",
+    breakdownAsOf: "A las {{time}}",
+    breakdownBarAccessibility: "Desglose de la ventana de contexto",
+    deferredTitle: "Fuera de la ventana",
+    messageToolResults: "Resultados de herramientas",
+    messageAttachments: "Adjuntos",
+    messageAssistant: "Asistente",
+    messageToolCalls: "Llamadas a herramientas",
+    messageUser: "Mensajes del usuario",
+    memoryTotalWarning:
+      "Los archivos de memoria usan {{tokens}} tokens, por encima de la pauta de {{limit}}.",
+    memoryFileWarning: "{{path}} tiene {{tokens}} tokens, por encima de {{limit}}.",
+    reReadAdvice:
+      "Esta sesión relee ~{{tokens}} tokens en cada turno. Una sesión nueva con un traspaso breve es más barata.",
   },
   review: {
     comment: {

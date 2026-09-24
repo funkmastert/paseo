@@ -614,6 +614,7 @@ export interface PaseoDaemonConfig {
   // settings interface would not carry the passthrough index signature this has to accept.
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
   leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
+  contextMeter?: MutableDaemonConfig["contextMeter"];
   /**
    * Test seams for AccountFailoverMonitor; production leaves this unset. Tests inject a fake usage
    * source (no real usage API call), push the timer past their own runtime and drive sweeps with
@@ -1131,6 +1132,12 @@ function createAccountFailoverMonitor(input: {
   });
 }
 
+function withContextMeterConfig(
+  config: Pick<PaseoDaemonConfig, "contextMeter">,
+): Pick<MutableDaemonConfig, "contextMeter"> {
+  return config.contextMeter !== undefined ? { contextMeter: { ...config.contextMeter } } : {};
+}
+
 function withBudgetPacingConfig(
   config: Pick<PaseoDaemonConfig, "budgetPacing">,
 ): Pick<MutableDaemonConfig, "budgetPacing"> {
@@ -1187,6 +1194,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
     ...withAccountFailoverConfig(config),
     ...withBudgetPacingConfig(config),
     ...withLeaderCompactionConfig(config),
+    ...withContextMeterConfig(config),
     ...withDoneJanitorConfig(config),
     ...withAdmissionConfig(config),
     ...withRefocusConfig(config),
