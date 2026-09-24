@@ -12,6 +12,7 @@ import {
   askAgentWhetherDone,
   probeProjectRoot,
   readProviderHealth,
+  volumeRootOf,
   type AskAgentResult,
   type DoneJanitorConfig,
   type DoneJanitorDependencies,
@@ -93,6 +94,8 @@ function harness(input: {
   /** Runs before each probe of a project root; `call` counts from 1. */
   onProbeRoot?: (call: number) => void;
   removeProject?: (projectId: string) => void;
+  /** Stands in for the mount-point rule, so a temp directory can be a volume. */
+  volumeRootOf?: (rootPath: string) => string | null;
   config?: DoneJanitorConfig | undefined;
   answer?: (agentId: string) => AskAgentResult;
   health?: ProviderHealth;
@@ -180,7 +183,7 @@ function harness(input: {
     probeProjectRoot: async (rootPath) => {
       probeCalls += 1;
       input.onProbeRoot?.(probeCalls);
-      return probeProjectRoot(rootPath);
+      return probeProjectRoot(rootPath, { volumeRootOf: input.volumeRootOf });
     },
     removeProject: async (projectId) => {
       input.removeProject?.(projectId);
@@ -1398,6 +1401,78 @@ describe("AgentDoneJanitor empty projects", () => {
     expect(report?.entries.map((entry) => entry.projectId)).toEqual(["p2"]);
   });
 
+  test("a root on a mounted volume is judged like any other", async () => {
+    const volume = join(dir, "Volumes", "disk");
+    mkdirSync(volume, { recursive: true });
+    const h = projectsHarness({
+      projects: [project("on-disk", { rootPath: join(volume, "wt4-gone") })],
+      volumeRootOf: () => volume,
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["on-disk"]);
+  });
+
+  test("a root whose volume is not mounted is kept, and the report says so", async () => {
+    const volume = join(dir, "Volumes", "unplugged");
+    const rootPath = join(volume, "wt4-gone");
+    const h = projectsHarness({
+      projects: [project("on-usb", { rootPath })],
+      volumeRootOf: () => volume,
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.removedProjectCount).toBe(0);
+    expect(report?.entries).toEqual([
+      expect.objectContaining({
+        action: "kept-project",
+        projectId: "on-usb",
+        path: rootPath,
+        reason: `its volume ${volume} is not mounted, so its directory may still exist on it`,
+      }),
+    ]);
+    expect(h.pushes).toEqual([]);
+  });
+
+  test("a volume that unmounts between the sweep's read and the removal spares the project", async () => {
+    const volume = join(dir, "Volumes", "flaky");
+    mkdirSync(volume, { recursive: true });
+    const h = projectsHarness({
+      projects: [project("on-flaky", { rootPath: join(volume, "wt4-gone") })],
+      volumeRootOf: () => volume,
+      // Probe 1 is the sweep's; the volume goes away before the fresh probe 2.
+      onProbeRoot: (call) => {
+        if (call === 2) rmSync(volume, { recursive: true });
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        reason: `it was empty and its directory was gone, but then its volume ${volume} is not mounted`,
+      }),
+    );
+  });
+
+  test("a dry run reports an unmounted volume as kept, not as a removal", async () => {
+    const volume = join(dir, "Volumes", "unplugged");
+    const h = projectsHarness({
+      projects: [project("on-usb", { rootPath: join(volume, "x") })],
+      volumeRootOf: () => volume,
+      config: { ...ON_PROJECTS, dryRun: true },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(report?.entries.map((entry) => entry.action)).toEqual(["kept-project"]);
+  });
+
   test("a failed removal is reported and does not stop the rest", async () => {
     const h = projectsHarness({
       projects: [project("bad"), project("good")],
@@ -1520,5 +1595,41 @@ describe("probeProjectRoot", () => {
       kind: "unknown",
       error: expect.stringContaining("ENOTDIR"),
     });
+  });
+
+  test("a missing root under a volume that is not there is the volume's absence, not the project's", async () => {
+    const volume = `/Volumes/paseo-test-${process.pid}-${Date.now()}`;
+    expect(await probeProjectRoot(`${volume}/work/app`)).toEqual({
+      kind: "volume-absent",
+      volumeRoot: volume,
+    });
+  });
+});
+
+describe("volumeRootOf", () => {
+  test.each([
+    ["/Volumes/Backup/work/app", "/Volumes/Backup"],
+    ["/Volumes/Backup", "/Volumes/Backup"],
+    ["/media/tyler/usb/work/app", "/media/tyler/usb"],
+    ["/mnt/data/work/app", "/mnt/data"],
+    ["D:\\work\\app", "D:\\"],
+    ["d:/work/app", "d:\\"],
+    ["C:\\Users\\t\\app", "C:\\"],
+  ])("%s sits on the volume %s", (rootPath, expected) => {
+    expect(volumeRootOf(rootPath)).toBe(expected);
+  });
+
+  test.each([
+    "/Users/tyler/work/app",
+    "/home/tyler/work/app",
+    "/tmp/app",
+    "/Volumes",
+    "/media/tyler",
+    "/mnt",
+    "/mnt-not/x",
+    "relative/Volumes/x/y",
+    "",
+  ])("%s is on the system volume", (rootPath) => {
+    expect(volumeRootOf(rootPath)).toBeNull();
   });
 });

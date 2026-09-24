@@ -61,9 +61,8 @@ const DEFAULT_MAX_DEAD_ARCHIVES_PER_SWEEP = 10;
 const EMPTY_PROJECT_MIN_AGE_MS = 60 * 60_000;
 /**
  * Removing a project record is cheap and re-adding the project undoes it, so it does not spend
- * the archive budget. The cap is a blast-radius limit for the one way the rule can be wrong at
- * scale: a volume that is not mounted makes every project on it read as ENOENT. 50 is twice the
- * backlog that motivated the rule, and a larger one drains over the next sweeps.
+ * the archive budget. The cap is a blast-radius limit in case the rule is ever wrong at scale;
+ * a larger backlog than 50 drains over the next sweeps, and 50 is twice the one that motivated it.
  */
 const MAX_PROJECT_REMOVALS_PER_SWEEP = 50;
 
@@ -134,10 +133,14 @@ export type DoneJanitorProject = Pick<
   "projectId" | "rootPath" | "projectKey" | "createdAt" | "updatedAt" | "archivedAt"
 >;
 
-/** `missing` is ENOENT and nothing else: any other failure to stat is `unknown` and spares the project. */
+/**
+ * `missing` is ENOENT on the root with its volume present, and nothing else: an absent volume is
+ * `volume-absent`, and any other failure to stat is `unknown`. Only `missing` removes a project.
+ */
 export type ProjectRootProbe =
   | { kind: "exists" }
   | { kind: "missing" }
+  | { kind: "volume-absent"; volumeRoot: string }
   | { kind: "unknown"; error: string };
 
 export type AskAgentResult =
@@ -403,7 +406,7 @@ export class AgentDoneJanitor {
   ): Promise<void> {
     const { logger } = this.options;
     try {
-      const candidates = await this.listEmptyProjectCandidates();
+      const candidates = await this.listEmptyProjectCandidates(report);
       for (const [index, candidate] of candidates.entries()) {
         if (index >= MAX_PROJECT_REMOVALS_PER_SWEEP) {
           report.entries.push({
@@ -423,7 +426,9 @@ export class AgentDoneJanitor {
     }
   }
 
-  private async listEmptyProjectCandidates(): Promise<DoneJanitorProject[]> {
+  private async listEmptyProjectCandidates(
+    report: DoneJanitorSweepReport,
+  ): Promise<DoneJanitorProject[]> {
     const [projects, workspaces] = await Promise.all([
       this.deps.listProjects(),
       this.deps.listWorkspaces(),
@@ -431,8 +436,15 @@ export class AgentDoneJanitor {
     const candidates: DoneJanitorProject[] = [];
     for (const project of projects) {
       if (emptyProjectBlocker(project, workspaces, this.now())) continue;
-      if ((await this.deps.probeProjectRoot(project.rootPath)).kind === "missing") {
+      const probe = await this.deps.probeProjectRoot(project.rootPath);
+      if (probe.kind === "missing") {
         candidates.push(project);
+      } else if (probe.kind === "volume-absent") {
+        // Empty and looks gone, but the volume it sits on is not there: worth saying, never removing.
+        report.entries.push({
+          ...describeEmptyProject(project, "kept-project"),
+          reason: describeAbsentVolume(probe.volumeRoot),
+        });
       }
     }
     return candidates;
@@ -1099,19 +1111,61 @@ function describeRootProbe(probe: ProjectRootProbe): string | null {
       return null;
     case "exists":
       return "its directory exists";
+    case "volume-absent":
+      return `its volume ${probe.volumeRoot} is not mounted`;
     case "unknown":
       return `its directory could not be checked (${probe.error})`;
   }
 }
 
-/** Whether the project's root is gone. Only ENOENT says so; EACCES, ENOTDIR on a parent and the rest say nothing. */
-export async function probeProjectRoot(rootPath: string): Promise<ProjectRootProbe> {
+function describeAbsentVolume(volumeRoot: string): string {
+  return `its volume ${volumeRoot} is not mounted, so its directory may still exist on it`;
+}
+
+/**
+ * The mount point a path sits under, decided from the path alone: `/Volumes/<name>` on macOS,
+ * `/media/<user>/<name>` and `/mnt/<name>` on Linux, a drive root on Windows. Null for anything
+ * else, which is the system volume. No mount table: the caller stats the answer once.
+ */
+export function volumeRootOf(rootPath: string): string | null {
+  const drive = /^([A-Za-z]:)[\\/]/u.exec(rootPath);
+  if (drive) return `${drive[1]}\\`;
+  const segments = rootPath.split("/");
+  if (segments[0] !== "") return null;
+  const [, top, first, second] = segments;
+  if (top === "Volumes" && first) return `/Volumes/${first}`;
+  if (top === "mnt" && first) return `/mnt/${first}`;
+  if (top === "media" && first && second) return `/media/${first}/${second}`;
+  return null;
+}
+
+/**
+ * Whether the project's root is gone. Only ENOENT says so, and only with its volume present:
+ * a root under an unmounted volume is `volume-absent`. EACCES, ENOTDIR on a parent and the rest
+ * say nothing. `volumeRootOf` is a seam for tests.
+ */
+export async function probeProjectRoot(
+  rootPath: string,
+  options: { volumeRootOf?: (rootPath: string) => string | null } = {},
+): Promise<ProjectRootProbe> {
+  const rootError = await statError(rootPath);
+  if (rootError === null) return { kind: "exists" };
+  if (rootError.code !== "ENOENT") return { kind: "unknown", error: rootError.message };
+  const volumeRoot = (options.volumeRootOf ?? volumeRootOf)(rootPath);
+  if (volumeRoot === null) return { kind: "missing" };
+  const volumeError = await statError(volumeRoot);
+  if (volumeError === null) return { kind: "missing" };
+  if (volumeError.code === "ENOENT") return { kind: "volume-absent", volumeRoot };
+  return { kind: "unknown", error: volumeError.message };
+}
+
+async function statError(path: string): Promise<{ code?: string; message: string } | null> {
   try {
-    await stat(rootPath);
-    return { kind: "exists" };
+    await stat(path);
+    return null;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
-    return { kind: "unknown", error: error instanceof Error ? error.message : String(error) };
+    const code = (error as NodeJS.ErrnoException).code;
+    return { code, message: error instanceof Error ? error.message : String(error) };
   }
 }
 
