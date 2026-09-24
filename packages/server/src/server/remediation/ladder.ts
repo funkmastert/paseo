@@ -119,6 +119,7 @@ export class RemediationLadder implements RemediationSink {
   /** Loads the state file and reconciles in-flight agents before the first timer tick. */
   async start(): Promise<void> {
     if (this.timer) return;
+    this.reportMode(this.readDaemonConfig().remediation);
     const timer = setInterval(() => {
       void this.tick().catch((error) => {
         this.logger.error({ err: error }, "Remediation ladder poll failed");
