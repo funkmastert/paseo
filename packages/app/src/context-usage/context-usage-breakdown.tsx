@@ -30,7 +30,12 @@ const MIN_SEGMENT_FRACTION = 0.004;
 type BreakdownStatus =
   | { kind: "loading" }
   | { kind: "message"; message: string; tone: "muted" | "error" }
-  | { kind: "breakdown"; usage: NonNullable<AgentContextUsagePayload["usage"]> };
+  // `refreshFailed`: the daemon could not capture again and sent its last good breakdown.
+  | {
+      kind: "breakdown";
+      usage: NonNullable<AgentContextUsagePayload["usage"]>;
+      refreshFailed: boolean;
+    };
 
 function resolveBreakdownStatus(
   payload: AgentContextUsagePayload | undefined,
@@ -42,8 +47,11 @@ function resolveBreakdownStatus(
       ? { kind: "loading" }
       : { kind: "message", message: t("contextWindow.breakdownError"), tone: "error" };
   }
+  if (payload.usage) {
+    const refreshFailed = payload.status !== "captured" && payload.status !== "cached";
+    return { kind: "breakdown", usage: payload.usage, refreshFailed };
+  }
   if (payload.status === "captured" || payload.status === "cached") {
-    if (payload.usage) return { kind: "breakdown", usage: payload.usage };
     return { kind: "message", message: t("contextWindow.breakdownError"), tone: "error" };
   }
   if (payload.status === "pending") {
@@ -246,6 +254,9 @@ export function ContextUsageBreakdown({
       ) : null}
       {status?.kind === "breakdown" ? (
         <BreakdownBody usage={status.usage} thresholds={thresholds} />
+      ) : null}
+      {status?.kind === "breakdown" && status.refreshFailed ? (
+        <Text style={styles.error}>{t("contextWindow.breakdownError")}</Text>
       ) : null}
       {advice ? (
         <Text

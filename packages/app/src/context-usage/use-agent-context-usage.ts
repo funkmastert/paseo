@@ -4,8 +4,9 @@ import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-
 import { useSessionStore } from "@/stores/session-store";
 import type { AgentContextUsagePayload } from "./context-meter-model";
 
-// While a turn runs the breakdown cannot move, and the daemon captures when it ends. Asking again
-// on this beat is what lets the turn-end capture appear under an open popover.
+// The daemon captures a watched agent shortly after each turn ends, and answers from its cache
+// otherwise. Asking again on this beat while the popover is open is what lets that capture appear
+// without reopening it. A turn can end between two polls, so the poll does not stop at idle.
 export const AGENT_CONTEXT_USAGE_POLL_MS = 15 * 1000;
 
 // Every open of the popover asks again; the daemon answers from its cache when nothing changed.
@@ -33,9 +34,6 @@ export function useAgentContextUsage(
   const isSupported = useSessionStore(
     (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.agentContextUsage === true,
   );
-  const isRunning = useSessionStore(
-    (state) => state.sessions[serverId ?? ""]?.agents.get(agentId ?? "")?.status === "running",
-  );
   const enabled = Boolean(
     (options.enabled ?? true) && serverId && agentId && client && isConnected && isSupported,
   );
@@ -53,7 +51,7 @@ export function useAgentContextUsage(
     staleTimeMs: AGENT_CONTEXT_USAGE_STALE_TIME_MS,
     queryFn,
     enabled,
-    refetchInterval: isRunning ? AGENT_CONTEXT_USAGE_POLL_MS : false,
+    refetchInterval: AGENT_CONTEXT_USAGE_POLL_MS,
   });
 
   return { data: query.data, isSupported, isLoading: enabled && query.isPending };

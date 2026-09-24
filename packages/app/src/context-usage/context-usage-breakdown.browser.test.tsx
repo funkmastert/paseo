@@ -132,6 +132,17 @@ function captured(usage: AgentContextUsage): AgentContextUsagePayload {
   return { requestId: "r", agentId: "a", status: "captured", usage, error: null };
 }
 
+// The daemon could not capture again and sent its last good breakdown with the error.
+function failedRefresh(usage: AgentContextUsage): AgentContextUsagePayload {
+  return {
+    requestId: "r",
+    agentId: "a",
+    status: "error",
+    usage,
+    error: "Context usage capture timed out after 30000ms",
+  };
+}
+
 function status(kind: string): AgentContextUsagePayload {
   return { requestId: "r", agentId: "a", status: kind, usage: null, error: null };
 }
@@ -308,6 +319,16 @@ describe("context meter popover", () => {
     );
     expect(container.textContent).toContain(message);
     expect(container.querySelector('[data-testid="context-usage-bar"]')).toBeNull();
+  });
+
+  it("keeps the last good breakdown when a refresh fails, and says so", () => {
+    const container = mount(
+      <Popover usage={opus} payload={failedRefresh(opus)} width={PHONE_WIDTH} />,
+      PHONE_WIDTH,
+    );
+    expect(container.querySelector('[data-testid="context-usage-bar"]')).not.toBeNull();
+    expect(container.textContent).toContain("As of 6m ago");
+    expect(container.textContent).toContain("Couldn't read the context breakdown.");
   });
 
   it("says it is reading while the first read is in flight", () => {
