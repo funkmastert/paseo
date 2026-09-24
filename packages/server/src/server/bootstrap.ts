@@ -221,6 +221,10 @@ import { AgentResourceMonitor } from "./agent-resource-monitor.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import {
+  RestartRecoveryService,
+  type RestartRecoveryConfig,
+} from "./agent/restart-recovery/service.js";
+import {
   AgentDoneJanitor,
   askAgentWhetherDone,
   readProviderHealth,
@@ -550,6 +554,8 @@ export interface PaseoDaemonConfig {
     now?: () => number;
   };
   doneJanitor?: DoneJanitorConfig;
+  /** Startup-only: read once at boot. See docs/restart-recovery.md. */
+  restartRecovery?: RestartRecoveryConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
    * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
@@ -597,6 +603,7 @@ export interface PaseoDaemon {
   getAccountFailoverMonitor(): AccountFailoverMonitor | null;
   /** Null until start() has constructed it, like the account-failover monitor. */
   getDoneJanitor(): AgentDoneJanitor | null;
+  getRestartRecovery(): RestartRecoveryService;
 }
 
 export interface PaseoDaemonDependencies {
@@ -1354,6 +1361,14 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before anything can load or prompt an agent: the open run markers are the only record of who
+  // was mid-turn when the last daemon stopped, and the first new turn would replace them.
+  const restartRecovery = await RestartRecoveryService.capture({
+    agentStorage,
+    agentManager,
+    config: config.restartRecovery,
+    logger: logger.child({ module: "restart-recovery" }),
+  });
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -2185,6 +2200,7 @@ export async function createPaseoDaemon(
                       worktreeDiskMonitor!.requestSample(workspaceId, cwd),
                   }
                 : undefined,
+              restartRecovery,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -2334,6 +2350,7 @@ export async function createPaseoDaemon(
               logger,
             });
             doneJanitor.start();
+            restartRecovery.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2394,6 +2411,7 @@ export async function createPaseoDaemon(
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
+    restartRecovery.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
@@ -2455,6 +2473,7 @@ export async function createPaseoDaemon(
     getListenTarget: () => boundListenTarget,
     getAccountFailoverMonitor: () => accountFailoverMonitor,
     getDoneJanitor: () => doneJanitor,
+    getRestartRecovery: () => restartRecovery,
   };
 }
 

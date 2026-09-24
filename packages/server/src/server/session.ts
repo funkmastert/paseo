@@ -182,6 +182,8 @@ import {
   createGitMetadataGenerator,
 } from "./session/checkout/git-metadata-generator.js";
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
+import { RestartRecoverySession } from "./session/restart-recovery/restart-recovery-session.js";
+import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
@@ -499,6 +501,8 @@ export interface SessionOptions {
   workspaceLabelService?: WorkspaceLabelService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
+  /** Absent when the daemon runs without restart recovery (tests, older wiring). */
+  restartRecovery?: RestartRecoveryService;
   checkoutDiffManager: CheckoutDiffManager;
   github?: ForgeService;
   createAgentMcpTransport?: AgentMcpTransportFactory;
@@ -803,6 +807,7 @@ export class Session {
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
   private readonly scheduleSession: ScheduleSession;
+  private readonly restartRecoverySession: RestartRecoverySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
@@ -979,6 +984,11 @@ export class Session {
     this.scheduleSession = new ScheduleSession({
       host: { emit: (msg) => this.emit(msg) },
       scheduleService,
+      logger: this.sessionLogger,
+    });
+    this.restartRecoverySession = new RestartRecoverySession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: options.restartRecovery,
       logger: this.sessionLogger,
     });
     this.providerCatalogSession = new ProviderCatalogSession({
@@ -2134,6 +2144,7 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
+      this.dispatchRestartRecoveryMessage(msg) ??
       this.dispatchMiscMessage(msg);
     if (promise) await promise;
   }
@@ -2844,6 +2855,17 @@ export class Session {
         return this.handleWorkspaceScriptStopRequest(msg);
       default:
         return this.terminalController.dispatch(msg);
+    }
+  }
+
+  private dispatchRestartRecoveryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "agent.restart_recovery.get_plan.request":
+      case "agent.restart_recovery.apply.request":
+      case "agent.restart_recovery.dismiss.request":
+        return this.restartRecoverySession.handle(msg);
+      default:
+        return undefined;
     }
   }
 

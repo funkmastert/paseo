@@ -13,6 +13,7 @@ import type pino from "pino";
 import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
 import type { ScheduleService } from "./schedule/service.js";
+import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
 import type { CheckoutDiffManager, CheckoutDiffMetrics } from "./checkout-diff-manager.js";
 import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-store.js";
 import {
@@ -554,6 +555,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly workspaceLabelService: WorkspaceLabelService | null;
   private readonly scheduleService: ScheduleService;
+  private readonly restartRecovery: RestartRecoveryService | undefined;
   private readonly checkoutDiffManager: CheckoutDiffManager;
   private readonly github: ForgeService;
   private readonly workspaceGitService: WorkspaceGitService;
@@ -658,6 +660,7 @@ export class VoiceAssistantWebSocketServer {
       get?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
       requestSample?: (workspaceId: string, cwd: string) => void;
     } = {},
+    restartRecovery?: RestartRecoveryService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -687,6 +690,7 @@ export class VoiceAssistantWebSocketServer {
       checkoutDiffManager,
     });
     this.scheduleService = requiredServices.scheduleService;
+    this.restartRecovery = restartRecovery;
     this.checkoutDiffManager = requiredServices.checkoutDiffManager;
     this.github = github ?? createGitHubService();
     this.workspaceGitService = workspaceGitService ?? createFallbackWorkspaceGitService();
@@ -1443,6 +1447,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceLabelService: this.workspaceLabelService ?? undefined,
       directorySync: this.directorySync,
       scheduleService: this.scheduleService,
+      restartRecovery: this.restartRecovery,
       checkoutDiffManager: this.checkoutDiffManager,
       github: this.github,
       workspaceGitService: this.workspaceGitService,
@@ -1743,6 +1748,8 @@ export class VoiceAssistantWebSocketServer {
         worktreeRestore: true,
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: true,
+        // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
+        restartRecovery: this.restartRecovery !== undefined,
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: true,
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
