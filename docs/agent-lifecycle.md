@@ -27,6 +27,8 @@ replacement. Once closure succeeds, a failed resume leaves the durable agent clo
 
 Idle agents remain resident indefinitely. Runtime closure happens only through an explicit lifecycle
 action such as archive, replacement, reload, workspace teardown, or daemon shutdown.
+An agent that daemon shutdown (or a crash) closed mid-turn keeps an open run marker on its record,
+and [restart recovery](restart-recovery.md) finds it on the next boot.
 
 A provider runtime can still die on its own — crash, OOM kill, host suspend. Work the agent parked
 inside that process dies with it: Claude Code's background Bash shells, `Monitor` watches, and
