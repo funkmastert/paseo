@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { extname } from "node:path";
 import { promisify } from "node:util";
@@ -9,7 +10,39 @@ import {
   quoteWindowsCommand,
 } from "./windows-command.js";
 
+import { lowerAgentProcessPriority, lowerBackgroundProcessPriority } from "./process-priority.js";
+
 const execFileAsync = promisify(execFile);
+
+/**
+ * Opt-in scheduling priority for a spawned process, per the daemon's `agents.processPriority`
+ * policy (see docs/resource-monitor.md). "agent" is for agent provider processes and terminals an
+ * agent owns; "background" is for the daemon's own periodic work. Unset leaves the process at the
+ * daemon's priority, which is what work someone is waiting on wants.
+ */
+export type SpawnPriority = "agent" | "background";
+
+const spawnPriorityScope = new AsyncLocalStorage<SpawnPriority>();
+
+/**
+ * Runs `work` with every spawn inside it defaulting to `priority`, for call sites that reach the
+ * subprocess through layers (forge status polling goes through the forge adapters and their CLI
+ * runners) that have no priority option to thread. An explicit `priority` on a spawn wins.
+ */
+/** The priority the enclosing `runWithSpawnPriority` scope gives spawns, if any. */
+export function currentSpawnPriority(): SpawnPriority | undefined {
+  return spawnPriorityScope.getStore();
+}
+
+export function runWithSpawnPriority<T>(priority: SpawnPriority, work: () => T): T {
+  return spawnPriorityScope.run(priority, work);
+}
+
+function lowerSpawnedPriority(pid: number | undefined, priority: SpawnPriority | undefined): void {
+  priority ??= currentSpawnPriority();
+  if (priority === "agent") lowerAgentProcessPriority(pid);
+  else if (priority === "background") lowerBackgroundProcessPriority(pid);
+}
 
 interface ExternalEnvOptions {
   baseEnv?: ProcessEnvRecord;
@@ -18,9 +51,11 @@ interface ExternalEnvOptions {
   envOverlay?: ProcessEnvRecord;
 }
 
-export type SpawnProcessOptions = Omit<SpawnOptions, "env"> & ExternalEnvOptions;
+export type SpawnProcessOptions = Omit<SpawnOptions, "env"> &
+  ExternalEnvOptions & { priority?: SpawnPriority };
 
 interface ExecCommandOptions extends ExternalEnvOptions {
+  priority?: SpawnPriority;
   cwd?: string;
   encoding?: BufferEncoding;
   killSignal?: NodeJS.Signals;
@@ -57,7 +92,7 @@ export function spawnProcess(
   args: string[],
   options?: SpawnProcessOptions,
 ): ChildProcess {
-  const { baseEnv, env, envOverlay, ...spawnOptions } = options ?? {};
+  const { baseEnv, env, envOverlay, priority, ...spawnOptions } = options ?? {};
   const resolvedBaseEnv = env ?? baseEnv ?? process.env;
   const isWindows = process.platform === "win32";
   const shell = shouldUseWindowsShell(command, spawnOptions.shell);
@@ -74,13 +109,15 @@ export function spawnProcess(
           ...(envOverlay ? [envOverlay] : []),
         );
 
-  return spawn(resolvedCommand, resolvedArgs, {
+  const child = spawn(resolvedCommand, resolvedArgs, {
     ...spawnOptions,
     env: childEnv,
     shell,
     signal: options?.signal,
     windowsHide: true,
   });
+  lowerSpawnedPriority(child.pid, priority);
+  return child;
 }
 
 export async function execCommand(
@@ -104,7 +141,7 @@ export async function execCommand(
           ...(envOverlay ? [envOverlay] : []),
         );
 
-  return execFileAsync(resolvedCommand, resolvedArgs, {
+  const pending = execFileAsync(resolvedCommand, resolvedArgs, {
     cwd: options?.cwd,
     env: childEnv,
     encoding: options?.encoding ?? "utf8",
@@ -113,5 +150,7 @@ export async function execCommand(
     maxBuffer: options?.maxBuffer,
     shell,
     windowsHide: true,
-  }) as Promise<ExecCommandResult>;
+  });
+  lowerSpawnedPriority(pending.child.pid, options?.priority);
+  return pending as Promise<ExecCommandResult>;
 }

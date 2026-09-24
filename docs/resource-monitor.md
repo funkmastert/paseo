@@ -2,6 +2,32 @@
 
 The daemon tracks OS-level memory and CPU per agent and warns when one runs away, alongside two machine-level checks: swap pressure and orphaned build daemons. An opt-in fourth leg reaps abandoned build daemons instead of only reporting them. It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage — same monitor shape, different signal.
 
+## Agents run at low priority
+
+The monitor below reports a runaway after the fact. This section is what keeps the machine usable while one is running: the daemon starts every agent at low priority, so a build farm that saturates every core still leaves the daemon, the app and whatever you're typing into first in line for CPU. It works by scheduling class, so it holds even when the monitor itself is blind because `ps` has stopped answering.
+
+**Lowered** (`agents.processPriority.agentNice`): the agent provider processes (Claude, Codex, ACP agents and the commands they run through the daemon, Pi/OMP, OpenCode's shared server), and the terminals and workspace scripts an agent starts through the MCP tools. **Lowered** (`backgroundNice`): the daemon's own periodic subprocesses, meaning the `git fetch` refresh and the forge PR-status polling (`gh`, `tea`, and the other forge CLIs). **Normal**: the daemon itself, terminals and scripts a person opens, and git or forge work someone is waiting on, such as opening a diff. A spawn site opts in with `priority` on `spawnProcess`/`execCommand`/`runGitCommand`, or `runWithSpawnPriority` around a call that reaches its subprocess through layers with no option to thread; nothing is lowered by default. The daemon never lowers itself: only root can raise a priority again on macOS and Linux.
+
+Children inherit the priority, which is why lowering the provider process is enough to make the builds and tests it runs low too:
+
+| Platform | What `nice 10` means                                                             | Inheritance                                                               |
+| -------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| macOS    | Unix nice 10                                                                     | Children inherit it                                                       |
+| Linux    | Unix nice 10                                                                     | Children inherit it                                                       |
+| Windows  | libuv maps 10..18 to `BELOW_NORMAL_PRIORITY_CLASS`, 19 to `IDLE`, 0..9 to normal | A child of a `BELOW_NORMAL` or `IDLE` parent starts in the parent's class |
+
+A process already at or below the target is left alone, and a failure to set the priority (the process exited, or belongs to another user) is swallowed: an agent that starts at normal priority is better than one that does not start.
+
+The terminal worker is a separate process that cannot read the daemon's config, so the daemon resolves the nice when an agent asks for a terminal and passes the number down. A reused workspace-script terminal keeps the priority it was created with.
+
+Config lives under `agents.processPriority`, live-patchable. Values outside 0..19 are rejected, since the daemon only ever lowers priority. Spawn sites read the current policy at spawn time; processes already running keep the priority they started with.
+
+| Key              | Default | Meaning                                                                   |
+| ---------------- | ------- | ------------------------------------------------------------------------- |
+| `enabled`        | `true`  | Off leaves every process at normal priority                               |
+| `agentNice`      | `10`    | Nice for agent provider processes and the terminals/scripts agents start  |
+| `backgroundNice` | `10`    | Nice for the daemon's periodic `git fetch` and forge polling subprocesses |
+
 ## What's attributed, and how
 
 Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) shells out to `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` and, on macOS/Linux, samples system swap. `uid` exists for the reaper alone — nothing may be signalled without proving it belongs to the user the daemon runs as. Both samples are best-effort with a 15s timeout: a host without `ps` gets one warning and no process legs, never a failing sweep, and a sweep still in flight is not overlapped by the next tick. `process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints — that one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the `ps` value, since for a young process the two agree.
