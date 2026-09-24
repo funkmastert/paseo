@@ -1949,6 +1949,21 @@ export const ru: TranslationResources = {
   sidebarCallout: {
     dismiss: "Закрыть",
   },
+  restartRecovery: {
+    summary_one: "{{count}} агент прерван посреди хода",
+    summary_other: "Агентов, прерванных посреди хода: {{count}}",
+    resumeAll: "Возобновить все",
+    dismissAll: "Отклонить",
+    state: {
+      pending: "Ожидает",
+      resuming: "Возобновляется",
+      failed: "Не удалось возобновить",
+    },
+    notRestorable: "Нельзя возобновить",
+    error: "Восстановление не удалось: {{error}}",
+    expand: "Развернуть восстановление после перезапуска",
+    collapse: "Свернуть восстановление после перезапуска",
+  },
   deviceStatus: {
     summary: "{{used}} из {{total}} устройств",
     summaryCapOff: "{{used}} устройств запущено",

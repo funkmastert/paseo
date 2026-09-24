@@ -1928,6 +1928,21 @@ export const ko: TranslationResources = {
   sidebarCallout: {
     dismiss: "닫기",
   },
+  restartRecovery: {
+    summary_one: "에이전트 {{count}}개가 턴 도중 중단되었습니다",
+    summary_other: "에이전트 {{count}}개가 턴 도중 중단되었습니다",
+    resumeAll: "모두 재개",
+    dismissAll: "무시",
+    state: {
+      pending: "대기 중",
+      resuming: "재개 중",
+      failed: "재개 실패",
+    },
+    notRestorable: "재개할 수 없음",
+    error: "복구 실패: {{error}}",
+    expand: "재시작 복구 펼치기",
+    collapse: "재시작 복구 접기",
+  },
   deviceStatus: {
     summary: "{{total}}대 중 {{used}}대 사용 중",
     summaryCapOff: "{{used}}대 실행 중",
