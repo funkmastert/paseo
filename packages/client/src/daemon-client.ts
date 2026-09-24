@@ -483,6 +483,10 @@ type UsageHistoryGetPayload = Extract<
   SessionOutboundMessage,
   { type: "usage.history.get.response" }
 >["payload"];
+export type AgentContextUsageReadPayload = Extract<
+  SessionOutboundMessage,
+  { type: "agent.context_usage.read.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -5142,6 +5146,23 @@ export class DaemonClient {
         type: "usage.history.get.request",
         ...(options?.agentId ? { agentId: options.agentId } : {}),
       },
+    });
+  }
+
+  /**
+   * What an agent's context window is made of, from its provider's own `/context`. The daemon
+   * reads it out of band of the agent's turns and caches it; see docs/context-usage.md.
+   */
+  async readAgentContextUsage(
+    agentId: string,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<AgentContextUsageReadPayload> {
+    // COMPAT(agentContextUsage): callers gate on `server_info.features.agentContextUsage`; an older
+    // daemon answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "agent.context_usage.read.request", agentId },
     });
   }
 

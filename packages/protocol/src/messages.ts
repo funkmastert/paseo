@@ -74,6 +74,10 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  AgentContextUsageReadRequestSchema,
+  AgentContextUsageReadResponseSchema,
+} from "./context-usage/rpc-schemas.js";
+import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
   PaseoMetadataGenerationEntrySchema,
@@ -329,6 +333,21 @@ const MutableBudgetPacingConfigSchema = z
   .passthrough();
 
 const MutableBudgetPacingPatchSchema = MutableBudgetPacingConfigSchema;
+
+// Where the composer's context meter turns amber and red, and when the context breakdown flags
+// memory files. Read by the app only; the daemon stores it. See docs/context-usage.md.
+const MutableContextMeterConfigSchema = z
+  .object({
+    amberTokens: z.number().positive().optional(),
+    amberPercent: z.number().positive().max(100).optional(),
+    redTokens: z.number().positive().optional(),
+    redPercent: z.number().positive().max(100).optional(),
+    memoryFilesTokens: z.number().positive().optional(),
+    memoryFileTokens: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableContextMeterPatchSchema = MutableContextMeterConfigSchema;
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/done-janitor.md.
 const MutableDoneJanitorConfigSchema = z
@@ -554,6 +573,8 @@ export const MutableDaemonConfigSchema = z
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
+    // COMPAT(contextMeter): added in v0.8.2, remove nothing — additive optional config.
+    contextMeter: MutableContextMeterConfigSchema.optional(),
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
@@ -586,6 +607,7 @@ export const MutableDaemonConfigPatchSchema = z
     artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
+    contextMeter: MutableContextMeterPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
@@ -3610,6 +3632,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderDiagnosticRequestMessageSchema,
   ProviderUsageListRequestMessageSchema,
   UsageHistoryGetRequestSchema,
+  AgentContextUsageReadRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4071,6 +4094,8 @@ export const ServerInfoStatusPayloadSchema = z
         deviceLeases: z.boolean().optional(),
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: z.boolean().optional(),
+        // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
+        agentContextUsage: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7290,6 +7315,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
   UsageHistoryGetResponseSchema,
+  AgentContextUsageReadResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,
