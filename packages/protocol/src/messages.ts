@@ -1346,6 +1346,8 @@ export const AgentTurnQueuedSchema = z.object({
   queuedAt: z.string(),
 });
 
+export type AgentTurnQueued = z.infer<typeof AgentTurnQueuedSchema>;
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,

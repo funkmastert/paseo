@@ -279,6 +279,7 @@ export const ko: TranslationResources = {
       running: "실행 중",
       error: "오류",
       closed: "종료됨",
+      queued: "대기열",
     },
     badges: {
       archived: "보관됨",
