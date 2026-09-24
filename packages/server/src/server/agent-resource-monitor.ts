@@ -37,9 +37,30 @@ import { withRecentCpuPercent, type CpuRateMemory } from "./agent/process-cpu-ra
 import type { OrphanBuildDaemonSummary } from "./agent/process-attribution.js";
 import type {
   ProcessSampleRow,
-  ProcessSampler,
+  ResourceMonitorSampler,
   SystemMemorySample,
 } from "./agent/process-sampler.js";
+import {
+  evaluateSaturation,
+  isSaturated,
+  type SaturationConfig,
+  type SaturationEpisode,
+  type SaturationState,
+  type SaturationTransition,
+} from "./agent/saturation-detector.js";
+import {
+  type AgentLabel,
+  buildSaturationEvidence,
+  type EvidenceProcessSample,
+  formatSaturationEvidence,
+  type SaturationEvidence,
+} from "./agent/saturation-evidence.js";
+import {
+  buildSaturationLedgerRecord,
+  type SaturationLedger,
+  type SaturationLedgerEvent,
+} from "./agent/saturation-ledger.js";
+import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import {
@@ -48,6 +69,10 @@ import {
   type RemedyAttempt,
   type RemedyState,
 } from "./remediation/contract.js";
+import {
+  lowerProcessPriority as lowerProcessPriorityDefault,
+  type LowerPriorityResult,
+} from "../utils/process-priority.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const GIBIBYTE = 1024 ** 3;
@@ -69,11 +94,37 @@ const DEFAULT_REAPER_GRACE_MS = 10_000;
 // How long the ladder waits on swap pressure before it sends an agent. The reaper and the
 // artifact janitor run inside every sweep, so ten minutes is ten chances for them to clear it.
 const SYSTEM_MEMORY_GRACE_MS = 10 * 60_000;
+// Saturation: a 1-minute load of two runnable tasks per core (macOS/Linux) or 90% of CPU time
+// busy (Windows), for as many sweeps as the other legs' sustainedMinutes.
+const DEFAULT_SATURATION_LOAD_PER_CORE = 2;
+const DEFAULT_SATURATION_BUSY_FRACTION = 0.9;
+// While an incident holds, the ledger gets a record this often, besides the open and the clear.
+const SATURATION_LEDGER_INTERVAL_MS = 5 * 60_000;
+// Child admission is held from the open until load falls to 1.5 runnable tasks per core (or 75%
+// busy on Windows), a line below the threshold so a load hovering at it does not flap the hold.
+const DEFAULT_SATURATION_RELEASE_LOAD_PER_CORE = 1.5;
+const DEFAULT_SATURATION_RELEASE_BUSY_FRACTION = 0.75;
+const DEFAULT_SATURATION_RENICE_TOP_TREES = 3;
+// Agents already run at nice 10. On macOS and Linux 15 is a real step below them that still
+// leaves room under it. On Windows libuv maps 10..18 to BELOW_NORMAL, where agents already are,
+// so the only step further down is 19, IDLE.
+const DEFAULT_SATURATION_RENICE_NICE = process.platform === "win32" ? 19 : 15;
+// A tree using less than a core is not what is loading the machine, and a lowered priority is
+// permanent on macOS and Linux, so it is left alone.
+const SATURATION_RENICE_MIN_TREE_CPU_PERCENT = 100;
+// Agent trees at or above this share of the sampled CPU are the cause, and the renice and the
+// admission hold are the answer to it.
+const SATURATION_AGENT_SHARE = 0.5;
+// With a cause in hand the remedies (or the person's own apps) are the answer, so a person hears
+// only if it outlasts them. With none, an agent goes to look soon.
+const DEFAULT_SATURATION_ATTRIBUTED_GRACE_MINUTES = 30;
+const DEFAULT_SATURATION_UNATTRIBUTED_GRACE_MINUTES = 5;
 // An episode's list of what was done to it is capped so a daemon-heavy day cannot grow it forever.
 const MAX_EPISODE_ATTEMPTS = 20;
 
 const ORPHAN_DAEMONS_KEY = "orphan-build-daemons";
 const SYSTEM_MEMORY_KEY = "system-memory";
+const CPU_SATURATION_KEY = "cpu-saturation";
 
 const ORPHAN_DAEMONS_TASK =
   "Find which orphaned build daemons are still running on this machine and why the reaper " +
@@ -90,6 +141,15 @@ const SYSTEM_MEMORY_TASK =
   "device lease, and dev servers that belonged to archived agents. You must never touch a " +
   "process of a running agent, and never the Paseo daemon.";
 
+const CPU_SATURATION_TASK =
+  "Find what is loading this machine's CPU. Process sampling is failing, so the daemon could not " +
+  "tell: the evidence has the load and the last sample it had, with its age. Stop only processes " +
+  "that are provably leftover: orphaned build daemons whose launcher is gone (`./gradlew --stop`, " +
+  "`dotnet build-server shutdown`), and test runners, simulators or dev servers that belonged to " +
+  "archived agents. You must never touch a running agent's processes, the Paseo daemon, or the " +
+  "user's own applications such as Android Studio, Xcode or a browser. If `ps` itself hangs, " +
+  "say so and report what you could see.";
+
 export interface ResourceMonitorReaperConfig {
   enabled?: boolean;
   dryRun?: boolean;
@@ -98,6 +158,19 @@ export interface ResourceMonitorReaperConfig {
   minIdleSweeps?: number;
   maxPerSweep?: number;
   graceMs?: number;
+}
+
+export interface ResourceMonitorSaturationConfig {
+  enabled?: boolean;
+  loadPerCore?: number;
+  busyFraction?: number;
+  sustainedMinutes?: number;
+  releaseLoadPerCore?: number;
+  releaseBusyFraction?: number;
+  reniceTopTrees?: number;
+  reniceNice?: number;
+  attributedGraceMinutes?: number;
+  unattributedGraceMinutes?: number;
 }
 
 export interface ResourceMonitorConfig {
@@ -109,6 +182,35 @@ export interface ResourceMonitorConfig {
   orphanBuildDaemonBytes?: number;
   notifyAgent?: boolean;
   reaper?: ResourceMonitorReaperConfig;
+  saturation?: ResourceMonitorSaturationConfig;
+}
+
+/**
+ * The process sample attribution comes from. Kept after the sweep that took it, so a sweep whose
+ * own sample failed can still say what was running, marked with its age.
+ */
+interface AttributedProcessSample extends EvidenceProcessSample {
+  orphanBuildDaemons: OrphanBuildDaemonSummary;
+}
+
+/**
+ * One sweep's saturation state, for whatever acts on it. Undefined (see getSaturationSweep) while
+ * the machine is not saturated.
+ */
+export interface SaturationSweep {
+  atMs: number;
+  /** `opened`, `held` or `cleared`; `quiet` sweeps produce no SaturationSweep. */
+  transition: Exclude<SaturationTransition, "quiet">;
+  episode: SaturationEpisode;
+  systemLoad: SystemLoadSample;
+  systemMemory: SystemMemorySample | undefined;
+  /** `evidence.sample` says whether the rows below are this sweep's or an older sample's. */
+  evidence: SaturationEvidence;
+  /**
+   * The rows and trees the evidence came from. Stale unless `evidence.sample.status` is
+   * `fresh`: never act on stale rows as proof that something is idle or gone.
+   */
+  processSample: EvidenceProcessSample | undefined;
 }
 
 interface AgentResourceMonitorLogger {
@@ -135,7 +237,12 @@ export interface AgentResourceMonitorOptions {
    */
   remediationSink?: RemediationSink;
   serverId: string;
-  processSampler: ProcessSampler;
+  processSampler: ResourceMonitorSampler;
+  /**
+   * Where saturation incidents are written so they survive a reboot
+   * (agent/saturation-ledger.ts). Absent: detected, but not recorded.
+   */
+  saturationLedger?: SaturationLedger;
   /**
    * Delivers ONE system-authored message into a running agent's conversation, reusing the same
    * steer path chat mentions and notify-on-finish use (agent-prompt.ts's sendPromptToAgent with
@@ -174,6 +281,14 @@ export interface AgentResourceMonitorOptions {
   sweepTestArtifacts?: (input: {
     rows: readonly ProcessSampleRow[];
   }) => Promise<TestArtifactSweepResult>;
+  /**
+   * Holds (true) or releases (false) the start of new child-agent turns while the machine is
+   * saturated. Called on changes only, and always with false on stop, when the monitor or
+   * saturation is turned off, and when the incident clears. Absent: the rung holds nothing.
+   */
+  holdChildAdmission?: (held: boolean, reason: string) => void;
+  /** Injectable so tests never renice a real pid. Defaults to utils/process-priority.ts's. */
+  lowerProcessPriority?: (pid: number, nice: number) => LowerPriorityResult;
 }
 
 interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
@@ -182,9 +297,19 @@ interface ResolvedReaperConfig extends BuildDaemonReaperConfig {
   graceMs: number;
 }
 
+interface ResolvedSaturationConfig extends SaturationConfig {
+  releaseLoadPerCore: number;
+  releaseBusyFraction: number;
+  reniceTopTrees: number;
+  reniceNice: number;
+  attributedGraceMs: number;
+  unattributedGraceMs: number;
+}
+
 interface ResolvedResourceMonitorConfig extends ResourceMonitorDetectorConfig {
   notifyAgent: boolean;
   reaper: ResolvedReaperConfig;
+  saturation: ResolvedSaturationConfig;
 }
 
 function resolveReaperConfig(
@@ -210,7 +335,70 @@ function resolveConfig(config: ResourceMonitorConfig | undefined): ResolvedResou
     orphanBuildDaemonBytes: config?.orphanBuildDaemonBytes ?? DEFAULT_ORPHAN_BUILD_DAEMON_BYTES,
     notifyAgent: config?.notifyAgent ?? true,
     reaper: resolveReaperConfig(config?.reaper),
+    saturation: resolveSaturationConfig(config),
   };
+}
+
+function resolveSaturationConfig(
+  config: ResourceMonitorConfig | undefined,
+): ResolvedSaturationConfig {
+  const saturation = config?.saturation;
+  return {
+    enabled: saturation?.enabled ?? true,
+    loadPerCore: saturation?.loadPerCore ?? DEFAULT_SATURATION_LOAD_PER_CORE,
+    busyFraction: saturation?.busyFraction ?? DEFAULT_SATURATION_BUSY_FRACTION,
+    sustainedMinutes:
+      saturation?.sustainedMinutes ?? config?.sustainedMinutes ?? DEFAULT_SUSTAINED_MINUTES,
+    ...resolveSaturationRemedyConfig(saturation),
+  };
+}
+
+/** The remediation rung's half of the saturation block. */
+function resolveSaturationRemedyConfig(
+  saturation: ResourceMonitorSaturationConfig | undefined,
+): Omit<ResolvedSaturationConfig, keyof SaturationConfig> {
+  return {
+    releaseLoadPerCore: saturation?.releaseLoadPerCore ?? DEFAULT_SATURATION_RELEASE_LOAD_PER_CORE,
+    releaseBusyFraction:
+      saturation?.releaseBusyFraction ?? DEFAULT_SATURATION_RELEASE_BUSY_FRACTION,
+    reniceTopTrees: saturation?.reniceTopTrees ?? DEFAULT_SATURATION_RENICE_TOP_TREES,
+    reniceNice: saturation?.reniceNice ?? DEFAULT_SATURATION_RENICE_NICE,
+    attributedGraceMs:
+      (saturation?.attributedGraceMinutes ?? DEFAULT_SATURATION_ATTRIBUTED_GRACE_MINUTES) * 60_000,
+    unattributedGraceMs:
+      (saturation?.unattributedGraceMinutes ?? DEFAULT_SATURATION_UNATTRIBUTED_GRACE_MINUTES) *
+      60_000,
+  };
+}
+
+function isBelowRelease(load: SystemLoadReading, config: ResolvedSaturationConfig): boolean {
+  return load.kind === "loadavg"
+    ? load.load1 < config.releaseLoadPerCore * load.cores
+    : load.busyFraction < config.releaseBusyFraction;
+}
+
+function describeLoad(load: SystemLoadReading | undefined): string {
+  if (!load) return "no load reading";
+  return load.kind === "loadavg"
+    ? `load ${load.load1.toFixed(1)} on ${load.cores} cores`
+    : `CPU ${Math.round(load.busyFraction * 100)}% busy on ${load.cores} cores`;
+}
+
+/**
+ * What the evidence says is loading the machine, which decides the rung's response. Only
+ * `unattributed` is a job for an agent: every other answer is either the remedies' to fix or
+ * belongs to something no agent may touch.
+ */
+type SaturationAttribution = "agents" | "other-processes" | "io" | "unattributed";
+
+function attributeSaturation(evidence: SaturationEvidence): SaturationAttribution {
+  const { cause } = evidence;
+  if (cause.kind === "unknown") return "unattributed";
+  if (cause.kind === "io") return "io";
+  const sampled = cause.explainedByAgents + cause.explainedByOthers;
+  return sampled > 0 && cause.explainedByAgents / sampled >= SATURATION_AGENT_SHARE
+    ? "agents"
+    : "other-processes";
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -367,7 +555,8 @@ export class AgentResourceMonitor {
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly remediationSink: RemediationSink;
   private readonly serverId: string;
-  private readonly processSampler: ProcessSampler;
+  private readonly processSampler: ResourceMonitorSampler;
+  private readonly saturationLedger: SaturationLedger | undefined;
   private readonly sendSystemMessageToAgent: AgentResourceMonitorOptions["sendSystemMessageToAgent"];
   private readonly readDaemonConfig: () => { resourceMonitor?: ResourceMonitorConfig };
   private readonly logger: AgentResourceMonitorLogger;
@@ -378,6 +567,8 @@ export class AgentResourceMonitor {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly reportDeviceSample: AgentResourceMonitorOptions["reportDeviceSample"];
   private readonly sweepTestArtifacts: AgentResourceMonitorOptions["sweepTestArtifacts"];
+  private readonly holdChildAdmission: AgentResourceMonitorOptions["holdChildAdmission"];
+  private readonly lowerProcessPriority: (pid: number, nice: number) => LowerPriorityResult;
   private timer: ReturnType<typeof setInterval> | null = null;
   /** Machine-level legs have no agent to attach state to, so this monitor instance — a
    * bootstrap-time singleton — owns it directly instead of round-tripping through AgentManager. */
@@ -395,6 +586,15 @@ export class AgentResourceMonitor {
    */
   private orphanEpisode: RemedyAttempt[] | null = null;
   private systemMemoryEpisode: RemedyAttempt[] | null = null;
+  private saturationEpisode: RemedyAttempt[] | null = null;
+  /** Whether this monitor currently holds child admission (holdChildAdmission). */
+  private admissionHeld = false;
+  /** The last process sample that worked. A failed sample reuses it for evidence, never to act. */
+  private lastProcessSample: AttributedProcessSample | undefined;
+  private saturationState: SaturationState | undefined;
+  private saturationSweep: SaturationSweep | undefined;
+  /** When the ledger last got a record for the open incident. */
+  private lastSaturationRecordAtMs = 0;
   private sweepInFlight = false;
   private readonly modeLog: MonitorModeLog;
 
@@ -405,6 +605,7 @@ export class AgentResourceMonitor {
     this.remediationSink = options.remediationSink ?? NULL_REMEDIATION_SINK;
     this.serverId = options.serverId;
     this.processSampler = options.processSampler;
+    this.saturationLedger = options.saturationLedger;
     this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
     this.readDaemonConfig = options.readDaemonConfig;
     this.logger = options.logger;
@@ -416,6 +617,9 @@ export class AgentResourceMonitor {
     this.reportDeviceSample = options.reportDeviceSample;
     this.modeLog = new MonitorModeLog(options.logger);
     this.sweepTestArtifacts = options.sweepTestArtifacts;
+    this.holdChildAdmission = options.holdChildAdmission;
+    this.lowerProcessPriority =
+      options.lowerProcessPriority ?? ((pid, nice) => lowerProcessPriorityDefault(pid, nice));
   }
 
   start(): void {
@@ -437,6 +641,8 @@ export class AgentResourceMonitor {
       clearInterval(this.timer);
       this.timer = null;
     }
+    // Nothing will be watching the load to release it later.
+    this.setAdmissionHeld(false, "resource monitor stopped");
   }
 
   async tick(): Promise<void> {
@@ -451,6 +657,11 @@ export class AgentResourceMonitor {
     } finally {
       this.sweepInFlight = false;
     }
+  }
+
+  /** This sweep's saturation state and evidence; undefined while the machine is not saturated. */
+  getSaturationSweep(): SaturationSweep | undefined {
+    return this.saturationSweep;
   }
 
   /** Logs the mode this monitor reads from its config, once per change (monitor-mode-log.ts). */
@@ -469,6 +680,8 @@ export class AgentResourceMonitor {
     const rawConfig = this.readDaemonConfig().resourceMonitor;
     if (rawConfig?.enabled === false) {
       await this.closeMachineEpisodes();
+      this.saturationState = undefined;
+      this.saturationSweep = undefined;
       return;
     }
     const config = resolveConfig(rawConfig);
@@ -480,16 +693,35 @@ export class AgentResourceMonitor {
     const agents = this.agentManager
       .listAgentsForResourceMonitor()
       .filter((agent) => !agent.internal);
-    const [sampledRows, systemMemory] = await Promise.all([
-      this.processSampler.sampleProcesses(),
+    const childAgentIds = new Set(
+      agents.filter((agent) => agent.parentAgentId !== null).map((agent) => agent.id),
+    );
+    const [table, systemMemory] = await Promise.all([
+      this.processSampler.sampleProcessTable(),
       this.processSampler.sampleSystemMemory(),
     ]);
-    const cpu = withRecentCpuPercent(sampledRows, this.cpuRateMemory, nowMs);
+    // Load and free memory come from `os` and cannot fail the way `ps` can, so the load and
+    // memory legs run every sweep whatever happened to the process sample.
+    const systemLoad = this.processSampler.sampleSystemLoad();
+
+    if (table.status === "failed") {
+      await this.sweepWithoutProcessSample({ agents, systemMemory, systemLoad, config, nowMs });
+      return;
+    }
+
+    const cpu = withRecentCpuPercent(table.rows, this.cpuRateMemory, nowMs);
     this.cpuRateMemory = cpu.memory;
     const attribution = attributeProcessTrees(
       cpu.rows,
       agents.map((agent) => agent.id),
     );
+    const sample: AttributedProcessSample = {
+      rows: cpu.rows,
+      agentTrees: attribution.agentTrees,
+      orphanBuildDaemons: attribution.orphanBuildDaemons,
+      takenAtMs: nowMs,
+    };
+    this.lastProcessSample = sample;
 
     const agentBreaches = this.evaluateAgentBreaches(agents, attribution.agentTrees, config, nowMs);
     this.advanceMachineState(systemMemory, attribution.orphanBuildDaemons, config);
@@ -517,13 +749,375 @@ export class AgentResourceMonitor {
     });
     await this.observeSystemMemory({
       systemMemory,
-      rows: cpu.rows,
-      agentTrees: attribution.agentTrees,
+      sample,
       config,
       reaperPass,
       janitorAttempts,
       nowMs,
     });
+    await this.observeSaturation({
+      systemLoad,
+      systemMemory,
+      sample,
+      fresh: true,
+      childAgentIds,
+      reaperPass,
+      config,
+      nowMs,
+    });
+  }
+
+  /**
+   * A sweep whose process sample failed, which on an overloaded machine is exactly when the
+   * monitor matters. Load, swap and saturation carry on, with the last good sample standing in
+   * for attribution in evidence, marked with its age. Nothing that acts on idle or absence runs
+   * off stale rows: the reaper, the artifact janitor and the device cap all skip this sweep, and
+   * the per-agent and orphan-daemon legs hold where they were, because "no tree found" would
+   * otherwise read as "under threshold" and re-arm them.
+   */
+  private async sweepWithoutProcessSample(input: {
+    agents: readonly ResourceMonitorAgentSummary[];
+    systemMemory: SystemMemorySample | undefined;
+    systemLoad: SystemLoadSample;
+    config: ResolvedResourceMonitorConfig;
+    nowMs: number;
+  }): Promise<void> {
+    const { systemMemory, config, nowMs } = input;
+    const sample = this.lastProcessSample;
+    this.advanceMachineState(
+      systemMemory,
+      sample?.orphanBuildDaemons ?? { count: 0, rssBytes: 0, pids: [] },
+      config,
+    );
+    this.breakReaperIdleEvidence();
+    await this.observeSystemMemory({
+      systemMemory,
+      sample,
+      config,
+      reaperPass: NO_REAPER_PASS,
+      janitorAttempts: [],
+      nowMs,
+    });
+    await this.observeSaturation({
+      systemLoad: input.systemLoad,
+      systemMemory,
+      sample,
+      fresh: false,
+      childAgentIds: new Set(),
+      reaperPass: NO_REAPER_PASS,
+      config,
+      nowMs,
+    });
+  }
+
+  /**
+   * A daemon's idle clock counts wall time between sweeps that saw it idle. Across a sweep that
+   * could not look, it might have been building, so the run of idle sweeps starts over — the
+   * same rule a busy sweep follows. What the reaper already did to a pid is kept.
+   */
+  private breakReaperIdleEvidence(): void {
+    if (!this.reapMemory) return;
+    for (const [pid, state] of this.reapMemory) {
+      this.reapMemory.set(pid, { ...state, idleSinceMs: undefined, idleSweeps: 0 });
+    }
+  }
+
+  /**
+   * Machine CPU saturation: detection and evidence. Every sweep of an open incident is exposed
+   * through getSaturationSweep; the ledger gets its open, a record every five minutes while it
+   * holds, and its clear.
+   */
+  private async observeSaturation(input: {
+    systemLoad: SystemLoadSample;
+    systemMemory: SystemMemorySample | undefined;
+    sample: AttributedProcessSample | undefined;
+    fresh: boolean;
+    /** Agents with a parent: the only trees the rung may lower. */
+    childAgentIds: ReadonlySet<string>;
+    reaperPass: ReaperPass;
+    config: ResolvedResourceMonitorConfig;
+    nowMs: number;
+  }): Promise<void> {
+    const { config, nowMs } = input;
+    if (!config.saturation.enabled) {
+      this.setAdmissionHeld(false, "saturation monitoring turned off");
+    }
+    const saturation: SaturationConfig = config.saturation.enabled
+      ? config.saturation
+      : // Turned off mid-incident: treat every sweep as under threshold, so the incident closes
+        // on the normal schedule and the ledger gets its clear.
+        { ...config.saturation, loadPerCore: Number.POSITIVE_INFINITY, busyFraction: 2 };
+    const result = evaluateSaturation({
+      load: input.systemLoad.load,
+      config: saturation,
+      previousState: this.saturationState,
+      nowMs,
+    });
+    this.saturationState = result.nextState;
+    if (result.transition === "quiet" || !result.episode) {
+      this.saturationSweep = undefined;
+      return;
+    }
+
+    const evidence = buildSaturationEvidence({
+      load: input.systemLoad.load,
+      sample: input.sample,
+      fresh: input.fresh,
+      nowMs,
+      agentLabels: await this.labelAgents(input.sample),
+    });
+    const sweep: SaturationSweep = {
+      atMs: nowMs,
+      transition: result.transition,
+      episode: result.episode,
+      systemLoad: input.systemLoad,
+      systemMemory: input.systemMemory,
+      evidence,
+      processSample: input.sample,
+    };
+    this.saturationSweep = result.transition === "cleared" ? undefined : sweep;
+    const actions = this.remedySaturation({
+      sweep,
+      childAgentIds: input.childAgentIds,
+      config: config.saturation,
+    });
+    await this.recordSaturation(sweep, actions);
+    await this.observeCpuSaturation({
+      sweep,
+      actions: [...input.reaperPass.attempts, ...actions],
+      spared: input.reaperPass.spared,
+      config,
+    });
+  }
+
+  /**
+   * Rung 1 for saturation, besides the reaper, which already ran this sweep on its own criteria:
+   * hold child admission while load is high, and lower the heaviest child agent trees further.
+   * Returns what it did, for the ladder and the ledger.
+   */
+  private remedySaturation(input: {
+    sweep: SaturationSweep;
+    childAgentIds: ReadonlySet<string>;
+    config: ResolvedSaturationConfig;
+  }): RemedyAttempt[] {
+    const { sweep, config } = input;
+    const at = new Date(sweep.atMs).toISOString();
+    const load = sweep.systemLoad.load;
+    const attempts: RemedyAttempt[] = [];
+    const hold = (held: boolean, detail: string): void => {
+      if (this.setAdmissionHeld(held, `cpu-saturation: ${detail}`)) {
+        attempts.push({ remedy: "admission-hold", outcome: "acted", detail, at });
+      }
+    };
+
+    if (sweep.transition === "cleared") {
+      hold(false, `Released child admission: saturation cleared, ${describeLoad(load)}`);
+      return attempts;
+    }
+    // Hysteresis: held at the threshold, released only under the lower release line. No reading
+    // (Windows' first sweep) changes nothing.
+    if (load && isSaturated(load, config)) {
+      hold(true, `Held new child-agent turns: ${describeLoad(load)}`);
+    } else if (load && isBelowRelease(load, config)) {
+      hold(false, `Released child admission: ${describeLoad(load)}`);
+    }
+
+    // Lowering acts on the processes it names, so only on this sweep's own sample, and only
+    // when CPU is the cause: a lower priority does nothing for tasks waiting on disk.
+    if (sweep.evidence.sample.status === "fresh" && sweep.evidence.cause.kind === "cpu") {
+      attempts.push(...this.lowerHeaviestChildTrees(sweep, input.childAgentIds, config, at));
+    }
+    return attempts;
+  }
+
+  /**
+   * Re-applied every saturated sweep, so a pid that joined one of these trees since the last
+   * sweep is lowered too. lowerProcessPriority never raises and skips a pid already there, so a
+   * tree's second pass reports only its new pids. Permanent on macOS and Linux: only root can
+   * raise a priority back, so these processes stay lowered for their lifetime.
+   */
+  private lowerHeaviestChildTrees(
+    sweep: SaturationSweep,
+    childAgentIds: ReadonlySet<string>,
+    config: ResolvedSaturationConfig,
+    at: string,
+  ): RemedyAttempt[] {
+    const trees = (sweep.processSample?.agentTrees ?? [])
+      .filter(
+        (tree) =>
+          childAgentIds.has(tree.agentId) &&
+          tree.cpuPercent >= SATURATION_RENICE_MIN_TREE_CPU_PERCENT,
+      )
+      .sort((a, b) => b.cpuPercent - a.cpuPercent)
+      .slice(0, config.reniceTopTrees);
+    const attempts: RemedyAttempt[] = [];
+    for (const tree of trees) {
+      let lowered = 0;
+      let failed = 0;
+      for (const pid of tree.pids) {
+        // Never the daemon, however the tree was attributed.
+        if (pid <= 1 || pid === process.pid) continue;
+        const result = this.lowerProcessPriority(pid, config.reniceNice);
+        if (result === "lowered") lowered += 1;
+        else if (result === "failed") failed += 1;
+      }
+      if (lowered === 0) continue;
+      const label =
+        sweep.evidence.agentTrees.find((evidence) => evidence.agentId === tree.agentId)?.title ??
+        tree.agentId;
+      const detail =
+        `Lowered ${lowered} process${lowered === 1 ? "" : "es"} of ${label} ` +
+        `(${Math.round(tree.cpuPercent)}% CPU) to nice ${config.reniceNice}` +
+        (failed > 0 ? `; ${failed} could not be lowered` : "");
+      this.logger.info(
+        { agentId: tree.agentId, lowered, failed, nice: config.reniceNice },
+        "Saturation: lowered a child agent tree's priority",
+      );
+      attempts.push({ remedy: "renice", outcome: "acted", detail, at });
+    }
+    return attempts;
+  }
+
+  /** Returns whether the state changed. Only changes reach holdChildAdmission. */
+  private setAdmissionHeld(held: boolean, reason: string): boolean {
+    if (!this.holdChildAdmission || this.admissionHeld === held) return false;
+    this.admissionHeld = held;
+    this.logger.info(
+      { held, reason },
+      held ? "Holding child admission" : "Releasing child admission",
+    );
+    try {
+      this.holdChildAdmission(held, reason);
+    } catch (error) {
+      this.logger.warn({ err: error, held }, "Failed to change child admission");
+    }
+    return true;
+  }
+
+  /**
+   * Reports saturation to the ladder. The response follows the cause: agent trees are what the
+   * remedies act on, the person's own processes and I/O are known and no agent may help, and
+   * only a load nothing can attribute asks for an agent.
+   */
+  private async observeCpuSaturation(input: {
+    sweep: SaturationSweep;
+    /** This sweep's reaper pass and rung-1 actions. */
+    actions: readonly RemedyAttempt[];
+    spared: RemedyAttempt | undefined;
+    config: ResolvedResourceMonitorConfig;
+  }): Promise<void> {
+    const { sweep, config } = input;
+    const remedy = this.saturationRemedyState(config);
+    const base = {
+      key: CPU_SATURATION_KEY,
+      kind: "cpu-saturation" as const,
+      remedy,
+      title: "The machine's CPU is saturated",
+    };
+    if (sweep.transition === "cleared") {
+      const attempts = this.appendEpisodeAttempts(this.saturationEpisode, input.actions);
+      this.saturationEpisode = null;
+      await this.observe({
+        ...base,
+        active: false,
+        summary: `CPU saturation cleared; the peak was load ${sweep.episode.peakLoad1.toFixed(1)}.`,
+        attempts,
+      });
+      return;
+    }
+
+    this.saturationEpisode = this.appendEpisodeAttempts(this.saturationEpisode, input.actions);
+    const attribution = attributeSaturation(sweep.evidence);
+    const minutes = Math.round((sweep.atMs - sweep.episode.openedAtMs) / 60_000);
+    const since = `${describeLoad(sweep.systemLoad.load)}, saturated for ${minutes} min`;
+    const summaries: Record<SaturationAttribution, string> = {
+      agents:
+        `${since}. Agent builds are most of it; new child-agent turns are held and the heaviest ` +
+        "child trees are running at lower priority.",
+      "other-processes":
+        `${since}. Most of it is processes outside any agent (see the evidence), which the ` +
+        "daemon leaves alone.",
+      io: `${since}. It is mostly tasks waiting on disk; it passes when that work finishes.`,
+      unattributed: `${since}. Process sampling is failing, so the cause is unknown.`,
+    };
+    await this.observe({
+      ...base,
+      active: true,
+      summary: summaries[attribution],
+      evidence: formatSaturationEvidence(sweep.systemLoad.load, sweep.evidence),
+      attempts: [...this.saturationEpisode, ...(input.spared ? [input.spared] : [])],
+      ...(attribution === "unattributed"
+        ? {
+            graceMs: config.saturation.unattributedGraceMs,
+            level: "alert" as const,
+            escalation: { task: CPU_SATURATION_TASK, taskClass: "standard" as const },
+          }
+        : { graceMs: config.saturation.attributedGraceMs, level: "notice" as const }),
+    });
+  }
+
+  private saturationRemedyState(config: ResolvedResourceMonitorConfig): RemedyState {
+    const canAct =
+      this.holdChildAdmission !== undefined ||
+      config.saturation.reniceTopTrees > 0 ||
+      reaperRemedyState(config.reaper) === "live";
+    return canAct ? "live" : "none";
+  }
+
+  private async recordSaturation(
+    sweep: SaturationSweep,
+    actions: readonly RemedyAttempt[],
+  ): Promise<void> {
+    let event: SaturationLedgerEvent | undefined;
+    if (sweep.transition === "opened") event = "open";
+    else if (sweep.transition === "cleared") event = "clear";
+    else if (
+      actions.length > 0 ||
+      sweep.atMs - this.lastSaturationRecordAtMs >= SATURATION_LEDGER_INTERVAL_MS
+    ) {
+      // A sweep that acted gets a record of its own, so the ledger says what the daemon did.
+      event = "ongoing";
+    }
+    if (!event) return;
+    this.lastSaturationRecordAtMs = sweep.atMs;
+    if (event === "open") {
+      this.logger.warn(
+        { load: sweep.systemLoad.load, cause: sweep.evidence.cause.kind },
+        "Machine CPU saturated",
+      );
+    } else if (event === "clear") {
+      this.logger.info(
+        { openedAtMs: sweep.episode.openedAtMs, peakLoad1: sweep.episode.peakLoad1 },
+        "Machine CPU saturation cleared",
+      );
+    }
+    await this.saturationLedger?.append(
+      buildSaturationLedgerRecord({
+        event,
+        atMs: sweep.atMs,
+        openedAtMs: sweep.episode.openedAtMs,
+        peakLoad1: sweep.episode.peakLoad1,
+        systemLoad: sweep.systemLoad,
+        systemMemory: sweep.systemMemory,
+        evidence: sweep.evidence,
+        actions,
+      }),
+    );
+  }
+
+  /** Titles and working directories for the heaviest agent trees in a sample. */
+  private async labelAgents(
+    sample: EvidenceProcessSample | undefined,
+  ): Promise<Map<string, AgentLabel>> {
+    const labels = new Map<string, AgentLabel>();
+    const heaviest = [...(sample?.agentTrees ?? [])]
+      .sort((a, b) => b.cpuPercent - a.cpuPercent)
+      .slice(0, 5);
+    for (const tree of heaviest) {
+      const record = await this.agentStorage.get(tree.agentId).catch(() => null);
+      labels.set(tree.agentId, { title: record?.title ?? null, cwd: record?.cwd ?? null });
+    }
+    return labels;
   }
 
   /**
@@ -821,8 +1415,8 @@ export class AgentResourceMonitor {
    */
   private async observeSystemMemory(input: {
     systemMemory: SystemMemorySample | undefined;
-    rows: readonly ProcessSampleRow[];
-    agentTrees: readonly AgentProcessTree[];
+    /** This sweep's sample, or the last good one when this sweep's failed. */
+    sample: AttributedProcessSample | undefined;
     config: ResolvedResourceMonitorConfig;
     reaperPass: ReaperPass;
     janitorAttempts: readonly RemedyAttempt[];
@@ -852,15 +1446,28 @@ export class AgentResourceMonitor {
     }
 
     this.systemMemoryEpisode = this.appendEpisodeAttempts(this.systemMemoryEpisode, newAttempts);
-    const consumers = await this.describeMemoryConsumers(input.rows, input.agentTrees);
+    const { sample } = input;
+    const consumers = await this.describeMemoryConsumers(
+      sample?.rows ?? [],
+      sample?.agentTrees ?? [],
+    );
+    const sampleAgeMs = sample ? input.nowMs - sample.takenAtMs : undefined;
     const reaperLine = describeReaperLineForSystemMemory(reaper, reaperPass.candidateCount);
+    let consumersHeading = "Biggest process trees by memory:";
+    if (sampleAgeMs === undefined) {
+      consumersHeading = "No process sample yet, so what holds the memory is unknown.";
+    } else if (sampleAgeMs > 0) {
+      consumersHeading =
+        `Biggest process trees by memory, from a sample ${Math.round(sampleAgeMs / 1000)}s old ` +
+        "(process sampling is failing):";
+    }
     await this.observe({
       ...this.systemMemoryObservationBase(remedy, systemMemory, config),
       active: true,
       evidence:
         `Swap: ${formatBytes(systemMemory.swapUsedBytes)} of ${formatBytes(systemMemory.swapTotalBytes)} ` +
         `used, over the ${Math.round(config.systemSwapUsedRatio * 100)}% threshold.\n` +
-        `${reaperLine}\nBiggest process trees by memory:\n${formatMemoryConsumers(consumers)}`,
+        `${reaperLine}\n${consumersHeading}\n${formatMemoryConsumers(consumers)}`,
       attempts: this.systemMemoryEpisode,
       graceMs: SYSTEM_MEMORY_GRACE_MS,
       level: "alert",
@@ -903,6 +1510,20 @@ export class AgentResourceMonitor {
 
   /** The monitor was switched off mid-condition: nothing is observing it any more. */
   private async closeMachineEpisodes(): Promise<void> {
+    this.setAdmissionHeld(false, "resource monitor turned off");
+    if (this.saturationEpisode) {
+      const attempts = this.saturationEpisode;
+      this.saturationEpisode = null;
+      await this.observe({
+        key: CPU_SATURATION_KEY,
+        kind: "cpu-saturation",
+        remedy: "disabled",
+        title: "The machine's CPU is saturated",
+        summary: "The resource monitor was turned off, so saturation is no longer watched.",
+        active: false,
+        attempts,
+      });
+    }
     if (this.orphanEpisode) {
       const attempts = this.orphanEpisode;
       this.orphanEpisode = null;

@@ -263,6 +263,7 @@ import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-rem
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
+import { createSaturationLedger } from "./agent/saturation-ledger.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
@@ -1512,8 +1513,16 @@ export async function createPaseoDaemon(
         if (raw?.enabled !== true) {
           return summarizeArtifactJanitorRun({ enabled: false, dryRun: false, result: null });
         }
-        const rows = await processSampler.sampleProcesses();
-        const result = await testArtifactJanitor.sweep({ rows });
+        // An unreadable process table must not read as "nothing uses these simulators".
+        const table = await processSampler.sampleProcessTable();
+        if (table.status === "failed") {
+          return {
+            state: "live",
+            outcome: "skipped",
+            detail: "processes could not be sampled, so nothing could be proven unused",
+          };
+        }
+        const result = await testArtifactJanitor.sweep({ rows: table.rows });
         return summarizeArtifactJanitorRun({ enabled: true, dryRun: raw.dryRun ?? false, result });
       };
     },
@@ -2635,6 +2644,7 @@ export async function createPaseoDaemon(
               remediationSink,
               serverId,
               processSampler,
+              saturationLedger: createSaturationLedger({ paseoHome: config.paseoHome, logger }),
               // The cap counts devices from this same sweep sample rather than taking its own
               // `ps` — one scan a minute on a machine that is already struggling.
               reportDeviceSample: (sample) => deviceLeaseManager.reconcileFromSample(sample),

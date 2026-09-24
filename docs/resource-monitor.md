@@ -1,6 +1,6 @@
 # Resource monitor
 
-The daemon tracks OS-level memory and CPU per agent and warns when one runs away, alongside two machine-level checks: swap pressure and orphaned build daemons. An opt-in fourth leg reaps abandoned build daemons instead of only reporting them. It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage — same monitor shape, different signal.
+The daemon tracks OS-level memory and CPU per agent and warns when one runs away, alongside three machine-level checks: swap pressure, orphaned build daemons and CPU saturation. An opt-in fourth leg reaps abandoned build daemons instead of only reporting them. It's the process-tree counterpart to [docs/token-burn.md](token-burn.md), which watches provider-reported token usage — same monitor shape, different signal.
 
 ## Agents run at low priority
 
@@ -56,11 +56,32 @@ Held prompts are written to `$PASEO_HOME/admission/queue.json` on every change. 
 
 ## What's attributed, and how
 
-Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) shells out to `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` and, on macOS/Linux, samples system swap. `uid` exists for the reaper alone — nothing may be signalled without proving it belongs to the user the daemon runs as. Both samples are best-effort with a 15s timeout: a host without `ps` gets one warning and no process legs, never a failing sweep, and a sweep still in flight is not overlapped by the next tick. `process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints — that one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the `ps` value, since for a young process the two agree.
+Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) takes three samples through the `ResourceMonitorSampler` seam (`agent/process-sampler.ts`):
 
-The same sweep hands its `ps` rows to the device cap, which counts booted simulators and emulators from them — one scan a minute rather than two. That cap is a sibling, not a leg of this monitor: see [docs/device-leases.md](device-leases.md).
+- **Load and free memory** from `os` (`agent/system-load.ts`). Nothing is spawned, so this works on a machine too loaded for `ps` to finish, which is when it is needed. macOS and Linux read `os.loadavg()`. Windows returns zeros there, so the load is the share of CPU time busy since the previous sweep, from `os.cpus()` deltas; the first sweep after a start has no reading.
+- **The process table.** `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` on macOS and Linux. Windows has no `ps`: PowerShell's `Get-CimInstance Win32_Process` produces the same rows, with CPU time from `UserModeTime + KernelModeTime` and no uid.
+- **System memory**: swap and available memory from `sysctl`/`vm_stat` on macOS or `/proc/meminfo` on Linux. Windows reports none.
 
-A process that gets reparented to pid 1 — a crashed shell, a build tool that daemonizes on purpose — falls out of every agent's tree. There's no way to attribute it to whoever launched it, so it isn't folded into any agent's usage. Gradle and Kotlin's compile daemons, .NET's compiler and build servers (`VBCSCompiler`, MSBuild node-reuse workers, the Razor server) and Metro do this by design or by habit, and they're common enough (and heavy enough — idle Gradle daemons commonly hold hundreds of MB to low GB each; a busy `VBCSCompiler` once used 439% CPU) to warrant their own signal: any ppid-1 process whose command line matches the build-daemon allowlist in `agent/build-daemon-signatures.ts` is counted separately as an orphan build daemon, by count and total RSS, rather than silently dropped. The list also keeps the bare names `GradleDaemon`, `KotlinCompileDaemon` and `VBCSCompiler` as counting markers, so a process carrying one of them still shows up (as `not-on-allowlist` to the reaper) when no exact matcher accepts its command line.
+The sampling children run at `BACKGROUND_NICE` (`utils/process-priority.ts`) with a 45s timeout. At load 38 on 16 cores the old 15s timeout failed every sweep and the monitor went blind exactly when the machine saturated. A sweep still in flight is never overlapped by the next tick.
+
+`uid` exists for the reaper alone: nothing may be signalled without proving it belongs to the user the daemon runs as. Windows rows carry none, so the reaper never signals there.
+
+`process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints. That one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the sampled value, since for a young process the two agree.
+
+The same sweep hands its process rows to the device cap, which counts booted simulators and emulators from them — one scan a minute rather than two. That cap is a sibling, not a leg of this monitor: see [docs/device-leases.md](device-leases.md).
+
+A process that gets reparented to pid 1 — a crashed shell, a build tool that daemonizes on purpose — falls out of every agent's tree. There's no way to attribute it to whoever launched it, so it isn't folded into any agent's usage. Gradle and Kotlin's compile daemons, .NET's compiler and build servers (`VBCSCompiler`, MSBuild node-reuse workers, the Razor server) and Metro do this by design or by habit, and they're common enough (and heavy enough — idle Gradle daemons commonly hold hundreds of MB to low GB each; a busy `VBCSCompiler` once used 439% CPU) to warrant their own signal: any ppid-1 process whose command line matches the build-daemon allowlist in `agent/build-daemon-signatures.ts` is counted separately as an orphan build daemon, by count and total RSS, rather than silently dropped. The list also keeps the bare names `GradleDaemon`, `KotlinCompileDaemon` and `VBCSCompiler` as counting markers, so a process carrying one of them still shows up (as `not-on-allowlist` to the reaper) when no exact matcher accepts its command line. Windows has no reparenting to pid 1, so this signal is macOS and Linux only.
+
+### When the process sample fails
+
+The load, swap and saturation legs run every sweep regardless. A failed process sample is reported as failed (`sampleProcessTable`), never as an empty machine, and the monitor keeps the last good sample:
+
+- **Evidence uses it, marked with its age.** The system-memory observation and saturation evidence name the trees from the last good sample and say how old it is.
+- **Nothing that acts on idleness or absence uses it.** The reaper, the artifact janitor and the device cap skip the sweep. A stale row can prove neither that a daemon is idle nor that a simulator is unused. The manual janitor run skips too.
+- **Per-agent and orphan-daemon legs hold.** A tree that can't be seen would otherwise read as under threshold and re-arm an alert.
+- **The reaper's idle clock restarts.** It counts wall time between sweeps that saw a daemon idle, and the daemon might have been building while nobody could look.
+
+The sampler warns when a failure streak starts and logs `Resource monitor can sample processes again` when it ends, so a second outage hours later is as visible as the first.
 
 ## Legs and thresholds
 
@@ -73,7 +94,9 @@ Config lives under `agents.resourceMonitor` (`persisted-config.ts`), live-toggle
 | `systemSwapUsedRatio`    | 0.9               | machine-wide                                            |
 | `orphanBuildDaemonBytes` | 2 GiB             | machine-wide, orphan daemons only                       |
 
-An agent's memory and CPU legs are independent state machines but share one alert: the agent's live `resourceAlert` clears only once both legs are back under threshold. A sweep with no attributable process for an agent (it hasn't launched anything, or its tree already exited) is treated as a below-threshold reading — the same path that re-arms a fired leg.
+Machine CPU saturation is a fifth condition with its own block and its own remedies; see [Saturation and the incident ledger](#saturation-and-the-incident-ledger).
+
+An agent's memory and CPU legs are independent state machines but share one alert: the agent's live `resourceAlert` clears only once both legs are back under threshold. A sweep with a working sample and no attributable process for an agent (it hasn't launched anything, or its tree already exited) is treated as a below-threshold reading — the same path that re-arms a fired leg. A sweep with no sample at all is not.
 
 ## Actions on an agent breach
 
@@ -81,16 +104,16 @@ An agent's memory and CPU legs are independent state machines but share one aler
 - **Live `resourceAlert`** on the agent payload (`AgentSnapshotPayloadSchema`/`AgentListItemPayloadSchema`), additive-optional and deliberately not part of the closed `attentionReason` enum — same treatment as `tokenBurnAlert`. Live-only: cleared on rewind, never persisted, and `agent-state-bucket.ts` treats it as attention-worthy alongside `tokenBurnAlert`.
 - **A message into the agent's own conversation**, when `notifyAgent` is on (default true) and the agent is mid-turn: one steered system message per episode, reusing the same `isSystemInjectedEnvelope`/`sendPromptToAgent` path chat mentions and notify-on-finish use (`activeTurnBehavior: "steer"`, `unarchive: false`) — not a new delivery mechanism. An idle agent is never steered: that path falls back to starting a new turn, which would spend tokens on an agent nobody is driving, and an idle agent with a heavy leftover child is the most common breach. It gets the push and the live alert only.
 
-## The two machine-level conditions ride the remediation ladder
+## The machine-level conditions ride the remediation ladder
 
-Swap pressure and orphan build daemons never push directly any more — this monitor has no agent to steer a fix into for either, so the old orphan-daemon push just named `./gradlew --stop` in the body and hoped. Instead each sweep reports both to the [remediation ladder](remediation.md) through `RemediationSink.observe()`, kind `orphan-build-daemons` (key `orphan-build-daemons`) and `system-memory` (key `system-memory`). The ladder owns the person-facing push; this section is what this monitor hands it.
+Swap pressure, orphan build daemons and CPU saturation never push directly — this monitor has no agent to steer a fix into for any of them, so the old orphan-daemon push just named `./gradlew --stop` in the body and hoped. Instead each sweep reports them to the [remediation ladder](remediation.md) through `RemediationSink.observe()`, kind and key `orphan-build-daemons`, `system-memory` and `cpu-saturation`. The ladder owns the person-facing push; this section is what this monitor hands it.
 
-- **Remedy state.** Orphan daemons: `live`/`dry-run`/`disabled` follows the reaper's own config directly. System memory has no leg of its own — its remedies are the reaper's pass and the artifact janitor's reclaim, both of which already run inside this same sweep — so it reads `live` when the reaper is live and `none` otherwise.
-- **Evidence.** Orphan daemons get one line per pid: kind, RSS, CPU rate, plus the reaper's current idle/grace settings. System memory gets swap used/total and the biggest process trees in the sample by RSS (`agent/memory-consumers.ts`), each labelled with its agent's title where process-attribution can name one, so a person or an agent doesn't have to re-run `ps` to see what to look at.
-- **Attempts.** Both accumulate this episode's own remedy activity: a reap or a dry-run "would reap" line for orphan daemons, plus the artifact janitor's reclaims for system memory. Orphan daemons also carry why the reaper spared whatever it left alone, rolled up from `build-daemon-reaper.ts`'s per-pid verdicts into counts (`busy 2, not-on-allowlist 1`) — the same evidence `reportReaperSightings`' log line already gathers, handed to the ladder instead of only the log.
-- **Grace.** Orphan daemons get the reaper's `idleMinutes` plus two sweeps — long enough for the reaper's own wait and the sweeps that observe it to run their course before an agent gets involved. System memory gets a flat 10 minutes: the reaper and the janitor already run every sweep, so ten minutes is ten more chances for either to clear it.
-- **Level.** Orphan daemons: `alert` when the reaper is live (a real remedy that still didn't clear it is worth interrupting for) and `notice` when it is disabled or in dry run (the operator opted out; rung 3 still fires, just quieter — the ranking [docs/remediation.md](remediation.md) already spells out). System memory is always `alert`: a machine low enough on memory to trip this leg is worth knowing about regardless of what can act on it.
-- **Escalation.** Both name a `task` for the ladder's rung-2 agent, with the boundary written into the task itself rather than left to the agent's judgement: orphan daemons may run `./gradlew --stop` or `dotnet build-server shutdown`, or end an idle daemon whose build is gone, and must never touch a daemon under a running agent's tree or a build still using CPU; system memory may stop provably leftover processes (orphaned build daemons, unleased simulators, dev servers of archived agents) and must never touch a running agent's process or the daemon itself.
+- **Remedy state.** Orphan daemons: `live`/`dry-run`/`disabled` follows the reaper's own config directly. System memory has no leg of its own — its remedies are the reaper's pass and the artifact janitor's reclaim, both of which already run inside this same sweep — so it reads `live` when the reaper is live and `none` otherwise. Saturation reads `live` when any of its remedies can act (admission hold wired, `reniceTopTrees` above 0, or a live reaper) and `none` otherwise; its remedies are under [The saturation rung](#the-saturation-rung).
+- **Evidence.** Orphan daemons get one line per pid: kind, RSS, CPU rate, plus the reaper's current idle/grace settings. System memory gets swap used/total and the biggest process trees in the sample by RSS (`agent/memory-consumers.ts`), each labelled with its agent's title where process-attribution can name one, so a person or an agent doesn't have to re-run `ps` to see what to look at. Saturation gets the incident evidence below: load, sample freshness, the cause and its split, the heaviest agent trees and other processes.
+- **Attempts.** Each accumulates this episode's own remedy activity: a reap or a dry-run "would reap" line for orphan daemons, plus the artifact janitor's reclaims for system memory, plus the admission holds and releases and each tree lowered for saturation. Orphan daemons also carry why the reaper spared whatever it left alone, rolled up from `build-daemon-reaper.ts`'s per-pid verdicts into counts (`busy 2, not-on-allowlist 1`) — the same evidence `reportReaperSightings`' log line already gathers, handed to the ladder instead of only the log.
+- **Grace.** Orphan daemons get the reaper's `idleMinutes` plus two sweeps — long enough for the reaper's own wait and the sweeps that observe it to run their course before an agent gets involved. System memory gets a flat 10 minutes: the reaper and the janitor already run every sweep, so ten minutes is ten more chances for either to clear it. Saturation gets `attributedGraceMinutes` (30) when it has a cause and `unattributedGraceMinutes` (5) when it doesn't. The grace counts from the episode's open, so an incident that loses its cause 10 minutes in escalates on that sweep.
+- **Level.** Orphan daemons: `alert` when the reaper is live (a real remedy that still didn't clear it is worth interrupting for) and `notice` when it is disabled or in dry run (the operator opted out; rung 3 still fires, just quieter — the ranking [docs/remediation.md](remediation.md) already spells out). System memory is always `alert`: a machine low enough on memory to trip this leg is worth knowing about regardless of what can act on it. Saturation is `notice` when it has a cause, since the remedies or your own apps are the answer and you hear only if it outlasts them, and `alert` when it has none.
+- **Escalation.** Orphan daemons and system memory name a `task` for the ladder's rung-2 agent, with the boundary written into the task itself rather than left to the agent's judgement: orphan daemons may run `./gradlew --stop` or `dotnet build-server shutdown`, or end an idle daemon whose build is gone, and must never touch a daemon under a running agent's tree or a build still using CPU; system memory may stop provably leftover processes (orphaned build daemons, unleased simulators, dev servers of archived agents) and must never touch a running agent's process or the daemon itself. Saturation names one only when the cause is `unknown`: find what is loading the CPU, stop only provable leftovers, and never touch a running agent's processes, the daemon, or your own apps such as Android Studio, Xcode or a browser.
 
 ## Reaping abandoned build daemons
 
@@ -146,6 +169,68 @@ A killed daemon means the next build in that project starts cold, and each kind 
 
 Fifteen minutes of idle is the default because it is long enough that you have probably moved on, but a daemon you come back to after a coffee is one you will pay to restart. Raise `idleMinutes` if you bounce between builds; lower it if memory or CPU matters more than the first build after a break.
 
+## Saturation and the incident ledger
+
+The machine is saturated when the 1-minute load reaches `loadPerCore` × cores on macOS and Linux, or the busy share reaches `busyFraction` on Windows, for `sustainedMinutes` sweeps. It clears after as many sweeps back under. A sweep with no load reading holds an open incident rather than counting toward clearing it.
+
+The two platforms need different thresholds. The macOS and Linux load average counts runnable tasks and tasks waiting on disk, so it can reach several times the core count, and 2× cores is the "machine is drowning" line. Windows' busy share tops out at 1 and cannot express 2×, so it compares a fraction instead.
+
+The defaults come from the 2026-09-24 incident on a 16-core Mac: load 38 five minutes after a forced reboot, then 32 to 89 for the next quarter hour, peaking while agent trees used 1,289% CPU (the stopgap's log, `~/Library/Logs/Bozeo/cpu-guard.log`). One heavy build doesn't get there: the heaviest single processes in that log were `VBCSCompiler` at 439% and a Gradle JVM at 271%, and even a build that uses every core loads about 1× cores. So 2× for 3 minutes fires on a pile-up of builds and not on one, and the 1.5× release line sits below the threshold and above what a single build leaves behind.
+
+| Key (`agents.resourceMonitor.saturation`) | Default                              | What it does                                                        |
+| ----------------------------------------- | ------------------------------------ | ------------------------------------------------------------------- |
+| `enabled`                                 | `true`                               | Detection, ledger and rung; off records none and releases admission |
+| `loadPerCore`                             | 2                                    | macOS/Linux threshold, per core                                     |
+| `busyFraction`                            | 0.9                                  | Windows threshold                                                   |
+| `sustainedMinutes`                        | the monitor's `sustainedMinutes` (3) | Sweeps to open, and to clear                                        |
+| `releaseLoadPerCore`                      | 1.5                                  | macOS/Linux: child admission is released under this                 |
+| `releaseBusyFraction`                     | 0.75                                 | Windows: the same                                                   |
+| `reniceTopTrees`                          | 3                                    | Child agent trees lowered per sweep; 0 lowers none                  |
+| `reniceNice`                              | 15 (macOS/Linux), 19 (Windows)       | The nice they are lowered to                                        |
+| `attributedGraceMinutes`                  | 30                                   | Ladder grace when the cause is known                                |
+| `unattributedGraceMinutes`                | 5                                    | Ladder grace when it isn't                                          |
+
+### Evidence and cause
+
+Each sweep of an open incident builds evidence (`agent/saturation-evidence.ts`): the five heaviest agent trees by CPU with title, cwd, CPU%, RSS and their top three commands, and the eight heaviest processes outside any agent. It also splits the load into what the sampled CPU rates explain (summed CPU% / 100, agents and the rest separately) and the remainder, and classifies the cause:
+
+- **`cpu`**: the sampled processes explain at least half the load.
+- **`io`**: they don't, and the sample is from this sweep. The remainder is tasks waiting on disk: Spotlight indexing a fresh `node_modules`, installs, git, tree walks. The evidence names the likely ones it found (`mds_stores`, `mdworker`, `git`, `npm ci`, `find`, ...). Windows' reading is CPU time, so it is never `io`.
+- **`unknown`**: the process sample is stale or missing, so nothing can split the load.
+
+### The saturation rung
+
+Rung 1 for `cpu-saturation`, run every sweep of an open incident after the reaper and the janitor:
+
+- **The reaper.** It already runs every sweep on its own criteria, and saturation doesn't loosen them. Its reaps and the summary of what it spared go into the episode's attempts, as they do for `system-memory`.
+- **Hold child admission.** Held when the load is at the threshold and released under `releaseLoadPerCore` × cores (`releaseBusyFraction` on Windows), so a load hovering at the threshold doesn't flap it. Released too on the clear, on `stop()`, and when the monitor or saturation is turned off. The monitor calls `holdChildAdmission(held, reason)` on changes only. It holds for every cause: fewer new builds and installs helps I/O too.
+- **Lower the heaviest child agent trees.** The top `reniceTopTrees` child trees by CPU rate that use at least one core have every pid lowered to `reniceNice` with `lowerProcessPriority`. A child has a `paseo.parent-agent-id` label. Roots, the daemon and processes outside an agent tree are never touched. This runs only on a fresh sample with a `cpu` cause: stale rows can name pids that are gone or reused, and a lower priority does nothing for tasks waiting on disk. It is re-applied every sweep so pids that join those trees later are covered, and a pid already there is skipped. Agents already run at nice 10, so on macOS and Linux 15 is a real step down. On Windows 10 to 18 are all `BELOW_NORMAL`, where agents already are, so the only step further is 19, `IDLE`. On macOS and Linux only root can raise a priority back, so these processes stay lowered for their lifetime, after the incident too. Windows keeps them lowered as well, because the daemon never raises a priority.
+
+Every action is a `RemedyAttempt` the ladder records at `record`, is logged at info, and is written into the ledger (below).
+
+What the ladder is told depends on who is loading the machine. Agent trees are the cause when they make up at least half the sampled CPU.
+
+| Cause                                                  | Escalation | Grace | Level    |
+| ------------------------------------------------------ | ---------- | ----- | -------- |
+| `cpu`, agent trees at least half                       | none       | 30m   | `notice` |
+| `cpu`, mostly other processes (Android Studio, Xcode…) | none       | 30m   | `notice` |
+| `io`                                                   | none       | 30m   | `notice` |
+| `unknown` (sampling failing)                           | an agent   | 5m    | `alert`  |
+
+Agent trees are what the remedies act on. Your own apps and disk work are known causes that no agent may touch, so an agent can't help. Only a load nothing can attribute justifies sending one to look.
+
+`holdChildAdmission` is an option on `AgentResourceMonitorOptions`, wired in `bootstrap.ts` to the child-turn admission controller. Unwired, the rung holds nothing.
+
+The stopgap `sh.bozeo.cpu-guard` LaunchAgent (`~/bozeo-ops/cpu-guard.mjs`) renices agent trees and logs load, which the daemon now does itself. Once this rung runs in the daemon, retire it with `launchctl bootout gui/$(id -u)/sh.bozeo.cpu-guard`, then delete `~/Library/LaunchAgents/sh.bozeo.cpu-guard.plist`.
+
+### The ledger
+
+Incidents go to `$PASEO_HOME/resource-monitor/incidents.jsonl`, one JSON record per line: when an incident opens, every five minutes while it holds, on any sweep where the rung acted, and when it clears. A record carries the event, cores, the load reading, free, available and swap memory, the process sample's freshness and age, the cause, the evidence above, and `actions`: what the rung did that sweep.
+
+The ledger exists because a saturated machine usually ends in a forced reboot, and the evidence has to outlive it. Every record is its own open, append, `fdatasync` and close, never a buffered stream. An incident with no `clear` record is one the daemon or the machine did not survive. The file rotates to `incidents.1.jsonl` at 1 MiB, keeping one previous file. A write failure is logged once per run of failures and never fails the sweep.
+
+`paseo doctor` reads it: `resource.saturation` reports the latest incident within 7 days (see [docs/doctor.md](doctor.md)).
+
 ## Why this is a separate monitor from token burn
 
-Token burn reads provider-reported usage per turn; it has no visibility into what a tool call spawned. A `git push` running heavy pack compression, or a Gradle daemon still resident from a build ten minutes ago, never shows up in provider token accounting — it only shows up in `ps`. The two monitors share a shape (`agent/token-burn-detector.ts` and `agent/sustained-breach-detector.ts` are structurally the same state machine) but sample entirely different data. They share an enforcement shape too: this doc's reaper, token burn's [spend governor](token-burn.md#the-spend-governor), the [device cap](device-leases.md) and the [artifact janitor](artifact-janitor.md) are all opt-in, all dry-runnable, and all act only on evidence gathered across sweeps.
+Token burn reads provider-reported usage per turn; it has no visibility into what a tool call spawned. A `git push` running heavy pack compression, or a Gradle daemon still resident from a build ten minutes ago, never shows up in provider token accounting — it only shows up in the process table. The two monitors share a shape (`agent/token-burn-detector.ts` and `agent/sustained-breach-detector.ts` are structurally the same state machine) but sample entirely different data. They share an enforcement shape too: this doc's reaper, token burn's [spend governor](token-burn.md#the-spend-governor), the [device cap](device-leases.md) and the [artifact janitor](artifact-janitor.md) are all opt-in, all dry-runnable, and all act only on evidence gathered across sweeps.

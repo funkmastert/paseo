@@ -4,7 +4,13 @@ import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-ma
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentResourceMonitorState } from "./agent/resource-monitor-detector.js";
 import type { ProcessSignalOutcome, ProcessSignaller } from "./agent/build-daemon-reaper.js";
-import type { ProcessSampleRow, SystemMemorySample } from "./agent/process-sampler.js";
+import type {
+  ProcessSampleRow,
+  ProcessTableSample,
+  SystemMemorySample,
+} from "./agent/process-sampler.js";
+import type { SaturationLedgerRecord } from "./agent/saturation-ledger.js";
+import type { SystemLoadReading, SystemLoadSample } from "./agent/system-load.js";
 import {
   AgentResourceMonitor,
   type AgentResourceMonitorOptions,
@@ -84,11 +90,26 @@ function createFakeSampler(
   overrides: {
     processRows?: ProcessSampleRow[];
     systemMemory?: SystemMemorySample;
+    load?: SystemLoadReading;
   } = {},
 ) {
+  const sampleProcesses = vi.fn(
+    async (): Promise<ProcessSampleRow[]> => overrides.processRows ?? [],
+  );
   return {
-    sampleProcesses: vi.fn(async () => overrides.processRows ?? []),
+    sampleProcesses,
     sampleSystemMemory: vi.fn(async () => overrides.systemMemory),
+    // Delegates, so a test that scripts sampleProcesses scripts the table the monitor reads too.
+    sampleProcessTable: vi.fn(
+      async (): Promise<ProcessTableSample> => ({ status: "ok", rows: await sampleProcesses() }),
+    ),
+    sampleSystemLoad: vi.fn(
+      (): SystemLoadSample => ({
+        load: overrides.load ?? { kind: "loadavg", cores: 16, load1: 4, load5: 4, load15: 4 },
+        freeMemoryBytes: 8 * 1024 ** 3,
+        totalMemoryBytes: 64 * 1024 ** 3,
+      }),
+    ),
   };
 }
 
@@ -147,6 +168,7 @@ function summary(overrides: Partial<ResourceMonitorAgentSummary>): ResourceMonit
     workspaceId: "workspace-1",
     internal: false,
     isRunning: true,
+    parentAgentId: null,
     ...overrides,
   };
 }
@@ -182,6 +204,10 @@ function createMonitor(params: {
   signaller?: ProcessSignaller;
   ownerUid?: number | undefined;
   sweepTestArtifacts?: AgentResourceMonitorOptions["sweepTestArtifacts"];
+  reportDeviceSample?: AgentResourceMonitorOptions["reportDeviceSample"];
+  saturationLedger?: AgentResourceMonitorOptions["saturationLedger"];
+  holdChildAdmission?: AgentResourceMonitorOptions["holdChildAdmission"];
+  lowerProcessPriority?: AgentResourceMonitorOptions["lowerProcessPriority"];
 }) {
   const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
   const push = createFakePushSender();
@@ -200,6 +226,10 @@ function createMonitor(params: {
     pushNotificationSender: push.sender,
     remediationSink: remediation.sink,
     ...(params.sweepTestArtifacts ? { sweepTestArtifacts: params.sweepTestArtifacts } : {}),
+    ...(params.reportDeviceSample ? { reportDeviceSample: params.reportDeviceSample } : {}),
+    ...(params.saturationLedger ? { saturationLedger: params.saturationLedger } : {}),
+    ...(params.holdChildAdmission ? { holdChildAdmission: params.holdChildAdmission } : {}),
+    ...(params.lowerProcessPriority ? { lowerProcessPriority: params.lowerProcessPriority } : {}),
     serverId: "server-1",
     processSampler: sampler,
     sendSystemMessageToAgent: steer.fn,
@@ -834,9 +864,7 @@ describe("AgentResourceMonitor", () => {
       await sweep(monitor, 5, clock);
 
       expect(sent).toEqual([]);
-      const spared = remediation
-        .last("orphan-build-daemons")
-        ?.attempts?.filter(isSkippedAttempt);
+      const spared = remediation.last("orphan-build-daemons")?.attempts?.filter(isSkippedAttempt);
       expect(spared).toHaveLength(1);
       expect(spared?.[0]?.remedy).toBe("reaper");
       expect(spared?.[0]?.detail).toContain("busy 1");
@@ -856,9 +884,7 @@ describe("AgentResourceMonitor", () => {
 
       await sweep(monitor, 20, clock);
 
-      const spared = remediation
-        .last("orphan-build-daemons")
-        ?.attempts?.find(isSkippedAttempt);
+      const spared = remediation.last("orphan-build-daemons")?.attempts?.find(isSkippedAttempt);
       expect(spared?.detail).toContain("not-permitted 1");
     });
 
@@ -1186,5 +1212,567 @@ describe("AgentResourceMonitor reaper", () => {
       { pid: 103, signal: "SIGTERM" },
       { pid: 101, signal: "SIGTERM" },
     ]);
+  });
+});
+
+function failProcessSamples(sampler: ReturnType<typeof createFakeSampler>): void {
+  sampler.sampleProcessTable.mockImplementation(async () => ({
+    status: "failed",
+    error: new Error("ps timed out"),
+  }));
+}
+
+function createRecordingLedger() {
+  const records: SaturationLedgerRecord[] = [];
+  return {
+    ledger: { append: vi.fn(async (record: SaturationLedgerRecord) => void records.push(record)) },
+    records,
+  };
+}
+
+function loadavg(load1: number): SystemLoadReading {
+  return { kind: "loadavg", cores: 16, load1, load5: load1, load15: load1 };
+}
+
+describe("AgentResourceMonitor when process sampling fails", () => {
+  test("stale rows never reach the reaper, the artifact janitor or the device cap", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ processRows: [gradleDaemonRow()] });
+    const sweepTestArtifacts = vi.fn(async () => ({ dryRun: false, reclaimed: [] }));
+    const reportDeviceSample = vi.fn(async () => undefined);
+    const { signaller, sent } = createFakeSignaller();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler,
+      signaller,
+      config: { reaper: { enabled: true, idleMinutes: 1, minIdleSweeps: 1 } },
+      sweepTestArtifacts,
+      reportDeviceSample,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+    failProcessSamples(sampler);
+    await sweep(monitor, 10, clock);
+
+    expect(sweepTestArtifacts).toHaveBeenCalledTimes(1);
+    expect(reportDeviceSample).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
+  });
+
+  test("swap pressure is still reported, naming the last good sample's trees and its age", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [agentProcessRow("agent-1", 4_000_000, 0)],
+      systemMemory: { totalPhysicalBytes: 1e12, swapTotalBytes: 100, swapUsedBytes: 95 },
+    });
+    const { monitor, remediation } = createMonitor({
+      sampler,
+      titles: { "agent-1": "Android checkout" },
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+    failProcessSamples(sampler);
+    await sweep(monitor, 2, clock);
+
+    const observation = remediation.last("system-memory");
+    expect(observation?.active).toBe(true);
+    expect(observation?.evidence).toContain("from a sample 120s old");
+    expect(observation?.evidence).toContain("Android checkout");
+  });
+
+  test("an agent's alert is held, not cleared, while its tree cannot be seen", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [agentProcessRow("agent-1", 100_000_000, 0)],
+    });
+    const { monitor, agentManager } = createMonitor({ sampler, now: () => clock.ms });
+
+    await sweep(monitor, 1, clock);
+    expect(agentManager.setResourceAlert).toHaveBeenCalledTimes(1);
+    failProcessSamples(sampler);
+    await sweep(monitor, 3, clock);
+
+    expect(agentManager.clearResourceAlert).not.toHaveBeenCalled();
+  });
+
+  test("a sweep that could not look restarts a daemon's idle clock", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ processRows: [gradleDaemonRow()] });
+    const { signaller, sent } = createFakeSignaller();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler,
+      signaller,
+      config: { reaper: { enabled: true } },
+      now: () => clock.ms,
+    });
+
+    // First sighting and one idle sweep, then twenty minutes blind.
+    await sweep(monitor, 2, clock);
+    failProcessSamples(sampler);
+    await sweep(monitor, 20, clock);
+    sampler.sampleProcessTable.mockImplementation(async () => ({
+      status: "ok",
+      rows: [gradleDaemonRow()],
+    }));
+
+    // Counting the blind stretch as idle would reap here, three idle sweeps and 20+ minutes in.
+    await sweep(monitor, 3, clock);
+    expect(sent).toEqual([]);
+
+    await sweep(monitor, 15, clock);
+    expect(sent).toEqual([{ pid: 28056, signal: "SIGTERM" }]);
+  });
+});
+
+describe("AgentResourceMonitor saturation", () => {
+  const SATURATION_3 = { saturation: { sustainedMinutes: 3 } } as const;
+
+  test("opens after three sweeps at twice the cores, records it, and exposes the evidence", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [agentProcessRow("agent-1", 1_000_000, 1_500)],
+      load: loadavg(38),
+    });
+    const { ledger, records } = createRecordingLedger();
+    const { monitor } = createMonitor({
+      sampler,
+      titles: { "agent-1": "Fix orders API" },
+      config: SATURATION_3,
+      saturationLedger: ledger,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 2, clock);
+    expect(records).toHaveLength(0);
+    expect(monitor.getSaturationSweep()).toBeUndefined();
+
+    await sweep(monitor, 1, clock);
+    expect(records.map((record) => record.event)).toEqual(["open"]);
+    expect(records[0]).toMatchObject({
+      load: { load1: 38 },
+      memory: { freeBytes: 8 * 1024 ** 3 },
+      evidence: {
+        sample: { status: "fresh" },
+        agentTrees: [{ agentId: "agent-1", title: "Fix orders API" }],
+      },
+    });
+    expect(monitor.getSaturationSweep()).toMatchObject({ transition: "opened" });
+  });
+
+  test("records every five minutes while it holds, then the clear", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ load: loadavg(40) });
+    const { ledger, records } = createRecordingLedger();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler,
+      config: SATURATION_3,
+      saturationLedger: ledger,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 13, clock);
+    expect(records.map((record) => record.event)).toEqual(["open", "ongoing", "ongoing"]);
+    expect(monitor.getSaturationSweep()?.transition).toBe("held");
+
+    sampler.sampleSystemLoad.mockReturnValue({
+      load: loadavg(6),
+      freeMemoryBytes: 1,
+      totalMemoryBytes: 2,
+    });
+    await sweep(monitor, 3, clock);
+
+    expect(records.map((record) => record.event)).toEqual(["open", "ongoing", "ongoing", "clear"]);
+    expect(records[3]).toMatchObject({ peakLoad1: 40 });
+    expect(monitor.getSaturationSweep()).toBeUndefined();
+  });
+
+  test("detects saturation with ps failing, with stale attribution and an unknown cause", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [agentProcessRow("agent-1", 1_000_000, 1_500)],
+      load: loadavg(38),
+    });
+    const { ledger, records } = createRecordingLedger();
+    const { monitor } = createMonitor({
+      sampler,
+      config: SATURATION_3,
+      saturationLedger: ledger,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+    failProcessSamples(sampler);
+    await sweep(monitor, 2, clock);
+
+    expect(records[0]?.evidence).toMatchObject({
+      sample: { status: "stale", ageMs: 120_000 },
+      cause: { kind: "unknown" },
+      agentTrees: [{ agentId: "agent-1" }],
+    });
+  });
+
+  test("records nothing when turned off", async () => {
+    const clock = { ms: 1_000_000 };
+    const { ledger, records } = createRecordingLedger();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler: createFakeSampler({ load: loadavg(40) }),
+      config: { saturation: { enabled: false } },
+      saturationLedger: ledger,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 5, clock);
+
+    expect(records).toHaveLength(0);
+  });
+});
+
+/** An agent's tree: the root carries the attribution marker, the rest are its direct children. */
+function agentTreeRows(
+  agentId: string,
+  rootPid: number,
+  cpu: readonly number[],
+): ProcessSampleRow[] {
+  return cpu.map((cpuPercent, index) =>
+    index === 0
+      ? row({ pid: rootPid, cpuPercent, command: `claude ...callerAgentId=${agentId}` })
+      : row({ pid: rootPid + index, ppid: rootPid, cpuPercent, command: `worker-${index}` }),
+  );
+}
+
+function createAdmissionRecorder() {
+  const calls: Array<{ held: boolean; reason: string }> = [];
+  return {
+    fn: vi.fn((held: boolean, reason: string) => void calls.push({ held, reason })),
+    calls,
+    held: () => calls.map((call) => call.held),
+  };
+}
+
+function createPriorityRecorder() {
+  const lowered: Array<{ pid: number; nice: number }> = [];
+  const nices = new Map<number, number>();
+  return {
+    fn: vi.fn((pid: number, nice: number) => {
+      if ((nices.get(pid) ?? 0) >= nice) return "unchanged" as const;
+      nices.set(pid, nice);
+      lowered.push({ pid, nice });
+      return "lowered" as const;
+    }),
+    lowered,
+  };
+}
+
+function setLoad(sampler: ReturnType<typeof createFakeSampler>, load1: number): void {
+  sampler.sampleSystemLoad.mockReturnValue({
+    load: loadavg(load1),
+    freeMemoryBytes: 8 * 1024 ** 3,
+    totalMemoryBytes: 64 * 1024 ** 3,
+  });
+}
+
+describe("AgentResourceMonitor saturation remedies", () => {
+  const CHILD = summary({ id: "child-1", parentAgentId: "leader-1" });
+  const CHILD_2 = summary({ id: "child-2", parentAgentId: "leader-1" });
+  const LEADER = summary({ id: "leader-1" });
+
+  test("agent trees dominate: holds admission, lowers child trees, a long quiet grace and no agent", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [
+        ...agentTreeRows("child-1", 300, [100, 1_500, 600]),
+        row({ pid: 900, cpuPercent: 200 }),
+      ],
+      load: loadavg(38),
+    });
+    const admission = createAdmissionRecorder();
+    const priority = createPriorityRecorder();
+    const { ledger, records } = createRecordingLedger();
+    const { monitor, remediation } = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      titles: { "child-1": "Backend build" },
+      config: { saturation: { reniceNice: 15 } },
+      saturationLedger: ledger,
+      holdChildAdmission: admission.fn,
+      lowerProcessPriority: priority.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+
+    expect(admission.calls).toEqual([{ held: true, reason: expect.stringContaining("load 38.0") }]);
+    expect(priority.lowered).toEqual([
+      { pid: 300, nice: 15 },
+      { pid: 301, nice: 15 },
+      { pid: 302, nice: 15 },
+    ]);
+    const observation = remediation.last("cpu-saturation");
+    expect(observation).toMatchObject({
+      kind: "cpu-saturation",
+      active: true,
+      remedy: "live",
+      graceMs: 30 * 60_000,
+      level: "notice",
+    });
+    expect(observation?.escalation).toBeUndefined();
+    expect(observation?.evidence).toContain("Backend build");
+    expect(observation?.attempts?.map((attempt) => attempt.remedy)).toEqual([
+      "admission-hold",
+      "renice",
+    ]);
+    expect(records[0]?.actions?.map((action) => action.remedy)).toEqual([
+      "admission-hold",
+      "renice",
+    ]);
+  });
+
+  test("lowers only the heaviest reniceTopTrees child trees, never a root agent or an idle tree", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [
+        ...agentTreeRows("leader-1", 100, [3_000]),
+        ...agentTreeRows("child-1", 300, [900]),
+        ...agentTreeRows("child-2", 500, [1_200]),
+        ...agentTreeRows("child-3", 700, [10]),
+      ],
+      load: loadavg(40),
+    });
+    const priority = createPriorityRecorder();
+    const { monitor } = createMonitor({
+      agents: [LEADER, CHILD, CHILD_2, summary({ id: "child-3", parentAgentId: "leader-1" })],
+      sampler,
+      config: { saturation: { reniceTopTrees: 1, reniceNice: 15 } },
+      lowerProcessPriority: priority.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+    expect(priority.lowered).toEqual([{ pid: 500, nice: 15 }]);
+
+    // Re-applied each saturated sweep, so a pid that joins the tree later is covered too.
+    sampler.sampleProcesses.mockResolvedValue([
+      ...agentTreeRows("leader-1", 100, [3_000]),
+      ...agentTreeRows("child-2", 500, [1_200, 400]),
+    ]);
+    await sweep(monitor, 1, clock);
+    expect(priority.lowered).toEqual([
+      { pid: 500, nice: 15 },
+      { pid: 501, nice: 15 },
+    ]);
+  });
+
+  test("identified non-agent processes dominate: no agent, a long quiet grace, the processes named", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [
+        ...agentTreeRows("child-1", 300, [200]),
+        row({
+          pid: 900,
+          cpuPercent: 3_000,
+          command: "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java",
+        }),
+      ],
+      load: loadavg(40),
+    });
+    const { monitor, remediation } = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+
+    const observation = remediation.last("cpu-saturation");
+    expect(observation).toMatchObject({ graceMs: 30 * 60_000, level: "notice" });
+    expect(observation?.escalation).toBeUndefined();
+    expect(observation?.summary).toContain("outside any agent");
+    expect(observation?.evidence).toContain("java pid 900");
+  });
+
+  test("I/O: holds admission but lowers nothing, names the I/O processes, no agent", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [
+        ...agentTreeRows("child-1", 300, [100]),
+        row({ pid: 900, cpuPercent: 80, command: "/System/Library/.../mds_stores" }),
+      ],
+      load: loadavg(40),
+    });
+    const admission = createAdmissionRecorder();
+    const priority = createPriorityRecorder();
+    const { monitor, remediation } = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      holdChildAdmission: admission.fn,
+      lowerProcessPriority: priority.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+
+    expect(admission.held()).toEqual([true]);
+    expect(priority.lowered).toEqual([]);
+    const observation = remediation.last("cpu-saturation");
+    expect(observation).toMatchObject({ graceMs: 30 * 60_000, level: "notice" });
+    expect(observation?.escalation).toBeUndefined();
+    expect(observation?.evidence).toContain("mds_stores");
+  });
+
+  test("unknown cause (process sampling failing): lowers nothing, alerts, and asks for an agent after 5 minutes", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: agentTreeRows("child-1", 300, [2_000]),
+      load: loadavg(40),
+    });
+    const priority = createPriorityRecorder();
+    const { monitor, remediation } = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      config: { saturation: { sustainedMinutes: 2 } },
+      lowerProcessPriority: priority.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+    failProcessSamples(sampler);
+    await sweep(monitor, 1, clock);
+
+    expect(priority.lowered).toEqual([]);
+    const observation = remediation.last("cpu-saturation");
+    expect(observation).toMatchObject({ active: true, graceMs: 5 * 60_000, level: "alert" });
+    expect(observation?.escalation?.task).toContain("never touch");
+    expect(observation?.escalation?.task).toContain("Android Studio");
+  });
+
+  test("releases admission once load falls below the release line, and re-holds only at the threshold", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ load: loadavg(38) });
+    const admission = createAdmissionRecorder();
+    const { monitor, remediation } = createMonitor({
+      agents: [],
+      sampler,
+      config: { saturation: { sustainedMinutes: 3 } },
+      holdChildAdmission: admission.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 3, clock);
+    expect(admission.held()).toEqual([true]);
+
+    // Under the 32 threshold but over the 24 release line (1.5 per core): still held.
+    setLoad(sampler, 28);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+
+    // Back over, so the episode's three sweeps under start again.
+    setLoad(sampler, 38);
+    await sweep(monitor, 1, clock);
+    setLoad(sampler, 20);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+
+    // Between the lines again: no flap back to held.
+    setLoad(sampler, 28);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+
+    setLoad(sampler, 38);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false, true]);
+    expect(remediation.last("cpu-saturation")?.active).toBe(true);
+  });
+
+  test("the clear closes the episode with its attempts and releases admission", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ load: loadavg(40) });
+    const admission = createAdmissionRecorder();
+    const { monitor, remediation } = createMonitor({
+      agents: [],
+      sampler,
+      holdChildAdmission: admission.fn,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 2, clock);
+    // Straight to under the threshold but over the release line, so only the clear releases.
+    setLoad(sampler, 30);
+    await sweep(monitor, 1, clock);
+
+    expect(admission.held()).toEqual([true, false]);
+    const observations = remediation.forKey("cpu-saturation");
+    expect(observations.map(observationIsActive)).toEqual([true, true, false]);
+    expect(observations[2]?.attempts?.map((attempt) => attempt.remedy)).toEqual([
+      "admission-hold",
+      "admission-hold",
+    ]);
+  });
+
+  test("folds the reaper's pass into the episode's attempts", async () => {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ processRows: [gradleDaemonRow()], load: loadavg(40) });
+    const { signaller } = createFakeSignaller();
+    const { monitor, remediation } = createMonitor({
+      agents: [],
+      sampler,
+      signaller,
+      config: { reaper: { enabled: true, idleMinutes: 1, minIdleSweeps: 1 } },
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 5, clock);
+
+    const attempts = remediation.last("cpu-saturation")?.attempts ?? [];
+    expect(
+      attempts.some((attempt) => attempt.remedy === "reaper" && attempt.outcome === "acted"),
+    ).toBe(true);
+  });
+
+  test("stop, and the monitor being turned off, release admission", async () => {
+    const clock = { ms: 1_000_000 };
+    const admission = createAdmissionRecorder();
+    const config: ResourceMonitorConfig = {};
+    const first = createMonitor({
+      agents: [],
+      sampler: createFakeSampler({ load: loadavg(40) }),
+      holdChildAdmission: admission.fn,
+      now: () => clock.ms,
+    });
+    await sweep(first.monitor, 1, clock);
+    first.monitor.stop();
+    expect(admission.held()).toEqual([true, false]);
+
+    const second = createAdmissionRecorder();
+    const { monitor, remediation } = createMonitor({
+      agents: [],
+      sampler: createFakeSampler({ load: loadavg(40) }),
+      config,
+      holdChildAdmission: second.fn,
+      now: () => clock.ms,
+    });
+    await sweep(monitor, 1, clock);
+    config.enabled = false;
+    await sweep(monitor, 1, clock);
+    expect(second.held()).toEqual([true, false]);
+    expect(remediation.last("cpu-saturation")?.active).toBe(false);
+  });
+
+  test("nothing wired and nothing to lower is a remedy of none", async () => {
+    const clock = { ms: 1_000_000 };
+    const { monitor, remediation } = createMonitor({
+      agents: [],
+      sampler: createFakeSampler({ load: loadavg(40) }),
+      config: { saturation: { reniceTopTrees: 0 } },
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 1, clock);
+
+    expect(remediation.last("cpu-saturation")?.remedy).toBe("none");
   });
 });

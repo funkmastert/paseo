@@ -6,6 +6,7 @@ import { finding, type DoctorCheck, type DoctorContext } from "./context.js";
 import { diskCheck } from "./disk.js";
 import { mcpGatewayCheck } from "./mcp-gateway.js";
 import { pluginCheck } from "./plugins.js";
+import { saturationCheck } from "./saturation.js";
 import { skillsCheck } from "./skills.js";
 import { worktreeCheck } from "./worktrees.js";
 
@@ -19,6 +20,7 @@ export const DOCTOR_CHECKS: readonly DoctorCheck[] = [
   mcpGatewayCheck,
   skillsCheck,
   diskCheck,
+  saturationCheck,
   worktreeCheck,
 ];
 
