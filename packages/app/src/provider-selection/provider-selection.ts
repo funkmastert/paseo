@@ -38,6 +38,8 @@ export interface ProviderSelectorProvider {
   id: string;
   label: string;
   modelSelection: ProviderModelSelection;
+  /** Set for a pooled account that is out of budget, e.g. "out until Sat 06:00". */
+  budgetNote?: string;
 }
 
 export interface ProviderSelectionState {
@@ -142,16 +144,20 @@ export function buildProviderSelectorProviders(input: {
 
 export function buildSelectableProviderSelectorProviders(
   entries: ProviderSnapshotEntry[] | undefined,
+  budgetNotes?: ReadonlyMap<string, string>,
 ): ProviderSelectorProvider[] {
   return (entries ?? [])
     .filter((entry) => entry.enabled)
     .map((entry) => {
       const label = entry.label ?? entry.provider;
-      return {
+      const provider: ProviderSelectorProvider = {
         id: entry.provider,
         label,
         modelSelection: buildEntryModelSelection(entry, label),
       };
+      const budgetNote = budgetNotes?.get(entry.provider);
+      if (budgetNote) provider.budgetNote = budgetNote;
+      return provider;
     });
 }
 
