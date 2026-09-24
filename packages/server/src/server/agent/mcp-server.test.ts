@@ -234,6 +234,7 @@ function buildAgentManagerSpies() {
     getTimeline: vi.fn().mockReturnValue([]),
     resumeAgentFromPersistence: vi.fn(),
     hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
+    noteFinishObserver: vi.fn(() => () => undefined),
     appendTimelineItem: vi.fn().mockResolvedValue(undefined),
     emitLiveTimelineItem: vi.fn().mockResolvedValue(undefined),
     hasInFlightRun: vi.fn().mockReturnValue(false),
@@ -892,7 +893,7 @@ describe("browser MCP tools", () => {
         agents: [],
       });
       expectSingleTextContent(browserResult);
-      expect(expectSingleTextContent(listAgentsResult)).toContain('"agents": []');
+      expect(expectSingleTextContent(listAgentsResult)).toContain('"agents":[]');
 
       const listedTools = await client.listTools();
       expect(listedTools.tools.map((tool) => tool.name)).toEqual(
@@ -5354,7 +5355,44 @@ describe("speak MCP tool", () => {
 describe("agent snapshot MCP serialization", () => {
   const logger = createTestLogger();
 
-  it("returns compact list items from list_agents", async () => {
+  it("returns lean list rows from list_agents by default", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentManager.listAgents = vi.fn().mockReturnValue([
+      createManagedAgent({
+        id: "agent-lean",
+        provider: "codex",
+        cwd: REPO_CWD,
+        config: { model: "gpt-5.4", thinkingOptionId: "high" },
+        runtimeInfo: { provider: "codex", sessionId: "session-123", model: "gpt-5.4" },
+        labels: { role: "researcher", "paseo.open-agent-tab.client-1": "true" },
+      }),
+    ]);
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger,
+    });
+    const response = await registeredTool(server, "list_agents").handler({});
+
+    expect(response.structuredContent).toEqual({
+      agents: [
+        {
+          id: "agent-lean",
+          title: null,
+          provider: "codex",
+          model: "gpt-5.4",
+          status: "idle",
+          cwd: REPO_CWD,
+          updatedAt: expect.any(String),
+          labels: { role: "researcher" },
+        },
+      ],
+    });
+  });
+
+  it("returns full list rows from list_agents when full is set", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     spies.agentManager.listAgents = vi.fn().mockReturnValue([
       createManagedAgent({
@@ -5374,7 +5412,7 @@ describe("agent snapshot MCP serialization", () => {
       logger,
     });
     const tool = registeredTool(server, "list_agents");
-    const response = await tool.handler({});
+    const response = await tool.handler({ full: true });
     const structured = z
       .object({ agents: z.array(z.record(z.string(), z.unknown())) })
       .parse(response.structuredContent);
@@ -5440,6 +5478,36 @@ describe("agent snapshot MCP serialization", () => {
     expect(spies.agentStorage.get).toHaveBeenCalledWith("archived-agent");
   });
 
+  it("returns a compact snapshot from get_agent_status by default", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    spies.agentStorage.get.mockResolvedValue({ title: "Lean agent" });
+    spies.agentManager.getAgent.mockReturnValue(
+      createManagedAgent({
+        id: "lean-agent",
+        provider: "codex",
+        cwd: "/tmp/lean",
+        config: { model: "gpt-5.4" },
+        availableModes: [{ id: "auto", label: "Auto", description: "Default coding mode" }],
+      }),
+    );
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger,
+    });
+
+    const response = await registeredTool(server, "get_agent_status").handler({
+      agentId: "lean-agent",
+    });
+    const snapshot = z.record(z.string(), z.unknown()).parse(response.structuredContent.snapshot);
+
+    expect(snapshot).toMatchObject({ id: "lean-agent", title: "Lean agent", status: "idle" });
+    expect(snapshot).not.toHaveProperty("persistence");
+    expect(snapshot).not.toHaveProperty("capabilities");
+    expect(snapshot).not.toHaveProperty("availableModes");
+  });
+
   it("returns full-detail snapshots from get_agent_status", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     spies.agentStorage.get.mockResolvedValue({ title: "Full detail agent" });
@@ -5497,7 +5565,7 @@ describe("agent snapshot MCP serialization", () => {
       logger,
     });
     const tool = registeredTool(server, "get_agent_status");
-    const response = await tool.handler({ agentId: "full-detail-agent" });
+    const response = await tool.handler({ agentId: "full-detail-agent", full: true });
     const snapshot = z.record(z.string(), z.unknown()).parse(response.structuredContent.snapshot);
 
     const parsed = AgentSnapshotPayloadSchema.safeParse(snapshot);
@@ -5715,7 +5783,7 @@ describe("agent snapshot MCP serialization", () => {
     expect(agentIds).not.toContain("old-archived");
   });
 
-  it("returns compact list items for stored archived agents", async () => {
+  it("returns full list rows for stored archived agents when full is set", async () => {
     const { agentManager, agentStorage, spies } = createTestDeps();
     const now = new Date().toISOString();
     spies.agentStorage.list.mockResolvedValue([
@@ -5743,7 +5811,7 @@ describe("agent snapshot MCP serialization", () => {
       providerSnapshotManager: createClaudeOnlyManager(),
     });
     const tool = registeredTool(server, "list_agents");
-    const response = await tool.handler({ cwd: REPO_CWD, includeArchived: true });
+    const response = await tool.handler({ cwd: REPO_CWD, includeArchived: true, full: true });
     const item = agentsOf(response)[0];
 
     expect(item).toEqual({
@@ -5854,7 +5922,7 @@ describe("agent snapshot MCP serialization", () => {
       providerSnapshotManager: createClaudeOnlyManager(),
     });
     const tool = registeredTool(server, "list_agents");
-    const response = await tool.handler({ includeArchived: true });
+    const response = await tool.handler({ includeArchived: true, full: true });
 
     const parsed = z.array(AgentListItemPayloadSchema).safeParse(response.structuredContent.agents);
     if (!parsed.success) {
@@ -5992,6 +6060,43 @@ describe("agent snapshot MCP serialization", () => {
 
     const content = String(response.structuredContent.content);
     expect(content).toContain("Hello world. How are you?");
+  });
+
+  it("get_agent_activity shows only the last entries by default and everything with full", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    const snapshot = createManagedAgent({ id: "long-activity-agent", currentModeId: "default" });
+    spies.agentManager.getAgent.mockReturnValue(snapshot);
+    spies.agentManager.getTimeline.mockReturnValue(
+      Array.from({ length: 40 }, (_, index) => ({
+        type: "user_message",
+        text: `message-${index}`,
+      })),
+    );
+
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      logger: createTestLogger(),
+      providerSnapshotManager: createClaudeOnlyManager(),
+    });
+    const tool = registeredTool(server, "get_agent_activity");
+
+    const compact = String(
+      (await tool.handler({ agentId: "long-activity-agent" })).structuredContent.content,
+    );
+    expect(compact).toContain(
+      "Showing 30 of 40 activities (limited to 30; pass full=true for all)",
+    );
+    expect(compact).toContain("message-39");
+    expect(compact).not.toContain("message-9\n");
+    expect(compact).not.toContain("[User] message-0\n");
+
+    const full = String(
+      (await tool.handler({ agentId: "long-activity-agent", full: true })).structuredContent
+        .content,
+    );
+    expect(full).toContain("Showing all 40 activities");
+    expect(full).toContain("[User] message-0");
   });
 
   it("get_agent_activity limit=2 returns the last two projected entries whole", async () => {
