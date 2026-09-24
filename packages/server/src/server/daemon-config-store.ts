@@ -29,6 +29,7 @@ interface SupportedMutableConfigPatch {
   artifactJanitor?: MutableDaemonConfig["artifactJanitor"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
+  leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
@@ -209,6 +210,7 @@ const RELOADABLE_PATHS = [
   "agents.artifactJanitor",
   "agents.accountFailover",
   "agents.budgetPacing",
+  "agents.leaderCompaction",
   "agents.doneJanitor",
   "agents.skills.selection",
   "worktrees.diskSweeper",
@@ -247,6 +249,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.artifactJanitor", "artifactJanitor"],
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
+  ["agents.leaderCompaction", "leaderCompaction"],
   ["agents.doneJanitor", "doneJanitor"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
@@ -346,6 +349,12 @@ function pickBudgetPacingPatch(
   return budgetPacing === undefined ? {} : { budgetPacing };
 }
 
+function pickLeaderCompactionPatch(
+  leaderCompaction: MutableDaemonConfigPatch["leaderCompaction"],
+): Pick<SupportedMutableConfigPatch, "leaderCompaction"> {
+  return leaderCompaction === undefined ? {} : { leaderCompaction };
+}
+
 function pickDoneJanitorPatch(
   doneJanitor: MutableDaemonConfigPatch["doneJanitor"],
 ): Pick<SupportedMutableConfigPatch, "doneJanitor"> {
@@ -382,6 +391,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickArtifactJanitorPatch(patch.artifactJanitor),
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
+    ...pickLeaderCompactionPatch(patch.leaderCompaction),
     ...pickDoneJanitorPatch(patch.doneJanitor),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
@@ -841,6 +851,19 @@ function mergeBudgetPacingForPersist(
   ) as PersistedBudgetPacing;
 }
 
+type PersistedLeaderCompaction = NonNullable<PersistedConfig["agents"]>["leaderCompaction"];
+
+// Flat, like deviceLeases: no nested block for a shallow spread to drop.
+function mergeLeaderCompactionForPersist(
+  persisted: PersistedLeaderCompaction,
+  patch: SupportedMutableConfigPatch["leaderCompaction"],
+): PersistedLeaderCompaction {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedLeaderCompaction;
+}
+
 type PersistedArtifactJanitor = NonNullable<PersistedConfig["agents"]>["artifactJanitor"];
 
 // `diskGuard` is a nested block, so a shallow spread would drop the rest of it when a patch
@@ -943,6 +966,7 @@ function touchesAgentConfig(
     patch.artifactJanitor !== undefined ||
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
+    patch.leaderCompaction !== undefined ||
     patch.doneJanitor !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
@@ -991,6 +1015,12 @@ function mergeMonitorSectionsForPersist(
     patch.budgetPacing,
   );
   if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
+
+  const leaderCompaction = mergeLeaderCompactionForPersist(
+    persistedAgents?.leaderCompaction,
+    patch.leaderCompaction,
+  );
+  if (leaderCompaction !== undefined) next["leaderCompaction"] = leaderCompaction;
 
   const doneJanitor = mergeDoneJanitorForPersist(persistedAgents?.doneJanitor, patch.doneJanitor);
   if (doneJanitor !== undefined) next["doneJanitor"] = doneJanitor;

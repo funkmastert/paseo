@@ -403,6 +403,19 @@ const AgentBudgetPacingSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.budgetPacing above. Off unless `enabled` says otherwise; every
+// field optional. See docs/leader-compaction.md.
+const AgentLeaderCompactionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    scope: z.enum(["leaders", "all"]).optional(),
+    prepareAtTokens: z.number().int().positive().optional(),
+    retryAfterMinutes: z.number().nonnegative().optional(),
+    maxAttempts: z.number().int().positive().optional(),
+  })
+  .strict();
+
 // Off unless `enabled` says otherwise. See docs/done-janitor.md.
 const AgentDoneJanitorSchema = z
   .object({
@@ -573,6 +586,7 @@ export const PersistedConfigSchema = z
         artifactJanitor: AgentArtifactJanitorSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
+        leaderCompaction: AgentLeaderCompactionSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
