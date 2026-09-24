@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
 import { HANDOFF_FROM_LABEL } from "./agent/account-failover-detector.js";
+import type { ChildAdmissionConfig } from "./agent/child-admission.js";
 import { setupFinishNotification } from "./agent/agent-prompt.js";
 import type { FinishObligation } from "./agent/finish-obligation.js";
 import { createPaseoDaemon, type PaseoDaemon } from "./bootstrap.js";
@@ -74,7 +75,10 @@ async function createHome(): Promise<Home> {
   return home;
 }
 
-async function startDaemon(home: Home): Promise<PaseoDaemon> {
+async function startDaemon(
+  home: Home,
+  options: { admission?: ChildAdmissionConfig } = {},
+): Promise<PaseoDaemon> {
   const staticDir = await mkdtemp(path.join(tmpdir(), "paseo-finish-reports-static-"));
   home.staticDirs.push(staticDir);
   const daemon = await createPaseoDaemon(
@@ -111,6 +115,7 @@ async function startDaemon(home: Home): Promise<PaseoDaemon> {
         now: () => home.clockMs,
       },
       accountFailoverOverrides: { sweepIntervalMs: 60 * MINUTE_MS },
+      ...(options.admission ? { admission: options.admission } : {}),
       agentStoragePath: path.join(home.paseoHome, "agents"),
       relayEnabled: false,
       relayEndpoint: "relay.paseo.sh:443",
@@ -137,9 +142,12 @@ async function stopDaemon(home: Home): Promise<void> {
 }
 
 /** A real stop and a fresh start on the same PASEO_HOME. */
-async function restart(home: Home): Promise<PaseoDaemon> {
+async function restart(
+  home: Home,
+  options: { admission?: ChildAdmissionConfig } = {},
+): Promise<PaseoDaemon> {
   await stopDaemon(home);
-  return startDaemon(home);
+  return startDaemon(home, options);
 }
 
 function daemonOf(home: Home): PaseoDaemon {
@@ -396,6 +404,49 @@ describe("finish reports survive a daemon restart (e2e)", () => {
     await expect
       .poll(() => daemonOf(home).agentManager.getLastAssistantMessage(held), { timeout: 10_000 })
       .toBe("HELD-TASK-RAN");
+  }, 60_000);
+
+  test("a child only queued when the daemon stops is pending after the restart, not stopped", async () => {
+    const admission = { maxConcurrentChildTurns: 1, bulkResumesPerMinute: 1 };
+    await clientOf(home).patchDaemonConfig({ admission });
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const workers: string[] = [];
+    for (const name of ["Busy", "First held", "Second held"]) {
+      workers.push(
+        await createAgent(home, {
+          title: `${name} worker`,
+          labels: { [PARENT_AGENT_ID_LABEL]: parent },
+        }),
+      );
+    }
+    const [busy, first, second] = workers as [string, string, string];
+    await clientOf(home).sendMessage(busy, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(busy)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    for (const held of [first, second]) {
+      await clientOf(home).sendMessage(held, `keep working until interrupted ${held}`);
+      await expect
+        .poll(() => daemonOf(home).agentManager.getAgent(held)?.turnQueued, { timeout: 10_000 })
+        .toBeDefined();
+    }
+    watchForParent(home, { child: second, parent });
+    await expect.poll(() => obligationOnDisk(home, second)).toMatchObject({ state: "pending" });
+
+    // One restart resume a minute: the first held turn is re-sent now, the second waits.
+    await restart(home, { admission });
+    await expect.poll(() => providerSaw(home, `interrupted ${first}`)).toBe(true);
+    expect(providerSaw(home, `interrupted ${second}`)).toBe(false);
+
+    // The second child's turn is held, so it is pending: never parked, never reported stopped.
+    await sweep(home);
+    expect(obligationInLedger(home, second)).toMatchObject({ state: "pending" });
+    expect(obligationInLedger(home, second)?.parkedSince).toBeUndefined();
+    home.clockMs += PARKED_GRACE_MS;
+    await sweep(home);
+    expect(obligationInLedger(home, second)).toMatchObject({ state: "pending" });
+    expect(await reportAbout(home, { to: parent, about: second })).toBeUndefined();
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {

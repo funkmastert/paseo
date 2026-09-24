@@ -43,7 +43,9 @@ owner, and a restart produces them all in one sweep, so they go through the daem
 pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)) and the sweep
 waits for them. Reports of an outcome seen live are not paced. The grace period gives a parent that resumes
 its child on its own a chance to do so first. A child seen running again is unparked and gets a
-watcher.
+watcher. A child whose turn was waiting for an admission slot when the daemon stopped is never
+parked: its held prompt is re-sent after the restart, so it counts as working until then, and
+telling the parent to resume it would send it the work twice.
 
 A parked child that is loaded and idle, and did run in this process, is reported as finished, and
 one in `error` as errored: its watcher missed the edge, but the outcome is plain. Loaded and idle

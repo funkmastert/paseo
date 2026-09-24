@@ -1026,6 +1026,7 @@ function createFinishObligationService(input: {
   serverId: string;
   logger: Logger;
   paceResume: PaceResume;
+  isTurnHeld: (agentId: string) => boolean;
 }): FinishObligationService {
   const overrides = input.config.finishReportOverrides;
   return new FinishObligationService({
@@ -1036,6 +1037,7 @@ function createFinishObligationService(input: {
     isAccountFailoverEnabled: () =>
       input.daemonConfigStore.get().accountFailover?.enabled !== false,
     paceResume: input.paceResume,
+    isTurnHeld: input.isTurnHeld,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     ladder: overrides?.ladder,
     now: overrides?.now,
@@ -1716,6 +1718,7 @@ export async function createPaseoDaemon(
     serverId,
     logger,
     paceResume: (resume, fn) => resumePacer.run(resume, fn),
+    isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
   });
   await finishObligations.initialize();
   agentManager.setFinishObligations(finishObligations);

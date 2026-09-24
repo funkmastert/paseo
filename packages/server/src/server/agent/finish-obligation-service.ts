@@ -54,6 +54,11 @@ export interface FinishObligationServiceOptions {
   /** Whether account failover will move an agent that hit a cap. Words the "errored" report. */
   isAccountFailoverEnabled?: () => boolean;
   /**
+   * Whether a child's turn is held for an admission slot: in line, or read back from the queue
+   * file after a restart and not yet re-sent. Such a child is pending, not stopped.
+   */
+  isTurnHeld?: (agentId: string) => boolean;
+  /**
    * The daemon's shared ResumePacer. After a restart every parked child reports "stopped before
    * reporting" in the same sweep, and each report can start a turn in its owner; those go through
    * the pacer. Reports of an outcome seen live are not paced. Unset sends immediately.
@@ -703,6 +708,7 @@ export class FinishObligationService {
       lifecycle: live?.lifecycle ?? null,
       lastError: live?.lastError ?? record?.lastError ?? null,
       hasPendingPermission: (live?.pendingPermissions.size ?? 0) > 0,
+      turnHeld: this.options.isTurnHeld?.(agentId) ?? false,
       parentAgentId: getParentAgentIdFromLabels(live?.labels ?? record?.labels),
       record,
       live,

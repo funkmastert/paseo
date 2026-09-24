@@ -169,6 +169,8 @@ export interface AgentPresence {
   lifecycle: AgentLifecycleStatus | null;
   lastError?: string | null;
   hasPendingPermission?: boolean;
+  /** A child turn waiting for an admission slot, including one held across a restart. */
+  turnHeld?: boolean;
 }
 
 /**
@@ -254,7 +256,8 @@ function planPending(obligation: FinishObligation, ctx: ObligationContext): Obli
   const working =
     child.lifecycle === "running" ||
     child.lifecycle === "initializing" ||
-    child.hasPendingPermission === true;
+    child.hasPendingPermission === true ||
+    child.turnHeld === true;
   if (working) {
     return obligation.parkedSince ? { kind: "unpark" } : { kind: "none" };
   }

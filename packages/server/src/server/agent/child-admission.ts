@@ -225,6 +225,11 @@ export class ChildAdmissionController {
     return this.queue.some((entry) => entry.agentId === agentId);
   }
 
+  /** In line now, or held across a restart and not yet re-sent. */
+  holdsTurnFor(agentId: string): boolean {
+    return this.isQueued(agentId) || this.restoring.has(agentId);
+  }
+
   queueLength(): number {
     return this.queue.length;
   }
