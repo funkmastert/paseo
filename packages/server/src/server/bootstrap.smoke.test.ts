@@ -440,6 +440,8 @@ describe("paseo daemon bootstrap", () => {
         daemonVitals: { enabled: true, dryRun: true },
         "leader-compaction": { enabled: true, dryRun: true },
         "stalled-agent-sweep": { enabled: true, dryRun: true },
+        // Read from config.json on every tick, not the mutable config; on unless it says false.
+        "token-audit": { enabled: true, dryRun: undefined },
       });
 
       const reloadedPersisted = {
