@@ -236,9 +236,7 @@ export class AgentStorage {
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
     // Callers build records by spreading one they read earlier, so their copy of the obligations
     // and queued messages can be stale by the time this write runs. The stored value wins.
-    return this.queueRecordMutation(record.id, (existing) =>
-      carryStoreOwnedFields(record, existing),
-    );
+    return this.queueRecordMutation(record.id, (existing) => carryOwnedFields(record, existing));
   }
 
   private queueRecordMutation(
@@ -369,7 +367,7 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      return carryStoreOwnedFields(record, existing);
+      return carryOwnedFields(record, existing);
     });
     return applied;
   }
@@ -539,7 +537,7 @@ export class AgentStorage {
 }
 
 /** Fields only their own store methods write. Every other write keeps the stored value. */
-function carryStoreOwnedFields(
+function carryOwnedFields(
   record: StoredAgentRecord,
   existing: StoredAgentRecord | null,
 ): StoredAgentRecord {
