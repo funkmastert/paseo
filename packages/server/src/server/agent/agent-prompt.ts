@@ -13,6 +13,7 @@ import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 import type { FinishOutcomeReason } from "./finish-obligation.js";
+import { PromptQueue, type QueuedPrompt, type QueuedPromptDelivery } from "./prompt-queue.js";
 
 export type AgentUnarchiveController = Pick<AgentManager, "notifyAgentState" | "unarchiveSnapshot">;
 
@@ -25,7 +26,7 @@ export type AgentRunController = Pick<
   | "steerIntoActiveTurn"
   | "streamAgent"
 > &
-  Partial<Pick<AgentManager, "interceptPromptForDispatch">> & {
+  Partial<Pick<AgentManager, "interceptPromptForDispatch" | "getPromptQueue">> & {
     reloadAgentSession(agentId: string): Promise<unknown>;
   };
 
@@ -47,16 +48,48 @@ export interface StartAgentRunOptions {
  */
 export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started" | "queued";
 
-/** Per manager, per agent: the tail of the prompts waiting for that agent, so they keep order. */
-const waitingDeliveries = new WeakMap<AgentRunController, Map<string, Promise<void>>>();
+/** Per manager: the queue used when none is wired, as in a daemon with no agent records. */
+const memoryQueues = new WeakMap<AgentRunController, PromptQueue>();
 
-function waitingDeliveriesFor(agentManager: AgentRunController): Map<string, Promise<void>> {
-  let deliveries = waitingDeliveries.get(agentManager);
-  if (!deliveries) {
-    deliveries = new Map();
-    waitingDeliveries.set(agentManager, deliveries);
+function promptQueueFor(agentManager: AgentRunController, logger: Logger): PromptQueue {
+  const wired = agentManager.getPromptQueue?.();
+  if (wired) return wired;
+  let queue = memoryQueues.get(agentManager);
+  if (!queue) {
+    queue = new PromptQueue({
+      store: null,
+      deliver: (agentId, prompt) => deliverQueuedPrompt({ agentManager, agentId, prompt, logger }),
+      logger,
+    });
+    memoryQueues.set(agentManager, queue);
   }
-  return deliveries;
+  return queue;
+}
+
+/** The daemon's queue: it lives on the agent records and is delivered again after a restart. */
+export function createPromptQueue(input: {
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  logger: Logger;
+}): PromptQueue {
+  const { agentManager, agentStorage, logger } = input;
+  return new PromptQueue({
+    store: agentStorage,
+    logger,
+    deliver: (agentId, prompt) =>
+      deliverQueuedPrompt({
+        agentManager,
+        agentId,
+        prompt,
+        logger,
+        loadAgent: async (id) => {
+          const record = await agentStorage.get(id);
+          if (!record || record.archivedAt) return false;
+          await ensureAgentLoaded(id, { agentManager, agentStorage, logger });
+          return true;
+        },
+      }),
+  });
 }
 
 function steerOptionsFor(options: StartAgentRunOptions | undefined): AgentSteerOptions | undefined {
@@ -87,10 +120,9 @@ async function steerOrWaitForActiveRun(
   if (options?.activeTurnBehavior !== "steer") {
     return null;
   }
-  const deliveries = waitingDeliveriesFor(agentManager);
-  let firstWait: Promise<void> | null = null;
+  const queue = promptQueueFor(agentManager, logger);
   // Anything already waiting goes first; a later message must not overtake it.
-  if (!deliveries.has(agentId)) {
+  if (!queue.hasWaiting(agentId)) {
     const result = await agentManager.steerIntoActiveTurn(
       agentId,
       prompt,
@@ -99,46 +131,50 @@ async function steerOrWaitForActiveRun(
     if (result.status === "steered") {
       return { disposition: "steered" };
     }
-    if (result.status === "busy") {
-      firstWait = result.nextOpportunity;
-    } else if (!agentManager.hasInFlightRun(agentId)) {
-      // Checked and started in one tick, so no other dispatch can start a run in between.
+    // Checked and started in one tick, so no other dispatch can start a run in between.
+    if (
+      result.status === "inactive" &&
+      !agentManager.hasInFlightRun(agentId) &&
+      !queue.hasWaiting(agentId)
+    ) {
       return {
         disposition: "turn_started",
         iterator: agentManager.streamAgent(agentId, prompt, options.runOptions),
       };
     }
   }
-
-  const previous = deliveries.get(agentId) ?? Promise.resolve();
-  const delivery = previous
-    .then(() => deliverWhenPossible(agentManager, agentId, prompt, logger, options, firstWait))
-    .catch((error: unknown) => {
-      logger.error({ err: error, agentId }, "A message waiting for a busy agent was not delivered");
-    });
-  deliveries.set(agentId, delivery);
-  void delivery.finally(() => {
-    if (deliveries.get(agentId) === delivery) deliveries.delete(agentId);
+  const clientMessageId = options.runOptions?.clientMessageId;
+  await queue.enqueue(agentId, {
+    prompt,
+    ...(clientMessageId ? { clientMessageId } : {}),
+    ...(options.clearPendingPermissions ? { clearPendingPermissions: true } : {}),
   });
   return { disposition: "queued" };
 }
 
-async function deliverWhenPossible(
-  agentManager: AgentRunController,
-  agentId: string,
-  prompt: AgentPromptInput,
-  logger: Logger,
-  options: StartAgentRunOptions,
-  firstWait: Promise<void> | null,
-): Promise<void> {
-  if (firstWait) await firstWait;
+/**
+ * Delivers one queued message: joins the agent's turn, or waits for its run and starts the next
+ * turn. Never replaces anything. A stored agent that is not live is loaded first when `loadAgent`
+ * is given; without it, or when the agent is archived or gone, the message is dropped.
+ */
+export async function deliverQueuedPrompt(input: {
+  agentManager: AgentRunController;
+  agentId: string;
+  prompt: QueuedPrompt;
+  logger: Logger;
+  loadAgent?: (agentId: string) => Promise<boolean>;
+}): Promise<QueuedPromptDelivery> {
+  const { agentManager, agentId, prompt, logger } = input;
+  const runOptions = prompt.clientMessageId ? { clientMessageId: prompt.clientMessageId } : {};
+  const steerOptions = prompt.clearPendingPermissions
+    ? { ...runOptions, clearPendingPermissions: true }
+    : runOptions;
   for (;;) {
-    const result = await agentManager.steerIntoActiveTurn(
-      agentId,
-      prompt,
-      steerOptionsFor(options),
-    );
-    if (result.status === "steered") return;
+    if (!agentManager.getAgent(agentId)) {
+      if (!input.loadAgent || !(await input.loadAgent(agentId))) return "dropped";
+    }
+    const result = await agentManager.steerIntoActiveTurn(agentId, prompt.prompt, steerOptions);
+    if (result.status === "steered") return "delivered";
     if (result.status === "busy") {
       await result.nextOpportunity;
       continue;
@@ -147,10 +183,10 @@ async function deliverWhenPossible(
     try {
       // Idle: start the turn through the ordinary path, which never replaces without
       // `replaceRunning`, so a run that appears in the meantime is refused, not interrupted.
-      await startAgentRunWithStaleRetry(agentManager, agentId, prompt, logger, {
-        runOptions: options.runOptions,
+      await startAgentRunWithStaleRetry(agentManager, agentId, prompt.prompt, logger, {
+        runOptions,
       });
-      return;
+      return "delivered";
     } catch (error) {
       if (!agentManager.hasInFlightRun(agentId)) throw error;
     }

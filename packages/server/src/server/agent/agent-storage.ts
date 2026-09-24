@@ -4,12 +4,28 @@ import { z } from "zod";
 import type { Logger } from "pino";
 
 import { writeJsonFileAtomic } from "../atomic-file.js";
-import { AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
+import { AgentAttachmentSchema, AgentFeatureSchema, AgentStatusSchema } from "../messages.js";
 import { toStoredAgentRecord } from "./agent-projections.js";
 import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
 import { FINISH_OBLIGATION_SCHEMA, type FinishObligation } from "./finish-obligation.js";
+import type { QueuedPrompt } from "./prompt-queue.js";
+
+// Passthrough, so a text attachment that also carries `text` keeps its other fields.
+const QUEUED_PROMPT_BLOCK_SCHEMA = z.union([
+  z.object({ type: z.literal("text"), text: z.string() }).passthrough(),
+  z.object({ type: z.literal("image"), data: z.string(), mimeType: z.string() }).passthrough(),
+  AgentAttachmentSchema,
+]);
+
+const QUEUED_PROMPT_SCHEMA = z.object({
+  id: z.string(),
+  prompt: z.union([z.string(), z.array(QUEUED_PROMPT_BLOCK_SCHEMA)]),
+  clientMessageId: z.string().optional(),
+  clearPendingPermissions: z.boolean().optional(),
+  queuedAt: z.string(),
+});
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -86,6 +102,10 @@ const STORED_AGENT_SCHEMA = z.object({
   // daemon cannot read is dropped rather than failing the whole record, which would hide the
   // agent: that is a daemon older than the one that wrote it, and it simply owes nothing.
   finishObligations: z.array(FINISH_OBLIGATION_SCHEMA).optional().catch(undefined),
+  // Messages waiting for this agent's run, in order (docs/data-model.md). Written only through
+  // appendQueuedPrompt and removeQueuedPrompt, carried forward like finishObligations, and
+  // dropped rather than failing the record when this daemon cannot read them.
+  queuedPrompts: z.array(QUEUED_PROMPT_SCHEMA).optional().catch(undefined),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -187,11 +207,37 @@ export class AgentStorage {
     return written;
   }
 
+  /**
+   * Put a message at the back of the agent's queue. Durable when it resolves. Resolves false when
+   * the agent has no record.
+   */
+  async appendQueuedPrompt(agentId: string, prompt: QueuedPrompt): Promise<boolean> {
+    await this.load();
+    let written = false;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) return null;
+      written = true;
+      return { ...existing, queuedPrompts: [...(existing.queuedPrompts ?? []), prompt] };
+    });
+    return written;
+  }
+
+  /** Take a delivered (or dropped) message out of the agent's queue. */
+  async removeQueuedPrompt(agentId: string, promptId: string): Promise<void> {
+    await this.load();
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing?.queuedPrompts?.some((prompt) => prompt.id === promptId)) return null;
+      const remaining = existing.queuedPrompts.filter((prompt) => prompt.id !== promptId);
+      const { queuedPrompts: _previous, ...rest } = existing;
+      return remaining.length > 0 ? { ...rest, queuedPrompts: remaining } : rest;
+    });
+  }
+
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
     // Callers build records by spreading one they read earlier, so their copy of the obligations
-    // can be stale by the time this write runs. The stored value wins.
+    // and queued messages can be stale by the time this write runs. The stored value wins.
     return this.queueRecordMutation(record.id, (existing) =>
-      carryFinishObligations(record, existing),
+      carryStoreOwnedFields(record, existing),
     );
   }
 
@@ -323,7 +369,7 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      return carryFinishObligations(record, existing);
+      return carryStoreOwnedFields(record, existing);
     });
     return applied;
   }
@@ -492,15 +538,18 @@ export class AgentStorage {
   }
 }
 
-function carryFinishObligations(
+/** Fields only their own store methods write. Every other write keeps the stored value. */
+function carryStoreOwnedFields(
   record: StoredAgentRecord,
   existing: StoredAgentRecord | null,
 ): StoredAgentRecord {
   if (!existing) return record;
-  const { finishObligations: _incoming, ...rest } = record;
-  return existing.finishObligations
-    ? { ...rest, finishObligations: existing.finishObligations }
-    : rest;
+  const { finishObligations: _obligations, queuedPrompts: _queued, ...rest } = record;
+  return {
+    ...rest,
+    ...(existing.finishObligations ? { finishObligations: existing.finishObligations } : {}),
+    ...(existing.queuedPrompts ? { queuedPrompts: existing.queuedPrompts } : {}),
+  };
 }
 
 function projectDirNameFromCwd(cwd: string): string {

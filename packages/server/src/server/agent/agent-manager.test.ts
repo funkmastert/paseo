@@ -19,6 +19,7 @@ import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import {
+  createPromptQueue,
   formatSystemNotificationPrompt,
   sendPromptToAgent,
   startAgentRun,
@@ -1711,6 +1712,149 @@ test("a message sent with no behavior steers into the running turn", async () =>
     expect(session.startPrompts).toEqual(["initial"]);
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// A message waiting for a busy agent lived only in memory, so a daemon restart before the turn
+// ended lost it. It lives on the agent's record now, and the next daemon delivers it.
+test("a message waiting for a busy agent is on its record until the turn it waited for ends", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-queued-record-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  session.steerResult = "unavailable";
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    registry: storage,
+    logger,
+  });
+  manager.setPromptQueue(
+    createPromptQueue({ agentManager: manager, agentStorage: storage, logger }),
+  );
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const result = await startAgentRun(manager, agent.id, "after your turn", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "queued-client" },
+    });
+
+    expect(result).toEqual({ disposition: "queued" });
+    expect((await storage.get(agent.id))?.queuedPrompts).toEqual([
+      expect.objectContaining({ prompt: "after your turn", clientMessageId: "queued-client" }),
+    ]);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "after your turn"]));
+    await vi.waitFor(async () =>
+      expect((await storage.get(agent.id))?.queuedPrompts).toBeUndefined(),
+    );
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("messages a busy agent was waiting for are delivered, in order, by the next daemon", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-queued-restart-"));
+  const agentsDir = join(workdir, "agents");
+  const firstStorage = new AgentStorage(agentsDir, logger);
+  const busy = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  busy.steerResult = "unavailable";
+  const firstDaemon = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return busy;
+        }
+      })(),
+    },
+    registry: firstStorage,
+    logger,
+  });
+  const firstQueue = createPromptQueue({
+    agentManager: firstDaemon,
+    agentStorage: firstStorage,
+    logger,
+  });
+  firstDaemon.setPromptQueue(firstQueue);
+  const agent = await firstDaemon.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const run = firstDaemon.streamAgent(agent.id, "long task");
+  void (async () => {
+    for await (const _event of run) {
+    }
+  })();
+  await firstDaemon.waitForAgentRunStart(agent.id);
+  for (const text of ["first", "second"]) {
+    await expect(
+      startAgentRun(firstDaemon, agent.id, text, logger, {
+        replaceRunning: true,
+        activeTurnBehavior: "steer",
+      }),
+    ).resolves.toEqual({ disposition: "queued" });
+  }
+  // The daemon goes down with the turn still running.
+  firstQueue.stop();
+  await firstStorage.flush();
+
+  const resumed = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  resumed.steerResult = "unavailable";
+  const secondStorage = new AgentStorage(agentsDir, logger);
+  await secondStorage.initialize();
+  const secondDaemon = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async resumeSession(): Promise<AgentSession> {
+          return resumed;
+        }
+        override async createSession(): Promise<AgentSession> {
+          return resumed;
+        }
+      })(),
+    },
+    registry: secondStorage,
+    logger,
+  });
+  const secondQueue = createPromptQueue({
+    agentManager: secondDaemon,
+    agentStorage: secondStorage,
+    logger,
+  });
+  secondDaemon.setPromptQueue(secondQueue);
+  try {
+    await secondQueue.resume();
+
+    await vi.waitFor(() => expect(resumed.startPrompts).toEqual(["first"]));
+    // "second" waits for the turn "first" started, and never interrupts it.
+    expect(resumed.interruptCount).toBe(0);
+    resumed.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+    await vi.waitFor(() => expect(resumed.startPrompts).toEqual(["first", "second"]));
+    await vi.waitFor(async () =>
+      expect((await secondStorage.get(agent.id))?.queuedPrompts).toBeUndefined(),
+    );
+  } finally {
+    await secondDaemon.closeAgent(agent.id).catch(() => undefined);
+    await firstDaemon.closeAgent(agent.id).catch(() => undefined);
     rmSync(workdir, { recursive: true, force: true });
   }
 });

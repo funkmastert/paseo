@@ -462,3 +462,65 @@ describe("finish reports survive a daemon restart (e2e)", () => {
       });
   }, 60_000);
 });
+
+/** Every prompt any agent received that mentions `text`, across daemons. */
+function promptsMentioning(home: Home, text: string): string[] {
+  return home.prompts.filter((prompt) => prompt.text.includes(text)).map((prompt) => prompt.text);
+}
+
+/** The messages queued for an agent exactly as they sit in its JSON file. */
+async function queuedOnDisk(home: Home, agentId: string): Promise<string[]> {
+  const agentsDir = path.join(home.paseoHome, "agents");
+  for (const dir of await readdir(agentsDir)) {
+    const file = path.join(agentsDir, dir, `${agentId}.json`);
+    const text = await readFile(file, "utf8").catch(() => null);
+    if (text === null) continue;
+    const record = JSON.parse(text) as { queuedPrompts?: Array<{ prompt: AgentPromptInput }> };
+    return (record.queuedPrompts ?? []).map((queued) => promptText(queued.prompt));
+  }
+  return [];
+}
+
+describe("messages waiting for a busy agent survive a daemon restart (e2e)", () => {
+  let home: Home;
+
+  beforeEach(async () => {
+    home = await createHome();
+    await startDaemon(home);
+  }, 30_000);
+
+  afterEach(async () => {
+    await home.cleanup();
+  }, 30_000);
+
+  // A report counts as delivered once it is queued behind its owner's turn. When that queue lived
+  // only in memory, a restart before the turn ended lost the report for good.
+  test("a finish report queued behind its parent's turn reaches the parent after a restart", async () => {
+    const parent = await createAgent(home, { title: "Leader" });
+    await clientOf(home).sendMessage(parent, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(parent)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    const child = await createAgent(home, {
+      title: "Worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    watchForParent(home, { child, parent });
+    await converse(home, child, "CHILD-DONE");
+
+    // The parent's turn cannot take it, so the report waits on the parent's record.
+    await expect.poll(() => obligationInLedger(home, child)).toMatchObject({ state: "delivered" });
+    await expect
+      .poll(() => queuedOnDisk(home, parent))
+      .toEqual([expect.stringContaining(`Agent ${child} (Worker) finished.`)]);
+    expect(home.prompts.some((prompt) => prompt.text.includes(`Agent ${child}`))).toBe(false);
+
+    await restart(home);
+
+    await expect
+      .poll(() => promptsMentioning(home, `Agent ${child}`), { timeout: 10_000 })
+      .toEqual([expect.stringContaining("CHILD-DONE")]);
+    expect(await reportAbout(home, { to: parent, about: child })).toContain("finished.");
+    await expect.poll(() => queuedOnDisk(home, parent)).toEqual([]);
+  });
+});

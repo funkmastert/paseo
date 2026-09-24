@@ -119,6 +119,7 @@ import {
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import { summarizeOwedFinishReport } from "./finish-obligation.js";
 import type { FinishObligationService } from "./finish-obligation-service.js";
+import type { PromptQueue } from "./prompt-queue.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
   isUnresponsiveCancelReason,
@@ -1138,6 +1139,7 @@ export class AgentManager {
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
+  private promptQueue: PromptQueue | null = null;
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
@@ -1340,6 +1342,15 @@ export class AgentManager {
 
   getFinishObligations(): FinishObligationService | null {
     return this.finishObligations;
+  }
+
+  /** Messages waiting for a busy agent, kept on the agent records (prompt-queue.ts). */
+  setPromptQueue(queue: PromptQueue | null): void {
+    this.promptQueue = queue;
+  }
+
+  getPromptQueue(): PromptQueue | null {
+    return this.promptQueue;
   }
 
   /** Sets the owed-report mirror and broadcasts the snapshot when it changed. */

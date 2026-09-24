@@ -243,7 +243,11 @@ import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
-import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
+import {
+  createPromptQueue,
+  formatSystemNotificationPrompt,
+  sendPromptToAgent,
+} from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
@@ -1430,6 +1434,9 @@ export async function createPaseoDaemon(
   });
   await finishObligations.initialize();
   agentManager.setFinishObligations(finishObligations);
+  // Messages waiting for a busy agent live on its record, so a restart still delivers them.
+  const promptQueue = createPromptQueue({ agentManager, agentStorage, logger });
+  agentManager.setPromptQueue(promptQueue);
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -2409,6 +2416,9 @@ export async function createPaseoDaemon(
             finishObligations.start({
               pushNotificationSender: wsServer.getPushNotificationSender(),
             });
+            void promptQueue.resume().catch((error: unknown) => {
+              logger.error({ err: error }, "Failed to resume messages queued before the restart");
+            });
             // Advice-only sibling of the two monitors above: it reads the same cached usage rows
             // the failover monitor does and the same steer path, and never acts on either.
             budgetPacingMonitor = new AgentBudgetPacingMonitor({
@@ -2518,6 +2528,8 @@ export async function createPaseoDaemon(
     agentManager.prepareForShutdown();
     // Before the closures below: each one would otherwise read as its child's outcome.
     finishObligations.prepareForShutdown();
+    // What is still queued stays on the agent records for the next daemon to deliver.
+    promptQueue.stop();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
     await finishObligations.stop().catch(() => undefined);

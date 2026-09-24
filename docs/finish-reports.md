@@ -69,6 +69,10 @@ An owner that is archived releases the report: whoever archived it ended that tr
 keeps its result on its own record. A `create_agent` report is also released when the child is
 detached from that parent.
 
+A report whose owner is mid-turn and cannot take a steer is queued behind that turn, and counts as
+delivered. The queue is on the owner's record ([providers.md](providers.md)), so a restart before
+the turn ends delivers it rather than losing it.
+
 Delivery failure means `sendPromptToAgent` threw: the owner could not be loaded, its session is
 gone. A turn the provider refuses after it started (a capped account) fails asynchronously and is
 not seen here. Account failover already handles that case: its resume prompt tells the owner to
