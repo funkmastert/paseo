@@ -26,6 +26,11 @@ import {
 } from "./agent/done-janitor-detector.js";
 import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import type { PushNotificationSender } from "./push/index.js";
+import type {
+  WorktreeSnapshotOffsite,
+  WorktreeSnapshotRequest,
+  WorktreeSnapshotResult,
+} from "./remediation/contract.js";
 import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
 import { isRealpathInsideRoot } from "../utils/path.js";
 
@@ -140,6 +145,12 @@ export interface DoneJanitorDependencies {
   measureBytes(path: string): Promise<number | undefined>;
   /** Archives the workspace record and deletes its worktree: archive-by-scope, the same path a person's archive takes. */
   reclaimWorkspace(workspaceId: string): Promise<{ removedDirectory: boolean }>;
+  /**
+   * Snapshots a worktree's uncommitted and unpushed work under `refs/backup/` without touching
+   * it (docs/work-snapshots.md). Called before a dead agent is archived and before any worktree
+   * is deleted.
+   */
+  snapshotWorktree(request: WorktreeSnapshotRequest): Promise<WorktreeSnapshotResult>;
 }
 
 export interface AgentDoneJanitorOptions {
@@ -168,7 +179,8 @@ export interface DoneJanitorReportEntry {
     | "would-delete"
     | "deleted"
     | "kept-workspace"
-    | "kept-agent";
+    | "kept-agent"
+    | "snapshotted";
   agentId?: string;
   title?: string | null;
   workspaceId?: string;
@@ -203,6 +215,11 @@ export class AgentDoneJanitor {
   private readonly memory: DoneJanitorMemory = new Map();
   /** The last report logged per subject, so an unchanged verdict is not logged every sweep. */
   private readonly lastLogged = new Map<string, string>();
+  /**
+   * This sweep's failed snapshots of work at risk, by worktree path. Each spares its worktree
+   * from reclamation until the next sweep tries again.
+   */
+  private readonly snapshotFailures = new Map<string, string>();
 
   constructor(options: AgentDoneJanitorOptions) {
     this.options = options;
@@ -246,6 +263,7 @@ export class AgentDoneJanitor {
     const config = resolveConfig(raw);
     const nowMs = this.now();
     const report: DoneJanitorSweepReport = { dryRun: config.dryRun, entries: [] };
+    this.snapshotFailures.clear();
 
     let views = await this.loadViews();
     let workspaces = await this.deps.listWorkspaces();
@@ -419,6 +437,12 @@ export class AgentDoneJanitor {
         reason: `dead, but then ${changed}`,
       });
       return false;
+    }
+    // Before the archive: once archived, nothing else watches this agent's work.
+    const cwds = new Set([freshRoot, ...listDescendants(root.id, fresh)].map((view) => view?.cwd));
+    for (const cwd of cwds) {
+      if (cwd)
+        await this.snapshot(report, cwd, `done janitor, before archiving dead agent ${root.id}`);
     }
     try {
       await this.deps.archiveAgent(root.id);
@@ -678,6 +702,11 @@ export class AgentDoneJanitor {
     if (!(await this.deps.isPaseoOwnedWorktreePath(path))) {
       return keep("its directory is outside the Paseo worktrees root");
     }
+    for (const [failedPath, error] of this.snapshotFailures) {
+      if (overlaps(path, failedPath)) {
+        return keep(`its work is at risk and could not be snapshotted: ${error}`);
+      }
+    }
     const conflict = directoryConflict(workspace, path, workspaces, views, archivingIds);
     if (conflict) return keep(conflict);
     const terminals = await this.deps.countTerminals(workspaceId);
@@ -728,6 +757,22 @@ export class AgentDoneJanitor {
       );
       return false;
     }
+    // The git gate passed, but it counts a commit on the local base branch as safe; the snapshot
+    // keeps a copy anyway, and a failure keeps the worktree.
+    const snapshotError = await this.snapshot(
+      report,
+      plan.path,
+      `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
+    );
+    if (snapshotError) {
+      report.entries.push({
+        action: "kept-workspace",
+        workspaceId: plan.workspace.workspaceId,
+        path: plan.path,
+        reason: `its work is at risk and could not be snapshotted: ${snapshotError}`,
+      });
+      return false;
+    }
     const bytes = await this.deps.measureBytes(plan.path);
     try {
       const result = await this.deps.reclaimWorkspace(plan.workspace.workspaceId);
@@ -763,6 +808,36 @@ export class AgentDoneJanitor {
       });
       return false;
     }
+  }
+
+  /**
+   * Snapshots the worktree around `cwd`. Returns the error when work at risk could not be
+   * snapshotted, and remembers it so the worktree is spared this sweep; null otherwise. A
+   * directory git cannot read holds nothing a snapshot could save.
+   */
+  private async snapshot(
+    report: DoneJanitorSweepReport,
+    cwd: string,
+    reason: string,
+  ): Promise<string | null> {
+    const result = await this.deps.snapshotWorktree({ cwd, reason });
+    if (result.kind === "snapshotted") {
+      report.entries.push({
+        action: "snapshotted",
+        path: result.worktreePath,
+        reason: `${result.ref}; ${describeOffsite(result.offsite)}`,
+      });
+      return null;
+    }
+    if (result.kind === "failed" && result.worktreePath) {
+      this.snapshotFailures.set(result.worktreePath, result.error);
+      this.options.logger.warn(
+        { path: result.worktreePath, error: result.error },
+        "Done janitor: snapshot of work at risk failed; its worktree is kept",
+      );
+      return result.error;
+    }
+    return null;
   }
 
   private async loadViews(): Promise<DoneJanitorAgentView[]> {
@@ -825,9 +900,9 @@ export class AgentDoneJanitor {
             reason: entry.reason,
           })),
         }),
-        // Routine tidying is only recorded. A worktree it had to leave behind is worth a line in
-        // the digest.
-        { level: keptWorktrees.length > 0 ? "notice" : "record" },
+        // Only recorded, kept worktrees included: each is snapshotted, and the work-at-risk sweep
+        // decides whether one needs a person (docs/work-snapshots.md).
+        { level: "record" },
       );
     } catch (error) {
       this.options.logger.warn({ err: error }, "Done janitor: push notification failed");
@@ -847,6 +922,17 @@ function describeDeadRoot(
   ]
     .filter(Boolean)
     .join("; ");
+}
+
+function describeOffsite(offsite: WorktreeSnapshotOffsite): string {
+  switch (offsite.kind) {
+    case "pushed":
+      return `pushed to ${offsite.remote} as ${offsite.branch}`;
+    case "bundled":
+      return `bundled at ${offsite.path}`;
+    case "none":
+      return `kept locally (${offsite.reason})`;
+  }
 }
 
 function describeAgent(
