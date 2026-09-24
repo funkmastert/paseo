@@ -51,6 +51,7 @@ import {
   runGitCommand,
   type RunGitCommand,
 } from "../utils/run-git-command.js";
+import { runWithSpawnPriority } from "../utils/spawn.js";
 import { branchNameFromRef } from "../utils/worktree-metadata.js";
 import { listPaseoWorktrees, type PaseoWorktreeInfo } from "../utils/worktree.js";
 import { READ_ONLY_GIT_ENV } from "./checkout-git-utils.js";
@@ -2506,15 +2507,18 @@ export class WorkspaceGitServiceImpl implements WorkspaceGitService {
         return;
       }
       try {
-        const status = await service.getCurrentPullRequestStatus({
-          cwd: target.cwd,
-          headRef: pollTarget.headRef,
-          ...(pollTarget.headSha ? { headSha: pollTarget.headSha } : {}),
-          ...(pollTarget.headRepositoryOwner
-            ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
-            : {}),
-          reason: "self-heal-forge-pr-status",
-        });
+        // Periodic self-heal nobody is waiting on: its CLI runs at background priority.
+        const status = await runWithSpawnPriority("background", () =>
+          service.getCurrentPullRequestStatus({
+            cwd: target.cwd,
+            headRef: pollTarget.headRef,
+            ...(pollTarget.headSha ? { headSha: pollTarget.headSha } : {}),
+            ...(pollTarget.headRepositoryOwner
+              ? { headRepositoryOwner: pollTarget.headRepositoryOwner }
+              : {}),
+            reason: "self-heal-forge-pr-status",
+          }),
+        );
         if (!closed && this.isActiveObservedWorkspaceTarget(target)) {
           latestStatus = status;
           consecutiveErrors = 0;
