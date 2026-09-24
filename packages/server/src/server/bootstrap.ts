@@ -229,6 +229,11 @@ import {
   readProviderHealth,
   type DoneJanitorConfig,
 } from "./agent-done-janitor.js";
+import {
+  startDaemonVitals,
+  type DaemonVitals,
+  type DaemonVitalsConfig,
+} from "./daemon-vitals/daemon-vitals.js";
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
@@ -570,6 +575,7 @@ export interface PaseoDaemonConfig {
   };
   doneJanitor?: DoneJanitorConfig;
   refocus?: RefocusConfig;
+  daemonVitals?: DaemonVitalsConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
    * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
@@ -1048,6 +1054,7 @@ export async function createPaseoDaemon(
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
+  let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
   // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
@@ -2427,6 +2434,13 @@ export async function createPaseoDaemon(
               logger,
             });
             doneJanitor.start();
+            daemonVitals = startDaemonVitals({
+              config: config.daemonVitals,
+              paseoHome: config.paseoHome,
+              serverId,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              logger,
+            });
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2531,6 +2545,9 @@ export async function createPaseoDaemon(
     await new Promise<void>((resolve) => {
       httpServer.close(() => resolve());
     });
+    // Last, so a wedge during any earlier step is still observed and the heartbeat file only says
+    // "stopped" once everything else has.
+    await daemonVitals?.stop();
     // Clean up socket files
     if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
       unlinkSync(listenTarget.path);

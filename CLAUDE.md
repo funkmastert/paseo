@@ -60,6 +60,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                        |
 | [docs/finish-reports.md](docs/finish-reports.md)                     | Durable finish reports — the obligation on the child record, restart re-arm, retry/escalation ladder, successors, parked         |
 | [docs/refocus.md](docs/refocus.md)                                   | Refocus — restating an agent's assignment after growth or compaction, riding on prompts it already gets, cost, compaction        |
+| [docs/daemon-vitals.md](docs/daemon-vitals.md)                       | Daemon vitals — event-loop wedge detector, why suspension is not a wedge, slow-op recorder, shutdown receipt                     |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                       |
 | [docs/testing.md](docs/testing.md)                                   | TDD workflow, determinism, real dependencies over mocks, test organization                                                       |
 | [docs/qa.md](docs/qa.md)                                             | QA evidence bar for pull requests — platform matrix, version drift, performance, UI proof                                        |

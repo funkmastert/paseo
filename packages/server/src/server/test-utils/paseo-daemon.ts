@@ -51,6 +51,7 @@ interface TestPaseoDaemonOptions {
   doneJanitor?: PaseoDaemonConfig["doneJanitor"];
   doneJanitorOverrides?: PaseoDaemonConfig["doneJanitorOverrides"];
   refocus?: PaseoDaemonConfig["refocus"];
+  daemonVitals?: PaseoDaemonConfig["daemonVitals"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
 }
@@ -207,6 +208,7 @@ async function prepareTestDaemonConfig(
     doneJanitor: options.doneJanitor,
     doneJanitorOverrides: options.doneJanitorOverrides,
     refocus: options.refocus,
+    daemonVitals: options.daemonVitals,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
   };

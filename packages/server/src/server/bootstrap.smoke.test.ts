@@ -361,6 +361,7 @@ describe("paseo daemon bootstrap", () => {
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
+        daemonVitals: { enabled: true, dryRun: true },
       },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
@@ -411,6 +412,7 @@ describe("paseo daemon bootstrap", () => {
         "account-pressure": { enabled: false, dryRun: undefined },
         refocus: { enabled: true, dryRun: true },
         "model-divergence": { enabled: true, dryRun: undefined },
+        daemonVitals: { enabled: true, dryRun: true },
       });
 
       const reloadedPersisted = {
@@ -424,6 +426,7 @@ describe("paseo daemon bootstrap", () => {
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
+          daemonVitals: { enabled: false },
         },
       };
       await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
@@ -439,6 +442,11 @@ describe("paseo daemon bootstrap", () => {
         "agents.resourceMonitor",
         "agents.tokenBurnMonitor",
       ]);
+      // Daemon vitals is read once at boot (docs/daemon-vitals.md): a reload flags it, and the
+      // running detector keeps its boot mode.
+      expect(
+        result.restartRequiredPaths.filter((changed) => changed.startsWith("agents.daemonVitals")),
+      ).not.toEqual([]);
       const reloaded = (await client.getDaemonConfig()).config;
       expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
       expect(reloaded.tokenBurnMonitor).toEqual(reloadedPersisted.agents.tokenBurnMonitor);
@@ -454,6 +462,7 @@ describe("paseo daemon bootstrap", () => {
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
         "model-divergence": { enabled: false },
+        daemonVitals: { enabled: true, dryRun: true },
       });
     } finally {
       await client?.close().catch(() => undefined);

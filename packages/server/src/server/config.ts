@@ -565,6 +565,7 @@ function resolveAgentMonitorConfig(
   | "budgetPacing"
   | "doneJanitor"
   | "refocus"
+  | "daemonVitals"
 > {
   const agents = persisted.agents;
   return {
@@ -576,6 +577,7 @@ function resolveAgentMonitorConfig(
     budgetPacing: agents?.budgetPacing,
     doneJanitor: agents?.doneJanitor,
     refocus: agents?.refocus,
+    daemonVitals: agents?.daemonVitals,
   };
 }
 
