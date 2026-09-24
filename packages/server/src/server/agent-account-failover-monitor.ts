@@ -3,7 +3,6 @@ import type { Logger } from "pino";
 import pLimit from "p-limit";
 import {
   buildAccountFailoverNotificationPayload,
-  buildAccountPoolExhaustedNotificationPayload,
   buildAccountFailoverReturnNotificationPayload,
 } from "@getpaseo/protocol/account-failover-notification";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
@@ -37,10 +36,13 @@ import {
 } from "./agent/account-failover-return.js";
 import {
   migrateStuckAgent,
+  rehomeIdleAgent,
   type AccountFailoverOutcome,
 } from "./agent/account-failover-migration.js";
+import { planIdleRehomes } from "./agent/account-failover-rehome.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import type { PushNotificationSender } from "./push/index.js";
+import { NULL_REMEDIATION_SINK, type RemediationSink } from "./remediation/contract.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_MIGRATION_CONCURRENCY = 3;
@@ -56,6 +58,9 @@ const DEFAULT_MIGRATION_CONCURRENCY = 3;
  * when it runs out Tyler is told in words.
  */
 const MAX_RESUME_ATTEMPTS = 3;
+
+/** The ladder key for "agents are stranded and no account can take them" (docs/remediation.md). */
+export const ACCOUNT_FAILOVER_STRANDED_KEY = "account-failover-stranded";
 
 export interface AccountFailoverConfig extends AccountFailoverReturnConfig {
   enabled?: boolean;
@@ -78,6 +83,8 @@ export interface AccountFailoverMonitorOptions {
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
   providerUsage: Pick<ProviderUsageService, "listUsage">;
   pushNotificationSender: PushNotificationSender;
+  /** Where "no account can take the work" goes. The ladder owns that push. */
+  remediationSink?: RemediationSink;
   serverId: string;
   /** `providers` is the daemon's resolved `agents.providers`; the pool lives in its params. */
   readDaemonConfig: () => {
@@ -142,8 +149,13 @@ export class AccountFailoverMonitor {
   private sightings = new Map<string, LimitErrorSighting>();
   private providerSightings = new Map<string, ProviderLimitSighting>();
   private unresumed = new Map<string, UnresumedAgent>();
-  /** The dead-account set already reported as exhausted, or null when the pool has targets. */
-  private exhaustionEpisode: string | null = null;
+  /** Whether the last stranding observation was active, so the all-clear is sent once. */
+  private strandingActive = false;
+  /**
+   * Per-agent earliest next idle move after a refused one. In memory: a refusal is structural, and
+   * forgetting the backoff across a restart costs one more refused move.
+   */
+  private idleBackoffs = new Map<string, number>();
   /**
    * Per-agent earliest next return attempt. In memory on purpose, unlike the home label: forgetting
    * a cooldown across a restart costs at most one extra move, and every other return gate — home
@@ -202,6 +214,8 @@ export class AccountFailoverMonitor {
       this.sightings.clear();
       this.providerSightings.clear();
       this.returnCooldowns.clear();
+      this.idleBackoffs.clear();
+      await this.observeStranding({ stranded: [], deadPoolIds: [], usage: null });
       return;
     }
 
@@ -249,69 +263,176 @@ export class AccountFailoverMonitor {
     );
 
     const stranded = plan.candidates.filter((_, index) => outcomes[index] === "no-target");
-    await this.reportExhaustion({ stranded, poolEntries, deadProviderIds: plan.deadProviderIds });
+    await this.observeStranding({
+      stranded,
+      deadPoolIds: poolEntries
+        .map((entry) => entry.providerId)
+        .filter((providerId) => plan.deadProviderIds.has(providerId)),
+      usage: usage?.providers ?? null,
+    });
+
+    // Re-read: the migrations above moved agents and wrote home labels.
+    const afterRescues =
+      plan.candidates.length === 0
+        ? agents
+        : this.options.agentManager.listAgentsForAccountFailover();
+    const idle = planIdleRehomes({
+      agents: afterRescues,
+      poolProviderIds: new Set(poolEntries.map((entry) => entry.providerId)),
+      deadProviderIds: plan.deadProviderIds,
+      backoffs: this.idleBackoffs,
+      nowMs,
+      migrateSubagents: config.migrateSubagents,
+    });
+    for (const agent of idle) {
+      await this.rehomeIdleOne({
+        agent,
+        poolEntries,
+        deadProviderIds: plan.deadProviderIds,
+        headroom,
+        accounts,
+        config,
+      });
+    }
+
     await this.returnAgentsHome({
-      // Re-read: the migrations above moved agents and wrote home labels.
       agents:
-        plan.candidates.length === 0
-          ? agents
-          : this.options.agentManager.listAgentsForAccountFailover(),
+        idle.length === 0 ? afterRescues : this.options.agentManager.listAgentsForAccountFailover(),
       poolEntries,
       deadProviderIds: plan.deadProviderIds,
       accounts,
+      headroom,
       config: config.return,
     });
   }
 
   /**
-   * Nobody could be moved because there was nowhere to move them. Said once per episode, not
-   * once per sweep and not once per agent: the sweep runs every 60 seconds, and an account that
-   * is out for the week would otherwise produce a push a minute for days.
+   * An agent between turns on an exhausted account: moved in place, never prompted. A refusal is
+   * structural (a retired handle on the target, a provider that went away), so it backs off for
+   * `returnRetryBackoffMinutes` rather than retrying every sweep.
+   */
+  private async rehomeIdleOne(input: {
+    agent: AccountFailoverAgentSummary;
+    poolEntries: readonly AccountPoolProviderEntry[];
+    deadProviderIds: ReadonlySet<string>;
+    headroom: ReadonlyMap<string, number>;
+    accounts: ReadonlyMap<string, AgentAccountAuth | null>;
+    config: ResolvedAccountFailoverConfig;
+  }): Promise<void> {
+    const { agent, config } = input;
+    const { logger } = this.options;
+    let outcome: Awaited<ReturnType<typeof rehomeIdleAgent>>;
+    try {
+      outcome = await rehomeIdleAgent({
+        agent,
+        poolEntries: input.poolEntries,
+        deadProviderIds: input.deadProviderIds,
+        headroom: input.headroom,
+        allowLeaderTarget: config.collapseToSharedAccount,
+        accounts: input.accounts,
+        agentManager: this.options.agentManager,
+        agentStorage: this.options.agentStorage,
+        workspaceProvisioning: this.options.workspaceProvisioning,
+        logger,
+      });
+    } catch (error) {
+      this.idleBackoffs.set(agent.id, this.now() + config.return.retryBackoffMs);
+      logger.warn(
+        { err: error, agentId: agent.id, provider: agent.provider },
+        "Account failover: could not move an idle agent off its exhausted account",
+      );
+      return;
+    }
+    switch (outcome.kind) {
+      case "moved":
+        this.idleBackoffs.delete(agent.id);
+        logger.info(
+          { agentId: agent.id, from: outcome.oldProviderId, to: outcome.targetProviderId },
+          "Account failover: moved an idle agent off its exhausted account",
+        );
+        await this.notifyPush({
+          workspaceId: agent.workspaceId,
+          oldAgentId: agent.id,
+          oldTitle: agent.title,
+          newAgentId: agent.id,
+          targetProviderId: outcome.targetProviderId,
+        });
+        return;
+      case "refused":
+        this.idleBackoffs.set(agent.id, this.now() + config.return.retryBackoffMs);
+        logger.info(
+          { agentId: agent.id, to: outcome.targetProviderId, reason: outcome.reason },
+          "Account failover: the idle agent's move was refused; backing off",
+        );
+        return;
+      case "no-target":
+        // Nothing to say: it is not doing anything. If it is asked to, it fails on the cap and
+        // becomes a rescue candidate, and a stranded rescue is what Tyler hears about.
+        return;
+      case "adopted":
+      case "duplicate":
+        this.logDuplicate(outcome);
+        return;
+    }
+  }
+
+  private logDuplicate(
+    outcome: Extract<AccountFailoverOutcome, { kind: "adopted" | "duplicate" }>,
+  ): void {
+    this.options.logger.info(
+      {
+        agentId: outcome.oldAgentId,
+        holderId: outcome.kind === "adopted" ? outcome.newAgentId : outcome.holderId,
+      },
+      outcome.kind === "adopted"
+        ? "Account failover: agent was already handed off; marked it retired"
+        : "Account failover: the conversation is live under another record; retired this duplicate",
+    );
+  }
+
+  /**
+   * Nobody could be moved because there was nowhere to move them. That is the one account
+   * condition a person hears about, and the ladder owns the push (docs/remediation.md): no remedy
+   * is left, and no agent can help, because it would need an account to run on. Reported every
+   * sweep while it holds and once when it clears, which is how the ladder keeps it to one push
+   * per episode.
    *
-   * The episode is keyed on the set of dead accounts, so it re-arms the moment that set changes
-   * — an account recovering, or a new one going down, is a different situation and worth saying.
    * Stranding is the deliberate outcome here, not a failure to act: every remaining target would
    * fail on the first turn, so a move would spend a rescue to leave the agent exactly as stuck.
    */
-  private async reportExhaustion(input: {
+  private async observeStranding(input: {
     stranded: readonly AccountFailoverAgentSummary[];
-    poolEntries: readonly AccountPoolProviderEntry[];
-    deadProviderIds: ReadonlySet<string>;
+    deadPoolIds: readonly string[];
+    usage: readonly ProviderUsage[] | null;
   }): Promise<void> {
-    if (input.stranded.length === 0) {
-      this.exhaustionEpisode = null;
+    const sink = this.options.remediationSink ?? NULL_REMEDIATION_SINK;
+    const active = input.stranded.length > 0;
+    if (!active && !this.strandingActive) {
       return;
     }
-    const poolIds = input.poolEntries.map((entry) => entry.providerId);
-    const deadPoolIds = poolIds.filter((providerId) => input.deadProviderIds.has(providerId));
-    const episode = deadPoolIds.slice().sort().join(",");
-    if (this.exhaustionEpisode === episode) {
-      return;
-    }
-    this.exhaustionEpisode = episode;
-
-    const resetHint = input.stranded
-      .map((agent) => parseResetTimeHint(agent.lastError))
-      .find((hint) => hint !== null);
-    this.options.logger.error(
-      { deadProviderIds: deadPoolIds, strandedAgentCount: input.stranded.length },
-      "Account failover: every pool account is out of budget; agents are stranded where they are",
-    );
-    try {
-      await this.options.pushNotificationSender.send(
-        buildAccountPoolExhaustedNotificationPayload({
-          serverId: this.options.serverId,
-          providerIds: deadPoolIds.length > 0 ? deadPoolIds : poolIds,
-          strandedAgentCount: input.stranded.length,
-          resetHint,
-        }),
-      );
-    } catch (error) {
-      this.options.logger.warn(
-        { err: error },
-        "Account failover: pool-exhausted push notification failed",
+    this.strandingActive = active;
+    const agents = input.stranded.length === 1 ? "1 agent" : `${input.stranded.length} agents`;
+    const accounts = input.deadPoolIds.join(", ");
+    if (active) {
+      this.options.logger.error(
+        { deadProviderIds: input.deadPoolIds, strandedAgentCount: input.stranded.length },
+        "Account failover: no pool account can take the stranded agents",
       );
     }
+    await sink.observe({
+      key: ACCOUNT_FAILOVER_STRANDED_KEY,
+      kind: "account-pool-exhausted",
+      active,
+      remedy: "none",
+      level: "alert",
+      title: "No Claude account can take stranded agents",
+      summary: active
+        ? `${agents} hit a usage limit and cannot be moved: ${accounts} are out of budget. ` +
+          "Sign another account in or raise a limit; failover moves them as soon as one recovers."
+        : "An account recovered and the stranded agents can move again.",
+      evidence: active ? strandingEvidence(input) : undefined,
+      ...(input.stranded[0] ? { link: { agentId: input.stranded[0].id } } : {}),
+    });
   }
 
   private async readUsage(options?: {
@@ -517,10 +638,10 @@ export class AccountFailoverMonitor {
         );
         return outcome.kind;
       case "adopted":
-        logger.info(
-          { agentId: outcome.oldAgentId, successorId: outcome.newAgentId },
-          "Account failover: agent was already handed off; marked it retired",
-        );
+      case "duplicate":
+        // Done, never a failure: the conversation already runs under a live record, and this
+        // retired one is never a candidate again.
+        this.logDuplicate(outcome);
         return outcome.kind;
       case "migrated":
         logger.info(
@@ -574,6 +695,7 @@ export class AccountFailoverMonitor {
     poolEntries: readonly AccountPoolProviderEntry[];
     deadProviderIds: ReadonlySet<string>;
     accounts: ReadonlyMap<string, AgentAccountAuth | null>;
+    headroom: ReadonlyMap<string, number>;
     config: ResolvedReturnConfig;
   }): Promise<void> {
     const plan = planAccountFailoverReturns({
@@ -581,6 +703,7 @@ export class AccountFailoverMonitor {
       poolEntries: input.poolEntries,
       deadProviderIds: input.deadProviderIds,
       accounts: input.accounts,
+      headroom: input.headroom,
       cooldowns: this.returnCooldowns,
       nowMs: this.now(),
       config: input.config,
@@ -598,12 +721,12 @@ export class AccountFailoverMonitor {
     const fresh = await this.readUsage({ forceRefresh: true });
     const nowMs = this.now();
     const blocked = new Map<string, string | null>();
-    for (const candidate of plan.candidates) {
-      if (!blocked.has(candidate.homeProviderId)) {
+    const blockedReason = (providerId: string): string | null => {
+      if (!blocked.has(providerId)) {
         blocked.set(
-          candidate.homeProviderId,
+          providerId,
           homeReturnBlockedReason({
-            homeProviderId: candidate.homeProviderId,
+            homeProviderId: providerId,
             usage: fresh?.providers ?? null,
             fetchedAtMs: fresh?.fetchedAtMs ?? null,
             nowMs,
@@ -611,15 +734,24 @@ export class AccountFailoverMonitor {
           }),
         );
       }
-      const reason = blocked.get(candidate.homeProviderId) ?? null;
-      if (reason !== null) {
+      return blocked.get(providerId) ?? null;
+    };
+    for (const candidate of plan.candidates) {
+      const target = candidate.targetProviderIds.find(
+        (providerId) => blockedReason(providerId) === null,
+      );
+      if (!target) {
         this.options.logger.debug(
-          { agentId: candidate.agentId, home: candidate.homeProviderId, reason },
-          "Account failover: not returning the agent home yet",
+          {
+            agentId: candidate.agentId,
+            targets: candidate.targetProviderIds,
+            reason: blockedReason(candidate.homeProviderId),
+          },
+          "Account failover: not returning the agent yet",
         );
         continue;
       }
-      await this.returnOne(candidate, input.config);
+      await this.returnOne(candidate, target, input.config);
     }
   }
 
@@ -642,21 +774,22 @@ export class AccountFailoverMonitor {
     }
   }
 
-  private async returnOne(candidate: ReturnCandidate, config: ResolvedReturnConfig): Promise<void> {
+  private async returnOne(
+    candidate: ReturnCandidate,
+    targetProviderId: string,
+    config: ResolvedReturnConfig,
+  ): Promise<void> {
     const { logger } = this.options;
     try {
-      await this.options.agentManager.moveAgentToProvider(
-        candidate.agentId,
-        candidate.homeProviderId,
-      );
+      await this.options.agentManager.moveAgentToProvider(candidate.agentId, targetProviderId);
     } catch (error) {
       // A refusal is nearly always structural, so back off rather than retry every sweep. The
       // label stays: the agent still belongs on its home account, and a later sweep may find the
       // reason gone.
       this.returnCooldowns.set(candidate.agentId, this.now() + config.retryBackoffMs);
       logger.info(
-        { err: error, agentId: candidate.agentId, home: candidate.homeProviderId },
-        "Account failover: could not move the agent back to its home account",
+        { err: error, agentId: candidate.agentId, to: targetProviderId },
+        "Account failover: could not move the agent back",
       );
       return;
     }
@@ -665,10 +798,11 @@ export class AccountFailoverMonitor {
       {
         agentId: candidate.agentId,
         from: candidate.fromProviderId,
-        to: candidate.homeProviderId,
+        to: targetProviderId,
       },
       "Account failover: returned the agent to its own account",
     );
+    // Back home, or a child back on a worker: either way the round trip is over.
     await this.dropHomeProvider({
       agentId: candidate.agentId,
       homeProviderId: candidate.homeProviderId,
@@ -681,9 +815,10 @@ export class AccountFailoverMonitor {
           workspaceId: candidate.workspaceId,
           agentId: candidate.agentId,
           agentTitle: candidate.title,
-          homeProviderId: candidate.homeProviderId,
+          homeProviderId: targetProviderId,
           fromProviderId: candidate.fromProviderId,
         }),
+        { level: "record" },
       );
     } catch (error) {
       logger.warn({ err: error }, "Account failover: return push notification failed");
@@ -710,8 +845,9 @@ export class AccountFailoverMonitor {
           targetProviderId: input.targetProviderId,
         }),
         {
-          // A move that carried on is news. One that could not restart the agent needs a person.
-          level: input.resumed === false ? "alert" : "notice",
+          // A move that carried on is the remedy working: the ledger, no push. One that could not
+          // restart the agent needs a person.
+          level: input.resumed === false ? "alert" : "record",
           dedupeKey: `account-failover:${input.oldAgentId}:${input.resumed === false ? "stuck" : "moved"}`,
         },
       );
@@ -755,4 +891,43 @@ export class AccountFailoverMonitor {
       );
     }
   }
+}
+
+/**
+ * The stranded agents, and when the first dead account comes back: the earliest reset among the
+ * capped windows of the accounts that are out, else the reset the agents' own cap messages name.
+ */
+function strandingEvidence(input: {
+  stranded: readonly AccountFailoverAgentSummary[];
+  deadPoolIds: readonly string[];
+  usage: readonly ProviderUsage[] | null;
+}): string {
+  const lines = input.stranded.map(
+    (agent) => `- ${agent.id} "${agent.title ?? "untitled"}" on ${agent.provider}`,
+  );
+  const resets = (input.usage ?? [])
+    .filter((row) => input.deadPoolIds.includes(row.providerId))
+    .flatMap((row) =>
+      row.windows
+        .filter((window) => typeof window.usedPct === "number" && window.usedPct >= 100)
+        .flatMap((window) => (window.resetsAt ? [{ at: window.resetsAt, row }] : [])),
+    )
+    .filter((reset) => Number.isFinite(Date.parse(reset.at)))
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const earliest = resets[0];
+  const hint = input.stranded
+    .map((agent) => parseResetTimeHint(agent.lastError))
+    .find((value) => value !== null);
+  let reset = "Earliest reset: unknown.";
+  if (earliest) {
+    reset = `Earliest reset: ${earliest.at} (${earliest.row.providerId}).`;
+  } else if (hint) {
+    reset = `Earliest reset: ${hint} (from the cap message).`;
+  }
+  return [
+    `Out of budget: ${input.deadPoolIds.join(", ")}.`,
+    reset,
+    "Stranded agents:",
+    ...lines,
+  ].join("\n");
 }

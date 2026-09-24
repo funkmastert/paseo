@@ -238,7 +238,7 @@ import {
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import type { RemediationConfig } from "./remediation/config.js";
-import { createForwardingRemediationSink } from "./remediation/contract.js";
+import { createForwardingRemediationSink, type RemediationSink } from "./remediation/contract.js";
 import { findEscalationAccountBlocker } from "./remediation/escalation.js";
 import { RemediationLadder } from "./remediation/ladder.js";
 import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
@@ -572,6 +572,7 @@ export interface PaseoDaemonConfig {
     providerUsage?: Pick<ProviderUsageService, "listUsage">;
     sweepIntervalMs?: number;
     now?: () => number;
+    remediationSink?: RemediationSink;
   };
   /**
    * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
@@ -950,6 +951,7 @@ function createAccountFailoverMonitor(input: {
     "getProviderUsageService" | "getPushNotificationSender"
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  remediationSink: RemediationSink;
   serverId: string;
   logger: Logger;
 }): AccountFailoverMonitor {
@@ -960,6 +962,7 @@ function createAccountFailoverMonitor(input: {
     workspaceProvisioning: input.workspaceProvisioning,
     providerUsage: overrides?.providerUsage ?? input.wsServer.getProviderUsageService(),
     pushNotificationSender: input.wsServer.getPushNotificationSender(),
+    remediationSink: overrides?.remediationSink ?? input.remediationSink,
     serverId: input.serverId,
     readDaemonConfig: () => ({
       accountFailover: input.daemonConfigStore.get().accountFailover,
@@ -2505,6 +2508,7 @@ export async function createPaseoDaemon(
               workspaceProvisioning,
               wsServer,
               daemonConfigStore,
+              remediationSink,
               serverId,
               logger,
             });
