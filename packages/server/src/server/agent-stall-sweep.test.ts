@@ -363,7 +363,7 @@ describe("a stalled agent on a capped account", () => {
   test("is handed to account failover after the shorter threshold, never nudged", async () => {
     h.add("a1", {
       provider: "claude-personal",
-      lastActivityAt: new Date(START + 4 * MINUTE).toISOString(),
+      lastActivityAt: new Date(START - 6 * MINUTE).toISOString(),
     });
     await h.warmUp();
     expect(h.handoffs).toEqual(["a1"]);
