@@ -238,6 +238,10 @@ import {
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import type { RemediationConfig } from "./remediation/config.js";
+import { createForwardingRemediationSink } from "./remediation/contract.js";
+import { findEscalationAccountBlocker } from "./remediation/escalation.js";
+import { RemediationLadder } from "./remediation/ladder.js";
+import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -629,6 +633,8 @@ export interface PaseoDaemon {
   getAccountFailoverMonitor(): AccountFailoverMonitor | null;
   /** Null until start() has constructed it, like the account-failover monitor. */
   getDoneJanitor(): AgentDoneJanitor | null;
+  /** Null until start() has constructed it, like the done janitor (docs/remediation.md). */
+  getRemediationLadder(): RemediationLadder | null;
   /** The durable finish-report ledger (docs/finish-reports.md). */
   getFinishObligations(): FinishObligationService;
 }
@@ -736,6 +742,108 @@ function withRemediationConfig(
   return config.remediation !== undefined ? { remediation: { ...config.remediation } } : {};
 }
 
+/** One account's health right now, shared by the done janitor and the remediation ladder. */
+function readProviderHealthNow(input: {
+  agentManager: AgentManager;
+  wsServer: Pick<VoiceAssistantWebSocketServer, "getProviderUsageService">;
+  provider: string;
+}): ReturnType<typeof readProviderHealth> {
+  const { agentManager } = input;
+  const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
+  for (const agent of agentManager.listAgentsForAccountFailover()) {
+    const errors = lastErrorsByProvider.get(agent.provider) ?? [];
+    errors.push(agent.lastError);
+    lastErrorsByProvider.set(agent.provider, errors);
+  }
+  return readProviderHealth({
+    provider: input.provider,
+    isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
+    listUsage: async () => {
+      try {
+        return (await input.wsServer.getProviderUsageService().listUsage()).providers;
+      } catch {
+        return null;
+      }
+    },
+    lastErrorsByProvider,
+  });
+}
+
+// Wired once the WebSocket server exists, like the done janitor: it needs the push sender, the
+// provider-usage cache and the create path (docs/remediation.md).
+function createRemediationLadder(input: {
+  config: Pick<PaseoDaemonConfig, "paseoHome">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  createAgent: (
+    input: Parameters<typeof createAgentCommand>[1],
+  ) => ReturnType<typeof createAgentCommand>;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  serverId: string;
+  logger: Logger;
+}): RemediationLadder {
+  const { agentManager, agentStorage, logger } = input;
+  return new RemediationLadder({
+    dependencies: {
+      createAgent: async (request) => {
+        const result = await input.createAgent({
+          kind: "mcp",
+          provider: request.provider,
+          title: request.title,
+          initialPrompt: request.prompt,
+          promptFailure: "throw",
+          cwd: request.cwd,
+          labels: request.labels,
+          background: true,
+          notifyOnFinish: false,
+        });
+        if (!result.initialPromptStarted) {
+          throw new Error(`agent ${result.snapshot.id} was created but its prompt did not start`);
+        }
+        return { agentId: result.snapshot.id };
+      },
+      inspectAgent: async (agentId) => {
+        const live = agentManager.getAgent(agentId);
+        if (!live || live.lifecycle === "closed") {
+          const record = await agentStorage.get(agentId);
+          return record && !record.archivedAt ? { status: "unloaded" } : { status: "gone" };
+        }
+        if (live.lifecycle === "error") return { status: "error", error: live.lastError };
+        if (live.lifecycle === "idle") {
+          return {
+            status: "idle",
+            finalText: await agentManager.getLastAssistantMessage(agentId),
+            totalTokens: live.totalTokens,
+          };
+        }
+        return { status: "running", totalTokens: live.totalTokens };
+      },
+      cancelAgent: async (agentId) => {
+        await agentManager.cancelAgentRun(agentId, "unspecified");
+      },
+      archiveAgent: async (agentId) => {
+        await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
+      },
+      findAccountBlocker: (provider) =>
+        findEscalationAccountBlocker({
+          provider,
+          poolEntries: resolveAccountPoolEntries(input.daemonConfigStore.get().providers),
+          getHealth: (id) =>
+            readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider: id }),
+        }),
+    },
+    getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
+    serverId: input.serverId,
+    readDaemonConfig: () => ({ remediation: input.daemonConfigStore.get().remediation }),
+    statePath: path.join(input.config.paseoHome, "remediation", "state.json"),
+    logger: logger.child({ module: "remediation-ladder" }),
+  });
+}
+
 // Wired once the WebSocket server exists, like AccountFailoverMonitor below: it owns the push
 // sender and the provider-usage cache.
 function createDoneJanitor(input: {
@@ -769,26 +877,8 @@ function createDoneJanitor(input: {
               : [],
           ),
         ),
-      getProviderHealth: async (provider) => {
-        const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
-        for (const agent of agentManager.listAgentsForAccountFailover()) {
-          const errors = lastErrorsByProvider.get(agent.provider) ?? [];
-          errors.push(agent.lastError);
-          lastErrorsByProvider.set(agent.provider, errors);
-        }
-        return readProviderHealth({
-          provider,
-          isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
-          listUsage: async () => {
-            try {
-              return (await input.wsServer.getProviderUsageService().listUsage()).providers;
-            } catch {
-              return null;
-            }
-          },
-          lastErrorsByProvider,
-        });
-      },
+      getProviderHealth: (provider) =>
+        readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider }),
       askAgent: (ask) => askAgentWhetherDone({ agentManager, agentStorage, logger }, ask),
       archiveAgent: async (agentId) => {
         await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
@@ -1068,6 +1158,7 @@ export async function createPaseoDaemon(
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
+  let remediationLadder: RemediationLadder | null = null;
   let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
@@ -1269,6 +1360,7 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  const remediationSink = createForwardingRemediationSink();
   worktreeDiskMonitor = new WorktreeDiskMonitor({
     projectRegistry,
     workspaceRegistry,
@@ -2456,6 +2548,22 @@ export async function createPaseoDaemon(
               logger,
             });
             doneJanitor.start();
+            remediationLadder = createRemediationLadder({
+              config,
+              agentManager,
+              agentStorage,
+              createAgent,
+              wsServer,
+              daemonConfigStore,
+              serverId,
+              logger,
+            });
+            remediationSink.attach(remediationLadder);
+            // Fire-and-forget: reconciling in-flight agents reads agent state and must not delay
+            // the daemon from accepting connections.
+            void remediationLadder.start().catch((error: unknown) => {
+              logger.error({ err: error }, "Remediation ladder failed to start");
+            });
             daemonVitals = startDaemonVitals({
               config: config.daemonVitals,
               paseoHome: config.paseoHome,
@@ -2550,6 +2658,7 @@ export async function createPaseoDaemon(
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();
     doneJanitor?.stop();
+    remediationLadder?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
@@ -2595,6 +2704,7 @@ export async function createPaseoDaemon(
     getListenTarget: () => boundListenTarget,
     getAccountFailoverMonitor: () => accountFailoverMonitor,
     getDoneJanitor: () => doneJanitor,
+    getRemediationLadder: () => remediationLadder,
     getFinishObligations: () => finishObligations,
   };
 }

@@ -362,6 +362,7 @@ describe("paseo daemon bootstrap", () => {
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
+        remediation: { escalation: { enabled: true, maxPerDay: 3 }, notify: { enabled: false } },
         daemonVitals: { enabled: true, dryRun: true },
       },
     };
@@ -404,6 +405,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
+      expect(booted.remediation).toEqual(bootPersisted.agents.remediation);
       expect(monitorModes()).toEqual({
         "resource-monitor": { enabled: true, dryRun: undefined },
         reaper: { enabled: true, dryRun: true },
@@ -412,6 +414,8 @@ describe("paseo daemon bootstrap", () => {
         "spend-governor": { enabled: true, dryRun: true },
         "account-pressure": { enabled: false, dryRun: undefined },
         refocus: { enabled: true, dryRun: true },
+        "remediation-escalation": { enabled: true, dryRun: undefined },
+        "remediation-notify": { enabled: false, dryRun: undefined },
         "model-divergence": { enabled: true, dryRun: undefined },
         daemonVitals: { enabled: true, dryRun: true },
       });
@@ -430,6 +434,7 @@ describe("paseo daemon bootstrap", () => {
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
+          remediation: { escalation: { enabled: false }, notify: { enabled: true } },
           daemonVitals: { enabled: false },
         },
       };
@@ -443,6 +448,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.deviceLeases",
         "agents.doneJanitor",
         "agents.refocus",
+        "agents.remediation",
         "agents.resourceMonitor",
         "agents.tokenBurnMonitor",
       ]);
@@ -460,11 +466,16 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
+      expect(reloaded.remediation).toEqual(reloadedPersisted.agents.remediation);
+      // The ladder re-reads its config on every poll; drive one instead of waiting a minute.
+      await daemon.getRemediationLadder()?.tick();
       expect(monitorModes()).toMatchObject({
         reaper: { enabled: true, dryRun: false },
         "device-cap": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
+        "remediation-escalation": { enabled: false },
+        "remediation-notify": { enabled: true },
         "model-divergence": { enabled: false },
         daemonVitals: { enabled: true, dryRun: true },
       });
