@@ -436,8 +436,9 @@ export class AccountFailoverMonitor {
           targetProviderId: input.targetProviderId,
         }),
         {
-          // A move that carried on is news. One that could not restart the agent needs a person.
-          level: input.resumed === false ? "alert" : "notice",
+          // A move that carried on is automation working as designed — a ledger record, not
+          // news. One that could not restart the agent needs a person.
+          level: input.resumed === false ? "alert" : "record",
           dedupeKey: `account-failover:${input.oldAgentId}:${input.resumed === false ? "stuck" : "moved"}`,
         },
       );
