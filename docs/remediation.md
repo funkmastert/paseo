@@ -63,6 +63,15 @@ The ladder reads the last non-empty line strictly. Anything else, including mark
 
 "No usable account" means every enabled account in the Claude account pool is dead or capped (for a provider outside the pool, the provider itself). The ladder reads that with the done janitor's `readProviderHealth`, so both agree on what dead means.
 
+## Advisory episodes
+
+Some monitors have nothing to fix, only something to say. An observation with `escalation.advice: true` (the token audit is the only one) gets an agent whose job is one recommendation:
+
+- the agent ends with `RECOMMENDATION: <one line>` instead of a REMEDIATION line; the ladder reads it with the same strictness and anything else says the line was missing;
+- there is no FIXED outcome: the agent is never archived, and the ladder does not wait for the condition to clear;
+- rung 3 is the recommendation as the push body, under the observation's own title (no "Needs you:"), at the observation's level; the summary follows it, so the summary is where the report path goes;
+- `escalation.budgetTokens` and `escalation.timeoutMinutes` set that agent's ceiling and timeout. `conditions.<kind>.budgetTokens` in config still wins.
+
 ## State and restarts
 
 `$PASEO_HOME/remediation/state.json` holds the episodes, each key's cooldown, the daily count and the in-flight agent ids, written atomically on every change. After a restart the ladder reconciles in-flight agents by id and carries on: it never re-spawns one and never forgets a cooldown. An agent the restart left unloaded is waited on until its timeout. A state file that fails to parse is logged and replaced by an empty one.
@@ -114,3 +123,4 @@ Keyed by the observation's `key`, not its `kind`: `account-pool-exhausted` and `
 | `work-at-risk`              | [work snapshots](work-snapshots.md#the-judge)                                                    | none (already snapshotted)                                                          | Judge whether the snapshot needs follow-up                                            | `alert`                                 |
 | `account-pool-exhausted`    | [token burn](token-burn.md#when-the-pool-cannot-route-at-all)                                    | none                                                                                | none: it needs an account                                                             | `urgent`                                |
 | `account-failover-stranded` | [failover](account-failover.md#when-tyler-hears)                                                 | none                                                                                | none: it needs an account                                                             | `urgent`                                |
+| `token-audit:<report time>` | [token audit](token-audit.md#when-someone-hears-about-it)                                        | none (advisory)                                                                     | Name the single highest-leverage change, as one line                                  | `notice`                                |

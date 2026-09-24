@@ -93,6 +93,16 @@ export interface DoctorProbes {
     keychainService?: string;
   }): Promise<boolean | null>;
   runGit?: RunGitCommand;
+  /**
+   * Runs one program with a hard timeout and returns what it printed, or null when it could not
+   * start or timed out. The token audit uses it for `claude -p /context`, `launchctl print`,
+   * `plutil` and `ps`; tests fake it with recorded output.
+   */
+  exec(
+    file: string,
+    args: readonly string[],
+    options: { timeoutMs: number; cwd?: string; env?: NodeJS.ProcessEnv },
+  ): Promise<{ stdout: string; stderr: string; code: number | null } | null>;
 }
 
 export interface DoctorCheck {

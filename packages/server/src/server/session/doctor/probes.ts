@@ -28,6 +28,29 @@ export function createRealProbes(): DoctorProbes {
       return { freeBytes: stats.bavail * stats.bsize, totalBytes: stats.blocks * stats.bsize };
     },
     measureDirBytes,
+    exec(file, args, options) {
+      return new Promise((resolve) => {
+        execFile(
+          file,
+          [...args],
+          {
+            timeout: options.timeoutMs,
+            cwd: options.cwd,
+            env: options.env,
+            maxBuffer: 32 * 1024 * 1024,
+          },
+          (error, stdout, stderr) => {
+            const code = error ? (error as NodeJS.ErrnoException & { code?: unknown }).code : 0;
+            // A spawn failure or a timeout kill has no exit code; a program that ran and failed does.
+            if (error && (typeof code !== "number" || (error as { killed?: boolean }).killed)) {
+              resolve(null);
+              return;
+            }
+            resolve({ stdout, stderr, code: typeof code === "number" ? code : 0 });
+          },
+        );
+      });
+    },
     async hasCredentials({ configDir, keychainService }) {
       if (existsSync(path.join(configDir, ".credentials.json"))) return true;
       if (process.platform !== "darwin") return null;

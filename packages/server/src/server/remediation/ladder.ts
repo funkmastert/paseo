@@ -18,8 +18,10 @@ import {
 } from "./config.js";
 import type { RemediationObservation, RemediationSink } from "./contract.js";
 import {
+  buildAdviceNotificationPayload,
   buildRemediationAgentTitle,
   buildRemediationPrompt,
+  parseAdviceReport,
   parseRemediationReport,
 } from "./escalation.js";
 import {
@@ -193,7 +195,9 @@ export class RemediationLadder implements RemediationSink {
       escalation: {
         ...base,
         taskClass: override?.taskClass ?? base.taskClass,
-        budgetTokens: override?.budgetTokens ?? base.budgetTokens,
+        budgetTokens:
+          override?.budgetTokens ?? observation.escalation?.budgetTokens ?? base.budgetTokens,
+        timeoutMinutes: observation.escalation?.timeoutMinutes ?? base.timeoutMinutes,
         cooldownMinutes: override?.cooldownMinutes ?? base.cooldownMinutes,
       },
       graceMs:
@@ -385,7 +389,12 @@ export class RemediationLadder implements RemediationSink {
     for (const episode of state.episodes) {
       if (!episode.agent) continue;
       const condition = this.resolveCondition(config, fromStoredObservation(episode.observation));
-      const outcome = await this.readAgentOutcome(episode.agent, condition.escalation, nowMs);
+      const outcome = await this.readAgentOutcome({
+        agent: episode.agent,
+        escalation: condition.escalation,
+        nowMs,
+        advice: episode.observation.escalation?.advice === true,
+      });
       if (outcome.kind === "pending") continue;
       changed = true;
       const agentId = episode.agent.id;
@@ -409,14 +418,19 @@ export class RemediationLadder implements RemediationSink {
     if (changed) await this.save();
   }
 
-  private async readAgentOutcome(
-    agent: NonNullable<LadderEpisode["agent"]>,
-    escalation: ResolvedRemediationEscalationConfig,
-    nowMs: number,
-  ): Promise<{ kind: "pending" } | { kind: "fixed" | "not-fixed"; line: string }> {
+  private async readAgentOutcome(input: {
+    agent: NonNullable<LadderEpisode["agent"]>;
+    escalation: ResolvedRemediationEscalationConfig;
+    nowMs: number;
+    /** An advisory agent: its report is a recommendation line and is never FIXED. */
+    advice: boolean;
+  }): Promise<{ kind: "pending" } | { kind: "fixed" | "not-fixed"; line: string }> {
+    const { agent, escalation, nowMs } = input;
     const view = await this.deps.inspectAgent(agent.id);
     if (view.status === "idle") {
-      const report = parseRemediationReport(view.finalText);
+      const report = input.advice
+        ? parseAdviceReport(view.finalText)
+        : parseRemediationReport(view.finalText);
       return { kind: report.outcome, line: report.line };
     }
     if (view.status === "error") {
@@ -464,16 +478,26 @@ export class RemediationLadder implements RemediationSink {
     if (episode.escalatedAt) return;
     episode.escalatedAt = new Date(this.now()).toISOString();
     const observation = episode.observation;
-    const payload = buildRemediationEscalatedNotificationPayload({
-      serverId: this.serverId,
-      key: episode.key,
-      kind: observation.kind,
-      title: observation.title,
-      summary: observation.summary,
-      attempts: observation.attempts ?? [],
-      outcome,
-      ...this.link(episode),
-    });
+    const payload = observation.escalation?.advice
+      ? buildAdviceNotificationPayload({
+          serverId: this.serverId,
+          key: episode.key,
+          kind: observation.kind,
+          title: observation.title,
+          summary: observation.summary,
+          recommendation: outcome,
+          agentId: episode.lastAgentId,
+        })
+      : buildRemediationEscalatedNotificationPayload({
+          serverId: this.serverId,
+          key: episode.key,
+          kind: observation.kind,
+          title: observation.title,
+          summary: observation.summary,
+          attempts: observation.attempts ?? [],
+          outcome,
+          ...this.link(episode),
+        });
     this.logger.info({ key: episode.key, outcome }, "Remediation ladder: escalated to a person");
     await this.send(
       payload,

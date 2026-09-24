@@ -31,7 +31,7 @@ import { addAttachOptions, runAttachCommand } from "./commands/agent/attach.js";
 import { addImportOptions, runImportCommand } from "./commands/agent/import.js";
 import { withOutput } from "./output/index.js";
 import { runCloneCommand } from "./commands/clone.js";
-import { runDoctorCommand } from "./commands/doctor.js";
+import { runDoctorCommand, runTokenAuditCommand, type DoctorOptions } from "./commands/doctor.js";
 import { addRecoverOptions, runRecoverCommand } from "./commands/recover.js";
 import { onboardCommand } from "./commands/onboard.js";
 import {
@@ -139,8 +139,16 @@ export function createCli(): Command {
         "--deep",
         "Give the worktree size and reclaim sweep a 5 minute budget instead of 25 s",
       )
-      .option("--full", "List every check, passing ones included"),
-  ).action(withOutput(runDoctorCommand));
+      .option("--full", "List every check, passing ones included")
+      .option(
+        "--tokens",
+        "Run the 7-item token audit (memory, tools, model, hooks, subagents, scheduled work, cache) and print its table; makes no model call",
+      ),
+  ).action((options: DoctorOptions, command: Command) =>
+    options.tokens
+      ? withOutput(runTokenAuditCommand)(options, command)
+      : withOutput(runDoctorCommand)(options, command),
+  );
   program.addCommand(daemonStartCommand());
   program.addCommand(createHooksCommand());
 

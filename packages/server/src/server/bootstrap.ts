@@ -260,6 +260,9 @@ import {
 } from "./remediation/contract.js";
 import { findEscalationAccountBlocker } from "./remediation/escalation.js";
 import { RemediationLadder } from "./remediation/ladder.js";
+import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
+import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
+import { TokenAuditJob } from "./token-audit/token-audit-job.js";
 import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
 import {
   AgentStallSweep,
@@ -1335,6 +1338,7 @@ export async function createPaseoDaemon(
   let leaderCompactionMonitor: AgentLeaderCompactionMonitor | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
   let remediationLadder: RemediationLadder | null = null;
+  let tokenAuditJob: TokenAuditJob | null = null;
   let agentStallSweep: AgentStallSweep | null = null;
   let workSnapshotSweep: AgentWorkSnapshotSweep | null = null;
   let daemonVitals: DaemonVitals | null = null;
@@ -2890,6 +2894,33 @@ export async function createPaseoDaemon(
               logger,
             });
             remediationSink.attach(remediationLadder);
+            // The weekly token audit: seven deterministic checks, no model. Only a new RED or a
+            // regression reaches the ladder above, as one small advisory agent (docs/token-audit.md).
+            const tokenAuditPushSender = wsServer.getPushNotificationSender();
+            tokenAuditJob = new TokenAuditJob({
+              paseoHome: config.paseoHome,
+              buildContext: () =>
+                buildDoctorContext({
+                  paseoHome: config.paseoHome,
+                  facts: {
+                    source: "daemon",
+                    daemon: null,
+                    plugins: null,
+                    agents: null,
+                    workspaces: null,
+                    usage: null,
+                  },
+                }),
+              readConfig: () =>
+                resolveTokenAuditConfig(
+                  tokenAuditSection(readRawConfig(config.paseoHome).rawConfig),
+                ),
+              sink: remediationSink,
+              getPushNotificationSender: () => tokenAuditPushSender,
+              serverId,
+              logger: logger.child({ module: "token-audit" }),
+            });
+            tokenAuditJob.start();
             // Fire-and-forget: reconciling in-flight agents reads agent state and must not delay
             // the daemon from accepting connections.
             void remediationLadder.start().catch((error: unknown) => {
@@ -3048,6 +3079,7 @@ export async function createPaseoDaemon(
     leaderCompactionMonitor?.stop();
     doneJanitor?.stop();
     remediationLadder?.stop();
+    tokenAuditJob?.stop();
     agentStallSweep?.stop();
     workSnapshotSweep?.stop();
     worktreeDiskMonitor?.stop();

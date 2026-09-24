@@ -107,4 +107,11 @@ export type {
 
 // `paseo doctor` (read-only diagnosis). The daemon runs it for itself over `daemon.doctor.request`;
 // the CLI runs the same checks locally when the daemon predates that RPC or is down.
-export { buildDoctorContext, runDoctorChecks } from "./session/doctor/index.js";
+export {
+  buildDoctorContext,
+  countSeverities,
+  renderTokenAuditTable,
+  runDoctorChecks,
+  runTokenAudit,
+  type TokenAuditRow,
+} from "./session/doctor/index.js";
