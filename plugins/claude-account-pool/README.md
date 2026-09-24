@@ -178,13 +178,32 @@ fails on its first turn, and a leader that reads that as "that one didn't
 work, try another" spawns the next one straight into the same wall. One clear
 error costs less than an unbounded loop. Refusal requires positive evidence —
 every pool member actually capped — so an unreadable pool still fails open,
-and human-created agents never reach this code at all (the router only acts on
-creates carrying a `callerAgentId`), so it can never lock you out of your own
-daemon.
+and a root agent is never refused (see below), so it can never lock you out of
+your own daemon.
 
 Set `refuseWhenExhausted: false` on `createRouter` to go back to passing
 through. It is a code-level option, not daemon config: an unknown key in
 `config.json` makes a running daemon reject the whole file.
+
+### Root agents
+
+A root agent (no `callerAgentId`: the app, the CLI, a schedule, a heartbeat)
+keeps the account it was started on while that account can run it, worker
+accounts included. It moves only when that account has a window **at its
+cap** — `five_hour`, `weekly`, or the `weekly_model_*` window for the
+requested model. A drained account is still the person's choice. With no
+model named, any capped window counts.
+
+The app remembers the last provider a workspace used, so a new chat can ask
+for an account that ran out since. Before this, it started there and died on
+its first turn while the leader account had budget.
+
+When it moves, it goes to the leader account first — a root is a leader by
+definition — and then to a worker, ranked like a child's. The agent is
+labelled `paseo.account-rerouted=<the account it asked for>`, the daemon log
+carries the reason, and the settings preview (Test This Name, started by a
+root agent, with the account filled in) shows the same sentence. When nothing in the pool can run it, it keeps its
+account and starts anyway: a root is never refused.
 
 ## Role policy
 
