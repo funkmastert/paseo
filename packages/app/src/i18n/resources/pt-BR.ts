@@ -2436,6 +2436,68 @@ export const ptBR: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "Notificações",
+        info: "Escolha o que chega ao dispositivo na hora e o que espera por um resumo. Alertas precisam de você; avisos são úteis, mas podem esperar.",
+        loadError: "Não foi possível carregar as configurações de notificação",
+        unsupported: "Atualize este host para alterar as configurações de notificação",
+        availability: {
+          label: "Disponibilidade",
+          options: {
+            available: "Disponível",
+            focus: "Foco",
+            away: "Ausente",
+            off: "Desligado",
+          },
+          hints: {
+            available: "Alertas interrompem; avisos chegam em um resumo",
+            focus: "Só alertas urgentes fazem barulho; avisos esperam",
+            away: "Alertas ainda interrompem; avisos esperam até você voltar",
+            off: "Nada faz barulho; tudo é entregue em silêncio",
+          },
+        },
+        duration: {
+          label: "Por",
+          options: {
+            oneHour: "1 hora",
+            fourHours: "4 horas",
+            untilChanged: "Até eu mudar",
+          },
+          endsAt: "Até {{time}}",
+        },
+        interrupt: {
+          label: "Me interromper por",
+          hint: "O resto espera por um resumo",
+          options: {
+            urgent: "Só urgentes",
+            alert: "Alertas e urgentes",
+            notice: "Tudo",
+          },
+        },
+        notices: {
+          label: "Avisos",
+          hint: "Bom saber, mas nada que exija ação agora",
+          options: {
+            digest: "Resumo",
+            off: "Desligado",
+          },
+        },
+        digestInterval: {
+          label: "Enviar resumo a cada",
+          options: {
+            m15: "15 min",
+            m30: "30 min",
+            m60: "1 hora",
+            m180: "3 horas",
+          },
+        },
+        status: {
+          held: "Aguardando o próximo resumo",
+          unreached: "Não entregues ({{count}})",
+          unreachedHint:
+            "Notificações recusadas pelo provedor ou enviadas sem nenhum dispositivo registrado",
+        },
+      },
       appearance: {
         title: "Aparência",
         name: {

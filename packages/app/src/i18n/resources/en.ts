@@ -2503,6 +2503,67 @@ export const en = {
       },
     },
     host: {
+      notifications: {
+        title: "Notifications",
+        info: "Choose what reaches this device right away and what waits for a digest. Alerts need you; notices are worth knowing but can wait.",
+        loadError: "Unable to load notification settings",
+        unsupported: "Update this host to change notification settings",
+        availability: {
+          label: "Availability",
+          options: {
+            available: "Available",
+            focus: "Focus",
+            away: "Away",
+            off: "Off",
+          },
+          hints: {
+            available: "Alerts interrupt; notices arrive in a digest",
+            focus: "Only urgent alerts make a sound; notices wait",
+            away: "Alerts still interrupt; notices wait until you are back",
+            off: "Nothing makes a sound; everything is delivered silently",
+          },
+        },
+        duration: {
+          label: "For",
+          options: {
+            oneHour: "1 hour",
+            fourHours: "4 hours",
+            untilChanged: "Until I change it",
+          },
+          endsAt: "Until {{time}}",
+        },
+        interrupt: {
+          label: "Interrupt me for",
+          hint: "Anything lower waits for a digest",
+          options: {
+            urgent: "Urgent only",
+            alert: "Alerts and urgent",
+            notice: "Everything",
+          },
+        },
+        notices: {
+          label: "Notices",
+          hint: "Worth knowing, but nothing you need to act on now",
+          options: {
+            digest: "Digest",
+            off: "Off",
+          },
+        },
+        digestInterval: {
+          label: "Send digest every",
+          options: {
+            m15: "15 min",
+            m30: "30 min",
+            m60: "1 hour",
+            m180: "3 hours",
+          },
+        },
+        status: {
+          held: "Waiting for the next digest",
+          unreached: "Not delivered ({{count}})",
+          unreachedHint: "Pushes the provider refused, or sent while no device was registered",
+        },
+      },
       appearance: {
         title: "Appearance",
         name: {

@@ -2458,6 +2458,68 @@ export const fr: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "Notifications",
+        info: "Choisissez ce qui arrive tout de suite sur cet appareil et ce qui attend un récapitulatif. Les alertes demandent votre attention ; les avis sont utiles mais peuvent attendre.",
+        loadError: "Impossible de charger les réglages de notification",
+        unsupported: "Mettez cet hôte à jour pour modifier les réglages de notification",
+        availability: {
+          label: "Disponibilité",
+          options: {
+            available: "Disponible",
+            focus: "Concentration",
+            away: "Absent",
+            off: "Désactivé",
+          },
+          hints: {
+            available: "Les alertes interrompent ; les avis arrivent dans un récapitulatif",
+            focus: "Seules les alertes urgentes font du bruit ; les avis attendent",
+            away: "Les alertes interrompent toujours ; les avis attendent votre retour",
+            off: "Rien ne sonne ; tout est livré en silence",
+          },
+        },
+        duration: {
+          label: "Pendant",
+          options: {
+            oneHour: "1 heure",
+            fourHours: "4 heures",
+            untilChanged: "Jusqu'à ce que je change",
+          },
+          endsAt: "Jusqu'à {{time}}",
+        },
+        interrupt: {
+          label: "M'interrompre pour",
+          hint: "Le reste attend un récapitulatif",
+          options: {
+            urgent: "Urgent seulement",
+            alert: "Alertes et urgent",
+            notice: "Tout",
+          },
+        },
+        notices: {
+          label: "Avis",
+          hint: "Utile à savoir, mais rien à traiter tout de suite",
+          options: {
+            digest: "Récapitulatif",
+            off: "Désactivé",
+          },
+        },
+        digestInterval: {
+          label: "Envoyer un récapitulatif toutes les",
+          options: {
+            m15: "15 min",
+            m30: "30 min",
+            m60: "1 heure",
+            m180: "3 heures",
+          },
+        },
+        status: {
+          held: "En attente du prochain récapitulatif",
+          unreached: "Non livré ({{count}})",
+          unreachedHint:
+            "Notifications refusées par le fournisseur ou envoyées sans appareil enregistré",
+        },
+      },
       appearance: {
         title: "Apparence",
         name: {

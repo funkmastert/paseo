@@ -37,7 +37,7 @@ import type {
   ProcessSampler,
   SystemMemorySample,
 } from "./agent/process-sampler.js";
-import type { PushNotificationSender } from "./push/index.js";
+import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
@@ -397,6 +397,7 @@ export class AgentResourceMonitor {
           claim: artifact.claim,
         })),
       }),
+      { level: "record" },
     );
   }
 
@@ -496,6 +497,7 @@ export class AgentResourceMonitor {
             workspaceId: breach.workspaceId,
           })),
         }),
+        { level: "notice" },
       );
     } else {
       for (const breach of breaches) {
@@ -512,6 +514,7 @@ export class AgentResourceMonitor {
             memoryBytesLimit: config.memoryBytesPerAgent,
             cpuPercentLimit: config.cpuPercentPerAgent,
           }),
+          { level: "notice" },
         );
       }
     }
@@ -557,6 +560,7 @@ export class AgentResourceMonitor {
           swapTotalBytes: systemMemory.swapTotalBytes,
           swapUsedRatio: computeSwapUsedRatio(systemMemory),
         }),
+        { level: "alert", dedupeKey: "resource-system-memory" },
       );
     }
     if (triggers.includes("orphanBuildDaemons")) {
@@ -566,6 +570,7 @@ export class AgentResourceMonitor {
           count: orphanBuildDaemons.count,
           rssBytes: orphanBuildDaemons.rssBytes,
         }),
+        { level: "notice", dedupeKey: "resource-orphan-daemons" },
       );
     }
   }
@@ -614,6 +619,7 @@ export class AgentResourceMonitor {
           dryRun: true,
           daemons: candidates.map(toReapedBuildDaemon),
         }),
+        { level: "record" },
       );
       return;
     }
@@ -628,6 +634,7 @@ export class AgentResourceMonitor {
         dryRun: false,
         daemons: reaped,
       }),
+      { level: "record" },
     );
   }
 
@@ -725,13 +732,16 @@ export class AgentResourceMonitor {
     return reaped;
   }
 
-  private async sendPush(payload: {
-    title: string;
-    body: string;
-    data: Record<string, unknown>;
-  }): Promise<void> {
+  private async sendPush(
+    payload: {
+      title: string;
+      body: string;
+      data: Record<string, unknown>;
+    },
+    meta: PushSendMeta,
+  ): Promise<void> {
     try {
-      await this.pushNotificationSender.send(payload);
+      await this.pushNotificationSender.send(payload, meta);
     } catch (error) {
       this.logger.warn({ err: error }, "Failed to send resource-monitor push notification");
     }

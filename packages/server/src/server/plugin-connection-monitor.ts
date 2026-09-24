@@ -103,6 +103,7 @@ export class PluginConnectionMonitor {
           pluginId,
           offlineForMs,
         }),
+        { level: "notice", dedupeKey: `plugin-offline:${pluginId}` },
       )
       .catch((error: unknown) => {
         this.options.logger.warn(

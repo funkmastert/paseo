@@ -809,6 +809,9 @@ export class AgentDoneJanitor {
     if (archivedAgentCount === 0 && archivedDeadAgentCount === 0 && deleted.length === 0) return;
     const sender = this.options.getPushNotificationSender();
     if (!sender) return;
+    const keptWorktrees = report.entries.filter(
+      (entry) => entry.action === "kept-workspace" && entry.workspaceId,
+    );
     try {
       await sender.send(
         buildDoneJanitorNotificationPayload({
@@ -817,13 +820,14 @@ export class AgentDoneJanitor {
           archivedDeadAgentCount,
           deletedWorktreeCount: deleted.length,
           reclaimedBytes: deleted.reduce((sum, entry) => sum + (entry.bytes ?? 0), 0),
-          keptWorktrees: report.entries
-            .filter((entry) => entry.action === "kept-workspace" && entry.workspaceId)
-            .map((entry) => ({
-              name: entry.path ?? entry.workspaceId ?? "",
-              reason: entry.reason,
-            })),
+          keptWorktrees: keptWorktrees.map((entry) => ({
+            name: entry.path ?? entry.workspaceId ?? "",
+            reason: entry.reason,
+          })),
         }),
+        // Routine tidying is only recorded. A worktree it had to leave behind is worth a line in
+        // the digest.
+        { level: keptWorktrees.length > 0 ? "notice" : "record" },
       );
     } catch (error) {
       this.options.logger.warn({ err: error }, "Done janitor: push notification failed");

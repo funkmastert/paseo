@@ -725,6 +725,7 @@ export class McpGateway {
             serverId: this.notifier.serverId,
             transitions,
           }),
+          { level: "alert" },
         );
         return;
       }
@@ -735,6 +736,12 @@ export class McpGateway {
             name: transition.name,
             status: transition.status,
           }),
+          {
+            // Signing in again is something only a person can do. An unresponsive server often
+            // comes back on its own.
+            level: transition.status === "needs-auth" ? "alert" : "notice",
+            dedupeKey: `mcp-gateway:${transition.name}:${transition.status}`,
+          },
         );
       }
     } catch (error) {

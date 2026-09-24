@@ -2422,6 +2422,68 @@ export const ja: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "通知",
+        info: "すぐに届けるものと、まとめて届けるものを選びます。アラートは対応が必要なもの、お知らせは知っておくと便利ですが後回しにできるものです。",
+        loadError: "通知設定を読み込めません",
+        unsupported: "通知設定を変更するには、このホストを更新してください",
+        availability: {
+          label: "応答可否",
+          options: {
+            available: "対応可能",
+            focus: "集中",
+            away: "離席",
+            off: "オフ",
+          },
+          hints: {
+            available: "アラートは即時に通知し、お知らせはまとめて届きます",
+            focus: "緊急のアラートだけ音が鳴り、お知らせは待機します",
+            away: "アラートは通知され、お知らせは戻るまで待機します",
+            off: "音は鳴らず、すべて静かに配信されます",
+          },
+        },
+        duration: {
+          label: "期間",
+          options: {
+            oneHour: "1時間",
+            fourHours: "4時間",
+            untilChanged: "変更するまで",
+          },
+          endsAt: "{{time}}まで",
+        },
+        interrupt: {
+          label: "割り込みを許可",
+          hint: "それ以外はまとめて届きます",
+          options: {
+            urgent: "緊急のみ",
+            alert: "アラートと緊急",
+            notice: "すべて",
+          },
+        },
+        notices: {
+          label: "お知らせ",
+          hint: "知っておくと便利ですが、今すぐ対応する必要はありません",
+          options: {
+            digest: "まとめて送信",
+            off: "オフ",
+          },
+        },
+        digestInterval: {
+          label: "まとめの送信間隔",
+          options: {
+            m15: "15分",
+            m30: "30分",
+            m60: "1時間",
+            m180: "3時間",
+          },
+        },
+        status: {
+          held: "次のまとめを待機中",
+          unreached: "未配信（{{count}}）",
+          unreachedHint:
+            "プロバイダーに拒否された通知、または登録済みデバイスがない状態で送信された通知",
+        },
+      },
       appearance: {
         title: "外観",
         name: {

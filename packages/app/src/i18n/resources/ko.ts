@@ -2412,6 +2412,67 @@ export const ko: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "알림",
+        info: "즉시 도착할 알림과 요약으로 모아 보낼 알림을 선택하세요. 경고는 확인이 필요하고, 안내는 알아 두면 좋지만 기다릴 수 있습니다.",
+        loadError: "알림 설정을 불러올 수 없습니다",
+        unsupported: "알림 설정을 변경하려면 이 호스트를 업데이트하세요",
+        availability: {
+          label: "상태",
+          options: {
+            available: "가능",
+            focus: "집중",
+            away: "자리 비움",
+            off: "끔",
+          },
+          hints: {
+            available: "경고는 즉시 알리고 안내는 요약으로 도착합니다",
+            focus: "긴급 경고만 소리가 나고 안내는 대기합니다",
+            away: "경고는 계속 알리고 안내는 돌아올 때까지 대기합니다",
+            off: "소리가 나지 않으며 모두 조용히 전달됩니다",
+          },
+        },
+        duration: {
+          label: "기간",
+          options: {
+            oneHour: "1시간",
+            fourHours: "4시간",
+            untilChanged: "변경할 때까지",
+          },
+          endsAt: "{{time}}까지",
+        },
+        interrupt: {
+          label: "방해 허용 대상",
+          hint: "그 외는 요약으로 대기합니다",
+          options: {
+            urgent: "긴급만",
+            alert: "경고 및 긴급",
+            notice: "모두",
+          },
+        },
+        notices: {
+          label: "안내",
+          hint: "알아 두면 좋지만 지금 조치할 필요는 없습니다",
+          options: {
+            digest: "요약",
+            off: "끔",
+          },
+        },
+        digestInterval: {
+          label: "요약 전송 간격",
+          options: {
+            m15: "15분",
+            m30: "30분",
+            m60: "1시간",
+            m180: "3시간",
+          },
+        },
+        status: {
+          held: "다음 요약 대기 중",
+          unreached: "미전달 ({{count}})",
+          unreachedHint: "공급자가 거부했거나 등록된 기기가 없을 때 보낸 알림",
+        },
+      },
       appearance: {
         title: "모양",
         name: {

@@ -2455,6 +2455,68 @@ export const es: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "Notificaciones",
+        info: "Elige qué llega al dispositivo al instante y qué espera a un resumen. Las alertas requieren tu atención; los avisos son útiles pero pueden esperar.",
+        loadError: "No se pudo cargar la configuración de notificaciones",
+        unsupported: "Actualiza este host para cambiar la configuración de notificaciones",
+        availability: {
+          label: "Disponibilidad",
+          options: {
+            available: "Disponible",
+            focus: "Concentrado",
+            away: "Ausente",
+            off: "Apagado",
+          },
+          hints: {
+            available: "Las alertas interrumpen; los avisos llegan en un resumen",
+            focus: "Solo las alertas urgentes suenan; los avisos esperan",
+            away: "Las alertas siguen interrumpiendo; los avisos esperan hasta que vuelvas",
+            off: "Nada suena; todo se entrega en silencio",
+          },
+        },
+        duration: {
+          label: "Durante",
+          options: {
+            oneHour: "1 hora",
+            fourHours: "4 horas",
+            untilChanged: "Hasta que lo cambie",
+          },
+          endsAt: "Hasta las {{time}}",
+        },
+        interrupt: {
+          label: "Interrumpirme por",
+          hint: "Lo demás espera a un resumen",
+          options: {
+            urgent: "Solo urgentes",
+            alert: "Alertas y urgentes",
+            notice: "Todo",
+          },
+        },
+        notices: {
+          label: "Avisos",
+          hint: "Útil saberlo, pero nada que requiera actuar ahora",
+          options: {
+            digest: "Resumen",
+            off: "Desactivado",
+          },
+        },
+        digestInterval: {
+          label: "Enviar resumen cada",
+          options: {
+            m15: "15 min",
+            m30: "30 min",
+            m60: "1 hora",
+            m180: "3 horas",
+          },
+        },
+        status: {
+          held: "Esperando el próximo resumen",
+          unreached: "Sin entregar ({{count}})",
+          unreachedHint:
+            "Notificaciones que el proveedor rechazó o enviadas sin ningún dispositivo registrado",
+        },
+      },
       appearance: {
         title: "Apariencia",
         name: {

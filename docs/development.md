@@ -323,7 +323,8 @@ To see what the monitors are doing, grep for `"msg":"Monitor mode"`. Each monito
 reload or config patch changes them. The line reports what the monitor itself read,
 so a config section that never reached it shows up as the wrong value. The alerting
 legs log nothing when they fire. Their pushes show up as `Sending push notification`
-lines, with `data.reason` naming the leg.
+lines, with `reason` naming the leg and `level` and `outcome` saying what the
+[notify policy](notification-policy.md) did with it.
 
 The supervisor rotates `daemon.log`. Persisted `log.file.rotate` settings in
 `$PASEO_HOME/config.json` win first. Without persisted config, the optional

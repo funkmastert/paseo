@@ -58,7 +58,7 @@ Bounded, and every step is logged.
 2. **Orchestrator.** The nearest non-archived agent above the owner, found by walking parent
    labels. It gets the report prefixed with who it was for and why that failed. One attempt, and
    the rung has one retry interval to find it reachable.
-3. **Operator.** One push (`data.reason: "finish_report_undelivered"`, outside the closed
+3. **Operator.** One `urgent` push ([notification-policy.md](notification-policy.md)) (`data.reason: "finish_report_undelivered"`, outside the closed
    `attentionReason` enum), and the child is flagged for attention without a second, generic push.
    Terminal whether or not the push itself went out.
 

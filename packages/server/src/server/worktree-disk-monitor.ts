@@ -10,7 +10,7 @@ import { getCheckoutStatus } from "../utils/checkout-git.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { deletePaseoWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
 import type { WorkspaceDiskUsage } from "./messages.js";
-import type { PushNotificationSender } from "./push/index.js";
+import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import {
   evaluateDeletionCandidate,
   type DeletionDecision,
@@ -200,6 +200,7 @@ export class WorktreeDiskMonitor {
           count: sweepResult.deletedCount,
           bytes: sweepResult.reclaimedBytes,
         }),
+        { level: "record" },
       );
     }
 
@@ -250,6 +251,7 @@ export class WorktreeDiskMonitor {
           freeBytes,
           minFreeGB: config.minFreeGB,
         }),
+        { level: "urgent", dedupeKey: "disk-space-critical" },
       );
     }
 
@@ -471,6 +473,7 @@ export class WorktreeDiskMonitor {
       );
       await this.sendPush(
         buildDiskSweepUnsafeOrphanNotificationPayload({ serverId: this.serverId, path }),
+        { level: "notice", dedupeKey: `disk-unsafe-orphan:${path}` },
       );
     }
   }
@@ -533,15 +536,18 @@ export class WorktreeDiskMonitor {
     });
   }
 
-  private async sendPush(payload: {
-    title: string;
-    body: string;
-    data: Record<string, unknown>;
-  }): Promise<void> {
+  private async sendPush(
+    payload: {
+      title: string;
+      body: string;
+      data: Record<string, unknown>;
+    },
+    meta: PushSendMeta,
+  ): Promise<void> {
     const sender = this.getPushNotificationSender();
     if (!sender) return;
     try {
-      await sender.send(payload);
+      await sender.send(payload, meta);
     } catch (error) {
       this.logger.warn({ err: error }, "Worktree disk sweep: failed to send push notification");
     }

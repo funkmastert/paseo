@@ -8,6 +8,11 @@ import {
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
+import type { NotificationsPolicyPayload } from "@getpaseo/protocol/notify-policy/rpc-schemas";
+import type {
+  NotifyLedgerEntry,
+  NotifyPolicySettings,
+} from "@getpaseo/protocol/notify-policy/types";
 import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
 import {
   AgentCreateFailedStatusPayloadSchema,
@@ -4888,6 +4893,37 @@ export class DaemonClient {
     });
   }
 
+  async getNotificationPolicy(requestId?: string): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.get.request" },
+    });
+  }
+
+  /** Every field is optional, so one call can change the dials, the availability, or both. */
+  async setNotificationPolicy(
+    changes: Partial<NotifyPolicySettings>,
+    requestId?: string,
+  ): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.set.request", ...changes },
+    });
+  }
+
+  async listNotificationLedger(
+    options: { unreachedOnly?: boolean; limit?: number; requestId?: string } = {},
+  ): Promise<{ entries: NotifyLedgerEntry[]; unreachedCount: number }> {
+    this.requireNotificationPolicySupport();
+    const { requestId, ...filters } = options;
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.ledger.list.request", ...filters },
+    });
+  }
+
   async connectHub(
     hubUrl: string,
     token: string,
@@ -5840,6 +5876,13 @@ export class DaemonClient {
     // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
     if (this.lastServerInfoMessage?.features?.hubRelationship !== true) {
       throw new Error("Update the host to use Hub relationship management.");
+    }
+  }
+
+  private requireNotificationPolicySupport(): void {
+    // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+    if (this.lastServerInfoMessage?.features?.notificationPolicy !== true) {
+      throw new Error("Update the host to change notification settings.");
     }
   }
 

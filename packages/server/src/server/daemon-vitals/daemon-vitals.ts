@@ -122,9 +122,14 @@ export function startDaemonVitals(options: StartDaemonVitalsOptions): DaemonVita
         );
         return;
       }
-      void options.pushNotificationSender.send(payload).catch((err: unknown) => {
-        logger.warn({ err }, "Failed to send daemon-wedged push notification");
-      });
+      // `alert`, not `urgent`: this only goes out once the loop has recovered, so nothing is about
+      // to be lost when it arrives, but agents that stalled through it may need a look.
+      // See docs/notification-policy.md.
+      void options.pushNotificationSender
+        .send(payload, { level: "alert" })
+        .catch((err: unknown) => {
+          logger.warn({ err }, "Failed to send daemon-wedged push notification");
+        });
     },
   });
   eventLoop.start();

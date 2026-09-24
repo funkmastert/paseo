@@ -24,6 +24,14 @@ import {
   ChatWaitResponseSchema,
 } from "./chat/rpc-schemas.js";
 import {
+  NotificationsPolicyGetRequestSchema,
+  NotificationsPolicySetRequestSchema,
+  NotificationsLedgerListRequestSchema,
+  NotificationsPolicyGetResponseSchema,
+  NotificationsPolicySetResponseSchema,
+  NotificationsLedgerListResponseSchema,
+} from "./notify-policy/rpc-schemas.js";
+import {
   ScheduleCreateRequestSchema,
   ScheduleListRequestSchema,
   ScheduleInspectRequestSchema,
@@ -3544,6 +3552,9 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusRequestSchema,
   DaemonGetPairingOfferRequestSchema,
   DaemonConfigReloadRequestSchema,
+  NotificationsPolicyGetRequestSchema,
+  NotificationsPolicySetRequestSchema,
+  NotificationsLedgerListRequestSchema,
   HubManagementDaemonConnectRequestSchema,
   HubManagementDaemonGetStatusRequestSchema,
   HubManagementDaemonDisconnectRequestSchema,
@@ -3983,6 +3994,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspacePinning: z.boolean().optional(),
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
         workspaceMarkUnread: z.boolean().optional(),
+        // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+        notificationPolicy: z.boolean().optional(),
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
         hubRelationship: z.boolean().optional(),
         // COMPAT(projectGithubClone): added in v0.1.108, remove gate after 2027-01-15.
@@ -7163,6 +7176,9 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusResponseSchema,
   DaemonGetPairingOfferResponseSchema,
   DaemonConfigReloadResponseSchema,
+  NotificationsPolicyGetResponseSchema,
+  NotificationsPolicySetResponseSchema,
+  NotificationsLedgerListResponseSchema,
   HubManagementDaemonConnectResponseSchema,
   HubManagementDaemonGetStatusResponseSchema,
   HubManagementDaemonDisconnectResponseSchema,
