@@ -10,16 +10,17 @@ import { ensureAgentLoaded } from "./agent-loading.js";
 import { sendPromptToAgent } from "./agent-prompt.js";
 import { importProviderSession } from "./import-sessions.js";
 import {
-  ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL,
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
-  getHomeProviderFromLabels,
   getMigratedToFromLabels,
   HANDOFF_FROM_LABEL,
   isLimitShapedError,
   parseResetTimeHint,
 } from "./account-failover-detector.js";
-import { providersShareAccount } from "./account-failover-return.js";
-import { pickFailoverTarget, type AccountPoolProviderEntry } from "./account-pool-providers.js";
+import {
+  pickFailoverTarget,
+  providersShareAccount,
+  type AccountPoolProviderEntry,
+} from "./account-pool-providers.js";
 import { AgentProviderMoveError } from "./provider-move.js";
 
 /**
@@ -341,42 +342,6 @@ export function buildMoveResumePrompt(input: {
 }
 
 /**
- * Remember which account this conversation came off, so the return leg can put it back
- * (docs/account-failover.md). Written after the move rather than before: a move that was refused
- * has taken nothing away and has no home to record.
- *
- * Only the first move writes it, and landing back on the recorded home clears it. Both halves
- * matter for a conversation that hops: A -> B -> C belongs to A, not B, and an ordinary rescue
- * that happens to pick A again has already completed the round trip, so leaving the label would
- * make the agent a return candidate for an account it is sitting on.
- *
- * Best-effort, like the other post-move steps. A failure here costs the round trip, not the rescue.
- */
-async function recordHomeProvider(input: {
-  agent: AccountFailoverAgentSummary;
-  targetProviderId: string;
-  agentManager: AgentManager;
-  logger: Logger;
-}): Promise<void> {
-  const existingHome = getHomeProviderFromLabels(input.agent.labels);
-  if (existingHome !== null && existingHome !== input.targetProviderId) {
-    return;
-  }
-  // Blank reads as unset; there is no label-removal API.
-  const home = existingHome === null ? input.agent.provider : "";
-  try {
-    await input.agentManager.updateAgentMetadata(input.agent.id, {
-      labels: { [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: home },
-    });
-  } catch (error) {
-    input.logger.warn(
-      { err: error, agentId: input.agent.id, home },
-      "Account failover: could not record the agent's home account",
-    );
-  }
-}
-
-/**
  * The preferred path: change the account under the agent instead of handing the conversation to a
  * new one. Returns null when the move cannot be used and the import path has to take over — a
  * target that still holds this conversation's retired handle is the routine case, since that
@@ -415,8 +380,6 @@ async function moveStuckAgentInPlace(input: {
     );
     return null;
   }
-
-  await recordHomeProvider({ agent, targetProviderId, agentManager, logger });
 
   // No settings to restore: a move keeps the agent's config, unlike an import.
   const model = agentManager.getAgent(agent.id)?.config.model;
@@ -594,7 +557,7 @@ export type IdleRehomeOutcome =
  * there it fails on the cap and the rescue leg takes over.
  */
 export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<IdleRehomeOutcome> {
-  const { agent, agentManager, agentStorage, logger } = input;
+  const { agent, agentManager, agentStorage } = input;
   const self = await agentStorage.get(agent.id);
   if (!self) {
     throw new Error(`Agent ${agent.id} has no stored record`);
@@ -639,7 +602,6 @@ export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<Id
     }
     return { kind: "refused", agentId: agent.id, targetProviderId, reason: getErrorMessage(error) };
   }
-  await recordHomeProvider({ agent, targetProviderId, agentManager, logger });
   return { kind: "moved", agentId: agent.id, oldProviderId: agent.provider, targetProviderId };
 }
 

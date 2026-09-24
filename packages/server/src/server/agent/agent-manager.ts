@@ -388,7 +388,7 @@ export interface AccountFailoverAgentSummary {
   lastError: string | undefined;
   title: string | null;
   /** A foreground turn, a pending run, or a replacement in flight. Same expression the done
-   * janitor reads: the return leg must not take the account out from under live work. */
+   * janitor reads: failover must not take the account out from under live work. */
   busy: boolean;
   pendingPermissionCount: number;
   /** The newest of every activity timestamp the manager holds, or null if none parses. */

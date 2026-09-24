@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { pickFailoverTarget, resolveAccountPoolEntries } from "./account-pool-providers.js";
+import type { AgentAccountAuth } from "./agent-sdk-types.js";
+import {
+  pickFailoverTarget,
+  providersShareAccount,
+  resolveAccountPoolEntries,
+} from "./account-pool-providers.js";
 
 describe("resolveAccountPoolEntries", () => {
   it("resolves the bare 'claude' id and extends:'claude' entries with accountPool params", () => {
@@ -279,5 +284,24 @@ describe("pickFailoverTarget", () => {
     expect(
       pickFailoverTarget([], { deadProviderIds: none, sourceProviderId: "claude" }),
     ).toBeNull();
+  });
+});
+
+describe("providersShareAccount", () => {
+  it("matches only on an equal, readable account", () => {
+    const tyler: AgentAccountAuth = { state: "signed-in", accountLabel: "tyler@example.com" };
+    expect(providersShareAccount(tyler, { ...tyler })).toBe(true);
+    expect(
+      providersShareAccount(tyler, { state: "signed-in", accountLabel: "worker@example.com" }),
+    ).toBe(false);
+    // Two shrugs are not a match: "cannot tell" must never be read as "the same".
+    expect(providersShareAccount({ state: "unknown" }, { state: "unknown" })).toBe(false);
+    expect(
+      providersShareAccount(
+        { state: "signed-in", accountLabel: null },
+        { state: "signed-in", accountLabel: null },
+      ),
+    ).toBe(false);
+    expect(providersShareAccount(null, null)).toBe(false);
   });
 });

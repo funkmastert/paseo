@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { NEUTRAL_HEADROOM } from "./account-pool-headroom.js";
+import type { AgentAccountAuth } from "./agent-sdk-types.js";
 import { ProviderOverrideSchema } from "./provider-launch-config.js";
 
 /**
@@ -144,4 +145,23 @@ export function pickFailoverTarget(
       a.providerId.localeCompare(b.providerId),
   );
   return ranked[0]?.providerId ?? null;
+}
+
+function accountKeyOf(auth: AgentAccountAuth | null | undefined): string | null {
+  return auth?.state === "signed-in" ? auth.accountLabel : null;
+}
+
+/**
+ * Whether two providers are provably the same Claude login. Only an equal, non-null account label
+ * counts: a pair of `unknown`s is two shrugs, not a match, and a pair of signed-in accounts whose
+ * label could not be read is the same. This is the live case in Tyler's pool — two
+ * `CLAUDE_CONFIG_DIR`s signed into one email — where the two providers report the same usage
+ * windows because they *are* the same windows, and a move between them changes no budget at all.
+ */
+export function providersShareAccount(
+  a: AgentAccountAuth | null | undefined,
+  b: AgentAccountAuth | null | undefined,
+): boolean {
+  const keyA = accountKeyOf(a);
+  return keyA !== null && keyA === accountKeyOf(b);
 }

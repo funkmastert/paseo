@@ -288,7 +288,7 @@ const MutableAccountFailoverConfigSchema = z
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
     collapseToSharedAccount: z.boolean().optional(),
-    // COMPAT(accountFailoverReturn): added in v0.8.3 — additive optional config, nothing to remove.
+    // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
     returnHome: z.boolean().optional(),
     returnMaxHomeUsedPct: z.number().nonnegative().optional(),
     returnMinIdleMinutes: z.number().nonnegative().optional(),
