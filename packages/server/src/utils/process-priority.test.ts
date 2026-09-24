@@ -7,6 +7,7 @@ import {
   lowerBackgroundProcessPriority,
   lowerProcessPriority,
   resetProcessPriorityPolicy,
+  resolveAgentNice,
   setProcessPriorityPolicy,
   type PriorityOps,
 } from "./process-priority.js";
@@ -122,5 +123,15 @@ describe("process priority policy", () => {
     setProcessPriorityPolicy({ agentNice: 0 });
     const ops = fakeOps({ 1: 0 });
     expect(lowerAgentProcessPriority(1, ops)).toBe("unchanged");
+  });
+
+  it("resolves the nice an agent's terminal should start at, or nothing to leave it normal", () => {
+    expect(resolveAgentNice()).toBe(10);
+    setProcessPriorityPolicy({ agentNice: 15 });
+    expect(resolveAgentNice()).toBe(15);
+    setProcessPriorityPolicy({ agentNice: 0 });
+    expect(resolveAgentNice()).toBeUndefined();
+    setProcessPriorityPolicy({ enabled: false });
+    expect(resolveAgentNice()).toBeUndefined();
   });
 });

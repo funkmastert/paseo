@@ -64,6 +64,7 @@ export interface TerminalManager {
     cols?: number;
     activityToken?: string;
     activityUrl?: string | null;
+    nice?: number;
   }): Promise<TerminalSession>;
   registerCwdEnv(options: { cwd: string; env: Record<string, string> }): void;
   validateTerminalActivityToken(terminalId: string, token: string): "valid" | "unknown" | "invalid";
@@ -321,6 +322,7 @@ export function createTerminalManager(
       cols?: number;
       activityToken?: string;
       activityUrl?: string | null;
+      nice?: number;
     }): Promise<TerminalSession> {
       assertAbsolutePath(options.cwd);
 
@@ -355,6 +357,7 @@ export function createTerminalManager(
             ...(options.rows !== undefined ? { rows: options.rows } : {}),
             ...(options.cols !== undefined ? { cols: options.cols } : {}),
             ...(mergedEnv ? { env: mergedEnv } : {}),
+            ...(options.nice !== undefined ? { nice: options.nice } : {}),
             activityEnv,
           }),
         );

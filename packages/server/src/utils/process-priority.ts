@@ -72,6 +72,11 @@ export function resetProcessPriorityPolicy(): void {
   currentPolicy = { ...DEFAULT_PROCESS_PRIORITY_POLICY };
 }
 
+/** The nice terminals an agent creates should start at, or undefined to leave them normal. */
+export function resolveAgentNice(): number | undefined {
+  return currentPolicy.enabled && currentPolicy.agentNice > 0 ? currentPolicy.agentNice : undefined;
+}
+
 /** Lowers a just-spawned agent provider process (or terminal an agent owns) per the policy. */
 export function lowerAgentProcessPriority(
   pid: number | undefined,

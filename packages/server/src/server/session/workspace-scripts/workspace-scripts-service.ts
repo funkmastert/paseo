@@ -168,7 +168,7 @@ export function createWorkspaceScriptsService(deps: {
     return buildSnapshot(workspace, project);
   }
 
-  async function launchProcess(input: { workspaceId: string; scriptName: string }) {
+  async function launchProcess(input: { workspaceId: string; scriptName: string; nice?: number }) {
     const available = requireAvailable();
     const workspace = await getWorkspace(input.workspaceId);
     await assertAutomationAllowed(workspace.workspaceId);
@@ -180,6 +180,7 @@ export function createWorkspaceScriptsService(deps: {
       projectSlug: gitMetadata.projectSlug,
       branchName: gitMetadata.currentBranch,
       scriptName: input.scriptName,
+      ...(input.nice !== undefined ? { nice: input.nice } : {}),
       daemonPort: getDaemonTcpPort?.() ?? null,
       daemonListenHost: getDaemonTcpHost?.() ?? null,
       serviceProxyPublicBaseUrl,
@@ -198,6 +199,8 @@ export function createWorkspaceScriptsService(deps: {
   async function launch(input: {
     workspaceId: string;
     scriptName: string;
+    /** Start a new script terminal at this nice; set when an agent asked for the launch. */
+    nice?: number;
   }): Promise<WorkspaceScriptPayload> {
     const { workspace, project } = await launchProcess(input);
     const script = buildSnapshot(workspace, project).find(

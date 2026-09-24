@@ -71,6 +71,7 @@ import {
   updateAgentCommand,
 } from "../lifecycle-command.js";
 import type { ForgeService } from "../../../services/forge-service.js";
+import { resolveAgentNice } from "../../../utils/process-priority.js";
 import type { WorkspaceGitService } from "../../workspace-git-service.js";
 import type {
   PersistedWorkspaceRecord,
@@ -678,6 +679,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
     return expandUserPath(trimmedCwd);
   };
+
+  // A terminal or script an agent starts is where its builds and tests run, so it gets the agent
+  // nice; a person's stays normal. Without a caller agent this is not an agent's request.
+  function callerNice(): number | undefined {
+    return callerAgentId ? resolveAgentNice() : undefined;
+  }
 
   async function resolveTerminalWorkspaceId(resolvedCwd: string): Promise<string> {
     // An agent-spawned terminal belongs to the caller agent's workspace. Only if
@@ -2322,7 +2329,11 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       return {
         content: [],
         structuredContent: ensureValidJson({
-          script: await workspaceScripts.launch({ workspaceId, scriptName }),
+          script: await workspaceScripts.launch({
+            workspaceId,
+            scriptName,
+            ...(callerNice() !== undefined ? { nice: callerNice() } : {}),
+          }),
         }),
       };
     },
@@ -2423,11 +2434,13 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
       const resolvedCwd = resolveScopedCwd(cwd, { required: true });
       const workspaceId = await resolveTerminalWorkspaceId(resolvedCwd);
+      const nice = callerNice();
 
       const terminal = await terminalManager.createTerminal({
         cwd: resolvedCwd,
         workspaceId,
         ...(name?.trim() ? { name: name.trim() } : {}),
+        ...(nice !== undefined ? { nice } : {}),
       });
 
       return {
