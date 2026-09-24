@@ -2,6 +2,9 @@ import type { Agent } from "@/stores/session-store";
 
 export type OrchestrationRowBadge = "needs-input" | "failed" | "owes-report" | "report-undelivered";
 
+/** Keys of `agentList.status` — the words the compact row's second line falls back to. */
+export type OrchestrationRowStatusKey = "initializing" | "idle" | "running" | "error" | "closed";
+
 export interface OrchestrationRowPresentation {
   /** The one row state that is happening now rather than having happened. */
   isRunning: boolean;
@@ -17,6 +20,20 @@ export interface OrchestrationRowPresentation {
    * column, with no time attached, that reads as current work hours after the agent stopped.
    */
   showActivity: boolean;
+  /** What the compact row's second line says when it has no activity to show. */
+  statusKey: OrchestrationRowStatusKey;
+}
+
+function resolveStatusKey(status: Agent["status"]): OrchestrationRowStatusKey {
+  switch (status) {
+    case "initializing":
+    case "running":
+    case "error":
+    case "closed":
+      return status;
+    default:
+      return "idle";
+  }
 }
 
 function resolveBadge(agent: Agent): OrchestrationRowBadge | null {
@@ -42,5 +59,6 @@ export function resolveOrchestrationRowPresentation(agent: Agent): Orchestration
     isClosed: agent.status === "closed",
     badge,
     showActivity: isRunning && Boolean(agent.lastActivitySummary),
+    statusKey: resolveStatusKey(agent.status),
   };
 }

@@ -19,6 +19,14 @@ import "@/i18n/i18next";
 import type { TokenBurnSibling } from "@/utils/token-burn-tone-model";
 import type { OrchestrationFlatRow } from "./orchestration-panel-model";
 
+// The unistyles stub has no runtime, so the real hook can never report a compact form factor;
+// the phone tests flip this instead.
+const layout = vi.hoisted(() => ({ compact: false }));
+vi.mock("@/constants/layout", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/constants/layout")>()),
+  useIsCompactFormFactor: () => layout.compact,
+}));
+
 // App sources compile against the classic JSX runtime, which expects React on the global.
 beforeEach(() => {
   vi.stubGlobal("React", React);
@@ -27,6 +35,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  layout.compact = false;
   vi.useRealTimers();
   for (const entry of mounted.splice(0)) {
     act(() => entry.root.unmount());
@@ -262,6 +271,70 @@ describe("orchestration default view", () => {
     await page.screenshot({
       element: container,
       path: "../../../../docs/assets/orchestration-panel-scoped-older.png",
+    });
+  });
+});
+
+/**
+ * The phone layout. Rows switch on the form factor and the captures above render wide, so these
+ * report a compact one and mount at a phone's width.
+ */
+describe("orchestration rows on a phone", () => {
+  const PHONE_WIDTH = 390;
+  const MIN_TAP_TARGET = 44;
+
+  function mountOnPhone(rows: OrchestrationFlatRow[]): HTMLDivElement {
+    layout.compact = true;
+    return mount(<Rows rows={rows} canShowActivity={false} />, PHONE_WIDTH);
+  }
+
+  function rowHeights(container: HTMLElement): number[] {
+    return Array.from(container.querySelectorAll('[data-testid^="orchestration-row-"]')).map(
+      (row) => row.getBoundingClientRect().height,
+    );
+  }
+
+  it("keeps every row one height whatever the agent is doing, and tall enough to tap", () => {
+    const container = mountOnPhone(buildOrchestrationFixtureRows());
+    const heights = rowHeights(container);
+    expect(heights.length).toBe(53);
+    expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(1);
+    expect(Math.min(...heights)).toBeGreaterThanOrEqual(MIN_TAP_TARGET);
+  });
+
+  it("puts archive and detach behind the row, not beside it", () => {
+    const container = mountOnPhone(buildOrchestrationFixtureRows());
+    expect(container.querySelectorAll('[data-testid^="orchestration-archive-"]').length).toBe(0);
+    expect(container.querySelectorAll('[data-testid^="orchestration-detach-"]').length).toBe(0);
+  });
+
+  it("shows what a running agent is doing on the row, and the state for the rest", async () => {
+    const rows = buildOrchestrationFixtureRows();
+    const running = rows.find(
+      (row) => row.agent.status === "running" && row.agent.lastActivitySummary,
+    );
+    const finished = rows.find((row) => row.agent.status === "idle");
+    if (!running || !finished) throw new Error("fixture fleet lost its running or idle agent");
+    const container = mountOnPhone(rows);
+    const rowText = (id: string) =>
+      container.querySelector(`[data-testid="orchestration-row-${id}"]`)?.textContent ?? "";
+    expect(rowText(running.agent.id)).toContain(running.agent.lastActivitySummary);
+    expect(rowText(finished.agent.id)).toContain("Idle");
+  });
+
+  it("keeps every row inside the screen", () => {
+    const container = mountOnPhone(buildOrchestrationFixtureRows());
+    const overflowing = Array.from(
+      container.querySelectorAll('[data-testid^="orchestration-row-"]'),
+    ).filter((row) => row.scrollWidth > row.clientWidth + 1);
+    expect(overflowing.length).toBe(0);
+  });
+
+  it("captures the phone layout", async () => {
+    const container = mountOnPhone(buildOrchestrationFixtureRows().slice(0, 14));
+    await page.screenshot({
+      element: container,
+      path: "../../../../docs/assets/orchestration-panel-compact.png",
     });
   });
 });

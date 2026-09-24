@@ -25,6 +25,7 @@ import {
   AccountBudgetStrip,
   DEFAULT_REFETCH_INTERVAL_MS,
 } from "@/orchestration/account-budget-strip";
+import { countAccountUsage } from "@/orchestration/account-budget-strip-model";
 import {
   collectFinishedAgentsAcrossRoots,
   collectOrchestrationProviderIds,
@@ -175,6 +176,12 @@ function OrchestrationPanel(): ReactElement {
     alwaysKeepAgentId: target.scopeAgentId ?? null,
   });
   const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
+  // Account usage is fleet-wide, so it counts the whole host's tree even when this tab is scoped
+  // to one leader's.
+  const accountUsage = useMemo(
+    () => countAccountUsage(flattenOrchestrationTree(allRoots)),
+    [allRoots],
+  );
 
   // Collection rows never independently subscribe to token-rate data — the list owner derives
   // the keyed tone model once (docs/coding-standards.md). useTokenBurnTones owns the hysteresis
@@ -278,6 +285,7 @@ function OrchestrationPanel(): ReactElement {
         <AccountBudgetStrip
           serverId={serverId}
           providerIds={providerIds}
+          usage={accountUsage}
           refetchIntervalMs={DEFAULT_REFETCH_INTERVAL_MS}
         />
         <OrchestrationHeaderControls

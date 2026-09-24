@@ -70,4 +70,15 @@ describe("resolveOrchestrationRowPresentation", () => {
       resolveOrchestrationRowPresentation(byTitle("Device lease protocol messages")).isClosed,
     ).toBe(false);
   });
+
+  it("names the state the compact row falls back to when there is no activity to show", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    expect(resolveOrchestrationRowPresentation(finished).statusKey).toBe(finished.status);
+    expect(resolveOrchestrationRowPresentation({ ...finished, status: "closed" }).statusKey).toBe(
+      "closed",
+    );
+    expect(resolveOrchestrationRowPresentation({ ...finished, status: "error" }).statusKey).toBe(
+      "error",
+    );
+  });
 });
