@@ -58,6 +58,16 @@ Recovery decides who was mid-turn. [Durable finish reports](finish-reports.md) d
 
 `RestartRecoveryService.isAboutToResume(agentId)` returns true while recovery has claimed an agent and not finished with it. In `resume` mode that covers the whole episode from construction until the boot apply reaches each agent. During any apply it covers the agents still queued. `FinishObligationService` takes it as `isClaimedByRestartRecovery` and leaves an obligation alone while its child or its owner is claimed: no park, no report, no wake. Once recovery resumes the child, the sweep sees it running and attaches its watcher as usual, so the leader's recovery prompt tells it the reports survived. In `plan` mode nothing is claimed, and finish reports behave as they do without recovery.
 
+## Who owns what
+
+One owner per case, so no agent is resumed twice:
+
+| Case                                     | Owner                                         | How the others stay out                                                                                                                           |
+| ---------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cut off mid-turn by a daemon stop        | Restart recovery                              | Finish reports and [account failover](account-failover.md) skip a claimed agent. The done janitor treats an open marker as neither dead nor done. |
+| Stalled in `running` on a live daemon    | The [stalled-agent sweep](stalled-agents.md)  | A restart-cut agent is not `running` until something resumes it, so the sweep never sees it.                                                      |
+| A turn that failed on a dead account     | [Account failover](account-failover.md)       | Recovery resumes on the agent's own account. If that turn hits the cap, failover takes it like any other capped turn.                             |
+
 ## Surfaces
 
 - CLI: `paseo recover` shows the plan. `--apply [agentIds...]` resumes. `--dismiss [agentIds...]` leaves agents closed and stops offering them. `--full` shows green checks too. `--json` returns the plan.

@@ -90,6 +90,12 @@ export interface AccountFailoverMonitorOptions {
     providers?: Record<string, unknown>;
   };
   logger: Logger;
+  /**
+   * Whether restart recovery has claimed this agent to resume it (docs/restart-recovery.md).
+   * Failover neither moves nor prompts a claimed agent: recovery owns an agent cut off by a
+   * daemon stop, and hands it over only when its resumed turn hits a cap on a live daemon.
+   */
+  isClaimedByRestartRecovery?: (agentId: string) => boolean;
   sweepIntervalMs?: number;
   reactiveSignalTtlMs?: number;
   now?: () => number;
@@ -209,7 +215,7 @@ export class AccountFailoverMonitor {
     }
 
     const nowMs = this.now();
-    const agents = this.options.agentManager.listAgentsForAccountFailover();
+    const agents = this.listUnclaimedAgents();
     const usage = await this.readUsage();
     const accounts = await this.readPoolAccounts(poolEntries);
     const plan = planAccountFailoverSweep({
@@ -266,10 +272,7 @@ export class AccountFailoverMonitor {
     });
 
     // Re-read: the migrations above moved agents.
-    const afterRescues =
-      plan.candidates.length === 0
-        ? agents
-        : this.options.agentManager.listAgentsForAccountFailover();
+    const afterRescues = plan.candidates.length === 0 ? agents : this.listUnclaimedAgents();
     const idle = planIdleRehomes({
       agents: afterRescues,
       poolProviderIds: new Set(poolEntries.map((entry) => entry.providerId)),
@@ -287,6 +290,13 @@ export class AccountFailoverMonitor {
         config,
       });
     }
+  }
+
+  /** Every loaded agent restart recovery has not claimed. */
+  private listUnclaimedAgents(): AccountFailoverAgentSummary[] {
+    const claimed = this.options.isClaimedByRestartRecovery;
+    const agents = this.options.agentManager.listAgentsForAccountFailover();
+    return claimed ? agents.filter((agent) => !claimed(agent.id)) : agents;
   }
 
   /**

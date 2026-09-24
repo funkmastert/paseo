@@ -42,6 +42,8 @@ interface Harness {
   /** What the monitor told the remediation ladder. */
   observations: RemediationObservation[];
   prompts: Record<PoolProvider, string[]>;
+  /** Agents the test says restart recovery has claimed. */
+  claimedByRestartRecovery: Set<string>;
   setUsage(providers: ProviderUsage[]): void;
   /** Make the next `times` resume prompts on `provider` fail the way a busy provider would. */
   failResumes(provider: PoolProvider, times: number): void;
@@ -90,6 +92,7 @@ async function createHarness(): Promise<Harness> {
   const pushes: PushPayload[] = [];
   const sends: Harness["sends"] = [];
   const observations: RemediationObservation[] = [];
+  const claimedByRestartRecovery = new Set<string>();
   const prompts: Record<PoolProvider, string[]> = {
     claude: [],
     "claude-personal": [],
@@ -171,6 +174,7 @@ async function createHarness(): Promise<Harness> {
             observations.push(observation);
           },
         },
+        isClaimedByRestartRecovery: (agentId) => claimedByRestartRecovery.has(agentId),
       },
       agentStoragePath: path.join(paseoHome, "agents"),
       relayEnabled: false,
@@ -214,6 +218,7 @@ async function createHarness(): Promise<Harness> {
     sends,
     observations,
     prompts,
+    claimedByRestartRecovery,
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
     },
@@ -914,6 +919,27 @@ describe("AccountFailoverMonitor (e2e)", () => {
     const resume = harness.prompts.claude.find((prompt) => prompt.includes("Account handoff"));
     expect(resume).toContain(`You are the same agent (${root})`);
     expect(levelOf(harness, failoverPushes(harness)[0])).toBe("record");
+  }, 60_000);
+
+  test("leaves an agent restart recovery has claimed, and rescues it once recovery lets go", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "CLAIMED-MARKER");
+    await failOnLimit(harness, root, REAL_WEEKLY_LIMIT_MESSAGE);
+    harness.claimedByRestartRecovery.add(root);
+
+    await harness.sweep();
+
+    // Recovery owns it: no move, no resume prompt, nothing on the record.
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(false);
+    expect(failoverPushes(harness)).toEqual([]);
+
+    harness.claimedByRestartRecovery.delete(root);
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    const resume = harness.prompts.claude.find((prompt) => prompt.includes("Account handoff"));
+    expect(resume).toContain(`You are the same agent (${root})`);
   }, 60_000);
 
   test("resumes a root whose dead turn the stalled-agent sweep cancelled", async () => {

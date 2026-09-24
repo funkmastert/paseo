@@ -609,6 +609,8 @@ export interface PaseoDaemonConfig {
     sweepIntervalMs?: number;
     now?: () => number;
     remediationSink?: RemediationSink;
+    /** Stands in for restart recovery's claims, which only a real restart produces. */
+    isClaimedByRestartRecovery?: (agentId: string) => boolean;
   };
   /**
    * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
@@ -1061,6 +1063,7 @@ function createAccountFailoverMonitor(input: {
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   remediationSink: RemediationSink;
+  restartRecovery: Pick<RestartRecoveryService, "isAboutToResume">;
   serverId: string;
   logger: Logger;
 }): AccountFailoverMonitor {
@@ -1078,6 +1081,9 @@ function createAccountFailoverMonitor(input: {
       providers: input.daemonConfigStore.get().providers,
     }),
     logger: input.logger,
+    isClaimedByRestartRecovery:
+      overrides?.isClaimedByRestartRecovery ??
+      ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });
@@ -2702,6 +2708,7 @@ export async function createPaseoDaemon(
               wsServer,
               daemonConfigStore,
               remediationSink,
+              restartRecovery,
               serverId,
               logger,
             });

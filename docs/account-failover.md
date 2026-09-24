@@ -117,7 +117,7 @@ Failover never interrupts a turn itself. A turn stuck in `running` with no progr
 
 Only a limit-shaped error makes an account dead; an agent in error for another reason is moved only when its account is already dead. An idle move uses the same targets as a rescue and the same duplicate rule, but never imports: a refused move backs off for an hour and the agent stays put. If it is asked to do something there, it fails on the cap and the rescue takes it.
 
-The sweep covers agents loaded in the daemon. After a restart, a stuck agent is picked up once something loads it (opening it in the app, or sending it a message).
+The sweep covers agents loaded in the daemon. After a restart, a stuck agent is picked up once something loads it (opening it in the app, or sending it a message). An agent a daemon stop cut off mid-turn is [restart recovery](restart-recovery.md)'s: while recovery has claimed it (`isAboutToResume`), failover neither moves nor prompts it. If the turn recovery resumes hits the cap, the agent is an ordinary cut-off turn on a live daemon, and failover rescues it.
 
 ## What a migration does
 
