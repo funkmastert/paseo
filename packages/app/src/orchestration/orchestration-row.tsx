@@ -1,4 +1,4 @@
-import { useCallback, useState, type ReactElement } from "react";
+import { useCallback, useMemo, useState, type ReactElement } from "react";
 import { Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
@@ -55,14 +55,6 @@ const MAX_INDENT_LEVELS = 4;
 /** Shared by the row's leading provider glyph and its trailing action glyphs, so a row keeps a
  * single icon column. The panel header reuses it for its own inline glyph. */
 export const ROW_ICON_SIZE = 14;
-
-// Module-level so the menu items receive a stable `leading` element on every render.
-const DETACH_MENU_ICON = (
-  <ThemedUnlink size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />
-);
-const ARCHIVE_MENU_ICON = (
-  <ThemedArchive size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />
-);
 
 // Plain react-native StyleSheet, not Unistyles: these widths are static (not theme-dependent), and
 // a raw per-row inline `{ width }` object would each hash into its own persisted web CSS class —
@@ -243,10 +235,10 @@ function WideOrchestrationRow({
 }
 
 /**
- * The phone row: title and badge on the first line, what the agent is doing and how long ago on
- * the second. The second line is always there — the activity while running, otherwise the state
- * in words — so a row's height never depends on what the agent is doing (docs/design.md §11), and
- * the time no longer competes with the title for the first line.
+ * The phone row: the title alone on the first line, on the second any badge, what the agent is
+ * doing and how long ago. The second line is always there — the activity while running, otherwise
+ * the state in words — so a row's height never depends on what the agent is doing
+ * (docs/design.md §11), and neither a badge nor the time competes with the title for its width.
  *
  * Archive and detach are behind a long press rather than beside the title. Two small icons next
  * to each other under a thumb is how the wrong agent gets archived, and they cost the title its
@@ -276,6 +268,16 @@ function CompactOrchestrationRow({
   const handlePress = useCallback(() => onPress(agent), [agent, onPress]);
   const handleArchive = useCallback(() => onArchive(agent.id), [agent.id, onArchive]);
   const handleDetach = useCallback(() => onDetach(agent.id), [agent.id, onDetach]);
+  // Built here rather than at module scope: the classic JSX runtime needs React on the global, and
+  // the browser capture only stubs it once a test is running, after this module has been imported.
+  const detachIcon = useMemo(
+    () => <ThemedUnlink size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />,
+    [],
+  );
+  const archiveIcon = useMemo(
+    () => <ThemedArchive size={ROW_ICON_SIZE} uniProps={foregroundMutedColorMapping} />,
+    [],
+  );
 
   return (
     <ContextMenu>
@@ -311,13 +313,13 @@ function CompactOrchestrationRow({
           />
         </View>
         <View style={styles.compactBody}>
-          <View style={styles.compactTitleLine}>
-            <Text
-              style={presentation.isClosed ? styles.compactTitleClosed : styles.compactTitle}
-              numberOfLines={1}
-            >
-              {displayTitle}
-            </Text>
+          <Text
+            style={presentation.isClosed ? styles.compactTitleClosed : styles.compactTitle}
+            numberOfLines={1}
+          >
+            {displayTitle}
+          </Text>
+          <View style={styles.compactDetailLine}>
             {tokenBurnTone ? (
               <TokenBurnBadge
                 tone={tokenBurnTone}
@@ -332,8 +334,6 @@ function CompactOrchestrationRow({
             {presentation.badge === "failed" ? (
               <StatusBadge label={t("agentList.badges.failed")} variant="error" />
             ) : null}
-          </View>
-          <View style={styles.compactDetailLine}>
             <Text style={styles.compactDetail} numberOfLines={1}>
               {secondary}
             </Text>
@@ -347,7 +347,7 @@ function CompactOrchestrationRow({
         {showDetach ? (
           <ContextMenuItem
             testID={`orchestration-detach-${agent.id}`}
-            leading={DETACH_MENU_ICON}
+            leading={detachIcon}
             onSelect={handleDetach}
           >
             {t("subagents.detachTooltip")}
@@ -355,7 +355,7 @@ function CompactOrchestrationRow({
         ) : null}
         <ContextMenuItem
           testID={`orchestration-archive-${agent.id}`}
-          leading={ARCHIVE_MENU_ICON}
+          leading={archiveIcon}
           onSelect={handleArchive}
         >
           {t("subagents.archiveTooltip")}
@@ -372,8 +372,11 @@ const styles = StyleSheet.create((theme) => {
   // leading cluster can be exactly one title line tall — that is what centres the dot on the title
   // rather than on the two-line block.
   const compactTitleLineHeight = Math.round(theme.fontSize.base * 1.4);
-  const compactBadgeLineHeight = Math.round(theme.fontSize.sm * 1.4) + 8;
-  const compactDetailLineHeight = Math.round(theme.fontSize.sm * 1.4);
+  // The badges live on the second line so the title keeps the whole first one — a "Needs input"
+  // pill beside it is what cut a title down to "[MOVED → 423edc86,…". That line is always as tall
+  // as a badge: one arriving or leaving must not change the row's height and reflow the list
+  // (docs/design.md §11), and a line shorter than its badge makes iOS clip the badge's text.
+  const compactDetailLineHeight = Math.round(theme.fontSize.sm * 1.4) + 8;
   return {
     compactRow: {
       flexDirection: "row",
@@ -386,33 +389,18 @@ const styles = StyleSheet.create((theme) => {
       flexDirection: "row",
       alignItems: "center",
       gap: theme.spacing[2],
-      height: compactBadgeLineHeight,
+      height: compactTitleLineHeight,
     },
     compactBody: {
       flex: 1,
       minWidth: 0,
     },
-    // The title line is always as tall as a badge. A badge arriving or leaving must not change the
-    // row's height and reflow the list (docs/design.md §11), and a line shorter than its badge
-    // makes iOS clip the badge's text instead of letting it overflow.
-    compactTitleLine: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: theme.spacing[2],
-      height: compactBadgeLineHeight,
-    },
     compactTitle: {
-      flexGrow: 1,
-      flexShrink: 1,
-      minWidth: 96,
       fontSize: theme.fontSize.base,
       lineHeight: compactTitleLineHeight,
       color: theme.colors.foreground,
     },
     compactTitleClosed: {
-      flexGrow: 1,
-      flexShrink: 1,
-      minWidth: 96,
       fontSize: theme.fontSize.base,
       lineHeight: compactTitleLineHeight,
       color: theme.colors.foregroundMuted,
