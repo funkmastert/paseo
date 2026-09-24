@@ -16,8 +16,11 @@ import { resolveCreateAgentTitles } from "../agent/create-agent-title.js";
 import { type BoundCreateAgentCommand, formatProviderModel } from "../agent/create-agent/create.js";
 import type { PersistedWorkspaceRecord } from "../workspace-registry.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../worktree-session.js";
+import { buildAgentViews } from "../agent-done-janitor.js";
 import { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
+import { evaluateScheduleCondition } from "./conditions.js";
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -152,6 +155,26 @@ function shouldCompleteSchedule(schedule: StoredSchedule, now: Date): boolean {
   return countCompletedRuns(schedule) >= schedule.maxRuns;
 }
 
+// A condition reads the target agent's state and its children's, so it means nothing on a
+// schedule that starts a fresh agent every time. Reject it there instead of storing a gate
+// that could never be evaluated.
+function normalizeCondition(
+  condition: ScheduleCondition | null | undefined,
+  target: ScheduleTarget,
+): ScheduleCondition | null {
+  if (!condition) {
+    return null;
+  }
+  if (target.type !== "agent") {
+    throw new Error("A condition is only valid on a heartbeat (an agent target)");
+  }
+  return condition;
+}
+
+function conditionField(condition: ScheduleCondition | null): { condition?: ScheduleCondition } {
+  return condition ? { condition } : {};
+}
+
 function requireSchedule(schedule: StoredSchedule | null, id: string): StoredSchedule {
   if (!schedule) {
     throw new Error(`Schedule not found: ${id}`);
@@ -219,6 +242,7 @@ type ScheduleAgentManager = Pick<
     | "createAgent"
     | "getRegisteredProviderIds"
     | "hydrateTimelineFromProvider"
+    | "listAgentsForDoneJanitor"
     | "resumeAgentFromPersistence"
     | "runAgent"
     | "waitForAgentEvent"
@@ -324,6 +348,7 @@ export class ScheduleService {
   async create(input: CreateScheduleInput): Promise<StoredSchedule> {
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    normalizeCondition(input.condition, input.target);
     return this.createScheduleRecord(input, {
       name: trimOptionalName(input.name),
       prompt,
@@ -358,6 +383,7 @@ export class ScheduleService {
       pausedAt: null,
       expiresAt: input.expiresAt ?? null,
       maxRuns: normalizeMaxRuns(input.maxRuns),
+      ...conditionField(normalizeCondition(input.condition, fields.target)),
       runs: [],
     };
   }
@@ -369,6 +395,7 @@ export class ScheduleService {
     const name = trimOptionalName(input.name);
     const prompt = normalizePrompt(input.prompt);
     validateScheduleCadence(input.cadence);
+    normalizeCondition(input.condition, input.target);
     if (name === null) {
       return this.createScheduleRecord(input, { name, prompt, target: input.target });
     }
@@ -383,8 +410,9 @@ export class ScheduleService {
         const cadence = mergeScheduleCadenceTimezone(current.cadence, input.cadence);
         const runOnCreate = input.runOnCreate ?? cadence.type === "every";
         const nextRunAt = runOnCreate ? now : computeNextRunAt(cadence, now);
+        const { condition: _previousCondition, ...rest } = current;
         return {
-          ...current,
+          ...rest,
           name,
           prompt,
           cadence,
@@ -394,6 +422,7 @@ export class ScheduleService {
           nextRunAt: nextRunAt.toISOString(),
           expiresAt: input.expiresAt ?? null,
           maxRuns: normalizeMaxRuns(input.maxRuns),
+          ...conditionField(normalizeCondition(input.condition, inputTarget)),
           updatedAt: now.toISOString(),
         };
       },
@@ -497,6 +526,14 @@ export class ScheduleService {
         updated = { ...updated, expiresAt: input.expiresAt };
       }
 
+      if (input.condition !== undefined) {
+        const { condition: _previousCondition, ...rest } = updated;
+        updated = {
+          ...rest,
+          ...conditionField(normalizeCondition(input.condition, updated.target)),
+        };
+      }
+
       return { ...updated, updatedAt: now.toISOString() };
     });
     return requireSchedule(next, input.id);
@@ -586,8 +623,65 @@ export class ScheduleService {
       if (new Date(schedule.nextRunAt).getTime() > now.getTime()) {
         continue;
       }
+      if (!(await this.conditionAllowsFire(schedule, now))) {
+        await this.skipTick(schedule, now);
+        continue;
+      }
       await this.runSchedule(schedule, now);
     }
+  }
+
+  // Evaluated before a run is recorded or a prompt is sent, so a tick that fails the gate costs
+  // no agent turn. Manual runs (`runOnce`) bypass it: asking for a run is asking for a run.
+  // An evaluation that throws lets the tick fire, the behavior a heartbeat had before
+  // conditions existed, rather than going quiet on a bug.
+  private async conditionAllowsFire(schedule: StoredSchedule, now: Date): Promise<boolean> {
+    const { condition, target } = schedule;
+    if (!condition || condition.type === "always" || target.type !== "agent") {
+      return true;
+    }
+    try {
+      const views = buildAgentViews(
+        this.agentManager.listAgentsForDoneJanitor(),
+        await this.agentStorage.list(),
+        new Set<string>(),
+        new Set<string>(),
+      );
+      const verdict = evaluateScheduleCondition(condition, {
+        target: views.find((view) => view.id === target.agentId) ?? null,
+        views,
+        createdAtMs: Date.parse(schedule.createdAt),
+        lastRunAtMs: schedule.lastRunAt ? Date.parse(schedule.lastRunAt) : null,
+      });
+      if (!verdict.fire) {
+        this.logger.debug(
+          { scheduleId: schedule.id, agentId: target.agentId, reason: verdict.reason },
+          "Heartbeat condition not met; skipping tick",
+        );
+      }
+      return verdict.fire;
+    } catch (error) {
+      this.logger.warn(
+        { err: error, scheduleId: schedule.id, now: now.toISOString() },
+        "Failed to evaluate heartbeat condition; firing",
+      );
+      return true;
+    }
+  }
+
+  // A quiet skip is neither recorded nor delivered: no run row, no `lastRunAt`, no `updatedAt`.
+  // Only the next slot moves, so the schedule is not re-evaluated every second until it fires.
+  private async skipTick(schedule: StoredSchedule, now: Date): Promise<void> {
+    await this.store.update(schedule.id, (current) => {
+      if (current.status !== "active" || current.nextRunAt !== schedule.nextRunAt) {
+        return current;
+      }
+      let nextRunAt = computeNextRunAt(current.cadence, new Date(schedule.nextRunAt ?? now));
+      while (nextRunAt.getTime() <= now.getTime()) {
+        nextRunAt = computeNextRunAt(current.cadence, nextRunAt);
+      }
+      return { ...current, nextRunAt: nextRunAt.toISOString() };
+    });
   }
 
   private async completeScheduleIfDue(scheduleId: string, now: Date): Promise<void> {

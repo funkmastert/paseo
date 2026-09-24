@@ -8,6 +8,7 @@ import {
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
 import {
   AgentCreateFailedStatusPayloadSchema,
@@ -767,6 +768,7 @@ export interface CreateScheduleOptions {
   maxRuns?: number;
   expiresAt?: string;
   runOnCreate?: boolean;
+  condition?: ScheduleCondition;
   requestId?: string;
 }
 export interface InspectScheduleOptions {
@@ -794,6 +796,8 @@ export interface UpdateScheduleOptions {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  /** Null clears the condition. */
+  condition?: ScheduleCondition | null;
   requestId?: string;
 }
 export interface RenameBranchInput {
@@ -5701,6 +5705,7 @@ export class DaemonClient {
         ...(typeof options.maxRuns === "number" ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
+        ...(options.condition ? { condition: options.condition } : {}),
       },
       responseType: "schedule/create/response",
     });
@@ -5794,6 +5799,7 @@ export class DaemonClient {
         ...(options.newAgentConfig !== undefined ? { newAgentConfig: options.newAgentConfig } : {}),
         ...(options.maxRuns !== undefined ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
+        ...(options.condition !== undefined ? { condition: options.condition } : {}),
       },
       responseType: "schedule/update/response",
     });
