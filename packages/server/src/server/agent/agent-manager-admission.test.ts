@@ -316,6 +316,30 @@ describe("AgentManager child admission", () => {
     expect(b.session.startedPrompts).toEqual([]);
   });
 
+  test("a steered message to a queued child joins the held one too, and never waits in memory", async () => {
+    // Messages steer by default (agent-prompt.ts): the steer path must reach the held turn as well.
+    const root = await create(null);
+    const running = await create(root.id);
+    const a = await create(root.id);
+    const b = await create(root.id);
+    await prompt(running.id, "task");
+    await prompt(a.id, "part one");
+    await prompt(b.id, "b task");
+    await flush();
+    const result = await startAgentRun(manager, a.id, "part two", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+    });
+    await flush();
+    expect(result.disposition).toBe("steered");
+    expect(admission.queueLength()).toBe(2);
+
+    running.session.finishTurn();
+    await flush();
+    expect(a.session.startedPrompts).toEqual(["part one\n\npart two"]);
+    expect(b.session.startedPrompts).toEqual([]);
+  });
+
   test("a stale session retry sends the merged held prompt, not only the first", async () => {
     const root = await create(null);
     const running = await create(root.id);

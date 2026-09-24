@@ -719,6 +719,10 @@ async function nudgeNow(
       agentId: input.agentId,
       prompt: input.prompt,
       messageId: randomUUID(),
+      // The one daemon prompt that replaces a turn on purpose: the turn is dead (no activity for
+      // stallMinutes, an idle process tree), and a steer would join it or wait behind it forever.
+      // Idle CPU is also why no background workflow is lost.
+      activeTurnBehavior: "interrupt",
       unarchive: false,
       logger,
     });

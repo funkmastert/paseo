@@ -107,7 +107,7 @@ async function steerOrWaitForActiveRun(
       // Checked and started in one tick, so no other dispatch can start a run in between.
       return {
         disposition: "turn_started",
-        iterator: agentManager.streamAgent(agentId, prompt, options.runOptions),
+        iterator: agentManager.streamAgent(agentId, prompt, options.runOptions, options.queuedAt),
       };
     }
   }
@@ -151,6 +151,7 @@ async function deliverWhenPossible(
       // `replaceRunning`, so a run that appears in the meantime is refused, not interrupted.
       await startAgentRunWithStaleRetry(agentManager, agentId, prompt, logger, {
         runOptions: options.runOptions,
+        ...(options.queuedAt ? { queuedAt: options.queuedAt } : {}),
       });
       return;
     } catch (error) {

@@ -4281,6 +4281,13 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
   ): Promise<ActiveTurnSteerDispatchResult> {
+    // A child waiting for an admission slot has no turn to join yet. The prompt joins the held one
+    // and keeps its place in line, on disk with it (docs/resource-monitor.md), so the turn starts
+    // with both and nothing waits in memory.
+    const { clearPendingPermissions: _clearPendingPermissions, ...runOptions } = options ?? {};
+    if (this.childAdmission?.mergeHeld(agentId, prompt, options ? runOptions : undefined)) {
+      return { status: "steered" };
+    }
     const agent = this.requireSessionAgent(agentId);
     // A turn that ends or changes mid-admission is not a reason to fail the message: the next
     // attempt targets whatever owns the agent now. Bounded, because the two turn fields can
