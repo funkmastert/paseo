@@ -1176,6 +1176,8 @@ export class AgentManager {
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
   private childAdmission: ChildAdmissionController | null = null;
+  /** What each admitted stream started with, for a caller that has to retry the same turn. */
+  private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
@@ -3692,6 +3694,14 @@ export class AgentManager {
     return this.streamAgentInternal(agentId, prompt, options);
   }
 
+  /**
+   * The prompt and options a stream from `streamAgent` actually started its turn with: a queued
+   * child's held prompt may have had later prompts merged in. Undefined until it is admitted.
+   */
+  getAdmittedTurn(stream: AsyncGenerator<AgentStreamEvent>): AdmittedTurn | undefined {
+    return this.admittedTurns.get(stream);
+  }
+
   /** `queuedAt` puts a held child turn back in line at its old place (reload, restart). */
   private streamAgentInternal(
     agentId: string,
@@ -3735,7 +3745,8 @@ export class AgentManager {
 
     const pendingRun = this.runs.createPendingRun(agentId);
 
-    const streamForwarder = async function* streamForwarder(this: AgentManager) {
+    // Named apart from the function: inside its body `streamForwarder` is the function itself.
+    const stream = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
       let turnStream: ReturnType<AgentRunState["createTurnStream"]> | null = null;
       // Synchronous unless the turn is queued: an extra await here would reorder every turn start
@@ -3750,6 +3761,7 @@ export class AgentManager {
       });
       const admitted = admission instanceof Promise ? await admission : admission;
       if (!admitted) return;
+      this.admittedTurns.set(stream, admitted);
       const { prompt: admittedPrompt, options: admittedOptions } = admitted;
       turnId = await this.startPendingForegroundTurn({
         agent,
@@ -3842,7 +3854,7 @@ export class AgentManager {
       }
     }.call(this);
 
-    return streamForwarder;
+    return stream;
   }
 
   /**
@@ -7043,7 +7055,7 @@ function optionalOwedFinishReport(report: OwedFinishReport | undefined): {
 async function* emptyAgentStream(): AsyncGenerator<AgentStreamEvent> {}
 
 /** What a new turn starts with once admitted; a queued child may have had a prompt merged in. */
-interface AdmittedTurn {
+export interface AdmittedTurn {
   prompt: AgentPromptInput;
   options?: AgentRunOptions;
 }

@@ -10,6 +10,7 @@ import { AgentManager } from "./agent-manager.js";
 import { startAgentRun } from "./agent-prompt.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { ChildAdmissionController, type ChildAdmissionConfig } from "./child-admission.js";
+import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import type {
   AgentClient,
   AgentPersistenceHandle,
@@ -40,6 +41,8 @@ class HeldTurnSession implements AgentSession {
   readonly capabilities = CAPABILITIES;
   readonly id = randomUUID();
   readonly startedPrompts: AgentPromptInput[] = [];
+  /** The next turn start fails as if the provider session had gone stale. */
+  staleOnNextStart = false;
   private openTurnId: string | null = null;
   private subscribers = new Set<(event: AgentStreamEvent) => void>();
 
@@ -53,6 +56,10 @@ class HeldTurnSession implements AgentSession {
   }
 
   async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+    if (this.staleOnNextStart) {
+      this.staleOnNextStart = false;
+      throw new StaleProviderSessionError("stale-bridge");
+    }
     this.startedPrompts.push(prompt);
     const turnId = `turn-${randomUUID()}`;
     this.openTurnId = turnId;
@@ -289,6 +296,24 @@ describe("AgentManager child admission", () => {
     await flush();
     expect(a.session.startedPrompts).toEqual(["part one\n\npart two"]);
     expect(b.session.startedPrompts).toEqual([]);
+  });
+
+  test("a stale session retry sends the merged held prompt, not only the first", async () => {
+    const root = await create(null);
+    const running = await create(root.id);
+    const waiting = await create(root.id);
+    await prompt(running.id, "task");
+    await prompt(waiting.id, "part one");
+    await flush();
+    await prompt(waiting.id, "part two");
+    waiting.session.staleOnNextStart = true;
+
+    running.session.finishTurn();
+    await flush();
+    await flush();
+    const reloadedSession = client.sessions.at(-1)!;
+    expect(reloadedSession).not.toBe(waiting.session);
+    expect(reloadedSession.startedPrompts).toEqual(["part one\n\npart two"]);
   });
 
   test("cancelling a queued child drops it and settles it as cancelled, without a turn", async () => {

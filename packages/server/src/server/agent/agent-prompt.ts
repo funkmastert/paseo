@@ -24,7 +24,7 @@ export type AgentRunController = Pick<
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
 > &
-  Partial<Pick<AgentManager, "interceptPromptForDispatch">> & {
+  Partial<Pick<AgentManager, "interceptPromptForDispatch" | "getAdmittedTurn">> & {
     reloadAgentSession(agentId: string): Promise<unknown>;
   };
 
@@ -190,8 +190,19 @@ async function startAgentRunInner(
           { agentId, err: error },
           "Provider session went stale; reopening from persistence",
         );
+        // A queued child's turn may have started with later prompts merged into this one; those
+        // callers got an empty stream, so the retry has to carry what was really sent.
+        const admitted = agentManager.getAdmittedTurn?.(iterator);
+        const retryOptions = admitted?.options
+          ? { ...options, runOptions: admitted.options }
+          : options;
         await agentManager.reloadAgentSession(agentId);
-        const retry = await startOrReplaceRun(agentManager, agentId, prompt, options);
+        const retry = await startOrReplaceRun(
+          agentManager,
+          agentId,
+          admitted?.prompt ?? prompt,
+          retryOptions,
+        );
         await drainAgentRunIterator(retry.iterator);
       }
       logger.trace(
