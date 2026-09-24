@@ -84,6 +84,7 @@ export function fakeProbes(overrides: Partial<DoctorProbes> = {}): DoctorProbes 
     statfs: async () => ({ freeBytes: 200 * 1024 ** 3, totalBytes: 900 * 1024 ** 3 }),
     measureDirBytes: async () => 1024 ** 3,
     hasCredentials: async () => true,
+    exec: async () => null,
     ...overrides,
   };
 }
