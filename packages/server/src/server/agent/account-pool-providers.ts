@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NEUTRAL_HEADROOM } from "./account-pool-headroom.js";
 import { ProviderOverrideSchema } from "./provider-launch-config.js";
 
 /**
@@ -72,27 +73,59 @@ export function resolveAccountPoolEntries(
   return entries;
 }
 
+export interface PickFailoverTargetOptions {
+  deadProviderIds: ReadonlySet<string>;
+  sourceProviderId: string;
+  /**
+   * Per-provider headroom from `headroomByProvider`, best-first. Absent providers score
+   * NEUTRAL_HEADROOM, so an empty map ranks everything equal and the configured priority order
+   * decides — the behaviour before headroom existed, and the behaviour when usage is unreadable.
+   */
+  headroom?: ReadonlyMap<string, number>;
+  /**
+   * Whether the leader account may be a target once no worker can take the agent. Defaults to
+   * true. `false` restores the strict isolation this used to enforce.
+   */
+  allowLeader?: boolean;
+}
+
 /**
- * Highest-priority (lowest `priority` number, then provider id) enabled worker that is not dead
- * this sweep and is not the account the agent is leaving.
+ * Where a stuck agent goes: an enabled account that is not dead this sweep and is not the one it
+ * is leaving, preferring a worker, and among equals preferring the one with the most budget left.
  *
- * Leader-role entries are never a target, whatever their health: the leader account can be the
- * one that ran dry, and when it isn't, it holds the budget the pool exists to protect. So there
- * is no "leader as last resort" here — with no eligible worker this returns null, and the caller
- * skips the agent and retries next sweep (no pending state; each sweep re-derives from scratch).
+ * **Isolation is a preference, not a rule.** Workers are still tried first — keeping rescued
+ * agents off the leader's account is the budget separation the pool exists for. But when no
+ * worker can take the agent, the leader account is better than leaving it stranded, which is
+ * what "the leader is never a target" produced on 2026-09-15: the leader account and the primary
+ * worker were both out for the week, the backup was reachable for children, and the rule kept it
+ * from being the general-purpose home. Placement at spawn time makes the same choice (the
+ * account-pool plugin's router), and the two have to agree or a migration will strand a leader on
+ * an account placement is happily using for children.
+ *
+ * With nothing eligible at all this returns null; the caller skips the agent and retries next
+ * sweep (no pending state — each sweep re-derives from scratch).
  */
 export function pickFailoverTarget(
   entries: readonly AccountPoolProviderEntry[],
-  exclusions: { deadProviderIds: ReadonlySet<string>; sourceProviderId: string },
+  options: PickFailoverTargetOptions,
 ): string | null {
-  const eligible = entries
-    .filter(
-      (entry) =>
-        entry.role === "worker" &&
-        entry.enabled &&
-        entry.providerId !== exclusions.sourceProviderId &&
-        !exclusions.deadProviderIds.has(entry.providerId),
-    )
-    .sort((a, b) => a.priority - b.priority || a.providerId.localeCompare(b.providerId));
-  return eligible[0]?.providerId ?? null;
+  const headroomOf = (providerId: string): number =>
+    options.headroom?.get(providerId) ?? NEUTRAL_HEADROOM;
+  const eligible = entries.filter(
+    (entry) =>
+      entry.enabled &&
+      entry.providerId !== options.sourceProviderId &&
+      !options.deadProviderIds.has(entry.providerId) &&
+      (entry.role === "worker" || (options.allowLeader ?? true)),
+  );
+  // Role first so a worker always outranks the leader however the budget compares: a leader
+  // account with more headroom is still the account whose budget the pool is protecting.
+  const ranked = [...eligible].sort(
+    (a, b) =>
+      Number(a.role === "leader") - Number(b.role === "leader") ||
+      headroomOf(b.providerId) - headroomOf(a.providerId) ||
+      a.priority - b.priority ||
+      a.providerId.localeCompare(b.providerId),
+  );
+  return ranked[0]?.providerId ?? null;
 }

@@ -5,6 +5,13 @@
  */
 export type AccountFailoverNotificationReason = "account_failover";
 
+/**
+ * `data.reason` for the pool-exhausted push: no account is left to move anyone to. Its own
+ * value rather than `account_failover` because there is nothing to open — no migration
+ * happened, and no agent id is the right destination.
+ */
+export type AccountPoolExhaustedNotificationReason = "account_pool_exhausted";
+
 /** Open on purpose: an app must treat an unrecognised hint as "no hint" and read `body`. */
 export type AccountFailoverOutcomeHint = "needs_prompt";
 
@@ -75,6 +82,58 @@ export function buildAccountFailoverNotificationPayload(
       agentId: input.newAgentId,
       reason: "account_failover",
       ...(resumed ? {} : { outcome: "needs_prompt" as const }),
+    },
+  };
+}
+
+export interface AccountPoolExhaustedNotificationData {
+  [key: string]: unknown;
+  serverId: string;
+  reason: AccountPoolExhaustedNotificationReason;
+  /** Every pool account that is out, so the push names what is actually dead. */
+  providerIds: string[];
+  /** How many agents are waiting on one of them. */
+  strandedAgentCount: number;
+}
+
+export interface AccountPoolExhaustedNotificationPayload {
+  title: string;
+  body: string;
+  data: AccountPoolExhaustedNotificationData;
+}
+
+interface BuildAccountPoolExhaustedNotificationPayloadInput {
+  serverId: string;
+  providerIds: readonly string[];
+  strandedAgentCount: number;
+  /** Free text from the provider's own cap message, e.g. "3:10pm (America/Los_Angeles)". */
+  resetHint?: string | null;
+}
+
+/**
+ * Every pooled account is out of budget, so stuck agents have nowhere to go.
+ *
+ * Sent instead of a migration, not alongside one. The monitor deliberately moves nobody here:
+ * the only remaining targets are accounts that would fail on the first turn, and a rescue onto
+ * one of those spends a move and a resume to leave the agent exactly as stuck, on a different
+ * account, with its evidence scattered. Stranded and visible beats moved and still broken.
+ */
+export function buildAccountPoolExhaustedNotificationPayload(
+  input: BuildAccountPoolExhaustedNotificationPayloadInput,
+): AccountPoolExhaustedNotificationPayload {
+  const agents =
+    input.strandedAgentCount === 1 ? "1 agent is" : `${input.strandedAgentCount} agents are`;
+  const reset = input.resetHint ? ` Earliest reset: ${input.resetHint}.` : "";
+  return {
+    title: "Every Claude account is out of budget",
+    body:
+      `${agents} stuck and cannot be moved: ${input.providerIds.join(", ")} are all capped.` +
+      `${reset} Sign another account in or raise a limit — nothing will run until one recovers.`,
+    data: {
+      serverId: input.serverId,
+      reason: "account_pool_exhausted",
+      providerIds: [...input.providerIds],
+      strandedAgentCount: input.strandedAgentCount,
     },
   };
 }
