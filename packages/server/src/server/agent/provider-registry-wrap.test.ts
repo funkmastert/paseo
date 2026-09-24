@@ -24,6 +24,7 @@ type OptionalAgentSessionMethodName = {
 
 const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
   "listCommands",
+  "getContextUsage",
   "setModel",
   "setThinkingOption",
   "setFeature",
@@ -132,6 +133,11 @@ class FakeSession implements AgentSession {
     return [];
   }
 
+  async getContextUsage() {
+    this.recordedCalls.push("getContextUsage");
+    return null;
+  }
+
   async setModel() {
     this.recordedCalls.push("setModel");
   }
@@ -178,6 +184,7 @@ describe("wrapSessionProvider", () => {
     const wrapped = wrapSessionProvider("custom-claude", session);
 
     await wrapped.listCommands?.();
+    await wrapped.getContextUsage?.({ allowStart: false });
     await wrapped.setModel?.("sonnet");
     await wrapped.setThinkingOption?.("high");
     await wrapped.setFeature?.("feature-1", true);
@@ -189,6 +196,7 @@ describe("wrapSessionProvider", () => {
 
     expect(session.recordedCalls).toEqual([
       "listCommands",
+      "getContextUsage",
       "setModel",
       "setThinkingOption",
       "setFeature",

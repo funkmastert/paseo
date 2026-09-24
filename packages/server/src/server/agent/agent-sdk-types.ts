@@ -6,6 +6,7 @@ import type {
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
 import type { AgentAttachment, McpGatewaySessionMode } from "@getpaseo/protocol/messages";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
 export type { AgentProviderNotice, AgentTaskItem };
@@ -763,6 +764,13 @@ export interface AgentSession {
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
+  /**
+   * What the context window is made of, from the provider's own `/context`, asked out of band of
+   * the conversation: it must never start a turn or enter the model's context. Resolves null when
+   * no runtime is live and `allowStart` is false, or when a turn is running and a runtime would
+   * have to be started. See docs/context-usage.md.
+   */
+  getContextUsage?(options: { allowStart: boolean }): Promise<AgentContextUsage | null>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;
   setFeature?(featureId: string, value: unknown): Promise<void>;

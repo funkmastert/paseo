@@ -1,0 +1,522 @@
+{
+  "categories": [
+    {
+      "name": "System prompt",
+      "tokens": 248,
+      "color": "promptBorder"
+    },
+    {
+      "name": "System tools",
+      "tokens": 23754,
+      "color": "inactive"
+    },
+    {
+      "name": "Memory files",
+      "tokens": 13437,
+      "color": "claude"
+    },
+    {
+      "name": "Skills",
+      "tokens": 8626,
+      "color": "warning"
+    },
+    {
+      "name": "Messages",
+      "tokens": 130302,
+      "color": "purple_FOR_SUBAGENTS_ONLY"
+    },
+    {
+      "name": "Free space",
+      "tokens": 823633,
+      "color": "promptBorder"
+    }
+  ],
+  "totalTokens": 174085,
+  "maxTokens": 1000000,
+  "rawMaxTokens": 1000000,
+  "autocompactSource": "auto",
+  "percentage": 17,
+  "model": "claude-opus-5-5[1m]",
+  "memoryFiles": [
+    {
+      "path": "/Users/tylerthackray/.claude-personal/CLAUDE.md",
+      "type": "User",
+      "tokens": 3976
+    },
+    {
+      "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md",
+      "type": "Project",
+      "tokens": 8580
+    },
+    {
+      "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md",
+      "type": "AutoMem",
+      "tokens": 881
+    }
+  ],
+  "mcpTools": [],
+  "agents": [],
+  "slashCommands": {
+    "totalCommands": 66,
+    "includedCommands": 66,
+    "tokens": 919
+  },
+  "skills": {
+    "totalSkills": 66,
+    "includedSkills": 66,
+    "tokens": 8626,
+    "skillFrontmatter": [
+      {
+        "name": "agent-orchestration",
+        "source": "userSettings",
+        "tokens": 290
+      },
+      {
+        "name": "backend-net-source-of-truth",
+        "source": "userSettings",
+        "tokens": 239
+      },
+      {
+        "name": "build-an-android-app",
+        "source": "userSettings",
+        "tokens": 209
+      },
+      {
+        "name": "build-to-the-contract",
+        "source": "userSettings",
+        "tokens": 195
+      },
+      {
+        "name": "claude-account-handoff",
+        "source": "userSettings",
+        "tokens": 190
+      },
+      {
+        "name": "delegate-dont-stop",
+        "source": "userSettings",
+        "tokens": 204
+      },
+      {
+        "name": "draft-pr-early",
+        "source": "userSettings",
+        "tokens": 179
+      },
+      {
+        "name": "figma-design-pull",
+        "source": "userSettings",
+        "tokens": 130
+      },
+      {
+        "name": "idle-means-audit",
+        "source": "userSettings",
+        "tokens": 199
+      },
+      {
+        "name": "link-prs",
+        "source": "userSettings",
+        "tokens": 74
+      },
+      {
+        "name": "orchestrated-build",
+        "source": "userSettings",
+        "tokens": 160
+      },
+      {
+        "name": "paseo",
+        "source": "userSettings",
+        "tokens": 38
+      },
+      {
+        "name": "paseo-advisor",
+        "source": "userSettings",
+        "tokens": 75
+      },
+      {
+        "name": "paseo-committee",
+        "source": "userSettings",
+        "tokens": 67
+      },
+      {
+        "name": "paseo-handoff",
+        "source": "userSettings",
+        "tokens": 60
+      },
+      {
+        "name": "paseo-help",
+        "source": "userSettings",
+        "tokens": 118
+      },
+      {
+        "name": "paseo-loop",
+        "source": "userSettings",
+        "tokens": 64
+      },
+      {
+        "name": "paseo-plugin",
+        "source": "userSettings",
+        "tokens": 193
+      },
+      {
+        "name": "pr-code-walkthrough",
+        "source": "userSettings",
+        "tokens": 137
+      },
+      {
+        "name": "rapid-mode",
+        "source": "userSettings",
+        "tokens": 146
+      },
+      {
+        "name": "silence-confirms",
+        "source": "userSettings",
+        "tokens": 166
+      },
+      {
+        "name": "split-into-stacked-prs",
+        "source": "userSettings",
+        "tokens": 214
+      },
+      {
+        "name": "token-budget-pacing",
+        "source": "userSettings",
+        "tokens": 107
+      },
+      {
+        "name": "ui-reuse-first",
+        "source": "userSettings",
+        "tokens": 107
+      },
+      {
+        "name": "wondergit",
+        "source": "userSettings",
+        "tokens": 298
+      },
+      {
+        "name": "wonderly-system-knowledge",
+        "source": "userSettings",
+        "tokens": 180
+      },
+      {
+        "name": "wonderpod",
+        "source": "userSettings",
+        "tokens": 96
+      },
+      {
+        "name": "release-beta",
+        "source": "projectSettings",
+        "tokens": 49
+      },
+      {
+        "name": "release-stable",
+        "source": "projectSettings",
+        "tokens": 78
+      },
+      {
+        "name": "code-review:code-review",
+        "source": "plugin",
+        "pluginName": "code-review",
+        "tokens": 18
+      },
+      {
+        "name": "compound-engineering:ce-babysit-pr",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 147
+      },
+      {
+        "name": "compound-engineering:ce-brainstorm",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 264
+      },
+      {
+        "name": "compound-engineering:ce-code-review",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 80
+      },
+      {
+        "name": "compound-engineering:ce-commit",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 72
+      },
+      {
+        "name": "compound-engineering:ce-commit-push-pr",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 62
+      },
+      {
+        "name": "compound-engineering:ce-compound",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 59
+      },
+      {
+        "name": "compound-engineering:ce-compound-refresh",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 88
+      },
+      {
+        "name": "compound-engineering:ce-debug",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 75
+      },
+      {
+        "name": "compound-engineering:ce-doc-review",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 56
+      },
+      {
+        "name": "compound-engineering:ce-explain",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 203
+      },
+      {
+        "name": "compound-engineering:ce-handoff",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 77
+      },
+      {
+        "name": "compound-engineering:ce-ideate",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 82
+      },
+      {
+        "name": "compound-engineering:ce-optimize",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 78
+      },
+      {
+        "name": "compound-engineering:ce-plan",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 89
+      },
+      {
+        "name": "compound-engineering:ce-pov",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 191
+      },
+      {
+        "name": "compound-engineering:ce-proof",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 81
+      },
+      {
+        "name": "compound-engineering:ce-resolve-pr-feedback",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 56
+      },
+      {
+        "name": "compound-engineering:ce-riffrec-feedback-analysis",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 106
+      },
+      {
+        "name": "compound-engineering:ce-simplify-code",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 65
+      },
+      {
+        "name": "compound-engineering:ce-strategy",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 68
+      },
+      {
+        "name": "compound-engineering:ce-test-browser",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 35
+      },
+      {
+        "name": "compound-engineering:ce-work",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 141
+      },
+      {
+        "name": "compound-engineering:ce-worktree",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 93
+      },
+      {
+        "name": "compound-engineering:lfg",
+        "source": "plugin",
+        "pluginName": "compound-engineering",
+        "tokens": 191
+      },
+      {
+        "name": "dataviz",
+        "source": "built-in",
+        "tokens": 382
+      },
+      {
+        "name": "update-config",
+        "source": "built-in",
+        "tokens": 236
+      },
+      {
+        "name": "keybindings-help",
+        "source": "built-in",
+        "tokens": 83
+      },
+      {
+        "name": "code-review",
+        "source": "built-in",
+        "tokens": 281
+      },
+      {
+        "name": "simplify",
+        "source": "built-in",
+        "tokens": 63
+      },
+      {
+        "name": "fewer-permission-prompts",
+        "source": "built-in",
+        "tokens": 64
+      },
+      {
+        "name": "loop",
+        "source": "built-in",
+        "tokens": 115
+      },
+      {
+        "name": "schedule",
+        "source": "built-in",
+        "tokens": 127
+      },
+      {
+        "name": "claude-api",
+        "source": "built-in",
+        "tokens": 361
+      },
+      {
+        "name": "run",
+        "source": "built-in",
+        "tokens": 123
+      },
+      {
+        "name": "init",
+        "source": "built-in",
+        "tokens": 22
+      },
+      {
+        "name": "security-review",
+        "source": "built-in",
+        "tokens": 30
+      }
+    ]
+  },
+  "autoCompactThreshold": 967000,
+  "isAutoCompactEnabled": true,
+  "messageBreakdown": {
+    "toolCallTokens": 3417,
+    "toolResultTokens": 59559,
+    "attachmentTokens": 44060,
+    "assistantMessageTokens": 27234,
+    "userMessageTokens": 973,
+    "redirectedContextTokens": 0,
+    "unattributedTokens": 0,
+    "toolCallsByType": [
+      {
+        "name": "Read",
+        "callTokens": 1820,
+        "resultTokens": 43101
+      },
+      {
+        "name": "Grep",
+        "callTokens": 1490,
+        "resultTokens": 16103
+      },
+      {
+        "name": "Glob",
+        "callTokens": 107,
+        "resultTokens": 355
+      }
+    ],
+    "attachmentsByType": [
+      {
+        "name": "prompt_snapshot",
+        "tokens": 16871
+      },
+      {
+        "name": "instructions",
+        "tokens": 9838
+      },
+      {
+        "name": "skill_listing",
+        "tokens": 8019
+      },
+      {
+        "name": "deferred_tools_delta",
+        "tokens": 4603
+      },
+      {
+        "name": "nested_memory",
+        "tokens": 1821
+      },
+      {
+        "name": "total_tokens_reminder",
+        "tokens": 851
+      },
+      {
+        "name": "mcp_instructions_delta",
+        "tokens": 516
+      },
+      {
+        "name": "deferred_tools_record",
+        "tokens": 446
+      },
+      {
+        "name": "agent_listing_delta",
+        "tokens": 415
+      },
+      {
+        "name": "session_context",
+        "tokens": 278
+      },
+      {
+        "name": "silent_turn_reminder",
+        "tokens": 204
+      },
+      {
+        "name": "hook_success",
+        "tokens": 65
+      },
+      {
+        "name": "environment",
+        "tokens": 62
+      },
+      {
+        "name": "model",
+        "tokens": 62
+      },
+      {
+        "name": "date",
+        "tokens": 9
+      }
+    ]
+  },
+  "apiUsage": {
+    "input_tokens": 2,
+    "output_tokens": 3604,
+    "cache_creation_input_tokens": 2160,
+    "cache_read_input_tokens": 171923
+  }
+}
