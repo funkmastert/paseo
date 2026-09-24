@@ -19,6 +19,7 @@ import {
 } from "./agent-done-janitor.js";
 import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import type { PushPayload } from "./push/index.js";
+import type { WorktreeSnapshotResult } from "./remediation/contract.js";
 
 const HOUR = 60 * 60_000;
 const NOW = Date.parse("2026-09-21T12:00:00.000Z");
@@ -67,6 +68,9 @@ interface Harness {
   archived: string[];
   reclaimed: string[];
   pushes: PushPayload[];
+  levels: (string | undefined)[];
+  /** Snapshots, archives and reclaims in the order they happened. */
+  events: string[];
   stored: StoredAgentRecord[];
   config: DoneJanitorConfig;
   setNow(ms: number): void;
@@ -87,6 +91,7 @@ function harness(input: {
   afterAnswer?: (stored: StoredAgentRecord[]) => void;
   /** Runs as each read of the stored agents is served; `call` counts from 1. */
   onListStored?: (call: number, stored: StoredAgentRecord[]) => void;
+  snapshot?: (cwd: string) => WorktreeSnapshotResult;
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -95,6 +100,8 @@ function harness(input: {
   const archived: string[] = [];
   const reclaimed: string[] = [];
   const pushes: PushPayload[] = [];
+  const levels: (string | undefined)[] = [];
+  const events: string[] = [];
   let listCalls = 0;
   const config = input.config;
   const deps: DoneJanitorDependencies = {
@@ -122,6 +129,7 @@ function harness(input: {
     },
     archiveAgent: async (agentId) => {
       archived.push(agentId);
+      events.push(`archive:${agentId}`);
       const archivedAt = new Date(now).toISOString();
       for (const [index, candidate] of stored.entries()) {
         const cascades =
@@ -137,14 +145,24 @@ function harness(input: {
     measureBytes: async () => 3 * GB,
     reclaimWorkspace: async (workspaceId) => {
       reclaimed.push(workspaceId);
+      events.push(`reclaim:${workspaceId}`);
       const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
       workspaces[index] = { ...workspaces[index], archivedAt: new Date(now).toISOString() };
       return { removedDirectory: true };
     },
+    snapshotWorktree: async ({ cwd }) => {
+      events.push(`snapshot:${cwd}`);
+      return input.snapshot?.(cwd) ?? { kind: "nothing-at-risk", worktreePath: cwd };
+    },
   };
   const janitor = new AgentDoneJanitor({
     dependencies: deps,
-    getPushNotificationSender: () => ({ send: async (payload) => void pushes.push(payload) }),
+    getPushNotificationSender: () => ({
+      send: async (payload, options) => {
+        pushes.push(payload);
+        levels.push(options?.level);
+      },
+    }),
     serverId: "server-1",
     readDaemonConfig: () => ({ doneJanitor: config }),
     logger: pino({ level: "silent" }),
@@ -156,6 +174,8 @@ function harness(input: {
     archived,
     reclaimed,
     pushes,
+    levels,
+    events,
     stored,
     config: config ?? {},
     setNow: (ms) => {
@@ -192,6 +212,18 @@ describe("AgentDoneJanitor", () => {
         body: "Archived 1 finished agent and deleted 1 worktree, freeing 3.0 GB.",
       }),
     ]);
+  });
+
+  test("an agent that answered DONE keeps its worktree when a snapshot of work at risk fails", async () => {
+    const h = harness({
+      config: ON,
+      snapshot: (cwd) => ({ kind: "failed", worktreePath: cwd, error: "disk full" }),
+    });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
   });
 
   test("an agent idle overnight is not asked", async () => {
@@ -908,6 +940,87 @@ describe("AgentDoneJanitor dead pass", () => {
           "every agent in it is dead or archived; clean tree and branch feature is merged or pushed",
       }),
     ]);
+  });
+
+  test("the worktree is snapshotted before the archive and before the reclaim", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: (cwd) => ({
+        kind: "snapshotted",
+        worktreePath: cwd,
+        ref: "refs/backup/2026-09-21/feature",
+        commit: "abc",
+        dirtyFiles: 0,
+        unpushedCommits: 1,
+        skippedFiles: [],
+        offsite: { kind: "bundled", path: "/b/feature.bundle" },
+      }),
+    });
+
+    const report = await h.janitor.tick();
+
+    const feature = "/home/t/.paseo/worktrees/h/feature";
+    expect(h.events).toEqual([
+      `snapshot:${feature}`,
+      "archive:agent-1",
+      `snapshot:${feature}`,
+      "reclaim:ws-1",
+    ]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "snapshotted",
+        path: feature,
+        reason: "refs/backup/2026-09-21/feature; bundled at /b/feature.bundle",
+      }),
+    );
+  });
+
+  test("a failed snapshot of work at risk spares the worktree this sweep, and says why", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: (cwd) => ({ kind: "failed", worktreePath: cwd, error: "git write-tree failed" }),
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "its work is at risk and could not be snapshotted: git write-tree failed",
+      }),
+    );
+  });
+
+  test("a snapshot that could not read the directory at all spares nothing", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: () => ({
+        kind: "failed",
+        worktreePath: null,
+        error: "the directory does not exist",
+      }),
+    });
+    await h.janitor.tick();
+    expect(h.reclaimed).toEqual(["ws-1"]);
+  });
+
+  test("a dry run takes no snapshot", async () => {
+    const h = harness({ config: { ...DEAD_ON, dryRun: true } });
+    await h.janitor.tick();
+    expect(h.events).toEqual([]);
+  });
+
+  test("a kept worktree is only recorded: it is snapshotted, and the work-at-risk sweep judges it", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      safety: { safe: false, reason: "it has 2 uncommitted or untracked file(s)" },
+    });
+    await h.janitor.tick();
+    expect(h.pushes).toHaveLength(1);
+    expect(h.levels).toEqual(["record"]);
   });
 
   test("archiveDead off leaves closed agents to the question, as before", async () => {

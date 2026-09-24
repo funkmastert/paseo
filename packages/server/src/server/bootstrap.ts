@@ -240,7 +240,6 @@ import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import type { RemediationConfig } from "./remediation/config.js";
 import {
   createForwardingRemediationSink,
-  UNAVAILABLE_WORKTREE_SNAPSHOTTER,
   type RemediationSink,
   type WorktreeSnapshotter,
 } from "./remediation/contract.js";
@@ -254,13 +253,20 @@ import {
 } from "./agent-stall-sweep.js";
 import type { ProcessSampler } from "./agent/process-sampler.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
-import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
+import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import { sendPromptToAgent, formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
+import { resolveWorkSnapshotsConfig } from "./remediation/config.js";
+import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
+import {
+  AgentWorkSnapshotSweep,
+  buildWorkSnapshotAgentViews,
+  listPaseoWorktreeDirectories,
+} from "./agent-work-snapshot-sweep.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
@@ -870,6 +876,7 @@ function createDoneJanitor(input: {
     "getProviderUsageService" | "getPushNotificationSender"
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  worktreeSnapshotter: WorktreeSnapshotter;
   serverId: string;
   logger: Logger;
 }): AgentDoneJanitor {
@@ -917,6 +924,7 @@ function createDoneJanitor(input: {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
         return { removedDirectory: result.removedDirectory };
       },
+      snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
     },
     getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
     serverId: input.serverId,
@@ -1218,6 +1226,7 @@ export async function createPaseoDaemon(
   let doneJanitor: AgentDoneJanitor | null = null;
   let remediationLadder: RemediationLadder | null = null;
   let agentStallSweep: AgentStallSweep | null = null;
+  let workSnapshotSweep: AgentWorkSnapshotSweep | null = null;
   let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
@@ -1483,6 +1492,13 @@ export async function createPaseoDaemon(
     listAgentIds: () => listDeviceLeaseAgents().map((agent) => agent.agentId),
     listLeasedDeviceIds: () => deviceLeaseManager.listLeasedDeviceIds(),
     logger: logger.child({ module: "artifact-janitor" }),
+  });
+  // Work snapshots (docs/work-snapshots.md): the done janitor, the work-at-risk sweep and the
+  // stalled-agent sweep all snapshot through this one instance.
+  const worktreeSnapshotter = new GitWorktreeSnapshotter({
+    readConfig: () => resolveWorkSnapshotsConfig(daemonConfigStore.get().remediation),
+    paseoHome: config.paseoHome,
+    logger: logger.child({ module: "work-snapshots" }),
   });
   const deviceLaunchGate = createArtifactAwareLaunchGate({
     janitor: testArtifactJanitor,
@@ -2603,6 +2619,7 @@ export async function createPaseoDaemon(
               archiveWorkspaceById: archiveWorkspaceByIdExternal,
               wsServer,
               daemonConfigStore,
+              worktreeSnapshotter,
               serverId,
               logger,
             });
@@ -2630,12 +2647,43 @@ export async function createPaseoDaemon(
               wsServer,
               daemonConfigStore,
               sink: remediationSink,
-              snapshotter: UNAVAILABLE_WORKTREE_SNAPSHOTTER,
+              snapshotter: worktreeSnapshotter,
               logger,
             });
             agentStallSweep = stallSweep;
             stallSweep.start();
             daemonConfigStore.onChange(() => stallSweep.reportMode());
+            workSnapshotSweep = new AgentWorkSnapshotSweep({
+              dependencies: {
+                listAgents: async () =>
+                  buildWorkSnapshotAgentViews({
+                    live: agentManager.listAgentsForDoneJanitor(),
+                    stored: await agentStorage.list(),
+                    lastErrors: new Map(
+                      agentManager
+                        .listAgentsForAccountFailover()
+                        .map((agent) => [agent.id, agent.lastError]),
+                    ),
+                  }),
+                listActiveWorkspaceDirectories: async () =>
+                  (await workspaceRegistry.list())
+                    .filter((workspace) => !workspace.archivedAt)
+                    .map((workspace) => workspace.worktreeRoot ?? workspace.cwd),
+                listOrphanCandidates: async () =>
+                  listPaseoWorktreeDirectories(
+                    resolvePaseoWorktreesBaseRoot({
+                      paseoHome: config.paseoHome,
+                      worktreesRoot: config.worktreesRoot,
+                    }),
+                  ),
+                snapshotter: worktreeSnapshotter,
+              },
+              sink: remediationSink,
+              readConfig: () => daemonConfigStore.get().remediation,
+              statePath: path.join(config.paseoHome, "work-snapshots.json"),
+              logger: logger.child({ module: "work-snapshots" }),
+            });
+            workSnapshotSweep.start();
             daemonVitals = startDaemonVitals({
               config: config.daemonVitals,
               paseoHome: config.paseoHome,
@@ -2732,6 +2780,7 @@ export async function createPaseoDaemon(
     doneJanitor?.stop();
     remediationLadder?.stop();
     agentStallSweep?.stop();
+    workSnapshotSweep?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);

@@ -109,9 +109,11 @@ Only after the agent is archived, through archive-by-scope, and only when all of
   - `git status --untracked-files=all` is empty. Ignored files do not count: they are the build output being reclaimed;
   - every commit reachable from HEAD is reachable from a remote-tracking ref or the local base branch recorded at creation. Both survive the deletion. Another local branch does not count: it may be the next worktree the janitor deletes. A squash-merged branch whose remote branch was deleted fails this check and is kept.
 
-Dead agents follow the same rules with one difference: nobody said the work was finished, so the git gate is the only proof, and it is enough. The gate keeps the worktree of a session that was cut off with uncommitted files. Worktrees are planned after every dead tree in a sweep is archived, once each, so one shared by several dead agents is judged on what is true then. A sweep deletes at most `maxArchivesPerSweep` worktrees; the rest are picked up next sweep as orphans.
+Dead agents follow the same rules with one difference: nobody said the work was finished, so the git gate is the only proof, and it is enough. The gate keeps the worktree of a session that was cut off with uncommitted files, and the [work-at-risk sweep](work-snapshots.md#the-work-at-risk-sweep) decides whether that work needs anyone. Worktrees are planned after every dead tree in a sweep is archived, once each, so one shared by several dead agents is judged on what is true then. A sweep deletes at most `maxArchivesPerSweep` worktrees; the rest are picked up next sweep as orphans.
 
 A workspace whose agents were all archived earlier — by a person, or by a sweep whose reclaim failed — is reclaimed on the same terms once it has been quiet for `quietHours`, without asking anyone. A workspace that never had an agent is never touched: it may be one someone created a minute ago.
+
+Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each worktree of a dead tree before the tree is archived, and each worktree before it is deleted. The second matters because the gate counts a commit on the local base branch as safe while the snapshot counts only remotes. A snapshot that fails on a worktree at risk keeps that worktree for the sweep, reported as `its work is at risk and could not be snapshotted: …`. A dry run takes no snapshot.
 
 The size is sampled with `du` immediately before the deletion.
 
@@ -137,7 +139,7 @@ and for live agents:
 {"action":"cannot-ask","agentId":"b2…","reason":"account claude-b is at its usage cap","dryRun":true,…}
 ```
 
-`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived or deleted something sends one push — "Archived 1 finished agent, archived 4 dead sessions and deleted 2 worktrees, freeing 5.8 GB. Kept …: …" — and a sweep that only checked sends nothing.
+`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived or deleted something sends one push at level `record`, ledger only — "Archived 1 finished agent, archived 4 dead sessions and deleted 2 worktrees, freeing 5.8 GB. Kept …: …" — and a sweep that only checked sends nothing. A kept worktree does not raise the level: it is snapshotted, and the work-at-risk sweep's judge decides whether Tyler hears about it. `snapshotted` lines name each snapshot's ref and offsite copy.
 
 ## Not automated
 
