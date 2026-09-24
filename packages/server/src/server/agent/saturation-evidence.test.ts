@@ -96,6 +96,70 @@ describe("buildSaturationEvidence", () => {
     expect(cause.unexplained).toBeCloseTo(3);
   });
 
+  // Sampled CPU can't exceed the cores, so at load >= 2x cores it never explains half the load.
+  // Pegged cores are the CPU signal, not the share of the load.
+  test("a load of 38 on 16 cores with the cores pegged by builds is CPU, not I/O", () => {
+    const sample: EvidenceProcessSample = {
+      rows: [
+        row({ pid: 101, cpuPercent: 900, command: "dotnet exec VBCSCompiler.dll" }),
+        row({ pid: 201, cpuPercent: 450, command: "java org.gradle.launcher.daemon.bootstrap" }),
+        row({ pid: 300, cpuPercent: 200, command: "/usr/bin/tsgo --noEmit" }),
+      ],
+      agentTrees: [
+        { agentId: "backend", rssBytes: 0, cpuPercent: 900, pids: [101] },
+        { agentId: "android", rssBytes: 0, cpuPercent: 450, pids: [201] },
+      ],
+      takenAtMs: 0,
+    };
+
+    const { cause } = buildSaturationEvidence({
+      load: LOAD_38,
+      sample,
+      fresh: true,
+      nowMs: 0,
+      agentLabels: LABELS,
+    });
+
+    expect(cause).toMatchObject({ kind: "cpu", explainedByAgents: 13.5, explainedByOthers: 2 });
+    expect(cause.unexplained).toBeCloseTo(22.5);
+  });
+
+  test("a load of 40 with the cores mostly idle and a fresh sample is I/O", () => {
+    const load: SystemLoadReading = {
+      kind: "loadavg",
+      cores: 16,
+      load1: 40,
+      load5: 35,
+      load15: 20,
+    };
+    const sample: EvidenceProcessSample = {
+      rows: [
+        row({ pid: 10, cpuPercent: 150, command: "/System/Library/.../mds_stores" }),
+        row({ pid: 12, cpuPercent: 150, command: "/opt/homebrew/bin/node /x/npm-cli.js ci" }),
+      ],
+      agentTrees: [],
+      takenAtMs: 0,
+    };
+
+    const evidence = buildSaturationEvidence({
+      load,
+      sample,
+      fresh: true,
+      nowMs: 0,
+      agentLabels: new Map(),
+    });
+    expect(evidence.cause.kind).toBe("io");
+
+    const stale = buildSaturationEvidence({
+      load,
+      sample,
+      fresh: false,
+      nowMs: 60_000,
+      agentLabels: new Map(),
+    });
+    expect(stale.cause.kind).toBe("unknown");
+  });
+
   test("a high load the CPU does not explain, with a fresh sample, is I/O and names suspects", () => {
     const sample: EvidenceProcessSample = {
       rows: [

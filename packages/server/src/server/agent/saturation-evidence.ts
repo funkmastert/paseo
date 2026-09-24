@@ -14,9 +14,11 @@ const TOP_COMMANDS_PER_TREE = 3;
 const TOP_OTHER_PROCESSES = 8;
 const TOP_IO_PROCESSES = 8;
 const MAX_COMMAND_CHARS = 200;
-// A remainder at least this share of the load, with a sample from this very sweep, is I/O: the
-// macOS and Linux load average counts tasks waiting on disk, not only runnable ones.
-const IO_REMAINDER_SHARE = 0.5;
+// Sampled CPU at least this share of the cores is a CPU-bound machine. It is measured against the
+// cores, not the load: sampled CPU can never exceed the cores, and saturation opens at 2x cores,
+// so it never explains half the load. A high load with the cores not pegged is I/O: the macOS and
+// Linux load average counts tasks waiting on disk, not only runnable ones.
+const CPU_PEGGED_SHARE = 0.8;
 
 /**
  * Programs that commonly load a machine through disk rather than CPU: Spotlight indexing fresh
@@ -80,8 +82,8 @@ export interface EvidenceAgentTree {
 }
 
 /**
- * `cpu`: the sampled processes' CPU explains most of the load. `io`: it does not, and the sample
- * is fresh, so the rest is tasks waiting on disk. `unknown`: no fresh sample to split it with.
+ * `cpu`: the sampled processes keep the cores pegged. `io`: they don't, and the sample is fresh,
+ * so the load is tasks waiting on disk. `unknown`: no fresh sample to split it with.
  * Loads are in the load average's unit, cores' worth of work: summed CPU% / 100.
  */
 export interface SaturationCause {
@@ -149,7 +151,8 @@ function classifyCause(input: {
   if (!input.fresh || !input.load) return { kind: "unknown", ...base, ioProcesses: [] };
   // Windows' reading is CPU busy time, so nothing in it is waiting on disk: whatever the sample
   // misses is CPU spent by processes too short-lived to be sampled, or by the kernel.
-  if (input.load.kind === "cpu-busy" || unexplained < IO_REMAINDER_SHARE * load1) {
+  const pegged = explainedByAgents + explainedByOthers >= CPU_PEGGED_SHARE * input.load.cores;
+  if (input.load.kind === "cpu-busy" || pegged) {
     return { kind: "cpu", ...base, ioProcesses: [] };
   }
   const ioProcesses = [...input.agentRows, ...input.otherRows]

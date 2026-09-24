@@ -192,10 +192,10 @@ The defaults come from the 2026-09-24 incident on a 16-core Mac: load 38 five mi
 
 ### Evidence and cause
 
-Each sweep of an open incident builds evidence (`agent/saturation-evidence.ts`): the five heaviest agent trees by CPU with title, cwd, CPU%, RSS and their top three commands, and the eight heaviest processes outside any agent. It also splits the load into what the sampled CPU rates explain (summed CPU% / 100, agents and the rest separately) and the remainder, and classifies the cause:
+Each sweep of an open incident builds evidence (`agent/saturation-evidence.ts`): the five heaviest agent trees by CPU with title, cwd, CPU%, RSS and their top three commands, and the eight heaviest processes outside any agent. It also splits the load into what the sampled CPU rates explain (summed CPU% / 100, agents and the rest separately) and the remainder, and classifies the cause against the machine's cores, not the load. Sampled CPU can never exceed the core count and saturation opens at 2× cores, so the sample never explains even half the load; comparing against the load would call every incident I/O.
 
-- **`cpu`**: the sampled processes explain at least half the load.
-- **`io`**: they don't, and the sample is from this sweep. The remainder is tasks waiting on disk: Spotlight indexing a fresh `node_modules`, installs, git, tree walks. The evidence names the likely ones it found (`mds_stores`, `mdworker`, `git`, `npm ci`, `find`, ...). Windows' reading is CPU time, so it is never `io`.
+- **`cpu`**: the sampled processes use at least 80% of the cores.
+- **`io`**: they don't, the load is still at the threshold, and the sample is from this sweep. A high load with idle cores is tasks waiting on disk: Spotlight indexing a fresh `node_modules`, installs, git, tree walks. The evidence names the likely ones it found (`mds_stores`, `mdworker`, `git`, `npm ci`, `find`, ...). Windows' reading is CPU time, so it is never `io`.
 - **`unknown`**: the process sample is stale or missing, so nothing can split the load.
 
 ### The saturation rung
