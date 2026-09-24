@@ -1,10 +1,8 @@
 import { useCallback } from "react";
-import type { AgentContextUsageReadResponse } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import { useFetchQuery } from "@/data/query";
 import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
-
-export type AgentContextUsagePayload = AgentContextUsageReadResponse["payload"];
+import type { AgentContextUsagePayload } from "./context-meter-model";
 
 // While a turn runs the breakdown cannot move, and the daemon captures when it ends. Asking again
 // on this beat is what lets the turn-end capture appear under an open popover.

@@ -2,6 +2,7 @@ import type { MutableDaemonConfig } from "@getpaseo/protocol/messages";
 import type {
   AgentContextUsage,
   AgentContextUsageCategory,
+  AgentContextUsageReadResponse,
 } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import { formatTokenCount } from "@/components/context-window-meter.utils";
 
@@ -27,6 +28,8 @@ export const DEFAULT_CONTEXT_METER_THRESHOLDS: ContextMeterThresholds = {
   memoryFilesTokens: 10_000,
   memoryFileTokens: 5_000,
 };
+
+export type AgentContextUsagePayload = AgentContextUsageReadResponse["payload"];
 
 export type ContextMeterTone = "neutral" | "amber" | "red";
 
