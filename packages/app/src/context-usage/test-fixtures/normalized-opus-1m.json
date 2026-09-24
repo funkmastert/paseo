@@ -1,0 +1,29 @@
+{
+  "provider": "claude",
+  "model": "claude-opus-5-5[1m]",
+  "capturedAt": "2026-09-24T23:21:54.742Z",
+  "source": "session",
+  "totalTokens": 174085,
+  "maxTokens": 1000000,
+  "categories": [
+    { "id": "system_prompt", "label": "System prompt", "tokens": 248, "kind": "used" },
+    { "id": "system_tools", "label": "System tools", "tokens": 23754, "kind": "used" },
+    { "id": "memory_files", "label": "Memory files", "tokens": 13437, "kind": "used" },
+    { "id": "skills", "label": "Skills", "tokens": 8626, "kind": "used" },
+    { "id": "messages", "label": "Messages", "tokens": 130302, "kind": "used" },
+    { "id": "autocompact_buffer", "label": "Autocompact buffer", "tokens": 33000, "kind": "buffer" },
+    { "id": "free_space", "label": "Free space", "tokens": 790633, "kind": "free" }
+  ],
+  "memoryFiles": [
+    { "path": "/Users/tylerthackray/.claude-personal/CLAUDE.md", "type": "User", "tokens": 3976 },
+    { "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/cpu-policing/CLAUDE.md", "type": "Project", "tokens": 8580 },
+    { "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md", "type": "AutoMem", "tokens": 881 }
+  ],
+  "messageBreakdown": {
+    "toolCallTokens": 3417,
+    "toolResultTokens": 59559,
+    "attachmentTokens": 44060,
+    "assistantMessageTokens": 27234,
+    "userMessageTokens": 973
+  }
+}
