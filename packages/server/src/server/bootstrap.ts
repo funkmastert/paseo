@@ -238,6 +238,7 @@ import {
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import type { RemediationConfig } from "./remediation/config.js";
+import { createForwardingRemediationSink } from "./remediation/contract.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -1269,6 +1270,7 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  const remediationSink = createForwardingRemediationSink();
   worktreeDiskMonitor = new WorktreeDiskMonitor({
     projectRegistry,
     workspaceRegistry,
@@ -2312,6 +2314,7 @@ export async function createPaseoDaemon(
               agentManager,
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
               serverId,
               // Same steer path AgentResourceMonitor uses below, for the same reason: it is
               // the only way to put a system-authored message into a live turn.
@@ -2341,6 +2344,7 @@ export async function createPaseoDaemon(
                 (await providerSnapshotManager.listModels({ provider })).map((model) => model.id),
               readDaemonConfig: () => ({
                 tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
+                providers: daemonConfigStore.get().providers,
               }),
               logger,
             });
@@ -2362,6 +2366,7 @@ export async function createPaseoDaemon(
               agentManager,
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
               serverId,
               processSampler,
               // The cap counts devices from this same sweep sample rather than taking its own
