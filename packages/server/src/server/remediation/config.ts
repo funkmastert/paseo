@@ -62,7 +62,11 @@ export interface ResolvedStalledAgentSweepConfig {
   dryRun: boolean;
   /** No timeline, usage or process-tree activity for this long while `running` is a stall. */
   stallMinutes: number;
-  /** The same, for an agent whose account is at its cap: the cause is already known. */
+  /**
+   * The same, for an agent whose account is at its cap. Fifteen minutes with no progress is what
+   * the hand-run mover (`~/bozeo-ops/rehome.mjs`) treated as a dead turn during the 2026-09-24
+   * cap; a turn that still makes progress is left to end on its own.
+   */
   deadAccountStallMinutes: number;
   /** After a nudge, how long the agent has to show activity before the ladder escalates. */
   recheckMinutes: number;
@@ -81,7 +85,7 @@ export function resolveStalledAgentSweepConfig(
     enabled: (stalled?.enabled ?? true) && isRemediesRungEnabled(config),
     dryRun: stalled?.dryRun ?? false,
     stallMinutes: stalled?.stallMinutes ?? 30,
-    deadAccountStallMinutes: stalled?.deadAccountStallMinutes ?? 5,
+    deadAccountStallMinutes: stalled?.deadAccountStallMinutes ?? 15,
     recheckMinutes: stalled?.recheckMinutes ?? 20,
     idleCpuPercent: stalled?.idleCpuPercent ?? 5,
     maxNudgesPerSweep: stalled?.maxNudgesPerSweep ?? 4,
