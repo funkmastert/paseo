@@ -279,6 +279,14 @@ const AgentTokenBurnMonitorSchema = z
       })
       .strict()
       .optional(),
+    // Passive usage history (usage-history/). On unless `enabled` is false; retention is fixed.
+    // See docs/usage-history.md.
+    usageHistory: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
     // Opt-in: surfaces agents whose responses report a model other than the configured one.
     // Read by AgentModelDivergenceMonitor, independent of `enabled` above. See
     // docs/model-divergence.md.

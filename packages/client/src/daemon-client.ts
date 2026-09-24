@@ -479,6 +479,10 @@ type GetProvidersSnapshotPayload = GetProvidersSnapshotResponseMessage["payload"
 type RefreshProvidersSnapshotPayload = RefreshProvidersSnapshotResponseMessage["payload"];
 type ProviderDiagnosticPayload = ProviderDiagnosticResponseMessage["payload"];
 type ProviderUsageListPayload = ProviderUsageListResponseMessage["payload"];
+type UsageHistoryGetPayload = Extract<
+  SessionOutboundMessage,
+  { type: "usage.history.get.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -5122,6 +5126,21 @@ export class DaemonClient {
         type: "mcp_gateway.server.adopt.request",
         name,
         agentId,
+      },
+    });
+  }
+
+  async getUsageHistory(options?: {
+    agentId?: string;
+    requestId?: string;
+  }): Promise<UsageHistoryGetPayload> {
+    // COMPAT(usageHistory): callers gate on `server_info.features.usageHistory`; an older daemon
+    // answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "usage.history.get.request",
+        ...(options?.agentId ? { agentId: options.agentId } : {}),
       },
     });
   }

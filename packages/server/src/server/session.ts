@@ -184,6 +184,11 @@ import {
 import { NotifyPolicySession } from "./session/notify-policy/notify-policy-session.js";
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
+import {
+  createUsageHistorySession,
+  type UsageHistorySession,
+} from "./session/usage-history/usage-history-session.js";
+import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
@@ -552,6 +557,7 @@ export interface SessionOptions {
   terminalManager: TerminalManager | null;
   providerSnapshotManager: ProviderSnapshotManager;
   providerUsageService: ProviderUsageService;
+  usageHistory?: UsageHistoryStore;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -807,6 +813,7 @@ export class Session {
   private readonly scheduleSession: ScheduleSession;
   private readonly notifyPolicySession: NotifyPolicySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
+  private readonly usageHistorySession: UsageHistorySession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -859,6 +866,7 @@ export class Session {
       terminalManager,
       providerSnapshotManager,
       providerUsageService,
+      usageHistory,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -1004,6 +1012,11 @@ export class Session {
       },
       providerSnapshotManager,
       providerUsageService,
+      logger: this.sessionLogger,
+    });
+    this.usageHistorySession = createUsageHistorySession({
+      host: { emit: (msg) => this.emit(msg) },
+      store: usageHistory,
       logger: this.sessionLogger,
     });
     this.agentConfigSession = new AgentConfigSession({
@@ -2161,6 +2174,7 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
+      this.dispatchUsageHistoryMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
@@ -2177,6 +2191,11 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "usage.history.get.request" || !this.usageHistorySession) return undefined;
+    return this.usageHistorySession.handleGetRequest(msg);
   }
 
   private dispatchOrchestrationSkillsMessage(

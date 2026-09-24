@@ -122,6 +122,7 @@ import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
+import { UsageHistorySampler } from "./usage-history/usage-history-sampler.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import {
   createWorkspaceProvisioningService,
@@ -518,6 +519,9 @@ export interface PaseoDaemonConfig {
     totalTokens?: number;
     scope?: "all" | "topLevelOnly";
     breachBatchThreshold?: number;
+    usageHistory?: {
+      enabled?: boolean;
+    };
     modelDivergence?: {
       enabled?: boolean;
       persistResponses?: number;
@@ -2313,6 +2317,14 @@ export async function createPaseoDaemon(
                 });
               },
               readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+              // The sampler shares the monitor's 60s loop and the usage service's cache; the
+              // store is the one the sessions read, so a request sees what was just recorded.
+              usageHistory: new UsageHistorySampler({
+                store: wsServer.getUsageHistoryStore(),
+                readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+                readSettings: () => daemonConfigStore.get().tokenBurnMonitor?.usageHistory,
+                logger,
+              }),
               // So the governor's downgrade never sets a model the agent's provider does not
               // have. `downgradeToModel` is one string for a fleet that is not one provider.
               listProviderModels: async (provider) =>
@@ -2519,6 +2531,8 @@ export async function createPaseoDaemon(
     agentManager.setPromptDispatchInterceptor(null);
     agentRefocus.stop();
     agentTokenBurnMonitor?.stop();
+    // After the monitor stops: its last sweep's readings are still in memory, not on disk.
+    await wsServer?.getUsageHistoryStore().close();
     agentModelDivergenceMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();

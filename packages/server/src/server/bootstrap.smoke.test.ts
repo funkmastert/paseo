@@ -356,6 +356,7 @@ describe("paseo daemon bootstrap", () => {
         tokenBurnMonitor: {
           governor: { enabled: true, dryRun: true },
           modelDivergence: { enabled: true },
+          usageHistory: { enabled: true },
         },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
@@ -421,7 +422,10 @@ describe("paseo daemon bootstrap", () => {
           resourceMonitor: { reaper: { enabled: true, dryRun: false } },
           deviceLeases: { enabled: false },
           artifactJanitor: { enabled: true, dryRun: false },
-          tokenBurnMonitor: { governor: { enabled: true, dryRun: false } },
+          tokenBurnMonitor: {
+            governor: { enabled: true, dryRun: false },
+            usageHistory: { enabled: false },
+          },
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },

@@ -2038,6 +2038,8 @@ export const ja: TranslationResources = {
     tokens: "{{used}} / {{max}}トークン",
     sessionCost: "セッションコスト: {{cost}}",
     accessibility: "コンテキストウィンドウ{{percentage}}%使用",
+    spendTitle: "消費",
+    spendSummary: "{{span}}で加重トークン{{total}}",
   },
   review: {
     comment: {

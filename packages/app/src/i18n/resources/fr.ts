@@ -2070,6 +2070,8 @@ export const fr: TranslationResources = {
     tokens: "Jetons{{used}}/{{max}}",
     sessionCost: "Coût de la séance{{cost}}",
     accessibility: "Fenêtre contextuelle{{percentage}}% utilisé",
+    spendTitle: "Dépense",
+    spendSummary: "{{total}} tokens pondérés sur {{span}}",
   },
   review: {
     comment: {

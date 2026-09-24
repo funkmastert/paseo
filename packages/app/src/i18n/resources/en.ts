@@ -2026,6 +2026,8 @@ export const en = {
     tokens: "{{used}} / {{max}} tokens",
     sessionCost: "Session cost {{cost}}",
     accessibility: "Context window {{percentage}}% used",
+    spendTitle: "Spend",
+    spendSummary: "{{total}} weighted tokens over {{span}}",
   },
   review: {
     comment: {

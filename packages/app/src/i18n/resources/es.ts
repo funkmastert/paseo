@@ -2066,6 +2066,8 @@ export const es: TranslationResources = {
     tokens: "Fichas{{used}}/{{max}}",
     sessionCost: "Costo de la sesión{{cost}}",
     accessibility: "Ventana de contexto{{percentage}}% utilizada",
+    spendTitle: "Gasto",
+    spendSummary: "{{total}} tokens ponderados en {{span}}",
   },
   review: {
     comment: {

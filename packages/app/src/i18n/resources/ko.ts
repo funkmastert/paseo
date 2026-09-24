@@ -2029,6 +2029,8 @@ export const ko: TranslationResources = {
     tokens: "{{used}} / {{max}} 토큰",
     sessionCost: "세션 비용 {{cost}}",
     accessibility: "컨텍스트 윈도우 {{percentage}}% 사용됨",
+    spendTitle: "사용량",
+    spendSummary: "{{span}} 동안 가중 토큰 {{total}}",
   },
   review: {
     comment: {

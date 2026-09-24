@@ -89,6 +89,7 @@ import {
 } from "./websocket/runtime-metrics.js";
 import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
+import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -598,6 +599,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeSpeechReadiness: (() => void) | null = null;
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
+  private readonly usageHistoryStore: UsageHistoryStore;
   private unsubscribeTerminalActivity: (() => void) | null = null;
   private readonly browserToolsBroker: BrowserToolsBroker | null;
   private readonly hubRelationships: HubRelationshipManagement | null;
@@ -678,6 +680,10 @@ export class VoiceAssistantWebSocketServer {
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
+    this.usageHistoryStore = new UsageHistoryStore({
+      rootDir: join(paseoHome, "usage-history"),
+      logger: this.logger,
+    });
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
@@ -959,6 +965,12 @@ export class VoiceAssistantWebSocketServer {
    * instance that would double-hit the Claude usage API. */
   public getProviderUsageService(): ProviderUsageService {
     return this.providerUsageService;
+  }
+
+  /** The usage-history store this instance owns: the sampler in AgentTokenBurnMonitor writes it and
+   * each session's `usage.history.get` reads it, so both must share one in-memory view. */
+  public getUsageHistoryStore(): UsageHistoryStore {
+    return this.usageHistoryStore;
   }
 
   public listSessions(): Session[] {
@@ -1464,6 +1476,7 @@ export class VoiceAssistantWebSocketServer {
       terminalManager: this.terminalManager,
       providerSnapshotManager: this.providerSnapshotManager,
       providerUsageService: this.providerUsageService,
+      usageHistory: this.usageHistoryStore,
       hubExecutionAgents: options.hubExecutionAgents,
       hubRelationships: options.hubRelationships,
       serviceProxy: this.serviceProxy ?? undefined,
@@ -1682,6 +1695,8 @@ export class VoiceAssistantWebSocketServer {
         mcpGatewayAdopt: true,
         // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
         deviceLeases: true,
+        // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
+        usageHistory: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.
