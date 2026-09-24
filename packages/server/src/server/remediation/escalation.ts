@@ -1,3 +1,4 @@
+import type { RemediationNotificationPayload } from "@getpaseo/protocol/remediation-notification";
 import type { AccountPoolProviderEntry } from "../agent/account-pool-providers.js";
 import type { ProviderHealth } from "../agent-done-janitor.js";
 import type { RemediationObservation } from "./contract.js";
@@ -33,6 +34,29 @@ export function parseRemediationReport(finalText: string | null | undefined): Re
   return { outcome: match[1] === "FIXED" ? "fixed" : "not-fixed", line: lastLine };
 }
 
+const ADVICE_LINE = /^RECOMMENDATION: \S.*$/;
+
+/**
+ * An advisory agent's last non-empty line, read strictly. Advice is never a fix, so the outcome is
+ * always `not-fixed`; the line is what a person reads. Anything but `RECOMMENDATION: …` says so.
+ */
+export function parseAdviceReport(finalText: string | null | undefined): RemediationReport {
+  const lastLine =
+    (finalText ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .findLast((line) => line.length > 0) ?? "";
+  if (ADVICE_LINE.test(lastLine)) {
+    return { outcome: "not-fixed", line: lastLine.slice("RECOMMENDATION: ".length) };
+  }
+  return {
+    outcome: "not-fixed",
+    line: lastLine
+      ? `The agent ended without a RECOMMENDATION line; its last line was: ${truncate(lastLine, 200)}`
+      : "The agent ended without a RECOMMENDATION line.",
+  };
+}
+
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
@@ -58,6 +82,7 @@ export function buildRemediationPrompt(input: {
   timeoutMinutes: number;
   budgetTokens: number;
 }): string {
+  if (input.observation.escalation?.advice) return buildAdvicePrompt(input);
   const { observation } = input;
   const attempts = observation.attempts ?? [];
   const attemptLines =
@@ -104,6 +129,65 @@ export function buildRemediationPrompt(input: {
     "REMEDIATION: NOT_FIXED — <one line: what is wrong and what a person has to do>",
     "Any other ending counts as NOT_FIXED.",
   ].join("\n");
+}
+
+/** The brief for an advisory agent: read the evidence, say the one change worth making. */
+function buildAdvicePrompt(input: {
+  observation: RemediationObservation;
+  task: string;
+  timeoutMinutes: number;
+  budgetTokens: number;
+}): string {
+  const { observation } = input;
+  const evidence = observation.evidence?.trim()
+    ? truncateEvidence(observation.evidence.trim())
+    : "(the monitor sent no evidence)";
+  return [
+    "You are an advisory agent started by the Paseo daemon. A monitor measured something and nothing could fix it automatically. You write one line of advice; you change nothing.",
+    "",
+    `## ${observation.title}`,
+    observation.summary,
+    "",
+    "## Evidence the monitor measured",
+    "```",
+    evidence,
+    "```",
+    "",
+    "## Your task",
+    input.task,
+    "",
+    "## Limits",
+    "- Read only. Do not edit, delete, install, restart or push anything.",
+    "- Use only the evidence above and, if you need a detail, the files it names. Do not estimate numbers; quote the measured ones.",
+    `- You have ${input.timeoutMinutes} minutes and about ${input.budgetTokens.toLocaleString("en-US")} tokens. Past either, you are cancelled.`,
+    "",
+    "## Report",
+    "End your final message with exactly one line, and nothing after it:",
+    "RECOMMENDATION: <one line: the single change with the most leverage, naming the file, setting or command, and the measured number it moves>",
+  ].join("\n");
+}
+
+/** Rung 3 for an advisory episode: the recommendation as the body, under the monitor's own title. */
+export function buildAdviceNotificationPayload(input: {
+  serverId: string;
+  key: string;
+  kind: string;
+  title: string;
+  summary: string;
+  recommendation: string;
+  agentId?: string;
+}): RemediationNotificationPayload {
+  return {
+    title: input.title,
+    body: `${input.recommendation.trim()} ${input.summary.trim()}`.trim(),
+    data: {
+      serverId: input.serverId,
+      reason: "remediation_escalated",
+      key: input.key,
+      kind: input.kind,
+      ...(input.agentId ? { agentId: input.agentId } : {}),
+    },
+  };
 }
 
 /**

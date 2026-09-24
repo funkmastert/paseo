@@ -33,6 +33,9 @@ const ObservationSchema = z.object({
       task: z.string(),
       cwd: z.string().optional(),
       taskClass: z.enum(["mechanical", "standard", "hard"]).optional(),
+      budgetTokens: z.number().optional(),
+      timeoutMinutes: z.number().optional(),
+      advice: z.boolean().optional(),
     })
     .optional(),
   link: z.object({ agentId: z.string().optional(), workspaceId: z.string().optional() }).optional(),

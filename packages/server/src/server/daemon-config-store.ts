@@ -215,6 +215,10 @@ const RELOADABLE_PATHS = [
   "agents.refocus",
   "agents.remediation",
   "agents.skills.selection",
+  // Live, but not through the mutable config: the token audit job re-reads config.json on every
+  // check, so a change never needs a restart. It has no PERSISTED_TO_MUTABLE_PATH entry on
+  // purpose; that only stops reload() from listing it as applied.
+  "agents.tokenAudit",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
   // and never observes config changes (its class doc calls live reconfiguration "wired

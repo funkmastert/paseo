@@ -19,7 +19,8 @@ export type RemediationConditionKind =
   | "disk-falling"
   | "stalled-agent"
   | "work-at-risk"
-  | "account-pool-exhausted";
+  | "account-pool-exhausted"
+  | "token-audit";
 
 /** What rung 1 can do about the condition right now. */
 export type RemedyState =
@@ -52,6 +53,19 @@ export interface RemediationEscalationRequest {
   cwd?: string;
   /** Absent: the ladder config's. `hard` only when the condition needs it. */
   taskClass?: RemediationTaskClass;
+  /**
+   * The token ceiling for this agent, overriding the ladder config's; `conditions.<kind>` in
+   * config still wins. A monitor whose task is small says so here so `paseo.budget` is small.
+   */
+  budgetTokens?: number;
+  /** Minutes before the agent is cancelled, overriding the ladder config's. */
+  timeoutMinutes?: number;
+  /**
+   * The agent's job is a recommendation, not a fix. It ends with `RECOMMENDATION: <one line>`,
+   * and rung 3 pushes that line under the observation's own title. No FIXED outcome exists for
+   * an advisory episode, so the ladder never archives the agent or waits for the condition to clear.
+   */
+  advice?: boolean;
 }
 
 export interface RemediationObservation {

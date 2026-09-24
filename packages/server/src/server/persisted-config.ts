@@ -552,6 +552,27 @@ const AgentDaemonVitalsSchema = z
   })
   .strict();
 
+// Read from config.json on every check, so every key is live. `windowDays`, `cwds` and
+// `maxContextRuns` steer the checks themselves. See docs/token-audit.md.
+const AgentTokenAuditSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    intervalDays: z.number().positive().optional(),
+    keep: z.number().int().positive().optional(),
+    windowDays: z.number().positive().optional(),
+    cwds: z.array(z.string().min(1)).optional(),
+    maxContextRuns: z.number().int().positive().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -709,6 +730,7 @@ export const PersistedConfigSchema = z
         refocus: AgentRefocusSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
+        tokenAudit: AgentTokenAuditSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

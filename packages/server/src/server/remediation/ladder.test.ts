@@ -478,3 +478,81 @@ describe("RemediationLadder durability", () => {
     expect(alerts()).toHaveLength(1);
   });
 });
+
+describe("RemediationLadder advisory episodes", () => {
+  function advisory(overrides: Partial<RemediationObservation> = {}): RemediationObservation {
+    return {
+      key: "token-audit:2026-09-24",
+      kind: "token-audit",
+      active: true,
+      remedy: "none",
+      title: "Token audit: 1 new RED",
+      summary: "MEMORY total is 14.7k tokens. Report: /home/.paseo/token-audit/r.md.",
+      level: "notice",
+      escalation: {
+        task: "Name the single highest-leverage change.",
+        taskClass: "mechanical",
+        budgetTokens: 150_000,
+        timeoutMinutes: 10,
+        advice: true,
+      },
+      ...overrides,
+    };
+  }
+
+  it("starts a small mechanical agent and pushes its recommendation at the observation's level", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(advisory());
+    expect(fleet.created).toHaveLength(1);
+    const request = fleet.created[0]!;
+    expect(request.labels["paseo.task-class"]).toBe("mechanical");
+    expect(request.labels["paseo.budget"]).toBe("150000");
+    expect(request.prompt).toContain("RECOMMENDATION: <one line");
+    expect(request.prompt).not.toContain("REMEDIATION:");
+
+    fleet.finish(
+      "agent-1",
+      "Looked.\nRECOMMENDATION: Trim ~/.claude/CLAUDE.md from 4.1k to under 2k tokens.",
+    );
+    await ladder.tick();
+    expect(fleet.archived).toEqual([]);
+    expect(alerts()).toHaveLength(1);
+    const push = alerts()[0]!;
+    expect(push.meta).toEqual({ level: "notice", dedupeKey: "remediation:token-audit:2026-09-24" });
+    expect(push.payload.title).toBe("Token audit: 1 new RED");
+    expect(push.payload.body).toBe(
+      "Trim ~/.claude/CLAUDE.md from 4.1k to under 2k tokens. MEMORY total is 14.7k tokens. Report: /home/.paseo/token-audit/r.md.",
+    );
+  });
+
+  it("never treats a FIXED-looking line as a fix, and says when the recommendation line is missing", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(advisory());
+    fleet.finish("agent-1", "REMEDIATION: FIXED — done");
+    await ladder.tick();
+    expect(fleet.archived).toEqual([]);
+    expect(alerts()[0]!.payload.body).toContain("The agent ended without a RECOMMENDATION line");
+  });
+
+  it("cancels an advisory agent at its own timeout, not the config's", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(advisory());
+    nowMs += 10 * MINUTE;
+    await ladder.tick();
+    expect(fleet.cancelled).toEqual(["agent-1"]);
+    expect(alerts()).toHaveLength(1);
+  });
+
+  it("lets conditions.token-audit override the budget, and still tells a person when no agent can run", async () => {
+    config = { conditions: { "token-audit": { budgetTokens: 90_000 } } };
+    fleet.accountBlocker = "every account is capped";
+    const ladder = buildLadder();
+    await ladder.observe(advisory());
+    expect(fleet.created).toHaveLength(0);
+    expect(alerts()[0]!.payload.body).toContain("No agent could run: every account is capped");
+    config = { conditions: { "token-audit": { budgetTokens: 90_000 } } };
+    fleet.accountBlocker = null;
+    await ladder.observe(advisory({ key: "token-audit:next" }));
+    expect(fleet.created[0]!.labels["paseo.budget"]).toBe("90000");
+  });
+});
