@@ -10,7 +10,8 @@
  * Ordered by effort, low to high: `off < minimal < low < medium < high <
  * xhigh < max`. `ultracode` (Ultra Code) is NOT a rung on that ladder: it is
  * a mode — `xhigh`'s effort plus Claude Code's multi-agent orchestration —
- * that only a leader is ever given (server/classifier.ts's `decideThinking`).
+ * that no agent runs unless the policy or a root's request names it, and no
+ * subagent ever runs (server/classifier.ts's `decideThinking`).
  * So the clamp never falls back ONTO it, and falling back FROM it lands on
  * the highest effort the model offers: a leader that can't orchestrate should
  * still think as hard as the model allows.
@@ -92,7 +93,7 @@ export interface ThinkingClamp {
  *   (a non-Claude provider's own option ids): the model's own default
  *   option, else its first advertised option — `model-default` either way.
  *   This is the one path that can land on Ultra Code (a model whose default
- *   it is), which is why the classifier re-checks a subagent's result.
+ *   it is), which is why the classifier replaces that default with `xhigh`.
  *
  * Callers with an empty `advertised` array get `wanted` back unclamped: there
  * is nothing to clamp against, and every caller in this plugin already

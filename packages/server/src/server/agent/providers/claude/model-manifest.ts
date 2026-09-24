@@ -50,10 +50,11 @@ export const CLAUDE_MODEL_MANIFEST = [
     minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 1_000_000,
     effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
-    // A new session from the app is a root agent, a leader, and leaders run Ultra Code. This is
-    // only the selector's preselection: the account-pool classifier gives every subagent an
-    // explicit level, and metadata generation caps it (structured-generation-providers.ts).
-    defaultThinkingOptionId: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+    // A new session from the app is a root agent, a leader, and leaders run Extra High. Ultra
+    // Code stays selectable but is never preselected: it fans work out to in-process workflows
+    // that a message to the agent can kill. This is only the selector's preselection; the
+    // account-pool classifier decides every agent's level.
+    defaultThinkingOptionId: "xhigh",
   },
   {
     id: "claude-opus-5",
@@ -317,7 +318,7 @@ export function resolveClaudeDisabledThinkingForModel(
     supported:
       !!model && "supportsThinkingDisabled" in model && model.supportsThinkingDisabled === true,
     // Not the entry's own default: this runs mid-session for any agent, subagents included, and
-    // Opus 5.5's default is Ultra Code, which only a leader may run.
+    // an entry's default can be a leader's level.
     fallbackThinkingOptionId:
       model && "effortLevels" in model ? CLAUDE_DEFAULT_THINKING_OPTION_ID : undefined,
   };

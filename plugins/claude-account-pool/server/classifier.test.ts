@@ -37,9 +37,10 @@ function catalog(models: readonly string[] = LIVE_MODELS): ModelCatalog {
 
 /**
  * A thinking catalog shaped like the real manifest: Opus 5.5 offers no `off`
- * (thinking can't be disabled) and defaults to `ultracode`, the level the
- * app's selector preselects for it; everything else offering `xhigh` also
- * offers `ultracode`; Haiku offers nothing at all.
+ * (thinking can't be disabled); everything else offering `xhigh` also offers
+ * `ultracode`; Haiku offers nothing at all. Opus 5.5 defaults to `ultracode`
+ * here, as it did in the manifest before Extra High replaced it. That is the
+ * harder case: the classifier must never land on a default of Ultra Code.
  */
 function thinkingCatalog(
   entries: Record<string, Record<string, ModelThinkingOptions>> = {
@@ -598,11 +599,11 @@ describe("classifyAgent — nothing silent", () => {
 
 
 /**
- * Tyler's rule, tested end to end: "the leader probably needs ultracode
- * because it DOES work with multiple agents.. but no sub agent would ever
- * need it, the classifier can decide that". `LIVE_POLICY.thinking` is
- * `DEFAULT_THINKING_POLICY`, so every case here is what an operator who never
- * touches the thinking settings gets.
+ * Tyler's rule, tested end to end: no agent runs Ultra Code unless the policy
+ * or a root's own request names it, leaders run Extra High, and no subagent
+ * ever runs Ultra Code. `LIVE_POLICY.thinking` is `DEFAULT_THINKING_POLICY`,
+ * so every case here is what an operator who never touches the thinking
+ * settings gets.
  */
 describe("classifyAgent — thinking", () => {
   const live = (overrides: Partial<ClassifierWorld> = {}) =>
@@ -623,12 +624,12 @@ describe("classifyAgent — thinking", () => {
       catalog: new Map([["claude", new Set(["claude-opus-4-6"])]]),
     });
 
-  describe("leaders run Ultra Code", () => {
-    it("a root agent is the leader tier, and runs Ultra Code", () => {
+  describe("leaders run Extra High", () => {
+    it("a root agent is the leader tier, and runs Extra High", () => {
       const decision = classifyAgent({ title: "orchestrate the fleet" }, live());
       expect(decision.model.model).toBe("claude-opus-5-5");
-      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", wanted: "ultracode" });
-      expect(decision.thinking.reason).toContain("Ultra Code");
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh", wanted: "xhigh" });
+      expect(decision.thinking.reason).toContain("Extra High");
       expect(decision.thinking.override).toBeUndefined();
     });
 
@@ -636,15 +637,44 @@ describe("classifyAgent — thinking", () => {
       const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "low" }, live());
       expect(decision.thinking).toMatchObject({
         outcome: "leader-rule",
-        optionId: "ultracode",
+        optionId: "xhigh",
         requested: "low",
-        override: { requested: "low", applied: "ultracode", reason: "leader-rule" },
+        override: { requested: "low", applied: "xhigh", reason: "leader-rule" },
       });
       expect(decision.thinking.reason).toContain("outranks");
     });
 
-    it("a leader on a model without Ultra Code runs the highest effort that model offers, and says so", () => {
+    it("a root agent's request for Ultra Code gives way to the leader rule, so a remembered choice can't bring it back", () => {
+      const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "ultracode" }, live());
+      expect(decision.thinking).toMatchObject({
+        outcome: "leader-rule",
+        optionId: "xhigh",
+        override: { requested: "ultracode", applied: "xhigh", reason: "leader-rule" },
+      });
+    });
+
+    it("a leader on a model without Extra High runs the nearest lower level, and says so", () => {
       const decision = classifyAgent({ title: "orchestrate" }, onOpus46());
+      expect(decision.model.model).toBe("claude-opus-4-6");
+      expect(decision.thinking).toMatchObject({
+        outcome: "leader-rule",
+        optionId: "high",
+        wanted: "xhigh",
+        clamped: { wanted: "xhigh", applied: "high", how: "nearest-lower" },
+      });
+    });
+  });
+
+  describe("Ultra Code runs only when named", () => {
+    it("a leader level of Ultra Code, chosen in the settings editor, runs it", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: "ultracode" }) };
+      const decision = classifyAgent({ title: "orchestrate" }, live({ policy }));
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", wanted: "ultracode" });
+    });
+
+    it("a leader level of Ultra Code on a model without it runs the highest effort that model offers, and says so", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: "ultracode" }) };
+      const decision = classifyAgent({ title: "orchestrate" }, onOpus46(policy));
       expect(decision.model.model).toBe("claude-opus-4-6");
       expect(decision.thinking).toMatchObject({
         outcome: "leader-rule",
@@ -653,6 +683,41 @@ describe("classifyAgent — thinking", () => {
         clamped: { wanted: "ultracode", applied: "max", how: "highest-effort" },
       });
       expect(decision.thinking.reason).toContain("Max");
+    });
+
+    it("with the leader rule off, a root agent's own request for Ultra Code is honored", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: null }) };
+      const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "ultracode" }, live({ policy }));
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "ultracode" });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
+    it("a root agent never gets Ultra Code from its model's default", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: null }) };
+      const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "banana" }, live({ policy }));
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({
+        outcome: "requested",
+        optionId: "xhigh",
+        clamped: { wanted: "banana", applied: "xhigh", how: "model-default" },
+      });
+      expect(decision.thinking.subagentCapped).toBeUndefined();
+      expect(decision.thinking.reason).toContain("only when asked for by name");
+    });
+
+    it("under the default policy, no root or subagent create that doesn't name Ultra Code gets it", () => {
+      for (const callerAgentId of [undefined, "caller-1"]) {
+        for (const role of [undefined, "worker", "reviewer", "advisor", "leader"]) {
+          for (const requested of [undefined, "low", "high", "xhigh", "max", "banana"]) {
+            const input: ClassifierInput = {
+              ...(callerAgentId ? { callerAgentId } : {}),
+              ...(role ? { labels: { "paseo.agent-role": role } } : {}),
+              ...(requested ? { requestedThinkingOptionId: requested } : {}),
+            };
+            expect(classifyAgent(input, live()).thinking.optionId, JSON.stringify(input)).not.toBe("ultracode");
+          }
+        }
+      }
     });
 
     it("with the leader rule switched off, a leader's own request stands", () => {
@@ -693,8 +758,9 @@ describe("classifyAgent — thinking", () => {
       });
     });
 
-    it("a child resolved to the leader role is still a subagent, so the leader rule gives it Extra High", () => {
-      const decision = classifyAgent(child({ labels: { "paseo.agent-role": "leader" } }), live());
+    it("a child resolved to the leader role is still a subagent, so a leader level of Ultra Code gives it Extra High", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: "ultracode" }) };
+      const decision = classifyAgent(child({ labels: { "paseo.agent-role": "leader" } }), live({ policy }));
       expect(decision.role.role.id).toBe("leader");
       expect(decision.model.model).toBe("claude-opus-5-5");
       expect(decision.thinking).toMatchObject({
@@ -761,7 +827,7 @@ describe("classifyAgent — thinking", () => {
       });
       expect(decision.thinking.reason).toContain("subagent");
 
-      // A leader on the same model runs it.
+      // A root on the same model gets the only option there is: nothing else is offered.
       const root = classifyAgent({ requestedModel: "claude-sonnet-5" }, live({ policy: DEFAULT_POLICY, thinkingCatalog: onlyUltracode }));
       expect(root.thinking.optionId).toBe("ultracode");
     });
@@ -964,7 +1030,7 @@ describe("classifyAgent — thinking", () => {
         live({ policy: DEFAULT_POLICY }),
       );
       expect(decision.model.outcome).toBe("unconfigured");
-      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", modelRef: "claude-sonnet-5" });
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh", modelRef: "claude-sonnet-5" });
     });
   });
 });

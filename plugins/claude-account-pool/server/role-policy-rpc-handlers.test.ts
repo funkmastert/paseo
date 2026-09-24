@@ -891,10 +891,10 @@ describe("explain — the thinking decision", () => {
       baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog, thinking), poolCache }),
     ).explain(input, context(fakePaseo({})));
 
-  it("reports Ultra Code for a root agent, with the classifier's reason", async () => {
+  it("reports Extra High for a root agent, with the classifier's reason", async () => {
     const result = await explain({ root: true });
-    expect(result.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", modelRef: OPUS_5_5 });
-    expect(result.reasons.thinking).toContain("Ultra Code");
+    expect(result.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh", modelRef: OPUS_5_5 });
+    expect(result.reasons.thinking).toContain("Extra High");
   });
 
   it("reports a subagent's requested Ultra Code as overridden to Extra High", async () => {

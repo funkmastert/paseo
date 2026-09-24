@@ -1271,8 +1271,8 @@ describe("ClaudeAgentSession features", () => {
   test.each([
     ["supported model", "claude-opus-4-8", { type: "disabled" }, undefined],
     ["unsupported model", "claude-fable-5", { type: "adaptive" }, "high"],
-    // Opus 5.5 preselects Ultra Code for a new session, but this fallback runs mid-session for
-    // any agent, subagents included, which must never run Ultra Code: it stays a plain level.
+    // Opus 5.5 preselects Extra High for a new session, but this fallback runs mid-session for
+    // any agent, subagents included: it stays the plain default level.
     ["Opus 5.5", "claude-opus-5-5", { type: "adaptive" }, "high"],
     ["custom model", "openrouter/anthropic/claude-opus-4-8", undefined, undefined],
     ["provider default", null, undefined, undefined],

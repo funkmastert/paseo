@@ -280,9 +280,9 @@ function resolveThinkingOptionId(
   ) {
     return preferredThinkingOptionId;
   }
-  // A model's default can be Ultra Code (Opus 5.5 preselects it for a new session, which is a
-  // leader). A one-shot metadata generation is not a leader, so it gets the effort Ultra Code
-  // implies, without the orchestration, or the provider's own level when that isn't offered.
+  // No manifest entry preselects Ultra Code, but a provider's catalog could. A one-shot metadata
+  // generation never orchestrates, so it gets the effort Ultra Code implies, without the
+  // orchestration, or the provider's own level when that isn't offered.
   if (model.defaultThinkingOptionId === CLAUDE_ULTRACODE_THINKING_OPTION_ID) {
     return model.thinkingOptions?.some((option) => option.id === ULTRACODE_EFFORT_OPTION_ID)
       ? ULTRACODE_EFFORT_OPTION_ID

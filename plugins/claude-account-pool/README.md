@@ -281,9 +281,10 @@ The paragraph a fleet prompt should carry, in full:
 > overrides a request the resolved pool doesn't approve, and labels the agent
 > `paseo.model-overridden-by-policy` — asking for the right task class is the
 > supported way to get a better model. The classifier also picks the thinking
-> level: leaders run Ultra Code and subagents never do, so do not set a
-> thinking option to force Ultra Code on a child — it is replaced and the
-> agent is labelled `paseo.thinking-overridden-by-policy`. **Opus 5.5 leads**:
+> level: leaders run Extra High, nothing defaults to Ultra Code, and
+> subagents never run it, so do not set a thinking option to force Ultra Code
+> on a child — it is replaced and the agent is labelled
+> `paseo.thinking-overridden-by-policy`. Delegate through Paseo agents. **Opus 5.5 leads**:
 > it heads the leader pool and every `hard` pool. **Fable is in no pool at
 > all** — Opus 5.5 supersedes it, so nothing routes there and asking for it
 > gets you overridden.
@@ -322,7 +323,7 @@ no schema version bump.
 ```json
 "agentModelPolicy": {
   "thinking": {
-    "leader": "ultracode",
+    "leader": "xhigh",
     "byTaskClass": { "mechanical": "low", "standard": "high", "hard": "xhigh" }
   }
 }
@@ -330,20 +331,29 @@ no schema version bump.
 
 The rules, in the order they apply:
 
-1. **Leaders run Ultra Code.** The leader tier is a root agent (no calling
-   agent: the app, the CLI, a schedule, a heartbeat) or an agent resolved to
-   the `leader` role. The leader level outranks a level the caller asked for.
-   On a model without Ultra Code, a leader gets the highest effort that model
-   offers. Set `leader` to `null` to switch the rule off; a leader then gets the
-   level it asked for, else its task class's level.
-2. **Subagents never run Ultra Code.** This is an invariant in the classifier,
+1. **Leaders run at the leader level, Extra High by default.** The leader
+   tier is a root agent (no calling agent: the app, the CLI, a schedule, a
+   heartbeat) or an agent resolved to the `leader` role. The leader level
+   outranks a level the caller asked for. Set `leader` to `null` to switch the
+   rule off; a leader then gets the level it asked for, else its task class's
+   level.
+2. **Nothing defaults to Ultra Code.** Ultra Code fans work out to in-process
+   workflows, which a message to the agent can kill, and its standing
+   instruction treats token cost as no constraint. Leaders delegate through
+   durable Paseo agents instead. The classifier never picks it on its own: a
+   model whose own default is Ultra Code is treated as defaulting to Extra
+   High. A root runs it only when `leader` is `"ultracode"` (the settings
+   editor still offers it), or when the rule is off and the root asked for it.
+   On a model without Ultra Code, such a leader gets the highest effort that
+   model offers.
+3. **Subagents never run Ultra Code.** This is an invariant in the classifier,
    not a policy knob. A subagent that asks for it, or reaches it through the
    model's own default, gets Extra High (clamped to the model) and the agent is
    labelled `paseo.thinking-overridden-by-policy`, valued with the level the
    caller asked for.
-3. **Otherwise a subagent gets the level it asked for, else its task class's
+4. **Otherwise a subagent gets the level it asked for, else its task class's
    level.** The class levels cannot be `null`.
-4. **Every level is clamped to what the model offers.** If the model is missing
+5. **Every level is clamped to what the model offers.** If the model is missing
    from the catalog, the level is left as requested, except that a subagent's
    Ultra Code is removed.
 
@@ -352,10 +362,11 @@ whatever the reason: the leader rule, the subagent rule, or a level the model
 doesn't offer.
 
 The leader rule outranks what the app's model selector sends. Every root
-session runs Ultra Code on a model that offers it, whatever the selector
-shows, until `leader` is `null`. Only Opus 5.5 preselects Ultra Code for a new
-session; on any other model the selector shows one level and the agent runs
-another, and the label is how you tell.
+session runs at the leader level, whatever the selector shows, until `leader`
+is `null`. Opus 5.5 preselects Extra High for a new session, so the two agree
+there; on a model whose selector shows another level, the agent runs the
+leader level, and the label is how you tell. A remembered Ultra Code choice
+in the app is overridden the same way.
 
 The classifier only governs creation. A thinking level changed mid-session from
 the app is not re-checked.

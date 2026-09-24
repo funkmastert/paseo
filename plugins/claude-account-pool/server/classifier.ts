@@ -310,10 +310,9 @@ export interface AccountDecision {
 
 /**
  * Which thinking-effort level the effective model runs at, decided AFTER the
- * model (`decideThinking` takes the already-decided `ModelDecision`). Tyler:
- * "the leader probably needs ultracode because it DOES work with multiple
- * agents.. but no sub agent would ever need it, the classifier can decide
- * that". See `decideThinking` for the order the rules apply in.
+ * model (`decideThinking` takes the already-decided `ModelDecision`). No
+ * agent runs Ultra Code unless the policy or a root's request names it, and a
+ * subagent never does. See `decideThinking` for the order the rules apply in.
  */
 export interface ThinkingDecision {
   /**
@@ -821,42 +820,54 @@ function clampSentence(modelRef: string, clamp: NonNullable<ThinkingDecision["cl
 }
 
 /**
- * One wanted level, made safe to apply: a subagent's Ultra Code becomes
- * `xhigh` first, then the result is clamped to what the model offers.
+ * One wanted level, made safe to apply. Ultra Code runs only when it is what
+ * was wanted and the agent is not a subagent: a leader level or a root's
+ * request that names it. Everything else is clamped to what the model offers
+ * WITHOUT Ultra Code:
  *
- * The cap runs on both sides of the clamp. Before, because Ultra Code is what
- * was wanted; after, because the clamp's last resort is the model's own
- * default, and Opus 5.5's default is Ultra Code. A subagent is clamped
- * against the model's options WITHOUT Ultra Code and against a default that
- * has already been capped, so no path through here can hand one back.
+ * - A subagent's wanted Ultra Code becomes `xhigh` first.
+ * - The clamp's last resort is the model's own default. A default of Ultra
+ *   Code is replaced by `xhigh` for everyone, so no agent reaches Ultra Code
+ *   without asking for it by name.
  */
 function resolveThinkingLevel(
   wanted: string,
   optionIds: readonly string[],
   defaultOptionId: string | undefined,
   isSubagent: boolean,
-): { optionId: string; subagentCapped: boolean; clamped?: NonNullable<ThinkingDecision["clamped"]> } {
-  if (!isSubagent) {
+): {
+  optionId: string;
+  subagentCapped: boolean;
+  /** A root agent's clamp fell back to the model's default, which was Ultra Code, and got `xhigh` instead. */
+  defaultCapped: boolean;
+  clamped?: NonNullable<ThinkingDecision["clamped"]>;
+} {
+  if (!isSubagent && wanted === ULTRACODE_OPTION_ID) {
     const clamp = clampThinkingOption(wanted, optionIds, defaultOptionId);
     return {
       optionId: clamp.optionId,
       subagentCapped: false,
+      defaultCapped: false,
       ...(clamp.how !== "unclamped" ? { clamped: { wanted, applied: clamp.optionId, how: clamp.how } } : {}),
     };
   }
 
-  const allowed = optionIds.filter((id) => id !== ULTRACODE_OPTION_ID);
+  // A subagent never gets here with a model that offers only Ultra Code (decideThinking's
+  // `usable` check). A root might, and then the clamp keeps to what the model offers.
+  const withoutUltracode = optionIds.filter((id) => id !== ULTRACODE_OPTION_ID);
+  const allowed = withoutUltracode.length > 0 ? withoutUltracode : optionIds;
   const capDefault = defaultOptionId === ULTRACODE_OPTION_ID;
-  const subagentDefault = capDefault
+  const safeDefault = capDefault
     ? clampThinkingOption(ULTRACODE_EFFORT_OPTION_ID, allowed, undefined).optionId
     : defaultOptionId;
   const capWanted = wanted === ULTRACODE_OPTION_ID;
   const target = capWanted ? ULTRACODE_EFFORT_OPTION_ID : wanted;
-  const clamp = clampThinkingOption(target, allowed, subagentDefault);
+  const clamp = clampThinkingOption(target, allowed, safeDefault);
   const usedCappedDefault = capDefault && clamp.how === "model-default";
   return {
     optionId: clamp.optionId,
-    subagentCapped: capWanted || usedCappedDefault,
+    subagentCapped: isSubagent && (capWanted || usedCappedDefault),
+    defaultCapped: !isSubagent && usedCappedDefault,
     ...(clamp.how !== "unclamped" ? { clamped: { wanted: target, applied: clamp.optionId, how: clamp.how } } : {}),
   };
 }
@@ -885,8 +896,12 @@ function resolveThinkingLevel(
  *
  * A subagent never runs Ultra Code. That is an invariant, not policy: no
  * rule, policy entry or request can give a child `ultracode`
- * (`resolveThinkingLevel`). Every level from c-e is clamped to what the
- * model offers — never an id it doesn't.
+ * (`resolveThinkingLevel`). Nor does the classifier pick it for anyone on its
+ * own: the leader level defaults to Extra High, and a model whose own default
+ * is Ultra Code is treated as defaulting to Extra High. A root runs Ultra Code
+ * only when the leader level names it, or when the leader rule is off and the
+ * root asked for it. Every level from c-e is clamped to what the model
+ * offers — never an id it doesn't.
  */
 function decideThinking(
   input: ClassifierInput,
@@ -1037,7 +1052,9 @@ function describeThinking(decision: {
     ? ""
     : level.subagentCapped && !cappedWanted
       ? ` ${modelRef} does not recognize ${thinkingLabel(level.clamped.wanted)}, and its own default, ${thinkingLabel(ULTRACODE_OPTION_ID)}, is never a subagent's, so ${applied} is used.`
-      : clampSentence(modelRef, level.clamped);
+      : level.defaultCapped
+        ? ` ${modelRef} does not recognize ${thinkingLabel(level.clamped.wanted)}, and its own default, ${thinkingLabel(ULTRACODE_OPTION_ID)}, runs only when asked for by name, so ${applied} is used.`
+        : clampSentence(modelRef, level.clamped);
   const outrankNote =
     override?.reason === "leader-rule"
       ? ` ${thinkingLabel(override.requested)} was asked for, but the leader rule outranks a requested level.`

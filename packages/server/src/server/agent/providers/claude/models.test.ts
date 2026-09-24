@@ -131,12 +131,22 @@ describe("getClaudeModels", () => {
     ]);
   });
 
-  it("preselects Ultra Code as Opus 5.5's default thinking option", () => {
+  it("preselects Extra High as Opus 5.5's default thinking option, and still offers Ultra Code", () => {
     const opus55 = getClaudeModels().find((model) => model.id === "claude-opus-5-5");
-    expect(opus55?.defaultThinkingOptionId).toBe(CLAUDE_ULTRACODE_THINKING_OPTION_ID);
+    expect(opus55?.defaultThinkingOptionId).toBe("xhigh");
     expect(opus55?.thinkingOptions?.filter((option) => option.isDefault)).toEqual([
-      { id: CLAUDE_ULTRACODE_THINKING_OPTION_ID, label: "Ultra Code", isDefault: true },
+      { id: "xhigh", label: "Extra High", isDefault: true },
     ]);
+    expect(opus55?.thinkingOptions).toContainEqual({
+      id: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+      label: "Ultra Code",
+    });
+  });
+
+  it("never preselects Ultra Code for any model", () => {
+    for (const model of getClaudeModels()) {
+      expect(model.defaultThinkingOptionId).not.toBe(CLAUDE_ULTRACODE_THINKING_OPTION_ID);
+    }
   });
 
   it("keeps every model's default thinking option among its own advertised options", () => {
@@ -213,7 +223,7 @@ describe("getClaudeModels", () => {
   });
 
   it.each([
-    // Never Opus 5.5's Ultra Code default: this fallback also runs for subagents.
+    // Never Opus 5.5's own default: this fallback also runs for subagents.
     ["claude-opus-5-5", false, "high"],
     ["claude-opus-5", true, "high"],
     ["claude-opus-5-20260724", true, "high"],

@@ -17,7 +17,7 @@ const NO_LEADER_RULE_VALUE = "(none)";
 /** The effort ladder this editor offers: every known level except "minimal" (not a Claude level). */
 const LEVEL_IDS = THINKING_LEVEL_IDS.filter((id) => id !== "minimal");
 
-/** Leader choices: the "no rule" sentinel first, then every offered level, including Ultra Code. */
+/** Leader choices: the "no rule" sentinel first, then every offered level, including Ultra Code — a choice, never the default. */
 const LEADER_OPTIONS = [
   { label: "No leader rule", value: NO_LEADER_RULE_VALUE },
   ...LEVEL_IDS.map((id) => ({ label: THINKING_LEVEL_LABELS[id], value: id as string })),
@@ -44,9 +44,10 @@ export function ThinkingSection({ model, state, theme }: ThinkingSectionProps) {
       title="Thinking"
       info={
         <Text style={{ color: theme.colors.foregroundMuted }}>
-          Leaders — root agents and the leader role — run at the leader level, which outranks one the caller asked
-          for. Subagents never run Ultra Code: they use the level they asked for, else their task class's. A level a
-          model doesn&apos;t offer falls back to the nearest one it does.
+          Leaders — root agents and the leader role — run at the leader level, Extra High by default, which outranks
+          one the caller asked for. Nothing defaults to Ultra Code, and subagents never run it: they use the level
+          they asked for, else their task class's. A level a model doesn&apos;t offer falls back to the nearest one it
+          does.
         </Text>
       }
       testID="thinking-section"

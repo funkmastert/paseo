@@ -171,11 +171,14 @@ export const THINKING_OPTION_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 const ThinkingOptionIdSchema = z.string().regex(THINKING_OPTION_ID_RE);
 
 /**
- * The leader tier's level: a leader orchestrates other agents, which is what
- * Ultra Code is for. Tyler: "the leader probably needs ultracode because it
- * DOES work with multiple agents.. but no sub agent would ever need it".
+ * The leader tier's level: Extra High, not Ultra Code. No agent runs Ultra
+ * Code by default. It fans work out to in-process workflows, which a message
+ * from Tyler kills, and its standing instruction says token cost is no
+ * constraint. Leaders delegate through durable Paseo agents instead. Ultra
+ * Code stays a choice for the leader row in the settings editor, but nothing
+ * defaults to it.
  */
-export const DEFAULT_LEADER_THINKING = "ultracode";
+export const DEFAULT_LEADER_THINKING = "xhigh";
 
 /**
  * Each task class's level for a subagent. Mechanical work gets the cheapest
@@ -191,8 +194,8 @@ export const DEFAULT_THINKING_BY_TASK_CLASS: Readonly<Record<TaskClassId, string
 /**
  * Required ids, never null: every subagent whose model offers thinking must
  * leave the classifier with an explicit level. A class with no level would
- * fall back to the model's own default — Ultra Code, on Opus 5.5, which is a
- * leader's level and never a subagent's.
+ * fall back to the model's own default, which the classifier never trusts to
+ * be a subagent's level.
  */
 const ThinkingByTaskClassSchema = z
   .object({
@@ -519,7 +522,7 @@ export function rolePolicyFamilies(policy: RoleModelPolicy): string[] {
  * `POOL_FAMILY` is included unconditionally because a root agent's model
  * never has to come from a configured role pool (the leader role can be
  * unconfigured, as it is by default) — without it, the leader rule would
- * find no thinking options to apply Ultra Code against.
+ * find no thinking options to apply its level against.
  */
 export function catalogFamilies(policy: RoleModelPolicy): string[] {
   const families = new Set<string>(rolePolicyFamilies(policy));

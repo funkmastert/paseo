@@ -76,7 +76,7 @@ describe("RoleModelPolicySchema", () => {
   });
 
   describe("thinking", () => {
-    it("defaults the whole block — leaders at Ultra Code, the three task-class levels — for a stored document that predates the field", () => {
+    it("defaults the whole block — leaders at Extra High, the three task-class levels — for a stored document that predates the field", () => {
       // Tyler's live v4 document, shaped exactly as `~/.paseo/config.json`
       // stores it: roles with models/mechanicalModels/hardModels,
       // allowUnlistedModels naming opus-5-5, and NO "thinking" key at all.
@@ -95,10 +95,10 @@ describe("RoleModelPolicySchema", () => {
       expect(result.success && result.data.schemaVersion).toBe(4);
     });
 
-    it("ships leaders at Ultra Code and subagents at low / high / xhigh by task class", () => {
+    it("ships leaders at Extra High, never Ultra Code, and subagents at low / high / xhigh by task class", () => {
       expect(ThinkingPolicySchema.parse(undefined)).toEqual(DEFAULT_THINKING_POLICY);
       expect(DEFAULT_THINKING_POLICY).toEqual({
-        leader: "ultracode",
+        leader: "xhigh",
         byTaskClass: { mechanical: "low", standard: "high", hard: "xhigh" },
       });
       expect(DEFAULT_THINKING_POLICY.byTaskClass).toEqual(DEFAULT_THINKING_BY_TASK_CLASS);
@@ -107,7 +107,7 @@ describe("RoleModelPolicySchema", () => {
     it("fills in each missing key independently", () => {
       expect(ThinkingPolicySchema.parse({ leader: "max" })).toEqual({ leader: "max", byTaskClass: DEFAULT_THINKING_BY_TASK_CLASS });
       expect(ThinkingPolicySchema.parse({ byTaskClass: { hard: "max" } })).toEqual({
-        leader: "ultracode",
+        leader: "xhigh",
         byTaskClass: { mechanical: "low", standard: "high", hard: "max" },
       });
     });

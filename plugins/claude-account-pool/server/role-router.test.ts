@@ -2223,7 +2223,7 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
     expect(result).toBeUndefined();
   });
 
-  it("a root create on claude-opus-5-5 asking for High comes out Ultra Code, labelled — a root agent is a leader", () => {
+  it("a root create on claude-opus-5-5 asking for High comes out Extra High, labelled — a root agent is a leader", () => {
     // DEFAULT_POLICY.thinking is already DEFAULT_THINKING_POLICY — nothing
     // configured beyond the shipped default.
     const router = createRoleRouter(
@@ -2247,7 +2247,7 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
     const result = router(request({ config: { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "high", cwd: "/tmp" } }), fakeContext);
 
     expect(result?.config.model).toBe("claude-opus-5-5");
-    expect(result?.config.thinkingOptionId).toBe("ultracode");
+    expect(result?.config.thinkingOptionId).toBe("xhigh");
     expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "high" });
   });
 });
