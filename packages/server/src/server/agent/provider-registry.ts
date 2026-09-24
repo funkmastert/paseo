@@ -450,8 +450,17 @@ function mergeModelAdditions(
   );
 }
 
+/**
+ * Every AgentSession member, the optional ones made required, so leaving one out of the wrapper
+ * is a type error rather than a silently missing capability. Dropping `steerActiveTurn` here made
+ * every derived provider (each account-pool account) interrupt its running turn — and the
+ * background workflows inside it — whenever a message arrived. Tests are not typechecked, so the
+ * guard has to live in this file.
+ */
+type ForwardedAgentSession = { [K in keyof Required<AgentSession>]: AgentSession[K] };
+
 export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession): AgentSession {
-  return {
+  const wrapped: ForwardedAgentSession = {
     provider,
     id: inner.id,
     capabilities: inner.capabilities,
@@ -460,6 +469,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     },
     run: (prompt, options) => inner.run(prompt, options),
     startTurn: (prompt, options) => inner.startTurn(prompt, options),
+    steerActiveTurn: inner.steerActiveTurn?.bind(inner),
     subscribe: (callback) => inner.subscribe((event) => callback(mapStreamEvent(provider, event))),
     async *streamHistory() {
       for await (const event of inner.streamHistory()) {
@@ -484,6 +494,7 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
     revertBoth: inner.revertBoth?.bind(inner),
     tryHandleOutOfBand: inner.tryHandleOutOfBand?.bind(inner),
   };
+  return wrapped;
 }
 
 function wrapClientProvider(
