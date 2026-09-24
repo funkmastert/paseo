@@ -38,7 +38,10 @@ On start the service rebuilds its index from every record, before anything can a
 agent. A child still owing a report is not loaded, so nothing watches it. The sweep finds it
 stopped and **parks** it; after `parkedGraceMs` (2 minutes) the sweep reports for it:
 "stopped before reporting", with instructions to read its activity and resume it with
-`send_agent_prompt` rather than start another agent. The grace period gives a parent that resumes
+`send_agent_prompt` rather than start another agent. Each such report can start a turn in its
+owner, and a restart produces them all in one sweep, so they go through the daemon's shared resume
+pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)) and the sweep
+waits for them. Reports of an outcome seen live are not paced. The grace period gives a parent that resumes
 its child on its own a chance to do so first. A child seen running again is unparked and gets a
 watcher.
 

@@ -119,7 +119,7 @@ The sweep covers agents loaded in the daemon. After a restart, a stuck agent is 
 
 1. **Adopt or retire, if the conversation already lives elsewhere.** If the agent already has a successor, or another live record holds its session, the monitor only retires this record (see [Idempotency](#idempotency) and [Duplicates](#duplicates)). Nothing is moved, imported, or sent.
 2. **Move the agent onto the target account.** Same id, same conversation, same settings, same children.
-3. **Send a resume prompt.** It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
+3. **Send a resume prompt**, through the daemon's shared resume pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)): after a drain the moved agents restart a few a minute, roots first, instead of all at once. Re-sends to an agent that never restarted go through it too. It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
 4. **Record** the agent id → account in the ledger.
 
 A moved agent keeps the parent label and the id its parent holds, so nobody has to be told where it went. Its parent was already told "errored" when the cap hit, so after the resume prompt the monitor re-arms the finish report and the parent hears again when the work finishes ([finish-reports.md](finish-reports.md#successors)).
