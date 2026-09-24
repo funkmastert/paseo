@@ -2277,6 +2277,12 @@ class ClaudeAgentSession implements AgentSession {
   private compactionMarkerOpen = false;
   private queryPumpPromise: Promise<void> | null = null;
   private queryRestartNeeded = false;
+  /**
+   * A thinking change needs a new Claude process, and the old one owns every background Workflow
+   * and Agent task in the session. It waits until none is running; the old setting applies until
+   * then. Restarts that correctness requires (rewind, a rebound session) use `queryRestartNeeded`.
+   */
+  private thinkingRestartPending = false;
   private pendingInterruptAbort = false;
   private foregroundHasVisibleActivity = false;
   private activeTurnHasAssistantText = false;
@@ -2637,7 +2643,7 @@ class ClaudeAgentSession implements AgentSession {
     }
 
     this.config.thinkingOptionId = resolution.fallbackThinkingOptionId;
-    this.queryRestartNeeded = true;
+    this.thinkingRestartPending = true;
     this.pushEvent({
       type: "thinking_option_changed",
       provider: "claude",
@@ -2659,7 +2665,7 @@ class ClaudeAgentSession implements AgentSession {
     } else {
       throw new Error(`Unknown thinking option: ${normalizedThinkingOptionId}`);
     }
-    this.queryRestartNeeded = true;
+    this.thinkingRestartPending = true;
     if (this.activeForegroundTurnId || this.autonomousTurn) {
       return THINKING_APPLIES_NEXT_TURN_NOTICE;
     }
@@ -3104,6 +3110,16 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
+  private thinkingRestartDue(): boolean {
+    if (!this.thinkingRestartPending) return false;
+    if (!this.taskProtocolSource.hasRunningTasks) return true;
+    this.logger.debug(
+      { agentId: this.agentId, sessionId: this.claudeSessionId },
+      "Deferring the thinking change while background tasks run in this Claude process",
+    );
+    return false;
+  }
+
   private async ensureFreshQuery(): Promise<Query> {
     if (this.query) {
       this.queryRestartNeeded = true;
@@ -3277,11 +3293,11 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private async ensureQuery(): Promise<Query> {
-    if (this.query && !this.queryRestartNeeded) {
+    if (this.query && !this.queryRestartNeeded && !this.thinkingRestartDue()) {
       return this.query;
     }
 
-    if (this.queryRestartNeeded && this.query) {
+    if (this.query) {
       const oldQuery = this.query;
       const oldInput = this.input;
       // Null out query/input BEFORE awaiting the old iterator's return so the
@@ -3290,6 +3306,7 @@ class ClaudeAgentSession implements AgentSession {
       this.input = null;
       this.queryPumpPromise = null;
       this.queryRestartNeeded = false;
+      this.thinkingRestartPending = false;
       // Ending the input retires the process on purpose. Detach first so its
       // exit is not reported as a crash.
       const retiredChild = this.childProcess;
@@ -3318,6 +3335,8 @@ class ClaudeAgentSession implements AgentSession {
     // Preserve claudeSessionId across query recreation so buildOptions() passes
     // resume: sessionId and the new query continues the existing conversation.
     this.persistence = null;
+    // The new process launches with the current thinking option.
+    this.thinkingRestartPending = false;
 
     const input = createAsyncMessageInput<SDKUserMessage>();
     const options = await this.buildOptions();
