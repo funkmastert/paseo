@@ -4126,6 +4126,8 @@ describe("rename_workspace MCP tool", () => {
       {
         ...workspace,
         title: "Payments flow",
+        // A deliberate rename: the workspace-title tracker leaves it alone from now on.
+        titleSource: "manual",
         updatedAt: expect.any(String),
       },
     ]);
@@ -4198,6 +4200,8 @@ describe("rename_workspace MCP tool", () => {
       {
         ...otherWorkspace,
         title: "Payments flow",
+        // A deliberate rename: the workspace-title tracker leaves it alone from now on.
+        titleSource: "manual",
         updatedAt: expect.any(String),
       },
     ]);
