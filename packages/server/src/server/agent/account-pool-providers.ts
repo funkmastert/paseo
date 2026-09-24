@@ -87,6 +87,12 @@ export interface PickFailoverTargetOptions {
    * true. `false` restores the strict isolation this used to enforce.
    */
   allowLeader?: boolean;
+  /**
+   * Rank the leader account first, and allow it whatever `allowLeader` says. For a root: Tyler's
+   * own session belongs on the leader account, and isolation only ever protected that account
+   * from children.
+   */
+  preferLeader?: boolean;
 }
 
 /**
@@ -116,13 +122,16 @@ export function pickFailoverTarget(
       entry.enabled &&
       entry.providerId !== options.sourceProviderId &&
       !options.deadProviderIds.has(entry.providerId) &&
-      (entry.role === "worker" || (options.allowLeader ?? true)),
+      (entry.role === "worker" || options.preferLeader || (options.allowLeader ?? true)),
   );
   // Role first so a worker always outranks the leader however the budget compares: a leader
-  // account with more headroom is still the account whose budget the pool is protecting.
+  // account with more headroom is still the account whose budget the pool is protecting. A root
+  // turns that round.
+  const leaderRank = (entry: AccountPoolProviderEntry): number =>
+    Number((entry.role === "leader") !== Boolean(options.preferLeader));
   const ranked = [...eligible].sort(
     (a, b) =>
-      Number(a.role === "leader") - Number(b.role === "leader") ||
+      leaderRank(a) - leaderRank(b) ||
       headroomOf(b.providerId) - headroomOf(a.providerId) ||
       a.priority - b.priority ||
       a.providerId.localeCompare(b.providerId),

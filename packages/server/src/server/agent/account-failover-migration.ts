@@ -107,6 +107,11 @@ export type AccountFailoverOutcome =
     }
   /** A successor already existed (an earlier sweep, or a person running `paseo import`). */
   | { kind: "adopted"; oldAgentId: string; newAgentId: string }
+  /**
+   * The conversation already runs under another live record, so this one is a duplicate left
+   * over from an earlier handoff. Retired like an adopted predecessor, never moved, never retried.
+   */
+  | { kind: "duplicate"; oldAgentId: string; holderId: string; holderProviderId: string }
   | { kind: "no-target"; oldAgentId: string };
 
 const MOVED_TITLE_PREFIX = /^\[MOVED [^\]]*\]\s*/;
@@ -187,6 +192,32 @@ export function findExistingSuccessor(
     )
     .sort(byCreatedAt);
   return laterOnSameSession[0] ?? null;
+}
+
+/**
+ * The live record that already holds this conversation, if any: unarchived, not retired, on the
+ * same provider session. One conversation has one live end. When another record is it, this one is
+ * the duplicate, whichever is older — moving it would be refused on the holder's account
+ * (`session_conflict`) and would leave two live agents on one transcript anywhere else.
+ *
+ * A retired holder is not live. It is the handle this conversation left behind on that account,
+ * and the import path revives it (see `migrateStuckAgent`).
+ */
+export function findLiveSessionHolder(
+  agent: StoredAgentRecord,
+  records: readonly StoredAgentRecord[],
+): StoredAgentRecord | null {
+  const handles = sessionHandlesOf(agent);
+  if (handles.size === 0) return null;
+  return (
+    records.find(
+      (record) =>
+        record.id !== agent.id &&
+        !record.archivedAt &&
+        !getMigratedToFromLabels(record.labels) &&
+        sharesSession(record, handles),
+    ) ?? null
+  );
 }
 
 async function retirePredecessor(
@@ -364,6 +395,15 @@ async function moveStuckAgentInPlace(input: {
     await agentManager.moveAgentToProvider(agent.id, targetProviderId);
   } catch (error) {
     const refusal = error instanceof AgentProviderMoveError ? error : null;
+    const duplicate = await retireIfDuplicate({
+      refusal,
+      agentId: agent.id,
+      agentManager,
+      agentStorage,
+    });
+    if (duplicate) {
+      return duplicate;
+    }
     logger.info(
       {
         err: refusal ? undefined : error,
@@ -415,6 +455,32 @@ async function moveStuckAgentInPlace(input: {
     model,
     workspaceId: agent.workspaceId,
     resume: { prompt, error: resumeError },
+  };
+}
+
+/**
+ * A `session_conflict` refusal names an account that already holds this conversation. If the
+ * holder is live, this record is a duplicate and is retired; a retired holder is left to the
+ * import path, which revives it. The check before the move normally catches a live holder; this
+ * covers one that appeared in between.
+ */
+async function retireIfDuplicate(input: {
+  refusal: AgentProviderMoveError | null;
+  agentId: string;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+}): Promise<AccountFailoverOutcome | null> {
+  if (input.refusal?.code !== "session_conflict") return null;
+  const self = await input.agentStorage.get(input.agentId);
+  if (!self) return null;
+  const holder = findLiveSessionHolder(self, await input.agentStorage.list());
+  if (!holder) return null;
+  await retirePredecessor(input.agentManager, self, holder.id);
+  return {
+    kind: "duplicate",
+    oldAgentId: input.agentId,
+    holderId: holder.id,
+    holderProviderId: holder.persistence?.provider ?? holder.provider,
   };
 }
 
@@ -496,8 +562,89 @@ function resolveUnavailableTargets(params: {
   return unavailable;
 }
 
+/** Children prefer a worker and collapse onto the leader account; roots prefer the leader account. */
+function pickTarget(params: {
+  input: MigrateStuckAgentInput;
+  sameSession: readonly StoredAgentRecord[];
+}): string | null {
+  const { input, sameSession } = params;
+  return pickFailoverTarget(input.poolEntries, {
+    headroom: input.headroom,
+    allowLeader: input.allowLeaderTarget,
+    preferLeader: getParentAgentIdFromLabels(input.agent.labels) === null,
+    deadProviderIds: resolveUnavailableTargets({
+      input,
+      sameSession,
+      agentManager: input.agentManager,
+    }),
+    sourceProviderId: input.agent.provider,
+  });
+}
+
+export type IdleRehomeOutcome =
+  | { kind: "moved"; agentId: string; oldProviderId: string; targetProviderId: string }
+  | Extract<AccountFailoverOutcome, { kind: "adopted" | "duplicate" | "no-target" }>
+  /** The daemon would not move it, for a reason that is not a duplicate. Retried after a backoff. */
+  | { kind: "refused"; agentId: string; targetProviderId: string; reason: string };
+
 /**
- * Move one stuck agent's conversation to a healthy worker account, following the
+ * Move an agent that is between turns off an exhausted account, in place, and send it nothing
+ * (account-failover-rehome.ts). Same placement and duplicate rules as a rescue. Unlike a rescue it
+ * never imports: a refused move leaves the agent where it is, and if it is asked to do something
+ * there it fails on the cap and the rescue leg takes over.
+ */
+export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<IdleRehomeOutcome> {
+  const { agent, agentManager, agentStorage, logger } = input;
+  const self = await agentStorage.get(agent.id);
+  if (!self) {
+    throw new Error(`Agent ${agent.id} has no stored record`);
+  }
+  const records = await agentStorage.list();
+  const existing = findExistingSuccessor(self, records);
+  if (existing) {
+    await retirePredecessor(agentManager, self, existing.id);
+    return { kind: "adopted", oldAgentId: agent.id, newAgentId: existing.id };
+  }
+  const holder = findLiveSessionHolder(self, records);
+  if (holder) {
+    await retirePredecessor(agentManager, self, holder.id);
+    return {
+      kind: "duplicate",
+      oldAgentId: agent.id,
+      holderId: holder.id,
+      holderProviderId: holder.persistence?.provider ?? holder.provider,
+    };
+  }
+
+  const handles = sessionHandlesOf(self);
+  const sameSession = records.filter(
+    (record) => record.id !== agent.id && !record.archivedAt && sharesSession(record, handles),
+  );
+  const targetProviderId = pickTarget({ input, sameSession });
+  if (!targetProviderId) {
+    return { kind: "no-target", oldAgentId: agent.id };
+  }
+  try {
+    await agentManager.moveAgentToProvider(agent.id, targetProviderId);
+  } catch (error) {
+    const refusal = error instanceof AgentProviderMoveError ? error : null;
+    const duplicate = await retireIfDuplicate({
+      refusal,
+      agentId: agent.id,
+      agentManager,
+      agentStorage,
+    });
+    if (duplicate?.kind === "duplicate") {
+      return duplicate;
+    }
+    return { kind: "refused", agentId: agent.id, targetProviderId, reason: getErrorMessage(error) };
+  }
+  await recordHomeProvider({ agent, targetProviderId, agentManager, logger });
+  return { kind: "moved", agentId: agent.id, oldProviderId: agent.provider, targetProviderId };
+}
+
+/**
+ * Move one stuck agent's conversation to a healthy account, following the
  * claude-account-handoff procedure: import the session (every account can read every
  * transcript), restore model/thinking/mode (import resets them), send an explicit resume prompt,
  * and retire the predecessor with a title prefix and label. The predecessor is never archived.
@@ -509,8 +656,10 @@ function resolveUnavailableTargets(params: {
  *   ("Provider session is already imported"). If that fires because another import won a race,
  *   the successor it created is adopted. If the target instead holds this conversation's retired
  *   handle (the conversation is returning to an account it left), that handle is reused.
- *   Targets holding a non-retired or running handle for this session are skipped — that agent is someone
- *   else's live copy, not ours to take over.
+ * - A conversation that already runs under another live record makes this one a duplicate: it is
+ *   retired in favour of that record and nothing moves (`findLiveSessionHolder`).
+ * - Children go to a worker first and collapse onto the leader account; roots go to the leader
+ *   account first and to the worker with the most budget when it is out.
  *
  * Throws when the import itself fails; restoration and the resume prompt are best-effort.
  */
@@ -533,17 +682,22 @@ export async function migrateStuckAgent(
     return { kind: "adopted", oldAgentId: agent.id, newAgentId: existing.id };
   }
 
+  const holder = findLiveSessionHolder(predecessor, records);
+  if (holder) {
+    await retirePredecessor(agentManager, predecessor, holder.id);
+    return {
+      kind: "duplicate",
+      oldAgentId: agent.id,
+      holderId: holder.id,
+      holderProviderId: holder.persistence?.provider ?? holder.provider,
+    };
+  }
+
   const handles = sessionHandlesOf(predecessor);
   const sameSession = records.filter(
     (record) => record.id !== agent.id && !record.archivedAt && sharesSession(record, handles),
   );
-  const unavailable = resolveUnavailableTargets({ input, sameSession, agentManager });
-  const targetProviderId = pickFailoverTarget(input.poolEntries, {
-    headroom: input.headroom,
-    allowLeader: input.allowLeaderTarget,
-    deadProviderIds: unavailable,
-    sourceProviderId: agent.provider,
-  });
+  const targetProviderId = pickTarget({ input, sameSession });
   if (!targetProviderId) {
     return { kind: "no-target", oldAgentId: agent.id };
   }

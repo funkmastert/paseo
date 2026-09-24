@@ -189,6 +189,47 @@ describe("pickFailoverTarget", () => {
     ).toBe("claude-w2");
   });
 
+  it("puts a root on the leader account first, whatever the workers have left", () => {
+    // A root is Tyler's own session. The leader account is where it belongs, and the one account
+    // it is never kept off for isolation's sake.
+    expect(
+      pickFailoverTarget(entries, {
+        deadProviderIds: none,
+        sourceProviderId: "claude-w2",
+        preferLeader: true,
+        headroom: new Map([
+          ["claude", 10],
+          ["claude-w1a", 95],
+        ]),
+      }),
+    ).toBe("claude");
+  });
+
+  it("sends a root to the worker with the most budget when the leader account is out", () => {
+    expect(
+      pickFailoverTarget(entries, {
+        deadProviderIds: new Set(["claude"]),
+        sourceProviderId: "claude-w2",
+        preferLeader: true,
+        headroom: new Map([
+          ["claude-w1a", 5],
+          ["claude-w1b", 60],
+        ]),
+      }),
+    ).toBe("claude-w1b");
+  });
+
+  it("lets a root onto the leader account even with collapse switched off", () => {
+    expect(
+      pickFailoverTarget(entries, {
+        deadProviderIds: none,
+        sourceProviderId: "claude-w2",
+        preferLeader: true,
+        allowLeader: false,
+      }),
+    ).toBe("claude");
+  });
+
   it("returns null when every account including the leader is dead", () => {
     expect(
       pickFailoverTarget(entries, {

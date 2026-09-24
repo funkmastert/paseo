@@ -112,6 +112,18 @@ describe("isLimitShapedError", () => {
     expect(isLimitShapedError("You've hit your Opus limit · resets 9pm")).toBe(true);
   });
 
+  it("matches the error the stalled-agent sweep leaves when it cancels a dead turn", () => {
+    // Workstream S cancels a turn stuck in running on a capped account and leaves this lastError
+    // so failover resumes the agent as cut off mid-turn. Its wording may change; its shape — it
+    // names the account and the stall and says the account is at its limit — is the contract.
+    expect(
+      isLimitShapedError(
+        "Account claude-backup is at its usage limit or unusable, and this turn stalled in " +
+          "running with no activity; the daemon canceled it so account failover can move the agent.",
+      ),
+    ).toBe(true);
+  });
+
   it("does not match the other API errors that now end a turn as a failure", () => {
     expect(isLimitShapedError("API Error: 529 Overloaded. This is a server-side issue.")).toBe(
       false,
@@ -160,6 +172,24 @@ describe("planAccountFailoverSweep", () => {
 
     expect([...result.deadProviderIds]).toEqual(["claude"]);
     expect(ids(result.candidates)).toEqual(["leader"]);
+  });
+
+  it("takes an agent the stalled-agent sweep cancelled: idle, with its limit-shaped error", () => {
+    // The cancel lands the agent idle, not in error. Its lastError is what makes it a turn cut
+    // off mid-way, so it is moved and resumed like any other capped agent.
+    const stalled = agent({
+      id: "stalled",
+      provider: "claude-backup",
+      lifecycle: "idle",
+      lastError:
+        "Account claude-backup is at its usage limit or unusable, and this turn stalled in " +
+        "running with no activity; the daemon canceled it so account failover can move the agent.",
+    });
+
+    const result = plan({ agents: [stalled] });
+
+    expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
+    expect(ids(result.candidates)).toEqual(["stalled"]);
   });
 
   it("keeps an account dead on evidence a move left behind, until the TTL runs out", () => {
