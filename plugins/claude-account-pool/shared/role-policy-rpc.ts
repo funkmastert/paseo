@@ -5,6 +5,7 @@ import {
   TASK_CLASS_IDS,
   RoleModelPolicySchema,
   RoleRecordSchema,
+  ThinkingPolicyShapeSchema,
 } from "./role-policy-schema";
 import { defineRpc } from "@getpaseo/plugin";
 
@@ -20,6 +21,16 @@ export const RoleModelPolicyDraftSchema = z.object({
   roles: z.array(RoleRecordSchema).max(MAX_ROLES),
   agentTypeMappings: z.record(z.string(), z.string()),
   modelBudgetThresholdPct: z.number().int().min(1).max(100).default(DEFAULT_MODEL_BUDGET_THRESHOLD_PCT),
+  /**
+   * OPTIONAL, unlike every other field here: an app build that predates this
+   * field never sends it, and `performWrite` (server/role-policy-rpc-handlers.ts)
+   * carries the stored value through untouched when it's absent — mirroring
+   * how `allowUnlistedModels` survives an unrelated save. `ThinkingPolicyShapeSchema`
+   * (not `ThinkingPolicySchema`) is used here specifically so an absent key
+   * parses to `undefined` rather than the default policy — the two must stay
+   * distinguishable for that carry-through to work.
+   */
+  thinking: ThinkingPolicyShapeSchema.optional(),
 });
 export type RoleModelPolicyDraft = z.infer<typeof RoleModelPolicyDraftSchema>;
 

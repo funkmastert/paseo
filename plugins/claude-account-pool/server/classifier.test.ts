@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_POLICY,
+  DEFAULT_THINKING_POLICY,
   type RoleModelPolicy,
   type RoleRecord,
+  type ThinkingPolicy,
 } from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
+import type { ModelThinkingOptions, ThinkingCatalog } from "./model-catalog";
 import type { ModelCatalog } from "./role-availability";
 
 /**
@@ -31,10 +34,30 @@ function catalog(models: readonly string[] = LIVE_MODELS): ModelCatalog {
   return new Map([["claude", new Set(models)]]);
 }
 
+/**
+ * A thinking catalog shaped like the real manifest: Opus 5.5 offers no `off`
+ * (thinking can't be disabled) and defaults to `ultracode`, the level the
+ * app's selector preselects for it; everything else offering `xhigh` also
+ * offers `ultracode`; Haiku offers nothing at all.
+ */
+function thinkingCatalog(
+  entries: Record<string, Record<string, ModelThinkingOptions>> = {
+    claude: {
+      "claude-opus-5-5": { optionIds: ["low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "ultracode" },
+      "claude-opus-5": { optionIds: ["off", "low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "high" },
+      "claude-sonnet-5": { optionIds: ["off", "low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "high" },
+      "claude-haiku-4-5-20251001": { optionIds: [] },
+    },
+  },
+): ThinkingCatalog {
+  return new Map(Object.entries(entries).map(([family, models]) => [family, new Map(Object.entries(models))]));
+}
+
 function world(overrides: Partial<ClassifierWorld> = {}): ClassifierWorld {
   return {
     policy: DEFAULT_POLICY,
     catalog: catalog(),
+    thinkingCatalog: thinkingCatalog(),
     pool: {
       workers: [
         { providerId: "claude-work", priority: 1 },
@@ -121,6 +144,9 @@ const LIVE_POLICY: RoleModelPolicy = {
   // The live value: Claude Code doesn't advertise claude-opus-5-5, and this
   // is what makes the leader's own top entry selectable at all.
   allowUnlistedModels: ["claude-opus-5-5"],
+  // No thinking rules configured: DEFAULT_THINKING_POLICY applies — leaders
+  // run Ultra Code, subagents take their task class's level.
+  thinking: DEFAULT_THINKING_POLICY,
   revision: "live-fixture",
 };
 
@@ -510,10 +536,339 @@ describe("classifyAgent — nothing silent", () => {
     ];
     for (const input of cases) {
       const decision = classifyAgent(input, world({ policy: LIVE_POLICY, nowMs: 1 } as Partial<ClassifierWorld>));
-      for (const part of [decision.role, decision.taskClass, decision.model, decision.tools, decision.account]) {
+      for (const part of [decision.role, decision.taskClass, decision.model, decision.tools, decision.account, decision.thinking]) {
         expect(part.reason.length).toBeGreaterThan(20);
         expect(part.reason.endsWith(".")).toBe(true);
       }
     }
+  });
+});
+
+
+/**
+ * Tyler's rule, tested end to end: "the leader probably needs ultracode
+ * because it DOES work with multiple agents.. but no sub agent would ever
+ * need it, the classifier can decide that". `LIVE_POLICY.thinking` is
+ * `DEFAULT_THINKING_POLICY`, so every case here is what an operator who never
+ * touches the thinking settings gets.
+ */
+describe("classifyAgent — thinking", () => {
+  const live = (overrides: Partial<ClassifierWorld> = {}) =>
+    world({ policy: LIVE_POLICY, ...overrides } as Partial<ClassifierWorld>);
+  const thinkingPolicy = (patch: Partial<ThinkingPolicy>): ThinkingPolicy => ({ ...DEFAULT_THINKING_POLICY, ...patch });
+
+  /** Opus 4.6's real option set: Max, but no Extra High and so no Ultra Code. */
+  const opus46Thinking = thinkingCatalog({
+    claude: { "claude-opus-4-6": { optionIds: ["off", "low", "medium", "high", "max"], defaultOptionId: "high" } },
+  });
+  const onOpus46 = (policy: RoleModelPolicy = LIVE_POLICY) =>
+    live({
+      policy: withRole(withRole(policy, "leader", { models: ["claude-opus-4-6"] }), "worker", {
+        models: ["claude-opus-4-6"],
+        hardModels: [],
+      }),
+      thinkingCatalog: opus46Thinking,
+      catalog: new Map([["claude", new Set(["claude-opus-4-6"])]]),
+    });
+
+  describe("leaders run Ultra Code", () => {
+    it("a root agent is the leader tier, and runs Ultra Code", () => {
+      const decision = classifyAgent({ title: "orchestrate the fleet" }, live());
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", wanted: "ultracode" });
+      expect(decision.thinking.reason).toContain("Ultra Code");
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
+    it("the leader rule outranks a root agent's own request, and records the override", () => {
+      const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "low" }, live());
+      expect(decision.thinking).toMatchObject({
+        outcome: "leader-rule",
+        optionId: "ultracode",
+        requested: "low",
+        override: { requested: "low", applied: "ultracode", reason: "leader-rule" },
+      });
+      expect(decision.thinking.reason).toContain("outranks");
+    });
+
+    it("a leader on a model without Ultra Code runs the highest effort that model offers, and says so", () => {
+      const decision = classifyAgent({ title: "orchestrate" }, onOpus46());
+      expect(decision.model.model).toBe("claude-opus-4-6");
+      expect(decision.thinking).toMatchObject({
+        outcome: "leader-rule",
+        optionId: "max",
+        wanted: "ultracode",
+        clamped: { wanted: "ultracode", applied: "max", how: "highest-effort" },
+      });
+      expect(decision.thinking.reason).toContain("Max");
+    });
+
+    it("with the leader rule switched off, a leader's own request stands", () => {
+      const policy: RoleModelPolicy = { ...LIVE_POLICY, thinking: thinkingPolicy({ leader: null }) };
+      const decision = classifyAgent({ title: "orchestrate", requestedThinkingOptionId: "high" }, live({ policy }));
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "high" });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+  });
+
+  describe("subagents never run Ultra Code", () => {
+    it("a subagent asking for Ultra Code gets Extra High, the effort it implies, and the override is recorded", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" }, requestedThinkingOptionId: "ultracode" }),
+        live(),
+      );
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({
+        outcome: "requested",
+        optionId: "xhigh",
+        wanted: "ultracode",
+        subagentCapped: true,
+        override: { requested: "ultracode", applied: "xhigh", reason: "subagent-no-ultracode" },
+      });
+      expect(decision.thinking.reason).toContain("subagent");
+    });
+
+    it("the Extra High a capped request becomes is still clamped to what the model offers", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "ultracode" }),
+        onOpus46(),
+      );
+      expect(decision.thinking).toMatchObject({
+        optionId: "high",
+        subagentCapped: true,
+        clamped: { wanted: "xhigh", applied: "high", how: "nearest-lower" },
+        override: { requested: "ultracode", applied: "high", reason: "subagent-no-ultracode" },
+      });
+    });
+
+    it("a child resolved to the leader role is still a subagent, so the leader rule gives it Extra High", () => {
+      const decision = classifyAgent(child({ labels: { "paseo.agent-role": "leader" } }), live());
+      expect(decision.role.role.id).toBe("leader");
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({
+        outcome: "leader-rule",
+        optionId: "xhigh",
+        wanted: "ultracode",
+        subagentCapped: true,
+      });
+    });
+
+    it("no policy value and no request can give a subagent Ultra Code", () => {
+      const policy: RoleModelPolicy = {
+        ...LIVE_POLICY,
+        thinking: { leader: "ultracode", byTaskClass: { mechanical: "ultracode", standard: "ultracode", hard: "ultracode" } },
+      };
+      const inputs: ClassifierInput[] = [];
+      for (const role of ["worker", "reviewer", "advisor", "leader"]) {
+        for (const taskClass of [undefined, "mechanical", "standard", "hard"]) {
+          for (const requested of [undefined, "ultracode", "max"]) {
+            inputs.push(
+              child({
+                labels: { "paseo.agent-role": role, ...(taskClass ? { "paseo.task-class": taskClass } : {}) },
+                ...(requested ? { requestedThinkingOptionId: requested } : {}),
+              }),
+            );
+          }
+        }
+      }
+      for (const input of inputs) {
+        const decision = classifyAgent(input, live({ policy }));
+        expect(decision.thinking.optionId, JSON.stringify(input)).not.toBe("ultracode");
+      }
+    });
+
+    it("every subagent whose model offers thinking gets an explicit level, so Opus 5.5's Ultra Code default never reaches one", () => {
+      // The fixture gives Opus 5.5 the manifest's own default, Ultra Code — the
+      // level a create with no thinkingOptionId would otherwise fall back to.
+      expect(thinkingCatalog().get("claude")?.get("claude-opus-5-5")?.defaultOptionId).toBe("ultracode");
+      for (const role of ["worker", "reviewer", "advisor"]) {
+        for (const taskClass of [undefined, "mechanical", "standard", "hard"]) {
+          const decision = classifyAgent(
+            child({ labels: { "paseo.agent-role": role, ...(taskClass ? { "paseo.task-class": taskClass } : {}) } }),
+            live(),
+          );
+          if (decision.thinking.outcome === "no-thinking-options") {
+            continue; // Haiku: nothing to set.
+          }
+          const where = `${role}/${taskClass ?? "unresolved"} on ${decision.model.model}`;
+          expect(decision.thinking.outcome, where).toBe("task-class-default");
+          expect(decision.thinking.optionId, where).not.toBeNull();
+          expect(decision.thinking.optionId, where).not.toBe("ultracode");
+        }
+      }
+    });
+
+    it("a subagent asking for Ultra Code on a model the catalog doesn't list has it removed, since nothing lower can be verified", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "ultracode" }),
+        live({ thinkingCatalog: new Map() }),
+      );
+      expect(decision.thinking).toMatchObject({
+        outcome: "model-unknown",
+        optionId: null,
+        override: { requested: "ultracode", applied: null, reason: "subagent-no-ultracode" },
+      });
+    });
+  });
+
+  describe("subagent thinking comes from the task class", () => {
+    it("mechanical defaults to low", () => {
+      const policy = withRole(LIVE_POLICY, "worker", { mechanicalModels: ["claude-sonnet-5"] });
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" } }),
+        live({ policy }),
+      );
+      expect(decision.model.model).toBe("claude-sonnet-5");
+      expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "low", wanted: "low" });
+    });
+
+    it("standard defaults to high", () => {
+      const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "standard" } }), live());
+      expect(decision.model.model).toBe("claude-sonnet-5");
+      expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "high", wanted: "high" });
+    });
+
+    it("hard defaults to xhigh, on Opus 5.5 too", () => {
+      const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" } }), live());
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "xhigh", wanted: "xhigh" });
+    });
+
+    it("an unresolved task class uses the standard default, and the reason says so", () => {
+      const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), live());
+      expect(decision.taskClass.taskClass).toBeUndefined();
+      expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "high" });
+      expect(decision.thinking.reason).toContain("standard");
+    });
+
+    it("an explicit request beats the class default, with no override", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "max" }),
+        live(),
+      );
+      expect(decision.model.model).toBe("claude-sonnet-5");
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "max", requested: "max", wanted: "max" });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
+    it("the class defaults are policy: a configured one replaces the shipped one", () => {
+      const policy: RoleModelPolicy = {
+        ...LIVE_POLICY,
+        thinking: thinkingPolicy({ byTaskClass: { mechanical: "low", standard: "medium", hard: "max" } }),
+      };
+      const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), live({ policy }));
+      expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "medium" });
+    });
+  });
+
+  describe("clamping", () => {
+    it("clamps a requested xhigh down to the nearest lower level a model without xhigh offers", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "xhigh" }),
+        onOpus46(),
+      );
+      expect(decision.thinking).toMatchObject({
+        outcome: "requested",
+        optionId: "high",
+        wanted: "xhigh",
+        clamped: { wanted: "xhigh", applied: "high", how: "nearest-lower" },
+        override: { requested: "xhigh", applied: "high", reason: "not-advertised" },
+      });
+    });
+
+    it("clamps off up to the nearest higher level on Opus 5.5, which cannot disable thinking", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" }, requestedThinkingOptionId: "off" }),
+        live(),
+      );
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking).toMatchObject({
+        outcome: "requested",
+        optionId: "low",
+        wanted: "off",
+        clamped: { wanted: "off", applied: "low", how: "nearest-higher" },
+      });
+    });
+
+    it("falls back to the model's own default when the requested id isn't on the ladder at all", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "banana" }),
+        onOpus46(),
+      );
+      expect(decision.thinking).toMatchObject({
+        outcome: "requested",
+        optionId: "high",
+        clamped: { wanted: "banana", applied: "high", how: "model-default" },
+      });
+    });
+
+    it("a subagent never gets Ultra Code from its model's default, even when that default is Ultra Code", () => {
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" }, requestedThinkingOptionId: "banana" }),
+        live(),
+      );
+      expect(decision.model.model).toBe("claude-opus-5-5");
+      expect(decision.thinking.optionId).toBe("xhigh");
+      expect(decision.thinking.subagentCapped).toBe(true);
+    });
+  });
+
+  it("a model with no thinking options gives optionId null and clears a requested id, with an override", () => {
+    const policy = withRole(LIVE_POLICY, "worker", { models: ["claude-haiku-4-5-20251001"] });
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "max" }),
+      live({ policy }),
+    );
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+    expect(decision.thinking).toMatchObject({
+      outcome: "no-thinking-options",
+      optionId: null,
+      requested: "max",
+      override: { requested: "max", applied: null, reason: "no-thinking-options" },
+    });
+    expect(decision.thinking.reason).toContain("no thinking options");
+  });
+
+  it("a model missing from the thinking catalog gives model-unknown, leaves the request's own option, and records no override", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "max" }),
+      live({ thinkingCatalog: new Map() }),
+    );
+    expect(decision.thinking).toMatchObject({ outcome: "model-unknown", optionId: "max", requested: "max" });
+    expect(decision.thinking.override).toBeUndefined();
+  });
+
+  describe("the effective model follows the model decision", () => {
+    it("a request for opus overridden by policy to sonnet is decided against sonnet, not opus", () => {
+      const decision = classifyAgent(
+        child({
+          labels: { "paseo.agent-type": "worker" },
+          requestedModel: "claude-opus-5",
+          requestedThinkingOptionId: "max",
+        }),
+        live(),
+      );
+      expect(decision.model.outcome).toBe("selected");
+      expect(decision.model.model).toBe("claude-sonnet-5"); // worker's pool doesn't include opus-5; policy overrode
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "max", modelRef: "claude-sonnet-5" });
+    });
+
+    it("an unconfigured role is decided against the request's own model", () => {
+      const decision = classifyAgent(
+        { callerAgentId: "caller-1", requestedModel: "claude-sonnet-5", requestedThinkingOptionId: "max" },
+        live({ policy: DEFAULT_POLICY }),
+      );
+      expect(decision.model.outcome).toBe("unconfigured");
+      expect(decision.thinking).toMatchObject({ outcome: "requested", optionId: "max", modelRef: "claude-sonnet-5" });
+    });
+
+    it("a root agent on an unconfigured leader role is decided against the model it asked for", () => {
+      const decision = classifyAgent(
+        { requestedModel: "claude-sonnet-5", requestedThinkingOptionId: "high" },
+        live({ policy: DEFAULT_POLICY }),
+      );
+      expect(decision.model.outcome).toBe("unconfigured");
+      expect(decision.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", modelRef: "claude-sonnet-5" });
+    });
   });
 });

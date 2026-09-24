@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../shared/tool-profiles";
-import { DEFAULT_MODEL_BUDGET_THRESHOLD_PCT } from "../shared/role-policy-schema";
+import { DEFAULT_MODEL_BUDGET_THRESHOLD_PCT, DEFAULT_THINKING_POLICY } from "../shared/role-policy-schema";
 import type { PluginHandlerContext } from "@getpaseo/plugin/server";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { createHealthTracker } from "./health";
-import type { ModelCatalog } from "./model-catalog";
+import type { ModelCatalog, ThinkingCatalog } from "./model-catalog";
 import { createRecentAgentTypes } from "./recent-agent-types";
 import { createRoleModelPolicyRpcHandlers, type RoleModelPolicyRpcDeps } from "./role-policy-rpc-handlers";
 
@@ -20,6 +20,7 @@ const VALID_POLICY: RoleModelPolicy = {
   enforceToolsOnClassifiedRoles: false,
   exposeClassifierTool: false,
   allowUnlistedModels: [],
+  thinking: DEFAULT_THINKING_POLICY,
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };
@@ -52,8 +53,8 @@ function fakePolicyCache(policy: RoleModelPolicy, options: { malformed?: boolean
   };
 }
 
-function fakeCatalogCache(catalog: ModelCatalog = new Map()) {
-  return { get: () => catalog, forceRefresh: vi.fn().mockResolvedValue(catalog), stop: vi.fn() };
+function fakeCatalogCache(catalog: ModelCatalog = new Map(), thinking: ThinkingCatalog = new Map()) {
+  return { get: () => catalog, getThinking: () => thinking, forceRefresh: vi.fn().mockResolvedValue(catalog), stop: vi.fn() };
 }
 
 function fakePoolCache() {
@@ -163,6 +164,78 @@ describe("role-model-policy RPC handlers", () => {
       expect(patch).toHaveBeenCalledWith({
         agentModelPolicy: expect.objectContaining({ allowUnlistedModels: ["claude-opus-5-5"] }),
       });
+    });
+
+    it("carries thinking through an unrelated save when the patch omits it (an older app build)", async () => {
+      const customThinking = { leader: "max", byTaskClass: { mechanical: "low", standard: "medium", hard: "xhigh" } };
+      const stored: RoleModelPolicy = { ...VALID_POLICY, thinking: customThinking };
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(stored) }));
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ config: { agentModelPolicy: stored }, patch });
+
+      const result = await handlers.write(
+        {
+          revision: stored.revision,
+          // No `thinking` key at all — exactly what an app build that predates the field sends.
+          patch: { roles: stored.roles, agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      expect(patch).toHaveBeenCalledWith({
+        agentModelPolicy: expect.objectContaining({ thinking: customThinking }),
+      });
+    });
+
+    it("saves the patch's own thinking field when the caller supplies one", async () => {
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps());
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ patch });
+      const newThinking = { leader: null, byTaskClass: { mechanical: "low", standard: "max", hard: "max" } };
+
+      const result = await handlers.write(
+        {
+          revision: VALID_POLICY.revision,
+          patch: {
+            roles: VALID_POLICY.roles,
+            agentTypeMappings: VALID_POLICY.agentTypeMappings,
+            modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+            thinking: newThinking,
+          },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      if (result.status !== "saved") throw new Error("expected saved");
+      expect(result.policy.thinking).toEqual(newThinking);
+      expect(patch).toHaveBeenCalledWith({ agentModelPolicy: expect.objectContaining({ thinking: newThinking }) });
+    });
+
+    it("a thinking-only change is not a semantic no-op", async () => {
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps());
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ patch });
+      const newThinking = { leader: "ultracode", byTaskClass: { mechanical: "medium", standard: "high", hard: "xhigh" } };
+
+      const result = await handlers.write(
+        {
+          revision: VALID_POLICY.revision,
+          patch: {
+            roles: VALID_POLICY.roles,
+            agentTypeMappings: VALID_POLICY.agentTypeMappings,
+            modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT,
+            thinking: newThinking,
+          },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      if (result.status !== "saved") throw new Error("expected saved");
+      expect(result.policy.revision).not.toBe(VALID_POLICY.revision); // bumped: this was not a no-op
+      expect(patch).toHaveBeenCalledTimes(1);
     });
 
     it("stale-revision conflict leaves storage untouched", async () => {
@@ -633,7 +706,12 @@ describe("explain — account-agnostic refs and tool profiles", () => {
     const handlers = createRoleModelPolicyRpcHandlers(
       baseDeps({
         policyCache: fakePolicyCache(policy),
-        catalogCache: { get: () => new Map([["claude", new Set(["claude-sonnet-5"])]]), forceRefresh: vi.fn(), stop: vi.fn() },
+        catalogCache: {
+          get: () => new Map([["claude", new Set(["claude-sonnet-5"])]]),
+          getThinking: () => new Map(),
+          forceRefresh: vi.fn(),
+          stop: vi.fn(),
+        },
         poolCache: { get: () => ({ pool: { workers: [{ providerId: "w1", priority: 1 }], leader: null }, failOpen: false }), forceRefresh: vi.fn(), stop: vi.fn() },
       }),
     );

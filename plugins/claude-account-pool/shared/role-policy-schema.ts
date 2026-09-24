@@ -24,6 +24,16 @@ export const TASK_CLASS_LABEL = "paseo.task-class";
 export const MODEL_OVERRIDDEN_LABEL = "paseo.model-overridden-by-policy";
 
 /**
+ * Set by the role router when the thinking level the caller asked for
+ * (`config.thinkingOptionId`) is not the one the agent runs: the leader rule
+ * outranked it, the agent is a subagent and asked for Ultra Code, or the
+ * model doesn't offer that level. Value is the option id the caller asked
+ * for, so the UI can show "thinking level chosen by policy (you asked for X)"
+ * instead of silently swapping it. Mirrors `MODEL_OVERRIDDEN_LABEL`.
+ */
+export const THINKING_OVERRIDDEN_LABEL = "paseo.thinking-overridden-by-policy";
+
+/**
  * Set by the role router when an explicitly requested model was honored even
  * though the provider's advertised catalog doesn't list it (see
  * `allowUnlistedModels`). Value is the ref the caller asked for. The model was
@@ -139,6 +149,93 @@ export const MAX_MODELS_PER_ROLE = 32;
 export const MAX_MAPPINGS = 256;
 export const MAX_MODEL_REF_LENGTH = 256;
 
+/**
+ * A thinking-effort option id, as a model's `thinkingOptions` (or the
+ * `thinking` policy block) names it: `low`, `xhigh`, `ultracode`, or a
+ * non-Claude provider's own token. Not restricted to Claude's known ids —
+ * other providers name their own effort levels, and the clamp in
+ * `shared/thinking-levels.ts` falls back to the model's own default for
+ * anything it doesn't recognize.
+ */
+export const THINKING_OPTION_ID_RE = /^[A-Za-z0-9_.-]{1,64}$/;
+
+const ThinkingOptionIdSchema = z.string().regex(THINKING_OPTION_ID_RE);
+
+/**
+ * The leader tier's level: a leader orchestrates other agents, which is what
+ * Ultra Code is for. Tyler: "the leader probably needs ultracode because it
+ * DOES work with multiple agents.. but no sub agent would ever need it".
+ */
+export const DEFAULT_LEADER_THINKING = "ultracode";
+
+/**
+ * Each task class's level for a subagent. Mechanical work gets the cheapest
+ * reasonable level, hard work the highest one short of Ultra Code, standard
+ * sits in between — priced like `RoleRecord`'s own three pools.
+ */
+export const DEFAULT_THINKING_BY_TASK_CLASS: Readonly<Record<TaskClassId, string>> = {
+  mechanical: "low",
+  standard: "high",
+  hard: "xhigh",
+};
+
+/**
+ * Required ids, never null: every subagent whose model offers thinking must
+ * leave the classifier with an explicit level. A class with no level would
+ * fall back to the model's own default — Ultra Code, on Opus 5.5, which is a
+ * leader's level and never a subagent's.
+ */
+const ThinkingByTaskClassSchema = z
+  .object({
+    mechanical: ThinkingOptionIdSchema.default(DEFAULT_THINKING_BY_TASK_CLASS.mechanical),
+    standard: ThinkingOptionIdSchema.default(DEFAULT_THINKING_BY_TASK_CLASS.standard),
+    hard: ThinkingOptionIdSchema.default(DEFAULT_THINKING_BY_TASK_CLASS.hard),
+  })
+  .default(DEFAULT_THINKING_BY_TASK_CLASS as Record<TaskClassId, string>);
+
+/**
+ * The block's shape with no top-level default — used standalone by
+ * `RoleModelPolicyDraftSchema`'s OPTIONAL `thinking` field (shared/role-policy-rpc.ts),
+ * where the key being absent has to stay distinguishable from a written
+ * block (an older app that never sends `thinking` vs. one that does).
+ * `ThinkingPolicySchema` below adds the top-level default for the
+ * stored-document shape, where "absent" always means "apply the default".
+ */
+export const ThinkingPolicyShapeSchema = z.object({
+  /**
+   * The level for the leader tier: a root agent, or one resolved to the
+   * leader role. It outranks a requested level. `null` switches the rule off,
+   * so leaders are decided like anyone else. A subagent resolved to the
+   * leader role still never runs Ultra Code — see `decideThinking`.
+   */
+  leader: z.union([ThinkingOptionIdSchema, z.null()]).default(DEFAULT_LEADER_THINKING),
+  /** A subagent's level by task class, used when the caller didn't ask for one. */
+  byTaskClass: ThinkingByTaskClassSchema,
+});
+
+/**
+ * Which thinking-effort level each agent's model runs at — a field
+ * `RoleModelPolicy` gained with NO `schemaVersion` bump, the same way
+ * `allowUnlistedModels`/`exposeClassifierTool` joined v4: the whole block
+ * defaults to `DEFAULT_THINKING_POLICY` when absent from a stored document,
+ * so a config that predates it keeps parsing. Inside it, an absent `leader`,
+ * `byTaskClass`, or task-class key each take their own default.
+ *
+ * There is no knob for the one rule that matters most: a subagent never runs
+ * Ultra Code. That is an invariant in the classifier, not policy.
+ */
+export const ThinkingPolicySchema = ThinkingPolicyShapeSchema.default({
+  leader: DEFAULT_LEADER_THINKING,
+  byTaskClass: DEFAULT_THINKING_BY_TASK_CLASS,
+} as { leader: string | null; byTaskClass: Record<TaskClassId, string> });
+export type ThinkingPolicy = z.infer<typeof ThinkingPolicySchema>;
+
+/** `ThinkingPolicySchema` parsed with nothing supplied — the value every field of it defaults to. */
+export const DEFAULT_THINKING_POLICY: ThinkingPolicy = {
+  leader: DEFAULT_LEADER_THINKING,
+  byTaskClass: { ...DEFAULT_THINKING_BY_TASK_CLASS },
+};
+
 export const RoleRecordSchema = z.object({
   /** Fixed lowercase id for standard roles; stable lowercase UUID for custom roles. */
   id: z.string().min(1),
@@ -240,6 +337,12 @@ export const RoleModelPolicySchema = z
      *   approval, it only stands in for catalog verification.
      */
     allowUnlistedModels: z.array(z.string().max(MAX_MODEL_REF_LENGTH).regex(MODEL_REF_RE)).max(MAX_MODELS_PER_ROLE).default([]),
+    /**
+     * Which thinking-effort level each agent's model runs at. See
+     * `ThinkingPolicySchema`'s own doc comment for the default/absent
+     * semantics at each level of this block.
+     */
+    thinking: ThinkingPolicySchema,
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -349,6 +452,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   enforceToolsOnClassifiedRoles: false,
   exposeClassifierTool: false,
   allowUnlistedModels: [],
+  thinking: DEFAULT_THINKING_POLICY,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",
@@ -395,6 +499,22 @@ export function rolePolicyFamilies(policy: RoleModelPolicy): string[] {
       }
     }
   }
+  return [...families];
+}
+
+/**
+ * Every provider family the model catalog must cover to answer this policy in
+ * full: every family a role's pools reference (`rolePolicyFamilies`), plus the
+ * pool family itself.
+ *
+ * `POOL_FAMILY` is included unconditionally because a root agent's model
+ * never has to come from a configured role pool (the leader role can be
+ * unconfigured, as it is by default) — without it, the leader rule would
+ * find no thinking options to apply Ultra Code against.
+ */
+export function catalogFamilies(policy: RoleModelPolicy): string[] {
+  const families = new Set<string>(rolePolicyFamilies(policy));
+  families.add(POOL_FAMILY);
   return [...families];
 }
 

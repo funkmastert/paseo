@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_TOOL_PROFILE } from "../../shared/tool-profiles";
-import { DEFAULT_POLICY, MAX_ALIASES_PER_ROLE, MAX_MAPPINGS, MAX_MODELS_PER_ROLE, MAX_ROLES, type RoleModelPolicy } from "../../shared/role-policy-schema";
+import { DEFAULT_POLICY, DEFAULT_THINKING_POLICY, MAX_ALIASES_PER_ROLE, MAX_MAPPINGS, MAX_MODELS_PER_ROLE, MAX_ROLES, type RoleModelPolicy } from "../../shared/role-policy-schema";
 import type { RoleModelPolicyWriteResult } from "../../shared/role-policy-rpc";
 import {
   formatAliasesText,
@@ -30,6 +30,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         enforceToolsOnClassifiedRoles: false,
         exposeClassifierTool: false,
         allowUnlistedModels: [],
+        thinking: DEFAULT_THINKING_POLICY,
         revision: `rev-${counter}`,
       },
     };

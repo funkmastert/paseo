@@ -2,12 +2,14 @@ import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/s
 import {
   AGENT_TYPE_LABEL,
   MODEL_OVERRIDDEN_LABEL,
+  THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
   type RoleModelPolicy,
   type TaskClassId,
 } from "../shared/role-policy-schema";
 import { restrictionNotice } from "../shared/restriction-notice";
+import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import { classifyAgent, type AgentDecision, type ClassifierWorld } from "./classifier";
 import type { HealthTracker } from "./health";
@@ -118,6 +120,26 @@ export interface UnadvertisedModelAllowedEpisode {
   taskClass?: TaskClassId;
 }
 
+/** Fired when a caller's explicit `config.thinkingOptionId` request didn't win. Mirrors `ExplicitModelOverriddenEpisode`. */
+export interface ThinkingOverriddenEpisode {
+  callerAgentId: string;
+  roleId: string;
+  /** The effective model the decision was made for, spelled like `formatModelRef`. Absent when no model was known at all. */
+  modelRef?: string;
+  /** The option id the caller explicitly requested. */
+  requested: string;
+  /** What ran instead. `null` when the requested id was removed and nothing replaced it. */
+  applied: string | null;
+  /**
+   * "leader-rule": the leader tier's level outranks a request.
+   * "subagent-no-ultracode": a subagent asked for Ultra Code, which only a
+   * leader runs. "not-advertised": the model doesn't offer the requested id,
+   * so it was clamped. "no-thinking-options": the model offers none, so the
+   * request was removed.
+   */
+  reason: "leader-rule" | "subagent-no-ultracode" | "not-advertised" | "no-thinking-options";
+}
+
 export interface RoleRouterOptions {
   policyCache: PolicyCache;
   catalogCache: ModelCatalogCache;
@@ -157,6 +179,8 @@ export interface RoleRouterOptions {
    * the agent, that it was let through.
    */
   onUnadvertisedModelAllowed?: (episode: UnadvertisedModelAllowedEpisode) => void;
+  /** Called (deduped per caller+modelRef+requested+applied) when a caller's explicit `thinkingOptionId` request was overridden by policy. */
+  onThinkingOverridden?: (episode: ThinkingOverriddenEpisode) => void;
   /**
    * The parent-restriction map that makes profile inheritance possible.
    * Optional: without it the router behaves exactly as it did before
@@ -299,6 +323,97 @@ function withToolProfile(
 }
 
 /**
+ * What a thinking decision writes into a create request: a `config.thinkingOptionId`
+ * patch (undefined means leave it alone), and the `THINKING_OVERRIDDEN_LABEL`
+ * value when the caller's own request didn't win. Both undefined means
+ * nothing to change, mirroring `ToolEnforcement`'s no-op shape.
+ */
+interface ThinkingEnforcement {
+  configPatch: { action: "set"; value: string } | { action: "remove" } | undefined;
+  /** The label VALUE to write, present only when `AgentDecision["thinking"]["override"]` is set. Add-only, mirroring `MODEL_OVERRIDDEN_LABEL`: there is nothing to strip on recovery, since an override is a fact about THIS create, not an inherited restriction. */
+  overriddenLabel: string | undefined;
+}
+
+/**
+ * Turns the classifier's thinking decision into request fields. It decides
+ * WHAT the option id should be (server/classifier.ts's `decideThinking`);
+ * this only writes it down, comparing against the request's OWN
+ * `thinkingOptionId` so an unchanged decision produces no patch at all.
+ */
+function enforceThinkingDecision(
+  currentThinkingOptionId: string | undefined,
+  thinking: AgentDecision["thinking"],
+): ThinkingEnforcement {
+  let configPatch: ThinkingEnforcement["configPatch"];
+  if (thinking.optionId !== null) {
+    if (thinking.optionId !== currentThinkingOptionId) {
+      configPatch = { action: "set", value: thinking.optionId };
+    }
+  } else if (thinking.override && currentThinkingOptionId !== undefined) {
+    // A requested id the decision removed: the model offers no thinking
+    // options, or a subagent asked for Ultra Code and nothing lower could be
+    // verified. Without an override, null only means nothing was asked for
+    // and nothing is known — so there is nothing to touch.
+    configPatch = { action: "remove" };
+  }
+  return { configPatch, overriddenLabel: thinking.override?.requested };
+}
+
+/**
+ * The subagent invariant, on the two paths that return a request WITHOUT
+ * applying a thinking decision: the provider-not-registered recovery and the
+ * never-block catch. A subagent never runs Ultra Code, including when routing
+ * gave up or broke. With no verified model to clamp against, the id is
+ * removed rather than replaced, so the provider's own no-effort default runs.
+ * Returns undefined when there is nothing to remove.
+ */
+function withoutSubagentUltracode(
+  request: PluginBeforeRequests["agent.create"],
+): PluginBeforeRequests["agent.create"] | undefined {
+  const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  if (!extended.callerAgentId || request.config.thinkingOptionId !== ULTRACODE_OPTION_ID) {
+    return undefined;
+  }
+  const next = withThinkingDecision(request, {
+    configPatch: { action: "remove" },
+    overriddenLabel: ULTRACODE_OPTION_ID,
+  });
+  return next ?? undefined;
+}
+
+/** Applies a `ThinkingEnforcement`'s config patch. Returns `config` itself, unchanged, when there is nothing to apply. */
+function applyThinkingConfigPatch(config: AgentCreateConfig, patch: ThinkingEnforcement["configPatch"]): AgentCreateConfig {
+  if (!patch) {
+    return config;
+  }
+  if (patch.action === "set") {
+    return { ...config, thinkingOptionId: patch.value };
+  }
+  const next = { ...config };
+  delete next.thinkingOptionId;
+  return next;
+}
+
+/** Applies thinking enforcement alone, on the paths that skip the model rewrite. Mirrors `withToolProfile`. */
+function withThinkingDecision(
+  request: PluginBeforeRequests["agent.create"],
+  enforcement: ThinkingEnforcement,
+): PluginBeforeRequests["agent.create"] | void {
+  if (enforcement.configPatch === undefined && enforcement.overriddenLabel === undefined) {
+    return;
+  }
+  const next: PluginBeforeRequests["agent.create"] = { ...request };
+  if (enforcement.configPatch) {
+    next.config = applyThinkingConfigPatch(request.config, enforcement.configPatch);
+  }
+  if (enforcement.overriddenLabel !== undefined) {
+    const extended = next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+    extended.labels = { ...extended.labels, [THINKING_OVERRIDDEN_LABEL]: enforcement.overriddenLabel };
+  }
+  return next;
+}
+
+/**
  * `before("agent.create")` handler. It no longer decides anything: it reads
  * the caches into a `ClassifierWorld`, asks `classifyAgent` (server/classifier.ts)
  * what this agent should be, and then WRITES that decision onto the request —
@@ -330,6 +445,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const unavailableRoleIds = new Set<string>();
   const overriddenSeen = new Set<string>();
   const unadvertisedSeen = new Set<string>();
+  const thinkingOverriddenSeen = new Set<string>();
   const toolProfileWithheldSeen = new Set<string>();
   const parentUnresolvedSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
@@ -344,6 +460,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         unavailableRoleIds,
         overriddenSeen,
         unadvertisedSeen,
+        thinkingOverriddenSeen,
         toolProfileWithheldSeen,
         parentUnresolvedSeen,
       );
@@ -360,7 +477,13 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
           error,
         );
       });
-      return undefined;
+      // Untouched except for the one thing no failure may let through: a
+      // subagent running Ultra Code.
+      try {
+        return withoutSubagentUltracode(input.request);
+      } catch {
+        return undefined;
+      }
     }
   };
 }
@@ -392,6 +515,7 @@ function routeRoleForCreateUnguarded(
   unavailableRoleIds: Set<string>,
   overriddenSeen: Set<string>,
   unadvertisedSeen: Set<string>,
+  thinkingOverriddenSeen: Set<string>,
   toolProfileWithheldSeen: Set<string>,
   parentUnresolvedSeen: Set<string>,
 ): PluginBeforeRequests["agent.create"] | void {
@@ -426,10 +550,12 @@ function routeRoleForCreateUnguarded(
       callerAgentId,
       requestedProvider: request.config.provider,
       requestedModel: request.config.model,
+      requestedThinkingOptionId: request.config.thinkingOptionId,
     },
     {
       policy,
       catalog: options.catalogCache.get(),
+      thinkingCatalog: options.catalogCache.getThinking(),
       pool,
       health: options.health,
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
@@ -490,14 +616,53 @@ function routeRoleForCreateUnguarded(
     options.onUnadvertisedModelAllowed?.({ callerAgentId: episodeCaller, roleId: role.id, source, ref, taskClass });
   };
 
+  // Deduped per (caller, effective model, requested id, applied id): the same
+  // fact logged once, not once per create that repeats it.
+  const noteThinkingOverridden = (
+    modelRef: string | undefined,
+    requested: string,
+    applied: string | null,
+    reason: ThinkingOverriddenEpisode["reason"],
+  ): void => {
+    const dedupeKey = `${episodeCaller} ${modelRef ?? "(unknown model)"} ${requested} ${applied}`;
+    if (thinkingOverriddenSeen.has(dedupeKey)) {
+      return;
+    }
+    thinkingOverriddenSeen.add(dedupeKey);
+    options.onThinkingOverridden?.({
+      callerAgentId: episodeCaller,
+      roleId: role.id,
+      ...(modelRef !== undefined ? { modelRef } : {}),
+      requested,
+      applied,
+      reason,
+    });
+  };
+
   const enforcement = enforceToolDecision(request, decision.tools);
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or
   // to pure delegation. An explicitly requested model that policy honors is
-  // the same shape — nothing to rewrite, tools still applied.
+  // the same shape — nothing to rewrite, tools still applied. The thinking
+  // decision applies here too: an honored/unconfigured model still has an
+  // effective model (its own, since nothing was rewritten) worth deciding a
+  // level for.
   if (decision.model.outcome === "unconfigured" || decision.model.outcome === "honored-request") {
-    const honored = withToolProfile(request, enforcement);
+    let honored = withToolProfile(request, enforcement);
+    const thinkingEnforcement = enforceThinkingDecision(request.config.thinkingOptionId, decision.thinking);
+    const withThinking = withThinkingDecision(honored ?? request, thinkingEnforcement);
+    if (withThinking) {
+      honored = withThinking;
+    }
+    if (decision.thinking.override) {
+      noteThinkingOverridden(
+        decision.thinking.modelRef,
+        decision.thinking.override.requested,
+        decision.thinking.override.applied,
+        decision.thinking.override.reason,
+      );
+    }
     // An honored request for a model the catalog doesn't list runs on the
     // operator's say-so alone, so it is honored LOUDLY — never just quietly
     // let through. (`unconfigured` never carries this: nothing was selected.)
@@ -540,8 +705,16 @@ function routeRoleForCreateUnguarded(
       }
       // Recovered, not blocked: skip the model rewrite but keep enforcing the
       // role's tools — a vanished model target is no reason to hand an
-      // orchestrator a shell.
-      return withToolProfile(request, enforcement);
+      // orchestrator a shell. The thinking decision is skipped too:
+      // `decision.thinking` was decided for the model the rewrite just gave
+      // up on, and a level meant for a model this create will never run must
+      // not land on it. The subagent invariant still holds.
+      const recovered = withToolProfile(request, enforcement);
+      const guarded = withoutSubagentUltracode(recovered ?? request);
+      if (guarded) {
+        noteThinkingOverridden(decision.thinking.modelRef, ULTRACODE_OPTION_ID, null, "subagent-no-ultracode");
+      }
+      return guarded ?? recovered;
     }
   }
 
@@ -566,6 +739,12 @@ function routeRoleForCreateUnguarded(
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;
+  }
+  const thinkingEnforcement = enforceThinkingDecision(request.config.thinkingOptionId, decision.thinking);
+  if (thinkingEnforcement.configPatch?.action === "set") {
+    nextConfig.thinkingOptionId = thinkingEnforcement.configPatch.value;
+  } else if (thinkingEnforcement.configPatch?.action === "remove") {
+    delete nextConfig.thinkingOptionId;
   }
 
   const routed: PluginBeforeRequests["agent.create"] = { ...request, config: nextConfig };
@@ -610,6 +789,16 @@ function routeRoleForCreateUnguarded(
       });
     }
     extraLabels[MODEL_OVERRIDDEN_LABEL] = override.requestedRef;
+  }
+
+  if (thinkingEnforcement.overriddenLabel !== undefined && decision.thinking.override) {
+    noteThinkingOverridden(
+      decision.thinking.modelRef,
+      decision.thinking.override.requested,
+      decision.thinking.override.applied,
+      decision.thinking.override.reason,
+    );
+    extraLabels[THINKING_OVERRIDDEN_LABEL] = thinkingEnforcement.overriddenLabel;
   }
 
   if (Object.keys(extraLabels).length === 0) {

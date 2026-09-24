@@ -32,6 +32,7 @@ function world(): ClassifierWorld {
   return {
     policy: POLICY,
     catalog: new Map([["claude", new Set(["claude-sonnet-5", "claude-haiku-4-5-20251001"])]]),
+    thinkingCatalog: new Map(),
     pool: { workers: [{ providerId: "claude-work", priority: 1 }], leader: { providerId: "claude-personal" } },
     health: {
       isHealthyFor: () => true,
