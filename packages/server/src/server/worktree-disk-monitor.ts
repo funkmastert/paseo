@@ -1,16 +1,31 @@
 import type { Dirent } from "node:fs";
 import { readdir, statfs } from "node:fs/promises";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
-  buildDiskSpaceCriticalNotificationPayload,
   buildDiskSweepReclaimedNotificationPayload,
   buildDiskSweepUnsafeOrphanNotificationPayload,
 } from "@getpaseo/protocol/disk-sweep-notification";
 import { getCheckoutStatus } from "../utils/checkout-git.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { deletePaseoWorktree, getPaseoWorktreesRoot } from "../utils/worktree.js";
+import {
+  DiskGrowthSampler,
+  formatGrowthEvidence,
+  type DiskGrowthReport,
+} from "./disk-growth-sampler.js";
+import { type DiskRemedyReport } from "./disk-remedies.js";
 import type { WorkspaceDiskUsage } from "./messages.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
+import { resolveDiskRemediationConfig, type RemediationConfig } from "./remediation/config.js";
+import {
+  NULL_REMEDIATION_SINK,
+  type RemediationConditionKind,
+  type RemediationSink,
+  type RemedyAttempt,
+  type RemedyState,
+} from "./remediation/contract.js";
+import { formatBytes } from "./session/doctor/helpers.js";
 import {
   evaluateDeletionCandidate,
   type DeletionDecision,
@@ -27,6 +42,13 @@ const DEFAULT_SAMPLE_TIMEOUT_MS = 30_000;
 // Once/day per path — an unsafe orphan usually stays unsafe for a while (see
 // disk-sweep-notification.ts), so a repeated push every tick would just be noise.
 const UNSAFE_ORPHAN_RENOTIFY_MS = 24 * 60 * 60 * 1000;
+// The main sweep tick (10 minutes) is also the free-space sampling cadence for the fall check.
+// At that cadence, six readings land inside any one-hour fallWindowMinutes, which resolves a fall
+// to within one tick — good enough that a second, faster timer would only double the statfs calls
+// for no earlier detection. History is capped by age rather than count so a slower or faster
+// sweep interval (a live-toggleable config) never overruns a fixed-size buffer.
+const FREE_SPACE_HISTORY_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const GIBIBYTE = 1024 ** 3;
 
 export interface DiskSweeperConfig {
   enabled?: boolean;
@@ -42,6 +64,15 @@ interface ResolvedDiskSweeperConfig {
   maxDeletionsPerTick: number;
   minFreeGB: number;
   sampleTimeoutMs: number;
+}
+
+/** `live` if any remedy is live, `dry-run` if none is live but one can't act only because of
+ * dry run, `disabled` otherwise — matches "remedy is live when at least one remedy is live, and
+ * disabled when none is" (docs/plans/2026-09-24-002-feat-remediation-ladder-plan.md). */
+function combinedRemedyState(states: readonly RemedyState[]): RemedyState {
+  if (states.includes("live")) return "live";
+  if (states.includes("dry-run")) return "dry-run";
+  return "disabled";
 }
 
 function resolveConfig(config: DiskSweeperConfig | undefined): ResolvedDiskSweeperConfig {
@@ -70,10 +101,12 @@ export interface WorktreeDiskMonitorOptions {
   workspaceRegistry: Pick<{ list(): Promise<PersistedWorkspaceRecord[]> }, "list">;
   paseoHome: string;
   worktreesBaseRoot?: string;
+  /** For growth-sampler root expansion (`~/...`) and its default root list. Defaults to `homedir()`. */
+  homeDir?: string;
   serverId: string;
   /** Lazy: the WebSocket server (and its push sender) may not exist yet at construction time. */
   getPushNotificationSender: () => PushNotificationSender | null;
-  readDaemonConfig: () => { diskSweeper?: DiskSweeperConfig };
+  readDaemonConfig: () => { diskSweeper?: DiskSweeperConfig; remediation?: RemediationConfig };
   logger: WorktreeDiskMonitorLogger;
   /**
    * Read once at construction, like AgentTokenBurnMonitor's `sweepIntervalMs` — every other
@@ -87,6 +120,17 @@ export interface WorktreeDiskMonitorOptions {
    * cross a free-space threshold. Defaults to the real `node:fs/promises.statfs`.
    */
   statfs?: (path: string) => Promise<{ bavail: number; bsize: number }>;
+  /** Where rung-1 disk conditions report (docs/disk-pressure.md). Defaults to a no-op sink. */
+  remediationSink?: RemediationSink;
+  /**
+   * Lazy like `getPushNotificationSender`: bootstrap builds the done janitor after this monitor.
+   * Null means not wired yet, or off — the remedy is reported as unavailable either way.
+   */
+  getDoneJanitorRunner?: () => (() => Promise<DiskRemedyReport>) | null;
+  /** Same laziness, for the artifact janitor's on-demand sweep (needs the shared `ps` sampler). */
+  getArtifactJanitorRunner?: () => (() => Promise<DiskRemedyReport>) | null;
+  /** Test seam. Defaults to a real `DiskGrowthSampler` rooted at `paseoHome`/`homeDir`. */
+  diskGrowthSampler?: Pick<DiskGrowthSampler, "sample" | "isSampleDue">;
 }
 
 /**
@@ -108,13 +152,18 @@ export class WorktreeDiskMonitor {
   private readonly workspaceRegistry: WorktreeDiskMonitorOptions["workspaceRegistry"];
   private readonly paseoHome: string;
   private readonly worktreesBaseRoot: string | undefined;
+  private readonly homeDir: string;
   private readonly serverId: string;
   private readonly getPushNotificationSender: () => PushNotificationSender | null;
-  private readonly readDaemonConfig: () => { diskSweeper?: DiskSweeperConfig };
+  private readonly readDaemonConfig: WorktreeDiskMonitorOptions["readDaemonConfig"];
   private readonly logger: WorktreeDiskMonitorLogger;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
   private readonly statfs: (path: string) => Promise<{ bavail: number; bsize: number }>;
+  private readonly remediationSink: RemediationSink;
+  private readonly getDoneJanitorRunner: () => (() => Promise<DiskRemedyReport>) | null;
+  private readonly getArtifactJanitorRunner: () => (() => Promise<DiskRemedyReport>) | null;
+  private readonly diskGrowthSampler: Pick<DiskGrowthSampler, "sample" | "isSampleDue">;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   private readonly diskUsageByWorkspaceId = new Map<string, WorkspaceDiskUsage>();
@@ -124,11 +173,22 @@ export class WorktreeDiskMonitor {
   private rotationIndex = 0;
   private criticalActive = false;
 
+  // Remediation-ladder state (docs/disk-pressure.md). Per condition kind: the free-space history
+  // used for the falling check, whether it was active last tick (so a clear is reported exactly
+  // once), and the rung-1 attempts accumulated since the episode opened.
+  private readonly freeBytesHistory: Array<{ atMs: number; freeBytes: number }> = [];
+  private readonly conditionWasActive = new Map<RemediationConditionKind, boolean>();
+  private readonly attemptsByCondition = new Map<RemediationConditionKind, RemedyAttempt[]>();
+  private lastGrowthReport: DiskGrowthReport | null = null;
+  /** Fallback for a closing observation's `remedy` field when this tick ran no remedies at all. */
+  private lastRemedyState: RemedyState | null = null;
+
   constructor(options: WorktreeDiskMonitorOptions) {
     this.projectRegistry = options.projectRegistry;
     this.workspaceRegistry = options.workspaceRegistry;
     this.paseoHome = options.paseoHome;
     this.worktreesBaseRoot = options.worktreesBaseRoot;
+    this.homeDir = options.homeDir ?? homedir();
     this.serverId = options.serverId;
     this.getPushNotificationSender = options.getPushNotificationSender;
     this.readDaemonConfig = options.readDaemonConfig;
@@ -136,6 +196,16 @@ export class WorktreeDiskMonitor {
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.now = options.now ?? Date.now;
     this.statfs = options.statfs ?? statfs;
+    this.remediationSink = options.remediationSink ?? NULL_REMEDIATION_SINK;
+    this.getDoneJanitorRunner = options.getDoneJanitorRunner ?? (() => null);
+    this.getArtifactJanitorRunner = options.getArtifactJanitorRunner ?? (() => null);
+    this.diskGrowthSampler =
+      options.diskGrowthSampler ??
+      new DiskGrowthSampler({
+        paseoHome: this.paseoHome,
+        homeDir: this.homeDir,
+        logger: this.logger,
+      });
   }
 
   start(): void {
@@ -180,14 +250,48 @@ export class WorktreeDiskMonitor {
 
   private async runTickPass(opts: { isEmergencyRecheck: boolean }): Promise<void> {
     const rawConfig = this.readDaemonConfig().diskSweeper;
-    if (rawConfig?.enabled === false) {
-      return;
-    }
+    const sweeperEnabled = rawConfig?.enabled !== false;
     const config = resolveConfig(rawConfig);
     const nowMs = this.now();
 
-    const emergency = await this.checkEmergency(config);
+    const freeBytes = await this.readFreeBytes();
+    // A statfs failure leaves every condition unreported this tick rather than guessed — reported
+    // as "unknown" would need its own state, and skipping is indistinguishable from "still fine"
+    // to the ladder, which only hears about a condition it is told is active.
+    if (freeBytes === null) {
+      if (sweeperEnabled) await this.runSweepPass(config, nowMs, opts);
+      return;
+    }
+    this.recordFreeBytes(nowMs, freeBytes);
+    const emergency = this.checkEmergency(config, freeBytes);
 
+    let sweepResult: SweepResult = { deletedCount: 0, reclaimedBytes: 0, unsafePaths: [] };
+    if (sweeperEnabled) {
+      sweepResult = await this.runSweepPass(config, nowMs, opts);
+    }
+
+    if (emergency.justEntered && sweeperEnabled && !opts.isEmergencyRecheck) {
+      await this.runTickPass({ isEmergencyRecheck: true });
+    }
+
+    if (!opts.isEmergencyRecheck) {
+      await this.reportToRemediationLadder({
+        config,
+        sweeperEnabled,
+        freeBytes,
+        nowMs,
+        sweepResult,
+      }).catch((error) => {
+        this.logger.warn({ err: error }, "Worktree disk sweep: remediation reporting failed");
+      });
+    }
+  }
+
+  private async runSweepPass(
+    config: ResolvedDiskSweeperConfig,
+    nowMs: number,
+    opts: { isEmergencyRecheck: boolean },
+  ): Promise<SweepResult> {
     const sweepResult = await this.runSweep(config, nowMs).catch((error): SweepResult => {
       this.logger.error({ err: error }, "Worktree disk sweep: sweep pass failed");
       return { deletedCount: 0, reclaimedBytes: 0, unsafePaths: [] };
@@ -219,43 +323,270 @@ export class WorktreeDiskMonitor {
       });
     }
 
-    if (emergency.justEntered && !opts.isEmergencyRecheck) {
-      await this.runTickPass({ isEmergencyRecheck: true });
-    }
+    return sweepResult;
   }
 
-  private async checkEmergency(
-    config: ResolvedDiskSweeperConfig,
-  ): Promise<{ justEntered: boolean }> {
-    let freeBytes: number;
+  private async readFreeBytes(): Promise<number | null> {
     try {
       const stats = await this.statfs(this.paseoHome);
-      freeBytes = stats.bavail * stats.bsize;
+      return stats.bavail * stats.bsize;
     } catch (error) {
       this.logger.warn(
         { err: error },
-        "Worktree disk sweep: failed to read free disk space; skipping emergency check",
+        "Worktree disk sweep: failed to read free disk space; skipping this tick's checks",
       );
-      return { justEntered: false };
+      return null;
     }
+  }
 
-    const thresholdBytes = config.minFreeGB * 1024 ** 3;
+  private recordFreeBytes(nowMs: number, freeBytes: number): void {
+    this.freeBytesHistory.push({ atMs: nowMs, freeBytes });
+    while (
+      this.freeBytesHistory.length > 0 &&
+      nowMs - this.freeBytesHistory[0].atMs > FREE_SPACE_HISTORY_MAX_AGE_MS
+    ) {
+      this.freeBytesHistory.shift();
+    }
+  }
+
+  private checkEmergency(
+    config: ResolvedDiskSweeperConfig,
+    freeBytes: number,
+  ): { justEntered: boolean } {
+    const thresholdBytes = config.minFreeGB * GIBIBYTE;
     const isCritical = freeBytes < thresholdBytes;
     const justEntered = isCritical && !this.criticalActive;
     this.criticalActive = isCritical;
+    return { justEntered };
+  }
 
-    if (justEntered) {
-      await this.sendPush(
-        buildDiskSpaceCriticalNotificationPayload({
-          serverId: this.serverId,
-          freeBytes,
-          minFreeGB: config.minFreeGB,
-        }),
-        { level: "urgent", dedupeKey: "disk-space-critical" },
-      );
+  // --- Remediation ladder (docs/disk-pressure.md) ---------------------------------------------
+
+  /**
+   * The peak free-space reading within the last `windowMinutes`, minus the current reading. A
+   * peak-to-now comparison (rather than oldest-to-now) catches a fall inside the window even if
+   * free space briefly recovered partway through, and is never negative when space only grew.
+   */
+  private peakFallBytes(nowMs: number, windowMinutes: number, currentFreeBytes: number): number {
+    const windowMs = windowMinutes * 60_000;
+    let peak = currentFreeBytes;
+    for (const entry of this.freeBytesHistory) {
+      if (nowMs - entry.atMs <= windowMs && entry.freeBytes > peak) {
+        peak = entry.freeBytes;
+      }
+    }
+    return peak - currentFreeBytes;
+  }
+
+  private buildEvidence(freeBytes: number, fallBytes: number, fallWindowMinutes: number): string {
+    const lines = [`Free space: ${formatBytes(freeBytes)}.`];
+    if (fallBytes > 0) {
+      lines.push(`Fell ${formatBytes(fallBytes)} over the last ${fallWindowMinutes} minutes.`);
+    }
+    if (this.lastGrowthReport) {
+      lines.push(formatGrowthEvidence(this.lastGrowthReport, this.homeDir));
+    }
+    return lines.join("\n");
+  }
+
+  private buildEscalationTask(
+    freeBytes: number,
+    fallBytes: number,
+    fallWindowMinutes: number,
+  ): string {
+    const fallNote =
+      fallBytes > 0
+        ? ` It has fallen ${formatBytes(fallBytes)} in the last ${fallWindowMinutes} minutes.`
+        : "";
+    return (
+      `Free space is ${formatBytes(freeBytes)}.${fallNote} The evidence lists the top growers ` +
+      "and the remedies already tried. Find what is consuming disk space; reclaim only what is " +
+      "provably safe (build outputs and caches: DerivedData of projects with no running agent, " +
+      "Gradle caches, /private/tmp build junk older than a day); never delete a worktree with " +
+      "uncommitted or unpushed work; report what you found and reclaimed."
+    );
+  }
+
+  private async runInjectedRemedy(
+    runner: (() => Promise<DiskRemedyReport>) | null,
+  ): Promise<DiskRemedyReport> {
+    if (!runner) {
+      return { state: "disabled", detail: "not wired in this daemon" };
+    }
+    try {
+      return await runner();
+    } catch (error) {
+      return {
+        state: "live",
+        outcome: "failed",
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async runRemedies(input: {
+    sweeperEnabled: boolean;
+    sweepResult: SweepResult;
+    nowMs: number;
+  }): Promise<{ attempts: RemedyAttempt[]; remedy: RemedyState }> {
+    const atIso = new Date(input.nowMs).toISOString();
+    const sweeperReport: DiskRemedyReport = input.sweeperEnabled
+      ? {
+          state: "live",
+          outcome: input.sweepResult.deletedCount > 0 ? "acted" : "nothing-to-do",
+          detail: `deleted ${input.sweepResult.deletedCount} worktree(s), freeing ${formatBytes(input.sweepResult.reclaimedBytes)}`,
+        }
+      : { state: "disabled", detail: "the worktree disk sweeper is off (diskSweeper.enabled)" };
+    const doneReport = await this.runInjectedRemedy(this.getDoneJanitorRunner());
+    const artifactReport = await this.runInjectedRemedy(this.getArtifactJanitorRunner());
+
+    const reports: Array<{ name: string; report: DiskRemedyReport }> = [
+      { name: "disk-sweeper", report: sweeperReport },
+      { name: "done-janitor", report: doneReport },
+      { name: "artifact-janitor", report: artifactReport },
+    ];
+    return {
+      attempts: reports.map(({ name, report }) => ({
+        remedy: name,
+        outcome: report.state === "live" ? report.outcome : "skipped",
+        detail: report.detail,
+        at: atIso,
+      })),
+      remedy: combinedRemedyState(reports.map(({ report }) => report.state)),
+    };
+  }
+
+  /**
+   * Calls `sink.observe()` for one condition, accumulating rung-1 attempts for the episode and
+   * reporting a clear exactly once — the sink is idempotent per key, but a condition that has
+   * never been active has nothing to report, and re-reporting a stale clear forever would be pure
+   * waste on a quiet machine.
+   */
+  private async observeCondition(input: {
+    kind: RemediationConditionKind;
+    active: boolean;
+    remedy: RemedyState | undefined;
+    attempts: RemedyAttempt[] | undefined;
+    title: string;
+    summary: string;
+    evidence: string;
+    graceMs?: number;
+    level: "notice" | "alert" | "urgent";
+    escalationTask: string;
+  }): Promise<void> {
+    const wasActive = this.conditionWasActive.get(input.kind) ?? false;
+    if (!input.active && !wasActive) return;
+
+    if (input.active && input.attempts && input.attempts.length > 0) {
+      const accumulated = this.attemptsByCondition.get(input.kind) ?? [];
+      this.attemptsByCondition.set(input.kind, [...accumulated, ...input.attempts]);
     }
 
-    return { justEntered };
+    await this.remediationSink.observe({
+      key: input.kind,
+      kind: input.kind,
+      active: input.active,
+      remedy: input.remedy ?? this.lastRemedyState ?? "disabled",
+      title: input.title,
+      summary: input.summary,
+      evidence: input.evidence,
+      attempts: this.attemptsByCondition.get(input.kind),
+      graceMs: input.graceMs,
+      level: input.level,
+      escalation: { task: input.escalationTask, taskClass: "standard" },
+    });
+
+    this.conditionWasActive.set(input.kind, input.active);
+    if (!input.active) {
+      this.attemptsByCondition.delete(input.kind);
+    }
+  }
+
+  private async reportToRemediationLadder(input: {
+    config: ResolvedDiskSweeperConfig;
+    sweeperEnabled: boolean;
+    freeBytes: number;
+    nowMs: number;
+    sweepResult: SweepResult;
+  }): Promise<void> {
+    const remediation = resolveDiskRemediationConfig(this.readDaemonConfig().remediation);
+    if (!remediation.enabled) return;
+
+    const { config, sweeperEnabled, freeBytes, nowMs, sweepResult } = input;
+    const fallBytes = this.peakFallBytes(nowMs, remediation.fallWindowMinutes, freeBytes);
+
+    const criticalActive = freeBytes < config.minFreeGB * GIBIBYTE;
+    const lowActive = freeBytes < remediation.lowFreeBytes;
+    const fallingActive = fallBytes >= remediation.fallBytes;
+    const anyActive = criticalActive || lowActive || fallingActive;
+
+    const growthDue = await this.diskGrowthSampler
+      .isSampleDue({
+        conditionActive: anyActive,
+        sampleIntervalMinutes: remediation.sampleIntervalMinutes,
+      })
+      .catch(() => false);
+    if (growthDue) {
+      try {
+        this.lastGrowthReport = await this.diskGrowthSampler.sample({
+          roots: remediation.growthRoots,
+          timeoutMs: remediation.sampleTimeoutMs,
+          referenceWindowMs: remediation.fallWindowMinutes * 60_000,
+        });
+      } catch (error) {
+        this.logger.warn({ err: error }, "Worktree disk sweep: growth sample failed");
+      }
+    }
+
+    let remedyResult: { attempts: RemedyAttempt[]; remedy: RemedyState } | undefined;
+    if (anyActive) {
+      remedyResult = await this.runRemedies({ sweeperEnabled, sweepResult, nowMs });
+      this.lastRemedyState = remedyResult.remedy;
+    }
+
+    const evidence = this.buildEvidence(freeBytes, fallBytes, remediation.fallWindowMinutes);
+    const escalationTask = this.buildEscalationTask(
+      freeBytes,
+      fallBytes,
+      remediation.fallWindowMinutes,
+    );
+
+    await this.observeCondition({
+      kind: "disk-critical",
+      active: criticalActive,
+      remedy: remedyResult?.remedy,
+      attempts: remedyResult?.attempts,
+      title: "Disk space critical",
+      summary: `Free space is ${formatBytes(freeBytes)}, below the ${config.minFreeGB} GB floor.`,
+      evidence,
+      graceMs: 0,
+      level: "urgent",
+      escalationTask,
+    });
+
+    await this.observeCondition({
+      kind: "disk-low",
+      active: lowActive,
+      remedy: remedyResult?.remedy,
+      attempts: remedyResult?.attempts,
+      title: "Disk space low",
+      summary: `Free space is ${formatBytes(freeBytes)}, below the ${formatBytes(remediation.lowFreeBytes)} threshold.`,
+      evidence,
+      level: "alert",
+      escalationTask,
+    });
+
+    await this.observeCondition({
+      kind: "disk-falling",
+      active: fallingActive,
+      remedy: remedyResult?.remedy,
+      attempts: remedyResult?.attempts,
+      title: "Disk space falling fast",
+      summary: `Free space fell ${formatBytes(fallBytes)} in the last ${remediation.fallWindowMinutes} minutes.`,
+      evidence,
+      level: "alert",
+      escalationTask,
+    });
   }
 
   private async runSweep(config: ResolvedDiskSweeperConfig, nowMs: number): Promise<SweepResult> {
@@ -473,7 +804,10 @@ export class WorktreeDiskMonitor {
       );
       await this.sendPush(
         buildDiskSweepUnsafeOrphanNotificationPayload({ serverId: this.serverId, path }),
-        { level: "notice", dedupeKey: `disk-unsafe-orphan:${path}` },
+        // `record`, not `notice`: the work-at-risk sweep (docs/work-snapshots.md) already snapshots
+        // and escalates an orphan holding uncommitted work for judgement, so this is a ledger
+        // entry, not something that still needs its own push.
+        { level: "record", dedupeKey: `disk-unsafe-orphan:${path}` },
       );
     }
   }
