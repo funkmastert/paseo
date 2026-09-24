@@ -3033,6 +3033,24 @@ export async function createPaseoDaemon(
     }
   };
 
+  // The periodic monitors, sweeps and jobs, in the order stop() has always stopped them. Split out
+  // of stop() to keep it under the complexity limit.
+  const stopMonitorsAndSweeps = () => {
+    agentModelDivergenceMonitor?.stop();
+    agentResourceMonitor?.stop();
+    deviceLeaseManager.stop();
+    pluginConnectionMonitor?.stop();
+    accountFailoverMonitor?.stop();
+    budgetPacingMonitor?.stop();
+    leaderCompactionMonitor?.stop();
+    doneJanitor?.stop();
+    remediationLadder?.stop();
+    tokenAuditJob?.stop();
+    agentStallSweep?.stop();
+    workSnapshotSweep?.stop();
+    worktreeDiskMonitor?.stop();
+  };
+
   const stop = async () => {
     await pluginRuntime.stopAllPlugins();
     unsubscribePluginProviders();
@@ -3070,19 +3088,7 @@ export async function createPaseoDaemon(
     agentTokenBurnMonitor?.stop();
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
-    agentModelDivergenceMonitor?.stop();
-    agentResourceMonitor?.stop();
-    deviceLeaseManager.stop();
-    pluginConnectionMonitor?.stop();
-    accountFailoverMonitor?.stop();
-    budgetPacingMonitor?.stop();
-    leaderCompactionMonitor?.stop();
-    doneJanitor?.stop();
-    remediationLadder?.stop();
-    tokenAuditJob?.stop();
-    agentStallSweep?.stop();
-    workSnapshotSweep?.stop();
-    worktreeDiskMonitor?.stop();
+    stopMonitorsAndSweeps();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);

@@ -62,12 +62,12 @@ Recovery decides who was mid-turn. [Durable finish reports](finish-reports.md) d
 
 One owner per case, so no agent is resumed twice:
 
-| Case                                     | Owner                                         | How the others stay out                                                                                                                           |
-| ---------------------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cut off mid-turn by a daemon stop        | Restart recovery                              | Finish reports and [account failover](account-failover.md) skip a claimed agent. The done janitor treats an open marker as neither dead nor done. |
-| Stalled in `running` on a live daemon    | The [stalled-agent sweep](stalled-agents.md)  | A restart-cut agent is not `running` until something resumes it, so the sweep never sees it.                                                      |
-| A turn that failed on a dead account     | [Account failover](account-failover.md)       | Recovery resumes on the agent's own account. If that turn hits the cap, failover takes it like any other capped turn.                             |
-| A child queued for a slot at the stop    | Child admission                               | Admission re-sends the held prompt. Recovery's capture leaves out any child whose turn admission holds.                                           |
+| Case                                  | Owner                                        | How the others stay out                                                                                                                           |
+| ------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cut off mid-turn by a daemon stop     | Restart recovery                             | Finish reports and [account failover](account-failover.md) skip a claimed agent. The done janitor treats an open marker as neither dead nor done. |
+| Stalled in `running` on a live daemon | The [stalled-agent sweep](stalled-agents.md) | A restart-cut agent is not `running` until something resumes it, so the sweep never sees it.                                                      |
+| A turn that failed on a dead account  | [Account failover](account-failover.md)      | Recovery resumes on the agent's own account. If that turn hits the cap, failover takes it like any other capped turn.                             |
+| A child queued for a slot at the stop | Child admission                              | Admission re-sends the held prompt. Recovery's capture leaves out any child whose turn admission holds.                                           |
 
 ## Surfaces
 

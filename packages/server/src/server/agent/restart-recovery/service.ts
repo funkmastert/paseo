@@ -317,18 +317,16 @@ export class RestartRecoveryService {
       // A bulk resume: paced with every other one, roots first. A child still asks admission
       // for a slot, and waitForAgentRunStart counts a queued turn as started.
       const pace = this.options.paceResume ?? unpacedResume;
-      await pace(
-        { agentId, root: entry.parentAgentId === null, source: "restart-recovery" },
-        () =>
-          sendPromptToAgent({
-            agentManager,
-            agentStorage,
-            agentId,
-            prompt: formatSystemNotificationPrompt(prompt),
-            messageId: randomUUID(),
-            unarchive: false,
-            logger,
-          }),
+      await pace({ agentId, root: entry.parentAgentId === null, source: "restart-recovery" }, () =>
+        sendPromptToAgent({
+          agentManager,
+          agentStorage,
+          agentId,
+          prompt: formatSystemNotificationPrompt(prompt),
+          messageId: randomUUID(),
+          unarchive: false,
+          logger,
+        }),
       );
       try {
         await waitForAgentRunStartWithTimeout(agentManager, agentId);

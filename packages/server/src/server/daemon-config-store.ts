@@ -1112,55 +1112,51 @@ function mergeMonitorSectionsForPersist(
   persistedAgents: PersistedConfig["agents"],
   patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
 ): void {
+  // Read once, so each section costs one branch here rather than two.
+  const persisted: NonNullable<PersistedConfig["agents"]> = persistedAgents ?? {};
   const tokenBurnMonitor = mergeTokenBurnMonitorForPersist(
-    persistedAgents?.tokenBurnMonitor,
+    persisted.tokenBurnMonitor,
     patch.tokenBurnMonitor,
   );
   if (tokenBurnMonitor !== undefined) next["tokenBurnMonitor"] = tokenBurnMonitor;
 
   const resourceMonitor = mergeResourceMonitorForPersist(
-    persistedAgents?.resourceMonitor,
+    persisted.resourceMonitor,
     patch.resourceMonitor,
   );
   if (resourceMonitor !== undefined) next["resourceMonitor"] = resourceMonitor;
 
-  const deviceLeases = mergeDeviceLeasesForPersist(
-    persistedAgents?.deviceLeases,
-    patch.deviceLeases,
-  );
+  const deviceLeases = mergeDeviceLeasesForPersist(persisted.deviceLeases, patch.deviceLeases);
   if (deviceLeases !== undefined) next["deviceLeases"] = deviceLeases;
 
   const artifactJanitor = mergeArtifactJanitorForPersist(
-    persistedAgents?.artifactJanitor,
+    persisted.artifactJanitor,
     patch.artifactJanitor,
   );
   if (artifactJanitor !== undefined) next["artifactJanitor"] = artifactJanitor;
 
   const accountFailover = mergeAccountFailoverForPersist(
-    persistedAgents?.accountFailover,
+    persisted.accountFailover,
     patch.accountFailover,
   );
   if (accountFailover !== undefined) next["accountFailover"] = accountFailover;
 
-  const budgetPacing = mergeBudgetPacingForPersist(
-    persistedAgents?.budgetPacing,
-    patch.budgetPacing,
-  );
+  const budgetPacing = mergeBudgetPacingForPersist(persisted.budgetPacing, patch.budgetPacing);
   if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
 
   const leaderCompaction = mergeLeaderCompactionForPersist(
-    persistedAgents?.leaderCompaction,
+    persisted.leaderCompaction,
     patch.leaderCompaction,
   );
   if (leaderCompaction !== undefined) next["leaderCompaction"] = leaderCompaction;
 
-  const doneJanitor = mergeDoneJanitorForPersist(persistedAgents?.doneJanitor, patch.doneJanitor);
+  const doneJanitor = mergeDoneJanitorForPersist(persisted.doneJanitor, patch.doneJanitor);
   if (doneJanitor !== undefined) next["doneJanitor"] = doneJanitor;
 
-  const refocus = mergeRefocusForPersist(persistedAgents?.refocus, patch.refocus);
+  const refocus = mergeRefocusForPersist(persisted.refocus, patch.refocus);
   if (refocus !== undefined) next["refocus"] = refocus;
 
-  const remediation = mergeRemediationForPersist(persistedAgents?.remediation, patch.remediation);
+  const remediation = mergeRemediationForPersist(persisted.remediation, patch.remediation);
   if (remediation !== undefined) next["remediation"] = remediation;
 }
 

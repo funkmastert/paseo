@@ -250,6 +250,11 @@ function providerSaw(home: Home, text: string): boolean {
   return home.prompts.some((prompt) => prompt.text.includes(text));
 }
 
+/** How many restart-recovery resume prompts the provider has seen. */
+function recoveryPromptCount(home: Home): number {
+  return home.prompts.filter((prompt) => prompt.text.includes("Restart recovery")).length;
+}
+
 /** How many of these children's reports reached their parent. */
 async function reportsDelivered(
   home: Home,
@@ -559,12 +564,7 @@ describe("finish reports survive a daemon restart (e2e)", () => {
     await expect
       .poll(() => providerSaw(home, `interrupted ${held}`), { timeout: 10_000 })
       .toBe(true);
-    await expect
-      .poll(
-        () => home.prompts.filter((prompt) => prompt.text.includes("Restart recovery")).length,
-        { timeout: 10_000 },
-      )
-      .toBe(1);
+    await expect.poll(() => recoveryPromptCount(home), { timeout: 10_000 }).toBe(1);
     const busySession = await sessionIdOf(home, busy);
     const recoveryPrompt = home.prompts.find((prompt) => prompt.text.includes("Restart recovery"));
     expect(recoveryPrompt?.sessionId).toBe(busySession);
