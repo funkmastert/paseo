@@ -1918,6 +1918,21 @@ export const zhCN: TranslationResources = {
   sidebarCallout: {
     dismiss: "关闭",
   },
+  restartRecovery: {
+    summary_one: "{{count}} 个代理在轮次中途被中断",
+    summary_other: "{{count}} 个代理在轮次中途被中断",
+    resumeAll: "全部恢复",
+    dismissAll: "忽略",
+    state: {
+      pending: "等待中",
+      resuming: "恢复中",
+      failed: "恢复失败",
+    },
+    notRestorable: "无法恢复",
+    error: "恢复失败：{{error}}",
+    expand: "展开重启恢复",
+    collapse: "收起重启恢复",
+  },
   deviceStatus: {
     summary: "{{total}} 个设备中已用 {{used}} 个",
     summaryCapOff: "{{used}} 个设备正在运行",

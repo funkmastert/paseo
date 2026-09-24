@@ -1971,6 +1971,21 @@ export const ptBR: TranslationResources = {
   sidebarCallout: {
     dismiss: "Dispensar",
   },
+  restartRecovery: {
+    summary_one: "{{count}} agente foi interrompido no meio do turno",
+    summary_other: "{{count}} agentes foram interrompidos no meio do turno",
+    resumeAll: "Retomar todos",
+    dismissAll: "Descartar",
+    state: {
+      pending: "Aguardando",
+      resuming: "Retomando",
+      failed: "Falha ao retomar",
+    },
+    notRestorable: "Não é possível retomar",
+    error: "A recuperação falhou: {{error}}",
+    expand: "Expandir recuperação após reinício",
+    collapse: "Recolher recuperação após reinício",
+  },
   deviceStatus: {
     summary: "{{used}} de {{total}} dispositivos",
     summaryCapOff: "{{used}} dispositivos em execução",

@@ -1958,6 +1958,21 @@ export const ja: TranslationResources = {
   sidebarCallout: {
     dismiss: "閉じる",
   },
+  restartRecovery: {
+    summary_one: "{{count}} 件のエージェントがターンの途中で中断されました",
+    summary_other: "{{count}} 件のエージェントがターンの途中で中断されました",
+    resumeAll: "すべて再開",
+    dismissAll: "破棄",
+    state: {
+      pending: "待機中",
+      resuming: "再開中",
+      failed: "再開に失敗",
+    },
+    notRestorable: "再開できません",
+    error: "復旧に失敗しました: {{error}}",
+    expand: "再起動後の復旧を展開",
+    collapse: "再起動後の復旧を折りたたむ",
+  },
   deviceStatus: {
     summary: "{{total}} 台中 {{used}} 台使用中",
     summaryCapOff: "{{used}} 台が実行中",

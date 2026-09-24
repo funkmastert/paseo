@@ -550,6 +550,24 @@ class FakeAgentSession implements AgentSession {
     this.notifySubscribers(completed);
   }
 
+  private async emitHeldTurn(): Promise<void> {
+    const holding: AgentStreamEvent = {
+      type: "timeline",
+      provider: this.providerName,
+      item: { type: "assistant_message", text: "Holding the turn open." },
+    };
+    await this.appendHistoryEvent(holding);
+    this.notifySubscribers(holding);
+    await this.interruptSignal.promise;
+    const canceled: AgentStreamEvent = {
+      type: "turn_canceled",
+      provider: this.providerName,
+      reason: "interrupted",
+    };
+    await this.appendHistoryEvent(canceled);
+    this.notifySubscribers(canceled);
+  }
+
   private async emitStressTurn(stress: { count: number; coalesced: boolean }): Promise<void> {
     for (let index = 0; index < stress.count; index += 1) {
       const stressUpdate: AgentStreamEvent = {
@@ -798,6 +816,13 @@ class FakeAgentSession implements AgentSession {
       if (/keep working until interrupted/i.test(textPrompt)) {
         // A long task: no outcome until someone interrupts it or its runtime closes.
         await this.interruptSignal.promise;
+        return;
+      }
+
+      // A turn still in flight when the daemon dies, for restart-recovery chaos tests. It ends
+      // only when interrupted.
+      if (/hold the turn open/i.test(textPrompt)) {
+        await this.emitHeldTurn();
         return;
       }
 

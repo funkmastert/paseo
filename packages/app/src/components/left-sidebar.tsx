@@ -51,6 +51,7 @@ import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-rout
 import { openHostOverview } from "@/navigation/settings-navigation";
 import { McpStatusStrip } from "@/mcp-status/mcp-status-strip";
 import { DeviceStatusStrip } from "@/device-status/device-status-strip";
+import { RestartRecoveryStrip } from "@/restart-recovery/restart-recovery-strip";
 import { SidebarAgentListSkeleton } from "./sidebar-agent-list-skeleton";
 import { SidebarCalloutSlot } from "./sidebar-callout-slot";
 import { SidebarWorkspaceList } from "./sidebar-workspace-list";
@@ -604,6 +605,7 @@ function MobileSidebar({
           />
         )}
 
+        <RestartRecoveryStrip />
         <DeviceStatusStrip />
         <McpStatusStrip />
 
@@ -783,6 +785,7 @@ function DesktopSidebar({
         )}
 
         <SidebarCalloutSlot />
+        <RestartRecoveryStrip />
         <DeviceStatusStrip />
         <McpStatusStrip />
 

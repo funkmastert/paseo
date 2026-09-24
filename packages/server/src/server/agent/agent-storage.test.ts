@@ -299,6 +299,52 @@ describe("AgentStorage", () => {
     expect(recordAfterSnapshot?.archivedAt).toBe(archivedAt);
   });
 
+  test("a run marker survives snapshot and upsert writes and changes only through updateRunMarker", async () => {
+    const agentId = "agent-marked";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "running" }));
+    const staleCopy = await storage.get(agentId);
+
+    await storage.updateRunMarker(agentId, () => ({ startedAt: "2026-09-23T10:00:00.000Z" }));
+    // Both writes below start from copies without the marker; neither may erase it.
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "closed" }));
+    await storage.upsert({ ...staleCopy!, title: "renamed" });
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    expect((await reloaded.get(agentId))?.runMarker).toEqual({
+      startedAt: "2026-09-23T10:00:00.000Z",
+    });
+
+    await storage.updateRunMarker(agentId, (current) => ({
+      ...current!,
+      endedAt: "2026-09-23T10:05:00.000Z",
+      endedBy: "idle",
+    }));
+    expect((await storage.get(agentId))?.runMarker).toEqual({
+      startedAt: "2026-09-23T10:00:00.000Z",
+      endedAt: "2026-09-23T10:05:00.000Z",
+      endedBy: "idle",
+    });
+  });
+
+  test("updateRunMarker reports a missing record instead of creating one", async () => {
+    expect(await storage.updateRunMarker("no-such-agent", () => ({ startedAt: "x" }))).toBe(false);
+    expect(await storage.get("no-such-agent")).toBeNull();
+  });
+
+  test("an unreadable run marker is dropped without hiding the agent", async () => {
+    const agentId = "agent-bad-marker";
+    await storage.applySnapshot(createManagedAgent({ id: agentId, lifecycle: "idle" }));
+    const [projectDir] = readdirSync(storagePath);
+    const filePath = path.join(storagePath, projectDir!, `${agentId}.json`);
+    const raw = JSON.parse(await fs.readFile(filePath, "utf8"));
+    await fs.writeFile(filePath, JSON.stringify({ ...raw, runMarker: { startedAt: 42 } }));
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    const record = await reloaded.get(agentId);
+    expect(record?.id).toBe(agentId);
+    expect(record?.runMarker).toBeUndefined();
+  });
+
   test("stores titles independently of snapshots", async () => {
     await storage.applySnapshot(
       createManagedAgent({

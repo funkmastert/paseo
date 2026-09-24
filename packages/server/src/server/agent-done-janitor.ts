@@ -9,6 +9,7 @@ import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import { ensureAgentLoaded } from "./agent/agent-loading.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import { isLimitShapedError } from "./agent/account-failover-detector.js";
+import { isRunMarkerOpen } from "./agent/restart-recovery/run-marker.js";
 import {
   buildDoneQuestion,
   formatDuration,
@@ -981,6 +982,7 @@ export function buildAgentViews(
       hasSchedule: scheduledAgentIds.has(record.id),
       live: false,
       workspacePinned: pinnedWorkspaceIds.has(record.workspaceId ?? ""),
+      interruptedMidTurn: isRunMarkerOpen(record.runMarker),
     });
   }
   for (const agent of live) {
@@ -1019,6 +1021,7 @@ function fromLive(
     hasSchedule: scheduledAgentIds.has(agent.id),
     live: agent.lifecycle !== "closed",
     workspacePinned: pinnedWorkspaceIds.has(agent.workspaceId ?? ""),
+    interruptedMidTurn: isRunMarkerOpen(record?.runMarker),
   };
 }
 

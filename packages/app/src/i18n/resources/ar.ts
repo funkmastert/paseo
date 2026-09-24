@@ -1939,6 +1939,21 @@ export const ar: TranslationResources = {
   sidebarCallout: {
     dismiss: "رفض",
   },
+  restartRecovery: {
+    summary_one: "انقطع {{count}} وكيل أثناء دوره",
+    summary_other: "انقطع {{count}} وكلاء أثناء أدوارهم",
+    resumeAll: "استئناف الكل",
+    dismissAll: "تجاهل",
+    state: {
+      pending: "في الانتظار",
+      resuming: "جارٍ الاستئناف",
+      failed: "فشل الاستئناف",
+    },
+    notRestorable: "لا يمكن الاستئناف",
+    error: "فشل الاسترداد: {{error}}",
+    expand: "توسيع الاسترداد بعد إعادة التشغيل",
+    collapse: "طي الاسترداد بعد إعادة التشغيل",
+  },
   deviceStatus: {
     summary: "{{used}} من {{total}} أجهزة",
     summaryCapOff: "{{used}} أجهزة قيد التشغيل",

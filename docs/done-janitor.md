@@ -34,7 +34,7 @@ The quiet period is three days because an idle agent is not a finished one. Agen
 
 The dead pass runs first each sweep and considers root agents only. A root is dead when its whole unarchived tree passes every check (`agentNotDeadReason` in `agent/done-janitor-detector.ts`):
 
-- **No runtime holds it, or its runtime is in `error`.** "No runtime" is what the UI calls `closed`: the daemon has no live session for it, whatever its record last said. A stored `running` with no runtime was cut off mid-turn and is dead. An errored runtime that is mid-turn, waiting on a permission or running provider subagents is not.
+- **No runtime holds it, or its runtime is in `error`.** "No runtime" is what the UI calls `closed`: the daemon has no live session for it, whatever its record last said. A stored `running` with no runtime and no open run marker is dead. One with an open marker was cut off by a daemon stop, and [restart recovery](restart-recovery.md) owns it until it is resumed or dismissed; the janitor neither archives nor asks it. An errored runtime that is mid-turn, waiting on a permission or running provider subagents is not.
 - **Untouched for `deadQuietHours`**, measured from the newest activity timestamp the daemon holds. An unreadable timestamp is not quiet.
 - **Not pinned** (below).
 - **No schedule or heartbeat that is not completed targets it.**

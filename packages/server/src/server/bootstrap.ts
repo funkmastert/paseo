@@ -227,6 +227,10 @@ import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { FinishObligationService } from "./agent/finish-obligation-service.js";
 import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
 import {
+  RestartRecoveryService,
+  type RestartRecoveryConfig,
+} from "./agent/restart-recovery/service.js";
+import {
   AgentDoneJanitor,
   askAgentWhetherDone,
   readProviderHealth,
@@ -592,6 +596,8 @@ export interface PaseoDaemonConfig {
   doneJanitor?: DoneJanitorConfig;
   refocus?: RefocusConfig;
   daemonVitals?: DaemonVitalsConfig;
+  /** Startup-only: read once at boot. See docs/restart-recovery.md. */
+  restartRecovery?: RestartRecoveryConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
    * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
@@ -650,6 +656,7 @@ export interface PaseoDaemon {
   getFinishObligations(): FinishObligationService;
   /** Null until start() has constructed it, like the account-failover monitor. */
   getLeaderCompactionMonitor(): AgentLeaderCompactionMonitor | null;
+  getRestartRecovery(): RestartRecoveryService;
 }
 
 export interface PaseoDaemonDependencies {
@@ -1449,6 +1456,14 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before anything can load or prompt an agent: the open run markers are the only record of who
+  // was mid-turn when the last daemon stopped, and the first new turn would replace them.
+  const restartRecovery = await RestartRecoveryService.capture({
+    agentStorage,
+    agentManager,
+    config: config.restartRecovery,
+    logger: logger.child({ module: "restart-recovery" }),
+  });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
   // the records, so a restart still knows who is waiting to hear back.
   const finishObligations = createFinishObligationService({
@@ -2324,6 +2339,7 @@ export async function createPaseoDaemon(
                       worktreeDiskMonitor!.requestSample(workspaceId, cwd),
                   }
                 : undefined,
+              restartRecovery,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
@@ -2518,6 +2534,7 @@ export async function createPaseoDaemon(
               pushNotificationSender: wsServer.getPushNotificationSender(),
               logger,
             });
+            restartRecovery.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -2578,6 +2595,7 @@ export async function createPaseoDaemon(
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
+    restartRecovery.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
@@ -2654,6 +2672,7 @@ export async function createPaseoDaemon(
     getDoneJanitor: () => doneJanitor,
     getFinishObligations: () => finishObligations,
     getLeaderCompactionMonitor: () => leaderCompactionMonitor,
+    getRestartRecovery: () => restartRecovery,
   };
 }
 

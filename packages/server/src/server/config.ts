@@ -567,6 +567,7 @@ function resolveAgentMonitorConfig(
   | "doneJanitor"
   | "refocus"
   | "daemonVitals"
+  | "restartRecovery"
 > {
   const agents = persisted.agents;
   return {
@@ -580,6 +581,7 @@ function resolveAgentMonitorConfig(
     doneJanitor: agents?.doneJanitor,
     refocus: agents?.refocus,
     daemonVitals: agents?.daemonVitals,
+    restartRecovery: agents?.restartRecovery,
   };
 }
 

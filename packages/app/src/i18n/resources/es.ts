@@ -1985,6 +1985,21 @@ export const es: TranslationResources = {
   sidebarCallout: {
     dismiss: "Despedir",
   },
+  restartRecovery: {
+    summary_one: "{{count}} agente se interrumpió a mitad de turno",
+    summary_other: "{{count}} agentes se interrumpieron a mitad de turno",
+    resumeAll: "Reanudar todos",
+    dismissAll: "Descartar",
+    state: {
+      pending: "En espera",
+      resuming: "Reanudando",
+      failed: "No se pudo reanudar",
+    },
+    notRestorable: "No se puede reanudar",
+    error: "La recuperación falló: {{error}}",
+    expand: "Expandir recuperación tras reinicio",
+    collapse: "Contraer recuperación tras reinicio",
+  },
   deviceStatus: {
     summary: "{{used}} de {{total}} dispositivos",
     summaryCapOff: "{{used}} dispositivos en ejecución",

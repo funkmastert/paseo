@@ -203,6 +203,16 @@ describe("agentNotDeadReason", () => {
     expect(agentNotDeadReason(view({ lifecycle: "running" }), NOW, QUIET)).toBeNull();
   });
 
+  test("an agent a daemon stop cut off mid-turn is left to restart recovery", () => {
+    const interrupted = view({ lifecycle: "running", interruptedMidTurn: true });
+    expect(agentNotDeadReason(interrupted, NOW, QUIET)).toBe(
+      "was cut off mid-turn by a daemon stop; restart recovery owns it",
+    );
+    expect(agentNotDoneReason({ ...interrupted, lifecycle: "idle" }, NOW, QUIET)).toBe(
+      "was cut off mid-turn by a daemon stop; restart recovery owns it",
+    );
+  });
+
   test.each<[string, Partial<DoneJanitorAgentView>, string]>([
     ["idle", { live: true, lifecycle: "idle" }, "is idle, not dead"],
     ["running", { live: true, lifecycle: "running" }, "is running, not dead"],

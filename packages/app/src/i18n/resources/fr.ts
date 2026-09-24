@@ -1990,6 +1990,21 @@ export const fr: TranslationResources = {
   sidebarCallout: {
     dismiss: "Rejeter",
   },
+  restartRecovery: {
+    summary_one: "{{count}} agent a été interrompu en plein tour",
+    summary_other: "{{count}} agents ont été interrompus en plein tour",
+    resumeAll: "Tout reprendre",
+    dismissAll: "Ignorer",
+    state: {
+      pending: "En attente",
+      resuming: "Reprise en cours",
+      failed: "Échec de la reprise",
+    },
+    notRestorable: "Impossible de reprendre",
+    error: "Échec de la récupération : {{error}}",
+    expand: "Développer la récupération après redémarrage",
+    collapse: "Réduire la récupération après redémarrage",
+  },
   deviceStatus: {
     summary: "{{used}} sur {{total}} appareils",
     summaryCapOff: "{{used}} appareils en cours",

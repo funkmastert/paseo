@@ -10,6 +10,7 @@ import type { ManagedAgent } from "./agent-manager.js";
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import { AgentOwnerSchema, daemonExecutionKey, type DaemonAgentOwner } from "./agent-owner.js";
 import { FINISH_OBLIGATION_SCHEMA, type FinishObligation } from "./finish-obligation.js";
+import { RUN_MARKER_SCHEMA, type RunMarker } from "./restart-recovery/run-marker.js";
 
 const SERIALIZABLE_CONFIG_SCHEMA = z
   .object({
@@ -86,6 +87,10 @@ const STORED_AGENT_SCHEMA = z.object({
   // daemon cannot read is dropped rather than failing the whole record, which would hide the
   // agent: that is a daemon older than the one that wrote it, and it simply owes nothing.
   finishObligations: z.array(FINISH_OBLIGATION_SCHEMA).optional().catch(undefined),
+  // Whether the agent was mid-turn (docs/restart-recovery.md). Written only through
+  // updateRunMarker; every other write carries the stored value forward. A marker this daemon
+  // cannot read is dropped rather than failing the whole record, which would hide the agent.
+  runMarker: RUN_MARKER_SCHEMA.optional().catch(undefined),
 });
 
 export type SerializableAgentConfig = Pick<
@@ -187,12 +192,33 @@ export class AgentStorage {
     return written;
   }
 
+  /**
+   * The only write that changes an agent's run marker. Runs in the agent's write queue, so it
+   * cannot interleave with a snapshot or metadata write. Resolves false when the agent has no
+   * record.
+   */
+  async updateRunMarker(
+    agentId: string,
+    mutate: (current: RunMarker | undefined) => RunMarker | undefined,
+  ): Promise<boolean> {
+    await this.load();
+    let written = false;
+    await this.queueRecordMutation(agentId, (existing) => {
+      if (!existing) return existing;
+      written = true;
+      const next = mutate(existing.runMarker);
+      if (next === existing.runMarker) return existing;
+      const { runMarker: _previous, ...rest } = existing;
+      return next ? { ...rest, runMarker: next } : rest;
+    });
+    return written;
+  }
+
   private queueRecordWrite(record: StoredAgentRecord): Promise<void> {
-    // Callers build records by spreading one they read earlier, so their copy of the obligations
-    // can be stale by the time this write runs. The stored value wins.
-    return this.queueRecordMutation(record.id, (existing) =>
-      carryFinishObligations(record, existing),
-    );
+    // Callers build records by spreading one they read earlier, so their copy of the finish
+    // obligations and the run marker can be stale by the time this write runs. The stored values
+    // win.
+    return this.queueRecordMutation(record.id, (existing) => carryOwnedFields(record, existing));
   }
 
   private queueRecordMutation(
@@ -323,7 +349,7 @@ export class AgentStorage {
       if (existing && existing.archivedAt !== undefined) {
         record.archivedAt = existing.archivedAt;
       }
-      return carryFinishObligations(record, existing);
+      return carryOwnedFields(record, existing);
     });
     return applied;
   }
@@ -492,15 +518,21 @@ export class AgentStorage {
   }
 }
 
-function carryFinishObligations(
+/**
+ * The fields only their own writer changes (`updateFinishObligations`, `updateRunMarker`) keep the
+ * stored value through every other write.
+ */
+function carryOwnedFields(
   record: StoredAgentRecord,
   existing: StoredAgentRecord | null,
 ): StoredAgentRecord {
   if (!existing) return record;
-  const { finishObligations: _incoming, ...rest } = record;
-  return existing.finishObligations
-    ? { ...rest, finishObligations: existing.finishObligations }
-    : rest;
+  const { finishObligations: _obligations, runMarker: _marker, ...rest } = record;
+  return {
+    ...rest,
+    ...(existing.finishObligations ? { finishObligations: existing.finishObligations } : {}),
+    ...(existing.runMarker ? { runMarker: existing.runMarker } : {}),
+  };
 }
 
 function projectDirNameFromCwd(cwd: string): string {

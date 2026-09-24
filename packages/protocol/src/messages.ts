@@ -74,6 +74,14 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  RestartRecoveryGetPlanRequestSchema,
+  RestartRecoveryApplyRequestSchema,
+  RestartRecoveryDismissRequestSchema,
+  RestartRecoveryGetPlanResponseSchema,
+  RestartRecoveryApplyResponseSchema,
+  RestartRecoveryDismissResponseSchema,
+} from "./restart-recovery/rpc-schemas.js";
+import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
   PaseoMetadataGenerationEntrySchema,
@@ -3556,6 +3564,9 @@ export const SessionEventsSetSubscriptionResponseSchema = z.object({
 
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionRequestSchema,
+  RestartRecoveryGetPlanRequestSchema,
+  RestartRecoveryApplyRequestSchema,
+  RestartRecoveryDismissRequestSchema,
   HubExecutionAgentCreateRequestSchema,
   HubExecutionAgentValidateRequestSchema,
   HubExecutionControlRequestSchema,
@@ -4013,6 +4024,8 @@ export const ServerInfoStatusPayloadSchema = z
         worktreeRestore: z.boolean().optional(),
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: z.boolean().optional(),
+        // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
+        restartRecovery: z.boolean().optional(),
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: z.boolean().optional(),
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
@@ -7133,6 +7146,9 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionResponseSchema,
+  RestartRecoveryGetPlanResponseSchema,
+  RestartRecoveryApplyResponseSchema,
+  RestartRecoveryDismissResponseSchema,
   HubExecutionAgentCreateResponseSchema,
   HubExecutionAgentValidateResponseSchema,
   HubExecutionControlResponseSchema,

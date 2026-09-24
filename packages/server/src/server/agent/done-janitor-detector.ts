@@ -49,9 +49,16 @@ export interface DoneJanitorAgentView {
   live: boolean;
   /** Its workspace is pinned in the sidebar. */
   workspacePinned: boolean;
+  /**
+   * A daemon stop cut its turn off and restart recovery has not settled it
+   * (docs/restart-recovery.md). Absent reads as false.
+   */
+  interruptedMidTurn?: boolean;
 }
 
 export type NotDoneReason = string;
+
+const INTERRUPTED_REASON = "was cut off mid-turn by a daemon stop; restart recovery owns it";
 
 /** What pins this agent, or null when nothing does. */
 export function pinReason(
@@ -94,6 +101,8 @@ export function agentNotDoneReason(
   if (view.runningProviderSubagentCount > 0) {
     return `has ${view.runningProviderSubagentCount} provider subagent(s) still running`;
   }
+  // Asking would prompt it: a second resume, racing restart recovery's.
+  if (view.interruptedMidTurn) return INTERRUPTED_REASON;
   if (view.hasSchedule) return "has a schedule or heartbeat that will wake it";
   // Its successor carries the work on; the retired record is the failover's to manage.
   if (view.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]) return "was retired by account failover";
@@ -186,6 +195,9 @@ export function agentNotDeadReason(
       return `has ${view.runningProviderSubagentCount} provider subagent(s) still running`;
     }
   }
+  // Closed because the daemon stopped, not because the work ended. Recovery resumes or dismisses
+  // it; archiving it first is how in-flight work used to disappear.
+  if (view.interruptedMidTurn) return INTERRUPTED_REASON;
   if (view.hasSchedule) return "has a schedule or heartbeat that will wake it";
   if (view.lastActivityAtMs === null) return "has no readable last-activity time";
   const quietForMs = nowMs - view.lastActivityAtMs;

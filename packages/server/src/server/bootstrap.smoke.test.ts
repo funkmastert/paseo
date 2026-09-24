@@ -364,6 +364,7 @@ describe("paseo daemon bootstrap", () => {
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         daemonVitals: { enabled: true, dryRun: true },
+        restartRecovery: { mode: "off" as const },
       },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
@@ -406,6 +407,8 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.leaderCompaction).toEqual(bootPersisted.agents.leaderCompaction);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
+      // Startup-only: it reaches the running service, not the mutable config.
+      expect((await client.getRestartRecoveryPlan()).mode).toBe("off");
       expect(monitorModes()).toEqual({
         "resource-monitor": { enabled: true, dryRun: undefined },
         reaper: { enabled: true, dryRun: true },
@@ -435,6 +438,7 @@ describe("paseo daemon bootstrap", () => {
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           daemonVitals: { enabled: false },
+          restartRecovery: { mode: "off" as const },
         },
       };
       await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");

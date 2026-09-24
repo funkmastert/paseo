@@ -1949,6 +1949,21 @@ export const en = {
   sidebarCallout: {
     dismiss: "Dismiss",
   },
+  restartRecovery: {
+    summary_one: "{{count}} agent was cut off mid-turn",
+    summary_other: "{{count}} agents were cut off mid-turn",
+    resumeAll: "Resume all",
+    dismissAll: "Dismiss",
+    state: {
+      pending: "Waiting",
+      resuming: "Resuming",
+      failed: "Resume failed",
+    },
+    notRestorable: "Cannot resume",
+    error: "Recovery failed: {{error}}",
+    expand: "Expand restart recovery",
+    collapse: "Collapse restart recovery",
+  },
   deviceStatus: {
     summary: "{{used}} of {{total}} devices",
     summaryCapOff: "{{used}} devices running",

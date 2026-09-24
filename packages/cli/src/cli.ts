@@ -32,6 +32,7 @@ import { addImportOptions, runImportCommand } from "./commands/agent/import.js";
 import { withOutput } from "./output/index.js";
 import { runCloneCommand } from "./commands/clone.js";
 import { runDoctorCommand } from "./commands/doctor.js";
+import { addRecoverOptions, runRecoverCommand } from "./commands/recover.js";
 import { onboardCommand } from "./commands/onboard.js";
 import {
   addDaemonHostOption,
@@ -119,6 +120,10 @@ export function createCli(): Command {
 
   addJsonAndDaemonHostOptions(addArchiveOptions(program.command("archive"))).action(
     withOutput(runArchiveCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addRecoverOptions(program.command("recover"))).action(
+    withOutput(runRecoverCommand),
   );
 
   // Top-level local daemon shortcuts

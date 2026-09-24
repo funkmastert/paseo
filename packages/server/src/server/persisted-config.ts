@@ -489,6 +489,14 @@ const AgentDaemonVitalsSchema = z
   })
   .strict();
 
+// Startup-only. Default `plan`: surface who was cut off mid-turn, resume nothing on its own.
+// See docs/restart-recovery.md.
+const AgentRestartRecoverySchema = z
+  .object({
+    mode: z.enum(["off", "plan", "resume"]).optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -646,6 +654,7 @@ export const PersistedConfigSchema = z
         doneJanitor: AgentDoneJanitorSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
+        restartRecovery: AgentRestartRecoverySchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
