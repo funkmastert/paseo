@@ -3657,6 +3657,9 @@ export class AgentManager {
       }
       return result.turnId;
     } catch (error) {
+      // A failed start gives the admitted slot back. Here rather than in a wrapper: an extra
+      // await between admission and the start would reorder turns against concurrent steers.
+      this.childAdmission?.settleStart(agentId);
       if (pendingRun.settled) {
         throw error;
       }
@@ -3748,18 +3751,13 @@ export class AgentManager {
       const admitted = admission instanceof Promise ? await admission : admission;
       if (!admitted) return;
       const { prompt: admittedPrompt, options: admittedOptions } = admitted;
-      try {
-        turnId = await this.startPendingForegroundTurn({
-          agent,
-          agentId,
-          pendingRun,
-          prompt: admittedPrompt,
-          options: admittedOptions,
-        });
-      } catch (error) {
-        this.childAdmission?.settleStart(agentId);
-        throw error;
-      }
+      turnId = await this.startPendingForegroundTurn({
+        agent,
+        agentId,
+        pendingRun,
+        prompt: admittedPrompt,
+        options: admittedOptions,
+      });
 
       if (isReplacement) {
         agent.pendingReplacement = false;
