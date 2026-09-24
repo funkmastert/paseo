@@ -164,8 +164,8 @@ export interface AccountFailoverSweepPlan {
  * also drops its sighting. A provider sighting is the same evidence without an agent to hang it
  * on, left behind by a move, and it expires on the same TTL.
  *
- * A candidate is a non-retired agent that failed on the cap itself (its own limit-shaped error)
- * and is still on a dead account. An idle agent that merely lives on a dead account is not a
+ * A candidate is a non-retired agent on a dead account that failed on the cap itself (its own
+ * limit-shaped error) or is otherwise in error. An idle agent that merely lives on a dead account is not a
  * candidate: it has nothing to resume, and the idle leg (account-failover-rehome.ts) moves it
  * without a prompt.
  */
@@ -211,9 +211,12 @@ export function planAccountFailoverSweep(
     if (atCap) deadProviderIds.add(provider.providerId);
   }
 
+  // An agent in error on a dead account is a candidate whatever its error says: its turn ended
+  // while its account was out, and it is resumed where it can run. Only a limit-shaped error
+  // condemns an account, though, so this never makes an account dead by itself.
   const candidates = input.agents.filter(
     (agent) =>
-      sightings.has(agent.id) &&
+      (sightings.has(agent.id) || (agent.lifecycle === "error" && !agent.internal)) &&
       !getMigratedToFromLabels(agent.labels) &&
       deadProviderIds.has(agent.provider) &&
       !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle) &&

@@ -1,8 +1,8 @@
 # Account failover
 
-When a Claude account runs out of budget, the agents running on it stop: a turn fails with the limit message and nothing moves them. `AccountFailoverMonitor` (`packages/server/src/server/agent-account-failover-monitor.ts`) puts each stuck agent's conversation on a healthy account in the pool, and moves the idle agents on that account before anyone asks them for anything. It moves an agent in place where it can, and imports the session into a new agent where it can't.
+When a Claude account runs out of budget, the agents running on it stop: a turn fails with the limit message and nothing moves them. `AccountFailoverMonitor` (`packages/server/src/server/agent-account-failover-monitor.ts`) puts each stuck agent's conversation on a healthy account in the pool, and moves the idle roots on that account before Tyler asks them for anything. It moves an agent in place where it can, and imports the session into a new agent where it can't.
 
-It is rung 1 of the [remediation ladder](remediation.md) for account limits. You hear about a cap only when no account can take the work: see [When Tyler hears](#when-tyler-hears). It replaces the hand-run mover `~/bozeo-ops/rehome.mjs`, which can be retired once a daemon with this build is running.
+It is rung 1 of the [remediation ladder](remediation.md) for account limits. You hear about a cap only when no account can take the work: see [When Tyler hears](#when-tyler-hears). It replaces two stopgaps in `~/bozeo-ops/`: the one-shot `rehome.mjs` and the continuous `failover-watch.mjs`, which runs as the LaunchAgent `sh.bozeo.failover-watch`. Once a daemon with this build is running, retire the watcher with `launchctl bootout gui/$(id -u)/sh.bozeo.failover-watch` and delete its plist from `~/Library/LaunchAgents/`. Leave both scripts where they are.
 
 It is a round trip. A rescued agent remembers the account it was taken off and goes back once that account's window has reset — see [Coming home](#coming-home). Without the return leg the pool decays: a leader account exists so its budget is isolated from the fleet, and one-way failover walks the leaders onto the workers one cap at a time until the isolation is gone.
 
@@ -40,11 +40,11 @@ A session family is the built-in provider whose client owns the transcript forma
 
 ## The pool
 
-The pool is the `params.accountPool` of each Claude account entry in `agents.providers` (`{ role: "leader" | "worker", priority: <n> }`; [custom-providers.md](custom-providers.md) covers the entries themselves). A Claude account entry is the built-in `claude` entry or any entry with `extends: "claude"`. Entries without a valid `accountPool` are ignored.
+The pool is the `params.accountPool` of each Claude account entry in `agents.providers` (`{ role: "leader" | "worker", priority: <n> }`; [custom-providers.md](custom-providers.md) covers the entries themselves). A Claude account entry is the built-in `claude` entry or any entry with `extends: "claude"`. Entries without a valid `accountPool` are ignored. A pool with workers and no leader gets the built-in `claude` entry as its leader.
 
 ## Where a rescued agent goes
 
-An enabled account that is not dead this sweep and is not the one being left, and among equals the one with the most budget left. Which role comes first depends on the agent:
+A **usable** account: enabled, not the one being left, not dead this sweep, and with every usage window under 90% (`USABLE_BELOW_PCT`, `account-pool-headroom.ts`). An account at 90% is not dead, but it would cap the agent again within a turn or two, so it is never a target for a rescue, an idle move or a return. An account whose usage cannot be read counts as usable; a failed usage poll must not strand every agent. Among equals, the one with the most budget left wins. Which role comes first depends on the agent:
 
 - **A child** prefers a worker, and collapses onto the leader account when no worker can take it.
 - **A root** prefers the leader account, and goes to the worker with the most budget when the leader account is out. A root is Tyler's own session; isolation only ever protected the leader account from children. On 2026-09-24 a root sat on an exhausted worker for hours while the leader account had nearly all its budget.
@@ -101,16 +101,17 @@ A failure is dated by the agent's newest timeline row (its own error row), not b
 
 Every loaded agent on a dead account that has a provider session and has not been retired, roots and children alike (`migrateSubagents: false` leaves children to their leader). What happens depends on where its turn is:
 
-| State                                                           | What failover does                                                                                                             |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| Cut off by the cap: a limit-shaped `lastError`                  | Moves it and sends the resume prompt. This is the rescue below.                                                                |
-| Between turns: `idle`, or `error` for some other reason         | Moves it in place and sends nothing (`account-failover-rehome.ts`). It has nothing to resume, and can answer the next message. |
-| Mid-turn: `running`, `initializing`, or waiting on a permission | Waits. The daemon refuses a mid-turn move, and the turn may finish.                                                            |
-| Mid-turn, but the turn is dead                                  | The [stalled-agent sweep](stalled-agents.md) cancels it and leaves a limit-shaped `lastError`, which makes it the first row.   |
+| State                                                           | What failover does                                                                                                                 |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Cut off: `error` (any error), or a limit-shaped `lastError`     | Moves it and sends the resume prompt. This is the rescue below.                                                                    |
+| A root between turns: `idle`                                    | Moves it in place and sends nothing (`account-failover-rehome.ts`). It has nothing to resume, and can answer Tyler's next message. |
+| A child between turns: `idle`                                   | Stays until asked. A child answers its leader; if a message to it fails on the cap, it is rescued then.                            |
+| Mid-turn: `running`, `initializing`, or waiting on a permission | Waits. The daemon refuses a mid-turn move, and the turn may finish.                                                                |
+| Mid-turn, but the turn is dead                                  | The [stalled-agent sweep](stalled-agents.md) cancels it and leaves a limit-shaped `lastError`, which makes it the first row.       |
 
 Failover never interrupts a turn itself. A turn stuck in `running` with no progress for `agents.remediation.stalledAgents.deadAccountStallMinutes` (15) on a capped account is cancelled by the stalled-agent sweep with the `account-capped` reason. The error it leaves names the account and the stall and is limit-shaped, so the next sweep moves the agent and resumes it as cut off mid-turn. That is the 15-minute rule the hand-run mover used.
 
-An idle move uses the same targets as a rescue and the same duplicate rule, but never imports: a refused move backs off for `returnRetryBackoffMinutes` and the agent stays put. If it is asked to do something there, it fails on the cap and the rescue takes it.
+Only a limit-shaped error makes an account dead; an agent in error for another reason is moved only when its account is already dead. An idle move uses the same targets as a rescue and the same duplicate rule, but never imports: a refused move backs off for `returnRetryBackoffMinutes` and the agent stays put. If it is asked to do something there, it fails on the cap and the rescue takes it.
 
 The sweep covers agents loaded in the daemon. After a restart, a stuck agent is picked up once something loads it (opening it in the app, or sending it a message).
 
@@ -166,7 +167,7 @@ A conversation that has hopped accounts by import eventually needs to return to 
 
 ### Duplicates
 
-One conversation has one live end. When another unarchived record without `migrated-to` holds the same provider session, whichever is older, the agent being moved is a duplicate left over from an earlier handoff (`findLiveSessionHolder`). The monitor retires it the way it retires an adopted predecessor, pointing `migrated-to` at the holder, and moves, imports and sends nothing. It is done, not failed: it is never retried, it is not stranded, and nobody is told. Moving it would be refused on the holder's account (`Provider X already holds agent Y for session Z`), and moving it anywhere else would put two live agents on one transcript. The check runs before a target is picked, and again on a `session_conflict` refusal in case the holder appeared in between.
+One conversation has one live end. The retirement label lives on the record, so a restart never retries a duplicate. When another unarchived record without `migrated-to` holds the same provider session, whichever is older, the agent being moved is a duplicate left over from an earlier handoff (`findLiveSessionHolder`). The monitor retires it the way it retires an adopted predecessor, pointing `migrated-to` at the holder, and moves, imports and sends nothing. It is done, not failed: it is never retried, it is not stranded, and nobody is told. Moving it would be refused on the holder's account (`Provider X already holds agent Y for session Z`), and moving it anywhere else would put two live agents on one transcript. The check runs before a target is picked, and again on a `session_conflict` refusal in case the holder appeared in between.
 
 The rule, by holder:
 
@@ -183,7 +184,7 @@ The return leg does not apply this rule: a return that is refused by a live hold
 A rescue is one leg. The other puts the agent back once an account it belongs on can pay again, so a leader that capped ten minutes before its window rolled spends one window on a worker instead of the rest of the week. Where it goes back to depends on the agent:
 
 - **A root** goes back only to the leader account. A root moved onto the leader account off an exhausted worker stays there; its home label is dropped.
-- **A child** on the leader account goes back to a worker: its own if that one has budget, else any other worker, most budget first. Any worker gives it its isolation back. A child already on a worker whose home is the leader account stays on the worker.
+- **A child** on the leader account goes back to a worker: its own if that one is usable, else any other usable worker, most budget first. Any worker gives it its isolation back, so this applies whoever put it there, with or without a home label. A child already on a worker whose home is the leader account stays on the worker.
 - **A child** on one worker whose home is another worker goes home, as before.
 
 ### The home label
@@ -204,6 +205,9 @@ Every condition, and all of them (`account-failover-return.ts`). "Home" below is
 - **Home is not this account under another name.** See [Two providers, one account](#two-providers-one-account).
 - **Home is not dead this sweep**, by either signal.
 - **Home's window has demonstrably reset.** Not that the clock passed `resetsAt` — a **forced** usage refresh, no older than 2 minutes, showing `available`, at least one window, every window with a readable utilization, and every one of them at or under 50%. The ordinary read is a ~5-minute cache, so a sweep reading it can be looking at numbers from before the window rolled; and a window can reset straight into a fresh cap if something else is spending hard.
+
+  A child leaving the leader account uses the usable line instead of 50%: every window under 90% on the same forced read. While it waits it spends the leader's budget, which is what the pool protects, so a worker at 60–89% is a better place for it than the leader account. The 50% rule exists to stop bouncing, and here the 5-hour return cooldown already bounds that. A root going home to the leader account keeps 50%: it waits on a worker's budget, not the leader's.
+
 - **The agent is doing nothing.** `idle`, no turn in flight, no pending run, no replacement, no pending permission, no limit-shaped error, and quiet for 10 minutes. A rescue is worth interrupting a turn for; a tidy-up is not.
 - **The agent is not within its cooldown.**
 

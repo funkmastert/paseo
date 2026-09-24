@@ -66,3 +66,24 @@ export function headroomByProvider(
   }
   return scores;
 }
+
+/**
+ * A window at or above this is too close to its cap to move an agent onto: the agent would cap
+ * again within a turn or two. The same line `~/bozeo-ops/failover-watch.mjs` drew.
+ */
+export const USABLE_BELOW_PCT = 90;
+
+/** Every account with a window at or above USABLE_BELOW_PCT. Never a move target. */
+export function saturatedProviderIds(usage: readonly ProviderUsage[] | null): Set<string> {
+  const saturated = new Set<string>();
+  for (const provider of usage ?? []) {
+    if (
+      provider.windows.some(
+        (window) => typeof window.usedPct === "number" && window.usedPct >= USABLE_BELOW_PCT,
+      )
+    ) {
+      saturated.add(provider.providerId);
+    }
+  }
+  return saturated;
+}

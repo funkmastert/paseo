@@ -20,7 +20,7 @@ import {
   getMigratedToFromLabels,
   isLimitShapedError,
 } from "./account-failover-detector.js";
-import { NEUTRAL_HEADROOM } from "./account-pool-headroom.js";
+import { NEUTRAL_HEADROOM, USABLE_BELOW_PCT } from "./account-pool-headroom.js";
 import type { AccountPoolProviderEntry } from "./account-pool-providers.js";
 
 /**
@@ -133,13 +133,19 @@ export interface ReturnCandidate {
   workspaceId: string | undefined;
   /** The rescuer it has been spending on. */
   fromProviderId: string;
-  homeProviderId: string;
+  /** Null for a child on the leader account that no failover move put there. */
+  homeProviderId: string | null;
   /**
    * Where it may go, best first; the monitor takes the first that passes the fresh usage read.
    * Just home, except for a child on the leader account: home first, then every other worker
    * with budget, since any worker gives it back its isolation.
    */
   targetProviderIds: string[];
+  /**
+   * Set for a child leaving the leader account: a target passes with every window under this,
+   * instead of `returnMaxHomeUsedPct`.
+   */
+  usableBelowPct?: number;
 }
 
 export interface PlanAccountFailoverReturnsInput {
@@ -222,18 +228,27 @@ export function planAccountFailoverReturns(
   const poolById = new Map(input.poolEntries.map((entry) => [entry.providerId, entry]));
 
   for (const agent of input.agents) {
-    const homeProviderId = getHomeProviderFromLabels(agent.labels);
-    if (!homeProviderId) continue;
     // A retired predecessor is a dead handle that happens to remember where its conversation came
     // from. Moving it would put a second record on that account for a session its live successor
     // may want back, so it is left alone entirely — label included, since that is history now.
     if (getMigratedToFromLabels(agent.labels)) continue;
+    const homeProviderId = getHomeProviderFromLabels(agent.labels);
+    if (!homeProviderId) {
+      // A child on the leader account goes back to a worker whoever put it there.
+      if (isChildOnLeader(agent, poolById)) {
+        const decision = childOnLeaderDecision(agent, null, input);
+        if (decision.kind === "return") {
+          candidates.push(candidateOf(agent, null, decision));
+        }
+      }
+      continue;
+    }
 
     const decision = decideReturn({ agent, homeProviderId, poolById, input });
     if (decision.kind === "drop") {
       drops.push({ agentId: agent.id, homeProviderId, reason: decision.reason });
     } else if (decision.kind === "return") {
-      candidates.push(candidateOf(agent, homeProviderId, decision.targetProviderIds));
+      candidates.push(candidateOf(agent, homeProviderId, decision));
     }
   }
   return { drops, candidates };
@@ -241,7 +256,7 @@ export function planAccountFailoverReturns(
 
 type ReturnDecision =
   | { kind: "drop"; reason: HomeDropReason }
-  | { kind: "return"; targetProviderIds: string[] }
+  | { kind: "return"; targetProviderIds: string[]; usableBelowPct?: number }
   /** Not now; the label stays and the agent is reconsidered next sweep. */
   | { kind: "wait" };
 
@@ -260,14 +275,8 @@ function decideReturn(params: {
   if (!home) return drop("not-in-pool");
   const isRoot = getParentAgentIdFromLabels(agent.labels) === null;
   if (isRoot && home.role !== "leader") return drop("root-belongs-on-leader");
-  if (!isRoot && poolById.get(agent.provider)?.role === "leader") {
-    // A child failover collapsed onto the leader account. Any worker with budget restores the
-    // isolation, so it does not wait for its own; with none, it waits here, label kept.
-    const targetProviderIds = workerTargetsFor(agent, homeProviderId, input);
-    if (targetProviderIds.length === 0 || returnBlockedReason(agent, input) !== null) {
-      return { kind: "wait" };
-    }
-    return { kind: "return", targetProviderIds };
+  if (isChildOnLeader(agent, poolById)) {
+    return childOnLeaderDecision(agent, homeProviderId, input);
   }
   if (!isRoot && home.role === "leader") return drop("child-belongs-on-worker");
   if (!home.enabled) return drop("provider-disabled");
@@ -282,10 +291,40 @@ function decideReturn(params: {
   return { kind: "return", targetProviderIds: [homeProviderId] };
 }
 
+function isChildOnLeader(
+  agent: AccountFailoverAgentSummary,
+  poolById: ReadonlyMap<string, AccountPoolProviderEntry>,
+): boolean {
+  return (
+    getParentAgentIdFromLabels(agent.labels) !== null &&
+    poolById.get(agent.provider)?.role === "leader"
+  );
+}
+
+/**
+ * A child on the leader account, put there by a collapse or by placement. Any usable worker
+ * restores the isolation, so it does not wait for its own; with none, it waits, label kept.
+ *
+ * "Usable" is every window under 90%, not `returnMaxHomeUsedPct`: while the child waits, it spends
+ * the leader's budget, which is what the pool protects, and a worker at 60–89% is a better place
+ * for it than the leader account. The return cooldown still bounds the bounce.
+ */
+function childOnLeaderDecision(
+  agent: AccountFailoverAgentSummary,
+  homeProviderId: string | null,
+  input: PlanAccountFailoverReturnsInput,
+): ReturnDecision {
+  const targetProviderIds = workerTargetsFor(agent, homeProviderId, input);
+  if (targetProviderIds.length === 0 || returnBlockedReason(agent, input) !== null) {
+    return { kind: "wait" };
+  }
+  return { kind: "return", targetProviderIds, usableBelowPct: USABLE_BELOW_PCT };
+}
+
 function candidateOf(
   agent: AccountFailoverAgentSummary,
-  homeProviderId: string,
-  targetProviderIds: string[],
+  homeProviderId: string | null,
+  decision: { targetProviderIds: string[]; usableBelowPct?: number },
 ): ReturnCandidate {
   return {
     agentId: agent.id,
@@ -293,14 +332,15 @@ function candidateOf(
     workspaceId: agent.workspaceId,
     fromProviderId: agent.provider,
     homeProviderId,
-    targetProviderIds,
+    targetProviderIds: decision.targetProviderIds,
+    ...(decision.usableBelowPct === undefined ? {} : { usableBelowPct: decision.usableBelowPct }),
   };
 }
 
 /** Every worker a child on the leader account could go to now: home first, then most budget. */
 function workerTargetsFor(
   agent: AccountFailoverAgentSummary,
-  homeProviderId: string,
+  homeProviderId: string | null,
   input: PlanAccountFailoverReturnsInput,
 ): string[] {
   const current = input.accounts.get(agent.provider);
@@ -332,6 +372,8 @@ export interface HomeReturnHealthInput {
   fetchedAtMs: number | null;
   nowMs: number;
   config: ResolvedReturnConfig;
+  /** Pass with every window strictly under this instead of at or under `maxHomeUsedPct`. */
+  usableBelowPct?: number;
 }
 
 /**
@@ -359,7 +401,11 @@ export function homeReturnBlockedReason(input: HomeReturnHealthInput): string | 
     if (typeof window.usedPct !== "number") {
       return `window "${window.id}" has no utilization`;
     }
-    if (window.usedPct > input.config.maxHomeUsedPct) {
+    const tooFull =
+      input.usableBelowPct === undefined
+        ? window.usedPct > input.config.maxHomeUsedPct
+        : window.usedPct >= input.usableBelowPct;
+    if (tooFull) {
       return `window "${window.id}" is at ${window.usedPct}%`;
     }
     const resetsAtMs = window.resetsAt ? Date.parse(window.resetsAt) : NaN;

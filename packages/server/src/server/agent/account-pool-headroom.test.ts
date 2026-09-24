@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
-import { headroomByProvider } from "./account-pool-headroom.js";
+import { headroomByProvider, saturatedProviderIds } from "./account-pool-headroom.js";
 
 const NOW_MS = Date.parse("2026-09-22T12:00:00Z");
 const hours = (n: number) => new Date(NOW_MS + n * 60 * 60 * 1000).toISOString();
@@ -17,6 +17,28 @@ function provider(
     windows: windows.map((window) => ({ label: window.id, ...window })),
   } as ProviderUsage;
 }
+
+describe("saturatedProviderIds", () => {
+  it("names every account with a window at 90% or more: never a move target", () => {
+    const saturated = saturatedProviderIds([
+      provider("at-90", [
+        { id: "five_hour", usedPct: 10 },
+        { id: "weekly", usedPct: 90 },
+      ]),
+      provider("at-89", [
+        { id: "five_hour", usedPct: 89 },
+        { id: "weekly", usedPct: 40 },
+      ]),
+      provider("capped", [{ id: "weekly", usedPct: 100 }]),
+      provider("unread", [{ id: "weekly", usedPct: null }]),
+    ]);
+    expect([...saturated].sort()).toEqual(["at-90", "capped"]);
+  });
+
+  it("names nothing when usage could not be read", () => {
+    expect(saturatedProviderIds(null).size).toBe(0);
+  });
+});
 
 describe("headroomByProvider", () => {
   it("scores an account on its tightest window, not an average of them", () => {

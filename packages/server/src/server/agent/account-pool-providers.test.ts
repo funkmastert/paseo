@@ -27,6 +27,39 @@ describe("resolveAccountPoolEntries", () => {
     expect(entries).toHaveLength(3);
   });
 
+  it("makes the bare claude entry the leader when the pool names no leader", () => {
+    const entries = resolveAccountPoolEntries({
+      "claude-personal": {
+        extends: "claude",
+        label: "Personal",
+        params: { accountPool: { role: "worker", priority: 1 } },
+      },
+    });
+
+    expect(entries).toEqual([
+      { providerId: "claude-personal", role: "worker", priority: 1, enabled: true },
+      { providerId: "claude", role: "leader", priority: 0, enabled: true },
+    ]);
+  });
+
+  it("keeps a disabled claude entry disabled when it becomes the default leader", () => {
+    const entries = resolveAccountPoolEntries({
+      claude: { enabled: false },
+      "claude-personal": {
+        extends: "claude",
+        label: "Personal",
+        params: { accountPool: { role: "worker", priority: 1 } },
+      },
+    });
+
+    expect(entries).toContainEqual({
+      providerId: "claude",
+      role: "leader",
+      priority: 0,
+      enabled: false,
+    });
+  });
+
   it("ignores non-claude-family providers even with accountPool-shaped params", () => {
     const entries = resolveAccountPoolEntries({
       codex: { params: { accountPool: { role: "worker", priority: 1 } } },
@@ -68,9 +101,12 @@ describe("resolveAccountPoolEntries", () => {
         params: { accountPool: { role: "worker", priority: 1 } },
       },
     });
-    expect(entries).toEqual([
-      { providerId: "claude-w1", role: "worker", priority: 1, enabled: false },
-    ]);
+    expect(entries).toContainEqual({
+      providerId: "claude-w1",
+      role: "worker",
+      priority: 1,
+      enabled: false,
+    });
   });
 
   it("returns an empty array when providers is undefined", () => {

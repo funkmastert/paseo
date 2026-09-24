@@ -55,9 +55,11 @@ export function resolveAccountPoolEntries(
   if (!providers) return [];
 
   const entries: AccountPoolProviderEntry[] = [];
+  let claudeEnabled = true;
   for (const [providerId, rawConfig] of Object.entries(providers)) {
     const result = ProviderOverrideSchema.safeParse(rawConfig);
     if (!result.success || !isClaudeFamily(providerId, result.data.extends)) continue;
+    if (providerId === "claude") claudeEnabled = result.data.enabled !== false;
 
     const params = AccountPoolParamsSchema.safeParse(result.data.params ?? {});
     const pool = params.success ? params.data.accountPool : undefined;
@@ -69,6 +71,11 @@ export function resolveAccountPoolEntries(
       priority: pool.priority,
       enabled: result.data.enabled !== false,
     });
+  }
+  // A pool of workers with no leader still has one: the built-in `claude` account, which is what
+  // an unconfigured leader runs on.
+  if (entries.length > 0 && !entries.some((entry) => entry.role === "leader")) {
+    entries.push({ providerId: "claude", role: "leader", priority: 0, enabled: claudeEnabled });
   }
   return entries;
 }

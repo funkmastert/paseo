@@ -1230,21 +1230,64 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
   }, 60_000);
 
-  test("moves an idle child to a worker with budget, and onto the leader account when none has any", async () => {
+  test("leaves an idle child until asked, then rescues it to a worker or the leader account", async () => {
     harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [30])]);
     const child = await createChild(harness, { provider: "claude-backup", title: "Child one" });
     await converse(harness, child, "CHILD-MARKER");
 
+    // A child answers its leader, not Tyler: nothing moves it while nobody asks it anything.
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    await failOnLimit(harness, child);
     await harness.sweep();
     expect(providerOf(harness, child)).toBe("claude-personal");
-    expect(harness.prompts["claude-personal"]).toEqual([]);
+    expect(
+      harness.prompts["claude-personal"].some((prompt) => prompt.includes("Account handoff")),
+    ).toBe(true);
 
-    // Both workers out: the child collapses onto the leader account, still unprompted.
+    // Both workers out: the next rescue collapses onto the leader account.
+    await settle(harness, child);
     harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [100])]);
+    await failOnLimit(harness, child);
+    harness.advanceClock(MINUTE_MS);
     await harness.sweep();
     expect(providerOf(harness, child)).toBe("claude");
-    expect(harness.prompts.claude).toEqual([]);
-    expect(managed(harness, child).lifecycle).toBe("idle");
+  }, 60_000);
+
+  test("never moves an agent onto an account at 90% or more", async () => {
+    // claude-personal is the first worker by priority and is not dead, but at 92% it would cap
+    // the agent again within a turn or two.
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude-backup", [60])]);
+    const child = await createChild(harness, { provider: "claude", title: "Child" });
+    await failOnLimit(harness, child);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    // With every other account at 90% or more, nothing can take the next one: it is stranded.
+    const other = await createChild(harness, { provider: "claude-backup", title: "Other" });
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude", [95])]);
+    await failOnLimit(harness, other);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, other)).toBe("claude-backup");
+    expect(strandedObservations(harness).at(-1)).toMatchObject({ active: true });
+  }, 60_000);
+
+  test("returns an idle child the leader account holds to a worker under 90%, with no label needed", async () => {
+    // Placement collapsed this child onto the leader account at spawn; failover never moved it.
+    const child = await createChild(harness, { provider: "claude", title: "Collapsed child" });
+    await converse(harness, child, "COLLAPSED-MARKER");
+    windowHasReset(harness);
+    // claude-personal at 70% is under the watcher's usable line, though over returnMaxHomeUsedPct.
+    harness.setUsage([usageRow("claude-personal", [70]), usageRow("claude-backup", [100])]);
+    const promptsBefore = harness.prompts["claude-personal"].length;
+
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-personal");
+    expect(harness.prompts["claude-personal"].slice(promptsBefore)).toEqual([]);
+    expect(assistantText(harness, child)).toContain("COLLAPSED-MARKER");
   }, 60_000);
 
   test("retires a duplicate record the leader account already holds, and never retries it", async () => {

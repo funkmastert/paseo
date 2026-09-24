@@ -43,7 +43,6 @@ function plan(
     deadProviderIds: new Set(["claude-backup"]),
     backoffs: new Map(),
     nowMs: NOW,
-    migrateSubagents: true,
     ...overrides,
   }).map((agent) => agent.id);
 }
@@ -53,10 +52,11 @@ describe("planIdleRehomes", () => {
     expect(plan([idleRoot()])).toEqual(["root-1"]);
   });
 
-  it("moves an idle child too", () => {
+  it("leaves an idle child where it is until someone asks it for something", () => {
+    // A child answers its leader, not Tyler. If a message to it fails on the cap, the rescue leg
+    // moves and resumes it then.
     const child = idleRoot({ id: "child-1", labels: { [PARENT_AGENT_ID_LABEL]: "root-1" } });
-    expect(plan([child])).toEqual(["child-1"]);
-    expect(plan([child], { migrateSubagents: false })).toEqual([]);
+    expect(plan([child])).toEqual([]);
   });
 
   it("leaves an agent on a healthy account, or outside the pool, where it is", () => {
@@ -87,8 +87,8 @@ describe("planIdleRehomes", () => {
     expect(plan([agent])).toEqual([]);
   });
 
-  it("moves an agent whose turn ended in an unrelated error, without resuming it", () => {
-    expect(plan([idleRoot({ lifecycle: "error", lastError: "tool crashed" })])).toEqual(["root-1"]);
+  it("leaves an agent in error to the rescue leg, which resumes it", () => {
+    expect(plan([idleRoot({ lifecycle: "error", lastError: "tool crashed" })])).toEqual([]);
   });
 
   it("holds an agent whose move was refused until its backoff runs out", () => {

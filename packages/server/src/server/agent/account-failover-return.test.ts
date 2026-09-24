@@ -295,6 +295,7 @@ describe("planAccountFailoverReturns", () => {
         fromProviderId: "claude",
         homeProviderId: "claude-backup",
         targetProviderIds: ["claude-backup", "claude-personal"],
+        usableBelowPct: 90,
       }),
     ]);
     // Home is still out for the week, but claude-personal has budget: isolation comes back now.
@@ -329,6 +330,27 @@ describe("planAccountFailoverReturns", () => {
       plan([child], { poolEntries: pool, headroom, deadProviderIds: new Set(["claude-backup"]) })
         .candidates[0]?.targetProviderIds,
     ).toEqual(["claude-spare", "claude-personal"]);
+  });
+
+  it("returns an idle child on the leader account even with no home label", () => {
+    // Placement may have collapsed it there at spawn. Any worker with budget gives it back its
+    // isolation, whoever put it on the leader account.
+    const child = rescued({
+      id: "child-1",
+      provider: "claude",
+      labels: { [PARENT_AGENT_ID_LABEL]: "leader-1" },
+    });
+
+    expect(plan([child]).candidates).toEqual([
+      expect.objectContaining({
+        agentId: "child-1",
+        homeProviderId: null,
+        targetProviderIds: ["claude-personal", "claude-backup"],
+        usableBelowPct: 90,
+      }),
+    ]);
+    // A root on the leader account without a label is where it belongs.
+    expect(plan([rescued({ provider: "claude", labels: {} })]).candidates).toEqual([]);
   });
 
   it("keeps a child that is already on a worker off the leader account", () => {
@@ -378,6 +400,22 @@ describe("homeReturnBlockedReason", () => {
     expect(health({ usage: [usageRow("claude", [{ usedPct: null }])] })).toBe(
       'window "window-0" has no utilization',
     );
+  });
+
+  it("takes a worker under 90% for a child leaving the leader account", () => {
+    // The watcher's rule: a usable worker is better than a child spending the leader's budget.
+    const reason = (usedPct: number) =>
+      homeReturnBlockedReason({
+        homeProviderId: "claude-personal",
+        usage: [usageRow("claude-personal", [{ usedPct }])],
+        fetchedAtMs: NOW,
+        nowMs: NOW,
+        config: CONFIG,
+        usableBelowPct: 90,
+      });
+    expect(reason(70)).toBeNull();
+    expect(reason(89)).toBeNull();
+    expect(reason(90)).not.toBeNull();
   });
 
   it("wants real headroom, not merely a window under its cap", () => {

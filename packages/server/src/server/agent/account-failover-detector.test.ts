@@ -192,6 +192,19 @@ describe("planAccountFailoverSweep", () => {
     expect(ids(result.candidates)).toEqual(["stalled"]);
   });
 
+  it("takes an agent in error on a dead account even when the error is not limit-shaped", () => {
+    // Its turn ended while its account was out; whatever the text, it is resumed where it can run.
+    const errored = agent({ id: "errored", provider: "claude-backup", lastError: "stream closed" });
+    const idle = agent({ id: "idle", provider: "claude-backup", lifecycle: "idle" });
+
+    const dead = plan({ agents: [errored, idle], usage: [usage("claude-backup", [100])] });
+    expect(ids(dead.candidates)).toEqual(["errored"]);
+    // It does not condemn the account by itself: only a limit-shaped error does.
+    const alive = plan({ agents: [errored] });
+    expect(alive.deadProviderIds.size).toBe(0);
+    expect(alive.candidates).toEqual([]);
+  });
+
   it("keeps an account dead on evidence a move left behind, until the TTL runs out", () => {
     const left = new Map([
       ["claude-personal", { error: REAL_LIMIT_MESSAGE, firstSeenMs: 900_000 }],
@@ -240,14 +253,15 @@ describe("planAccountFailoverSweep", () => {
     expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
   });
 
-  it("never makes an idle agent without its own limit failure a candidate", () => {
+  it("never makes an idle agent without its own limit failure a candidate, but takes one in error", () => {
     const failed = agent({ id: "failed", lastError: REAL_LIMIT_MESSAGE });
     const idle = agent({ id: "idle", lifecycle: "idle", lastError: undefined });
     const otherError = agent({ id: "other", lastError: "ECONNRESET" });
 
     const result = plan({ agents: [failed, idle, otherError] });
 
-    expect(ids(result.candidates)).toEqual(["failed"]);
+    // "other" is in error on the account "failed" condemned, so it is resumed too.
+    expect(ids(result.candidates)).toEqual(["failed", "other"]);
   });
 
   it("accepts idle and error lifecycles, never running, closed, or initializing", () => {
