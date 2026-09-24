@@ -128,6 +128,22 @@ describe("saturation ledger", () => {
     expect(incident).toMatchObject({ clearedAt: null, durationMs: 0, peakLoad1: 38 });
   });
 
+  test("the first record after a torn line starts on its own line and is read back", async () => {
+    const ledger = createSaturationLedger({ paseoHome: home, logger });
+    await ledger.append(record({ event: "open", atMs: T0, load1: 38 }));
+    await appendFile(saturationLedgerPath(home), '{"version":1,"at":"2026-09-');
+
+    // The daemon comes back up after the reboot and the incident is still open.
+    await ledger.append(record({ event: "ongoing", atMs: T0 + 300_000, load1: 44 }));
+
+    const incident = await readLatestSaturationIncident({
+      paseoHome: home,
+      nowMs: T0 + 300_000,
+      windowMs: DAY_MS,
+    });
+    expect(incident).toMatchObject({ durationMs: 300_000, peakLoad1: 44 });
+  });
+
   test("ignores an incident older than the window", async () => {
     const ledger = createSaturationLedger({ paseoHome: home, logger });
     await ledger.append(record({ event: "open", atMs: T0, load1: 38 }));

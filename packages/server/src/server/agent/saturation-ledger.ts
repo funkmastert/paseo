@@ -96,6 +96,19 @@ async function fileSize(file: string): Promise<number | undefined> {
   }
 }
 
+// A power cut can leave the last line torn, with no newline. Appending straight after it would glue
+// the next record onto that line and lose it too.
+async function endsMidLine(file: string, size: number): Promise<boolean> {
+  const handle = await open(file, "r");
+  try {
+    const last = Buffer.alloc(1);
+    await handle.read(last, 0, 1, size - 1);
+    return last[0] !== 0x0a;
+  } finally {
+    await handle.close();
+  }
+}
+
 export function createSaturationLedger(options: {
   paseoHome: string;
   logger: { warn: (obj: object, msg?: string) => void };
@@ -113,9 +126,10 @@ export function createSaturationLedger(options: {
         const size = await fileSize(file);
         const rotate = size !== undefined && size > 0 && size + Buffer.byteLength(line) > maxBytes;
         if (rotate) await rename(file, path.join(dir, PREVIOUS_LEDGER_FILE));
+        const torn = !rotate && size !== undefined && size > 0 && (await endsMidLine(file, size));
         const handle = await open(file, "a");
         try {
-          await handle.write(line);
+          await handle.write(torn ? `\n${line}` : line);
           await handle.datasync();
         } finally {
           await handle.close();
