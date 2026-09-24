@@ -52,6 +52,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/agent-stream-performance.md](docs/agent-stream-performance.md) | Assistant text pipeline — coalescing window, paced reveal, why arrival lumps are smoothed at render                            |
 | [docs/token-burn.md](docs/token-burn.md)                             | Token burn — cost-weighted unit, per-request deltas, why the monitor only rates running agents                                 |
 | [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds          |
+| [docs/leader-compaction.md](docs/leader-compaction.md)               | Leader compaction — the CLI auto-compact window, prepare → /compact → restore, never interrupting a turn, Opus 5.5 thinking    |
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — process-tree attribution by callerAgentId, orphan build daemons, thresholds                                 |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                       |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                |
