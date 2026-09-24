@@ -1,6 +1,6 @@
 ---
 title: Remediation ladder — deterministic first, one agent second, a person last
-status: in progress
+status: landed on multi-account-orchestrator-self-heal-first
 branch: multi-account-orchestrator-self-heal-first
 date: 2026-09-24
 ---
@@ -54,6 +54,7 @@ Each workstream is one agent in its own worktree, branched from this branch afte
 | **D — disk**           | `worktree-disk-monitor.ts`, new `disk-growth-sampler.ts`, on-demand triggers into the done janitor and the artifact janitor, `docs/disk-pressure.md` (new)                                                                                                                          | disk-low, disk-critical, disk-falling                       |
 | **W — work snapshots** | new `agent/worktree-snapshot.ts` (implements `WorktreeSnapshotter`), new work-at-risk sweep, `agent-done-janitor.ts` integration (snapshot before any archive or reclaim of a dead agent's worktree), `docs/work-snapshots.md` (new), `docs/done-janitor.md`                        | work-at-risk                                                |
 | **S — stalled agents** | new `agent-stall-sweep.ts` (+ detector), any `agent-manager.ts` addition it needs (keep it small), `docs/stalled-agents.md` (new)                                                                                                                                                   | stalled-agent                                               |
+| **F — account limit**  | `agent-account-failover-monitor.ts` stranding observation, merges the `flexible-placement` and `failover-return` branches (collapse onto the leader account, return on reset), `docs/account-failover.md`                                                                           | account-pool-exhausted (key `account-failover-stranded`)    |
 
 Shared files everyone may need a few lines in: `bootstrap.ts` (wire your monitor next to its siblings; keep your block contiguous), `CLAUDE.md` docs table (one row per new doc), `docs/notification-policy.md` (inventory rows only, except L). The leader merges and resolves conflicts in these.
 
