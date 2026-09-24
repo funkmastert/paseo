@@ -237,6 +237,7 @@ import {
 } from "./daemon-vitals/daemon-vitals.js";
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
+import type { RemediationConfig } from "./remediation/config.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -579,6 +580,7 @@ export interface PaseoDaemonConfig {
   };
   doneJanitor?: DoneJanitorConfig;
   refocus?: RefocusConfig;
+  remediation?: RemediationConfig;
   daemonVitals?: DaemonVitalsConfig;
   /**
    * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
@@ -725,6 +727,13 @@ function withRefocusConfig(
 ): Pick<MutableDaemonConfig, "refocus"> {
   // Spread: an interface carries no index signature, and the wire schema is passthrough.
   return config.refocus !== undefined ? { refocus: { ...config.refocus } } : {};
+}
+
+function withRemediationConfig(
+  config: Pick<PaseoDaemonConfig, "remediation">,
+): Pick<MutableDaemonConfig, "remediation"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.remediation !== undefined ? { remediation: { ...config.remediation } } : {};
 }
 
 // Wired once the WebSocket server exists, like AccountFailoverMonitor below: it owns the push
@@ -919,6 +928,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...withBudgetPacingConfig(config),
     ...withDoneJanitorConfig(config),
     ...withRefocusConfig(config),
+    ...withRemediationConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
