@@ -168,6 +168,74 @@ describe("createRouter — root agents", () => {
   });
 });
 
+describe("createRouter — a root routing decision never fails a create", () => {
+  it("reroutes when the capped window's reset is an Invalid Date, and names no reset", () => {
+    const health = tracker();
+    health.reportUsage("claude-backup", [{ window: WINDOW_SEVEN_DAY, usedPct: 100, resetsAt: new Date("not-a-real-date") }]);
+    const episodes: RootRerouteEpisode[] = [];
+
+    const result = router(health, { onRootRerouted: (episode) => episodes.push(episode) })(
+      rootCreate("claude-backup", "claude-opus-5-5"),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("claude");
+    expect(episodes[0]?.resetsAt).toBeUndefined();
+    expect(episodes[0]?.reason).not.toContain("until");
+  });
+
+  it("keeps the requested provider and logs when root routing throws", () => {
+    const health = tracker();
+    health.reportUsage("claude-backup", [{ window: WINDOW_SEVEN_DAY, usedPct: 100 }]);
+    const broken: HealthTracker = {
+      ...health,
+      describeWindow: () => {
+        throw new Error("boom");
+      },
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = router(broken)(rootCreate("claude-backup", "claude-opus-5-5"), fakeContext);
+
+    expect(result).toBeUndefined();
+    expect(errors).toHaveBeenCalledTimes(1);
+    expect(String(errors.mock.calls[0]?.[0])).toContain("keeping the requested provider");
+    errors.mockRestore();
+  });
+});
+
+describe("createRouter — a root asking for the bare claude id", () => {
+  const NAMED_POOL: ResolvedPool = {
+    workers: [
+      { providerId: "claude-worker-1", priority: 1 },
+      { providerId: "claude-worker-2", priority: 2 },
+    ],
+    leader: { providerId: "claude-leader" },
+  };
+  const namedRouter = (health: HealthTracker) =>
+    router(health, {
+      poolCache: fakePoolCache(NAMED_POOL),
+      providerIds: fakeProviderIds(["claude", "claude-leader", "claude-worker-1", "claude-worker-2"]),
+    });
+
+  it("is a pool-family request even when no pool entry is named claude, as for a child", () => {
+    const health = tracker();
+    health.reportUsage("claude", [{ window: WINDOW_SEVEN_DAY, usedPct: 100 }]);
+
+    const result = namedRouter(health)(rootCreate("claude", "claude-opus-5-5"), fakeContext);
+
+    expect(result?.config.provider).toBe("claude-leader");
+    expect(labelsOf(result)?.[ACCOUNT_REROUTED_LABEL]).toBe("claude");
+  });
+
+  it("stays on claude while that entry has budget", () => {
+    const health = tracker();
+    health.reportUsage("claude", [{ window: WINDOW_SEVEN_DAY, usedPct: 42 }]);
+
+    expect(namedRouter(health)(rootCreate("claude", "claude-opus-5-5"), fakeContext)).toBeUndefined();
+  });
+});
+
 describe("createRouter — children keep today's behaviour", () => {
   it("routes a child off a capped worker by headroom, with no reroute label", () => {
     const health = tracker();

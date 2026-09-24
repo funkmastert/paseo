@@ -1,3 +1,4 @@
+import { POOL_FAMILY } from "../shared/role-policy-schema";
 import { rankByHeadroom, type HeadroomHealth } from "./headroom";
 import { relevantWindows, type HealthTracker } from "./health";
 
@@ -119,6 +120,14 @@ export function selectPoolAccount(
   return { kind: "exhausted", providerIds: poolMemberIds(pool) };
 }
 
+/**
+ * Whether a reset time can be formatted. An unparseable reset string becomes an Invalid Date,
+ * which is truthy and makes `toISOString()` throw — inside the create hook, that fails the create.
+ */
+export function isValidDate(date: Date | null | undefined): date is Date {
+  return date instanceof Date && !Number.isNaN(date.getTime());
+}
+
 /** A window at its cap, and when it comes back if the source said. */
 export interface CappedWindow {
   window: string;
@@ -142,7 +151,7 @@ export function cappedWindowFor(
   for (const window of windows) {
     const state = health.describeWindow(providerId, window);
     if (state?.status === "capped") {
-      return state.resetsAt ? { window, resetsAt: state.resetsAt } : { window };
+      return isValidDate(state.resetsAt) ? { window, resetsAt: state.resetsAt } : { window };
     }
   }
   return undefined;
@@ -151,7 +160,7 @@ export function cappedWindowFor(
 /**
  * Where a ROOT agent lands.
  *
- * - `not-pooled` — it asked for a provider the pool doesn't own; the pool has no say.
+ * - `not-pooled` — it asked for a provider outside the Claude family; the pool has no say.
  * - `kept` — its own account can run it, so it stays there. Isolation is a preference, and a
  *   root's chosen account is respected whenever it can serve.
  * - `rerouted` — its own account is at a cap, so it starts on `providerId` instead.
@@ -182,7 +191,10 @@ export function selectRootAccount(
   nowMs: number,
 ): RootAccountSelection {
   const members = poolMemberIds(pool);
-  if (!members.includes(requestedProviderId)) {
+  // The bare family id is a pool-family request even when no entry is named after it, exactly as
+  // the child router treats it (router.ts's isClaudeFamily). It is judged on its own entry's usage,
+  // which the usage poll reports like any other provider's.
+  if (!members.includes(requestedProviderId) && requestedProviderId !== POOL_FAMILY) {
     return { kind: "not-pooled" };
   }
   const blockedBy = cappedWindowFor(health, requestedProviderId, modelId);
@@ -224,7 +236,7 @@ export function selectRootAccount(
 }
 
 function describeCap(providerId: string, blockedBy: CappedWindow, modelId: string): string {
-  const until = blockedBy.resetsAt ? ` until ${blockedBy.resetsAt.toISOString()}` : "";
+  const until = isValidDate(blockedBy.resetsAt) ? ` until ${blockedBy.resetsAt.toISOString()}` : "";
   return `${providerId} is out of budget for ${modelId || "this request"} (its ${blockedBy.window} window is at its cap${until})`;
 }
 

@@ -33,6 +33,22 @@ describe("createUsagePoller", () => {
     poller.stop();
   });
 
+  it("drops an unparseable reset time rather than handing the tracker an Invalid Date", async () => {
+    const tracker = createHealthTracker();
+    const poller = createUsagePoller(tracker, {
+      fetchUsage: vi.fn().mockResolvedValue({
+        providers: [{ providerId: PROVIDER, windows: [{ id: "weekly", usedPct: 100, resetsAt: "not-a-real-date" }] }],
+      }),
+      setIntervalFn: vi.fn() as unknown as typeof setInterval,
+      clearIntervalFn: vi.fn() as unknown as typeof clearInterval,
+    });
+
+    await poller.pollOnce();
+
+    expect(tracker.describeWindow(PROVIDER, "weekly")).toMatchObject({ status: "capped", resetsAt: undefined });
+    poller.stop();
+  });
+
   it("handles a payload missing a provider's row gracefully (no reading = no change)", async () => {
     const tracker = createHealthTracker({ now: () => new Date("2026-09-10T10:00:00Z") });
     tracker.reportTurnFailure(PROVIDER, "You've hit your limit");

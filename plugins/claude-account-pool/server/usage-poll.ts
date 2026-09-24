@@ -72,6 +72,20 @@ function normalizeWindowId(id: string): string {
 }
 
 /**
+ * A reset time the tracker can use, or null. An unparseable string must not reach it as an
+ * Invalid Date: that is truthy, so it would become a cap expiry that never arrives (the window
+ * stays capped until a healthy reading) and a reset whose `toISOString()` throws wherever it is
+ * printed.
+ */
+function parseResetsAt(value: string | null | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
  * Polls `fetchUsage()` on an interval and feeds readings into a
  * HealthTracker. A fetch failure leaves tracker state untouched — it is
  * never treated as a cap signal. A provider absent from the payload (e.g.
@@ -98,7 +112,7 @@ export function createUsagePoller(tracker: HealthTracker, options: UsagePollerOp
         const readings = provider.windows.map((window) => ({
           window: normalizeWindowId(window.id),
           usedPct: window.usedPct ?? null,
-          resetsAt: window.resetsAt ? new Date(window.resetsAt) : null,
+          resetsAt: parseResetsAt(window.resetsAt),
         }));
         tracker.reportUsage(provider.providerId, readings);
         options.accountIdentity?.reportUsage(provider.providerId, readings);

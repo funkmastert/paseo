@@ -192,7 +192,9 @@ keeps the account it was started on while that account can run it, worker
 accounts included. It moves only when that account has a window **at its
 cap** — `five_hour`, `weekly`, or the `weekly_model_*` window for the
 requested model. A drained account is still the person's choice. With no
-model named, any capped window counts.
+model named, any capped window counts. A root that asks for the bare `claude`
+id is a pool-family request even when no pool entry is named `claude`, as it
+is for a child, and is judged on that entry's own usage.
 
 The app remembers the last provider a workspace used, so a new chat can ask
 for an account that ran out since. Before this, it started there and died on
@@ -203,7 +205,9 @@ definition — and then to a worker, ranked like a child's. The agent is
 labelled `paseo.account-rerouted=<the account it asked for>`, the daemon log
 carries the reason, and the settings preview (Test This Name, started by a
 root agent, with the account filled in) shows the same sentence. When nothing in the pool can run it, it keeps its
-account and starts anyway: a root is never refused.
+account and starts anyway: a root is never refused. Nor can routing itself
+fail one: any error while placing a root logs a warning and keeps the account
+it asked for.
 
 ## Role policy
 

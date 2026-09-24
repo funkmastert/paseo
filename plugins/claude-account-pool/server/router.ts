@@ -4,6 +4,7 @@ import type { AccountIdentity } from "./account-identity";
 import type { HealthTracker } from "./health";
 import {
   describeRootSelection,
+  isValidDate,
   poolMemberIds,
   selectPoolAccount,
   selectRootAccount,
@@ -220,7 +221,7 @@ function earliestReset(health: LadderHealth, providerIds: readonly string[]): Da
   for (const providerId of providerIds) {
     for (const window of health.windowIds(providerId)) {
       const state = health.describeWindow(providerId, window);
-      if (state?.status !== "capped" || !state.resetsAt) continue;
+      if (state?.status !== "capped" || !isValidDate(state.resetsAt)) continue;
       if (earliest === null || state.resetsAt.getTime() < earliest.getTime()) {
         earliest = state.resetsAt;
       }
@@ -341,7 +342,22 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
     // yet. Read it structurally rather than forking the SDK types.
     const callerAgentId = (request as { callerAgentId?: string }).callerAgentId;
     if (!callerAgentId) {
-      return poolFailOpen ? undefined : routeRootCreate(request, pool);
+      if (poolFailOpen) {
+        return;
+      }
+      // A placement decision must never be the reason a create fails: whatever goes wrong here,
+      // the root starts on the account it asked for, which is what it did before roots were routed.
+      try {
+        return routeRootCreate(request, pool);
+      } catch (error) {
+        logThrottle("root-routing-failed", () => {
+          console.error(
+            `[claude-account-pool] router: WARNING — routing a root agent on "${request.config.provider}" failed; keeping the requested provider`,
+            error,
+          );
+        });
+        return;
+      }
     }
 
     // Only claude-family requests are pool members. A codex/gpt/etc. child
