@@ -74,6 +74,10 @@ describe("clampThinkingOption", () => {
     expect(clampThinkingOption("banana", OFF_TO_MAX, undefined)).toEqual({ optionId: "off", how: "model-default" });
   });
 
+  it("never returns a default the model doesn't advertise", () => {
+    expect(clampThinkingOption("banana", ["a", "b"], "c")).toEqual({ optionId: "a", how: "model-default" });
+  });
+
   it("falls back to model-default when none of the advertised ids are on the ladder either", () => {
     expect(clampThinkingOption("high", ["custom-reasoning-mode"], "custom-reasoning-mode")).toEqual({
       optionId: "custom-reasoning-mode",

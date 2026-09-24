@@ -712,7 +712,11 @@ function routeRoleForCreateUnguarded(
       const recovered = withToolProfile(request, enforcement);
       const guarded = withoutSubagentUltracode(recovered ?? request);
       if (guarded) {
-        noteThinkingOverridden(decision.thinking.modelRef, ULTRACODE_OPTION_ID, null, "subagent-no-ultracode");
+        // Named against the model that runs — the request's own — not the one the rewrite gave up on.
+        const runningRef = request.config.model
+          ? formatModelRef({ provider: request.config.provider ?? null, model: request.config.model })
+          : undefined;
+        noteThinkingOverridden(runningRef, ULTRACODE_OPTION_ID, null, "subagent-no-ultracode");
       }
       return guarded ?? recovered;
     }

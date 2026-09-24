@@ -52,7 +52,7 @@ export const CLAUDE_MODEL_MANIFEST = [
     effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     // A new session from the app is a root agent, a leader, and leaders run Ultra Code. This is
     // only the selector's preselection: the account-pool classifier gives every subagent an
-    // explicit level, so it never reaches one.
+    // explicit level, and metadata generation caps it (structured-generation-providers.ts).
     defaultThinkingOptionId: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
   },
   {

@@ -111,7 +111,12 @@ export function clampThinkingOption(
   const ranked = advertised
     .map((id) => ({ id, rank: THINKING_LEVEL_RANK[id as ThinkingLevelId] }))
     .filter((entry): entry is { id: string; rank: number } => entry.rank !== undefined);
-  const modelDefault = (): ThinkingClamp => ({ optionId: defaultOptionId ?? advertised[0], how: "model-default" });
+  // A default the model doesn't list is not one it offers — a provider's catalog-level default can
+  // name an id this particular model lacks.
+  const modelDefault = (): ThinkingClamp => ({
+    optionId: defaultOptionId !== undefined && advertised.includes(defaultOptionId) ? defaultOptionId : advertised[0],
+    how: "model-default",
+  });
 
   if (wanted === ULTRACODE_OPTION_ID) {
     const highest = ranked.reduce<{ id: string; rank: number } | undefined>(

@@ -884,7 +884,14 @@ function decideThinking(
   }
 
   const { modelRef } = effective;
-  if (entry.optionIds.length === 0) {
+  // What this agent may run: a subagent may not run Ultra Code, so a model
+  // offering nothing else offers a subagent nothing at all.
+  const usable = isSubagent ? entry.optionIds.filter((id) => id !== ULTRACODE_OPTION_ID) : entry.optionIds;
+  if (usable.length === 0) {
+    const why =
+      entry.optionIds.length === 0
+        ? `${modelRef} offers no thinking options`
+        : `${modelRef} offers only ${thinkingLabel(ULTRACODE_OPTION_ID)}, which a subagent never runs`;
     return {
       outcome: "no-thinking-options",
       optionId: null,
@@ -893,7 +900,7 @@ function decideThinking(
       ...(requested !== undefined
         ? { override: { requested, applied: null, reason: "no-thinking-options" as const } }
         : {}),
-      reason: `None, because ${modelRef} offers no thinking options.${requested !== undefined ? ` ${thinkingLabel(requested)} was asked for and is removed.` : ""}`,
+      reason: `None, because ${why}.${requested !== undefined ? ` ${thinkingLabel(requested)} was asked for and is removed.` : ""}`,
     };
   }
 

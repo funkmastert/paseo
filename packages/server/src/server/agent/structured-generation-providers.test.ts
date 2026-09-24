@@ -167,6 +167,42 @@ describe("resolveStructuredGenerationProviders", () => {
     ]);
   });
 
+  test("never inherits Ultra Code from a model's default: metadata generation is not a leader", async () => {
+    const opus55 = {
+      provider: "claude",
+      id: "claude-opus-5-5",
+      label: "Opus 5.5",
+      isDefault: true,
+      defaultThinkingOptionId: "ultracode",
+      thinkingOptions: [
+        { id: "high", label: "High" },
+        { id: "xhigh", label: "Extra High" },
+        { id: "ultracode", label: "Ultra Code", isDefault: true },
+      ],
+    };
+    const snapshots = new ProviderSnapshots([
+      { provider: "claude", status: READY, enabled: true, models: [opus55] },
+    ]);
+
+    const configured = await resolveStructuredGenerationProviders({
+      cwd: "/tmp/repo",
+      providerSnapshotManager: snapshots,
+      daemonConfig: { metadataGeneration: { providers: [{ provider: "claude" }] } },
+    });
+    expect(configured).toEqual([
+      { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "xhigh" },
+    ]);
+
+    const selected = await resolveStructuredGenerationProviders({
+      cwd: "/tmp/repo",
+      providerSnapshotManager: snapshots,
+      currentSelection: { provider: "claude" },
+    });
+    expect(selected).toEqual([
+      { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "xhigh" },
+    ]);
+  });
+
   test("normalizes configured nested-provider aliases from the provider snapshot", async () => {
     const snapshots = new ProviderSnapshots([
       {

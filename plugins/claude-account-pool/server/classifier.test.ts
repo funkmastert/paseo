@@ -677,6 +677,50 @@ describe("classifyAgent — thinking", () => {
       }
     });
 
+    it("no policy value and no request gives a subagent Ultra Code under the default policy, an empty catalog, or a model without it", () => {
+      const worlds = [live({ policy: DEFAULT_POLICY }), live({ thinkingCatalog: new Map() }), onOpus46()];
+      for (const w of worlds) {
+        for (const role of ["worker", "leader"]) {
+          for (const requested of [undefined, "ultracode"]) {
+            for (const requestedModel of [undefined, "claude-opus-5-5"]) {
+              const input = child({
+                labels: { "paseo.agent-role": role },
+                ...(requested ? { requestedThinkingOptionId: requested } : {}),
+                ...(requestedModel ? { requestedModel } : {}),
+              });
+              expect(classifyAgent(input, w).thinking.optionId, JSON.stringify(input)).not.toBe("ultracode");
+            }
+          }
+        }
+      }
+    });
+
+    it("a subagent on a model that offers only Ultra Code gets no level at all, and a requested one is removed", () => {
+      const onlyUltracode = thinkingCatalog({ claude: { "claude-sonnet-5": { optionIds: ["ultracode"], defaultOptionId: "ultracode" } } });
+      const decision = classifyAgent(
+        child({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "high" }),
+        live({ thinkingCatalog: onlyUltracode }),
+      );
+      expect(decision.model.model).toBe("claude-sonnet-5");
+      expect(decision.thinking).toMatchObject({
+        outcome: "no-thinking-options",
+        optionId: null,
+        override: { requested: "high", applied: null, reason: "no-thinking-options" },
+      });
+      expect(decision.thinking.reason).toContain("subagent");
+
+      // A leader on the same model runs it.
+      const root = classifyAgent({ requestedModel: "claude-sonnet-5" }, live({ policy: DEFAULT_POLICY, thinkingCatalog: onlyUltracode }));
+      expect(root.thinking.optionId).toBe("ultracode");
+    });
+
+    it("a subagent whose create names no model, on a role with no pool, is left alone: no model to verify a level against", () => {
+      const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), live({ policy: DEFAULT_POLICY }));
+      expect(decision.model.outcome).toBe("unconfigured");
+      expect(decision.thinking).toMatchObject({ outcome: "model-unknown", optionId: null });
+      expect(decision.thinking.override).toBeUndefined();
+    });
+
     it("every subagent whose model offers thinking gets an explicit level, so Opus 5.5's Ultra Code default never reaches one", () => {
       // The fixture gives Opus 5.5 the manifest's own default, Ultra Code — the
       // level a create with no thinkingOptionId would otherwise fall back to.

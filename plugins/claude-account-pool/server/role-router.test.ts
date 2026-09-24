@@ -2033,11 +2033,13 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
 
   it("still removes a subagent's Ultra Code on the provider-not-registered path", () => {
     const providerIds = { get: () => new Set(["claude", "claude-backup", "leader"]), forceRefresh: vi.fn(), stop: vi.fn() };
+    const onThinkingOverridden = vi.fn();
     const router = createRoleRouter({
       ...baseOptions({ poolCache: fakePoolCache(pool) }),
       policyCache: fakePolicyCache(policyWithWorkerModels(["deadfamily/some-model"])),
       catalogCache: fakeCatalogCache(new Map()),
       providerIds,
+      onThinkingOverridden,
     });
 
     const result = router(
@@ -2051,6 +2053,10 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
     expect(result?.config.model).toBe("claude-sonnet"); // the rewrite is still skipped
     expect(result?.config).not.toHaveProperty("thinkingOptionId");
     expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "ultracode" });
+    // Reported against the model that runs, not the one the rewrite gave up on.
+    expect(onThinkingOverridden).toHaveBeenCalledWith(
+      expect.objectContaining({ modelRef: "claude/claude-sonnet", requested: "ultracode", applied: null }),
+    );
   });
 
   it("still removes a subagent's Ultra Code when classification throws and the request otherwise passes through", () => {
