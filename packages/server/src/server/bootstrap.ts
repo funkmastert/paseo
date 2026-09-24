@@ -2479,6 +2479,7 @@ export async function createPaseoDaemon(
               agentManager,
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
               serverId,
               // Same steer path AgentResourceMonitor uses below, for the same reason: it is
               // the only way to put a system-authored message into a live turn.
@@ -2508,6 +2509,7 @@ export async function createPaseoDaemon(
                 (await providerSnapshotManager.listModels({ provider })).map((model) => model.id),
               readDaemonConfig: () => ({
                 tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
+                providers: daemonConfigStore.get().providers,
               }),
               logger,
             });
@@ -2529,6 +2531,7 @@ export async function createPaseoDaemon(
               agentManager,
               agentStorage,
               pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
               serverId,
               processSampler,
               // The cap counts devices from this same sweep sample rather than taking its own
