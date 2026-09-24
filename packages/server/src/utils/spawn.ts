@@ -24,16 +24,16 @@ export type SpawnPriority = "agent" | "background";
 
 const spawnPriorityScope = new AsyncLocalStorage<SpawnPriority>();
 
-/**
- * Runs `work` with every spawn inside it defaulting to `priority`, for call sites that reach the
- * subprocess through layers (forge status polling goes through the forge adapters and their CLI
- * runners) that have no priority option to thread. An explicit `priority` on a spawn wins.
- */
 /** The priority the enclosing `runWithSpawnPriority` scope gives spawns, if any. */
 export function currentSpawnPriority(): SpawnPriority | undefined {
   return spawnPriorityScope.getStore();
 }
 
+/**
+ * Runs `work` with every spawn inside it defaulting to `priority`, for call sites that reach the
+ * subprocess through layers (forge status polling goes through the forge adapters and their CLI
+ * runners) that have no priority option to thread. An explicit `priority` on a spawn wins.
+ */
 export function runWithSpawnPriority<T>(priority: SpawnPriority, work: () => T): T {
   return spawnPriorityScope.run(priority, work);
 }
