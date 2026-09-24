@@ -24,9 +24,12 @@ carries the stored value forward, because callers build records by spreading one
 and their copy can be stale by the time the per-agent write queue runs it. A list a daemon cannot
 parse is dropped rather than failing the record, so a downgrade hides no agents.
 
-The in-memory watcher stays the fast path. It notices the outcome, and the service records it on
-the record before trying delivery. Each arm bumps a `generation`; a watcher from an older arm stands
-down, so a re-prompt never produces two reports.
+The in-memory watcher stays the fast path, but it only notices the outcome: the service records it
+on the record and is the one path that delivers a report. `setupFinishNotification` refuses to arm
+without the service. It used to deliver the report itself when none was wired, and two watchers for
+one child then both delivered; the second delivery replaced the turn the first had started. Each
+arm bumps a `generation`; a watcher from an older arm stands down, so a re-prompt never produces two
+reports. A permission the child blocks on is not a report, so the watcher still sends that itself.
 
 ## Shutdown and restart
 
@@ -70,6 +73,10 @@ Bounded, and every step is logged.
 An owner that is archived releases the report: whoever archived it ended that tree, and the child
 keeps its result on its own record. A `create_agent` report is also released when the child is
 detached from that parent.
+
+A report whose owner is mid-turn and cannot take a steer is queued behind that turn, and counts as
+delivered. The queue is on the owner's record ([providers.md](providers.md)), so a restart before
+the turn ends delivers it rather than losing it.
 
 Delivery failure means `sendPromptToAgent` threw: the owner could not be loaded, its session is
 gone. A turn the provider refuses after it started (a capped account) fails asynchronously and is

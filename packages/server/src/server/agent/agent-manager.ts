@@ -126,6 +126,7 @@ import type {
   ChildAdmissionController,
   HeldTurn,
 } from "./child-admission.js";
+import type { PromptQueue } from "./prompt-queue.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
   isUnresponsiveCancelReason,
@@ -1228,6 +1229,7 @@ export class AgentManager {
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
   private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
+  private promptQueue: PromptQueue | null = null;
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
@@ -1480,6 +1482,15 @@ export class AgentManager {
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
       lifecycle: agent.lifecycle,
     }));
+  }
+
+  /** Messages waiting for a busy agent, kept on the agent records (prompt-queue.ts). */
+  setPromptQueue(queue: PromptQueue | null): void {
+    this.promptQueue = queue;
+  }
+
+  getPromptQueue(): PromptQueue | null {
+    return this.promptQueue;
   }
 
   /** Sets the owed-report mirror and broadcasts the snapshot when it changed. */
