@@ -341,6 +341,20 @@ const MutableBudgetPacingConfigSchema = z
   .passthrough();
 
 const MutableBudgetPacingPatchSchema = MutableBudgetPacingConfigSchema;
+// Live-toggleable like budgetPacing above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/leader-compaction.md.
+const MutableLeaderCompactionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    scope: z.enum(["leaders", "all"]).optional(),
+    prepareAtTokens: z.number().int().positive().optional(),
+    retryAfterMinutes: z.number().nonnegative().optional(),
+    maxAttempts: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableLeaderCompactionPatchSchema = MutableLeaderCompactionConfigSchema;
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/done-janitor.md.
 const MutableDoneJanitorConfigSchema = z
@@ -566,6 +580,8 @@ export const MutableDaemonConfigSchema = z
     accountFailover: MutableAccountFailoverConfigSchema.optional(),
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
+    // COMPAT(leaderCompaction): added in v0.8.2, remove nothing — additive optional config.
+    leaderCompaction: MutableLeaderCompactionConfigSchema.optional(),
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
@@ -598,6 +614,7 @@ export const MutableDaemonConfigPatchSchema = z
     artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
+    leaderCompaction: MutableLeaderCompactionPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),

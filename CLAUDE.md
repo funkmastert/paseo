@@ -53,6 +53,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/token-burn.md](docs/token-burn.md)                             | Token burn — cost-weighted unit, per-request deltas, why the monitor only rates running agents                                   |
 | [docs/model-divergence.md](docs/model-divergence.md)                 | Model divergence — responses vs configured model, what counts as intentional, surfaces, the `normalizeClaudeRuntimeModelId` trap |
 | [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds            |
+| [docs/leader-compaction.md](docs/leader-compaction.md)               | Leader compaction — the CLI auto-compact window, prepare → /compact → restore, never interrupting a turn, Opus 5.5 thinking      |
 | [docs/usage-history.md](docs/usage-history.md)                       | Usage history — what is sampled and from where, bounded storage, projection rules, the RPC and where it surfaces                 |
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — process-tree attribution by callerAgentId, orphan build daemons, thresholds                                   |
 | [docs/doctor.md](docs/doctor.md)                                     | `paseo doctor` — read-only diagnosis of this fork's known failures, where checks run, credential and deadline gotchas            |

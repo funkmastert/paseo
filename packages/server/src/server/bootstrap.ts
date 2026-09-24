@@ -218,6 +218,7 @@ import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
+import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentModelDivergenceMonitor } from "./agent-model-divergence-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
@@ -567,6 +568,7 @@ export interface PaseoDaemonConfig {
   // Wire-shaped like mcpGateway above rather than restated as a literal: the monitor's own
   // settings interface would not carry the passthrough index signature this has to accept.
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
+  leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
   /**
    * Test seams for AccountFailoverMonitor; production leaves this unset. Tests inject a fake usage
    * source (no real usage API call), push the timer past their own runtime and drive sweeps with
@@ -597,6 +599,13 @@ export interface PaseoDaemonConfig {
   doneJanitorOverrides?: {
     sweepIntervalMs?: number;
     now?: () => number;
+  };
+  /**
+   * Test seam for AgentLeaderCompactionMonitor; production leaves this unset. Tests push the
+   * timer past their own runtime and drive sweeps with `getLeaderCompactionMonitor().tick()`.
+   */
+  leaderCompactionOverrides?: {
+    sweepIntervalMs?: number;
   };
   diskSweeper?: {
     enabled?: boolean;
@@ -639,6 +648,8 @@ export interface PaseoDaemon {
   getDoneJanitor(): AgentDoneJanitor | null;
   /** The durable finish-report ledger (docs/finish-reports.md). */
   getFinishObligations(): FinishObligationService;
+  /** Null until start() has constructed it, like the account-failover monitor. */
+  getLeaderCompactionMonitor(): AgentLeaderCompactionMonitor | null;
 }
 
 export interface PaseoDaemonDependencies {
@@ -887,6 +898,12 @@ function withBudgetPacingConfig(
   return config.budgetPacing !== undefined ? { budgetPacing: config.budgetPacing } : {};
 }
 
+function withLeaderCompactionConfig(
+  config: Pick<PaseoDaemonConfig, "leaderCompaction">,
+): Pick<MutableDaemonConfig, "leaderCompaction"> {
+  return config.leaderCompaction !== undefined ? { leaderCompaction: config.leaderCompaction } : {};
+}
+
 function withDiskSweeperConfig(
   config: Pick<PaseoDaemonConfig, "diskSweeper">,
 ): Pick<MutableDaemonConfig, "diskSweeper"> {
@@ -929,6 +946,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
     ...withArtifactJanitorConfig(config),
     ...withAccountFailoverConfig(config),
     ...withBudgetPacingConfig(config),
+    ...withLeaderCompactionConfig(config),
     ...withDoneJanitorConfig(config),
     ...withRefocusConfig(config),
     ...withDiskSweeperConfig(config),
@@ -1069,6 +1087,7 @@ export async function createPaseoDaemon(
   let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
+  let leaderCompactionMonitor: AgentLeaderCompactionMonitor | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
   let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
@@ -2463,6 +2482,21 @@ export async function createPaseoDaemon(
               logger,
             });
             budgetPacingMonitor.start();
+            // Starts its own turns rather than steering, through startTurnIfIdle, so it takes no
+            // sendSystemMessageToAgent: every message it sends waits for an idle agent.
+            leaderCompactionMonitor = new AgentLeaderCompactionMonitor({
+              agentManager,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readDaemonConfig: () => ({
+                leaderCompaction: daemonConfigStore.get().leaderCompaction,
+              }),
+              logger,
+              sweepIntervalMs: config.leaderCompactionOverrides?.sweepIntervalMs,
+            });
+            leaderCompactionMonitor.start();
+            const leaderCompactionMonitorForModeLog = leaderCompactionMonitor;
+            daemonConfigStore.onChange(() => leaderCompactionMonitorForModeLog.reportMode());
             doneJanitor = createDoneJanitor({
               config,
               agentManager,
@@ -2571,6 +2605,7 @@ export async function createPaseoDaemon(
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();
+    leaderCompactionMonitor?.stop();
     doneJanitor?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
@@ -2618,6 +2653,7 @@ export async function createPaseoDaemon(
     getAccountFailoverMonitor: () => accountFailoverMonitor,
     getDoneJanitor: () => doneJanitor,
     getFinishObligations: () => finishObligations,
+    getLeaderCompactionMonitor: () => leaderCompactionMonitor,
   };
 }
 

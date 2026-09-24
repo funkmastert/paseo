@@ -36,7 +36,7 @@ What replaces it is the governor's `notify` stage, which compares spend against 
 
 The rate default was 50,000, and it fired on ordinary agents, continuously. Measured on one machine: an Opus agent reading source files read 205K, then 181K, then 106K weighted tokens/min, and tripped the alert on its third sweep. Two finished implementation agents averaged 98K and 97K across their whole runs, and the agent that implemented this feature averaged 110K/min over 20 minutes for 2.14M total. Every one of those was healthy.
 
-That is structural, not an outlier. A Claude agent re-reads its context from cache on every request, so the weighted rate tracks context size times request frequency. It climbs as any task progresses, and a 1M-context agent doing identical work reads roughly nine times the cache per request. **The rate is a readout of how large a context is, not of whether the work is worth doing.** 400K is about twice the measured healthy peak — quiet enough to be worth reading, still not a basis for action. The spend governor never acts on it.
+That is structural, not an outlier. A Claude agent re-reads its context from cache on every request, so the weighted rate tracks context size times request frequency. It climbs as any task progresses, and a 1M-context agent doing identical work reads roughly nine times the cache per request. **The rate is a readout of how large a context is, not of whether the work is worth doing.** Shrinking the context is [docs/leader-compaction.md](leader-compaction.md)'s job. 400K is about twice the measured healthy peak — quiet enough to be worth reading, still not a basis for action. The spend governor never acts on it.
 
 ## The spend governor
 
