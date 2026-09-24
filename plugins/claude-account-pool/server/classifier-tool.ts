@@ -58,7 +58,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 const TOOL = {
   name: "agent_model_policy",
   description:
-    "Ask what an agent WOULD be configured as before you create it: which role it resolves to, which task class, which model and pooled account it would run on, and which tools it would keep. Deterministic — this is the same classifier the daemon applies at agent.create, not advice. Use it when you are about to spawn an agent and want to know whether your labels get you the model you think they do.",
+    "Ask what an agent WOULD be configured as before you create it: which role it resolves to, which task class, which model and thinking level and pooled account it would run on, and which tools it would keep. Deterministic — this is the same classifier the daemon applies at agent.create, not advice. Use it when you are about to spawn an agent and want to know whether your labels get you the model you think they do.",
   inputSchema: {
     type: "object",
     properties: {
@@ -84,6 +84,11 @@ const TOOL = {
         type: "string",
         description: "The provider for requestedModel. Defaults to the Claude pool.",
       },
+      requestedThinkingOptionId: {
+        type: "string",
+        description:
+          "A thinking level you would ask for explicitly (e.g. high, xhigh, ultracode). The answer says whether policy keeps it — a subagent never runs ultracode.",
+      },
       root: {
         type: "boolean",
         description: "Ask about a root agent (one started by a human, the CLI or the app) rather than a subagent.",
@@ -102,6 +107,7 @@ export interface ClassifierToolQuery {
   prompt?: string;
   requestedModel?: string;
   requestedProvider?: string;
+  requestedThinkingOptionId?: string;
   /** True to ask about a ROOT agent (no calling agent), which resolves to `leader` structurally. */
   root?: boolean;
 }
@@ -189,6 +195,7 @@ export function queryToInput(query: ClassifierToolQuery): ClassifierInput {
     callerAgentId: query.root === true ? undefined : "(policy-query)",
     requestedProvider: query.requestedProvider,
     requestedModel: query.requestedModel,
+    ...(query.requestedThinkingOptionId ? { requestedThinkingOptionId: query.requestedThinkingOptionId } : {}),
   };
 }
 

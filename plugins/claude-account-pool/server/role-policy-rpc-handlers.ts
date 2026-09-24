@@ -273,14 +273,11 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           callerAgentId: input.root === true ? undefined : "(preview)",
           requestedProvider: input.requestedProvider,
           requestedModel: input.requestedModel,
+          requestedThinkingOptionId: input.requestedThinkingOptionId,
         },
         {
           policy: freshPolicy,
           catalog: deps.catalogCache.get(),
-          // REQUIRED on ClassifierWorldBase: wired here so a consumer that
-          // forgets it is a type error, not a silent model-unknown outcome.
-          // The output field this decides (`thinking`) is added by a later
-          // agent; this only keeps `explain` classifiable at all.
           thinkingCatalog: deps.catalogCache.getThinking(),
           pool,
           health: deps.health,
@@ -288,7 +285,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         },
       );
 
-      const { role, taskClass, model, tools, account } = decision;
+      const { role, taskClass, model, tools, account, thinking } = decision;
       const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
             requestedRef: model.override.requestedRef,
@@ -350,6 +347,25 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           model: model.reason,
           tools: tools.reason,
           account: account.reason,
+          thinking: thinking.reason,
+        },
+        thinking: {
+          outcome: thinking.outcome,
+          ...(thinking.optionId !== null ? { optionId: thinking.optionId } : {}),
+          ...(thinking.modelRef !== undefined ? { modelRef: thinking.modelRef } : {}),
+          ...(thinking.wanted !== undefined ? { wanted: thinking.wanted } : {}),
+          ...(thinking.subagentCapped ? { subagentCapped: true } : {}),
+          ...(thinking.clamped ? { clamped: thinking.clamped } : {}),
+          ...(thinking.requested !== undefined ? { requested: thinking.requested } : {}),
+          ...(thinking.override
+            ? {
+                override: {
+                  requested: thinking.override.requested,
+                  ...(thinking.override.applied !== null ? { applied: thinking.override.applied } : {}),
+                  reason: thinking.override.reason,
+                },
+              }
+            : {}),
         },
         ...(requestedModelOverride ? { requestedModelOverride } : {}),
         ...(model.unadvertisedPoolEntries.length > 0

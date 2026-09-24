@@ -827,3 +827,65 @@ describe("explain — an explicit request for a model the catalog doesn't list",
     expect(result).not.toHaveProperty("unadvertisedPoolEntries");
   });
 });
+
+describe("explain — the thinking decision", () => {
+  const OPUS_5_5 = "claude-opus-5-5";
+  const policy: RoleModelPolicy = {
+    ...DEFAULT_POLICY,
+    roles: DEFAULT_POLICY.roles.map((r) =>
+      r.id === "leader" || r.id === "worker" ? { ...r, models: [OPUS_5_5], mechanicalModels: ["claude-haiku-4-5"] } : r,
+    ),
+  };
+  const catalog: ModelCatalog = new Map([["claude", new Set([OPUS_5_5, "claude-haiku-4-5"])]]);
+  const thinking: ThinkingCatalog = new Map([
+    [
+      "claude",
+      new Map([
+        [OPUS_5_5, { optionIds: ["low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "ultracode" }],
+        ["claude-haiku-4-5", { optionIds: [] }],
+      ]),
+    ],
+  ]);
+  const poolCache = {
+    get: () => ({ pool: { workers: [], leader: { providerId: "claude-personal" } }, failOpen: false }),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+  };
+  const explain = (input: Parameters<ReturnType<typeof createRoleModelPolicyRpcHandlers>["explain"]>[0]) =>
+    createRoleModelPolicyRpcHandlers(
+      baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog, thinking), poolCache }),
+    ).explain(input, context(fakePaseo({})));
+
+  it("reports Ultra Code for a root agent, with the classifier's reason", async () => {
+    const result = await explain({ root: true });
+    expect(result.thinking).toMatchObject({ outcome: "leader-rule", optionId: "ultracode", modelRef: OPUS_5_5 });
+    expect(result.reasons.thinking).toContain("Ultra Code");
+  });
+
+  it("reports a subagent's requested Ultra Code as overridden to Extra High", async () => {
+    const result = await explain({ agentType: "worker", requestedThinkingOptionId: "ultracode" });
+    expect(result.thinking).toMatchObject({
+      outcome: "requested",
+      optionId: "xhigh",
+      subagentCapped: true,
+      requested: "ultracode",
+      override: { requested: "ultracode", applied: "xhigh", reason: "subagent-no-ultracode" },
+    });
+  });
+
+  it("omits optionId, and reports the removal, when the model offers no thinking options", async () => {
+    const result = await explain({ agentType: "worker", taskClass: "mechanical", requestedThinkingOptionId: "max" });
+    expect(result.model).toBe("claude-haiku-4-5");
+    expect(result.thinking).toMatchObject({ outcome: "no-thinking-options", override: { requested: "max", reason: "no-thinking-options" } });
+    expect(result.thinking).not.toHaveProperty("optionId");
+    expect(result.thinking?.override).not.toHaveProperty("applied");
+  });
+
+  it("still parses a response from a plugin that predates the thinking decision", async () => {
+    const { RoleModelPolicyExplainResultSchema } = await import("../shared/role-policy-rpc");
+    const result = await explain({ root: true });
+    const { thinking: _thinking, ...older } = result;
+    const { thinking: _reason, ...olderReasons } = result.reasons;
+    expect(RoleModelPolicyExplainResultSchema.safeParse({ ...older, reasons: olderReasons }).success).toBe(true);
+  });
+});

@@ -149,7 +149,41 @@ export const RoleModelPolicyExplainResultSchema = z.object({
     model: z.string(),
     tools: z.string(),
     account: z.string(),
+    /** Optional: a plugin that predates the thinking decision sends none. */
+    thinking: z.string().optional(),
   }),
+  /**
+   * The thinking level the create hook would write to `config.thinkingOptionId`
+   * — server/classifier.ts's `ThinkingDecision`, projected. Optional, like
+   * everything added here, because the app and the plugin drift in version.
+   * The discriminants are plain strings rather than enums for the same
+   * reason: a newer plugin's outcome must not fail an older app's parse of
+   * the whole result.
+   */
+  thinking: z
+    .object({
+      /** leader-rule, requested, task-class-default, no-thinking-options, or model-unknown. */
+      outcome: z.string(),
+      /** Absent when no level applies: the model offers none, or nothing is known and nothing was asked for. */
+      optionId: z.string().optional(),
+      modelRef: z.string().optional(),
+      /** What the leader rule, the request or the task class named, before any cap or clamp. */
+      wanted: z.string().optional(),
+      /** True when this is a subagent and Ultra Code was replaced by Extra High. */
+      subagentCapped: z.boolean().optional(),
+      clamped: z.object({ wanted: z.string(), applied: z.string(), how: z.string() }).optional(),
+      /** The simulated `requestedThinkingOptionId`, when one was given. */
+      requested: z.string().optional(),
+      /**
+       * Present when the requested level is not what would run. A real agent
+       * would carry `paseo.thinking-overridden-by-policy=<requested>`.
+       * `applied` is absent when the requested id would be removed.
+       */
+      override: z
+        .object({ requested: z.string(), applied: z.string().optional(), reason: z.string() })
+        .optional(),
+    })
+    .optional(),
   /**
    * Present only when the query named `requestedModel`: what the create hook
    * would actually do with that explicit request — honored because it's a
@@ -253,6 +287,11 @@ export const roleModelPolicyRpc = {
        */
       requestedModel: z.string().optional(),
       requestedProvider: z.string().optional(),
+      /**
+       * Simulates an explicit `config.thinkingOptionId`. The result's
+       * `thinking.override` reports whether the create hook would keep it.
+       */
+      requestedThinkingOptionId: z.string().optional(),
     }),
     output: RoleModelPolicyExplainResultSchema,
   }),

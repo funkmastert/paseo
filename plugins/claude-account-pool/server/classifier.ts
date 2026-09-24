@@ -871,7 +871,7 @@ function decideThinking(
         ...modelRefField,
         requested,
         override: { requested, applied: null, reason: "subagent-no-ultracode" },
-        reason: `Removed: ${thinkingLabel(requested)} was asked for, but a subagent never runs it, and ${unverified}, so no lower level can be verified in its place.`,
+        reason: `Removed, because ${thinkingLabel(requested)} was asked for, a subagent never runs it, and ${unverified}, so no lower level can be verified in its place.`,
       };
     }
     return {
@@ -879,7 +879,7 @@ function decideThinking(
       optionId: requested ?? null,
       ...modelRefField,
       ...requestedField,
-      reason: `${requested !== undefined ? "Left as requested" : "Left unset"}: ${unverified}, so no level can be verified for it.`,
+      reason: `${requested !== undefined ? "Left as requested" : "Left unset"}, because ${unverified}, so no level can be verified for it.`,
     };
   }
 
@@ -893,7 +893,7 @@ function decideThinking(
       ...(requested !== undefined
         ? { override: { requested, applied: null, reason: "no-thinking-options" as const } }
         : {}),
-      reason: `None: ${modelRef} offers no thinking options.${requested !== undefined ? ` ${thinkingLabel(requested)} was asked for and is removed.` : ""}`,
+      reason: `None, because ${modelRef} offers no thinking options.${requested !== undefined ? ` ${thinkingLabel(requested)} was asked for and is removed.` : ""}`,
     };
   }
 
@@ -960,11 +960,11 @@ function describeThinking(decision: {
   let basis: string;
   switch (outcome) {
     case "leader-rule":
-      basis = `${applied}: ${decision.hasCaller ? "this agent resolved to the leader role" : "this is a root agent, the leader by definition"}, and the policy runs leaders at ${wantedLabel}.`;
+      basis = `${applied}, because ${decision.hasCaller ? "this agent resolved to the leader role" : "this is a root agent, the leader by definition,"} and the policy runs leaders at ${wantedLabel}.`;
       break;
     case "requested":
       basis = changed
-        ? `${applied}: ${wantedLabel} was asked for, and a requested level outranks the task class's.`
+        ? `${applied}, because ${wantedLabel} was asked for and a requested level outranks the task class's.`
         : `${applied}, as requested: a requested level outranks the task class's.`;
       break;
     case "task-class-default": {
@@ -972,7 +972,7 @@ function describeThinking(decision: {
         taskClass === undefined
           ? "nothing was requested and no task class resolved, so the standard task class's level"
           : `nothing was requested, so the ${taskClass} task class's level`;
-      basis = `${applied}: ${which}${changed ? `, ${wantedLabel},` : ""} applies.`;
+      basis = `${applied}, because ${which}${changed ? `, ${wantedLabel},` : ""} applies.`;
       break;
     }
   }

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
-import { startClassifierToolServer, type ClassifierToolServer } from "./classifier-tool";
+import { queryToInput, startClassifierToolServer, type ClassifierToolServer } from "./classifier-tool";
 import type { ClassifierWorld } from "./classifier";
 
 /**
@@ -32,7 +32,15 @@ function world(): ClassifierWorld {
   return {
     policy: POLICY,
     catalog: new Map([["claude", new Set(["claude-sonnet-5", "claude-haiku-4-5-20251001"])]]),
-    thinkingCatalog: new Map(),
+    thinkingCatalog: new Map([
+      [
+        "claude",
+        new Map([
+          ["claude-sonnet-5", { optionIds: ["off", "low", "medium", "high", "xhigh", "max", "ultracode"], defaultOptionId: "high" }],
+          ["claude-haiku-4-5-20251001", { optionIds: [] }],
+        ]),
+      ],
+    ]),
     pool: { workers: [{ providerId: "claude-work", priority: 1 }], leader: { providerId: "claude-personal" } },
     health: {
       isHealthyFor: () => true,
@@ -154,6 +162,25 @@ describe("the agent_model_policy MCP tool", () => {
     expect(text).toContain("classified-seed");
     expect(text).toContain("paseo.agent-role=reviewer");
     expect(text).toContain("paseo.task-class=hard");
+  });
+
+  it("reports the thinking level, and that a subagent asking for Ultra Code is overridden", async () => {
+    const send = startShim();
+    const called = (await send({
+      jsonrpc: "2.0",
+      id: 5,
+      method: "tools/call",
+      params: { name: "agent_model_policy", arguments: { agentType: "worker", requestedThinkingOptionId: "ultracode" } },
+    })) as { result: { content: Array<{ text: string }> } };
+
+    const text = called.result.content[0].text;
+    expect(text).toContain("Thinking: Extra High");
+    expect(text).toContain("paseo.thinking-overridden-by-policy=ultracode");
+  });
+
+  it("carries a requested thinking level into the classifier input", () => {
+    expect(queryToInput({ requestedThinkingOptionId: "max" }).requestedThinkingOptionId).toBe("max");
+    expect(queryToInput({})).not.toHaveProperty("requestedThinkingOptionId");
   });
 
   it("reports an unknown tool as a protocol error", async () => {
