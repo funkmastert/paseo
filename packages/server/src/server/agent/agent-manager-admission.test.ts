@@ -334,6 +334,29 @@ describe("AgentManager child admission", () => {
     expect(reloadedSession.startedPrompts).toEqual(["part one\n\npart two"]);
   });
 
+  test("a turn held across a restart goes back in line at its old place", async () => {
+    const root = await create(null);
+    const running = await create(root.id);
+    const later = await create(root.id);
+    const restored = await create(root.id);
+    await prompt(running.id, "task");
+    await prompt(later.id, "queued after the restart");
+    await flush();
+
+    await startAgentRun(manager, restored.id, "held before the restart", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      queuedAt: "2026-09-24T10:00:00.000Z",
+    });
+    await flush();
+    expect(admission.heldTurns().map((turn) => turn.agentId)).toEqual([restored.id, later.id]);
+
+    running.session.finishTurn();
+    await flush();
+    expect(restored.session.startedPrompts).toEqual(["held before the restart"]);
+    expect(later.session.startedPrompts).toEqual([]);
+  });
+
   test("cancelling a queued child drops it and settles it as cancelled, without a turn", async () => {
     const root = await create(null);
     const running = await create(root.id);

@@ -2723,6 +2723,8 @@ export async function createPaseoDaemon(
                   ...(turn.runOptions ? { runOptions: turn.runOptions } : {}),
                   activeTurnBehavior: "steer",
                   unarchive: false,
+                  // If it queues again, it keeps its place in line rather than joining the back.
+                  queuedAt: turn.queuedAt,
                   logger,
                 });
               },

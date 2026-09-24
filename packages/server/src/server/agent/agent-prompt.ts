@@ -34,6 +34,8 @@ export interface StartAgentRunOptions {
   runOptions?: AgentRunOptions;
   /** Ask the provider to deny permissions blocking this steer. */
   clearPendingPermissions?: boolean;
+  /** A child turn held across a restart: if it queues again, it keeps its original place. */
+  queuedAt?: string;
 }
 
 export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
@@ -79,7 +81,7 @@ async function startOrReplaceRun(
   const replaced = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const iterator = replaced
     ? await agentManager.replaceAgentRun(agentId, prompt, options?.runOptions)
-    : agentManager.streamAgent(agentId, prompt, options?.runOptions);
+    : agentManager.streamAgent(agentId, prompt, options?.runOptions, options?.queuedAt);
   return { iterator, replaced };
 }
 
@@ -280,6 +282,8 @@ export interface SendPromptToAgentParams {
   unarchive?: boolean;
   /** See {@link StartAgentRunOptions.clearPendingPermissions}. */
   clearPendingPermissions?: boolean;
+  /** See {@link StartAgentRunOptions.queuedAt}. */
+  queuedAt?: string;
   logger: Logger;
 }
 
@@ -371,6 +375,7 @@ export async function sendPromptToAgent(
     replaceRunning: true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
+    ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
     runOptions,
   });
 }

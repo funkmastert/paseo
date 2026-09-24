@@ -3703,12 +3703,14 @@ export class AgentManager {
     }
   }
 
+  /** `queuedAt` puts a child turn held across a restart back in line at its old place. */
   streamAgent(
     agentId: string,
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
+    queuedAt?: string,
   ): AsyncGenerator<AgentStreamEvent> {
-    return this.streamAgentInternal(agentId, prompt, options);
+    return this.streamAgentInternal(agentId, prompt, options, queuedAt);
   }
 
   /**
