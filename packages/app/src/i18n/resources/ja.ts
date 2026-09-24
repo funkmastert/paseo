@@ -246,6 +246,9 @@ export const ja: TranslationResources = {
       unarchive: "アーカイブ解除",
     },
   },
+  agentIdChip: {
+    copiedLabel: "エージェントID",
+  },
   pinnedGrid: {
     title: "固定済み ({{count}})",
     close: "グリッドを閉じる",

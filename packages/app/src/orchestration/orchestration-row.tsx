@@ -3,6 +3,7 @@ import { Pressable, StyleSheet as RNStyleSheet, Text, View } from "react-native"
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import { AgentStatusDot } from "@/components/agent-status-dot";
 import { getProviderIcon } from "@/components/provider-icons";
 import { RowActionButton } from "@/components/row-action-button";
@@ -208,6 +209,7 @@ function WideOrchestrationRow({
         <Text style={presentation.isClosed ? styles.titleClosed : styles.title} numberOfLines={1}>
           {displayTitle}
         </Text>
+        <AgentIdChip agentId={agent.id} testID={`agent-id-chip-${agent.id}`} />
         <OrchestrationRowStatusBadges
           badge={presentation.badge}
           modelDivergence={agent.modelDivergence}
@@ -354,6 +356,7 @@ function CompactOrchestrationRow({
             {displayTitle}
           </Text>
           <View style={styles.compactDetailLine}>
+            <AgentIdChip agentId={agent.id} testID={`agent-id-chip-${agent.id}`} />
             {tokenBurnTone ? (
               <TokenBurnBadge
                 tone={tokenBurnTone}
@@ -469,11 +472,12 @@ const styles = StyleSheet.create((theme) => {
     },
     // minWidth, not 0: a wide badge plus a timestamp could otherwise squeeze the title out of
     // its own row entirely, leaving a row that says a lot about an agent you cannot identify.
+    // Lowered from 96 to make room for the fixed-width AgentIdChip, which never shrinks.
     title: {
       flexGrow: 1,
       flexShrink: 1,
       flexBasis: "auto",
-      minWidth: 96,
+      minWidth: 48,
       fontSize: theme.fontSize.base,
       color: theme.colors.foreground,
     },
@@ -483,7 +487,7 @@ const styles = StyleSheet.create((theme) => {
       flexGrow: 1,
       flexShrink: 1,
       flexBasis: "auto",
-      minWidth: 96,
+      minWidth: 48,
       fontSize: theme.fontSize.base,
       color: theme.colors.foregroundMuted,
     },

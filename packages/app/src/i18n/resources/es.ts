@@ -246,6 +246,9 @@ export const es: TranslationResources = {
       unarchive: "Desarchivar",
     },
   },
+  agentIdChip: {
+    copiedLabel: "ID del agente",
+  },
   pinnedGrid: {
     title: "Anclados ({{count}})",
     close: "Cerrar cuadrícula",

@@ -1,4 +1,5 @@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
 import {
@@ -491,6 +492,12 @@ function ResolvedMobileActiveTabTrigger({
               ? t("workspace.tabs.loading")
               : presentation.label}
           </Text>
+          {activeTab.target.kind === "agent" ? (
+            <AgentIdChip
+              agentId={activeTab.target.agentId}
+              testID="workspace-active-tab-agent-id"
+            />
+          ) : null}
         </>
       )}
     </WorkspaceTabPresentationResolver>

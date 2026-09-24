@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { paneContentToolbarIconSize, ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { mutedIconColorMapping } from "@/components/ui/icon-color";
@@ -149,6 +150,9 @@ export const PinnedGridCell = memo(function PinnedGridCell({
           <Text style={styles.subtitle} numberOfLines={1}>
             {workspace.projectName}
           </Text>
+          {agentId ? (
+            <AgentIdChip agentId={agentId} testID={`agent-id-chip-${workspaceKey}`} />
+          ) : null}
         </View>
         <ToolbarButton
           compact={isCompact}

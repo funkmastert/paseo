@@ -246,6 +246,9 @@ export const ptBR: TranslationResources = {
       unarchive: "Desarquivar",
     },
   },
+  agentIdChip: {
+    copiedLabel: "ID do agente",
+  },
   pinnedGrid: {
     title: "Fixados ({{count}})",
     close: "Fechar grade",

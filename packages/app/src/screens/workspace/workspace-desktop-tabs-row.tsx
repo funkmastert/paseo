@@ -83,6 +83,7 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { getAgentShortId } from "@/utils/agent-short-id";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -177,7 +178,7 @@ function AgentTabTooltipBody({
         {title}
       </Text>
       <View style={styles.tooltipAgentMetadata}>
-        <Text style={styles.tooltipAgentId}>{agentId.slice(0, 7)}</Text>
+        <Text style={styles.tooltipAgentId}>{getAgentShortId(agentId)}</Text>
         {activity ? (
           <>
             <Text style={styles.tooltipAgentSeparator}>·</Text>

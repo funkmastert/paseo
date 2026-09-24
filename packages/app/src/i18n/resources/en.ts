@@ -241,6 +241,9 @@ export const en = {
       unarchive: "Unarchive",
     },
   },
+  agentIdChip: {
+    copiedLabel: "Agent ID",
+  },
   pinnedGrid: {
     title: "Pinned ({{count}})",
     close: "Close grid",

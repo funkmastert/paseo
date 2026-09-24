@@ -12,6 +12,7 @@ import {
 } from "./fixture-fleet";
 import { selectVisibleOrchestrationRows } from "./orchestration-visibility";
 import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
+import { ToastProvider } from "@/contexts/toast-context";
 // Side-effecting: creating the instance is what registers it with react-i18next, so the rows
 // render their real copy rather than raw keys.
 // eslint-disable-next-line import/no-unassigned-import
@@ -68,7 +69,7 @@ function mount(node: ReactNode, width = PANEL_WIDTH): HTMLDivElement {
   document.body.style.background = "#fff";
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => root.render(node));
+  act(() => root.render(<ToastProvider>{node}</ToastProvider>));
   mounted.push({ root, container });
   return container;
 }

@@ -245,6 +245,9 @@ export const ru: TranslationResources = {
       unarchive: "Разархивировать",
     },
   },
+  agentIdChip: {
+    copiedLabel: "ID агента",
+  },
   pinnedGrid: {
     title: "Закреплённые ({{count}})",
     close: "Закрыть сетку",
