@@ -12,6 +12,7 @@ import { createTestLogger } from "../../test-utils/test-logger.js";
 import { createAgentMcpServer } from "./mcp-server.js";
 import { AgentManager, type CreateAgentOptions, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
+import { FinishObligationService } from "./finish-obligation-service.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
 import type { AgentMode, AgentProvider, ProviderSnapshotEntry } from "./agent-sdk-types.js";
 import type { ProviderSnapshotManager } from "./provider-snapshot-manager.js";
@@ -238,6 +239,15 @@ function buildAgentManagerSpies() {
     emitLiveTimelineItem: vi.fn().mockResolvedValue(undefined),
     hasInFlightRun: vi.fn().mockReturnValue(false),
     steerIntoActiveTurn: vi.fn().mockResolvedValue({ status: "inactive" }),
+    noteFinishObserver: vi.fn(() => () => {}),
+    // The durable finish-report ledger. These tests only check that a watcher is armed.
+    getFinishObligations: vi.fn(() => ({
+      arm: vi.fn(() => 1),
+      noteWatcher: vi.fn(() => () => {}),
+      isCurrent: vi.fn(() => true),
+      isShuttingDown: vi.fn(() => false),
+      settle: vi.fn(async () => undefined),
+    })),
     tryRunOutOfBand: vi.fn().mockReturnValue(false),
     subscribe: vi.fn().mockReturnValue(() => {}),
     streamAgent: vi.fn(() => (async function* noop() {})()),
@@ -3500,6 +3510,15 @@ describe("create_agent MCP tool", () => {
       registry: storage,
       logger,
     });
+    // Wired as bootstrap wires it: create_agent arms the parent's finish report on it.
+    agentManager.setFinishObligations(
+      new FinishObligationService({
+        agentManager,
+        agentStorage: storage,
+        serverId: "srv_test",
+        logger,
+      }),
+    );
 
     try {
       const parent = await agentManager.createAgent(

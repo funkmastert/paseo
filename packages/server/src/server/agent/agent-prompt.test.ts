@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { FinishObligationService } from "./finish-obligation-service.js";
 import {
   formatSystemNotificationPrompt,
   isSystemInjectedEnvelope,
@@ -28,14 +29,14 @@ interface CapturedLogger {
   nextRecord: Promise<void>;
 }
 
-function createCapturedLogger(): CapturedLogger {
+function createCapturedLogger(level: "error" | "warn" = "error"): CapturedLogger {
   const records: Array<Record<string, unknown>> = [];
   let resolveNextRecord!: () => void;
   const nextRecord = new Promise<void>((resolve) => {
     resolveNextRecord = resolve;
   });
   const logger = pino(
-    { level: "error" },
+    { level },
     {
       write(line: string) {
         records.push(JSON.parse(line) as Record<string, unknown>);
@@ -56,6 +57,7 @@ interface FinishNotificationScenarioOptions {
 
 interface FinishNotificationScenario {
   startWatchingChild(): void;
+  finishObligations: FinishObligationService;
   requestChildPermission(requestId?: string): void;
   resolveChildPermission(requestId?: string): void;
   resolveChildPermissionFromState(requestId?: string): void;
@@ -71,10 +73,35 @@ interface FinishNotificationScenario {
   flaggedOutcomes(): string[];
 }
 
+/**
+ * The durable ledger that owns every finish report. Tests wire the real service: a watcher only
+ * notices an outcome, so without it nothing is ever delivered.
+ */
+function wireFinishObligations(
+  agentManager: AgentManager,
+  agentStorage: AgentStorage,
+  logger: Logger = createTestLogger(),
+): FinishObligationService {
+  Reflect.set(agentStorage, "list", async () => []);
+  Reflect.set(agentStorage, "updateFinishObligations", async () => true);
+  Reflect.set(agentManager, "setOwedFinishReport", () => {});
+  const service = new FinishObligationService({
+    agentManager,
+    agentStorage,
+    serverId: "srv_test",
+    logger,
+  });
+  agentManager.setFinishObligations(service);
+  return service;
+}
+
 function createFinishNotificationScenario(
   options?: FinishNotificationScenarioOptions,
 ): FinishNotificationScenario {
-  let subscriber: ((event: AgentManagerEvent) => void) | null = null;
+  const subscribers = new Set<(event: AgentManagerEvent) => void>();
+  const publish = (event: AgentManagerEvent) => {
+    for (const callback of subscribers) callback(event);
+  };
   let resolveParentPrompt: ((prompt: string) => void) | null = null;
   let parentPrompted = false;
   let steerAttemptCount = 0;
@@ -91,6 +118,8 @@ function createFinishNotificationScenario(
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", {});
+  Reflect.set(callerAgent, "pendingPermissions", new Map());
 
   const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
   Reflect.set(agentManager, "getAgent", (agentId: string) => {
@@ -103,9 +132,9 @@ function createFinishNotificationScenario(
     return null;
   });
   Reflect.set(agentManager, "subscribe", (callback: (event: AgentManagerEvent) => void) => {
-    subscriber = callback;
+    subscribers.add(callback);
     return () => {
-      subscriber = null;
+      subscribers.delete(callback);
     };
   });
   Reflect.set(agentManager, "getLastAssistantMessage", async () => {
@@ -144,8 +173,10 @@ function createFinishNotificationScenario(
     }
     return null;
   });
+  const finishObligations = wireFinishObligations(agentManager, agentStorage, options?.logger);
 
   return {
+    finishObligations,
     startWatchingChild() {
       setupFinishNotification({
         agentManager,
@@ -169,11 +200,11 @@ function createFinishNotificationScenario(
           content: "PASEO_PERMISSION_NOTIFY_QA_OK\n",
         },
       });
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
-      subscriber?.({
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -185,7 +216,7 @@ function createFinishNotificationScenario(
     },
     resolveChildPermission(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
-      subscriber?.({
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -198,13 +229,13 @@ function createFinishNotificationScenario(
     },
     resolveChildPermissionFromState(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
-      subscriber?.({ type: "agent_state", agent: childAgent });
+      publish({ type: "agent_state", agent: childAgent });
     },
     resolveChildPermissionWhileIdle(requestId = "permission-1") {
       childAgent.pendingPermissions.delete(requestId);
       childAgent.lifecycle = "idle";
-      subscriber?.({ type: "agent_state", agent: childAgent });
-      subscriber?.({
+      publish({ type: "agent_state", agent: childAgent });
+      publish({
         type: "agent_stream",
         agentId: "child-agent",
         event: {
@@ -217,13 +248,13 @@ function createFinishNotificationScenario(
     },
     finishChild() {
       childAgent.lifecycle = "running";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
 
       childAgent.lifecycle = "idle";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
@@ -241,11 +272,11 @@ function createFinishNotificationScenario(
         resolveParentPrompt = resolve;
       });
       childAgent.lifecycle = "running";
-      subscriber?.({ type: "agent_state", agent: childAgent });
+      publish({ type: "agent_state", agent: childAgent });
 
       // The shape emitState dispatches for a cancelled turn: idle, and carrying the outcome.
       childAgent.lifecycle = "idle";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: { ...childAgent, turnCanceled: true },
       });
@@ -258,13 +289,13 @@ function createFinishNotificationScenario(
       });
 
       childAgent.lifecycle = "running";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
 
       childAgent.lifecycle = "closed";
-      subscriber?.({
+      publish({
         type: "agent_state",
         agent: childAgent,
       });
@@ -305,6 +336,42 @@ test("a watched child is registered as observed, and released when it finishes",
   await scenario.finishChildAndReadParentPrompt();
 
   expect(scenario.isChildObserved()).toBe(false);
+});
+
+// The 20:42 kill: create_agent and a later send_agent_prompt each armed a watcher for the same
+// child and owner, both delivered the finish, and the second delivery replaced the turn the first
+// had started. The durable ledger owns the report, so it is sent once.
+test("a child's finish reaches its owner once, however many watchers were armed for it", async () => {
+  const scenario = createFinishNotificationScenario({ childLastAssistantMessage: "Fixed." });
+
+  scenario.startWatchingChild();
+  scenario.startWatchingChild();
+  await scenario.finishChildAndReadParentPrompt();
+  await vi.waitFor(() =>
+    expect(scenario.finishObligations.getObligations("child-agent")).toEqual([
+      expect.objectContaining({ ownerAgentId: "caller-agent", state: "delivered" }),
+    ]),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  expect(scenario.parentPrompts()).toHaveLength(1);
+  expect(scenario.parentPrompts()[0]).toContain("Agent child-agent (Child Agent) finished.");
+});
+
+test("a watcher never sends a finish report itself: without the durable ledger it refuses", () => {
+  const agentManager = new AgentManager({ clients: {}, logger: createTestLogger() });
+  const agentStorage: AgentStorage = Object.create(AgentStorage.prototype);
+
+  expect(() =>
+    setupFinishNotification({
+      agentManager,
+      agentStorage,
+      childAgentId: "child-agent",
+      callerAgentId: "caller-agent",
+      logger: createTestLogger(),
+    }),
+  ).toThrow("Finish reports need the finish-obligation service");
+  expect(agentManager.hasFinishObserver("child-agent")).toBe(false);
 });
 
 test("finish notifications tell the parent the child's last assistant message", async () => {
@@ -502,8 +569,10 @@ test("follow-up finish notifications do not require a parent relationship", asyn
   expect(parentPrompt).toContain("Agent child-agent (Child Agent) finished.");
 });
 
-test("finish notifications log a rejected parent prompt without an unhandled rejection", async () => {
-  const captured = createCapturedLogger();
+test("a finish report the parent rejected stays owed for the ladder, logged, not thrown", async () => {
+  // The durable ledger owns the report, so a failed delivery is a retry on its ladder (owner,
+  // then orchestrator, then a push), not a one-shot flag.
+  const captured = createCapturedLogger("warn");
   const scenario = createFinishNotificationScenario({
     parentPromptError: new Error("parent provider rejected the prompt"),
     logger: captured.logger,
@@ -515,26 +584,21 @@ test("finish notifications log a rejected parent prompt without an unhandled rej
 
   expect(captured.records).toEqual([
     expect.objectContaining({
-      msg: "Failed to notify caller agent",
+      msg: "Finish report delivery failed",
       childAgentId: "child-agent",
-      callerAgentId: "caller-agent",
-      reason: "finished",
-      err: expect.objectContaining({ message: "parent provider rejected the prompt" }),
+      ownerAgentId: "caller-agent",
+      err: "parent provider rejected the prompt",
     }),
   ]);
-});
-
-test("a notification the parent never received falls back to flagging the child", async () => {
-  // The delegated agent's finish is kept silent on the premise that the parent is told in-band.
-  // When that delivery fails the premise is false, and without this the child's work is finished,
-  // nobody has been told, and no flag exists for anyone to find it by.
-  const scenario = createFinishNotificationScenario({
-    parentPromptError: new Error("parent provider rejected the prompt"),
-  });
-
-  scenario.startWatchingChild();
-  await scenario.finishChildAndReadParentPrompt();
-  await vi.waitFor(() => expect(scenario.flaggedOutcomes()).toEqual(["finished"]));
+  expect(scenario.finishObligations.getObligations("child-agent")).toEqual([
+    expect.objectContaining({
+      ownerAgentId: "caller-agent",
+      state: "owed",
+      attempts: 1,
+      lastError: "parent provider rejected the prompt",
+    }),
+  ]);
+  expect(scenario.flaggedOutcomes()).toEqual([]);
 });
 
 test("a permission the parent never heard about falls back to flagging the child", async () => {
@@ -561,6 +625,8 @@ it("does not notify archived callers", async () => {
   Reflect.set(callerAgent, "id", "caller-agent");
   Reflect.set(callerAgent, "lifecycle", "idle");
   Reflect.set(callerAgent, "config", { title: "Caller Agent" });
+  Reflect.set(callerAgent, "labels", {});
+  Reflect.set(callerAgent, "pendingPermissions", new Map());
 
   const streamAgentSpy = vi.fn(() => (async function* noop() {})());
   const replaceAgentRunSpy = vi.fn(() => (async function* noop() {})());
@@ -598,6 +664,7 @@ it("does not notify archived callers", async () => {
   );
   const agentStorage: AgentStorage = Object.create(AgentStorage.prototype);
   Reflect.set(agentStorage, "get", agentStorageGetSpy);
+  wireFinishObligations(agentManager, agentStorage);
 
   setupFinishNotification({
     agentManager,

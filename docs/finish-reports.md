@@ -24,9 +24,12 @@ carries the stored value forward, because callers build records by spreading one
 and their copy can be stale by the time the per-agent write queue runs it. A list a daemon cannot
 parse is dropped rather than failing the record, so a downgrade hides no agents.
 
-The in-memory watcher stays the fast path. It notices the outcome, and the service records it on
-the record before trying delivery. Each arm bumps a `generation`; a watcher from an older arm stands
-down, so a re-prompt never produces two reports.
+The in-memory watcher stays the fast path, but it only notices the outcome: the service records it
+on the record and is the one path that delivers a report. `setupFinishNotification` refuses to arm
+without the service. It used to deliver the report itself when none was wired, and two watchers for
+one child then both delivered; the second delivery replaced the turn the first had started. Each
+arm bumps a `generation`; a watcher from an older arm stands down, so a re-prompt never produces two
+reports. A permission the child blocks on is not a report, so the watcher still sends that itself.
 
 ## Shutdown and restart
 

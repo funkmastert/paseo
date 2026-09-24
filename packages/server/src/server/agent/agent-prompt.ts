@@ -585,6 +585,16 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     requireParentOwnership = false,
     logger,
   } = params;
+  // The durable ledger (docs/finish-reports.md) is the one path that delivers a finish report: it
+  // records the outcome on the child's record and delivers through its retry/escalation ladder,
+  // so the report survives a restart and is sent once. This closure only notices the outcome. It
+  // used to deliver the report itself when no ledger was wired, and two such watchers for one
+  // child both delivered it; the second delivery replaced the turn the first had started.
+  const ledger = agentManager.getFinishObligations();
+  if (!ledger) {
+    throw new Error("Finish reports need the finish-obligation service, and none is wired");
+  }
+  const obligations = ledger;
   let hasSeenRunning = false;
   let stopped = false;
   const notifiedPermissionRequestIds = new Set<string>();
@@ -593,18 +603,10 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
   // Tells the manager someone is watching this child, so a permission it blocks on is answered
   // here rather than escalated to a person. Released the moment this observer stops.
   const releaseObserver = agentManager.noteFinishObserver(childAgentId);
-  // The durable ledger (docs/finish-reports.md). When it is wired, the terminal report is
-  // recorded on the child's record and delivered through its retry/escalation ladder, so it
-  // survives a restart; this closure stays the fast path that notices the outcome.
-  const obligations = agentManager.getFinishObligations();
-  const generation = obligations
-    ? (params.rearmedGeneration ??
-      obligations.arm({ childAgentId, ownerAgentId: callerAgentId, requireParentOwnership }))
-    : null;
-  const releaseWatcher =
-    obligations && generation !== null
-      ? obligations.noteWatcher(childAgentId, callerAgentId, generation)
-      : () => {};
+  const generation =
+    params.rearmedGeneration ??
+    obligations.arm({ childAgentId, ownerAgentId: callerAgentId, requireParentOwnership });
+  const releaseWatcher = obligations.noteWatcher(childAgentId, callerAgentId, generation);
 
   function stop(): void {
     if (stopped) return;
@@ -616,17 +618,11 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
 
   /** A newer arm for the same child and owner supersedes this watcher; only one may report. */
   function isSuperseded(): boolean {
-    return (
-      obligations !== null &&
-      generation !== null &&
-      !obligations.isCurrent(childAgentId, callerAgentId, generation)
-    );
+    return !obligations.isCurrent(childAgentId, callerAgentId, generation);
   }
 
-  async function notify(
-    reason: FinishNotificationReason,
-    permissionRequest?: AgentPermissionRequest,
-  ): Promise<void> {
+  /** A permission the child blocks on. Not a finish report: the ledger does not carry these. */
+  async function notifyPermission(permissionRequest: AgentPermissionRequest): Promise<void> {
     const callerRecord = await agentStorage.get(callerAgentId);
     if (callerRecord?.archivedAt) {
       // An archived caller will never read another notification, so this observer is dead. Say
@@ -645,7 +641,7 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     const body = formatFinishNotificationBody({
       childAgentId,
       title,
-      reason,
+      reason: "needs permission",
       lastAssistantMessage,
       permissionRequest,
     });
@@ -665,36 +661,35 @@ export function setupFinishNotification(params: SetupFinishNotificationParams): 
     if (stopped) return;
     const terminal = options.terminal ?? true;
     if (terminal) stop();
-    if (obligations && generation !== null && terminal && reason !== "needs permission") {
-      if (reason === "was closed" && obligations.isShuttingDown()) {
-        // Every agent is closed on the way down. That is not this child's outcome: its report
-        // stays owed on the record, and the restarted daemon picks it up.
-        return;
-      }
+    if (reason === "needs permission") {
+      const permissionRequest = options.permissionRequest;
+      if (!permissionRequest) return;
       notificationQueue = notificationQueue
-        .then(() =>
-          obligations.settle({ childAgentId, ownerAgentId: callerAgentId, generation, reason }),
-        )
+        .then(() => notifyPermission(permissionRequest))
         .catch((error) => {
           logger.error(
             { err: error, childAgentId, callerAgentId, reason },
-            "Failed to record a finish report",
+            "Failed to notify caller agent",
           );
+          // The in-band delivery that justifies keeping a delegated agent silent just failed, so
+          // fall back to flagging the child for a person.
+          agentManager.flagUndeliveredDelegatedOutcome(childAgentId, "permission");
         });
       return;
     }
+    if (reason === "was closed" && obligations.isShuttingDown()) {
+      // Every agent is closed on the way down. That is not this child's outcome: its report
+      // stays owed on the record, and the restarted daemon picks it up.
+      return;
+    }
     notificationQueue = notificationQueue
-      .then(() => notify(reason, options.permissionRequest))
+      .then(() =>
+        obligations.settle({ childAgentId, ownerAgentId: callerAgentId, generation, reason }),
+      )
       .catch((error) => {
         logger.error(
           { err: error, childAgentId, callerAgentId, reason },
-          "Failed to notify caller agent",
-        );
-        // The in-band delivery that justifies keeping a delegated agent silent just failed, so
-        // fall back to flagging the child for a person.
-        agentManager.flagUndeliveredDelegatedOutcome(
-          childAgentId,
-          reason === "needs permission" ? "permission" : "finished",
+          "Failed to record a finish report",
         );
       });
   }
