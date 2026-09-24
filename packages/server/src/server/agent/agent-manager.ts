@@ -33,6 +33,7 @@ import type { TerminalManager } from "../../terminal/terminal-manager.js";
 
 import {
   getAgentStreamEventTurnId,
+  type AgentAccountAuth,
   type AgentCapabilityFlags,
   type AgentClient,
   type AgentCreateSessionOptions,
@@ -384,6 +385,13 @@ export interface AccountFailoverAgentSummary {
   internal: boolean;
   lifecycle: AgentLifecycleStatus;
   lastError: string | undefined;
+  title: string | null;
+  /** A foreground turn, a pending run, or a replacement in flight. Same expression the done
+   * janitor reads: the return leg must not take the account out from under live work. */
+  busy: boolean;
+  pendingPermissionCount: number;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
   /** Timeline generation: moves on every appended row, so a repeat failure with identical text
    * is still distinguishable from the old one. Null before the timeline is initialized. */
   timelineSeq: number | null;
@@ -1259,6 +1267,28 @@ export class AgentManager {
     return Array.from(this.clients.keys());
   }
 
+  /**
+   * Which account a provider's sessions run as, asked of its client. `null` when the provider is
+   * not registered or its client cannot tell — two providers are only ever treated as the same
+   * account on a positive, equal answer, never on a pair of shrugs.
+   *
+   * The account failover monitor uses it to notice that two pool entries point at one Claude
+   * login, which happens whenever two `CLAUDE_CONFIG_DIR`s are signed into the same email: their
+   * usage windows are then literally the same window, so moving between them changes no budget.
+   */
+  async describeProviderAccount(providerId: AgentProvider): Promise<AgentAccountAuth | null> {
+    const client = this.clients.get(providerId);
+    if (!client?.describeAccountAuth) {
+      return null;
+    }
+    try {
+      return await client.describeAccountAuth();
+    } catch (error) {
+      this.logger.debug({ err: error, providerId }, "Could not read a provider's account");
+      return null;
+    }
+  }
+
   /** Registers a notify-on-finish observer for `childAgentId`; returns its release function. */
   noteFinishObserver(childAgentId: string): () => void {
     this.finishObservers.set(childAgentId, (this.finishObservers.get(childAgentId) ?? 0) + 1);
@@ -1697,7 +1727,8 @@ export class AgentManager {
     return agent ? this.toDoneJanitorSummary(agent) : null;
   }
 
-  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
+  /** The newest activity timestamp the manager holds for an agent, or null if none parses. */
+  private lastActivityAtOf(agent: ManagedAgent): string | null {
     const timestamps = [
       agent.updatedAt.getTime(),
       agent.lastUserMessageAt?.getTime(),
@@ -1706,6 +1737,20 @@ export class AgentManager {
         ? Date.parse(this.timelineStore.getLastRowTimestamp(agent.id) ?? "")
         : undefined,
     ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null;
+  }
+
+  /** A foreground turn, a pending run, or a replacement in flight. */
+  private isAgentBusy(agent: ManagedAgent): boolean {
+    return (
+      Boolean(agent.activeForegroundTurnId) ||
+      Boolean(agent.activeTurnId) ||
+      agent.pendingReplacement ||
+      Boolean(this.runs.getPendingRun(agent.id))
+    );
+  }
+
+  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
     return {
       id: agent.id,
       provider: agent.provider,
@@ -1713,11 +1758,7 @@ export class AgentManager {
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       lifecycle: agent.lifecycle,
-      busy:
-        Boolean(agent.activeForegroundTurnId) ||
-        Boolean(agent.activeTurnId) ||
-        agent.pendingReplacement ||
-        Boolean(this.runs.getPendingRun(agent.id)),
+      busy: this.isAgentBusy(agent),
       pendingPermissionCount: agent.pendingPermissions.size,
       requiresAttention: agent.attention.requiresAttention,
       attentionReason: agent.attention.requiresAttention ? agent.attention.attentionReason : null,
@@ -1725,8 +1766,7 @@ export class AgentManager {
       runningProviderSubagentCount: this.providerSubagents
         .list(agent.id)
         .filter((subagent) => subagent.status === "running").length,
-      lastActivityAt:
-        timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null,
+      lastActivityAt: this.lastActivityAtOf(agent),
       labels: agent.labels,
       title: agent.config.title ?? null,
       sessionId: agent.persistence?.sessionId,
@@ -1779,6 +1819,10 @@ export class AgentManager {
       internal: agent.internal ?? false,
       lifecycle: agent.lifecycle,
       lastError: agent.lastError,
+      title: agent.config.title ?? null,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      lastActivityAt: this.lastActivityAtOf(agent),
       timelineSeq: this.timelineStore.getNextSeq(agent.id),
       lastTimelineAt: this.timelineStore.has(agent.id)
         ? this.timelineStore.getLastRowTimestamp(agent.id)

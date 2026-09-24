@@ -4,17 +4,21 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import { getErrorMessage } from "@getpaseo/protocol/error-utils";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent-storage.js";
+import type { AgentAccountAuth } from "./agent-sdk-types.js";
 import type { WorkspaceProvisioningService } from "../session/workspace-provisioning/workspace-provisioning-service.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { sendPromptToAgent } from "./agent-prompt.js";
 import { importProviderSession } from "./import-sessions.js";
 import {
+  ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL,
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  getHomeProviderFromLabels,
   getMigratedToFromLabels,
   HANDOFF_FROM_LABEL,
   isLimitShapedError,
   parseResetTimeHint,
 } from "./account-failover-detector.js";
+import { providersShareAccount } from "./account-failover-return.js";
 import { pickFailoverTarget, type AccountPoolProviderEntry } from "./account-pool-providers.js";
 import { AgentProviderMoveError } from "./provider-move.js";
 
@@ -38,6 +42,8 @@ export interface MigrateStuckAgentInput {
    * see `pickFailoverTarget`.
    */
   allowLeaderTarget?: boolean;
+  /** Account identity per pool provider id, from AgentManager.describeProviderAccount. */
+  accounts: ReadonlyMap<string, AgentAccountAuth | null>;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
@@ -304,6 +310,42 @@ export function buildMoveResumePrompt(input: {
 }
 
 /**
+ * Remember which account this conversation came off, so the return leg can put it back
+ * (docs/account-failover.md). Written after the move rather than before: a move that was refused
+ * has taken nothing away and has no home to record.
+ *
+ * Only the first move writes it, and landing back on the recorded home clears it. Both halves
+ * matter for a conversation that hops: A -> B -> C belongs to A, not B, and an ordinary rescue
+ * that happens to pick A again has already completed the round trip, so leaving the label would
+ * make the agent a return candidate for an account it is sitting on.
+ *
+ * Best-effort, like the other post-move steps. A failure here costs the round trip, not the rescue.
+ */
+async function recordHomeProvider(input: {
+  agent: AccountFailoverAgentSummary;
+  targetProviderId: string;
+  agentManager: AgentManager;
+  logger: Logger;
+}): Promise<void> {
+  const existingHome = getHomeProviderFromLabels(input.agent.labels);
+  if (existingHome !== null && existingHome !== input.targetProviderId) {
+    return;
+  }
+  // Blank reads as unset; there is no label-removal API.
+  const home = existingHome === null ? input.agent.provider : "";
+  try {
+    await input.agentManager.updateAgentMetadata(input.agent.id, {
+      labels: { [ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL]: home },
+    });
+  } catch (error) {
+    input.logger.warn(
+      { err: error, agentId: input.agent.id, home },
+      "Account failover: could not record the agent's home account",
+    );
+  }
+}
+
+/**
  * The preferred path: change the account under the agent instead of handing the conversation to a
  * new one. Returns null when the move cannot be used and the import path has to take over — a
  * target that still holds this conversation's retired handle is the routine case, since that
@@ -333,6 +375,8 @@ async function moveStuckAgentInPlace(input: {
     );
     return null;
   }
+
+  await recordHomeProvider({ agent, targetProviderId, agentManager, logger });
 
   // No settings to restore: a move keeps the agent's config, unlike an import.
   const model = agentManager.getAgent(agent.id)?.config.model;
@@ -417,6 +461,42 @@ async function sendResumePrompt(input: {
 }
 
 /**
+ * Every account this agent may not be moved onto, beyond the ones already dead this sweep:
+ *
+ * - **The same Claude login as the account that ran dry.** Two providers signed into one account
+ *   report the same usage windows because they *are* the same windows, so moving there cannot buy
+ *   budget. Better to wait for a real target than to spend a move and a resume on nothing.
+ * - **An account already holding a live record for this conversation.** That is someone else's
+ *   copy, and a move would be refused by `session_conflict` anyway.
+ */
+function resolveUnavailableTargets(params: {
+  input: MigrateStuckAgentInput;
+  sameSession: readonly StoredAgentRecord[];
+  agentManager: AgentManager;
+}): Set<string> {
+  const { input, sameSession, agentManager } = params;
+  const unavailable = new Set(input.deadProviderIds);
+  const sourceAccount = input.accounts.get(input.agent.provider);
+  for (const entry of input.poolEntries) {
+    if (
+      entry.providerId !== input.agent.provider &&
+      providersShareAccount(sourceAccount, input.accounts.get(entry.providerId))
+    ) {
+      unavailable.add(entry.providerId);
+    }
+  }
+  for (const record of sameSession) {
+    const live =
+      !getMigratedToFromLabels(record.labels) ||
+      agentManager.getAgent(record.id)?.lifecycle === "running";
+    if (record.persistence && live) {
+      unavailable.add(record.persistence.provider);
+    }
+  }
+  return unavailable;
+}
+
+/**
  * Move one stuck agent's conversation to a healthy worker account, following the
  * claude-account-handoff procedure: import the session (every account can read every
  * transcript), restore model/thinking/mode (import resets them), send an explicit resume prompt,
@@ -457,15 +537,7 @@ export async function migrateStuckAgent(
   const sameSession = records.filter(
     (record) => record.id !== agent.id && !record.archivedAt && sharesSession(record, handles),
   );
-  const unavailable = new Set(input.deadProviderIds);
-  for (const record of sameSession) {
-    const live =
-      !getMigratedToFromLabels(record.labels) ||
-      agentManager.getAgent(record.id)?.lifecycle === "running";
-    if (record.persistence && live) {
-      unavailable.add(record.persistence.provider);
-    }
-  }
+  const unavailable = resolveUnavailableTargets({ input, sameSession, agentManager });
   const targetProviderId = pickFailoverTarget(input.poolEntries, {
     headroom: input.headroom,
     allowLeader: input.allowLeaderTarget,

@@ -382,6 +382,14 @@ const AgentAccountFailoverSchema = z
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
     collapseToSharedAccount: z.boolean().optional(),
+    // The return leg. Absent means the built-in defaults (account-failover-return.ts), which is
+    // what a daemon that has never been configured runs.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
   })
   .strict();
 

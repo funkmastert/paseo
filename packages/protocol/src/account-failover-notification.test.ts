@@ -1,6 +1,7 @@
 import { describe, expect, it, test } from "vitest";
 import {
   buildAccountFailoverNotificationPayload,
+  buildAccountFailoverReturnNotificationPayload,
   buildAccountPoolExhaustedNotificationPayload,
 } from "./account-failover-notification.js";
 
@@ -99,5 +100,46 @@ describe("buildAccountPoolExhaustedNotificationPayload", () => {
     expect(payload.data.agentId).toBeUndefined();
     // Its own reason, so an app cannot mistake it for a migration it can navigate to.
     expect(payload.data.reason).not.toBe("account_failover");
+  });
+});
+
+describe("buildAccountFailoverReturnNotificationPayload", () => {
+  test("names both ends of the round trip and why it happened now", () => {
+    const payload = buildAccountFailoverReturnNotificationPayload({
+      serverId: "server-1",
+      workspaceId: "ws-1",
+      agentId: "agent-1",
+      agentTitle: "Build failover",
+      homeProviderId: "claude",
+      fromProviderId: "claude-personal",
+    });
+
+    expect(payload.title).toBe("Agent returned to its own account");
+    expect(payload.body).toBe(
+      "Build failover went back to claude from claude-personal now that claude's usage " +
+        "window has reset.",
+    );
+    expect(payload.data).toEqual({
+      serverId: "server-1",
+      workspaceId: "ws-1",
+      agentId: "agent-1",
+      reason: "account_failover",
+      outcome: "returned_home",
+    });
+  });
+
+  test("rides the rescue's reason so an app that never heard of returns still renders it", () => {
+    const payload = buildAccountFailoverReturnNotificationPayload({
+      serverId: "server-1",
+      agentId: "agent-1",
+      agentTitle: null,
+      homeProviderId: "claude",
+      fromProviderId: "claude-backup",
+    });
+
+    expect(payload.data.reason).toBe("account_failover");
+    expect(payload.data.workspaceId).toBeUndefined();
+    // An unrecognised `outcome` reads as no hint, and `body` carries the whole story either way.
+    expect(payload.body).toContain("An agent went back to claude");
   });
 });

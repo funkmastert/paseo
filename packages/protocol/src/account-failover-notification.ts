@@ -13,7 +13,7 @@ export type AccountFailoverNotificationReason = "account_failover";
 export type AccountPoolExhaustedNotificationReason = "account_pool_exhausted";
 
 /** Open on purpose: an app must treat an unrecognised hint as "no hint" and read `body`. */
-export type AccountFailoverOutcomeHint = "needs_prompt";
+export type AccountFailoverOutcomeHint = "needs_prompt" | "returned_home";
 
 export interface AccountFailoverNotificationData {
   [key: string]: unknown;
@@ -23,9 +23,10 @@ export interface AccountFailoverNotificationData {
   agentId: string;
   reason: AccountFailoverNotificationReason;
   /**
-   * Present and `"needs_prompt"` only when the move landed but the resume prompt never did, so
-   * the agent is healthy, idle, and waiting for any message. Optional and additive: an app that
-   * does not read it still gets the whole story from `body`, which states it in words.
+   * `"needs_prompt"` when the move landed but the resume prompt never did, so the agent is
+   * healthy, idle, and waiting for any message. `"returned_home"` when the agent went back to
+   * the account it was rescued off. Optional and additive: an app that does not read it still
+   * gets the whole story from `body`, which states it in words.
    */
   outcome?: AccountFailoverOutcomeHint;
 }
@@ -134,6 +135,42 @@ export function buildAccountPoolExhaustedNotificationPayload(
       reason: "account_pool_exhausted",
       providerIds: [...input.providerIds],
       strandedAgentCount: input.strandedAgentCount,
+    },
+  };
+}
+
+interface BuildAccountFailoverReturnNotificationPayloadInput {
+  serverId: string;
+  workspaceId?: string;
+  agentId: string;
+  agentTitle: string | null | undefined;
+  /** The account it was rescued off and has now gone back to. */
+  homeProviderId: string;
+  /** The rescuer it was spending on until now. */
+  fromProviderId: string;
+}
+
+/**
+ * The return leg of a failover: same agent, same conversation, back on the account it started on.
+ * It rides the same `reason` as a rescue because it is the same fact Tyler reads these for — which
+ * account an agent spends on changed — and an app that only knows the rescue still renders it and
+ * taps through to the agent. Hardcoded English for the same reason as the rescue payload.
+ */
+export function buildAccountFailoverReturnNotificationPayload(
+  input: BuildAccountFailoverReturnNotificationPayloadInput,
+): AccountFailoverNotificationPayload {
+  const label = resolveAgentLabel(input.agentTitle);
+  return {
+    title: "Agent returned to its own account",
+    body:
+      `${label} went back to ${input.homeProviderId} from ${input.fromProviderId} now that ` +
+      `${input.homeProviderId}'s usage window has reset.`,
+    data: {
+      serverId: input.serverId,
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      agentId: input.agentId,
+      reason: "account_failover",
+      outcome: "returned_home",
     },
   };
 }
