@@ -3,7 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import chalk, { Chalk } from "chalk";
 import type { Command } from "commander";
-import { buildDoctorContext, runDoctorChecks } from "@getpaseo/server";
+import {
+  buildDoctorContext,
+  countSeverities,
+  renderTokenAuditTable,
+  runDoctorChecks,
+  runTokenAudit,
+  type TokenAuditRow,
+} from "@getpaseo/server";
 import type { DoctorFinding } from "@getpaseo/protocol/doctor/rpc-schemas";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import type { PluginListItem } from "@getpaseo/protocol/messages";
@@ -26,6 +33,13 @@ export interface DoctorOptions extends CommandOptions {
   home?: string;
   deep?: boolean;
   full?: boolean;
+  tokens?: boolean;
+}
+
+export interface TokenAuditCliReport {
+  generatedAt: string;
+  counts: ReturnType<typeof countSeverities>;
+  rows: TokenAuditRow[];
 }
 
 const RANK: Record<DoctorFinding["status"], number> = { fail: 0, warn: 1, skip: 2, ok: 3 };
@@ -153,6 +167,49 @@ async function runLocally(
     summary: summarize(findings),
     findings,
     note,
+  };
+}
+
+/**
+ * `paseo doctor --tokens`: the token audit, on demand. Every check reads files and the process
+ * table, or runs `claude -p /context`, which makes no API call, so it needs no daemon and runs here.
+ */
+export async function runTokenAuditCommand(
+  options: DoctorOptions,
+  _command: Command,
+): Promise<SingleResult<TokenAuditCliReport>> {
+  const paseoHome = resolveHomeReadOnly(options.home);
+  const ctx = buildDoctorContext({
+    paseoHome,
+    facts: {
+      source: "cli",
+      daemon: null,
+      plugins: null,
+      agents: null,
+      workspaces: null,
+      usage: null,
+    },
+  });
+  process.stderr.write("Measuring the seven token audit items (about 30 seconds)...\n");
+  const rows = await runTokenAudit(ctx);
+  const counts = countSeverities(rows);
+  if (counts.RED > 0) process.exitCode = 1;
+  return {
+    type: "single",
+    data: { generatedAt: new Date().toISOString(), counts, rows },
+    schema: {
+      idField: () => "token-audit",
+      columns: [],
+      renderHuman(result) {
+        if (result.type !== "single") return "";
+        const { data } = result;
+        return [
+          renderTokenAuditTable(data.rows),
+          "",
+          `${data.counts.RED} RED, ${data.counts.AMBER} AMBER, ${data.counts.GREEN} GREEN, ${data.counts.UNKNOWN} UNKNOWN. Measured, not estimated; UNKNOWN means the probe could not run. Nothing was changed and no model was called.`,
+        ].join("\n");
+      },
+    },
   };
 }
 
