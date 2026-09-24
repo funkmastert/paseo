@@ -17,7 +17,7 @@ Callers pass `{ level }` as the second argument to `send`. The type is `PushSend
 
 A push with no level is a `notice` and is logged as undeclared. `push-callers.test.ts` fails when a sender in the daemon does not declare one, so the next unranked source is caught when it is written, not after a week of pushes.
 
-**Rank by what happens if the person never reads it.** An agent's token rate spiking costs nothing if it is ignored, so it is a `notice`. A capped account stops every agent on it, so it is `urgent`. Ask that question again for every new sender; "it felt important when I wrote it" is how the stream got flat.
+**Rank by what happens if the person never reads it, after automation has had its turn.** A condition the daemon can fix is not the person's to read about. A monitor with an automatic remedy runs it and records what it did at `record`; it reports the condition to the [remediation ladder](remediation.md), which pushes only when the remedy and one bounded agent both failed or could not act, and picks that push's level from the observation. For everything with no remedy, ask what ignoring it costs: an agent's token rate spiking costs nothing, so it is a `notice`; a capped account stops every agent on it, so it is `urgent`. Ask both questions again for every new sender; "it felt important when I wrote it" is how the stream got flat.
 
 ## Two dials and one mode
 
@@ -110,7 +110,9 @@ Settings are edited through `notifications.policy.get|set.request` and read back
 
 ## Adding a sender
 
-Pass `{ level }` (and `dedupeKey` if it can re-fire) on the `send` call, add a row to the inventory above, and put a test on the level if the level depends on state. If it is a monitor, keep the once-per-episode logic; the policy is not a substitute.
+First decide whether something could fix the condition. If a deterministic remedy exists, or an agent could try, the sender is a monitor on the ladder: report through `RemediationSink.observe()` every sweep, record what the remedy did at `record`, and never push about the condition yourself. The ladder owns the one push, its level (`observation.level`) and its dedupe key ([remediation.md](remediation.md#plugging-in-a-monitor)).
+
+Otherwise pass `{ level }` (and `dedupeKey` if it can re-fire) on the `send` call, and put a test on the level if the level depends on state. If it is a monitor, keep the once-per-episode logic; the policy is not a substitute. Either way, add a row to the inventory above.
 
 ## Not built yet
 

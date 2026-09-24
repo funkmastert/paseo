@@ -62,6 +62,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                        |
 | [docs/finish-reports.md](docs/finish-reports.md)                     | Durable finish reports — the obligation on the child record, restart re-arm, retry/escalation ladder, successors, parked         |
 | [docs/notification-policy.md](docs/notification-policy.md)           | Notification policy — push levels, dials, availability modes, digests, the delivery ledger, and the sender inventory             |
+| [docs/remediation.md](docs/remediation.md)                           | Remediation ladder — remedy first, one bounded agent second, a person last; episodes, the agent contract, config                 |
 | [docs/refocus.md](docs/refocus.md)                                   | Refocus — restating an agent's assignment after growth or compaction, riding on prompts it already gets, cost, compaction        |
 | [docs/daemon-vitals.md](docs/daemon-vitals.md)                       | Daemon vitals — event-loop wedge detector, why suspension is not a wedge, slow-op recorder, shutdown receipt                     |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                       |
