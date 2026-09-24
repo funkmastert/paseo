@@ -22,6 +22,7 @@ import {
   snapshotGitCommandRuntimeMetrics,
 } from "../utils/run-git-command.js";
 import { DEFAULT_GIT_PROCESS_POLICY } from "../utils/git-process-scheduler.js";
+import { getProcessPriorityPolicy, resetProcessPriorityPolicy } from "../utils/process-priority.js";
 import type {
   HubEnrollment,
   HubEnrollmentResult,
@@ -351,6 +352,7 @@ describe("paseo daemon bootstrap", () => {
       },
       agents: {
         resourceMonitor: { reaper: { enabled: true, dryRun: true } },
+        processPriority: { agentNice: 12 },
         deviceLeases: { enabled: true, dryRun: true, pendingTtlMinutes: 25 },
         artifactJanitor: { enabled: true, dryRun: true, diskGuard: { enabled: true } },
         tokenBurnMonitor: {
@@ -402,6 +404,13 @@ describe("paseo daemon bootstrap", () => {
 
       const booted = (await client.getDaemonConfig()).config;
       expect(booted.resourceMonitor).toEqual(bootPersisted.agents.resourceMonitor);
+      expect(booted.processPriority).toEqual(bootPersisted.agents.processPriority);
+      // The spawn sites read the holder, not the config store.
+      expect(getProcessPriorityPolicy()).toEqual({
+        enabled: true,
+        agentNice: 12,
+        backgroundNice: 10,
+      });
       expect(booted.deviceLeases).toEqual(bootPersisted.agents.deviceLeases);
       expect(booted.artifactJanitor).toEqual(bootPersisted.agents.artifactJanitor);
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
@@ -429,6 +438,7 @@ describe("paseo daemon bootstrap", () => {
         ...bootPersisted,
         agents: {
           resourceMonitor: { reaper: { enabled: true, dryRun: false } },
+          processPriority: { enabled: false, agentNice: 14 },
           deviceLeases: { enabled: false },
           artifactJanitor: { enabled: true, dryRun: false },
           tokenBurnMonitor: {
@@ -461,6 +471,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.budgetPacing",
         "agents.deviceLeases",
         "agents.doneJanitor",
+        "agents.processPriority",
         "agents.refocus",
         "agents.remediation",
         "agents.resourceMonitor",
@@ -473,6 +484,12 @@ describe("paseo daemon bootstrap", () => {
       ).not.toEqual([]);
       const reloaded = (await client.getDaemonConfig()).config;
       expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
+      expect(reloaded.processPriority).toEqual(reloadedPersisted.agents.processPriority);
+      expect(getProcessPriorityPolicy()).toEqual({
+        enabled: false,
+        agentNice: 14,
+        backgroundNice: 10,
+      });
       expect(reloaded.tokenBurnMonitor).toEqual(reloadedPersisted.agents.tokenBurnMonitor);
       expect(reloaded.deviceLeases).toEqual(reloadedPersisted.agents.deviceLeases);
       expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
@@ -497,6 +514,7 @@ describe("paseo daemon bootstrap", () => {
     } finally {
       await client?.close().catch(() => undefined);
       await daemon.stop().catch(() => undefined);
+      resetProcessPriorityPolicy();
       await rm(paseoHomeRoot, { recursive: true, force: true });
     }
   });

@@ -914,3 +914,22 @@ describe.skipIf(process.platform === "win32")("persisted config file permissions
     }
   });
 });
+
+describe("PersistedConfigSchema agents.processPriority config", () => {
+  test("accepts nice values from 0 to 19", () => {
+    const processPriority = { enabled: true, agentNice: 0, backgroundNice: 19 };
+    expect(
+      PersistedConfigSchema.parse({ agents: { processPriority } }).agents?.processPriority,
+    ).toEqual(processPriority);
+  });
+
+  test.each([-1, 20, 10.5])("rejects a nice of %s (the daemon never raises priority)", (nice) => {
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { processPriority: { agentNice: nice } } }).success,
+    ).toBe(false);
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { processPriority: { backgroundNice: nice } } })
+        .success,
+    ).toBe(false);
+  });
+});
