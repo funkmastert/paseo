@@ -284,6 +284,7 @@ export const ptBR: TranslationResources = {
       running: "Em execução",
       error: "Erro",
       closed: "Fechada",
+      queued: "Na fila",
     },
     badges: {
       archived: "Arquivado",

@@ -334,6 +334,33 @@ const AgentResourceMonitorSchema = z
       })
       .strict()
       .optional(),
+    // Machine CPU saturation: detection, the incident ledger, and its remediation rung. On
+    // unless this says otherwise.
+    saturation: z
+      .object({
+        enabled: z.boolean().optional(),
+        loadPerCore: z.number().positive().optional(),
+        busyFraction: z.number().positive().max(1).optional(),
+        sustainedMinutes: z.number().int().positive().optional(),
+        releaseLoadPerCore: z.number().positive().optional(),
+        releaseBusyFraction: z.number().positive().max(1).optional(),
+        reniceTopTrees: z.number().int().nonnegative().optional(),
+        reniceNice: z.number().int().min(1).max(19).optional(),
+        attributedGraceMinutes: z.number().positive().optional(),
+        unattributedGraceMinutes: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.resourceMonitor above. On by default: the structural CPU fix.
+// Nice 0..19 only — the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const AgentProcessPrioritySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
   })
   .strict();
 
@@ -467,6 +494,16 @@ const AgentDoneJanitorSchema = z
     deadQuietHours: z.number().positive().optional(),
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
+  })
+  .strict();
+
+// On unless `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume
+// pacing".
+const AgentAdmissionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
   })
   .strict();
 
@@ -731,12 +768,14 @@ export const PersistedConfigSchema = z
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
+        processPriority: AgentProcessPrioritySchema.optional(),
         deviceLeases: AgentDeviceLeasesSchema.optional(),
         artifactJanitor: AgentArtifactJanitorSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
         leaderCompaction: AgentLeaderCompactionSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
+        admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),

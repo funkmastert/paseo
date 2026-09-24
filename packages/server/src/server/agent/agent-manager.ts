@@ -120,6 +120,12 @@ import {
 import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
 import { summarizeOwedFinishReport } from "./finish-obligation.js";
 import type { FinishObligationService } from "./finish-obligation-service.js";
+import type {
+  AdmissionAgentView,
+  AdmissionOutcome,
+  ChildAdmissionController,
+  HeldTurn,
+} from "./child-admission.js";
 import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
 import {
   isUnresponsiveCancelReason,
@@ -367,6 +373,8 @@ export interface ResourceMonitorAgentSummary {
   /** Mid-turn right now. Only a running agent can be told about its usage — steering a message
    * into an idle agent would start a new turn on its own (agent-prompt.ts's fallback). */
   isRunning: boolean;
+  /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
+  parentAgentId: string | null;
 }
 
 /**
@@ -486,6 +494,8 @@ export type IdleTurnOutcome =
 export interface StallSweepAgentSummary extends DoneJanitorAgentSummary {
   /** The done janitor's question is the turn now running. */
   quietTurn: boolean;
+  /** Waiting for a child-admission slot: `running` with no turn, so silence is expected. */
+  turnQueued?: boolean;
   /** Token usage as last reported, for comparing across sweeps; usage touches no timestamp. */
   usageFingerprint: string;
   /** The newest activity of each provider subagent still reported running. */
@@ -756,6 +766,12 @@ interface ManagedAgentBase {
    * resource-monitor-detector.ts.
    */
   resourceMonitorState?: AgentResourceMonitorState;
+  /**
+   * Set while this child's new turn waits for a slot under ChildAdmissionController. The agent
+   * shows `running` meanwhile, so every waiter treats it as pending rather than finished.
+   * Live-only: the held prompt itself is persisted by the controller.
+   */
+  turnQueued?: { queuedAt: string };
   /**
    * Mirror of the finish report this agent still owes, kept by FinishObligationService from the
    * stored obligation so the snapshot can carry it (docs/finish-reports.md). Never persisted
@@ -1204,6 +1220,9 @@ export class AgentManager {
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
+  private childAdmission: ChildAdmissionController | null = null;
+  /** What each admitted stream started with, for a caller that has to retry the same turn. */
+  private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
@@ -1437,6 +1456,27 @@ export class AgentManager {
     return this.finishObligations;
   }
 
+  /**
+   * The machine-wide cap on child turns (child-admission.ts), set by bootstrap. Every new turn
+   * passes through streamAgent, so this is the one place it is enforced. Unset in unit tests
+   * that don't exercise it.
+   */
+  setChildAdmission(controller: ChildAdmissionController | null): void {
+    this.childAdmission = controller;
+  }
+
+  getChildAdmission(): ChildAdmissionController | null {
+    return this.childAdmission;
+  }
+
+  listAgentsForAdmission(): AdmissionAgentView[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      lifecycle: agent.lifecycle,
+    }));
+  }
+
   /** Sets the owed-report mirror and broadcasts the snapshot when it changed. */
   setOwedFinishReport(agentId: string, report: OwedFinishReport | undefined): void {
     const agent = this.agents.get(agentId);
@@ -1593,6 +1633,7 @@ export class AgentManager {
 
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    this.childAdmission?.prepareForShutdown();
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -1755,6 +1796,7 @@ export class AgentManager {
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
     }));
   }
 
@@ -1796,6 +1838,7 @@ export class AgentManager {
     return Array.from(this.agents.values()).map((agent) =>
       Object.assign(this.toDoneJanitorSummary(agent), {
         quietTurn: agent.quietTurn === true,
+        turnQueued: agent.turnQueued !== undefined,
         usageFingerprint: JSON.stringify(agent.lastUsage ?? null),
         runningSubagentActivityAt: this.providerSubagents
           .list(agent.id)
@@ -2582,17 +2625,37 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, overrides, options),
+        this.reloadKeepingHeldTurn(agentId, overrides, options),
       ),
     );
   }
 
-  private async reloadAgentSessionInternal(
+  /**
+   * A queued child has no turn to cancel: its held prompt leaves the line here and goes back in at
+   * the same place on the new session, and the agent never shows an idle edge in between. A
+   * reload that fails anywhere still gives the held prompt back.
+   */
+  private async reloadKeepingHeldTurn(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
     options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    const heldTurn = this.detachQueuedTurn(this.requireSessionAgent(agentId));
+    try {
+      return await this.reloadAgentSessionInternal(agentId, heldTurn, overrides, options);
+    } catch (error) {
+      this.returnHeldTurnAfterFailedReload(heldTurn, error);
+      throw error;
+    }
+  }
+
+  private async reloadAgentSessionInternal(
+    agentId: string,
+    heldTurn: HeldTurn | null,
+    overrides?: Partial<AgentSessionConfig>,
+    options?: ReloadAgentSessionOptions,
+  ): Promise<ManagedAgent> {
     let existing = this.requireSessionAgent(agentId);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "reload");
@@ -2659,7 +2722,7 @@ export class AgentManager {
 
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
-      return this.registerSession(session, storedConfig, agentId, {
+      const registered = await this.registerSession(session, storedConfig, agentId, {
         labels: existing.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
@@ -2674,7 +2737,10 @@ export class AgentManager {
         // The record's provider is what a later load resumes with, and it reads the handle
         // first (persistence-hooks.ts). A move has to land on both, so it is stated here.
         ...(handle ? { persistence: handle } : {}),
+        carriesQueuedTurn: heldTurn !== null,
       });
+      this.requeueHeldTurn(heldTurn);
+      return registered;
     } catch (error) {
       if (closedExisting) {
         this.emitClosedAgent(closedExisting, { persist: false });
@@ -2733,7 +2799,7 @@ export class AgentManager {
     await this.assertProviderCanAdoptSession(agentId, targetProviderId, handle);
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, undefined, { moveToProvider: targetProviderId }),
+        this.reloadKeepingHeldTurn(agentId, undefined, { moveToProvider: targetProviderId }),
       ),
     );
   }
@@ -3750,6 +3816,9 @@ export class AgentManager {
       }
       return result.turnId;
     } catch (error) {
+      // A failed start gives the admitted slot back. Here rather than in a wrapper: an extra
+      // await between admission and the start would reorder turns against concurrent steers.
+      this.childAdmission?.settleStart(agentId);
       if (pendingRun.settled) {
         throw error;
       }
@@ -3774,10 +3843,30 @@ export class AgentManager {
     }
   }
 
+  /** `queuedAt` puts a child turn held across a restart back in line at its old place. */
   streamAgent(
     agentId: string,
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
+    queuedAt?: string,
+  ): AsyncGenerator<AgentStreamEvent> {
+    return this.streamAgentInternal(agentId, prompt, options, queuedAt);
+  }
+
+  /**
+   * The prompt and options a stream from `streamAgent` actually started its turn with: a queued
+   * child's held prompt may have had later prompts merged in. Undefined until it is admitted.
+   */
+  getAdmittedTurn(stream: AsyncGenerator<AgentStreamEvent>): AdmittedTurn | undefined {
+    return this.admittedTurns.get(stream);
+  }
+
+  /** `queuedAt` puts a held child turn back in line at its old place (reload, restart). */
+  private streamAgentInternal(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+    queuedAt?: string,
   ): AsyncGenerator<AgentStreamEvent> {
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
@@ -3815,15 +3904,30 @@ export class AgentManager {
 
     const pendingRun = this.runs.createPendingRun(agentId);
 
-    const streamForwarder = async function* streamForwarder(this: AgentManager) {
+    // Named apart from the function: inside its body `streamForwarder` is the function itself.
+    const stream = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
       let turnStream: ReturnType<AgentRunState["createTurnStream"]> | null = null;
+      // Synchronous unless the turn is queued: an extra await here would reorder every turn start
+      // against concurrent steers and replacements, queued or not.
+      const admission = this.admitForegroundTurn({
+        agent,
+        pendingRun,
+        prompt,
+        options,
+        keepsSlot: isReplacement,
+        queuedAt,
+      });
+      const admitted = admission instanceof Promise ? await admission : admission;
+      if (!admitted) return;
+      this.admittedTurns.set(stream, admitted);
+      const { prompt: admittedPrompt, options: admittedOptions } = admitted;
       turnId = await this.startPendingForegroundTurn({
         agent,
         agentId,
         pendingRun,
-        prompt,
-        options,
+        prompt: admittedPrompt,
+        options: admittedOptions,
       });
 
       if (isReplacement) {
@@ -3834,6 +3938,8 @@ export class AgentManager {
       agent.activeForegroundTurnId = turnId;
       this.openActiveTurn(agent, turnId, turnStartedAt);
       agent.lifecycle = "running";
+      // Lifecycle now counts this turn, so the admitted-but-starting mark can go.
+      this.childAdmission?.settleStart(agentId);
       this.touchUpdatedAt(agent);
       // AgentManager owns the accepted-turn boundary. Publish liveness before the canonical
       // prompt so clients can retire optimistic activity without painting an idle frame.
@@ -3843,17 +3949,18 @@ export class AgentManager {
         { type: "turn_started", provider: agent.provider, turnId },
         { timestamp: turnStartedAt.toISOString() },
       );
-      const stagedSubmittedPromptEcho = options?.clientMessageId
+      const clientMessageId = admittedOptions?.clientMessageId;
+      const stagedSubmittedPromptEcho = clientMessageId
         ? pendingRun.stagedEvents.find(
             (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
               event.type === "timeline" &&
               event.item.type === "user_message" &&
-              event.item.clientMessageId === options.clientMessageId,
+              event.item.clientMessageId === clientMessageId,
           )
         : undefined;
-      if (options?.clientMessageId) {
-        this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, {
-          messageId: options.clientMessageId,
+      if (clientMessageId) {
+        this.recordSubmittedPrompt(agent, admittedPrompt, clientMessageId, {
+          messageId: clientMessageId,
           turnId,
           providerMessageId:
             stagedSubmittedPromptEcho?.item.type === "user_message"
@@ -3906,7 +4013,129 @@ export class AgentManager {
       }
     }.call(this);
 
-    return streamForwarder;
+    return stream;
+  }
+
+  /**
+   * Asks ChildAdmissionController for a slot before a new turn starts. Returns what to start
+   * with (a queued child may have had a second prompt merged in), or null when the queued turn
+   * was dropped and must end without starting. Roots, replacements of a running turn and a
+   * daemon without the controller pass straight through.
+   */
+  private admitForegroundTurn(params: {
+    agent: ActiveManagedAgent;
+    pendingRun: PendingForegroundRun;
+    prompt: AgentPromptInput;
+    options?: AgentRunOptions;
+    keepsSlot: boolean;
+    queuedAt?: string;
+  }): AdmittedTurn | Promise<AdmittedTurn | null> {
+    const { agent, pendingRun, prompt, options } = params;
+    const controller = this.childAdmission;
+    if (!controller) return { prompt, options };
+    const request = controller.request({
+      agentId: agent.id,
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      prompt,
+      ...(options ? { runOptions: options } : {}),
+      keepsSlot: params.keepsSlot,
+      ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
+    });
+    if (request.status === "admitted") return { prompt, options };
+
+    // Queued: show running so wait_for_agent, finish notifications and the done janitor all
+    // treat the child as pending, and waitForAgentRunStart returns instead of timing out.
+    agent.turnQueued = { queuedAt: request.queuedAt };
+    agent.lifecycle = "running";
+    this.touchUpdatedAt(agent);
+    this.emitState(agent);
+    return this.awaitQueuedTurn(agent, pendingRun, request.result);
+  }
+
+  private async awaitQueuedTurn(
+    agent: ActiveManagedAgent,
+    pendingRun: PendingForegroundRun,
+    result: Promise<AdmissionOutcome>,
+  ): Promise<AdmittedTurn | null> {
+    const outcome = await result;
+    delete agent.turnQueued;
+    if (outcome.outcome === "admitted") {
+      return { prompt: outcome.prompt, options: outcome.runOptions };
+    }
+    this.runs.settleForegroundRun(agent.id, pendingRun.token);
+    if (outcome.reason === "reloaded") {
+      // The reload re-registers the agent in `running` and re-queues the prompt; no edge here.
+      agent.lifecycle = "idle";
+      return null;
+    }
+    if (this.agents.get(agent.id) === agent && !agent.activeForegroundTurnId) {
+      agent.lifecycle = "idle";
+      agent.turnCanceled = true;
+      this.touchUpdatedAt(agent);
+      this.emitState(agent);
+    }
+    return null;
+  }
+
+  /** Takes a queued child's held turn out of line before its session is swapped. */
+  private detachQueuedTurn(agent: ActiveManagedAgent): HeldTurn | null {
+    const held = this.childAdmission?.detach(agent.id) ?? null;
+    if (held) {
+      delete agent.turnQueued;
+      agent.lifecycle = "idle";
+    }
+    return held;
+  }
+
+  /**
+   * A reload failed after taking a queued child's held turn out of line. While the agent is still
+   * registered (the old session survived) the turn goes back in line at its place; once the old
+   * session is closed there is nothing to queue it on, so it stays in queue.json for the next start.
+   */
+  private returnHeldTurnAfterFailedReload(held: HeldTurn | null, error: unknown): void {
+    if (!held) return;
+    if (this.agents.has(held.agentId)) {
+      this.logger.warn(
+        { err: error, agentId: held.agentId },
+        "Reload failed; putting the queued child turn back in line",
+      );
+      this.requeueHeldTurn(held);
+      return;
+    }
+    this.logger.warn(
+      { err: error, agentId: held.agentId },
+      "Reload failed and closed the agent; keeping its queued child turn for the next start",
+    );
+    this.childAdmission?.retainForRestart(held);
+  }
+
+  /** Puts a detached held turn back in line on the agent's new session. */
+  private requeueHeldTurn(held: HeldTurn | null): void {
+    if (!held) return;
+    let stream: AsyncGenerator<AgentStreamEvent>;
+    try {
+      stream = this.streamAgentInternal(held.agentId, held.prompt, held.runOptions, held.queuedAt);
+    } catch (error) {
+      // Registered in `running` for this turn; without it the agent has to come back to idle.
+      const agent = this.agents.get(held.agentId);
+      if (agent && !agent.activeForegroundTurnId) {
+        agent.lifecycle = "idle";
+        this.emitState(agent);
+      }
+      this.logger.error(
+        { err: error, agentId: held.agentId },
+        "Could not re-queue a child turn; keeping it for the next start",
+      );
+      this.childAdmission?.retainForRestart(held);
+      return;
+    }
+    void (async () => {
+      for await (const _event of stream) {
+        // Events are broadcast via subscribers.
+      }
+    })().catch((error) => {
+      this.logger.error({ err: error, agentId: held.agentId }, "Re-queued child turn failed");
+    });
   }
 
   private finalizeForegroundTurn(agent: ActiveManagedAgent, turnId?: string): void {
@@ -3982,6 +4211,11 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
+    // A queued child has no turn to replace. The second prompt joins the held one and keeps its
+    // place in line; the turn already waiting starts with both.
+    if (this.childAdmission?.mergeHeld(agentId, prompt, options)) {
+      return emptyAgentStream();
+    }
     const snapshot = this.requireAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
@@ -4329,6 +4563,11 @@ export class AgentManager {
     cancelReason: AgentCancelReason = "unspecified",
   ): Promise<AgentRunCancellationResult> {
     return this.runForegroundMutation(agentId, async () => {
+      if (this.childAdmission?.drop(agentId, "canceled")) {
+        // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
+        await this.runs.getRun(agentId)?.settledPromise;
+        return { status: "settled" };
+      }
       const result = await this.cancelAgentRunNow(agentId, cancelReason);
       if (cancelReason === "account-capped" && result.status === "settled") {
         await this.recordAccountCappedCancel(agentId);
@@ -4833,6 +5072,8 @@ export class AgentManager {
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      /** A reload is carrying a queued turn: land in `running`, never idle, so no waiter settles. */
+      carriesQueuedTurn?: boolean;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -4881,7 +5122,7 @@ export class AgentManager {
 
       await this.refreshSessionState(managed, { emit: false });
       this.assertAgentRegistrationActive(managed);
-      managed.lifecycle = "idle";
+      managed.lifecycle = options?.carriesQueuedTurn ? "running" : "idle";
       this.touchUpdatedAt(managed);
       await this.persistSnapshot(managed);
       this.assertAgentRegistrationActive(managed);
@@ -5047,6 +5288,8 @@ export class AgentManager {
     cancelReason: string,
   ): ManagedAgentClosed {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
+    // Close, archive and delete all end here. A reload detached its held turn already.
+    this.childAdmission?.drop(agent.id, "closed");
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
     this.brokeredMcpServerNames.delete(agent.id);
@@ -6322,6 +6565,8 @@ export class AgentManager {
       type: "agent_state",
       agent: { ...agent, turnCanceled },
     });
+    // A child turn ending (idle, error, closed) frees a slot; this is the edge that notices.
+    this.childAdmission?.pump();
   }
 
   private syncFeaturesFromSession(agent: ManagedAgent): void {
@@ -6990,4 +7235,13 @@ function optionalOwedFinishReport(report: OwedFinishReport | undefined): {
   owedFinishReport?: OwedFinishReport;
 } {
   return report ? { owedFinishReport: report } : {};
+}
+
+/** What replaceAgentRun returns when a second prompt merged into a queued turn: no new turn. */
+async function* emptyAgentStream(): AsyncGenerator<AgentStreamEvent> {}
+
+/** What a new turn starts with once admitted; a queued child may have had a prompt merged in. */
+export interface AdmittedTurn {
+  prompt: AgentPromptInput;
+  options?: AgentRunOptions;
 }

@@ -10,53 +10,15 @@
  * one on its own is enough to spare a process.
  */
 
-import { ORPHAN_BUILD_DAEMON_MARKERS } from "./process-attribution.js";
+import {
+  isOrphanBuildDaemonCommand,
+  matchBuildDaemonSignature,
+  type BuildDaemonSignature,
+  type ReapableBuildDaemonKind,
+} from "./build-daemon-signatures.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
-export type ReapableBuildDaemonKind = "gradle" | "kotlin";
-
-interface ReapableBuildDaemonSignature {
-  kind: ReapableBuildDaemonKind;
-  label: string;
-  /**
-   * The daemon's JVM main class, matched as a whole argv token. Verified against a live Gradle
-   * 9.7.1 daemon (`org.gradle.launcher.daemon.bootstrap.GradleDaemon` is the last token of its
-   * command line) and against `kotlin-daemon-embeddable`'s jar contents, which is where the
-   * Kotlin Gradle plugin's `COMPILER_DAEMON_CLASS_FQN` points. A substring match would be a
-   * generic process killer wearing an allowlist: `grep GradleDaemon`, an editor with the string
-   * in a file path, and this very source file all contain it.
-   */
-  mainClass: string;
-}
-
-/**
- * Both daemons are JVMs launched as `.../bin/java <opts> <mainClass>`, so a `java` token has to
- * precede the main class. Without it, `grep -r org.gradle...GradleDaemon .` passes the
- * whole-token test — that rule alone can't tell a daemon from something looking for one. This
- * scans for the token rather than reading argv[0], because `ps` gives one space-joined string
- * and the JVM Tyler's daemons launch from lives at
- * `/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java` — argv[0] doesn't
- * survive a whitespace split.
- */
-const JVM_EXECUTABLE = "java";
-
-/**
- * The allowlist. Nothing outside it is ever signalled — everything else the monitor finds is
- * reported exactly as before. Adding an entry means verifying the process's real command line
- * first, not guessing at a plausible marker.
- */
-const REAPABLE_BUILD_DAEMONS: readonly ReapableBuildDaemonSignature[] = [
-  {
-    kind: "gradle",
-    label: "Gradle daemon",
-    mainClass: "org.gradle.launcher.daemon.bootstrap.GradleDaemon",
-  },
-  {
-    kind: "kotlin",
-    label: "Kotlin compile daemon",
-    mainClass: "org.jetbrains.kotlin.daemon.KotlinCompileDaemon",
-  },
-];
+export type { ReapableBuildDaemonKind } from "./build-daemon-signatures.js";
 
 /** The marker process-attribution.ts attributes trees by; here it's purely a veto. */
 const AGENT_MARKER = "callerAgentId=";
@@ -149,17 +111,6 @@ export interface EvaluateBuildDaemonReapCandidatesResult {
   sightings: BuildDaemonSighting[];
 }
 
-function matchSignature(command: string): ReapableBuildDaemonSignature | undefined {
-  const tokens = command.split(/\s+/);
-  return REAPABLE_BUILD_DAEMONS.find((signature) => {
-    const mainClassIndex = tokens.indexOf(signature.mainClass);
-    return (
-      mainClassIndex > 0 &&
-      tokens.slice(0, mainClassIndex).some((token) => token.split("/").pop() === JVM_EXECUTABLE)
-    );
-  });
-}
-
 /**
  * The four facts that together mean "nobody is using this". Not idleness — that's measured over
  * time below; this is the structural half, re-checked on every sweep.
@@ -192,7 +143,7 @@ export function evaluateBuildDaemonReapCandidates(
   const idleThresholdMs = input.config.idleMinutes * 60_000;
 
   for (const row of input.rows) {
-    const signature = matchSignature(row.command);
+    const signature: BuildDaemonSignature | undefined = matchBuildDaemonSignature(row.command);
     const sight = (verdict: BuildDaemonVerdict, idleSweeps = 0): void => {
       sightings.push({
         pid: row.pid,
@@ -204,10 +155,7 @@ export function evaluateBuildDaemonReapCandidates(
       });
     };
     if (!signature) {
-      if (
-        row.ppid === 1 &&
-        ORPHAN_BUILD_DAEMON_MARKERS.some((marker) => row.command.includes(marker))
-      ) {
+      if (row.ppid === 1 && isOrphanBuildDaemonCommand(row.command)) {
         sight("not-on-allowlist");
       }
       continue;

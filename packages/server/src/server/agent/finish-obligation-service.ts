@@ -16,6 +16,7 @@ import {
   sendPromptToAgent,
   setupFinishNotification,
 } from "./agent-prompt.js";
+import { pacedResume, type PaceResume } from "./resume-pacer.js";
 import {
   armObligation,
   canPassToSuccessor,
@@ -58,6 +59,17 @@ export interface FinishObligationServiceOptions {
    * report or a wake then would race recovery's own resume prompt.
    */
   isClaimedByRestartRecovery?: (agentId: string) => boolean;
+  /**
+   * Whether a child's turn is held for an admission slot: in line, or read back from the queue
+   * file after a restart and not yet re-sent. Such a child is pending, not stopped.
+   */
+  isTurnHeld?: (agentId: string) => boolean;
+  /**
+   * The daemon's shared ResumePacer. After a restart every parked child reports "stopped before
+   * reporting" in the same sweep, and each report can start a turn in its owner; those go through
+   * the pacer. Reports of an outcome seen live are not paced. Unset sends immediately.
+   */
+  paceResume?: PaceResume;
   sweepIntervalMs?: number;
   ladder?: Partial<FinishReportLadderConfig>;
   now?: () => number;
@@ -516,17 +528,30 @@ export class FinishObligationService {
       const report = await this.buildReport(childAgentId, obligation, context);
       const body =
         plan.rung === "orchestrator" ? await this.wrapForOrchestrator(obligation, report) : report;
-      await sendPromptToAgent({
-        agentManager: this.options.agentManager,
-        agentStorage: this.options.agentStorage,
-        agentId: plan.targetAgentId,
-        prompt: formatSystemNotificationPrompt(body),
-        // Decided by gateDelivery before we got here: "steer" joins a running turn, and on an
-        // idle or closed agent it starts one, which is the point of a report.
-        activeTurnBehavior: "steer",
-        unarchive: false,
-        logger: this.options.logger,
-      });
+      const send = () =>
+        sendPromptToAgent({
+          agentManager: this.options.agentManager,
+          agentStorage: this.options.agentStorage,
+          agentId: plan.targetAgentId,
+          prompt: formatSystemNotificationPrompt(body),
+          // Decided by gateDelivery before we got here: "steer" joins a running turn, and on an
+          // idle or closed agent it starts one, which is the point of a report.
+          activeTurnBehavior: "steer",
+          unarchive: false,
+          logger: this.options.logger,
+        });
+      if (obligation.outcome?.reason === "stopped before reporting" && this.options.paceResume) {
+        // After a restart the owner is usually not loaded yet; its record has the same labels.
+        const labels =
+          this.options.agentManager.getAgent(plan.targetAgentId)?.labels ??
+          (await this.options.agentStorage.get(plan.targetAgentId))?.labels;
+        await this.options.paceResume(
+          pacedResume(plan.targetAgentId, labels, "restart-report"),
+          send,
+        );
+      } else {
+        await send();
+      }
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     }
@@ -691,6 +716,7 @@ export class FinishObligationService {
       lifecycle: live?.lifecycle ?? null,
       lastError: live?.lastError ?? record?.lastError ?? null,
       hasPendingPermission: (live?.pendingPermissions.size ?? 0) > 0,
+      turnHeld: this.options.isTurnHeld?.(agentId) ?? false,
       parentAgentId: getParentAgentIdFromLabels(live?.labels ?? record?.labels),
       record,
       live,

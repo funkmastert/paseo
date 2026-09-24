@@ -248,10 +248,39 @@ const MutableResourceMonitorConfigSchema = z
       })
       .passthrough()
       .optional(),
+    // Machine CPU saturation: detection, the incident ledger, and its remediation rung. On
+    // unless this says otherwise.
+    saturation: z
+      .object({
+        enabled: z.boolean().optional(),
+        loadPerCore: z.number().positive().optional(),
+        busyFraction: z.number().positive().max(1).optional(),
+        sustainedMinutes: z.number().int().positive().optional(),
+        releaseLoadPerCore: z.number().positive().optional(),
+        releaseBusyFraction: z.number().positive().max(1).optional(),
+        reniceTopTrees: z.number().int().nonnegative().optional(),
+        reniceNice: z.number().int().min(1).max(19).optional(),
+        attributedGraceMinutes: z.number().positive().optional(),
+        unattributedGraceMinutes: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
 const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
+
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason. Nice values
+// stop at 0: the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const MutableProcessPriorityConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
+  })
+  .passthrough();
+
+const MutableProcessPriorityPatchSchema = MutableProcessPriorityConfigSchema;
 
 // Live-toggleable like resourceMonitor above — same mutable/patch split, same reason.
 // See docs/device-leases.md.
@@ -390,6 +419,17 @@ const MutableDoneJanitorConfigSchema = z
   .passthrough();
 
 const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
+// Live-toggleable like doneJanitor above — same mutable/patch split, same reason. On unless
+// `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume pacing".
+const MutableAdmissionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableAdmissionPatchSchema = MutableAdmissionConfigSchema;
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/refocus.md.
 const MutableRefocusConfigSchema = z
@@ -668,6 +708,8 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    // COMPAT(processPriority): additive optional config, nothing to remove.
+    processPriority: MutableProcessPriorityConfigSchema.optional(),
     // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
     deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     // COMPAT(artifactJanitor): added in v0.8.2, remove nothing — additive optional config.
@@ -678,6 +720,8 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(leaderCompaction): added in v0.8.2, remove nothing — additive optional config.
     leaderCompaction: MutableLeaderCompactionConfigSchema.optional(),
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
+    // COMPAT(admission): additive optional config, nothing to remove.
+    admission: MutableAdmissionConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
     // COMPAT(remediation): additive optional config, nothing to remove.
@@ -707,12 +751,14 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    processPriority: MutableProcessPriorityPatchSchema.optional(),
     deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
     leaderCompaction: MutableLeaderCompactionPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
+    admission: MutableAdmissionPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
@@ -1364,6 +1410,13 @@ const AgentMcpServerStatusSchema = z.object({
   status: z.string(),
 });
 
+/** A child turn held by the daemon's child-admission cap (docs/resource-monitor.md). */
+export const AgentTurnQueuedSchema = z.object({
+  queuedAt: z.string(),
+});
+
+export type AgentTurnQueued = z.infer<typeof AgentTurnQueuedSchema>;
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,
@@ -1403,6 +1456,9 @@ export const AgentSnapshotPayloadSchema = z.object({
   // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
   owedFinishReport: OwedFinishReportSchema.optional(),
   modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove. Set while a child's new turn
+  // waits for a machine-wide admission slot; the agent's status reads running meanwhile.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1436,6 +1492,8 @@ export const AgentListItemPayloadSchema = z.object({
   // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
   owedFinishReport: OwedFinishReportSchema.optional(),
   modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

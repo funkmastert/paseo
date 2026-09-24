@@ -283,6 +283,7 @@ export const ru: TranslationResources = {
       running: "Работает",
       error: "Ошибка",
       closed: "Закрыт",
+      queued: "В очереди",
     },
     badges: {
       archived: "В архиве",

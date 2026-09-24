@@ -25,12 +25,14 @@ interface SupportedMutableConfigPatch {
   metadataGeneration?: Partial<MutableDaemonConfig["metadataGeneration"]>;
   tokenBurnMonitor?: MutableDaemonConfig["tokenBurnMonitor"];
   resourceMonitor?: MutableDaemonConfig["resourceMonitor"];
+  processPriority?: MutableDaemonConfig["processPriority"];
   deviceLeases?: MutableDaemonConfig["deviceLeases"];
   artifactJanitor?: MutableDaemonConfig["artifactJanitor"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
   leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
+  admission?: MutableDaemonConfig["admission"];
   refocus?: MutableDaemonConfig["refocus"];
   remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
@@ -208,12 +210,14 @@ const RELOADABLE_PATHS = [
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
   "agents.resourceMonitor",
+  "agents.processPriority",
   "agents.deviceLeases",
   "agents.artifactJanitor",
   "agents.accountFailover",
   "agents.budgetPacing",
   "agents.leaderCompaction",
   "agents.doneJanitor",
+  "agents.admission",
   "agents.refocus",
   "agents.remediation",
   "agents.skills.selection",
@@ -249,12 +253,14 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.resourceMonitor", "resourceMonitor"],
+  ["agents.processPriority", "processPriority"],
   ["agents.deviceLeases", "deviceLeases"],
   ["agents.artifactJanitor", "artifactJanitor"],
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
   ["agents.leaderCompaction", "leaderCompaction"],
   ["agents.doneJanitor", "doneJanitor"],
+  ["agents.admission", "admission"],
   ["agents.refocus", "refocus"],
   ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
@@ -335,6 +341,12 @@ function pickResourceMonitorPatch(
   return resourceMonitor === undefined ? {} : { resourceMonitor };
 }
 
+function pickProcessPriorityPatch(
+  processPriority: MutableDaemonConfigPatch["processPriority"],
+): Pick<SupportedMutableConfigPatch, "processPriority"> {
+  return processPriority === undefined ? {} : { processPriority };
+}
+
 function pickDeviceLeasesPatch(
   deviceLeases: MutableDaemonConfigPatch["deviceLeases"],
 ): Pick<SupportedMutableConfigPatch, "deviceLeases"> {
@@ -369,6 +381,12 @@ function pickDoneJanitorPatch(
   doneJanitor: MutableDaemonConfigPatch["doneJanitor"],
 ): Pick<SupportedMutableConfigPatch, "doneJanitor"> {
   return doneJanitor === undefined ? {} : { doneJanitor };
+}
+
+function pickAdmissionPatch(
+  admission: MutableDaemonConfigPatch["admission"],
+): Pick<SupportedMutableConfigPatch, "admission"> {
+  return admission === undefined ? {} : { admission };
 }
 
 function pickRefocusPatch(
@@ -409,12 +427,14 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickMetadataGenerationPatch(patch.metadataGeneration),
     ...pickTokenBurnMonitorPatch(patch.tokenBurnMonitor),
     ...pickResourceMonitorPatch(patch.resourceMonitor),
+    ...pickProcessPriorityPatch(patch.processPriority),
     ...pickDeviceLeasesPatch(patch.deviceLeases),
     ...pickArtifactJanitorPatch(patch.artifactJanitor),
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
     ...pickLeaderCompactionPatch(patch.leaderCompaction),
     ...pickDoneJanitorPatch(patch.doneJanitor),
+    ...pickAdmissionPatch(patch.admission),
     ...pickRefocusPatch(patch.refocus),
     ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
@@ -853,6 +873,19 @@ function mergeResourceMonitorForPersist(
   ) as PersistedResourceMonitor;
 }
 
+type PersistedProcessPriority = NonNullable<PersistedConfig["agents"]>["processPriority"];
+
+// Flat like deviceLeases below: every key is a scalar, so a shallow merge keeps the rest.
+function mergeProcessPriorityForPersist(
+  persisted: PersistedProcessPriority,
+  patch: SupportedMutableConfigPatch["processPriority"],
+): PersistedProcessPriority {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch };
+}
+
 type PersistedDeviceLeases = NonNullable<PersistedConfig["agents"]>["deviceLeases"];
 
 // Flat, unlike resourceMonitor above: every key is a scalar, so a shallow merge keeps the rest
@@ -936,6 +969,19 @@ function mergeDoneJanitorForPersist(
     return persisted;
   }
   return { ...persisted, ...patch };
+}
+
+type PersistedAdmission = NonNullable<PersistedConfig["agents"]>["admission"];
+
+// Flat, like doneJanitor above: every key is a scalar.
+function mergeAdmissionForPersist(
+  persisted: PersistedAdmission,
+  patch: SupportedMutableConfigPatch["admission"],
+): PersistedAdmission {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedAdmission;
 }
 
 type PersistedRemediation = NonNullable<PersistedConfig["agents"]>["remediation"];
@@ -1024,17 +1070,35 @@ function touchesAgentConfig(
     patch.metadataGeneration !== undefined ||
     patch.tokenBurnMonitor !== undefined ||
     patch.resourceMonitor !== undefined ||
+    patch.processPriority !== undefined ||
     patch.deviceLeases !== undefined ||
     patch.artifactJanitor !== undefined ||
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
     patch.leaderCompaction !== undefined ||
     patch.doneJanitor !== undefined ||
+    patch.admission !== undefined ||
     patch.refocus !== undefined ||
     patch.remediation !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
+}
+
+// The agents.* sections that limit how the daemon treats agent processes rather than monitor
+// them. Split from mergeMonitorSectionsForPersist to keep it under the complexity limit.
+function mergeProcessPolicySectionsForPersist(
+  next: Record<string, unknown>,
+  persistedAgents: PersistedConfig["agents"],
+  patch: Omit<SupportedMutableConfigPatch, "removeProviders">,
+): void {
+  const processPriority = mergeProcessPriorityForPersist(
+    persistedAgents?.processPriority,
+    patch.processPriority,
+  );
+  if (processPriority !== undefined) next["processPriority"] = processPriority;
+  const admission = mergeAdmissionForPersist(persistedAgents?.admission, patch.admission);
+  if (admission !== undefined) next["admission"] = admission;
 }
 
 // The agents.* monitor sections, one merge each. Split out of mergeMutableAgentPatch so a new
@@ -1125,6 +1189,7 @@ function mergeMutableAgentPatch(
   if (metadataGeneration !== undefined) next["metadataGeneration"] = metadataGeneration;
 
   mergeMonitorSectionsForPersist(next, persistedAgents, patch);
+  mergeProcessPolicySectionsForPersist(next, persistedAgents, patch);
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

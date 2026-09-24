@@ -1,6 +1,12 @@
-import { execFile } from "node:child_process";
+import { type ExecFileOptions, execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { lowerProcessPriority, SAMPLER_NICE } from "../../utils/process-priority.js";
+import {
+  createSystemLoadSampler,
+  type SystemLoadSample,
+  type SystemLoadSampler,
+} from "./system-load.js";
 
 /**
  * One row of `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` output. `command` is the full
@@ -16,8 +22,9 @@ export interface ProcessSampleRow {
   pid: number;
   ppid: number;
   /** Owning user id. Carried so build-daemon-reaper.ts can refuse to signal another user's
-   * process; nothing in the reporting-only legs reads it. */
-  uid: number;
+   * process; nothing in the reporting-only legs reads it. Undefined on Windows, which has no
+   * uid: the reaper refuses to signal a row without one. */
+  uid: number | undefined;
   rssKb: number;
   cpuPercent: number;
   etime: string;
@@ -86,6 +93,75 @@ export function parsePsOutput(output: string): ProcessSampleRow[] {
     const trimmed = line.trim();
     if (!trimmed) continue;
     const row = parsePsLine(trimmed);
+    if (row) rows.push(row);
+  }
+  return rows;
+}
+
+function readJsonNumber(value: unknown): number | undefined {
+  const parsed = typeof value === "string" ? Number(value) : value;
+  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/** Formats seconds the way `ps` prints `etime` (`[dd-][hh:]mm:ss`), so parseClockSeconds reads it. */
+function formatClock(totalSeconds: number): string {
+  const whole = Math.max(0, Math.floor(totalSeconds));
+  const days = Math.floor(whole / 86_400);
+  const hours = Math.floor((whole % 86_400) / 3_600);
+  const minutes = Math.floor((whole % 3_600) / 60);
+  const seconds = whole % 60;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const clock = `${pad(minutes)}:${pad(seconds)}`;
+  if (days > 0) return `${days}-${pad(hours)}:${clock}`;
+  return hours > 0 ? `${pad(hours)}:${clock}` : clock;
+}
+
+// Win32_Process's CPU counters are in 100-nanosecond units.
+const WINDOWS_CPU_TICKS_PER_SECOND = 10_000_000;
+
+function parseWindowsProcess(entry: unknown): ProcessSampleRow | undefined {
+  if (typeof entry !== "object" || entry === null) return undefined;
+  const record = entry as Record<string, unknown>;
+  const pid = readJsonNumber(record.ProcessId);
+  const ppid = readJsonNumber(record.ParentProcessId);
+  if (pid === undefined || ppid === undefined) return undefined;
+  const cpuSeconds =
+    ((readJsonNumber(record.UserModeTime) ?? 0) + (readJsonNumber(record.KernelModeTime) ?? 0)) /
+    WINDOWS_CPU_TICKS_PER_SECOND;
+  const ageSeconds = readJsonNumber(record.AgeSeconds) ?? 0;
+  const commandLine = typeof record.CommandLine === "string" ? record.CommandLine : "";
+  const name = typeof record.Name === "string" ? record.Name : "";
+  return {
+    pid,
+    ppid,
+    uid: undefined,
+    rssKb: Math.round((readJsonNumber(record.WorkingSetSize) ?? 0) / 1024),
+    // ps's %CPU is a lifetime average; this is the same number, and process-cpu-rate.ts replaces
+    // it with the rate between sweeps from the second sighting on.
+    cpuPercent: ageSeconds > 0 ? (cpuSeconds / ageSeconds) * 100 : 0,
+    etime: formatClock(ageSeconds),
+    cpuSeconds,
+    // Protected processes hide their command line from a non-elevated caller.
+    command: commandLine || name,
+  };
+}
+
+/**
+ * Parses the JSON WINDOWS_PROCESS_QUERY prints into the rows `ps` produces elsewhere.
+ * ConvertTo-Json emits a bare object for a single process and an array otherwise; UInt64
+ * counters may come out as numbers or strings depending on the PowerShell version.
+ */
+export function parseWindowsProcessJson(output: string): ProcessSampleRow[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    return [];
+  }
+  const entries = Array.isArray(parsed) ? parsed : [parsed];
+  const rows: ProcessSampleRow[] = [];
+  for (const entry of entries) {
+    const row = parseWindowsProcess(entry);
     if (row) rows.push(row);
   }
   return rows;
@@ -173,35 +249,69 @@ export function parseProcMeminfo(content: string): SystemMemorySample | undefine
 }
 
 /**
- * Injectable seam for AgentResourceMonitor's sweep — the real implementation shells out to
- * `ps`/`sysctl` or reads `/proc/meminfo`; tests supply a fake that returns fixture rows without
- * spawning anything. Both methods are best-effort telemetry, never a critical path: they resolve
- * to "no signal" (`[]` / undefined) on any failure — `ps` or `sysctl` missing (minimal
- * containers), a hung child (bounded by a timeout), unrecognized output — rather than throwing.
+ * Injectable seam for the process table and system memory — the real implementation shells out
+ * to `ps`/`sysctl` (PowerShell on Windows) or reads `/proc/meminfo`; tests supply a fake that
+ * returns fixture rows without spawning anything. Both methods are best-effort telemetry, never a
+ * critical path: they resolve to "no signal" (`[]` / undefined) on any failure — the tool missing
+ * (minimal containers), a hung child (bounded by a timeout), unrecognized output — rather than
+ * throwing. A caller that must tell "no processes" from "could not look" uses
+ * ResourceMonitorSampler.sampleProcessTable instead.
  */
 export interface ProcessSampler {
   sampleProcesses(): Promise<ProcessSampleRow[]>;
   sampleSystemMemory(): Promise<SystemMemorySample | undefined>;
 }
 
+export type ProcessTableSample =
+  | { status: "ok"; rows: ProcessSampleRow[] }
+  | { status: "failed"; error: unknown };
+
+/** What AgentResourceMonitor needs on top of ProcessSampler. See docs/resource-monitor.md. */
+export interface ResourceMonitorSampler extends ProcessSampler {
+  /** Like sampleProcesses, but a failed read says so instead of looking like an empty machine. */
+  sampleProcessTable(): Promise<ProcessTableSample>;
+  /** Load and free memory from `os`, which spawns nothing and so cannot go blind. */
+  sampleSystemLoad(): SystemLoadSample;
+}
+
 const execFileAsync = promisify(execFile);
 const PS_ARGS = ["-axo", "pid,ppid,uid,rss,pcpu,etime,cputime,command"];
-const PS_MAX_BUFFER_BYTES = 8 * 1024 * 1024;
-// The monitor exists for overloaded machines, where `ps` itself can stall; a stalled sample must
-// not outlive the sweep interval or pile up child processes on top of the load being measured.
-const SAMPLE_TIMEOUT_MS = 15_000;
+const PROCESS_TABLE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+// The monitor exists for overloaded machines, where `ps` itself can take a long time to be
+// scheduled; at load 38 on 16 cores a 15s timeout failed every sweep and blinded the monitor
+// exactly when it mattered. 45s still ends inside the 60s sweep interval, and the monitor's
+// sweepInFlight guard stops a slow sweep from overlapping the next.
+const SAMPLE_TIMEOUT_MS = 45_000;
+
+/**
+ * Runs a sampling tool at SAMPLER_NICE: below normal, so the daemon's own telemetry yields to
+ * interactive work, but ahead of the agent builds it measures, so it is still scheduled on a
+ * saturated machine. Only the child is lowered, never the daemon: a lowered priority cannot be
+ * raised again without root.
+ */
+export async function execFileAtLowPriority(
+  file: string,
+  args: readonly string[],
+  options: ExecFileOptions,
+): Promise<string> {
+  const pending = execFileAsync(file, [...args], { ...options, encoding: "utf8" });
+  lowerProcessPriority(pending.child.pid, SAMPLER_NICE);
+  const { stdout } = await pending;
+  return stdout;
+}
 
 async function sampleMacosMemory(): Promise<SystemMemorySample | undefined> {
+  const options = { timeout: SAMPLE_TIMEOUT_MS };
   try {
     const [memsize, swapUsage, vmStat] = await Promise.all([
-      execFileAsync("sysctl", ["-n", "hw.memsize"], { timeout: SAMPLE_TIMEOUT_MS }),
-      execFileAsync("sysctl", ["vm.swapusage"], { timeout: SAMPLE_TIMEOUT_MS }),
-      execFileAsync("vm_stat", [], { timeout: SAMPLE_TIMEOUT_MS }).catch(() => undefined),
+      execFileAtLowPriority("sysctl", ["-n", "hw.memsize"], options),
+      execFileAtLowPriority("sysctl", ["vm.swapusage"], options),
+      execFileAtLowPriority("vm_stat", [], options).catch(() => undefined),
     ]);
-    const totalPhysicalBytes = Number.parseInt(memsize.stdout.trim(), 10);
-    const swap = parseMacosSwapUsage(swapUsage.stdout);
+    const totalPhysicalBytes = Number.parseInt(memsize.trim(), 10);
+    const swap = parseMacosSwapUsage(swapUsage);
     if (!Number.isFinite(totalPhysicalBytes) || !swap) return undefined;
-    const availableBytes = vmStat ? parseMacosVmStat(vmStat.stdout) : undefined;
+    const availableBytes = vmStat ? parseMacosVmStat(vmStat) : undefined;
     return {
       totalPhysicalBytes,
       ...swap,
@@ -223,45 +333,88 @@ async function sampleLinuxMemory(): Promise<SystemMemorySample | undefined> {
   }
 }
 
-export interface SystemProcessSamplerOptions {
-  logger?: { warn: (obj: object, msg?: string) => void };
-  /** Runs `ps` and resolves its stdout; injectable so tests can fail it without spawning. */
-  runPs?: () => Promise<string>;
+// Windows has no `ps`. CreationDate is turned into an age in PowerShell so the parser never has
+// to read CIM or /Date()/ timestamps, whose JSON shape differs between PowerShell 5.1 and 7.
+const WINDOWS_PROCESS_QUERY =
+  "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $now=Get-Date; " +
+  "Get-CimInstance Win32_Process | ForEach-Object { [pscustomobject]@{ " +
+  "ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; WorkingSetSize=$_.WorkingSetSize; " +
+  "UserModeTime=$_.UserModeTime; KernelModeTime=$_.KernelModeTime; " +
+  "AgeSeconds=$(if ($_.CreationDate) { [int64]($now - $_.CreationDate).TotalSeconds } else { $null }); " +
+  "Name=$_.Name; CommandLine=$_.CommandLine } } | ConvertTo-Json -Compress";
+
+async function readSystemProcessTable(): Promise<ProcessSampleRow[]> {
+  const options = { maxBuffer: PROCESS_TABLE_MAX_BUFFER_BYTES, timeout: SAMPLE_TIMEOUT_MS };
+  if (process.platform === "win32") {
+    const stdout = await execFileAtLowPriority(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        WINDOWS_PROCESS_QUERY,
+      ],
+      { ...options, windowsHide: true },
+    );
+    return parseWindowsProcessJson(stdout);
+  }
+  return parsePsOutput(await execFileAtLowPriority("ps", PS_ARGS, options));
 }
 
-async function runSystemPs(): Promise<string> {
-  const { stdout } = await execFileAsync("ps", PS_ARGS, {
-    maxBuffer: PS_MAX_BUFFER_BYTES,
-    timeout: SAMPLE_TIMEOUT_MS,
-  });
-  return stdout;
+export interface SystemProcessSamplerOptions {
+  logger: {
+    info: (obj: object, msg?: string) => void;
+    warn: (obj: object, msg?: string) => void;
+  };
+  /** Reads the platform's process table; injectable so tests can fail it without spawning. */
+  readProcessTable?: () => Promise<ProcessSampleRow[]>;
+  /** Injectable so tests control load and free memory. */
+  loadSampler?: SystemLoadSampler;
 }
 
 export function createSystemProcessSampler(
-  options: SystemProcessSamplerOptions = {},
-): ProcessSampler {
-  const runPs = options.runPs ?? runSystemPs;
-  // A host without `ps` fails the same way every sweep; say so once, not every 60 seconds.
-  let warnedAboutPs = false;
-  return {
-    async sampleProcesses() {
-      try {
-        return parsePsOutput(await runPs());
-      } catch (error) {
-        if (!warnedAboutPs) {
-          warnedAboutPs = true;
-          options.logger?.warn(
-            { err: error },
-            "Resource monitor cannot sample processes; process legs are off until ps works",
-          );
-        }
-        return [];
+  options: SystemProcessSamplerOptions,
+): ResourceMonitorSampler {
+  const readProcessTable = options.readProcessTable ?? readSystemProcessTable;
+  const loadSampler = options.loadSampler ?? createSystemLoadSampler();
+  // Warn when a failure streak starts and say when it ends, rather than once for the life of the
+  // daemon: the outage that matters is the second one, on a loaded machine, hours after the first.
+  let failedSamples = 0;
+  async function sampleProcessTable(): Promise<ProcessTableSample> {
+    try {
+      const rows = await readProcessTable();
+      // A machine always has processes; an empty table is output nobody could parse.
+      if (rows.length === 0) throw new Error("The process table came back empty");
+      if (failedSamples > 0) {
+        options.logger.info({ failedSamples }, "Resource monitor can sample processes again");
+        failedSamples = 0;
       }
+      return { status: "ok", rows };
+    } catch (error) {
+      failedSamples += 1;
+      if (failedSamples === 1) {
+        options.logger.warn(
+          { err: error },
+          "Resource monitor cannot sample processes; load and memory are still watched, " +
+            "and attribution uses the last good sample until this recovers",
+        );
+      }
+      return { status: "failed", error };
+    }
+  }
+  return {
+    sampleProcessTable,
+    async sampleProcesses() {
+      const sample = await sampleProcessTable();
+      return sample.status === "ok" ? sample.rows : [];
     },
     async sampleSystemMemory() {
       if (process.platform === "darwin") return sampleMacosMemory();
       if (process.platform === "linux") return sampleLinuxMemory();
       return undefined;
     },
+    sampleSystemLoad: () => loadSampler.sample(),
   };
 }

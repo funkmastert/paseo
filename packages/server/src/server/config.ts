@@ -559,12 +559,14 @@ function resolveAgentMonitorConfig(
   PaseoDaemonConfig,
   | "tokenBurnMonitor"
   | "resourceMonitor"
+  | "processPriority"
   | "deviceLeases"
   | "artifactJanitor"
   | "accountFailover"
   | "budgetPacing"
   | "leaderCompaction"
   | "doneJanitor"
+  | "admission"
   | "refocus"
   | "remediation"
   | "daemonVitals"
@@ -574,12 +576,14 @@ function resolveAgentMonitorConfig(
   return {
     tokenBurnMonitor: agents?.tokenBurnMonitor,
     resourceMonitor: agents?.resourceMonitor,
+    processPriority: agents?.processPriority,
     deviceLeases: agents?.deviceLeases,
     artifactJanitor: agents?.artifactJanitor,
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
     leaderCompaction: agents?.leaderCompaction,
     doneJanitor: agents?.doneJanitor,
+    admission: agents?.admission,
     refocus: agents?.refocus,
     remediation: agents?.remediation,
     daemonVitals: agents?.daemonVitals,

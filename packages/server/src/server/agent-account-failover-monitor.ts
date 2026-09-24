@@ -28,6 +28,7 @@ import {
 } from "./agent/account-failover-migration.js";
 import { planIdleRehomes } from "./agent/account-failover-rehome.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
+import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { PushNotificationSender } from "./push/index.js";
 import { NULL_REMEDIATION_SINK, type RemediationSink } from "./remediation/contract.js";
 
@@ -96,6 +97,8 @@ export interface AccountFailoverMonitorOptions {
    * daemon stop, and hands it over only when its resumed turn hits a cap on a live daemon.
    */
   isClaimedByRestartRecovery?: (agentId: string) => boolean;
+  /** The daemon's shared ResumePacer; every resume prompt this monitor sends goes through it. */
+  paceResume?: PaceResume;
   sweepIntervalMs?: number;
   reactiveSignalTtlMs?: number;
   now?: () => number;
@@ -506,16 +509,19 @@ export class AccountFailoverMonitor {
       }
 
       entry.attempts += 1;
+      const paceResume = this.options.paceResume ?? unpacedResume;
       try {
-        await sendPromptToAgent({
-          agentManager: this.options.agentManager,
-          agentStorage: this.options.agentStorage,
-          agentId: entry.agentId,
-          prompt: entry.prompt,
-          messageId: randomUUID(),
-          unarchive: false,
-          logger,
-        });
+        await paceResume(pacedResume(entry.agentId, summary.labels, "account-failover-retry"), () =>
+          sendPromptToAgent({
+            agentManager: this.options.agentManager,
+            agentStorage: this.options.agentStorage,
+            agentId: entry.agentId,
+            prompt: entry.prompt,
+            messageId: randomUUID(),
+            unarchive: false,
+            logger,
+          }),
+        );
         logger.info(
           { agentId: entry.agentId, attempts: entry.attempts, lastError: summary.lastError },
           "Account failover: re-sent the resume prompt to a stalled agent",
@@ -578,6 +584,7 @@ export class AccountFailoverMonitor {
         agentStorage: this.options.agentStorage,
         workspaceProvisioning: this.options.workspaceProvisioning,
         logger,
+        paceResume: this.options.paceResume,
       });
     } catch (error) {
       logger.warn(

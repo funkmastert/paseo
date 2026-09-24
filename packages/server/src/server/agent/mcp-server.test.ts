@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { realpathSync, rmSync } from "node:fs";
 import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath } from "node:path";
@@ -9,6 +9,10 @@ import { tmpdir } from "node:os";
 import { z } from "zod";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import {
+  resetProcessPriorityPolicy,
+  setProcessPriorityPolicy,
+} from "../../utils/process-priority.js";
 import { createAgentMcpServer } from "./mcp-server.js";
 import { AgentManager, type CreateAgentOptions, type ManagedAgent } from "./agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent-storage.js";
@@ -234,7 +238,6 @@ function buildAgentManagerSpies() {
     getTimeline: vi.fn().mockReturnValue([]),
     resumeAgentFromPersistence: vi.fn(),
     hydrateTimelineFromProvider: vi.fn().mockResolvedValue(undefined),
-    noteFinishObserver: vi.fn(() => () => undefined),
     appendTimelineItem: vi.fn().mockResolvedValue(undefined),
     emitLiveTimelineItem: vi.fn().mockResolvedValue(undefined),
     hasInFlightRun: vi.fn().mockReturnValue(false),
@@ -251,6 +254,10 @@ function buildAgentManagerSpies() {
     // null is the real "this caller may fan out" answer; a test that wants the refusal path
     // overrides it with a { budgetTokens, spentTokens } pair.
     getSpendFanOutDenial: vi.fn().mockReturnValue(null),
+    // setupFinishNotification registers as a finish observer and asks for the durable ledger
+    // (agent-prompt.ts). No ledger is the real "not wired" answer; the release is a no-op.
+    noteFinishObserver: vi.fn().mockReturnValue(() => {}),
+    getFinishObligations: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -1210,6 +1217,50 @@ describe("terminal MCP tools", () => {
       lines: ["from worker scrollback"],
       totalLines: 42,
     });
+  });
+});
+
+describe("create_terminal MCP tool priority", () => {
+  const logger = createTestLogger();
+
+  afterEach(() => {
+    resetProcessPriorityPolicy();
+  });
+
+  async function createdTerminalOptions(callerAgentId?: string): Promise<Record<string, unknown>> {
+    const createTerminal = vi
+      .fn()
+      .mockResolvedValue({ id: "term-1", name: "t", cwd: process.cwd() });
+    const server = await createAgentMcpServer({
+      agentManager: (callerAgentId
+        ? new BoundaryAgentManagerFake()
+        : createTestDeps().agentManager) as AgentManager,
+      agentStorage: new BoundaryAgentStorageFake() as AgentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      terminalManager: createTerminalManagerStub({ createTerminal }),
+      ensureWorkspaceForCreate: async () => "ws-1",
+      ...(callerAgentId ? { callerAgentId } : {}),
+      logger,
+    });
+    await registeredTool(server, "create_terminal").handler(
+      callerAgentId ? {} : { cwd: process.cwd() },
+    );
+    return createTerminal.mock.calls[0]?.[0] as Record<string, unknown>;
+  }
+
+  it("starts an agent's terminal at the agent nice", async () => {
+    setProcessPriorityPolicy({ agentNice: 12 });
+    expect(await createdTerminalOptions("agent-1")).toMatchObject({ nice: 12 });
+  });
+
+  it("leaves the terminal at normal priority while the policy is disabled", async () => {
+    setProcessPriorityPolicy({ enabled: false });
+    expect(await createdTerminalOptions("agent-1")).not.toHaveProperty("nice");
+  });
+
+  it("leaves a terminal at normal priority when no agent asked for it", async () => {
+    setProcessPriorityPolicy({ agentNice: 12 });
+    expect(await createdTerminalOptions()).not.toHaveProperty("nice");
   });
 });
 

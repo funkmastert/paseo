@@ -39,6 +39,7 @@ import type {
 } from "@getpaseo/protocol/agent-types";
 import type {
   AgentMcpServerStatus,
+  AgentTurnQueued,
   ServerInfoStatusPayload,
   ProjectPlacementPayload,
   ServerCapabilities,
@@ -127,6 +128,11 @@ export interface Agent {
    * daemons that predate it. See docs/finish-reports.md.
    */
   owedFinishReport?: OwedFinishReport;
+  /**
+   * Set while this child's new turn waits for a machine-wide admission slot; `status` reads
+   * running meanwhile. Absent on daemons that predate it. See docs/resource-monitor.md.
+   */
+  turnQueued?: AgentTurnQueued;
   /**
    * Live finding from the daemon-side model-divergence monitor: the responses report a model the
    * agent was not configured with. Absent when the monitor is off and on old daemons.

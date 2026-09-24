@@ -38,8 +38,14 @@ export function describeProcess(command: string): string {
   const optionStart = command.search(/\s-/);
   const executable = optionStart === -1 ? command : command.slice(0, optionStart);
   const firstToken = executable.trim().split(/\s+/)[0] ?? "";
-  const name = (executable.includes("/") ? executable.split("/").pop() : firstToken) ?? "";
-  const base = name.trim().split(/\s+/)[0] || "unknown";
+  // Windows command lines use backslashes, often quote the executable, and end it in `.exe`.
+  const name = (/[\\/]/.test(executable) ? executable.split(/[\\/]/).pop() : firstToken) ?? "";
+  const base =
+    name
+      .replace(/"/g, "")
+      .trim()
+      .split(/\s+/)[0]
+      ?.replace(/\.exe$/i, "") || "unknown";
   if (base === "java") {
     const mainClass = command
       .split(/\s+/)

@@ -24,7 +24,7 @@ export type AgentRunController = Pick<
   | "steerOrReplaceActiveTurn"
   | "streamAgent"
 > &
-  Partial<Pick<AgentManager, "interceptPromptForDispatch">> & {
+  Partial<Pick<AgentManager, "interceptPromptForDispatch" | "getAdmittedTurn">> & {
     reloadAgentSession(agentId: string): Promise<unknown>;
   };
 
@@ -34,6 +34,8 @@ export interface StartAgentRunOptions {
   runOptions?: AgentRunOptions;
   /** Ask the provider to deny permissions blocking this steer. */
   clearPendingPermissions?: boolean;
+  /** A child turn held across a restart: if it queues again, it keeps its original place. */
+  queuedAt?: string;
 }
 
 export type PromptDispatchDisposition = "out_of_band" | "steered" | "turn_started";
@@ -79,7 +81,7 @@ async function startOrReplaceRun(
   const replaced = Boolean(options?.replaceRunning && agentManager.hasInFlightRun(agentId));
   const iterator = replaced
     ? await agentManager.replaceAgentRun(agentId, prompt, options?.runOptions)
-    : agentManager.streamAgent(agentId, prompt, options?.runOptions);
+    : agentManager.streamAgent(agentId, prompt, options?.runOptions, options?.queuedAt);
   return { iterator, replaced };
 }
 
@@ -190,8 +192,19 @@ async function startAgentRunInner(
           { agentId, err: error },
           "Provider session went stale; reopening from persistence",
         );
+        // A queued child's turn may have started with later prompts merged into this one; those
+        // callers got an empty stream, so the retry has to carry what was really sent.
+        const admitted = agentManager.getAdmittedTurn?.(iterator);
+        const retryOptions = admitted?.options
+          ? { ...options, runOptions: admitted.options }
+          : options;
         await agentManager.reloadAgentSession(agentId);
-        const retry = await startOrReplaceRun(agentManager, agentId, prompt, options);
+        const retry = await startOrReplaceRun(
+          agentManager,
+          agentId,
+          admitted?.prompt ?? prompt,
+          retryOptions,
+        );
         await drainAgentRunIterator(retry.iterator);
       }
       logger.trace(
@@ -269,6 +282,8 @@ export interface SendPromptToAgentParams {
   unarchive?: boolean;
   /** See {@link StartAgentRunOptions.clearPendingPermissions}. */
   clearPendingPermissions?: boolean;
+  /** See {@link StartAgentRunOptions.queuedAt}. */
+  queuedAt?: string;
   logger: Logger;
 }
 
@@ -360,6 +375,7 @@ export async function sendPromptToAgent(
     replaceRunning: true,
     activeTurnBehavior: params.activeTurnBehavior,
     clearPendingPermissions: params.clearPendingPermissions,
+    ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
     runOptions,
   });
 }

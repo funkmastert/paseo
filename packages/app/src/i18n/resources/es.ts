@@ -284,6 +284,7 @@ export const es: TranslationResources = {
       running: "Correr",
       error: "Error",
       closed: "Cerrado",
+      queued: "En cola",
     },
     badges: {
       archived: "Archivado",

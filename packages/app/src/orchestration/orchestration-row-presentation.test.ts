@@ -18,6 +18,16 @@ describe("resolveOrchestrationRowPresentation", () => {
     expect(running).toMatchObject({ isRunning: true, showActivity: true });
   });
 
+  it("says a child waiting for an admission slot is queued, not doing its last activity", () => {
+    const running = byTitle("Orchestration panel: staleness then presentation");
+    const queued: Agent = { ...running, turnQueued: { queuedAt: "2026-09-24T12:00:00.000Z" } };
+    expect(resolveOrchestrationRowPresentation(queued)).toMatchObject({
+      isRunning: true,
+      showActivity: false,
+      statusKey: "queued",
+    });
+  });
+
   it("hides a finished agent's last activity rather than passing it off as current work", () => {
     const finished = byTitle("Audit every field the panel renders");
     const withStaleSummary: Agent = { ...finished, lastActivitySummary: "[Bash] npm run lint" };

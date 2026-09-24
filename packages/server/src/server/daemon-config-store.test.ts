@@ -1074,6 +1074,36 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-updates processPriority and keeps the other persisted keys", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { processPriority: { agentNice: 15 } } }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        processPriority: { agentNice: 15 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ processPriority: { enabled: false } });
+
+    expect(next.processPriority).toEqual({ agentNice: 15, enabled: false });
+    expect(loadPersistedConfig(paseoHome).agents?.processPriority).toEqual({
+      agentNice: 15,
+      enabled: false,
+    });
+  });
+
   test("patch turns the reaper off without losing the rest of its settings on disk", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
@@ -1106,6 +1136,41 @@ describe("DaemonConfigStore", () => {
     const expected = { enabled: true, dryRun: false, idleMinutes: 30 };
     expect(next.resourceMonitor).toEqual({ reaper: expected });
     expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({ reaper: expected });
+  });
+
+  test("patch tunes one saturation setting and keeps the rest, in memory and on disk", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const saturation = { loadPerCore: 3, sustainedMinutes: 5 };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { resourceMonitor: { saturation } } }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        resourceMonitor: { saturation },
+      },
+      undefined,
+    );
+
+    const remedies = { reniceTopTrees: 2, reniceNice: 19, releaseLoadPerCore: 1.2 };
+    const next = store.patch({
+      resourceMonitor: { saturation: { busyFraction: 0.8, ...remedies } },
+    });
+
+    const expected = { loadPerCore: 3, sustainedMinutes: 5, busyFraction: 0.8, ...remedies };
+    expect(next.resourceMonitor).toEqual({ saturation: expected });
+    expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({
+      saturation: expected,
+    });
   });
 
   test("patch live-toggles doneJanitor.dryRun without disturbing its other fields", () => {
@@ -1143,6 +1208,39 @@ describe("DaemonConfigStore", () => {
       enabled: true,
       quietHours: 96,
       dryRun: true,
+    });
+  });
+
+  test("patch sets admission.maxConcurrentChildTurns live without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({ version: 1, agents: { admission: { bulkResumesPerMinute: 2 } } }, null, 2)}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        admission: { bulkResumesPerMinute: 2 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ admission: { maxConcurrentChildTurns: 6 } });
+
+    expect(next.admission).toEqual({ bulkResumesPerMinute: 2, maxConcurrentChildTurns: 6 });
+    expect(loadPersistedConfig(paseoHome).agents?.admission).toEqual({
+      bulkResumesPerMinute: 2,
+      maxConcurrentChildTurns: 6,
     });
   });
 

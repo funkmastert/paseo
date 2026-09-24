@@ -281,6 +281,7 @@ export const ar: TranslationResources = {
       running: "جري",
       error: "خطأ",
       closed: "مغلق",
+      queued: "في الانتظار",
     },
     badges: {
       archived: "مؤرشف",

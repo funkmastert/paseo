@@ -14,6 +14,7 @@ import type { RemediationTaskClass } from "./config.js";
 export type RemediationConditionKind =
   | "orphan-build-daemons"
   | "system-memory"
+  | "cpu-saturation"
   | "disk-low"
   | "disk-critical"
   | "disk-falling"

@@ -7106,6 +7106,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       "provider.codex.spawn",
     );
     const child = spawnProcess(launchPrefix.command, args, {
+      priority: "agent",
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
       ...createProviderEnvSpec({

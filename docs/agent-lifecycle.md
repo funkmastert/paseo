@@ -10,7 +10,7 @@ initializing → idle → running → idle (or error → closed)
                  └────────┘  (agent completes a turn, awaits next prompt)
 ```
 
-Each live agent in `AgentManager` carries a `lastStatus` of `initializing`, `idle`, `running`, or `error`. `closed` is the persisted, resumable state for an agent record that has no live provider runtime. State transitions persist to disk and stream to subscribed clients via WebSocket.
+Each live agent in `AgentManager` carries a `lastStatus` of `initializing`, `idle`, `running`, or `error`. `running` also covers a child whose new turn is waiting for a machine-wide admission slot; its payload carries `turnQueued` until the turn starts ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)). `closed` is the persisted, resumable state for an agent record that has no live provider runtime. State transitions persist to disk and stream to subscribed clients via WebSocket.
 
 ## Runtime residency
 
