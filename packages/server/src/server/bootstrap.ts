@@ -1774,6 +1774,8 @@ export async function createPaseoDaemon(
     agentManager,
     config: config.restartRecovery,
     logger: logger.child({ module: "restart-recovery" }),
+    isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
+    paceResume: (resume, fn) => resumePacer.run(resume, fn),
   });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
   // the records, so a restart still knows who is waiting to hear back. Recovery decides who was

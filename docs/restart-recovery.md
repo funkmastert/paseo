@@ -15,7 +15,7 @@ A marker with no `endedAt` is open. Two rules keep an open marker meaning "inter
 
 ## Boot
 
-`RestartRecoveryService.capture` runs right after agent storage loads, before anything can load or prompt an agent. It reads every unarchived, non-internal record with an open marker. That list is the episode. Later plans re-read the records, so they reflect what happened after boot.
+`RestartRecoveryService.capture` runs right after agent storage loads and child admission reads back its held turns, before anything can load or prompt an agent. It reads every unarchived, non-internal record with an open marker, minus the children whose turn [child admission](resource-monitor.md#child-admission-and-resume-pacing) holds. A child queued for a slot reads as `running`, so its marker is open too, but its turn never reached the provider and admission re-sends it after the restart. That list is the episode. Later plans re-read the records, so they reflect what happened after boot.
 
 `agents.restartRecovery.mode` in `config.json` sets what happens at boot. It is read once, at startup:
 
@@ -48,7 +48,7 @@ Entry states are `pending`, `resuming`, `resumed`, `failed`, `not_attempted` and
 
 `depth` counts an entry's ancestors that are also in the episode, following `paseo.parent-agent-id` through idle ancestors. Apply resumes depth 0 first. Each depth waits until every agent in the depth before it has started its run, with up to four resuming at a time.
 
-Resuming an agent is `sendPromptToAgent` with one `<paseo-system>` prompt (`envelope.ts`). The prompt names the interrupted turn and says what survived it and what did not. It tells a leader which of its children recovery is bringing back, so the leader does not relaunch them. It tells a child that its parent was resumed first. A resume that fails is recorded as `failed` with the error, and the agent stays closed. It never falls back to a fresh agent. After the waves finish, each resumed parent gets one steer that lists the mid-turn children recovery could not bring back.
+Resuming an agent is `sendPromptToAgent` with one `<paseo-system>` prompt (`envelope.ts`), sent through the daemon's shared `ResumePacer` like every other bulk resume. A child's resume still asks admission for a slot, and a turn queued there counts as started, so the next wave does not wait on it. The prompt names the interrupted turn and says what survived it and what did not. It tells a leader which of its children recovery is bringing back, so the leader does not relaunch them. It tells a child that its parent was resumed first. A resume that fails is recorded as `failed` with the error, and the agent stays closed. It never falls back to a fresh agent. After the waves finish, each resumed parent gets one steer that lists the mid-turn children recovery could not bring back.
 
 `stop()` runs first in daemon shutdown. An apply stops before its next wave.
 
@@ -67,6 +67,7 @@ One owner per case, so no agent is resumed twice:
 | Cut off mid-turn by a daemon stop        | Restart recovery                              | Finish reports and [account failover](account-failover.md) skip a claimed agent. The done janitor treats an open marker as neither dead nor done. |
 | Stalled in `running` on a live daemon    | The [stalled-agent sweep](stalled-agents.md)  | A restart-cut agent is not `running` until something resumes it, so the sweep never sees it.                                                      |
 | A turn that failed on a dead account     | [Account failover](account-failover.md)       | Recovery resumes on the agent's own account. If that turn hits the cap, failover takes it like any other capped turn.                             |
+| A child queued for a slot at the stop    | Child admission                               | Admission re-sends the held prompt. Recovery's capture leaves out any child whose turn admission holds.                                           |
 
 ## Surfaces
 

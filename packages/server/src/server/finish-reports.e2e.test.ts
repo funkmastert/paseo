@@ -152,7 +152,10 @@ async function stopDaemon(home: Home): Promise<void> {
 /** A real stop and a fresh start on the same PASEO_HOME. */
 async function restart(
   home: Home,
-  options: { admission?: ChildAdmissionConfig } = {},
+  options: {
+    restartRecovery?: PaseoDaemonConfig["restartRecovery"];
+    admission?: ChildAdmissionConfig;
+  } = {},
 ): Promise<PaseoDaemon> {
   await stopDaemon(home);
   return startDaemon(home, options);
@@ -511,6 +514,60 @@ describe("finish reports survive a daemon restart (e2e)", () => {
     await sweep(home);
     expect(obligationInLedger(home, second)).toMatchObject({ state: "pending" });
     expect(await reportAbout(home, { to: parent, about: second })).toBeUndefined();
+  }, 60_000);
+
+  test("restart recovery resumes the child cut off mid-turn and leaves a queued child's turn to admission", async () => {
+    const admission = { maxConcurrentChildTurns: 1, bulkResumesPerMinute: 10 };
+    await clientOf(home).patchDaemonConfig({ admission });
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const busy = await createAgent(home, {
+      title: "Busy worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    const held = await createAgent(home, {
+      title: "Held worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    await clientOf(home).sendMessage(busy, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(busy)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    await clientOf(home).sendMessage(held, `keep working until interrupted ${held}`);
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(held)?.turnQueued, { timeout: 10_000 })
+      .toBeDefined();
+    // A queued child reads as running, so its run marker is open like the busy one's.
+    await expect
+      .poll(async () => (await daemonOf(home).agentStorage.get(held))?.runMarker, {
+        timeout: 10_000,
+      })
+      .toMatchObject({ startedAt: expect.any(String) });
+    expect(providerSaw(home, `interrupted ${held}`)).toBe(false);
+
+    // Two slots after the restart: the held turn admission re-sends never ends, and the busy
+    // child's resume must not queue behind it.
+    await restart(home, {
+      admission: { ...admission, maxConcurrentChildTurns: 2 },
+      restartRecovery: { mode: "resume" },
+    });
+
+    // Recovery owns only the turn that reached the provider.
+    const plan = await daemonOf(home).getRestartRecovery().getPlan();
+    expect(plan.entries.map((entry) => entry.agentId)).toEqual([busy]);
+    // Admission re-sends the held prompt; recovery sends one resume, to the busy child only.
+    await expect
+      .poll(() => providerSaw(home, `interrupted ${held}`), { timeout: 10_000 })
+      .toBe(true);
+    await expect
+      .poll(
+        () => home.prompts.filter((prompt) => prompt.text.includes("Restart recovery")).length,
+        { timeout: 10_000 },
+      )
+      .toBe(1);
+    const busySession = await sessionIdOf(home, busy);
+    const recoveryPrompt = home.prompts.find((prompt) => prompt.text.includes("Restart recovery"));
+    expect(recoveryPrompt?.sessionId).toBe(busySession);
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {

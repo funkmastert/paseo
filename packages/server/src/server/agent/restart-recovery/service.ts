@@ -22,6 +22,7 @@ import {
   waitForAgentRunStartWithTimeout,
 } from "../agent-prompt.js";
 import { isLimitShapedError } from "../account-failover-detector.js";
+import { unpacedResume, type PaceResume } from "../resume-pacer.js";
 import { isRunMarkerOpen, settleRunMarker } from "./run-marker.js";
 import {
   computeRecoveryDepths,
@@ -84,6 +85,14 @@ export interface RestartRecoveryServiceOptions {
    * nothing here: a mid-turn agent was interrupted whichever way the daemon went down.
    */
   readPreviousShutdown?: () => Promise<string>;
+  /**
+   * Whether child admission holds this agent's turn: queued for a slot when the daemon stopped,
+   * and re-sent by admission after the restart (docs/resource-monitor.md). Such a turn never
+   * reached the provider, so it was not cut off; admission owns it and recovery leaves it out.
+   */
+  isTurnHeld?: (agentId: string) => boolean;
+  /** The daemon's shared ResumePacer; every resume prompt recovery sends goes through it. */
+  paceResume?: PaceResume;
 }
 
 /**
@@ -124,6 +133,7 @@ export class RestartRecoveryService {
     const episode = records
       .filter((record) => !record.archivedAt && !record.internal)
       .filter((record) => isRunMarkerOpen(record.runMarker))
+      .filter((record) => !options.isTurnHeld?.(record.id))
       .map(
         (record): InterruptedRun => ({
           agentId: record.id,
@@ -304,15 +314,22 @@ export class RestartRecoveryService {
             : null,
         recoveringChildren: children.map(toPeer),
       });
-      await sendPromptToAgent({
-        agentManager,
-        agentStorage,
-        agentId,
-        prompt: formatSystemNotificationPrompt(prompt),
-        messageId: randomUUID(),
-        unarchive: false,
-        logger,
-      });
+      // A bulk resume: paced with every other one, roots first. A child still asks admission
+      // for a slot, and waitForAgentRunStart counts a queued turn as started.
+      const pace = this.options.paceResume ?? unpacedResume;
+      await pace(
+        { agentId, root: entry.parentAgentId === null, source: "restart-recovery" },
+        () =>
+          sendPromptToAgent({
+            agentManager,
+            agentStorage,
+            agentId,
+            prompt: formatSystemNotificationPrompt(prompt),
+            messageId: randomUUID(),
+            unarchive: false,
+            logger,
+          }),
+      );
       try {
         await waitForAgentRunStartWithTimeout(agentManager, agentId);
       } catch (error) {
