@@ -641,6 +641,8 @@ export interface PaseoDaemonConfig {
     sweepIntervalMs?: number;
     ladder?: Partial<FinishReportLadderConfig>;
     now?: () => number;
+    /** Stands in for restart recovery's claims, which only a real restart produces. */
+    isClaimedByRestartRecovery?: (agentId: string) => boolean;
   };
   doneJanitor?: DoneJanitorConfig;
   admission?: ChildAdmissionConfig;
@@ -1087,7 +1089,9 @@ function createFinishObligationService(input: {
     logger: input.logger,
     isAccountFailoverEnabled: () =>
       input.daemonConfigStore.get().accountFailover?.enabled !== false,
-    isClaimedByRestartRecovery: (agentId) => input.restartRecovery.isAboutToResume(agentId),
+    isClaimedByRestartRecovery:
+      overrides?.isClaimedByRestartRecovery ??
+      ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
     paceResume: input.paceResume,
     isTurnHeld: input.isTurnHeld,
     sweepIntervalMs: overrides?.sweepIntervalMs,

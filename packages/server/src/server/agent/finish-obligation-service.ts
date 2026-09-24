@@ -523,13 +523,24 @@ export class FinishObligationService {
     plan: Extract<ObligationStep, { kind: "deliver" }>,
     context: ObligationContext,
   ): Promise<boolean> {
+    // The target is not always the stored owner advanceSteps checked: resolveOwner follows
+    // `migrated-to` to a successor, and the orchestrator rung walks up the tree. A target restart
+    // recovery has claimed waits for it to let go, like a claimed owner; nothing is recorded.
+    const claimed = this.options.isClaimedByRestartRecovery;
+    if (claimed?.(plan.targetAgentId)) return false;
+    let deferredToRecovery = false;
     let error: string | null = null;
     try {
       const report = await this.buildReport(childAgentId, obligation, context);
       const body =
         plan.rung === "orchestrator" ? await this.wrapForOrchestrator(obligation, report) : report;
-      const send = () =>
-        sendPromptToAgent({
+      const send = async (): Promise<void> => {
+        // Again at the moment of sending: a paced send can wait while an apply claims the target.
+        if (claimed?.(plan.targetAgentId)) {
+          deferredToRecovery = true;
+          return;
+        }
+        await sendPromptToAgent({
           agentManager: this.options.agentManager,
           agentStorage: this.options.agentStorage,
           agentId: plan.targetAgentId,
@@ -540,6 +551,7 @@ export class FinishObligationService {
           unarchive: false,
           logger: this.options.logger,
         });
+      };
       if (obligation.outcome?.reason === "stopped before reporting" && this.options.paceResume) {
         // After a restart the owner is usually not loaded yet; its record has the same labels.
         const labels =
@@ -555,6 +567,7 @@ export class FinishObligationService {
     } catch (caught) {
       error = caught instanceof Error ? caught.message : String(caught);
     }
+    if (deferredToRecovery) return false;
     const nowMs = this.now();
     const next = recordDeliveryAttempt(obligation, {
       rung: plan.rung,

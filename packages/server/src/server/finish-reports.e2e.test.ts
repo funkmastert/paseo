@@ -5,7 +5,10 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
-import { HANDOFF_FROM_LABEL } from "./agent/account-failover-detector.js";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  HANDOFF_FROM_LABEL,
+} from "./agent/account-failover-detector.js";
 import type { ChildAdmissionConfig } from "./agent/child-admission.js";
 import { setupFinishNotification } from "./agent/agent-prompt.js";
 import type { FinishObligation } from "./agent/finish-obligation.js";
@@ -78,13 +81,14 @@ async function createHome(): Promise<Home> {
   return home;
 }
 
-async function startDaemon(
-  home: Home,
-  options: {
-    restartRecovery?: PaseoDaemonConfig["restartRecovery"];
-    admission?: ChildAdmissionConfig;
-  } = {},
-): Promise<PaseoDaemon> {
+interface StartOptions {
+  restartRecovery?: PaseoDaemonConfig["restartRecovery"];
+  admission?: ChildAdmissionConfig;
+  /** Agents restart recovery is said to hold; only a real restart produces real claims. */
+  claimedByRecovery?: ReadonlySet<string>;
+}
+
+async function startDaemon(home: Home, options: StartOptions = {}): Promise<PaseoDaemon> {
   const staticDir = await mkdtemp(path.join(tmpdir(), "paseo-finish-reports-static-"));
   home.staticDirs.push(staticDir);
   const daemon = await createPaseoDaemon(
@@ -120,6 +124,9 @@ async function startDaemon(
         sweepIntervalMs: 60 * MINUTE_MS,
         ladder: { retryIntervalMs: RETRY_INTERVAL_MS, parkedGraceMs: PARKED_GRACE_MS },
         now: () => home.clockMs,
+        ...(options.claimedByRecovery
+          ? { isClaimedByRestartRecovery: (id: string) => options.claimedByRecovery!.has(id) }
+          : {}),
       },
       accountFailoverOverrides: { sweepIntervalMs: 60 * MINUTE_MS },
       ...(options.restartRecovery ? { restartRecovery: options.restartRecovery } : {}),
@@ -150,13 +157,7 @@ async function stopDaemon(home: Home): Promise<void> {
 }
 
 /** A real stop and a fresh start on the same PASEO_HOME. */
-async function restart(
-  home: Home,
-  options: {
-    restartRecovery?: PaseoDaemonConfig["restartRecovery"];
-    admission?: ChildAdmissionConfig;
-  } = {},
-): Promise<PaseoDaemon> {
+async function restart(home: Home, options: StartOptions = {}): Promise<PaseoDaemon> {
   await stopDaemon(home);
   return startDaemon(home, options);
 }
@@ -568,6 +569,43 @@ describe("finish reports survive a daemon restart (e2e)", () => {
     const busySession = await sessionIdOf(home, busy);
     const recoveryPrompt = home.prompts.find((prompt) => prompt.text.includes("Restart recovery"));
     expect(recoveryPrompt?.sessionId).toBe(busySession);
+  }, 60_000);
+
+  test("a report whose owner moved to a successor waits while restart recovery holds that successor", async () => {
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const successor = await createAgent(home, { title: "Leader (moved)" });
+    await converse(home, successor, "SUCCESSOR-READY");
+    const child = await createAgent(home, {
+      title: "Worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    await clientOf(home).sendMessage(child, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(child)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    watchForParent(home, { child, parent });
+    await expect.poll(() => obligationOnDisk(home, child)).toMatchObject({ state: "pending" });
+    // Account failover retired the leader into the successor, so reports resolve to it.
+    await daemonOf(home).agentManager.setLabels(parent, {
+      [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: successor,
+    });
+
+    // The stored owner is the leader, which nobody claims; recovery holds the successor.
+    const claimed = new Set([successor]);
+    await restart(home, { claimedByRecovery: claimed });
+    await sweep(home);
+    home.clockMs += PARKED_GRACE_MS;
+    await sweep(home);
+    expect(await reportAbout(home, { to: successor, about: child })).toBeUndefined();
+    expect(obligationInLedger(home, child)?.state).not.toBe("delivered");
+
+    // Recovery lets go: the report goes to the successor, as it always would have.
+    claimed.delete(successor);
+    await sweep(home);
+    await expect
+      .poll(() => reportAbout(home, { to: successor, about: child }))
+      .toContain(`Agent ${child} (Worker) stopped before reporting.`);
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {
