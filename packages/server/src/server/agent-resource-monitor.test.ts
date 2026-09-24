@@ -5,8 +5,14 @@ import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentResourceMonitorState } from "./agent/resource-monitor-detector.js";
 import type { ProcessSignalOutcome, ProcessSignaller } from "./agent/build-daemon-reaper.js";
 import type { ProcessSampleRow, SystemMemorySample } from "./agent/process-sampler.js";
-import { AgentResourceMonitor, type ResourceMonitorConfig } from "./agent-resource-monitor.js";
+import {
+  AgentResourceMonitor,
+  type AgentResourceMonitorOptions,
+  type ResourceMonitorConfig,
+} from "./agent-resource-monitor.js";
 import type { PushPayload } from "./push/push-service.js";
+import type { PushSendMeta } from "./push/index.js";
+import type { RemediationObservation, RemediationSink } from "./remediation/contract.js";
 
 function createLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -41,9 +47,36 @@ function createFakeAgentStorage(titles: Record<string, string> = {}) {
 
 function createFakePushSender() {
   const sent: PushPayload[] = [];
+  const levels: Array<PushSendMeta["level"]> = [];
   return {
-    sender: { send: vi.fn(async (payload: PushPayload) => void sent.push(payload)) },
+    sender: {
+      send: vi.fn(async (payload: PushPayload, meta?: PushSendMeta) => {
+        sent.push(payload);
+        levels.push(meta?.level);
+      }),
+    },
     sent,
+    levels,
+  };
+}
+
+/** Records every observation, the way the ladder's own tests will see them. */
+function createRecordingSink() {
+  const observations: RemediationObservation[] = [];
+  const sink: RemediationSink = {
+    observe: async (observation) => {
+      observations.push(observation);
+    },
+  };
+  return {
+    sink,
+    observations,
+    /** The observations for one key, oldest first. */
+    forKey: (key: string) => observations.filter((observation) => observation.key === key),
+    last: (key: string) => {
+      const forKey = observations.filter((observation) => observation.key === key);
+      return forKey[forKey.length - 1];
+    },
   };
 }
 
@@ -148,6 +181,7 @@ function createMonitor(params: {
   sampler?: ReturnType<typeof createFakeSampler>;
   signaller?: ProcessSignaller;
   ownerUid?: number | undefined;
+  sweepTestArtifacts?: AgentResourceMonitorOptions["sweepTestArtifacts"];
 }) {
   const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
   const push = createFakePushSender();
@@ -159,10 +193,13 @@ function createMonitor(params: {
       systemMemory: params.systemMemory,
     });
   const logger = createLogger();
+  const remediation = createRecordingSink();
   const monitor = new AgentResourceMonitor({
     agentManager,
     agentStorage: createFakeAgentStorage(params.titles),
     pushNotificationSender: push.sender,
+    remediationSink: remediation.sink,
+    ...(params.sweepTestArtifacts ? { sweepTestArtifacts: params.sweepTestArtifacts } : {}),
     serverId: "server-1",
     processSampler: sampler,
     sendSystemMessageToAgent: steer.fn,
@@ -173,7 +210,7 @@ function createMonitor(params: {
     ...(params.signaller ? { processSignaller: params.signaller } : {}),
     ...(params.now ? { now: params.now } : {}),
   });
-  return { monitor, agentManager, push, steer, sampler, logger };
+  return { monitor, agentManager, push, steer, sampler, logger, remediation };
 }
 
 /** Drives `count` consecutive 60s sweeps, the way the real unref'd timer would. */
@@ -182,6 +219,14 @@ async function sweep(monitor: AgentResourceMonitor, count: number, clock: { ms: 
     await monitor.tick();
     clock.ms += 60_000;
   }
+}
+
+function isSkippedAttempt(attempt: { outcome: string }): boolean {
+  return attempt.outcome === "skipped";
+}
+
+function observationIsActive(observation: { active: boolean }): boolean {
+  return observation.active;
 }
 
 describe("AgentResourceMonitor", () => {
@@ -408,39 +453,442 @@ describe("AgentResourceMonitor", () => {
     expect(agentManager.setResourceAlert).not.toHaveBeenCalled();
   });
 
-  test("a sustained system-memory (swap) breach pushes without setting any agent alert", async () => {
-    const { monitor, push, agentManager } = createMonitor({
-      agents: [],
-      systemMemory: {
-        totalPhysicalBytes: 1e12,
-        swapTotalBytes: 10_000_000,
-        swapUsedBytes: 9_500_000,
-      },
-      config: { systemSwapUsedRatio: 0.9 },
+  describe("per-agent breaches", () => {
+    const BREACH_CONFIG = { memoryBytesPerAgent: 6 * 1024 ** 3, cpuPercentPerAgent: 10_000 };
+
+    test("a running agent that was steered is recorded, not pushed", async () => {
+      const { monitor, push, steer } = createMonitor({
+        processRows: [agentProcessRow("agent-1", 7 * 1024 * 1024, 0)],
+        config: BREACH_CONFIG,
+      });
+
+      await monitor.tick();
+
+      expect(steer.calls).toHaveLength(1);
+      expect(push.sent).toHaveLength(1);
+      expect(push.levels).toEqual(["record"]);
     });
 
-    await monitor.tick();
+    test("an idle agent cannot be steered, so its breach stays a notice", async () => {
+      const { monitor, push } = createMonitor({
+        agents: [summary({ isRunning: false })],
+        processRows: [agentProcessRow("agent-1", 7 * 1024 * 1024, 0)],
+        config: BREACH_CONFIG,
+      });
 
-    expect(push.sent).toHaveLength(1);
-    expect(push.sent[0]?.data?.reason).toBe("resource_system_memory");
-    expect(agentManager.setResourceAlert).not.toHaveBeenCalled();
+      await monitor.tick();
+
+      expect(push.levels).toEqual(["notice"]);
+    });
+
+    test("notifyAgent off means no remedy was applied, so the breach stays a notice", async () => {
+      const { monitor, push } = createMonitor({
+        processRows: [agentProcessRow("agent-1", 7 * 1024 * 1024, 0)],
+        config: { ...BREACH_CONFIG, notifyAgent: false },
+      });
+
+      await monitor.tick();
+
+      expect(push.levels).toEqual(["notice"]);
+    });
+
+    test("a steer that failed did not apply the remedy, so the breach stays a notice", async () => {
+      const { monitor, push, steer } = createMonitor({
+        processRows: [agentProcessRow("agent-1", 7 * 1024 * 1024, 0)],
+        config: BREACH_CONFIG,
+      });
+      steer.fn.mockRejectedValueOnce(new Error("agent is gone"));
+
+      await monitor.tick();
+
+      expect(push.levels).toEqual(["notice"]);
+    });
+
+    function fleet(idleIds: readonly string[] = []) {
+      const agents = ["agent-1", "agent-2", "agent-3", "agent-4"].map((id) =>
+        summary({ id, isRunning: !idleIds.includes(id) }),
+      );
+      const rows = agents.map((agent, index) =>
+        row({
+          pid: 200 + index,
+          rssKb: 7 * 1024 * 1024,
+          cpuPercent: 0,
+          command: `claude ...callerAgentId=${agent.id}`,
+        }),
+      );
+      return { agents, rows };
+    }
+
+    test("a batched push is recorded when every breach in it was steered", async () => {
+      const { agents, rows } = fleet();
+      const { monitor, push } = createMonitor({ agents, processRows: rows, config: BREACH_CONFIG });
+
+      await monitor.tick();
+
+      expect(push.sent[0]?.data?.reason).toBe("resource_multi");
+      expect(push.levels).toEqual(["record"]);
+    });
+
+    test("a batched push stays a notice when any breach in it could not be steered", async () => {
+      const { agents, rows } = fleet(["agent-3"]);
+      const { monitor, push } = createMonitor({ agents, processRows: rows, config: BREACH_CONFIG });
+
+      await monitor.tick();
+
+      expect(push.sent[0]?.data?.reason).toBe("resource_multi");
+      expect(push.levels).toEqual(["notice"]);
+    });
   });
 
-  test("orphan build daemons push once, naming the gradlew fix, with no agent message", async () => {
-    const { monitor, push, steer } = createMonitor({
-      agents: [],
-      processRows: [
-        row({ pid: 500, ppid: 1, rssKb: 2 * 1024 * 1024, command: "java ...GradleDaemon" }),
-      ],
-      config: { orphanBuildDaemonBytes: 1024 ** 3 },
+  describe("system memory on the ladder", () => {
+    const SWAP_HIGH: SystemMemorySample = {
+      totalPhysicalBytes: 1e12,
+      swapTotalBytes: 10_000_000,
+      swapUsedBytes: 9_500_000,
+    };
+    const SWAP_LOW: SystemMemorySample = { ...SWAP_HIGH, swapUsedBytes: 100_000 };
+
+    test("never pushes directly: the ladder owns the person-facing alert", async () => {
+      const { monitor, push, agentManager } = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        config: { systemSwapUsedRatio: 0.9 },
+      });
+
+      await monitor.tick();
+
+      expect(push.sent).toHaveLength(0);
+      expect(agentManager.setResourceAlert).not.toHaveBeenCalled();
     });
 
-    await monitor.tick();
+    test("with the reaper off there is no remedy, and a standard agent may try", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        config: { systemSwapUsedRatio: 0.9 },
+      });
 
-    expect(push.sent).toHaveLength(1);
-    expect(push.sent[0]?.data?.reason).toBe("resource_orphan_daemons");
-    expect(push.sent[0]?.body).toContain("./gradlew --stop");
-    expect(steer.fn).not.toHaveBeenCalled();
+      await monitor.tick();
+
+      const observation = remediation.last("system-memory");
+      expect(observation).toMatchObject({
+        key: "system-memory",
+        kind: "system-memory",
+        active: true,
+        remedy: "none",
+        level: "alert",
+        graceMs: 10 * 60_000,
+        escalation: { taskClass: "standard" },
+      });
+      // What the agent may touch, and what it must not: the boundary is in the task itself.
+      expect(observation?.escalation?.task).toContain("orphaned build daemons");
+      expect(observation?.escalation?.task).toContain("never");
+      expect(observation?.summary).toContain("95%");
+    });
+
+    test("a live reaper is the remedy, and a dry run is not", async () => {
+      const live = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        config: { reaper: { enabled: true } },
+      });
+      await live.monitor.tick();
+      expect(live.remediation.last("system-memory")?.remedy).toBe("live");
+
+      const dryRun = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        config: { reaper: { enabled: true, dryRun: true } },
+      });
+      await dryRun.monitor.tick();
+      expect(dryRun.remediation.last("system-memory")?.remedy).toBe("none");
+    });
+
+    test("the evidence names the biggest process trees, labelled with their agent", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [summary({ id: "agent-1" })],
+        titles: { "agent-1": "Walk & Talk orchestrator" },
+        processRows: [
+          agentProcessRow("agent-1", 5 * 1024 * 1024, 0),
+          row({ pid: 300, ppid: 1, rssKb: 3 * 1024 * 1024, command: "/opt/tools/simulator-host" }),
+          row({ pid: 301, ppid: 1, rssKb: 10 * 1024, command: "tiny" }),
+        ],
+        systemMemory: SWAP_HIGH,
+      });
+
+      await monitor.tick();
+
+      const evidence = remediation.last("system-memory")?.evidence ?? "";
+      expect(evidence).toContain("- agent Walk & Talk orchestrator: 5.0 GB");
+      expect(evidence).toContain("- simulator-host (pid 300): 3.0 GB");
+      expect(evidence.indexOf("Walk & Talk")).toBeLessThan(evidence.indexOf("simulator-host"));
+    });
+
+    test("what the artifact janitor reclaimed this sweep is an attempt", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        sweepTestArtifacts: async () => ({
+          dryRun: false,
+          reclaimed: [
+            {
+              setId: "xcode-test-simulator-clones",
+              label: "Xcode test simulator clone",
+              name: "ABCD-1234",
+              path: "/Users/t/Library/Developer/XCTestDevices/ABCD-1234",
+              sizeBytes: 4 * 1024 ** 3,
+              ageMs: 3 * 3_600_000,
+              claim: "unowned",
+            },
+          ],
+        }),
+      });
+
+      await monitor.tick();
+
+      expect(remediation.last("system-memory")?.attempts).toEqual([
+        expect.objectContaining({
+          remedy: "artifact-janitor",
+          outcome: "acted",
+          detail: expect.stringContaining("ABCD-1234"),
+        }),
+      ]);
+    });
+
+    test("closes the episode once swap has been back under the threshold", async () => {
+      const { monitor, remediation, sampler } = createMonitor({
+        agents: [],
+        systemMemory: SWAP_HIGH,
+        config: { systemSwapUsedRatio: 0.9 },
+      });
+      await monitor.tick();
+      expect(remediation.last("system-memory")?.active).toBe(true);
+
+      sampler.sampleSystemMemory.mockResolvedValue(SWAP_LOW);
+      await monitor.tick();
+
+      expect(remediation.last("system-memory")?.active).toBe(false);
+    });
+
+    test("says nothing about a condition that never held", async () => {
+      const { monitor, remediation } = createMonitor({ agents: [], systemMemory: SWAP_LOW });
+
+      await monitor.tick();
+      await monitor.tick();
+
+      expect(remediation.observations).toEqual([]);
+    });
+  });
+
+  describe("orphan build daemons on the ladder", () => {
+    const SWEEP_MS = 60_000;
+    const HEAVY_DAEMON = () => gradleDaemonRow({ rssKb: 3 * 1024 * 1024 });
+
+    test("never pushes directly, even with the reaper off", async () => {
+      const { monitor, push } = createMonitor({
+        agents: [],
+        processRows: [HEAVY_DAEMON()],
+      });
+
+      await monitor.tick();
+
+      expect(push.sent).toHaveLength(0);
+    });
+
+    test("with the reaper off the operator opted out: a notice, no agent", async () => {
+      const { monitor, remediation, steer } = createMonitor({
+        agents: [],
+        processRows: [HEAVY_DAEMON()],
+      });
+
+      await monitor.tick();
+
+      expect(remediation.last("orphan-build-daemons")).toMatchObject({
+        key: "orphan-build-daemons",
+        kind: "orphan-build-daemons",
+        active: true,
+        remedy: "disabled",
+        level: "notice",
+      });
+      expect(steer.fn).not.toHaveBeenCalled();
+    });
+
+    test("a dry-run reaper cannot act either: dry-run, notice", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        processRows: [HEAVY_DAEMON()],
+        config: { reaper: { enabled: true, dryRun: true } },
+      });
+
+      await monitor.tick();
+
+      expect(remediation.last("orphan-build-daemons")).toMatchObject({
+        remedy: "dry-run",
+        level: "notice",
+      });
+    });
+
+    test("a live reaper is the remedy, an alert if it fails, and gets its idle window plus two sweeps", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        processRows: [HEAVY_DAEMON()],
+        config: { reaper: { enabled: true, idleMinutes: 20 } },
+      });
+
+      await monitor.tick();
+
+      const observation = remediation.last("orphan-build-daemons");
+      expect(observation).toMatchObject({ remedy: "live", level: "alert" });
+      expect(observation?.graceMs).toBe(20 * 60_000 + 2 * SWEEP_MS);
+      expect(observation?.escalation).toMatchObject({ taskClass: "mechanical" });
+      // The boundary an agent must respect is in the task, not left to its judgement.
+      expect(observation?.escalation?.task).toContain("./gradlew --stop");
+      expect(observation?.escalation?.task).toContain("never");
+      expect(observation?.evidence).toContain("GradleDaemon");
+      expect(observation?.evidence).toContain("28056");
+    });
+
+    test("below the threshold the condition does not hold", async () => {
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        processRows: [gradleDaemonRow({ rssKb: 500 * 1024 })],
+      });
+
+      await monitor.tick();
+
+      expect(remediation.observations).toEqual([]);
+    });
+
+    test("carries this episode's reaps as attempts, and closes the episode once they are gone", async () => {
+      const clock = { ms: 1_000_000 };
+      const { signaller } = createFakeSignaller();
+      const sampler = createFakeSampler();
+      let visible = true;
+      const sampleWhileVisible = async () => (visible ? [HEAVY_DAEMON()] : []);
+      sampler.sampleProcesses.mockImplementation(sampleWhileVisible);
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        sampler,
+        config: { reaper: { enabled: true } },
+        signaller,
+        now: () => clock.ms,
+      });
+
+      await sweep(monitor, 20, clock);
+
+      const reaped = remediation.last("orphan-build-daemons");
+      expect(reaped?.active).toBe(true);
+      expect(reaped?.attempts).toEqual([
+        expect.objectContaining({
+          remedy: "reaper",
+          outcome: "acted",
+          detail: expect.stringMatching(/Gradle daemon pid 28056 \(3\.0 GB/),
+        }),
+      ]);
+
+      visible = false;
+      await sweep(monitor, 1, clock);
+
+      const closed = remediation.last("orphan-build-daemons");
+      expect(closed?.active).toBe(false);
+      expect(closed?.attempts).toHaveLength(1);
+
+      // A later, unrelated episode starts with a clean list.
+      visible = true;
+      const sampleUnrelatedDaemon = async () => [
+        gradleDaemonRow({ pid: 999, rssKb: 3 * 1024 * 1024 }),
+      ];
+      sampler.sampleProcesses.mockImplementation(sampleUnrelatedDaemon);
+      await sweep(monitor, 1, clock);
+      expect(remediation.last("orphan-build-daemons")?.attempts ?? []).not.toContainEqual(
+        expect.objectContaining({ detail: expect.stringContaining("pid 28056") }),
+      );
+    });
+
+    test("says why the daemons it did not touch were spared", async () => {
+      const clock = { ms: 1_000_000 };
+      const { signaller, sent } = createFakeSignaller();
+      const sampler = createFakeSampler();
+      let cpuSeconds = 5_000;
+      const sampleBusyAndOffAllowlist = async () => {
+        cpuSeconds += 19.2;
+        return [
+          gradleDaemonRow({ cpuPercent: 32, cpuSeconds, etime: "3:00:00" }),
+          row({
+            pid: 77,
+            ppid: 1,
+            rssKb: 3 * 1024 * 1024,
+            command: "/usr/bin/grep GradleDaemon /tmp/x",
+          }),
+        ];
+      };
+      sampler.sampleProcesses.mockImplementation(sampleBusyAndOffAllowlist);
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        sampler,
+        config: { reaper: { enabled: true } },
+        signaller,
+        now: () => clock.ms,
+      });
+
+      await sweep(monitor, 5, clock);
+
+      expect(sent).toEqual([]);
+      const spared = remediation
+        .last("orphan-build-daemons")
+        ?.attempts?.filter(isSkippedAttempt);
+      expect(spared).toHaveLength(1);
+      expect(spared?.[0]?.remedy).toBe("reaper");
+      expect(spared?.[0]?.detail).toContain("busy 1");
+      expect(spared?.[0]?.detail).toContain("not-on-allowlist 1");
+    });
+
+    test("a daemon the reaper may not signal is reported as not-permitted", async () => {
+      const clock = { ms: 1_000_000 };
+      const { signaller } = createFakeSignaller({ notPermitted: [28056] });
+      const { monitor, remediation } = createMonitor({
+        agents: [],
+        processRows: [HEAVY_DAEMON()],
+        config: { reaper: { enabled: true } },
+        signaller,
+        now: () => clock.ms,
+      });
+
+      await sweep(monitor, 20, clock);
+
+      const spared = remediation
+        .last("orphan-build-daemons")
+        ?.attempts?.find(isSkippedAttempt);
+      expect(spared?.detail).toContain("not-permitted 1");
+    });
+
+    test("turning the whole monitor off closes an open episode once", async () => {
+      let enabled = true;
+      const remediation = createRecordingSink();
+      const monitor = new AgentResourceMonitor({
+        agentManager: createFakeAgentManager([]),
+        agentStorage: createFakeAgentStorage(),
+        pushNotificationSender: createFakePushSender().sender,
+        remediationSink: remediation.sink,
+        serverId: "server-1",
+        processSampler: createFakeSampler({ processRows: [HEAVY_DAEMON()] }),
+        sendSystemMessageToAgent: createFakeSteer().fn,
+        readDaemonConfig: () => ({ resourceMonitor: { ...SUSTAINED_ONE, enabled } }),
+        logger: createLogger(),
+        ownerUid: OWNER_UID,
+        sleep: async () => {},
+      });
+
+      await monitor.tick();
+      enabled = false;
+      await monitor.tick();
+      await monitor.tick();
+
+      expect(remediation.forKey("orphan-build-daemons").map(observationIsActive)).toEqual([
+        true,
+        false,
+      ]);
+    });
   });
 });
 
@@ -454,7 +902,7 @@ describe("AgentResourceMonitor reaper", () => {
   test("is off by default: a long-abandoned daemon is reported, never signalled", async () => {
     const clock = { ms: 1_000_000 };
     const { signaller, sent } = createFakeSignaller();
-    const { monitor, push } = createMonitor({
+    const { monitor, push, remediation } = createMonitor({
       agents: [],
       processRows: [gradleDaemonRow()],
       signaller,
@@ -465,10 +913,8 @@ describe("AgentResourceMonitor reaper", () => {
 
     expect(sent).toEqual([]);
     expect(reapPushes(push.sent)).toHaveLength(0);
-    // The alert Tyler already gets still fires — reaping replaces nothing until it's enabled.
-    expect(push.sent.some((payload) => payload.data?.reason === "resource_orphan_daemons")).toBe(
-      true,
-    );
+    // Reaping replaces nothing until it's enabled: the ladder is told the remedy is disabled.
+    expect(remediation.last("orphan-build-daemons")?.remedy).toBe("disabled");
   });
 
   test("dry run reports exactly what it would kill and signals nothing", async () => {

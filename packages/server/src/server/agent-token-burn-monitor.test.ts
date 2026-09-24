@@ -1,10 +1,13 @@
 import { describe, expect, test, vi } from "vitest";
+import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { TokenBurnMonitorState } from "./agent/token-burn-detector.js";
 import { SPEND_BUDGET_LABEL, type SpendGovernorState } from "./agent/spend-governor.js";
 import { AgentTokenBurnMonitor, type TokenBurnMonitorConfig } from "./agent-token-burn-monitor.js";
 import type { PushPayload } from "./push/push-service.js";
+import type { PushSendMeta } from "./push/index.js";
+import type { RemediationObservation } from "./remediation/contract.js";
 
 function createLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -59,9 +62,16 @@ function createFakeAgentStorage(titles: Record<string, string> = {}) {
 
 function createFakePushSender() {
   const sent: PushPayload[] = [];
+  const levels: Array<PushSendMeta["level"]> = [];
   return {
-    sender: { send: vi.fn(async (payload: PushPayload) => void sent.push(payload)) },
+    sender: {
+      send: vi.fn(async (payload: PushPayload, meta?: PushSendMeta) => {
+        sent.push(payload);
+        levels.push(meta?.level);
+      }),
+    },
     sent,
+    levels,
   };
 }
 
@@ -85,6 +95,10 @@ const HIGH_RATE_CONFIG: TokenBurnMonitorConfig = {
   ratePerMinute: 50_000,
   sustainedMinutes: 1,
 };
+
+function observationIsActive(observation: { active: boolean }): boolean {
+  return observation.active;
+}
 
 describe("AgentTokenBurnMonitor", () => {
   test("disabled config is a no-op", async () => {
@@ -451,6 +465,36 @@ describe("AgentTokenBurnMonitor spend governor", () => {
     expect(steer.calls[0]?.body).toContain("wrapping up");
   });
 
+  test("the governor's stages rank by whether a person has to act", async () => {
+    // notify and downgrade are the automation acting on the agent and telling it; pause and
+    // stopFanOut leave an agent stopped until somebody raises its budget.
+    const { push, monitor } = createGovernedMonitor({
+      agents: [budgeted({ id: "agent-1", totalTokens: 2_000_000 })],
+      config: {
+        ...GOVERNED,
+        governor: {
+          enabled: true,
+          downgradeToModel: "claude-sonnet-5",
+          downgrade: { enabled: true },
+          stopFanOut: { enabled: true },
+          pause: { enabled: true },
+        },
+      },
+    });
+
+    await monitor.tick();
+
+    const byStage = new Map(
+      push.sent.map((payload, index) => [payload.data?.stage, push.levels[index]]),
+    );
+    expect(Object.fromEntries(byStage)).toEqual({
+      notify: "record",
+      downgrade: "record",
+      stopFanOut: "alert",
+      pause: "alert",
+    });
+  });
+
   test("downgrade moves the model and says so, in that order", async () => {
     const { agentManager, steer, monitor } = createGovernedMonitor({
       agents: [budgeted({ id: "agent-1", totalTokens: 1_100_000 })],
@@ -579,23 +623,39 @@ describe("AgentTokenBurnMonitor account pressure", () => {
   }
 
   function createUsageMonitor(input: {
-    usage: ReturnType<typeof usage> | null;
+    usage: readonly ProviderUsage[] | null;
     enabled?: boolean;
+    providers?: Record<string, unknown>;
+    usedPct?: number;
   }) {
     const push = createFakePushSender();
+    const observations: RemediationObservation[] = [];
     const monitor = new AgentTokenBurnMonitor({
       agentManager: createFakeAgentManager([]),
       agentStorage: createFakeAgentStorage(),
       pushNotificationSender: push.sender,
+      remediationSink: {
+        observe: async (observation) => {
+          observations.push(observation);
+        },
+      },
       serverId: "server-1",
       sendSystemMessageToAgent: async () => {},
       readProviderUsage: async () => input.usage,
       readDaemonConfig: () => ({
-        tokenBurnMonitor: { accountPressure: { enabled: input.enabled ?? true } },
+        tokenBurnMonitor: {
+          accountPressure: {
+            enabled: input.enabled ?? true,
+            ...(input.usedPct === undefined ? {} : { usedPct: input.usedPct }),
+          },
+        },
+        ...(input.providers ? { providers: input.providers } : {}),
       }),
       logger: createLogger(),
     });
-    return { push, monitor };
+    const exhausted = () =>
+      observations.filter((observation) => observation.key === "account-pool-exhausted");
+    return { push, monitor, observations, exhausted };
   }
 
   test("warns once per cycle when a usage window is nearly exhausted", async () => {
@@ -682,6 +742,234 @@ describe("AgentTokenBurnMonitor account pressure", () => {
     const { push, monitor } = createUsageMonitor({ usage: usage(96) });
     await monitor.tick();
     expect(push.sent).toHaveLength(1);
+  });
+
+  test("a window over the threshold is recorded, not pushed: the pool manages it", async () => {
+    // The account pool routes new work off a hot account and failover moves stuck agents, so
+    // there is nothing for a person to do about one account being hot.
+    const { push, monitor } = createUsageMonitor({ usage: usage(94) });
+
+    await monitor.tick();
+
+    expect(push.sent).toHaveLength(1);
+    expect(push.levels).toEqual(["record"]);
+  });
+
+  describe("when the pool cannot route at all", () => {
+    function account(providerId: string, usedPct: number, resetsAt = "2026-09-26T06:00:00.000Z") {
+      return {
+        providerId,
+        displayName: providerId,
+        status: "available" as const,
+        planLabel: "Max",
+        windows: [{ id: "weekly", label: "weekly limit", usedPct, resetsAt }],
+      } satisfies ProviderUsage;
+    }
+
+    const POOL = {
+      claude: { params: { accountPool: { role: "leader", priority: 0 } } },
+      "claude-personal": {
+        extends: "claude",
+        params: { accountPool: { role: "worker", priority: 1 } },
+      },
+      "claude-backup": {
+        extends: "claude",
+        params: { accountPool: { role: "worker", priority: 2 } },
+      },
+    };
+
+    test("every pool account at the threshold is one urgent, unfixable condition", async () => {
+      const { monitor, exhausted } = createUsageMonitor({
+        providers: POOL,
+        usage: [
+          account("claude", 95),
+          account("claude-personal", 92),
+          account("claude-backup", 90),
+        ],
+      });
+
+      await monitor.tick();
+
+      expect(exhausted()).toHaveLength(1);
+      expect(exhausted()[0]).toMatchObject({
+        key: "account-pool-exhausted",
+        kind: "account-pool-exhausted",
+        active: true,
+        remedy: "none",
+        level: "urgent",
+      });
+      // An agent would need an account to do anything, and there is none left.
+      expect(exhausted()[0]?.escalation).toBeUndefined();
+      expect(exhausted()[0]?.evidence).toContain("claude-personal");
+      expect(exhausted()[0]?.evidence).toContain("92%");
+    });
+
+    test("one account under the threshold means the pool can still route", async () => {
+      const { monitor, exhausted } = createUsageMonitor({
+        providers: POOL,
+        usage: [
+          account("claude", 95),
+          account("claude-personal", 92),
+          account("claude-backup", 89),
+        ],
+      });
+
+      await monitor.tick();
+
+      expect(exhausted()).toEqual([]);
+    });
+
+    test("the boundary is the configured threshold, inclusive", async () => {
+      const at = createUsageMonitor({
+        providers: POOL,
+        usedPct: 80,
+        usage: [
+          account("claude", 80),
+          account("claude-personal", 80),
+          account("claude-backup", 80),
+        ],
+      });
+      await at.monitor.tick();
+      expect(at.exhausted()).toHaveLength(1);
+
+      const under = createUsageMonitor({
+        providers: POOL,
+        usedPct: 80,
+        usage: [
+          account("claude", 80),
+          account("claude-personal", 80),
+          account("claude-backup", 79.9),
+        ],
+      });
+      await under.monitor.tick();
+      expect(under.exhausted()).toEqual([]);
+    });
+
+    test("a disabled pool entry is not an account the pool could route to", async () => {
+      const { monitor, exhausted } = createUsageMonitor({
+        providers: {
+          ...POOL,
+          "claude-backup": { ...POOL["claude-backup"], enabled: false },
+        },
+        usage: [
+          account("claude", 95),
+          account("claude-personal", 92),
+          account("claude-backup", 10),
+        ],
+      });
+
+      await monitor.tick();
+
+      expect(exhausted()).toHaveLength(1);
+    });
+
+    test("a pool account that reports no usage is unknown, not exhausted", async () => {
+      const { monitor, exhausted } = createUsageMonitor({
+        providers: POOL,
+        usage: [account("claude", 95), account("claude-personal", 92)],
+      });
+
+      await monitor.tick();
+
+      expect(exhausted()).toEqual([]);
+    });
+
+    test("accounts outside the pool do not count toward it", async () => {
+      const { monitor, exhausted } = createUsageMonitor({
+        providers: POOL,
+        usage: [
+          account("claude", 95),
+          account("claude-personal", 92),
+          account("claude-backup", 91),
+          account("codex", 5),
+        ],
+      });
+
+      await monitor.tick();
+
+      expect(exhausted()).toHaveLength(1);
+    });
+
+    test("with no pool configured, every provider in the usage rows is a candidate", async () => {
+      const hot = createUsageMonitor({ usage: [account("claude", 95), account("codex", 99)] });
+      await hot.monitor.tick();
+      expect(hot.exhausted()).toHaveLength(1);
+
+      const oneCold = createUsageMonitor({ usage: [account("claude", 95), account("codex", 12)] });
+      await oneCold.monitor.tick();
+      expect(oneCold.exhausted()).toEqual([]);
+    });
+
+    test("no accounts at all is not exhaustion", async () => {
+      const { monitor, exhausted } = createUsageMonitor({ usage: [] });
+
+      await monitor.tick();
+
+      expect(exhausted()).toEqual([]);
+    });
+
+    test("is reported every sweep it holds, and closed once when an account frees up", async () => {
+      let rows = [
+        account("claude", 95),
+        account("claude-personal", 92),
+        account("claude-backup", 91),
+      ];
+      const push = createFakePushSender();
+      const observations: RemediationObservation[] = [];
+      const monitor = new AgentTokenBurnMonitor({
+        agentManager: createFakeAgentManager([]),
+        agentStorage: createFakeAgentStorage(),
+        pushNotificationSender: push.sender,
+        remediationSink: { observe: async (observation) => void observations.push(observation) },
+        serverId: "server-1",
+        sendSystemMessageToAgent: async () => {},
+        readProviderUsage: async () => rows,
+        readDaemonConfig: () => ({
+          tokenBurnMonitor: { accountPressure: { enabled: true } },
+          providers: POOL,
+        }),
+        logger: createLogger(),
+      });
+
+      await monitor.tick();
+      await monitor.tick();
+      rows = [account("claude", 95), account("claude-personal", 92), account("claude-backup", 20)];
+      await monitor.tick();
+      await monitor.tick();
+
+      expect(observations.map(observationIsActive)).toEqual([true, true, false]);
+    });
+
+    test("turning the leg off closes an open condition", async () => {
+      let enabled = true;
+      const observations: RemediationObservation[] = [];
+      const monitor = new AgentTokenBurnMonitor({
+        agentManager: createFakeAgentManager([]),
+        agentStorage: createFakeAgentStorage(),
+        pushNotificationSender: createFakePushSender().sender,
+        remediationSink: { observe: async (observation) => void observations.push(observation) },
+        serverId: "server-1",
+        sendSystemMessageToAgent: async () => {},
+        readProviderUsage: async () => [account("claude", 95)],
+        readDaemonConfig: () => ({ tokenBurnMonitor: { accountPressure: { enabled } } }),
+        logger: createLogger(),
+      });
+
+      await monitor.tick();
+      enabled = false;
+      await monitor.tick();
+      await monitor.tick();
+
+      expect(observations.map(observationIsActive)).toEqual([true, false]);
+    });
+
+    test("unreadable usage says nothing either way", async () => {
+      const { monitor, observations } = createUsageMonitor({ providers: POOL, usage: null });
+
+      await monitor.tick();
+
+      expect(observations).toEqual([]);
+    });
   });
   // A paused agent that carries no alert is indistinguishable in the app from one that finished
   // its turn: `cancelReason` is log-only and the governor has no attentionReason of its own.
