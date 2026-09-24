@@ -86,6 +86,7 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { registerCoordinationTools } from "./coordination-tools.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
 import type { DeviceLeaseManager } from "../device-lease-manager.js";
 import type {
@@ -1234,6 +1235,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       resolveCallerProvider: () => resolveCallerAgent()?.provider,
     });
   }
+
+  registerCoordinationTools({
+    registerTool,
+    agentManager,
+    agentStorage,
+    callerAgentId,
+    logger: childLogger,
+  });
 
   registerTool(
     "create_workspace",
