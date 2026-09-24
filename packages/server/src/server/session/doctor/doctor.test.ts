@@ -472,6 +472,32 @@ describe("skills drift", () => {
     expect(result?.detail).not.toContain("good:");
   });
 
+  it("does not flag a path the skill labels as another platform's", async () => {
+    const fx = makeFixture();
+    const canonical = path.join(fx.home, ".claude", "skills");
+    skill(
+      canonical,
+      "help",
+      [
+        "- Linux desktop log: `~/.config/Paseo/logs/main.log`",
+        "- Windows desktop log: `~/AppData/Roaming/Paseo/logs/main.log`",
+        "- macOS desktop log: `~/Library/Logs/Paseo/main.log`",
+      ].join("\n"),
+    );
+    const onMac = (await skillsCheck.run(makeContext(fx, {}, { platform: "darwin" }), 0)).find(
+      (f) => f.id === "skills.lint",
+    );
+    expect(onMac?.detail ?? "").not.toContain("~/.config/Paseo");
+    expect(onMac?.detail ?? "").not.toContain("~/AppData");
+    expect(onMac?.detail).toContain("~/Library/Logs/Paseo/main.log");
+
+    const onLinux = (await skillsCheck.run(makeContext(fx, {}, { platform: "linux" }), 0)).find(
+      (f) => f.id === "skills.lint",
+    );
+    expect(onLinux?.detail).toContain("~/.config/Paseo/logs/main.log");
+    expect(onLinux?.detail ?? "").not.toContain("~/Library/Logs");
+  });
+
   it("reports drift between the bundle and what Paseo installed", async () => {
     const fx = makeFixture();
     const ctx = makeContext(fx, {

@@ -177,15 +177,35 @@ function parseFrontmatter(text: string): Record<string, string> | null {
   return out;
 }
 
+const PLATFORM_LABELS: Partial<Record<NodeJS.Platform, RegExp>> = {
+  darwin: /\b(?:macos|mac|os x)\b/i,
+  linux: /\blinux\b/i,
+  win32: /\bwindows\b/i,
+};
+
+/** The line names some platform, and not this one: "Linux desktop log: `~/.config/…`". */
+function labelsAnotherPlatform(line: string, platform: NodeJS.Platform): boolean {
+  if (PLATFORM_LABELS[platform]?.test(line)) return false;
+  return Object.values(PLATFORM_LABELS).some((label) => label.test(line));
+}
+
+function lineAt(text: string, index: number): string {
+  const start = text.lastIndexOf("\n", index) + 1;
+  const end = text.indexOf("\n", index);
+  return text.slice(start, end === -1 ? undefined : end);
+}
+
 /** Paths a skill names in backticks that point into a directory that is gone. */
 function missingPathReferences(ctx: DoctorContext, text: string): string[] {
   const missing = new Set<string>();
   for (const match of text.matchAll(PATH_REFERENCE)) {
     const raw = match[1]!.replace(/[.,:;)]+$/, "");
     if (NON_LITERAL.test(raw) || raw.startsWith("/tmp")) continue;
-    // A /home path is never meaningful off Linux, and a path in a directory that exists is
-    // usually a file the tool writes at run time. A missing directory is a moved project.
+    // A /home path, or one on a line labelled for another platform, is never meaningful here,
+    // and a path in a directory that exists is usually a file the tool writes at run time. A
+    // missing directory is a moved project.
     if (raw.startsWith("/home/") && ctx.platform !== "linux") continue;
+    if (labelsAnotherPlatform(lineAt(text, match.index), ctx.platform)) continue;
     const resolved = raw.startsWith("~") ? path.join(ctx.home, raw.slice(1)) : raw;
     if (existsSync(resolved)) continue;
     if (existsSync(path.dirname(resolved.replace(/\/+$/, "")))) continue;
