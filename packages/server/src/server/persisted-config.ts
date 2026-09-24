@@ -325,6 +325,16 @@ const AgentResourceMonitorSchema = z
       })
       .strict()
       .optional(),
+    // Machine CPU saturation: detection and the incident ledger. On unless this says otherwise.
+    saturation: z
+      .object({
+        enabled: z.boolean().optional(),
+        loadPerCore: z.number().positive().optional(),
+        busyFraction: z.number().positive().max(1).optional(),
+        sustainedMinutes: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

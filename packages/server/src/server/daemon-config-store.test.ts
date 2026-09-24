@@ -1108,6 +1108,38 @@ describe("DaemonConfigStore", () => {
     expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({ reaper: expected });
   });
 
+  test("patch tunes one saturation setting and keeps the rest, in memory and on disk", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const saturation = { loadPerCore: 3, sustainedMinutes: 5 };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { resourceMonitor: { saturation } } }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        resourceMonitor: { saturation },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ resourceMonitor: { saturation: { busyFraction: 0.8 } } });
+
+    const expected = { loadPerCore: 3, sustainedMinutes: 5, busyFraction: 0.8 };
+    expect(next.resourceMonitor).toEqual({ saturation: expected });
+    expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({
+      saturation: expected,
+    });
+  });
+
   test("patch live-toggles doneJanitor.dryRun without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
