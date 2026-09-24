@@ -100,13 +100,16 @@ Add a row below for a new kind, and add the kind to `RemediationConditionKind`.
 
 ## Conditions
 
-| Kind                     | Monitor                                          | Remedy (rung 1) | Escalation task (rung 2)  | Rung 3 level |
-| ------------------------ | ------------------------------------------------ | --------------- | ------------------------- | ------------ |
-| `orphan-build-daemons`   |                                                  |                 |                           |              |
-| `system-memory`          |                                                  |                 |                           |              |
-| `disk-low`               |                                                  |                 |                           |              |
-| `disk-critical`          |                                                  |                 |                           |              |
-| `disk-falling`           |                                                  |                 |                           |              |
-| `stalled-agent`          |                                                  |                 |                           |              |
-| `work-at-risk`           |                                                  |                 |                           |              |
-| `account-pool-exhausted` | [failover](account-failover.md#when-tyler-hears) | none            | none: it needs an account | `alert`      |
+Keyed by the observation's `key`, not its `kind`: `account-pool-exhausted` and `account-failover-stranded` share the kind `account-pool-exhausted` but are separate episodes from separate monitors.
+
+| Key                         | Monitor                                                                                              | Remedy (rung 1)                                 | Escalation task (rung 2)                                          | Rung 3 level                            |
+| --------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------- |
+| `orphan-build-daemons`      | [resource monitor](resource-monitor.md#the-two-machine-level-conditions-ride-the-remediation-ladder) | the build daemon reaper                         | Stop the orphaned daemons the reaper spared that are safe to stop | `alert` live, `notice` disabled/dry-run |
+| `system-memory`             | [resource monitor](resource-monitor.md#the-two-machine-level-conditions-ride-the-remediation-ladder) | the reaper's pass plus the artifact janitor     | Stop provably leftover processes holding memory                   | `alert`                                 |
+| `disk-critical`             | [disk pressure](disk-pressure.md#the-three-conditions)                                               | sweeper reclaim, done janitor, artifact janitor | Reclaim only provably safe disk space                             | `urgent`                                |
+| `disk-low`                  | [disk pressure](disk-pressure.md#the-three-conditions)                                               | sweeper reclaim, done janitor, artifact janitor | Reclaim only provably safe disk space                             | `alert`                                 |
+| `disk-falling`              | [disk pressure](disk-pressure.md#the-three-conditions)                                               | sweeper reclaim, done janitor, artifact janitor | Reclaim only provably safe disk space                             | `alert`                                 |
+| `stalled-agent`             | [stalled agents](stalled-agents.md#the-ladder)                                                       | resume nudge, or handoff to account failover    | Recover the stuck agent without losing its work                   | `alert`                                 |
+| `work-at-risk`              | [work snapshots](work-snapshots.md#the-judge)                                                        | none (already snapshotted)                      | Judge whether the snapshot needs follow-up                        | `alert`                                 |
+| `account-pool-exhausted`    | [token burn](token-burn.md#when-the-pool-cannot-route-at-all)                                        | none                                            | none: it needs an account                                         | `urgent`                                |
+| `account-failover-stranded` | [failover](account-failover.md#when-tyler-hears)                                                     | none                                            | none: it needs an account                                         | `urgent`                                |
