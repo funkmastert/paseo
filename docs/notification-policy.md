@@ -94,7 +94,7 @@ Read it with `client.listNotificationLedger({ unreachedOnly: true })`. Settings 
 | `disk_space_critical`                            | `urgent`                                 | Writes start failing                                                                           |
 | `disk_sweep_unsafe_orphan`                       | `notice`                                 | A decision, but not a timed one                                                                |
 | `disk_sweep_reclaimed`                           | `record`                                 | Cleanup that worked                                                                            |
-| `done_janitor`                                   | `record`, `notice` if it kept a worktree | Routine tidying, unless it left something behind                                               |
+| `done_janitor`                                   | `record`                                 | Routine tidying. A kept worktree is snapshotted and judged by the work-at-risk sweep           |
 | `mcp_gateway_needs_auth`, `_multi`               | `alert`                                  | Only a person can sign in again                                                                |
 | `mcp_gateway_error`                              | `notice`                                 | Often recovers on its own                                                                      |
 | `daemon_event_loop_wedged`                       | `alert`                                  | Sent only after the loop recovers; agents that stalled through it may need a look              |

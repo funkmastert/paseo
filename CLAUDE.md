@@ -60,6 +60,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                   |
 | [docs/done-janitor.md](docs/done-janitor.md)                         | Done janitor — what counts as finished, the question and its strict parse, the worktree git gate, dry run                        |
+| [docs/work-snapshots.md](docs/work-snapshots.md)                     | Work snapshots — what is at risk, the temporary-index snapshot, backup refs, personal push vs bundle, restoring, the judge       |
 | [docs/finish-reports.md](docs/finish-reports.md)                     | Durable finish reports — the obligation on the child record, restart re-arm, retry/escalation ladder, successors, parked         |
 | [docs/notification-policy.md](docs/notification-policy.md)           | Notification policy — push levels, dials, availability modes, digests, the delivery ledger, and the sender inventory             |
 | [docs/refocus.md](docs/refocus.md)                                   | Refocus — restating an agent's assignment after growth or compaction, riding on prompts it already gets, cost, compaction        |
