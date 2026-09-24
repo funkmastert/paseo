@@ -850,6 +850,7 @@ function createFinishObligationService(input: {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  restartRecovery: Pick<RestartRecoveryService, "isAboutToResume">;
   serverId: string;
   logger: Logger;
 }): FinishObligationService {
@@ -861,6 +862,7 @@ function createFinishObligationService(input: {
     logger: input.logger,
     isAccountFailoverEnabled: () =>
       input.daemonConfigStore.get().accountFailover?.enabled !== false,
+    isClaimedByRestartRecovery: (agentId) => input.restartRecovery.isAboutToResume(agentId),
     sweepIntervalMs: overrides?.sweepIntervalMs,
     ladder: overrides?.ladder,
     now: overrides?.now,
@@ -1465,12 +1467,14 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "restart-recovery" }),
   });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
-  // the records, so a restart still knows who is waiting to hear back.
+  // the records, so a restart still knows who is waiting to hear back. Recovery decides who was
+  // mid-turn and resumes them; the ledger leaves alone any agent recovery has claimed.
   const finishObligations = createFinishObligationService({
     config,
     agentManager,
     agentStorage,
     daemonConfigStore,
+    restartRecovery,
     serverId,
     logger,
   });

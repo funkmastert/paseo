@@ -8,7 +8,7 @@ import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
 import { HANDOFF_FROM_LABEL } from "./agent/account-failover-detector.js";
 import { setupFinishNotification } from "./agent/agent-prompt.js";
 import type { FinishObligation } from "./agent/finish-obligation.js";
-import { createPaseoDaemon, type PaseoDaemon } from "./bootstrap.js";
+import { createPaseoDaemon, type PaseoDaemon, type PaseoDaemonConfig } from "./bootstrap.js";
 import type { PushPayload } from "./push/index.js";
 import { DaemonClient } from "./test-utils/daemon-client.js";
 import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
@@ -36,6 +36,8 @@ interface Home {
   pushes: PushPayload[];
   /** Provider sessions whose resume fails, the way a vanished transcript does. */
   refusedSessions: Set<string>;
+  /** Provider sessions whose resume waits until the promise settles. */
+  heldSessions: Map<string, Promise<void>>;
   clockMs: number;
   staticDirs: string[];
   daemon: PaseoDaemon | null;
@@ -58,6 +60,7 @@ async function createHome(): Promise<Home> {
     prompts: [],
     pushes: [],
     refusedSessions: new Set(),
+    heldSessions: new Map(),
     clockMs: Date.parse("2026-09-23T12:00:00.000Z"),
     staticDirs: [],
     daemon: null,
@@ -74,7 +77,10 @@ async function createHome(): Promise<Home> {
   return home;
 }
 
-async function startDaemon(home: Home): Promise<PaseoDaemon> {
+async function startDaemon(
+  home: Home,
+  options: { restartRecovery?: PaseoDaemonConfig["restartRecovery"] } = {},
+): Promise<PaseoDaemon> {
   const staticDir = await mkdtemp(path.join(tmpdir(), "paseo-finish-reports-static-"));
   home.staticDirs.push(staticDir);
   const daemon = await createPaseoDaemon(
@@ -92,10 +98,11 @@ async function startDaemon(home: Home): Promise<PaseoDaemon> {
           onStartTurn: (prompt, sessionId) => {
             home.prompts.push({ sessionId, text: promptText(prompt) });
           },
-          onResumeSession: (handle) => {
+          onResumeSession: async (handle) => {
             if (home.refusedSessions.has(handle.sessionId)) {
               throw new Error(`session ${handle.sessionId} is gone`);
             }
+            await home.heldSessions.get(handle.sessionId);
           },
         }),
       },
@@ -111,6 +118,7 @@ async function startDaemon(home: Home): Promise<PaseoDaemon> {
         now: () => home.clockMs,
       },
       accountFailoverOverrides: { sweepIntervalMs: 60 * MINUTE_MS },
+      ...(options.restartRecovery ? { restartRecovery: options.restartRecovery } : {}),
       agentStoragePath: path.join(home.paseoHome, "agents"),
       relayEnabled: false,
       relayEndpoint: "relay.paseo.sh:443",
@@ -308,6 +316,62 @@ describe("finish reports survive a daemon restart (e2e)", () => {
         resolution: `delivered to ${parent}`,
       });
     await expect.poll(() => owedReportOnTheWire(home, child)).toBeUndefined();
+  }, 60_000);
+
+  test("a child restart recovery resumes is not also parked and reported on: one resume, one report", async () => {
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const child = await createAgent(home, {
+      title: "Worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    await clientOf(home).sendMessage(child, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(child)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    watchForParent(home, { child, parent });
+    await expect.poll(() => obligationOnDisk(home, child)).toMatchObject({ state: "pending" });
+
+    const childSession = await sessionIdOf(home, child);
+    await stopDaemon(home);
+    const promptsBeforeRestart = home.prompts.length;
+    // Recovery's resume of the child waits here, so the sweeps below run while it holds the child.
+    let releaseChild = () => {};
+    home.heldSessions.set(
+      childSession,
+      new Promise<void>((resolve) => {
+        releaseChild = resolve;
+      }),
+    );
+    // In `resume` mode recovery claims the child from the moment it reads the run markers.
+    const daemon = await startDaemon(home, { restartRecovery: { mode: "resume" } });
+    expect(daemon.getRestartRecovery().isAboutToResume(child)).toBe(true);
+
+    // Sweeping while recovery holds the child, and past the grace period, parks nothing and
+    // reports nothing.
+    await sweep(home);
+    home.clockMs += PARKED_GRACE_MS;
+    await sweep(home);
+    expect(obligationInLedger(home, child)?.parkedSince).toBeUndefined();
+    expect(obligationInLedger(home, child)?.state).toBe("pending");
+    releaseChild();
+
+    // Recovery resumed the child once, and the child finished and reported as usual.
+    await expect
+      .poll(async () => (await reportAbout(home, { to: parent, about: child })) ?? null, {
+        timeout: 10_000,
+      })
+      .not.toBeNull();
+    const report = await reportAbout(home, { to: parent, about: child });
+    expect(report).not.toContain("stopped before reporting");
+    const childPromptsAfterRestart = home.prompts
+      .slice(promptsBeforeRestart)
+      .filter((prompt) => prompt.sessionId === childSession);
+    expect(childPromptsAfterRestart).toHaveLength(1);
+    expect(childPromptsAfterRestart[0]?.text).toContain("Restart recovery");
+    await expect
+      .poll(() => obligationOnDisk(home, child))
+      .toMatchObject({ state: "delivered", resolution: `delivered to ${parent}` });
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {

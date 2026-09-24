@@ -37,8 +37,8 @@ export function buildRecoveryResumePrompt(input: {
     lines.push(
       `3. Recovery is also resuming these subagents of yours, which were mid-turn: ` +
         `${input.recoveringChildren.map(formatPeer).join(", ")}. Do not relaunch or re-prompt ` +
-        "them. A finish notification armed before the restart may not arrive, so follow them " +
-        "with wait_for_agent or get_agent_status.",
+        "them. A finish report armed before the restart survives it, so you hear from each " +
+        "as usual.",
     );
   }
   if (input.recoveringParent) {

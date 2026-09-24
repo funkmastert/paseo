@@ -52,6 +52,12 @@ export interface FinishObligationServiceOptions {
   logger: Logger;
   /** Whether account failover will move an agent that hit a cap. Words the "errored" report. */
   isAccountFailoverEnabled?: () => boolean;
+  /**
+   * Whether restart recovery has claimed this agent to resume it (docs/restart-recovery.md). An
+   * obligation whose child or owner is claimed is left alone until recovery lets go: a park, a
+   * report or a wake then would race recovery's own resume prompt.
+   */
+  isClaimedByRestartRecovery?: (agentId: string) => boolean;
   sweepIntervalMs?: number;
   ladder?: Partial<FinishReportLadderConfig>;
   now?: () => number;
@@ -429,6 +435,8 @@ export class FinishObligationService {
       if (this.shuttingDown) return;
       const obligation = this.find(childAgentId, ownerAgentId);
       if (!obligation || !isUnresolved(obligation)) return;
+      const claimed = this.options.isClaimedByRestartRecovery;
+      if (claimed?.(childAgentId) || claimed?.(ownerAgentId)) return;
       const context = await this.buildContext(childAgentId, obligation);
       const plan = planObligationStep(obligation, context);
       if (plan.kind === "none") return;

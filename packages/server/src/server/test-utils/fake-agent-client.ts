@@ -69,8 +69,11 @@ export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
   /** `sessionId` names the provider session, so a test can tell which agent was prompted. */
   onStartTurn?: (prompt: AgentPromptInput, sessionId: string) => void;
-  /** Runs before a persisted session is resumed; throw to make the resume fail. */
-  onResumeSession?: (handle: AgentPersistenceHandle) => void;
+  /**
+   * Runs before a persisted session is resumed; throw to make the resume fail, or return a
+   * promise to hold the resume until it settles.
+   */
+  onResumeSession?: (handle: AgentPersistenceHandle) => void | Promise<void>;
   supportsMcpServers?: boolean;
 }
 
@@ -1296,7 +1299,7 @@ class FakeAgentClient implements AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     _launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
-    this.options.onResumeSession?.(handle);
+    await this.options.onResumeSession?.(handle);
     await copyFakeSessionHistory(this.provider, handle.sessionId);
     const cfg: AgentSessionConfig = {
       provider: this.provider,

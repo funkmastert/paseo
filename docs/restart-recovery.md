@@ -11,7 +11,7 @@ A marker with no `endedAt` is open. Two rules keep an open marker meaning "inter
 - **Shutdown does not settle.** After `prepareForShutdown`, closing an agent leaves its marker open. The agent did not finish; the daemon stopped it. A crash writes nothing at all. Both cases look the same on the next boot, so recovery does not need to tell them apart.
 - **Only this process settles its own markers.** Loading an agent that an earlier daemon interrupted, or looking at it, does not settle its marker. A new run replaces the marker. Recovery's dismiss settles it with `endedBy: "dismissed"`.
 
-`AgentStorage.updateRunMarker` is the only write that changes the field. Every other write carries the stored value forward, because snapshot and metadata writes rebuild the record from a copy that may not have the marker. Durable finish reports store `finishObligations` the same way, so merging the two is mechanical.
+`AgentStorage.updateRunMarker` is the only write that changes the field. Every other write carries the stored value forward, because snapshot and metadata writes rebuild the record from a copy that may not have the marker. Durable finish reports store `finishObligations` the same way, and one function, `carryOwnedFields` in `agent-storage.ts`, carries both.
 
 ## Boot
 
@@ -54,11 +54,9 @@ Resuming an agent is `sendPromptToAgent` with one `<paseo-system>` prompt (`enve
 
 ## The finish-report seam
 
-Recovery decides who was mid-turn. Durable finish reports (the `durable-finish` branch, `docs/finish-reports.md` there) decide who is owed a wake. Recovery runs first. An agent must not get both a recovery prompt and a finish-report wake.
+Recovery decides who was mid-turn. [Durable finish reports](finish-reports.md) decide who is owed a wake. Recovery is captured first at boot, then the finish-report ledger. An agent must not get both a recovery prompt and a finish-report wake.
 
-`RestartRecoveryService.isAboutToResume(agentId)` returns true while recovery has claimed an agent and not finished with it. In `resume` mode that covers the whole episode from construction until the boot apply reaches each agent. During any apply it covers the agents still queued. Whichever of the two branches merges second must add this to the finish-report sweep: skip parking, reporting on, or waking an agent while `isAboutToResume` returns true. Once recovery resumes the child, the sweep sees it running and attaches its watcher as usual. In `plan` mode nothing is claimed, and finish reports behave as they do without recovery.
-
-Until durable finish lands, a finish notification armed before the restart does not survive it. The leader's recovery prompt says so and tells it to follow its children with `wait_for_agent`.
+`RestartRecoveryService.isAboutToResume(agentId)` returns true while recovery has claimed an agent and not finished with it. In `resume` mode that covers the whole episode from construction until the boot apply reaches each agent. During any apply it covers the agents still queued. `FinishObligationService` takes it as `isClaimedByRestartRecovery` and leaves an obligation alone while its child or its owner is claimed: no park, no report, no wake. Once recovery resumes the child, the sweep sees it running and attaches its watcher as usual, so the leader's recovery prompt tells it the reports survived. In `plan` mode nothing is claimed, and finish reports behave as they do without recovery.
 
 ## Surfaces
 
@@ -78,4 +76,4 @@ An agent with an open marker is neither dead nor askable (`interruptedMidTurn` i
 
 - An agent that was idle with background work when the daemon stopped has no open marker. That work is gone, and recovery does not see it.
 - A permission request that was waiting when the daemon stopped is not replayed. The prompt says it was dropped.
-- `previousShutdown` reads `unknown` until the daemon shutdown receipt (OR-C11) lands and is wired to `readPreviousShutdown`.
+- `previousShutdown` reads `unknown`. The daemon shutdown receipt ([daemon-vitals.md](daemon-vitals.md)) exists, but `daemon-worker.ts` consumes it before the daemon is built and nothing passes it to `readPreviousShutdown` yet.
