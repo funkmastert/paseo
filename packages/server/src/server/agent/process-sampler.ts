@@ -1,7 +1,7 @@
 import { type ExecFileOptions, execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { BACKGROUND_NICE, lowerProcessPriority } from "../../utils/process-priority.js";
+import { lowerProcessPriority, SAMPLER_NICE } from "../../utils/process-priority.js";
 import {
   createSystemLoadSampler,
   type SystemLoadSample,
@@ -284,9 +284,10 @@ const PROCESS_TABLE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const SAMPLE_TIMEOUT_MS = 45_000;
 
 /**
- * Runs a sampling tool below normal priority. The tools are the daemon's own telemetry, and on a
- * saturated machine they should not compete with the work they are measuring. Only the child is
- * lowered, never the daemon: a lowered priority cannot be raised again without root.
+ * Runs a sampling tool at SAMPLER_NICE: below normal, so the daemon's own telemetry yields to
+ * interactive work, but ahead of the agent builds it measures, so it is still scheduled on a
+ * saturated machine. Only the child is lowered, never the daemon: a lowered priority cannot be
+ * raised again without root.
  */
 export async function execFileAtLowPriority(
   file: string,
@@ -294,7 +295,7 @@ export async function execFileAtLowPriority(
   options: ExecFileOptions,
 ): Promise<string> {
   const pending = execFileAsync(file, [...args], { ...options, encoding: "utf8" });
-  lowerProcessPriority(pending.child.pid, BACKGROUND_NICE);
+  lowerProcessPriority(pending.child.pid, SAMPLER_NICE);
   const { stdout } = await pending;
   return stdout;
 }

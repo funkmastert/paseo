@@ -1,5 +1,6 @@
+import os from "node:os";
 import { describe, expect, test, vi } from "vitest";
-import { BACKGROUND_NICE } from "../../utils/process-priority.js";
+import { BACKGROUND_NICE, SAMPLER_NICE } from "../../utils/process-priority.js";
 import {
   createSystemProcessSampler,
   execFileAtLowPriority,
@@ -193,7 +194,7 @@ describe("createSystemProcessSampler", () => {
 });
 
 describe("execFileAtLowPriority", () => {
-  test("runs the sampling child below normal priority", async () => {
+  test("runs the sampling child below normal priority but ahead of agent processes", async () => {
     // The child reports its own priority after a pause long enough for the parent to have
     // lowered it; the parent lowers it synchronously right after spawning.
     const stdout = await execFileAtLowPriority(
@@ -202,7 +203,26 @@ describe("execFileAtLowPriority", () => {
       { timeout: 10_000 },
     );
 
-    expect(Number.parseInt(stdout.trim(), 10)).toBe(BACKGROUND_NICE);
+    // Windows has no class between NORMAL and BELOW_NORMAL; libuv maps 5 to NORMAL, read as 0.
+    // The child inherits the test runner's priority and is never raised, so a runner started at
+    // low priority (an agent's) keeps its own.
+    const target = process.platform === "win32" ? 0 : SAMPLER_NICE;
+    const expected = Math.max(target, os.getPriority());
+    expect(Number.parseInt(stdout.trim(), 10)).toBe(expected);
+    expect(SAMPLER_NICE).toBeGreaterThan(0);
+    expect(SAMPLER_NICE).toBeLessThan(BACKGROUND_NICE);
+  });
+
+  test("asks for SAMPLER_NICE, whatever priority the runner itself has", async () => {
+    const getPriority = vi.spyOn(os, "getPriority").mockReturnValue(0);
+    const setPriority = vi.spyOn(os, "setPriority").mockImplementation(() => undefined);
+    try {
+      await execFileAtLowPriority(process.execPath, ["-e", ""], { timeout: 10_000 });
+      expect(setPriority).toHaveBeenCalledWith(expect.any(Number), SAMPLER_NICE);
+    } finally {
+      getPriority.mockRestore();
+      setPriority.mockRestore();
+    }
   });
 });
 

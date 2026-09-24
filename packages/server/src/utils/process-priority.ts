@@ -8,6 +8,15 @@ import os from "node:os";
  */
 export const BACKGROUND_NICE = os.constants.priority.PRIORITY_BELOW_NORMAL;
 
+/**
+ * The nice the resource monitor's sampling children (`ps`, `sysctl`, `vm_stat`, PowerShell) run
+ * at: below normal, but ahead of every agent process. At BACKGROUND_NICE `ps` competed equally
+ * with the builds it measures and timed out when the machine saturated, blinding the monitor. On
+ * Windows there is no class between NORMAL and BELOW_NORMAL, and libuv maps 0..9 to NORMAL, so
+ * there the samplers run at normal priority.
+ */
+export const SAMPLER_NICE = 5;
+
 const MAX_NICE = os.constants.priority.PRIORITY_LOW;
 
 export type PriorityOps = Pick<typeof os, "getPriority" | "setPriority">;

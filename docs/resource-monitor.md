@@ -62,7 +62,7 @@ Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-mo
 - **The process table.** `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` on macOS and Linux. Windows has no `ps`: PowerShell's `Get-CimInstance Win32_Process` produces the same rows, with CPU time from `UserModeTime + KernelModeTime` and no uid.
 - **System memory**: swap and available memory from `sysctl`/`vm_stat` on macOS or `/proc/meminfo` on Linux. Windows reports none.
 
-The sampling children run at `BACKGROUND_NICE` (`utils/process-priority.ts`) with a 45s timeout. At load 38 on 16 cores the old 15s timeout failed every sweep and the monitor went blind exactly when the machine saturated. A sweep still in flight is never overlapped by the next tick.
+The sampling children run at `SAMPLER_NICE`, nice 5 (`utils/process-priority.ts`), with a 45s timeout: below normal, but ahead of every agent process at nice 10 or lower. At load 38 on 16 cores the old 15s timeout, with `ps` at the same nice as the builds it measured, failed every sweep and the monitor went blind exactly when the machine saturated. Windows has no class between normal and `BELOW_NORMAL`, and libuv maps 5 to normal, so there the samplers run at normal priority. A sweep still in flight is never overlapped by the next tick.
 
 `uid` exists for the reaper alone: nothing may be signalled without proving it belongs to the user the daemon runs as. Windows rows carry none, so the reaper never signals there.
 
