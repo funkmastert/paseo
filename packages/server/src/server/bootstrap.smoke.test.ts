@@ -363,6 +363,7 @@ describe("paseo daemon bootstrap", () => {
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         daemonVitals: { enabled: true, dryRun: true },
+        remediation: { stalledAgents: { dryRun: true } },
       },
     };
     await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
@@ -414,6 +415,7 @@ describe("paseo daemon bootstrap", () => {
         refocus: { enabled: true, dryRun: true },
         "model-divergence": { enabled: true, dryRun: undefined },
         daemonVitals: { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: true, dryRun: true },
       });
 
       const reloadedPersisted = {
@@ -431,6 +433,7 @@ describe("paseo daemon bootstrap", () => {
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           daemonVitals: { enabled: false },
+          remediation: { stalledAgents: { enabled: false } },
         },
       };
       await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
@@ -443,6 +446,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.deviceLeases",
         "agents.doneJanitor",
         "agents.refocus",
+        "agents.remediation",
         "agents.resourceMonitor",
         "agents.tokenBurnMonitor",
       ]);
@@ -467,6 +471,7 @@ describe("paseo daemon bootstrap", () => {
         refocus: { enabled: true, dryRun: false },
         "model-divergence": { enabled: false },
         daemonVitals: { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: false, dryRun: false },
       });
     } finally {
       await client?.close().catch(() => undefined);

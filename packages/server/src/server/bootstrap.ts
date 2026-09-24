@@ -238,6 +238,18 @@ import {
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import type { RemediationConfig } from "./remediation/config.js";
+import {
+  createForwardingRemediationSink,
+  UNAVAILABLE_WORKTREE_SNAPSHOTTER,
+  type RemediationSink,
+  type WorktreeSnapshotter,
+} from "./remediation/contract.js";
+import {
+  AgentStallSweep,
+  handOffStalledAgentToFailover,
+  nudgeStalledAgent,
+} from "./agent-stall-sweep.js";
+import type { ProcessSampler } from "./agent/process-sampler.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -826,6 +838,53 @@ function createDoneJanitor(input: {
   });
 }
 
+// Wired once the WebSocket server exists, like the done janitor: account health reads its
+// provider-usage cache. See docs/stalled-agents.md.
+function createAgentStallSweep(input: {
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  processSampler: ProcessSampler;
+  wsServer: Pick<VoiceAssistantWebSocketServer, "getProviderUsageService">;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  sink: RemediationSink;
+  snapshotter: WorktreeSnapshotter;
+  logger: Logger;
+}): AgentStallSweep {
+  const { agentManager, agentStorage, logger } = input;
+  return new AgentStallSweep({
+    dependencies: {
+      listAgents: () => agentManager.listAgentsForStallSweep(),
+      sampleProcesses: () => input.processSampler.sampleProcesses(),
+      getProviderHealth: async (provider) => {
+        const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
+        for (const agent of agentManager.listAgentsForAccountFailover()) {
+          const errors = lastErrorsByProvider.get(agent.provider) ?? [];
+          errors.push(agent.lastError);
+          lastErrorsByProvider.set(agent.provider, errors);
+        }
+        return readProviderHealth({
+          provider,
+          isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
+          listUsage: async () => {
+            try {
+              return (await input.wsServer.getProviderUsageService().listUsage()).providers;
+            } catch {
+              return null;
+            }
+          },
+          lastErrorsByProvider,
+        });
+      },
+      snapshotter: input.snapshotter,
+      nudgeAgent: (nudge) => nudgeStalledAgent({ agentManager, agentStorage, logger }, nudge),
+      handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
+    },
+    sink: input.sink,
+    readRemediationConfig: () => input.daemonConfigStore.get().remediation,
+    logger,
+  });
+}
+
 function createFinishObligationService(input: {
   config: Pick<PaseoDaemonConfig, "finishReportOverrides">;
   agentManager: AgentManager;
@@ -1068,6 +1127,7 @@ export async function createPaseoDaemon(
   let accountFailoverMonitor: AccountFailoverMonitor | null = null;
   let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
   let doneJanitor: AgentDoneJanitor | null = null;
+  let agentStallSweep: AgentStallSweep | null = null;
   let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
   // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
@@ -1269,6 +1329,7 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  const remediationSink = createForwardingRemediationSink();
   worktreeDiskMonitor = new WorktreeDiskMonitor({
     projectRegistry,
     workspaceRegistry,
@@ -2456,6 +2517,19 @@ export async function createPaseoDaemon(
               logger,
             });
             doneJanitor.start();
+            const stallSweep = createAgentStallSweep({
+              agentManager,
+              agentStorage,
+              processSampler,
+              wsServer,
+              daemonConfigStore,
+              sink: remediationSink,
+              snapshotter: UNAVAILABLE_WORKTREE_SNAPSHOTTER,
+              logger,
+            });
+            agentStallSweep = stallSweep;
+            stallSweep.start();
+            daemonConfigStore.onChange(() => stallSweep.reportMode());
             daemonVitals = startDaemonVitals({
               config: config.daemonVitals,
               paseoHome: config.paseoHome,
@@ -2550,6 +2624,7 @@ export async function createPaseoDaemon(
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();
     doneJanitor?.stop();
+    agentStallSweep?.stop();
     worktreeDiskMonitor?.stop();
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
