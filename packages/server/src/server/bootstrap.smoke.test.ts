@@ -360,6 +360,7 @@ describe("paseo daemon bootstrap", () => {
         },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
+        contextMeter: { amberTokens: 150_000, redPercent: 75 },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         daemonVitals: { enabled: true, dryRun: true },
@@ -402,6 +403,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
+      expect(booted.contextMeter).toEqual(bootPersisted.agents.contextMeter);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
       expect(monitorModes()).toEqual({
@@ -428,6 +430,7 @@ describe("paseo daemon bootstrap", () => {
           },
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
+          contextMeter: { amberTokens: 250_000 },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           daemonVitals: { enabled: false },
@@ -440,6 +443,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.accountFailover",
         "agents.artifactJanitor",
         "agents.budgetPacing",
+        "agents.contextMeter",
         "agents.deviceLeases",
         "agents.doneJanitor",
         "agents.refocus",
@@ -458,6 +462,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
+      expect(reloaded.contextMeter).toEqual(reloadedPersisted.agents.contextMeter);
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
       expect(monitorModes()).toMatchObject({

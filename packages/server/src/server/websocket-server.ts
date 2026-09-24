@@ -90,6 +90,7 @@ import {
 import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
+import { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -600,6 +601,7 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
   private readonly usageHistoryStore: UsageHistoryStore;
+  private readonly contextUsageService: AgentContextUsageService;
   private unsubscribeTerminalActivity: (() => void) | null = null;
   private readonly browserToolsBroker: BrowserToolsBroker | null;
   private readonly hubRelationships: HubRelationshipManagement | null;
@@ -684,6 +686,17 @@ export class VoiceAssistantWebSocketServer {
       rootDir: join(paseoHome, "usage-history"),
       logger: this.logger,
     });
+    this.contextUsageService = new AgentContextUsageService({
+      agents: {
+        getAgent: (agentId) => agentManager.getAgent(agentId),
+        subscribe: (listener) =>
+          agentManager.subscribe((event) => {
+            if (event.type === "agent_state") listener(event.agent.id, event.agent.lifecycle);
+          }),
+      },
+      logger: this.logger,
+    });
+    this.contextUsageService.start();
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
@@ -1074,6 +1087,7 @@ export class VoiceAssistantWebSocketServer {
     this.unsubscribeDaemonConfigChange = null;
     this.unsubscribeTerminalActivity?.();
     this.unsubscribeTerminalActivity = null;
+    this.contextUsageService.stop();
     this.pushNotifications.stop();
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
@@ -1477,6 +1491,7 @@ export class VoiceAssistantWebSocketServer {
       providerSnapshotManager: this.providerSnapshotManager,
       providerUsageService: this.providerUsageService,
       usageHistory: this.usageHistoryStore,
+      contextUsage: this.contextUsageService,
       hubExecutionAgents: options.hubExecutionAgents,
       hubRelationships: options.hubRelationships,
       serviceProxy: this.serviceProxy ?? undefined,
@@ -1697,6 +1712,8 @@ export class VoiceAssistantWebSocketServer {
         deviceLeases: true,
         // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
         usageHistory: true,
+        // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
+        agentContextUsage: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

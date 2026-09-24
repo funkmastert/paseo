@@ -29,6 +29,7 @@ interface SupportedMutableConfigPatch {
   artifactJanitor?: MutableDaemonConfig["artifactJanitor"];
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
+  contextMeter?: MutableDaemonConfig["contextMeter"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
   refocus?: MutableDaemonConfig["refocus"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
@@ -210,6 +211,7 @@ const RELOADABLE_PATHS = [
   "agents.artifactJanitor",
   "agents.accountFailover",
   "agents.budgetPacing",
+  "agents.contextMeter",
   "agents.doneJanitor",
   "agents.refocus",
   "agents.skills.selection",
@@ -249,6 +251,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.artifactJanitor", "artifactJanitor"],
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
+  ["agents.contextMeter", "contextMeter"],
   ["agents.doneJanitor", "doneJanitor"],
   ["agents.refocus", "refocus"],
   ["agents.skills.selection", "skills.selection"],
@@ -349,6 +352,12 @@ function pickBudgetPacingPatch(
   return budgetPacing === undefined ? {} : { budgetPacing };
 }
 
+function pickContextMeterPatch(
+  contextMeter: MutableDaemonConfigPatch["contextMeter"],
+): Pick<SupportedMutableConfigPatch, "contextMeter"> {
+  return contextMeter === undefined ? {} : { contextMeter };
+}
+
 function pickDoneJanitorPatch(
   doneJanitor: MutableDaemonConfigPatch["doneJanitor"],
 ): Pick<SupportedMutableConfigPatch, "doneJanitor"> {
@@ -391,6 +400,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickArtifactJanitorPatch(patch.artifactJanitor),
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
+    ...pickContextMeterPatch(patch.contextMeter),
     ...pickDoneJanitorPatch(patch.doneJanitor),
     ...pickRefocusPatch(patch.refocus),
     ...pickDiskSweeperPatch(patch.diskSweeper),
@@ -892,6 +902,18 @@ function mergeDoneJanitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedContextMeter = NonNullable<PersistedConfig["agents"]>["contextMeter"];
+
+function mergeContextMeterForPersist(
+  persisted: PersistedContextMeter,
+  patch: SupportedMutableConfigPatch["contextMeter"],
+): PersistedContextMeter {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedContextMeter;
+}
+
 type PersistedRefocus = NonNullable<PersistedConfig["agents"]>["refocus"];
 
 function mergeRefocusForPersist(
@@ -965,6 +987,7 @@ function touchesAgentConfig(
     patch.artifactJanitor !== undefined ||
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
+    patch.contextMeter !== undefined ||
     patch.doneJanitor !== undefined ||
     patch.refocus !== undefined ||
     patch.skills !== undefined ||
@@ -1014,6 +1037,12 @@ function mergeMonitorSectionsForPersist(
     patch.budgetPacing,
   );
   if (budgetPacing !== undefined) next["budgetPacing"] = budgetPacing;
+
+  const contextMeter = mergeContextMeterForPersist(
+    persistedAgents?.contextMeter,
+    patch.contextMeter,
+  );
+  if (contextMeter !== undefined) next["contextMeter"] = contextMeter;
 
   const doneJanitor = mergeDoneJanitorForPersist(persistedAgents?.doneJanitor, patch.doneJanitor);
   if (doneJanitor !== undefined) next["doneJanitor"] = doneJanitor;

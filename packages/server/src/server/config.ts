@@ -563,6 +563,7 @@ function resolveAgentMonitorConfig(
   | "artifactJanitor"
   | "accountFailover"
   | "budgetPacing"
+  | "contextMeter"
   | "doneJanitor"
   | "refocus"
   | "daemonVitals"
@@ -575,6 +576,7 @@ function resolveAgentMonitorConfig(
     artifactJanitor: agents?.artifactJanitor,
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
+    contextMeter: agents?.contextMeter,
     doneJanitor: agents?.doneJanitor,
     refocus: agents?.refocus,
     daemonVitals: agents?.daemonVitals,

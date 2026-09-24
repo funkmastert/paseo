@@ -27,6 +27,7 @@ import type {
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
 import { importSessionFromPersistence } from "../agent/provider-session-import.js";
 import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 
 const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
@@ -932,6 +933,23 @@ class FakeAgentSession implements AgentSession {
     // A turn that keeps working until interrupted ends with its process, as a real one would.
     this.interruptSignal.resolve();
     await this.closeSession?.();
+  }
+
+  /** A fixed `/context` breakdown: 1.2K of messages in a 200K window. */
+  async getContextUsage(): Promise<AgentContextUsage | null> {
+    return {
+      provider: this.providerName,
+      model: this.config.model ?? null,
+      capturedAt: new Date().toISOString(),
+      source: "session",
+      totalTokens: 1_200,
+      maxTokens: 200_000,
+      categories: [
+        { id: "messages", label: "Messages", tokens: 1_200, kind: "used" },
+        { id: "free_space", label: "Free space", tokens: 198_800, kind: "free" },
+      ],
+      memoryFiles: [],
+    };
   }
 
   async listCommands(): Promise<AgentSlashCommand[]> {

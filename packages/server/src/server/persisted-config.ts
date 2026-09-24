@@ -384,6 +384,19 @@ const AgentAccountFailoverSchema = z
   })
   .strict();
 
+// Where the app's context meter turns amber and red, and when its breakdown flags memory files.
+// The daemon only stores it; the app reads it through daemon config. See docs/context-usage.md.
+const AgentContextMeterSchema = z
+  .object({
+    amberTokens: z.number().positive().optional(),
+    amberPercent: z.number().positive().max(100).optional(),
+    redTokens: z.number().positive().optional(),
+    redPercent: z.number().positive().max(100).optional(),
+    memoryFilesTokens: z.number().positive().optional(),
+    memoryFileTokens: z.number().positive().optional(),
+  })
+  .strict();
+
 // Live-toggleable like agents.accountFailover above — same mutable/patch split, same reason.
 // Every field optional and absent means today's behaviour: the leg is off unless `enabled` says
 // otherwise. See docs/budget-pacing.md.
@@ -620,6 +633,7 @@ export const PersistedConfigSchema = z
         artifactJanitor: AgentArtifactJanitorSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
+        contextMeter: AgentContextMeterSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
