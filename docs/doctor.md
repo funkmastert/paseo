@@ -15,20 +15,20 @@ A daemon that predates the RPC, or none at all, still gets a run. The CLI (`pack
 
 ## Checks
 
-| Id                                              | Catches                                                                                                                                                                |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `account.claude-md`                             | A Claude config dir used by a provider with no `CLAUDE.md`, a broken link, or a private copy. Canonical is `~/.claude/CLAUDE.md`.                                      |
-| `account.projects-link`                         | `projects/` not resolving to `~/.claude/projects`. A private one strands a session moved between accounts.                                                             |
-| `account.login`                                 | Signed out, never signed in, credential missing, or two dirs signed into one login.                                                                                    |
-| `account.budget`                                | A usage window at 90% (warn) or 100% (fail), or usage unreadable.                                                                                                      |
-| `plugin.status`                                 | A configured plugin that failed, never loaded, or runs from a path that is gone; `pluginsEnabled: false` with plugins configured.                                      |
-| `daemon.build`                                  | The bundle staged after the daemon started, or a version mismatch. Compares against the app the daemon runs from, else `Bozeo`/`Paseo`.                                |
-| `config.keys`                                   | Keys the running build's strict schema rejects. Reads the daemon's own `PersistedConfigSchema`.                                                                        |
-| `mcp.gateway`                                   | OAuth servers behind the gateway with no stored login. Critical servers fail.                                                                                          |
-| `skills.mirror`, `skills.lint`, `skills.bundle` | A pool account's `skills/` that drifted from `~/.claude/skills`; skills naming paths in directories that are gone; Paseo-installed skills out of sync with the bundle. |
-| `disk.free`                                     | Free space below `agents.artifactJanitor.diskGuard.minFreeBytes` (default 20 GiB) fails; below 1.5x warns.                                                             |
-| `resource.saturation`                           | The latest CPU saturation incident in the resource monitor's ledger within 7 days: when, how long, peak load, cause, heaviest agent trees.                             |
-| `worktrees.size`, `worktrees.reclaimable`       | Count and size of `<home>/worktrees/*/*`, and which are clean, merged or pushed, unpinned and have no live agent.                                                      |
+| Id                                              | Catches                                                                                                                                                                               |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `account.claude-md`                             | A Claude config dir used by a provider with no `CLAUDE.md`, a broken link, or a private copy. Canonical is `~/.claude/CLAUDE.md`.                                                     |
+| `account.projects-link`                         | `projects/` not resolving to `~/.claude/projects`. A private one strands a session moved between accounts.                                                                            |
+| `account.login`                                 | Signed out, never signed in, credential missing, or two dirs signed into one login.                                                                                                   |
+| `account.budget`                                | A usage window at 90% (warn) or 100% (fail), or usage unreadable.                                                                                                                     |
+| `plugin.status`                                 | A configured plugin that failed, never loaded, or runs from a path that is gone; `pluginsEnabled: false` with plugins configured.                                                     |
+| `daemon.build`                                  | The bundle staged after the daemon started, or a version mismatch. Compares against the app the daemon runs from, else `Bozeo`/`Paseo`.                                               |
+| `config.keys`                                   | Keys the running build's strict schema rejects. Reads the daemon's own `PersistedConfigSchema`.                                                                                       |
+| `mcp.gateway`                                   | OAuth servers behind the gateway with no stored login. Critical servers fail.                                                                                                         |
+| `skills.mirror`, `skills.lint`, `skills.bundle` | A pool account's `skills/` that drifted from `~/.claude/skills`; skills naming paths in directories that are gone; Paseo-installed skills out of sync with the bundle.                |
+| `disk.free`                                     | Free space below `agents.artifactJanitor.diskGuard.minFreeBytes` (default 20 GiB) fails; below 1.5x warns.                                                                            |
+| `resource.saturation`                           | The latest CPU saturation incident in the resource monitor's [ledger](resource-monitor.md#the-incident-ledger) within 7 days: when, how long, peak load, cause, heaviest agent trees. |
+| `worktrees.size`, `worktrees.reclaimable`       | Count and size of `<home>/worktrees/*/*`, and which are clean, merged or pushed, unpinned and have no live agent.                                                                     |
 
 Every finding carries what is wrong, why it matters and the exact command. A check that finds nothing wrong reports one `ok` line, so a passing run still shows what it looked at (`--full`).
 

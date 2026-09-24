@@ -54,7 +54,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/model-divergence.md](docs/model-divergence.md)                 | Model divergence — responses vs configured model, what counts as intentional, surfaces, the `normalizeClaudeRuntimeModelId` trap |
 | [docs/budget-pacing.md](docs/budget-pacing.md)                       | Budget pacing — advising leaders to widen or narrow fan-out against a usage window's clock, plus the noise thresholds            |
 | [docs/usage-history.md](docs/usage-history.md)                       | Usage history — what is sampled and from where, bounded storage, projection rules, the RPC and where it surfaces                 |
-| [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — process-tree attribution by callerAgentId, orphan build daemons, thresholds                                   |
+| [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — agent priority, child admission, process-tree attribution, CPU saturation and its ledger, build-daemon reaper |
 | [docs/doctor.md](docs/doctor.md)                                     | `paseo doctor` — read-only diagnosis of this fork's known failures, where checks run, credential and deadline gotchas            |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                         |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
