@@ -32,6 +32,7 @@ interface SupportedMutableConfigPatch {
   leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
   refocus?: MutableDaemonConfig["refocus"];
+  remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
   // entry doesn't require `url`/`transport` (see MutableMcpGatewayServerPatchSchema), so this
@@ -214,6 +215,7 @@ const RELOADABLE_PATHS = [
   "agents.leaderCompaction",
   "agents.doneJanitor",
   "agents.refocus",
+  "agents.remediation",
   "agents.skills.selection",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
@@ -254,6 +256,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.leaderCompaction", "leaderCompaction"],
   ["agents.doneJanitor", "doneJanitor"],
   ["agents.refocus", "refocus"],
+  ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
   ["mcpGateway", "mcpGateway"],
@@ -374,6 +377,12 @@ function pickRefocusPatch(
   return refocus === undefined ? {} : { refocus };
 }
 
+function pickRemediationPatch(
+  remediation: MutableDaemonConfigPatch["remediation"],
+): Pick<SupportedMutableConfigPatch, "remediation"> {
+  return remediation === undefined ? {} : { remediation };
+}
+
 function pickDiskSweeperPatch(
   diskSweeper: MutableDaemonConfigPatch["diskSweeper"],
 ): Pick<SupportedMutableConfigPatch, "diskSweeper"> {
@@ -407,6 +416,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickLeaderCompactionPatch(patch.leaderCompaction),
     ...pickDoneJanitorPatch(patch.doneJanitor),
     ...pickRefocusPatch(patch.refocus),
+    ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
     ...(patch.autoArchiveAfterMerge !== undefined
@@ -928,6 +938,23 @@ function mergeDoneJanitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedRemediation = NonNullable<PersistedConfig["agents"]>["remediation"];
+
+// Deep, like resourceMonitor: every rung and sweep is a nested block, so a
+// `{ escalation: { enabled: false } }` patch has to keep the rest of the ladder on disk.
+function mergeRemediationForPersist(
+  persisted: PersistedRemediation,
+  patch: SupportedMutableConfigPatch["remediation"],
+): PersistedRemediation {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedRemediation;
+}
+
 type PersistedRefocus = NonNullable<PersistedConfig["agents"]>["refocus"];
 
 function mergeRefocusForPersist(
@@ -1004,6 +1031,7 @@ function touchesAgentConfig(
     patch.leaderCompaction !== undefined ||
     patch.doneJanitor !== undefined ||
     patch.refocus !== undefined ||
+    patch.remediation !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
   );
@@ -1063,6 +1091,9 @@ function mergeMonitorSectionsForPersist(
 
   const refocus = mergeRefocusForPersist(persistedAgents?.refocus, patch.refocus);
   if (refocus !== undefined) next["refocus"] = refocus;
+
+  const remediation = mergeRemediationForPersist(persistedAgents?.remediation, patch.remediation);
+  if (remediation !== undefined) next["remediation"] = remediation;
 }
 
 function mergeMutableAgentPatch(

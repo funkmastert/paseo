@@ -1,6 +1,6 @@
 # Done janitor
 
-Nothing else in the daemon removes finished work. Archiving an agent does not archive its workspace, and archiving the workspace is the only thing that deletes its worktree, so every finished task leaves a worktree behind: about 3 GB each once `node_modules` and build output are in it. `AgentDoneJanitor` (`packages/server/src/server/agent-done-janitor.ts`) does two things. It archives agents that are **dead** (closed or errored, untouched for days, not pinned) without asking anyone, and it finds idle **live** agents that are definitely finished, asks each one, and archives it on a strict yes. Either way it then deletes the worktree if nothing in it exists anywhere else.
+Nothing else in the daemon removes finished work. Archiving an agent does not archive its workspace, and archiving the workspace is the only thing that deletes its worktree, so every finished task leaves a worktree behind: about 3 GB each once `node_modules` and build output are in it. `AgentDoneJanitor` (`packages/server/src/server/agent-done-janitor.ts`) does two things. It archives agents that are **dead** (closed or errored, untouched for days, not pinned) without asking anyone, and it finds idle **live** agents that are definitely finished, asks each one, and archives it on a strict yes. Either way it then deletes the worktree if nothing in it exists anywhere else. Last, it removes [empty projects](#empty-projects) whose directory is gone.
 
 The rule for dead agents is Tyler's: a dead session archives itself unless it is pinned.
 
@@ -109,11 +109,29 @@ Only after the agent is archived, through archive-by-scope, and only when all of
   - `git status --untracked-files=all` is empty. Ignored files do not count: they are the build output being reclaimed;
   - every commit reachable from HEAD is reachable from a remote-tracking ref or the local base branch recorded at creation. Both survive the deletion. Another local branch does not count: it may be the next worktree the janitor deletes. A squash-merged branch whose remote branch was deleted fails this check and is kept.
 
-Dead agents follow the same rules with one difference: nobody said the work was finished, so the git gate is the only proof, and it is enough. The gate keeps the worktree of a session that was cut off with uncommitted files. Worktrees are planned after every dead tree in a sweep is archived, once each, so one shared by several dead agents is judged on what is true then. A sweep deletes at most `maxArchivesPerSweep` worktrees; the rest are picked up next sweep as orphans.
+Dead agents follow the same rules with one difference: nobody said the work was finished, so the git gate is the only proof, and it is enough. The gate keeps the worktree of a session that was cut off with uncommitted files, and the [work-at-risk sweep](work-snapshots.md#the-work-at-risk-sweep) decides whether that work needs anyone. Worktrees are planned after every dead tree in a sweep is archived, once each, so one shared by several dead agents is judged on what is true then. A sweep deletes at most `maxArchivesPerSweep` worktrees; the rest are picked up next sweep as orphans.
 
 A workspace whose agents were all archived earlier — by a person, or by a sweep whose reclaim failed — is reclaimed on the same terms once it has been quiet for `quietHours`, without asking anyone. A workspace that never had an agent is never touched: it may be one someone created a minute ago.
 
+Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each worktree of a dead tree before the tree is archived, and each worktree before it is deleted. The second matters because the gate counts a commit on the local base branch as safe while the snapshot counts only remotes. A snapshot that fails on a worktree at risk keeps that worktree for the sweep, reported as `its work is at risk and could not be snapshotted: …`. A dry run takes no snapshot.
+
 The size is sampled with `du` immediately before the deletion.
+
+## Empty projects
+
+Deleting a worktree leaves its project on the sidebar with no workspaces. A project stays there until someone removes it by hand, and one whose directory no longer exists is clutter, not a place to start work. Each sweep, after everything above, the janitor removes a project only when **all** of these hold:
+
+- **It has no workspace at all.** A workspace record of any state carrying its `projectId` spares it, archived ones included: they are history someone may still open. Archiving a workspace keeps its record, so the rule reaches only projects whose workspace records were deleted outright.
+- **Its root is gone.** `stat` fails with `ENOENT` and nothing else does. `EACCES`, `ENOTDIR` on a parent, a timeout or an empty or relative path say nothing about whether the directory exists, so they spare it. So does an absent volume: a root under `/Volumes/<name>`, `/media/<user>/<name>`, `/mnt/<name>` or a Windows drive root is only gone if that volume root exists, checked with one `stat` decided from the path (`volumeRootOf`, no mount table). An unplugged drive is reported as a `kept-project` line naming the volume. A root on the system volume needs only its own `ENOENT`.
+- **It is not remote-keyed.** A project whose `projectKey` or `projectId` starts with `remote:` is never looked at, its root included.
+- **It is not archived.** An archived project is not on the sidebar, so it is not the clutter this rule is for.
+- **It is at least an hour old**, by the newer of `createdAt` and `updatedAt`. Someone adding a project, or a worktree being created for one, has no workspace for a moment.
+
+The removal is decided against freshly read state: the project, its workspaces and its root are read again immediately before each removal, and a project that changed is kept and reported as `kept-project`. The registry has no conditional remove, so a workspace created in the few milliseconds after that check still loses its project record. Adding the project again restores it; its custom name and icon do not come back.
+
+It removes through the same two steps as a person's project removal (`removeProjectRecord`: the registry, then the custom icon). Every connected session subscribes to the project registry, so each sidebar drops the project when the record goes, with no reload and nothing the janitor sends.
+
+A sweep removes at most 50. Removing a record is cheap and reversible, so it does not spend `maxArchivesPerSweep`; the cap limits the damage if the rule is ever wrong at scale. Any more wait for the next sweep. There is no config key for the rule or its cap. The rule runs whenever the janitor is `enabled`, and `dryRun` reports `would-remove-project` instead of removing.
 
 ## What you see
 
@@ -125,6 +143,7 @@ Each report line is logged to `daemon.log` when it changes, never every sweep. G
 {"action":"kept-agent","agentId":"c3…","title":"Fix the bug","reason":"its workspace is pinned","dryRun":true,…}
 {"action":"kept-agent","agentId":"d4…","reason":"quiet for 14h of the 3d required","dryRun":true,…}
 {"action":"kept-workspace","workspaceId":"ws-4","path":"…","reason":"it has 2 uncommitted or untracked file(s)","dryRun":true,…}
+{"action":"would-remove-project","projectId":"prj_3f…","path":"~/.paseo/worktrees/…/wt4-feature","reason":"it has no workspaces and its directory no longer exists","dryRun":true,"msg":"Done janitor (dry run)"}
 ```
 
 and for live agents:
@@ -137,7 +156,7 @@ and for live agents:
 {"action":"cannot-ask","agentId":"b2…","reason":"account claude-b is at its usage cap","dryRun":true,…}
 ```
 
-`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived or deleted something sends one push — "Archived 1 finished agent, archived 4 dead sessions and deleted 2 worktrees, freeing 5.8 GB. Kept …: …" — and a sweep that only checked sends nothing.
+`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived, deleted or removed something sends one push at level `record`, ledger only — "Archived 1 finished agent, archived 4 dead sessions, deleted 2 worktrees, freeing 5.8 GB and removed 25 empty projects. Kept …: …" — and a sweep that only checked sends nothing. A live sweep logs `removed-project` lines with the project id, root path and reason, once each; a removal that failed or lost a race is a `kept-project` line, and `tick()` reports the count as `removedProjectCount`. A kept worktree does not raise the level: it is snapshotted, and the work-at-risk sweep's judge decides whether Tyler hears about it. `snapshotted` lines name each snapshot's ref and offsite copy.
 
 ## Not automated
 

@@ -566,6 +566,7 @@ function resolveAgentMonitorConfig(
   | "leaderCompaction"
   | "doneJanitor"
   | "refocus"
+  | "remediation"
   | "daemonVitals"
   | "restartRecovery"
 > {
@@ -580,6 +581,7 @@ function resolveAgentMonitorConfig(
     leaderCompaction: agents?.leaderCompaction,
     doneJanitor: agents?.doneJanitor,
     refocus: agents?.refocus,
+    remediation: agents?.remediation,
     daemonVitals: agents?.daemonVitals,
     restartRecovery: agents?.restartRecovery,
   };

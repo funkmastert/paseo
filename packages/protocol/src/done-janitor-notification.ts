@@ -1,7 +1,7 @@
 /**
  * Push-notification `data.reason` value for the done janitor. Untyped JSON on the wire (not part
  * of the closed `attentionReason` enum), so it is safe for old apps: with no `agentId` to open
- * they fall back to the workspaces list. Sent only when a sweep archived or deleted something —
+ * they fall back to the workspaces list. Sent only when a sweep archived, deleted or removed something —
  * a sweep that merely checked stays silent.
  */
 export type DoneJanitorNotificationReason = "done_janitor";
@@ -24,6 +24,8 @@ export interface BuildDoneJanitorNotificationPayloadInput {
   /** Agents archived because they were closed or errored and unpinned, not because they answered. */
   archivedDeadAgentCount?: number;
   deletedWorktreeCount: number;
+  /** Projects removed because they had no workspaces and their directory was gone. */
+  removedProjectCount?: number;
   /** Total freed, summed over worktrees whose size was sampled before deletion. */
   reclaimedBytes: number;
   /** Worktrees whose agents were archived but which were kept, with the reason for each. */
@@ -53,6 +55,12 @@ export function buildDoneJanitorNotificationPayload(
     const verb = parts.length > 0 ? "deleted" : "Deleted";
     parts.push(
       `${verb} ${plural(input.deletedWorktreeCount, "worktree")}, freeing ${formatGigabytes(input.reclaimedBytes)}`,
+    );
+  }
+  const removedProjects = input.removedProjectCount ?? 0;
+  if (removedProjects > 0) {
+    parts.push(
+      `${parts.length > 0 ? "removed" : "Removed"} ${plural(removedProjects, "empty project")}`,
     );
   }
   const head = parts.slice(0, -1).join(", ");

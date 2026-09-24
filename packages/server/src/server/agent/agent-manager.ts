@@ -33,6 +33,7 @@ import type { TerminalManager } from "../../terminal/terminal-manager.js";
 
 import {
   getAgentStreamEventTurnId,
+  type AgentAccountAuth,
   type AgentCapabilityFlags,
   type AgentClient,
   type AgentCreateSessionOptions,
@@ -124,6 +125,7 @@ import {
   isUnresponsiveCancelReason,
   UNRESPONSIVE_CANCEL_ERROR,
   UNRESPONSIVE_CANCEL_REASON,
+  formatAccountCappedCancelError,
 } from "./turn-cancel.js";
 import {
   AgentProviderMoveError,
@@ -385,6 +387,13 @@ export interface AccountFailoverAgentSummary {
   internal: boolean;
   lifecycle: AgentLifecycleStatus;
   lastError: string | undefined;
+  title: string | null;
+  /** A foreground turn, a pending run, or a replacement in flight. Same expression the done
+   * janitor reads: failover must not take the account out from under live work. */
+  busy: boolean;
+  pendingPermissionCount: number;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
   /** Timeline generation: moves on every appended row, so a repeat failure with identical text
    * is still distinguishable from the old one. Null before the timeline is initialized. */
   timelineSeq: number | null;
@@ -470,6 +479,19 @@ export type IdleTurnOutcome =
   | { status: "canceled" }
   | { status: "failed"; error: string };
 
+/**
+ * Lean per-agent view for AgentStallSweep: the done janitor's view plus the three things a stall
+ * needs that it does not carry. See agent/stall-detector.ts.
+ */
+export interface StallSweepAgentSummary extends DoneJanitorAgentSummary {
+  /** The done janitor's question is the turn now running. */
+  quietTurn: boolean;
+  /** Token usage as last reported, for comparing across sweeps; usage touches no timestamp. */
+  usageFingerprint: string;
+  /** The newest activity of each provider subagent still reported running. */
+  runningSubagentActivityAt: string[];
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -491,6 +513,10 @@ export type AgentCancelReason =
   | "spend-governor"
   | "done-janitor"
   | "hub"
+  /** The stalled-agent sweep, handing a turn stuck on a capped account to account failover. */
+  | "account-capped"
+  /** The remediation ladder, cancelling a timed-out or over-budget escalation agent. */
+  | "remediation"
   | "unspecified";
 
 interface ProviderEnabledFlag {
@@ -1311,6 +1337,28 @@ export class AgentManager {
     return Array.from(this.clients.keys());
   }
 
+  /**
+   * Which account a provider's sessions run as, asked of its client. `null` when the provider is
+   * not registered or its client cannot tell — two providers are only ever treated as the same
+   * account on a positive, equal answer, never on a pair of shrugs.
+   *
+   * The account failover monitor uses it to notice that two pool entries point at one Claude
+   * login, which happens whenever two `CLAUDE_CONFIG_DIR`s are signed into the same email: their
+   * usage windows are then literally the same window, so moving between them changes no budget.
+   */
+  async describeProviderAccount(providerId: AgentProvider): Promise<AgentAccountAuth | null> {
+    const client = this.clients.get(providerId);
+    if (!client?.describeAccountAuth) {
+      return null;
+    }
+    try {
+      return await client.describeAccountAuth();
+    } catch (error) {
+      this.logger.debug({ err: error, providerId }, "Could not read a provider's account");
+      return null;
+    }
+  }
+
   /** Registers a notify-on-finish observer for `childAgentId`; returns its release function. */
   noteFinishObserver(childAgentId: string): () => void {
     this.finishObservers.set(childAgentId, (this.finishObservers.get(childAgentId) ?? 0) + 1);
@@ -1744,6 +1792,21 @@ export class AgentManager {
     return Array.from(this.agents.values()).map((agent) => this.toDoneJanitorSummary(agent));
   }
 
+  listAgentsForStallSweep(): StallSweepAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) =>
+      Object.assign(this.toDoneJanitorSummary(agent), {
+        quietTurn: agent.quietTurn === true,
+        usageFingerprint: JSON.stringify(agent.lastUsage ?? null),
+        runningSubagentActivityAt: this.providerSubagents
+          .list(agent.id)
+          .filter((subagent) => subagent.status === "running")
+          .flatMap(
+            (subagent) => this.providerSubagents.lastActivityAt(agent.id, subagent.id) ?? [],
+          ),
+      }),
+    );
+  }
+
   getDoneJanitorSummary(agentId: string): DoneJanitorAgentSummary | null {
     const agent = this.agents.get(agentId);
     return agent ? this.toDoneJanitorSummary(agent) : null;
@@ -1757,12 +1820,12 @@ export class AgentManager {
       lifecycle: agent.lifecycle,
       title: agent.config.title ?? null,
       lastActivitySummary: agent.lastActivitySummary ?? null,
-      lastActivityAt: this.computeLastActivityAt(agent),
+      lastActivityAt: this.lastActivityAtOf(agent),
     }));
   }
 
-  /** Newest of every activity timestamp the manager holds for an agent. */
-  private computeLastActivityAt(agent: ManagedAgent): string | null {
+  /** The newest activity timestamp the manager holds for an agent, or null if none parses. */
+  private lastActivityAtOf(agent: ManagedAgent): string | null {
     const timestamps = [
       agent.updatedAt.getTime(),
       agent.lastUserMessageAt?.getTime(),
@@ -1782,11 +1845,7 @@ export class AgentManager {
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       lifecycle: agent.lifecycle,
-      busy:
-        Boolean(agent.activeForegroundTurnId) ||
-        Boolean(agent.activeTurnId) ||
-        agent.pendingReplacement ||
-        Boolean(this.runs.getPendingRun(agent.id)),
+      busy: this.isAgentBusy(agent),
       pendingPermissionCount: agent.pendingPermissions.size,
       requiresAttention: agent.attention.requiresAttention,
       attentionReason: agent.attention.requiresAttention ? agent.attention.attentionReason : null,
@@ -1794,7 +1853,7 @@ export class AgentManager {
       runningProviderSubagentCount: this.providerSubagents
         .list(agent.id)
         .filter((subagent) => subagent.status === "running").length,
-      lastActivityAt: this.computeLastActivityAt(agent),
+      lastActivityAt: this.lastActivityAtOf(agent),
       labels: agent.labels,
       title: agent.config.title ?? null,
       sessionId: agent.persistence?.sessionId,
@@ -1920,6 +1979,10 @@ export class AgentManager {
       internal: agent.internal ?? false,
       lifecycle: agent.lifecycle,
       lastError: agent.lastError,
+      title: agent.config.title ?? null,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      lastActivityAt: this.lastActivityAtOf(agent),
       timelineSeq: this.timelineStore.getNextSeq(agent.id),
       lastTimelineAt: this.timelineStore.has(agent.id)
         ? this.timelineStore.getLastRowTimestamp(agent.id)
@@ -4265,7 +4328,27 @@ export class AgentManager {
     agentId: string,
     cancelReason: AgentCancelReason = "unspecified",
   ): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId, cancelReason));
+    return this.runForegroundMutation(agentId, async () => {
+      const result = await this.cancelAgentRunNow(agentId, cancelReason);
+      if (cancelReason === "account-capped" && result.status === "settled") {
+        await this.recordAccountCappedCancel(agentId);
+      }
+      return result;
+    });
+  }
+
+  /**
+   * A cancel clears `lastError`, and failover reads nothing else, so an account-capped cancel
+   * leaves a limit-shaped one. The timeline row dates the failure now: failover dates a failure
+   * by the newest row, and the stuck turn's newest row can be many hours old.
+   */
+  private async recordAccountCappedCancel(agentId: string): Promise<void> {
+    const agent = this.requireSessionAgent(agentId);
+    if (agent.lifecycle === "running") return;
+    agent.lastError = formatAccountCappedCancelError(agent.provider);
+    await this.appendSystemErrorTimelineMessage(agent, agent.provider, agent.lastError);
+    this.touchUpdatedAt(agent);
+    this.emitState(agent);
   }
 
   private async cancelAgentRunNow(

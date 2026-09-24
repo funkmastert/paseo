@@ -4,8 +4,6 @@ import {
   buildResourceAgentNotificationPayload,
   buildArtifactJanitorNotificationPayload,
   buildResourceBuildDaemonReapNotificationPayload,
-  buildResourceOrphanBuildDaemonsNotificationPayload,
-  buildResourceSystemMemoryNotificationPayload,
   type ReapedBuildDaemon,
 } from "@getpaseo/protocol/resource-monitor-notification";
 import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-manager.js";
@@ -14,7 +12,6 @@ import {
   evaluateAgentResourceBreach,
   evaluateMachineResourceBreach,
   type MachineResourceMonitorState,
-  type MachineResourceTrigger,
   type ResourceMonitorDetectorConfig,
 } from "./agent/resource-monitor-detector.js";
 import {
@@ -22,11 +19,17 @@ import {
   type BuildDaemonReaperConfig,
   type BuildDaemonReaperMemory,
   type BuildDaemonSighting,
+  type BuildDaemonVerdict,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
   markBuildDaemonHandled,
   type ProcessSignaller,
 } from "./agent/build-daemon-reaper.js";
+import {
+  describeProcess,
+  formatMemoryConsumers,
+  summarizeMemoryConsumers,
+} from "./agent/memory-consumers.js";
 import { attributeProcessTrees, type AgentProcessTree } from "./agent/process-attribution.js";
 import { detectRunningDevices, type RunningDevice } from "./agent/device-detection.js";
 import type { TestArtifactSweepResult } from "./agent/test-artifact-janitor.js";
@@ -39,6 +42,12 @@ import type {
 } from "./agent/process-sampler.js";
 import type { PushNotificationSender, PushSendMeta } from "./push/index.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
+import {
+  NULL_REMEDIATION_SINK,
+  type RemediationSink,
+  type RemedyAttempt,
+  type RemedyState,
+} from "./remediation/contract.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const GIBIBYTE = 1024 ** 3;
@@ -57,6 +66,27 @@ const DEFAULT_REAPER_IDLE_MINUTES = 15;
 const DEFAULT_REAPER_MIN_IDLE_SWEEPS = 3;
 const DEFAULT_REAPER_MAX_PER_SWEEP = 2;
 const DEFAULT_REAPER_GRACE_MS = 10_000;
+// How long the ladder waits on swap pressure before it sends an agent. The reaper and the
+// artifact janitor run inside every sweep, so ten minutes is ten chances for them to clear it.
+const SYSTEM_MEMORY_GRACE_MS = 10 * 60_000;
+// An episode's list of what was done to it is capped so a daemon-heavy day cannot grow it forever.
+const MAX_EPISODE_ATTEMPTS = 20;
+
+const ORPHAN_DAEMONS_KEY = "orphan-build-daemons";
+const SYSTEM_MEMORY_KEY = "system-memory";
+
+const ORPHAN_DAEMONS_TASK =
+  "Find which orphaned Gradle and Kotlin build daemons are still running on this machine and why " +
+  "the reaper spared them (the evidence lists them). Stop the ones that are safe to stop: run " +
+  "`./gradlew --stop` in the project that owns a daemon, or end an idle daemon whose build is " +
+  "gone. You must never touch a daemon under a running agent's process tree, never a build that " +
+  "is still using CPU, and never any other process.";
+
+const SYSTEM_MEMORY_TASK =
+  "Find what is holding this machine's memory (the evidence lists the biggest process trees) and " +
+  "stop only what is provably leftover: orphaned build daemons, simulators or emulators with no " +
+  "device lease, and dev servers that belonged to archived agents. You must never touch a " +
+  "process of a running agent, and never the Paseo daemon.";
 
 export interface ResourceMonitorReaperConfig {
   enabled?: boolean;
@@ -96,6 +126,12 @@ export interface AgentResourceMonitorOptions {
   >;
   agentStorage: Pick<AgentStorage, "get">;
   pushNotificationSender: PushNotificationSender;
+  /**
+   * Where the two machine-level conditions (orphan build daemons, swap pressure) are reported.
+   * The ladder owns the person-facing push for them; this monitor pushes nothing about either.
+   * Absent: they are observed by no one (docs/remediation.md).
+   */
+  remediationSink?: RemediationSink;
   serverId: string;
   processSampler: ProcessSampler;
   /**
@@ -182,6 +218,13 @@ function defaultSleep(ms: number): Promise<void> {
   });
 }
 
+function describeReapedDaemon(daemon: ReapedBuildDaemon): string {
+  return (
+    `${daemon.label} pid ${daemon.pid} (${formatBytes(daemon.rssBytes)}, ` +
+    `idle ${Math.round(daemon.idleMs / 60_000)}m)`
+  );
+}
+
 function toReapedBuildDaemon(candidate: BuildDaemonReapCandidate): ReapedBuildDaemon {
   return {
     pid: candidate.pid,
@@ -189,6 +232,12 @@ function toReapedBuildDaemon(candidate: BuildDaemonReapCandidate): ReapedBuildDa
     rssBytes: candidate.rssBytes,
     idleMs: candidate.idleMs,
   };
+}
+
+function formatBytes(bytes: number): string {
+  return bytes >= GIBIBYTE
+    ? `${(bytes / GIBIBYTE).toFixed(1)} GB`
+    : `${Math.round(bytes / 1_048_576)} MB`;
 }
 
 function computeSwapUsedRatio(systemMemory: SystemMemorySample): number {
@@ -214,6 +263,84 @@ function formatAgentResourceMessage(input: {
   );
 }
 
+/** What the reaper did and saw in one sweep, for the conditions it is the remedy of. */
+interface ReaperPass {
+  /** Reaps, or in a dry run what it would have reaped. */
+  attempts: RemedyAttempt[];
+  /** Why the daemons it left alone were left alone; undefined when there were none. */
+  spared: RemedyAttempt | undefined;
+  /** Daemons selected this sweep. Zero on a live reaper means nothing reclaimable remains. */
+  candidateCount: number;
+}
+
+const NO_REAPER_PASS: ReaperPass = { attempts: [], spared: undefined, candidateCount: 0 };
+
+/** The verdicts that mean "left alone", in the order the summary lists them. */
+const SPARED_VERDICTS: readonly BuildDaemonVerdict[] = [
+  "busy",
+  "idle-accumulating",
+  "first-sighting",
+  "not-abandoned",
+  "not-on-allowlist",
+];
+
+function reaperRemedyState(reaper: ResolvedReaperConfig): RemedyState {
+  if (!reaper.enabled) return "disabled";
+  return reaper.dryRun ? "dry-run" : "live";
+}
+
+function describeOrphanRemedyState(remedy: RemedyState): string {
+  if (remedy === "live") return "";
+  if (remedy === "dry-run") return " The reaper is in dry run, so it has not stopped them.";
+  return " The reaper is off, so nothing has stopped them.";
+}
+
+function describeReaperLineForSystemMemory(
+  reaper: ResolvedReaperConfig,
+  candidateCount: number,
+): string {
+  if (!reaper.enabled) return "Reaper: off, so nothing reclaims build daemons automatically.";
+  if (reaper.dryRun) return "Reaper: dry run, so it cannot free anything.";
+  if (candidateCount === 0) return "Reaper: live, and it has no reclaimable daemons left.";
+  return (
+    `Reaper: live, with ${candidateCount} reclaimable daemon${candidateCount === 1 ? "" : "s"} ` +
+    "this sweep."
+  );
+}
+
+function summarizeSparedDaemons(
+  sightings: readonly BuildDaemonSighting[],
+  memory: BuildDaemonReaperMemory,
+  selectedCount: number,
+  at: string,
+): RemedyAttempt | undefined {
+  const counts = new Map<string, number>();
+  const bump = (reason: string): void => void counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  let candidates = 0;
+  for (const sighting of sightings) {
+    if (memory.get(sighting.pid)?.handled === "not-permitted") {
+      bump("not-permitted");
+    } else if (sighting.verdict === "candidate") {
+      candidates += 1;
+    } else if (SPARED_VERDICTS.includes(sighting.verdict)) {
+      bump(sighting.verdict);
+    }
+  }
+  if (candidates > selectedCount)
+    counts.set("queued behind maxPerSweep", candidates - selectedCount);
+  if (counts.size === 0) return undefined;
+  const reasons = [...SPARED_VERDICTS, "not-permitted", "queued behind maxPerSweep"]
+    .filter((reason) => counts.has(reason))
+    .map((reason) => `${reason} ${counts.get(reason)}`);
+  const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  return {
+    remedy: "reaper",
+    outcome: "skipped",
+    detail: `Left ${total} orphaned build daemon${total === 1 ? "" : "s"} alone: ${reasons.join(", ")}`,
+    at,
+  };
+}
+
 interface AgentBreach {
   agentId: string;
   workspaceId: string | undefined;
@@ -236,6 +363,7 @@ export class AgentResourceMonitor {
   private readonly agentManager: AgentResourceMonitorOptions["agentManager"];
   private readonly agentStorage: Pick<AgentStorage, "get">;
   private readonly pushNotificationSender: PushNotificationSender;
+  private readonly remediationSink: RemediationSink;
   private readonly serverId: string;
   private readonly processSampler: ProcessSampler;
   private readonly sendSystemMessageToAgent: AgentResourceMonitorOptions["sendSystemMessageToAgent"];
@@ -258,6 +386,13 @@ export class AgentResourceMonitor {
   private reapMemory: BuildDaemonReaperMemory | undefined;
   /** The last verdict set logged for the reaper, so the log line appears on change and not every minute. */
   private lastReaperWatch = "";
+  /**
+   * What this monitor's remedies did while each machine-level condition has been active, oldest
+   * first; null while it is not. The ladder is idempotent per key, so the list is the monitor's
+   * to keep and it hands the whole thing over on every sweep.
+   */
+  private orphanEpisode: RemedyAttempt[] | null = null;
+  private systemMemoryEpisode: RemedyAttempt[] | null = null;
   private sweepInFlight = false;
   private readonly modeLog: MonitorModeLog;
 
@@ -265,6 +400,7 @@ export class AgentResourceMonitor {
     this.agentManager = options.agentManager;
     this.agentStorage = options.agentStorage;
     this.pushNotificationSender = options.pushNotificationSender;
+    this.remediationSink = options.remediationSink ?? NULL_REMEDIATION_SINK;
     this.serverId = options.serverId;
     this.processSampler = options.processSampler;
     this.sendSystemMessageToAgent = options.sendSystemMessageToAgent;
@@ -330,6 +466,7 @@ export class AgentResourceMonitor {
     this.reportMode();
     const rawConfig = this.readDaemonConfig().resourceMonitor;
     if (rawConfig?.enabled === false) {
+      await this.closeMachineEpisodes();
       return;
     }
     const config = resolveConfig(rawConfig);
@@ -353,37 +490,58 @@ export class AgentResourceMonitor {
     );
 
     const agentBreaches = this.evaluateAgentBreaches(agents, attribution.agentTrees, config, nowMs);
-    const machineTriggers = this.evaluateMachineBreaches(
-      systemMemory,
-      attribution.orphanBuildDaemons,
-      config,
-    );
+    this.advanceMachineState(systemMemory, attribution.orphanBuildDaemons, config);
 
     await this.reportDevices(cpu.rows, attribution.agentTrees, systemMemory);
 
     await this.sendAgentBreaches(agentBreaches, config);
-    await this.sendMachineBreaches(machineTriggers, systemMemory, attribution.orphanBuildDaemons);
-    // Runs on its own criteria, not off the orphan alert's threshold: an abandoned daemon sitting
-    // on 800 MB is worth reclaiming even though the machine-level leg only fires at 2 GiB.
-    await this.reapAbandonedBuildDaemons(cpu.rows, attribution.agentTrees, config.reaper, nowMs);
-    await this.reclaimTestArtifacts(cpu.rows);
+    // Runs on its own criteria, not off the orphan condition's threshold: an abandoned daemon
+    // sitting on 800 MB is worth reclaiming even though the condition only opens at 2 GiB.
+    const reaperPass = await this.reapAbandonedBuildDaemons(
+      cpu.rows,
+      attribution.agentTrees,
+      config.reaper,
+      nowMs,
+    );
+    const janitorAttempts = await this.reclaimTestArtifacts(cpu.rows, nowMs);
+
+    // Last, so a reap or a reclaim in this very sweep is in what the ladder is told.
+    await this.observeOrphanBuildDaemons({
+      orphans: attribution.orphanBuildDaemons,
+      rows: cpu.rows,
+      config,
+      reaperPass,
+      nowMs,
+    });
+    await this.observeSystemMemory({
+      systemMemory,
+      rows: cpu.rows,
+      agentTrees: attribution.agentTrees,
+      config,
+      reaperPass,
+      janitorAttempts,
+      nowMs,
+    });
   }
 
   /**
    * Never lets the janitor's bookkeeping break a sweep, for the same reason the device cap
    * cannot: this monitor's own legs have already run by here, and a failed disk scan must not
-   * cost the next one.
+   * cost the next one. Returns what it reclaimed as attempts, for the conditions it helps.
    */
-  private async reclaimTestArtifacts(rows: readonly ProcessSampleRow[]): Promise<void> {
-    if (!this.sweepTestArtifacts) return;
+  private async reclaimTestArtifacts(
+    rows: readonly ProcessSampleRow[],
+    nowMs: number,
+  ): Promise<RemedyAttempt[]> {
+    if (!this.sweepTestArtifacts) return [];
     let result: TestArtifactSweepResult;
     try {
       result = await this.sweepTestArtifacts({ rows });
     } catch (error) {
       this.logger.warn({ err: error }, "Artifact janitor sweep failed");
-      return;
+      return [];
     }
-    if (result.reclaimed.length === 0) return;
+    if (result.reclaimed.length === 0) return [];
     await this.sendPush(
       buildArtifactJanitorNotificationPayload({
         serverId: this.serverId,
@@ -399,6 +557,15 @@ export class AgentResourceMonitor {
       }),
       { level: "record" },
     );
+    const at = new Date(nowMs).toISOString();
+    return result.reclaimed.map((artifact) => ({
+      remedy: "artifact-janitor",
+      outcome: result.dryRun ? "skipped" : "acted",
+      detail:
+        `${result.dryRun ? "Dry run, would have reclaimed" : "Reclaimed"} ${artifact.label} ` +
+        `${artifact.name} (${formatBytes(artifact.sizeBytes)})`,
+      at,
+    }));
   }
 
   /** Never lets the cap's bookkeeping break a sweep: this monitor's own legs come first. */
@@ -465,11 +632,17 @@ export class AgentResourceMonitor {
     return breaches;
   }
 
-  private evaluateMachineBreaches(
+  /**
+   * Only the swap leg is read back from the detector: its sustained fire-and-re-arm shape is
+   * what keeps a ratio hovering at the threshold from opening and closing an episode every
+   * sweep. The orphan condition is a raw comparison, because the ladder's grace window is the
+   * persistence it needs.
+   */
+  private advanceMachineState(
     systemMemory: SystemMemorySample | undefined,
     orphanBuildDaemons: OrphanBuildDaemonSummary,
     config: ResolvedResourceMonitorConfig,
-  ): MachineResourceTrigger[] {
+  ): void {
     const result = evaluateMachineResourceBreach({
       swapUsedRatio: systemMemory ? computeSwapUsedRatio(systemMemory) : undefined,
       orphanBuildDaemonBytes: orphanBuildDaemons.rssBytes,
@@ -477,7 +650,6 @@ export class AgentResourceMonitor {
       previousState: this.machineState,
     });
     this.machineState = result.nextState;
-    return result.triggers;
   }
 
   private async sendAgentBreaches(
@@ -486,6 +658,35 @@ export class AgentResourceMonitor {
   ): Promise<void> {
     if (breaches.length === 0) {
       return;
+    }
+
+    // Steer first: whether the agent was told is what ranks the push. A running agent that was
+    // told to trim its children has had the remedy applied, so the push is only a record of it.
+    // An idle agent cannot be steered — the steer path would start a turn for it (agent-prompt.ts),
+    // spending tokens on an agent nobody is driving, and an idle agent with a heavy leftover
+    // child is the most likely breach shape — so it stays a notice: nothing has acted on it.
+    const steered = new Set<string>();
+    if (config.notifyAgent) {
+      for (const breach of breaches) {
+        if (!breach.isRunning) {
+          continue;
+        }
+        const body = formatAgentResourceMessage({
+          memoryBytes: breach.memoryBytes,
+          cpuPercent: breach.cpuPercent,
+          memoryBytesLimit: config.memoryBytesPerAgent,
+          cpuPercentLimit: config.cpuPercentPerAgent,
+        });
+        try {
+          await this.sendSystemMessageToAgent(breach.agentId, body);
+          steered.add(breach.agentId);
+        } catch (error) {
+          this.logger.warn(
+            { err: error, agentId: breach.agentId },
+            "Failed to steer resource-monitor message into agent",
+          );
+        }
+      }
     }
 
     if (breaches.length > DEFAULT_BREACH_BATCH_THRESHOLD) {
@@ -497,81 +698,226 @@ export class AgentResourceMonitor {
             workspaceId: breach.workspaceId,
           })),
         }),
-        { level: "notice" },
+        { level: breaches.every((breach) => steered.has(breach.agentId)) ? "record" : "notice" },
       );
-    } else {
-      for (const breach of breaches) {
-        const record = await this.agentStorage.get(breach.agentId).catch(() => null);
-        await this.sendPush(
-          buildResourceAgentNotificationPayload({
-            serverId: this.serverId,
-            workspaceId: breach.workspaceId,
-            agentId: breach.agentId,
-            agentTitle: record?.title ?? null,
-            trigger: breach.trigger,
-            memoryBytes: breach.memoryBytes,
-            cpuPercent: breach.cpuPercent,
-            memoryBytesLimit: config.memoryBytesPerAgent,
-            cpuPercentLimit: config.cpuPercentPerAgent,
-          }),
-          { level: "notice" },
-        );
-      }
-    }
-
-    if (!config.notifyAgent) {
       return;
     }
+
     for (const breach of breaches) {
-      // The steer path only steers into an active turn; for an idle agent it falls back to
-      // starting a new turn (agent-prompt.ts), which would spend tokens on an agent nobody is
-      // driving — the most likely breach shape, too: a heavy child left behind after the agent
-      // stopped. Idle agents get the push and the live alert only.
-      if (!breach.isRunning) {
-        continue;
-      }
-      const body = formatAgentResourceMessage({
-        memoryBytes: breach.memoryBytes,
-        cpuPercent: breach.cpuPercent,
-        memoryBytesLimit: config.memoryBytesPerAgent,
-        cpuPercentLimit: config.cpuPercentPerAgent,
-      });
-      try {
-        await this.sendSystemMessageToAgent(breach.agentId, body);
-      } catch (error) {
-        this.logger.warn(
-          { err: error, agentId: breach.agentId },
-          "Failed to steer resource-monitor message into agent",
-        );
-      }
+      const record = await this.agentStorage.get(breach.agentId).catch(() => null);
+      await this.sendPush(
+        buildResourceAgentNotificationPayload({
+          serverId: this.serverId,
+          workspaceId: breach.workspaceId,
+          agentId: breach.agentId,
+          agentTitle: record?.title ?? null,
+          trigger: breach.trigger,
+          memoryBytes: breach.memoryBytes,
+          cpuPercent: breach.cpuPercent,
+          memoryBytesLimit: config.memoryBytesPerAgent,
+          cpuPercentLimit: config.cpuPercentPerAgent,
+        }),
+        { level: steered.has(breach.agentId) ? "record" : "notice" },
+      );
     }
   }
 
-  private async sendMachineBreaches(
-    triggers: MachineResourceTrigger[],
-    systemMemory: SystemMemorySample | undefined,
-    orphanBuildDaemons: OrphanBuildDaemonSummary,
-  ): Promise<void> {
-    if (triggers.includes("systemMemory") && systemMemory) {
-      await this.sendPush(
-        buildResourceSystemMemoryNotificationPayload({
-          serverId: this.serverId,
-          swapUsedBytes: systemMemory.swapUsedBytes,
-          swapTotalBytes: systemMemory.swapTotalBytes,
-          swapUsedRatio: computeSwapUsedRatio(systemMemory),
-        }),
-        { level: "alert", dedupeKey: "resource-system-memory" },
+  /** Never throws: the sink's own contract, and a sweep must not depend on it anyway. */
+  private async observe(observation: Parameters<RemediationSink["observe"]>[0]): Promise<void> {
+    try {
+      await this.remediationSink.observe(observation);
+    } catch (error) {
+      this.logger.warn(
+        { err: error, key: observation.key },
+        "Remediation sink rejected an observation",
       );
     }
-    if (triggers.includes("orphanBuildDaemons")) {
-      await this.sendPush(
-        buildResourceOrphanBuildDaemonsNotificationPayload({
-          serverId: this.serverId,
-          count: orphanBuildDaemons.count,
-          rssBytes: orphanBuildDaemons.rssBytes,
-        }),
-        { level: "notice", dedupeKey: "resource-orphan-daemons" },
-      );
+  }
+
+  private appendEpisodeAttempts(
+    episode: RemedyAttempt[] | null,
+    attempts: readonly RemedyAttempt[],
+  ): RemedyAttempt[] {
+    const next = [...(episode ?? []), ...attempts];
+    return next.slice(-MAX_EPISODE_ATTEMPTS);
+  }
+
+  /**
+   * Reports the orphan-build-daemon condition to the ladder. This monitor no longer pushes about
+   * it: a live reaper is the remedy, and the ladder decides whether an agent, then a person, is
+   * needed once the reaper has had its chance. Opens at the same 2 GiB the old push did.
+   */
+  private async observeOrphanBuildDaemons(input: {
+    orphans: OrphanBuildDaemonSummary;
+    rows: readonly ProcessSampleRow[];
+    config: ResolvedResourceMonitorConfig;
+    reaperPass: ReaperPass;
+    nowMs: number;
+  }): Promise<void> {
+    const { orphans, config, reaperPass } = input;
+    const remedy = reaperRemedyState(config.reaper);
+    const active = orphans.count > 0 && orphans.rssBytes >= config.orphanBuildDaemonBytes;
+    if (!active) {
+      if (this.orphanEpisode) {
+        const attempts = this.appendEpisodeAttempts(this.orphanEpisode, reaperPass.attempts);
+        this.orphanEpisode = null;
+        await this.observe({
+          ...this.orphanObservationBase(remedy, orphans),
+          active: false,
+          attempts,
+        });
+      }
+      return;
+    }
+
+    this.orphanEpisode = this.appendEpisodeAttempts(this.orphanEpisode, reaperPass.attempts);
+    const rowsByPid = new Map(input.rows.map((row) => [row.pid, row] as const));
+    const daemonLines = orphans.pids.map((pid) => {
+      const row = rowsByPid.get(pid);
+      return row
+        ? `- pid ${pid} (${describeProcess(row.command)}): ${formatBytes(row.rssKb * 1024)}, ` +
+            `${Math.round(row.cpuPercent)}% CPU`
+        : `- pid ${pid}`;
+    });
+    await this.observe({
+      ...this.orphanObservationBase(remedy, orphans),
+      active: true,
+      evidence:
+        `${orphans.count} orphaned build daemon${orphans.count === 1 ? "" : "s"} (their launcher ` +
+        `is gone) hold ${formatBytes(orphans.rssBytes)}; the condition opens at ` +
+        `${formatBytes(config.orphanBuildDaemonBytes)}.\n${daemonLines.join("\n")}\n` +
+        `Reaper: ${remedy}, idle for ${config.reaper.idleMinutes} min across at least ` +
+        `${config.reaper.minIdleSweeps} sweeps before it acts.`,
+      attempts: [...this.orphanEpisode, ...(reaperPass.spared ? [reaperPass.spared] : [])],
+      // The reaper needs the idle window to elapse plus the sweeps that observe it, then one
+      // sweep to act. Past that it has had its chance.
+      graceMs: config.reaper.idleMinutes * 60_000 + 2 * this.sweepIntervalMs,
+      // A live reaper that could not clear it is worth interrupting for. With the reaper off or
+      // in dry run nothing can act, so it stays the notice it always was.
+      level: remedy === "live" ? "alert" : "notice",
+      escalation: { task: ORPHAN_DAEMONS_TASK, taskClass: "mechanical" },
+    });
+  }
+
+  private orphanObservationBase(remedy: RemedyState, orphans: OrphanBuildDaemonSummary) {
+    return {
+      key: ORPHAN_DAEMONS_KEY,
+      kind: "orphan-build-daemons" as const,
+      remedy,
+      title: "Orphaned build daemons are holding memory",
+      summary:
+        `${orphans.count} orphaned build daemon${orphans.count === 1 ? "" : "s"} hold ` +
+        `${formatBytes(orphans.rssBytes)}.` +
+        describeOrphanRemedyState(remedy),
+    };
+  }
+
+  /**
+   * Reports swap pressure to the ladder. Its remedies are the two that already run inside this
+   * sweep: the reaper (when it is live) and the artifact janitor. This monitor pushes nothing
+   * about it any more.
+   */
+  private async observeSystemMemory(input: {
+    systemMemory: SystemMemorySample | undefined;
+    rows: readonly ProcessSampleRow[];
+    agentTrees: readonly AgentProcessTree[];
+    config: ResolvedResourceMonitorConfig;
+    reaperPass: ReaperPass;
+    janitorAttempts: readonly RemedyAttempt[];
+    nowMs: number;
+  }): Promise<void> {
+    const { systemMemory, config, reaperPass } = input;
+    const reaper = config.reaper;
+    const live = reaper.enabled && !reaper.dryRun;
+    const remedy: RemedyState = live ? "live" : "none";
+    const active = this.machineState?.systemMemory.fired === true;
+    const newAttempts = [...reaperPass.attempts, ...input.janitorAttempts];
+    if (!active) {
+      if (this.systemMemoryEpisode) {
+        const attempts = this.appendEpisodeAttempts(this.systemMemoryEpisode, newAttempts);
+        this.systemMemoryEpisode = null;
+        await this.observe({
+          ...this.systemMemoryObservationBase(remedy, systemMemory, config),
+          active: false,
+          attempts,
+        });
+      }
+      return;
+    }
+    if (!systemMemory) {
+      // Still over threshold as far as the detector knows, but there is nothing to describe.
+      return;
+    }
+
+    this.systemMemoryEpisode = this.appendEpisodeAttempts(this.systemMemoryEpisode, newAttempts);
+    const consumers = await this.describeMemoryConsumers(input.rows, input.agentTrees);
+    const reaperLine = describeReaperLineForSystemMemory(reaper, reaperPass.candidateCount);
+    await this.observe({
+      ...this.systemMemoryObservationBase(remedy, systemMemory, config),
+      active: true,
+      evidence:
+        `Swap: ${formatBytes(systemMemory.swapUsedBytes)} of ${formatBytes(systemMemory.swapTotalBytes)} ` +
+        `used, over the ${Math.round(config.systemSwapUsedRatio * 100)}% threshold.\n` +
+        `${reaperLine}\nBiggest process trees by memory:\n${formatMemoryConsumers(consumers)}`,
+      attempts: this.systemMemoryEpisode,
+      graceMs: SYSTEM_MEMORY_GRACE_MS,
+      level: "alert",
+      escalation: { task: SYSTEM_MEMORY_TASK, taskClass: "standard" },
+    });
+  }
+
+  private systemMemoryObservationBase(
+    remedy: RemedyState,
+    systemMemory: SystemMemorySample | undefined,
+    config: ResolvedResourceMonitorConfig,
+  ) {
+    const ratio = systemMemory ? computeSwapUsedRatio(systemMemory) : config.systemSwapUsedRatio;
+    return {
+      key: SYSTEM_MEMORY_KEY,
+      kind: "system-memory" as const,
+      remedy,
+      title: "The machine is running out of memory",
+      summary:
+        `Swap is ${Math.round(ratio * 100)}% used` +
+        (systemMemory
+          ? ` (${formatBytes(systemMemory.swapUsedBytes)} of ${formatBytes(systemMemory.swapTotalBytes)}).`
+          : "."),
+    };
+  }
+
+  /** The largest process trees in the sample, labelled with their agent's title where there is one. */
+  private async describeMemoryConsumers(
+    rows: readonly ProcessSampleRow[],
+    agentTrees: readonly AgentProcessTree[],
+  ) {
+    const largestAgents = [...agentTrees].sort((a, b) => b.rssBytes - a.rssBytes).slice(0, 8);
+    const agentLabels = new Map<string, string>();
+    for (const tree of largestAgents) {
+      const record = await this.agentStorage.get(tree.agentId).catch(() => null);
+      if (record?.title) agentLabels.set(tree.agentId, record.title);
+    }
+    return summarizeMemoryConsumers({ rows, agentTrees, agentLabels });
+  }
+
+  /** The monitor was switched off mid-condition: nothing is observing it any more. */
+  private async closeMachineEpisodes(): Promise<void> {
+    if (this.orphanEpisode) {
+      const attempts = this.orphanEpisode;
+      this.orphanEpisode = null;
+      await this.observe({
+        ...this.orphanObservationBase("disabled", { count: 0, rssBytes: 0, pids: [] }),
+        active: false,
+        attempts,
+      });
+    }
+    if (this.systemMemoryEpisode) {
+      const attempts = this.systemMemoryEpisode;
+      this.systemMemoryEpisode = null;
+      await this.observe({
+        ...this.systemMemoryObservationBase("none", undefined, resolveConfig(undefined)),
+        active: false,
+        attempts,
+      });
     }
   }
 
@@ -580,13 +926,13 @@ export class AgentResourceMonitor {
     agentTrees: readonly AgentProcessTree[],
     reaper: ResolvedReaperConfig,
     nowMs: number,
-  ): Promise<void> {
+  ): Promise<ReaperPass> {
     if (!reaper.enabled) {
       // Turning the reaper on starts the evidence over. Sweeps observed while it was off were
       // never checked against the abandonment rules, and acting on them would skip the wait.
       this.reapMemory = undefined;
       this.lastReaperWatch = "";
-      return;
+      return NO_REAPER_PASS;
     }
 
     const attributedPids = new Set(agentTrees.flatMap((tree) => tree.pids));
@@ -600,8 +946,14 @@ export class AgentResourceMonitor {
     });
     this.reapMemory = memory;
     this.reportReaperSightings(sightings);
+    const at = new Date(nowMs).toISOString();
+    const pass = (attempts: RemedyAttempt[]): ReaperPass => ({
+      attempts,
+      spared: summarizeSparedDaemons(sightings, memory, candidates.length, at),
+      candidateCount: candidates.length,
+    });
     if (candidates.length === 0) {
-      return;
+      return pass([]);
     }
 
     if (reaper.dryRun) {
@@ -621,12 +973,19 @@ export class AgentResourceMonitor {
         }),
         { level: "record" },
       );
-      return;
+      return pass(
+        candidates.map((candidate) => ({
+          remedy: "reaper",
+          outcome: "skipped",
+          detail: `Dry run, would have reaped ${describeReapedDaemon(toReapedBuildDaemon(candidate))}`,
+          at,
+        })),
+      );
     }
 
     const reaped = await this.terminateBuildDaemons(candidates, reaper, memory);
     if (reaped.length === 0) {
-      return;
+      return pass([]);
     }
     await this.sendPush(
       buildResourceBuildDaemonReapNotificationPayload({
@@ -635,6 +994,14 @@ export class AgentResourceMonitor {
         daemons: reaped,
       }),
       { level: "record" },
+    );
+    return pass(
+      reaped.map((daemon) => ({
+        remedy: "reaper",
+        outcome: "acted",
+        detail: `Stopped ${describeReapedDaemon(daemon)}`,
+        at,
+      })),
     );
   }
 

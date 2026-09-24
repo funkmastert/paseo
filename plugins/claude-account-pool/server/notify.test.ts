@@ -168,8 +168,10 @@ describe("createNotifier", () => {
     // Names the duplicate-login entries, so a "move" between them is visibly pointless.
     expect(text).toContain("claude-personal");
     expect(text).toContain("worker-a, backup");
-    // The three things only a person can do.
-    expect(text).toMatch(/Sign another Claude account in, raise a limit, or wind the fleet down/);
+    // Informational, not a call to action: failover already collapsed onto this account, and
+    // will spread back out on its own once another account has budget.
+    expect(text).toContain("informational");
+    expect(text).not.toMatch(/sign in|raise a limit|wind the fleet down/i);
     // And that it undoes itself.
     expect(text).toContain("Isolation resumes");
 
@@ -552,6 +554,90 @@ describe("createNotifier", () => {
     expect(sendCalls[0].id).toBe("leader-1");
     expect(sendCalls[0].text).toContain("Live Child");
     expect(sendCalls[0].text).not.toContain("Dead Child");
+
+    notifier.stop();
+  });
+
+  it("excludes idle and errored children too: only running or initializing counts as still there", async () => {
+    // The incident this fixes: a leader was told 21 children "were running there" when most
+    // had long since finished their turn (idle) or failed (error) — isAffectedByCapRow only
+    // excluded `closed`. `initializing` still counts: a child mid-launch on the capped account
+    // is as much "there" as a running one.
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Running Child", provider: "worker-a", status: "running" },
+      { id: "child-2", parentLabel: "leader-1", title: "Starting Child", provider: "worker-a", status: "initializing" },
+      { id: "child-3", parentLabel: "leader-1", title: "Idle Child", provider: "worker-a", status: "idle" },
+      { id: "child-4", parentLabel: "leader-1", title: "Errored Child", provider: "worker-a", status: "error" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker({ now: () => new Date("2026-01-01T00:00:00.000Z") });
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    notifier.onTurnEnded("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T03:00:00.000Z");
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].text).toContain("Running Child");
+    expect(sendCalls[0].text).toContain("Starting Child");
+    expect(sendCalls[0].text).not.toContain("Idle Child");
+    expect(sendCalls[0].text).not.toContain("Errored Child");
+
+    notifier.stop();
+  });
+
+  it("skips a leader entirely when its only affected children are idle or errored, not running", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Idle Child", provider: "worker-a", status: "idle" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker({ now: () => new Date("2026-01-01T00:00:00.000Z") });
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    notifier.onTurnEnded("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T03:00:00.000Z");
+    await flush();
+
+    expect(sendCalls).toHaveLength(0);
+    notifier.stop();
+  });
+
+  it("tells the leader failover handles the cap automatically, without asking it to act", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader One", provider: "human-claude" },
+      { id: "child-1", parentLabel: "leader-1", title: "Child One", provider: "worker-a", status: "running" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const health = createHealthTracker({ now: () => new Date("2026-01-01T00:00:00.000Z") });
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({
+      paseo,
+      health,
+      schedule,
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    notifier.onTurnEnded("leader-1");
+    health.reportTurnFailure("worker-a", "hit your limit, resets at 2026-01-01T03:00:00.000Z");
+    await flush();
+
+    const text = sendCalls[0].text;
+    expect(text).toContain("automatically");
+    expect(text).not.toMatch(/you should|please|sign in|raise a limit/i);
 
     notifier.stop();
   });

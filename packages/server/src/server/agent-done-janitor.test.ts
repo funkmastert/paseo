@@ -1,8 +1,8 @@
-import { mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { AgentManager, type DoneJanitorAgentSummary } from "./agent/agent-manager.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
@@ -10,15 +10,19 @@ import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
 import {
   AgentDoneJanitor,
   askAgentWhetherDone,
+  probeProjectRoot,
   readProviderHealth,
+  volumeRootOf,
   type AskAgentResult,
   type DoneJanitorConfig,
   type DoneJanitorDependencies,
+  type DoneJanitorProject,
   type DoneJanitorWorkspace,
   type ProviderHealth,
 } from "./agent-done-janitor.js";
 import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import type { PushPayload } from "./push/index.js";
+import type { WorktreeSnapshotResult } from "./remediation/contract.js";
 
 const HOUR = 60 * 60_000;
 const NOW = Date.parse("2026-09-21T12:00:00.000Z");
@@ -45,6 +49,7 @@ function record(overrides: Partial<StoredAgentRecord> = {}): StoredAgentRecord {
 function workspace(overrides: Partial<DoneJanitorWorkspace> = {}): DoneJanitorWorkspace {
   return {
     workspaceId: "ws-1",
+    projectId: "project-1",
     kind: "worktree",
     cwd: "/home/t/.paseo/worktrees/h/feature",
     displayName: "feature",
@@ -66,7 +71,11 @@ interface Harness {
   asked: string[];
   archived: string[];
   reclaimed: string[];
+  removedProjects: string[];
   pushes: PushPayload[];
+  levels: (string | undefined)[];
+  /** Snapshots, archives and reclaims in the order they happened. */
+  events: string[];
   stored: StoredAgentRecord[];
   config: DoneJanitorConfig;
   setNow(ms: number): void;
@@ -76,6 +85,17 @@ function harness(input: {
   stored?: StoredAgentRecord[];
   live?: DoneJanitorAgentSummary[];
   workspaces?: DoneJanitorWorkspace[];
+  projects?: DoneJanitorProject[];
+  /** Runs as each read of the projects is served; `call` counts from 1. */
+  onListProjects?: (
+    call: number,
+    state: { projects: DoneJanitorProject[]; workspaces: DoneJanitorWorkspace[] },
+  ) => void;
+  /** Runs before each probe of a project root; `call` counts from 1. */
+  onProbeRoot?: (call: number) => void;
+  removeProject?: (projectId: string) => void;
+  /** Stands in for the mount-point rule, so a temp directory can be a volume. */
+  volumeRootOf?: (rootPath: string) => string | null;
   config?: DoneJanitorConfig | undefined;
   answer?: (agentId: string) => AskAgentResult;
   health?: ProviderHealth;
@@ -87,6 +107,7 @@ function harness(input: {
   afterAnswer?: (stored: StoredAgentRecord[]) => void;
   /** Runs as each read of the stored agents is served; `call` counts from 1. */
   onListStored?: (call: number, stored: StoredAgentRecord[]) => void;
+  snapshot?: (cwd: string) => WorktreeSnapshotResult;
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -94,8 +115,14 @@ function harness(input: {
   const asked: string[] = [];
   const archived: string[] = [];
   const reclaimed: string[] = [];
+  const removedProjects: string[] = [];
+  const projects = input.projects ?? [];
   const pushes: PushPayload[] = [];
+  const levels: (string | undefined)[] = [];
+  const events: string[] = [];
   let listCalls = 0;
+  let listProjectCalls = 0;
+  let probeCalls = 0;
   const config = input.config;
   const deps: DoneJanitorDependencies = {
     listLiveAgents: () => input.live ?? [],
@@ -122,6 +149,7 @@ function harness(input: {
     },
     archiveAgent: async (agentId) => {
       archived.push(agentId);
+      events.push(`archive:${agentId}`);
       const archivedAt = new Date(now).toISOString();
       for (const [index, candidate] of stored.entries()) {
         const cascades =
@@ -137,14 +165,40 @@ function harness(input: {
     measureBytes: async () => 3 * GB,
     reclaimWorkspace: async (workspaceId) => {
       reclaimed.push(workspaceId);
+      events.push(`reclaim:${workspaceId}`);
       const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
       workspaces[index] = { ...workspaces[index], archivedAt: new Date(now).toISOString() };
       return { removedDirectory: true };
     },
+    snapshotWorktree: async ({ cwd }) => {
+      events.push(`snapshot:${cwd}`);
+      return input.snapshot?.(cwd) ?? { kind: "nothing-at-risk", worktreePath: cwd };
+    },
+    listProjects: async () => {
+      listProjectCalls += 1;
+      input.onListProjects?.(listProjectCalls, { projects, workspaces });
+      return projects.filter((project) => !removedProjects.includes(project.projectId));
+    },
+    // The real probe on real files: a fake would only prove the janitor trusts the fake.
+    probeProjectRoot: async (rootPath) => {
+      probeCalls += 1;
+      input.onProbeRoot?.(probeCalls);
+      return probeProjectRoot(rootPath, { volumeRootOf: input.volumeRootOf });
+    },
+    removeProject: async (projectId) => {
+      input.removeProject?.(projectId);
+      removedProjects.push(projectId);
+      events.push(`remove-project:${projectId}`);
+    },
   };
   const janitor = new AgentDoneJanitor({
     dependencies: deps,
-    getPushNotificationSender: () => ({ send: async (payload) => void pushes.push(payload) }),
+    getPushNotificationSender: () => ({
+      send: async (payload, options) => {
+        pushes.push(payload);
+        levels.push(options?.level);
+      },
+    }),
     serverId: "server-1",
     readDaemonConfig: () => ({ doneJanitor: config }),
     logger: pino({ level: "silent" }),
@@ -155,7 +209,10 @@ function harness(input: {
     asked,
     archived,
     reclaimed,
+    removedProjects,
     pushes,
+    levels,
+    events,
     stored,
     config: config ?? {},
     setNow: (ms) => {
@@ -192,6 +249,18 @@ describe("AgentDoneJanitor", () => {
         body: "Archived 1 finished agent and deleted 1 worktree, freeing 3.0 GB.",
       }),
     ]);
+  });
+
+  test("an agent that answered DONE keeps its worktree when a snapshot of work at risk fails", async () => {
+    const h = harness({
+      config: ON,
+      snapshot: (cwd) => ({ kind: "failed", worktreePath: cwd, error: "disk full" }),
+    });
+
+    await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
   });
 
   test("an agent idle overnight is not asked", async () => {
@@ -910,6 +979,87 @@ describe("AgentDoneJanitor dead pass", () => {
     ]);
   });
 
+  test("the worktree is snapshotted before the archive and before the reclaim", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: (cwd) => ({
+        kind: "snapshotted",
+        worktreePath: cwd,
+        ref: "refs/backup/2026-09-21/feature",
+        commit: "abc",
+        dirtyFiles: 0,
+        unpushedCommits: 1,
+        skippedFiles: [],
+        offsite: { kind: "bundled", path: "/b/feature.bundle" },
+      }),
+    });
+
+    const report = await h.janitor.tick();
+
+    const feature = "/home/t/.paseo/worktrees/h/feature";
+    expect(h.events).toEqual([
+      `snapshot:${feature}`,
+      "archive:agent-1",
+      `snapshot:${feature}`,
+      "reclaim:ws-1",
+    ]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "snapshotted",
+        path: feature,
+        reason: "refs/backup/2026-09-21/feature; bundled at /b/feature.bundle",
+      }),
+    );
+  });
+
+  test("a failed snapshot of work at risk spares the worktree this sweep, and says why", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: (cwd) => ({ kind: "failed", worktreePath: cwd, error: "git write-tree failed" }),
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "its work is at risk and could not be snapshotted: git write-tree failed",
+      }),
+    );
+  });
+
+  test("a snapshot that could not read the directory at all spares nothing", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      snapshot: () => ({
+        kind: "failed",
+        worktreePath: null,
+        error: "the directory does not exist",
+      }),
+    });
+    await h.janitor.tick();
+    expect(h.reclaimed).toEqual(["ws-1"]);
+  });
+
+  test("a dry run takes no snapshot", async () => {
+    const h = harness({ config: { ...DEAD_ON, dryRun: true } });
+    await h.janitor.tick();
+    expect(h.events).toEqual([]);
+  });
+
+  test("a kept worktree is only recorded: it is snapshotted, and the work-at-risk sweep judges it", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      safety: { safe: false, reason: "it has 2 uncommitted or untracked file(s)" },
+    });
+    await h.janitor.tick();
+    expect(h.pushes).toHaveLength(1);
+    expect(h.levels).toEqual(["record"]);
+  });
+
   test("archiveDead off leaves closed agents to the question, as before", async () => {
     const h = harness({ config: { enabled: true, archiveDead: false } });
 
@@ -1017,3 +1167,469 @@ function liveSummary(overrides: Partial<DoneJanitorAgentSummary>): DoneJanitorAg
     ...overrides,
   };
 }
+
+describe("AgentDoneJanitor empty projects", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "done-janitor-projects-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Nothing but projects: no agents, so the other passes have nothing to do.
+  const ON_PROJECTS: DoneJanitorConfig = { enabled: true };
+  const TWO_HOURS_AGO = new Date(NOW - 2 * HOUR).toISOString();
+
+  /** A project whose root was never created: the shape of a deleted worktree's leftover. */
+  function project(id: string, overrides: Partial<DoneJanitorProject> = {}): DoneJanitorProject {
+    return {
+      projectId: id,
+      rootPath: join(dir, id),
+      projectKey: null,
+      createdAt: FOUR_DAYS_AGO,
+      updatedAt: FOUR_DAYS_AGO,
+      archivedAt: null,
+      ...overrides,
+    };
+  }
+
+  function projectsHarness(input: Parameters<typeof harness>[0]): Harness {
+    return harness({ stored: [], workspaces: [], config: ON_PROJECTS, ...input });
+  }
+
+  test("a project with no workspaces and a missing root is removed, and the report says why", async () => {
+    const h = projectsHarness({ projects: [project("wt4-gone")] });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["wt4-gone"]);
+    expect(report?.removedProjectCount).toBe(1);
+    expect(report?.entries).toEqual([
+      expect.objectContaining({
+        action: "removed-project",
+        projectId: "wt4-gone",
+        path: join(dir, "wt4-gone"),
+        reason: "it has no workspaces and its directory no longer exists",
+      }),
+    ]);
+  });
+
+  test("several empty projects go in one sweep, with one push at record level", async () => {
+    const h = projectsHarness({
+      projects: [project("a"), project("b"), project("c")],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["a", "b", "c"]);
+    expect(report?.removedProjectCount).toBe(3);
+    expect(h.pushes).toEqual([
+      expect.objectContaining({
+        title: "Cleaned up finished work",
+        body: "Removed 3 empty projects.",
+      }),
+    ]);
+    expect(h.levels).toEqual(["record"]);
+  });
+
+  test("the summary line carries the project count beside agents and worktrees", async () => {
+    const h = harness({
+      config: ON,
+      projects: [project("a"), project("b")],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.pushes).toEqual([
+      expect.objectContaining({
+        body: "Archived 1 finished agent, deleted 1 worktree, freeing 3.0 GB and removed 2 empty projects.",
+      }),
+    ]);
+  });
+
+  test("a project that still has an archived workspace is kept", async () => {
+    const h = projectsHarness({
+      projects: [project("p1")],
+      workspaces: [workspace({ projectId: "p1", archivedAt: FOUR_DAYS_AGO })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.removedProjectCount).toBe(0);
+    expect(h.pushes).toEqual([]);
+  });
+
+  test("a project whose root still exists is kept", async () => {
+    mkdirSync(join(dir, "alive"));
+    const h = projectsHarness({ projects: [project("alive")] });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+  });
+
+  test("a remote-keyed project is kept and its root is never checked", async () => {
+    const h = projectsHarness({
+      projects: [
+        project("remote:github.com/acme/app", { projectKey: "remote:github.com/acme/app" }),
+        project("prj_1", { projectKey: "remote:github.com/acme/other#subdir:web" }),
+        project("remote:github.com/acme/legacy", { projectKey: null }),
+      ],
+      onProbeRoot: () => {
+        throw new Error("a remote project's root must not be probed");
+      },
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+  });
+
+  test("a root that fails to stat for any reason but ENOENT is kept", async () => {
+    // ENOTDIR: a parent is a file.
+    writeFileSync(join(dir, "a-file"), "x");
+    const h = projectsHarness({
+      projects: [project("under-a-file", { rootPath: join(dir, "a-file", "child") })],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+  });
+
+  test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "an unreadable parent (EACCES) keeps the project",
+    async () => {
+      const locked = join(dir, "locked");
+      mkdirSync(join(locked, "child"), { recursive: true });
+      chmodSync(locked, 0o000);
+      try {
+        const h = projectsHarness({
+          projects: [project("locked-child", { rootPath: join(locked, "child") })],
+        });
+
+        await h.janitor.tick();
+
+        expect(h.removedProjects).toEqual([]);
+      } finally {
+        chmodSync(locked, 0o755);
+      }
+    },
+  );
+
+  test("a project made in the last hour is kept", async () => {
+    const tenMinutesAgo = new Date(NOW - 10 * 60_000).toISOString();
+    const h = projectsHarness({
+      projects: [
+        project("just-created", { createdAt: tenMinutesAgo, updatedAt: tenMinutesAgo }),
+        project("just-touched", { updatedAt: tenMinutesAgo }),
+        project("bad-clock", { createdAt: "not a date" }),
+        project("two-hours-old", { createdAt: TWO_HOURS_AGO, updatedAt: TWO_HOURS_AGO }),
+      ],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["two-hours-old"]);
+  });
+
+  test("an archived project is not on the sidebar and is left alone", async () => {
+    const h = projectsHarness({ projects: [project("shelved", { archivedAt: FOUR_DAYS_AGO })] });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+  });
+
+  test("a workspace that appears between the sweep's read and the removal spares the project", async () => {
+    const h = projectsHarness({
+      projects: [project("p1"), project("p2")],
+      // Call 1 is the sweep's read; call 2 is the fresh read before p1's removal.
+      onListProjects: (call, { workspaces }) => {
+        if (call === 2) {
+          workspaces.push(workspace({ workspaceId: "ws-new", projectId: "p1", kind: "directory" }));
+        }
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["p2"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        projectId: "p1",
+        reason: "it was empty and its directory was gone, but then it gained a workspace",
+      }),
+    );
+  });
+
+  test("a root that reappears between the sweep's read and the removal spares the project", async () => {
+    const h = projectsHarness({
+      projects: [project("p1")],
+      // Probe 1 is the sweep's; probe 2 is the fresh one before the removal.
+      onProbeRoot: (call) => {
+        if (call === 2) mkdirSync(join(dir, "p1"));
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        projectId: "p1",
+        reason: "it was empty and its directory was gone, but then its directory exists",
+      }),
+    );
+  });
+
+  test("a project someone else removed in the meantime is skipped without a line", async () => {
+    const h = projectsHarness({
+      projects: [project("p1"), project("p2")],
+      onListProjects: (call, { projects }) => {
+        if (call === 2) projects.splice(0, 1);
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["p2"]);
+    expect(report?.entries.map((entry) => entry.projectId)).toEqual(["p2"]);
+  });
+
+  test("a root on a mounted volume is judged like any other", async () => {
+    const volume = join(dir, "Volumes", "disk");
+    mkdirSync(volume, { recursive: true });
+    const h = projectsHarness({
+      projects: [project("on-disk", { rootPath: join(volume, "wt4-gone") })],
+      volumeRootOf: () => volume,
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["on-disk"]);
+  });
+
+  test("a root whose volume is not mounted is kept, and the report says so", async () => {
+    const volume = join(dir, "Volumes", "unplugged");
+    const rootPath = join(volume, "wt4-gone");
+    const h = projectsHarness({
+      projects: [project("on-usb", { rootPath })],
+      volumeRootOf: () => volume,
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.removedProjectCount).toBe(0);
+    expect(report?.entries).toEqual([
+      expect.objectContaining({
+        action: "kept-project",
+        projectId: "on-usb",
+        path: rootPath,
+        reason: `its volume ${volume} is not mounted, so its directory may still exist on it`,
+      }),
+    ]);
+    expect(h.pushes).toEqual([]);
+  });
+
+  test("a volume that unmounts between the sweep's read and the removal spares the project", async () => {
+    const volume = join(dir, "Volumes", "flaky");
+    mkdirSync(volume, { recursive: true });
+    const h = projectsHarness({
+      projects: [project("on-flaky", { rootPath: join(volume, "wt4-gone") })],
+      volumeRootOf: () => volume,
+      // Probe 1 is the sweep's; the volume goes away before the fresh probe 2.
+      onProbeRoot: (call) => {
+        if (call === 2) rmSync(volume, { recursive: true });
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        reason: `it was empty and its directory was gone, but then its volume ${volume} is not mounted`,
+      }),
+    );
+  });
+
+  test("a dry run reports an unmounted volume as kept, not as a removal", async () => {
+    const volume = join(dir, "Volumes", "unplugged");
+    const h = projectsHarness({
+      projects: [project("on-usb", { rootPath: join(volume, "x") })],
+      volumeRootOf: () => volume,
+      config: { ...ON_PROJECTS, dryRun: true },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(report?.entries.map((entry) => entry.action)).toEqual(["kept-project"]);
+  });
+
+  test("a failed removal is reported and does not stop the rest", async () => {
+    const h = projectsHarness({
+      projects: [project("bad"), project("good")],
+      removeProject: (projectId) => {
+        if (projectId === "bad") throw new Error("disk full");
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["good"]);
+    expect(report?.removedProjectCount).toBe(1);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        projectId: "bad",
+        reason: "removal failed: disk full",
+      }),
+    );
+  });
+
+  test("a dry run removes nothing and reports would-remove-project, with no push", async () => {
+    const h = projectsHarness({
+      projects: [project("wt4-gone"), project("alive-here")],
+      config: { ...ON_PROJECTS, dryRun: true },
+    });
+    mkdirSync(join(dir, "alive-here"));
+
+    const report = await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual([]);
+    expect(report?.removedProjectCount).toBe(0);
+    expect(report?.entries).toEqual([
+      expect.objectContaining({
+        action: "would-remove-project",
+        projectId: "wt4-gone",
+        path: join(dir, "wt4-gone"),
+        reason: "it has no workspaces and its directory no longer exists",
+      }),
+    ]);
+    expect(h.pushes).toEqual([]);
+  });
+
+  test("removals do not spend the archive budget", async () => {
+    const h = projectsHarness({
+      projects: [project("a"), project("b"), project("c"), project("d")],
+      config: { ...ON_PROJECTS, maxArchivesPerSweep: 1, maxDeadArchivesPerSweep: 1 },
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["a", "b", "c", "d"]);
+  });
+
+  test("one sweep removes at most 50, and the rest wait for the next", async () => {
+    const projects = Array.from({ length: 55 }, (_, index) => project(`p${index}`));
+    const h = projectsHarness({ projects });
+
+    const first = await h.janitor.tick();
+    expect(h.removedProjects).toHaveLength(50);
+    expect(first?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-project",
+        reason: "5 more empty projects wait for the next sweep",
+      }),
+    );
+
+    const second = await h.janitor.tick();
+    expect(h.removedProjects).toHaveLength(55);
+    expect(second?.removedProjectCount).toBe(5);
+  });
+
+  test("a project pass runs even when the janitor has no agents to look at", async () => {
+    const h = projectsHarness({
+      projects: [project("wt4-gone")],
+      config: { enabled: true, archiveDead: false, askFinished: false, reclaimWorkspaces: false },
+    });
+
+    await h.janitor.tick();
+
+    expect(h.removedProjects).toEqual(["wt4-gone"]);
+  });
+
+  test("a disabled janitor removes nothing", async () => {
+    const h = projectsHarness({
+      projects: [project("wt4-gone")],
+      config: { enabled: false },
+    });
+
+    expect(await h.janitor.tick()).toBeNull();
+    expect(h.removedProjects).toEqual([]);
+  });
+});
+
+describe("probeProjectRoot", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "done-janitor-probe-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("an existing directory exists", async () => {
+    expect(await probeProjectRoot(dir)).toEqual({ kind: "exists" });
+  });
+
+  test("an existing file exists too: the janitor only asks whether the path is gone", async () => {
+    writeFileSync(join(dir, "f"), "x");
+    expect(await probeProjectRoot(join(dir, "f"))).toEqual({ kind: "exists" });
+  });
+
+  test("ENOENT is missing", async () => {
+    expect(await probeProjectRoot(join(dir, "nope"))).toEqual({ kind: "missing" });
+  });
+
+  test("ENOTDIR is unknown, not missing", async () => {
+    writeFileSync(join(dir, "f"), "x");
+    expect(await probeProjectRoot(join(dir, "f", "child"))).toEqual({
+      kind: "unknown",
+      error: expect.stringContaining("ENOTDIR"),
+    });
+  });
+
+  test("a missing root under a volume that is not there is the volume's absence, not the project's", async () => {
+    const volume = `/Volumes/paseo-test-${process.pid}-${Date.now()}`;
+    expect(await probeProjectRoot(`${volume}/work/app`)).toEqual({
+      kind: "volume-absent",
+      volumeRoot: volume,
+    });
+  });
+});
+
+describe("volumeRootOf", () => {
+  test.each([
+    ["/Volumes/Backup/work/app", "/Volumes/Backup"],
+    ["/Volumes/Backup", "/Volumes/Backup"],
+    ["/media/tyler/usb/work/app", "/media/tyler/usb"],
+    ["/mnt/data/work/app", "/mnt/data"],
+    ["D:\\work\\app", "D:\\"],
+    ["d:/work/app", "d:\\"],
+    ["C:\\Users\\t\\app", "C:\\"],
+  ])("%s sits on the volume %s", (rootPath, expected) => {
+    expect(volumeRootOf(rootPath)).toBe(expected);
+  });
+
+  test.each([
+    "/Users/tyler/work/app",
+    "/home/tyler/work/app",
+    "/tmp/app",
+    "/Volumes",
+    "/media/tyler",
+    "/mnt",
+    "/mnt-not/x",
+    "relative/Volumes/x/y",
+    "",
+  ])("%s is on the system volume", (rootPath) => {
+    expect(volumeRootOf(rootPath)).toBeNull();
+  });
+});

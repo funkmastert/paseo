@@ -20,3 +20,13 @@ export const UNRESPONSIVE_CANCEL_ERROR =
 export function isUnresponsiveCancelReason(reason: string): boolean {
   return reason === UNRESPONSIVE_CANCEL_REASON;
 }
+
+/**
+ * What `lastError` carries after the stalled-agent sweep cancels a turn stuck on an account at
+ * its cap (docs/stalled-agents.md). A turn stuck in `running` never fails, so without this the
+ * account-failover detector, which reads only `lastError`, would never see the agent. The text
+ * has to stay limit-shaped for `isLimitShapedError`.
+ */
+export function formatAccountCappedCancelError(provider: string): string {
+  return `Account ${provider} is at its usage limit or unusable, and this turn stalled in running with no activity; the daemon canceled it so account failover can move the agent.`;
+}

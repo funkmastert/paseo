@@ -8,6 +8,7 @@ import {
   buildMoveResumePrompt,
   buildResumePrompt,
   findExistingSuccessor,
+  findLiveSessionHolder,
   formatMovedTitle,
   stripMovedTitlePrefix,
 } from "./account-failover-migration.js";
@@ -120,6 +121,58 @@ describe("findExistingSuccessor", () => {
     });
 
     expect(findExistingSuccessor(predecessor, [predecessor, unrelated])).toBeNull();
+  });
+});
+
+describe("findLiveSessionHolder", () => {
+  it("finds an older, live record for the same session on another account", () => {
+    // The 2026-09-24 shape: the conversation already runs under another record on the leader
+    // account, left over from an earlier handoff. Moving this one there is refused, and moving it
+    // anywhere else would leave two live agents on one transcript.
+    const holder = record({
+      id: "holder",
+      provider: "claude",
+      createdAt: "2026-09-14T10:00:00.000Z",
+      sessionId: SESSION,
+    });
+    const duplicate = record({
+      id: "duplicate",
+      provider: "claude-backup",
+      createdAt: "2026-09-15T10:00:00.000Z",
+      sessionId: SESSION,
+    });
+
+    expect(findLiveSessionHolder(duplicate, [holder, duplicate])?.id).toBe("holder");
+  });
+
+  it("does not count a retired handle: that one is revived by the import path", () => {
+    const retired = record({
+      id: "retired",
+      provider: "claude",
+      createdAt: "2026-09-14T10:00:00.000Z",
+      sessionId: SESSION,
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "old" },
+    });
+
+    expect(findLiveSessionHolder(predecessor, [retired, predecessor])).toBeNull();
+  });
+
+  it("does not count an archived record, a record on another session, or itself", () => {
+    const archived = record({
+      id: "archived",
+      provider: "claude-personal",
+      createdAt: "2026-09-14T10:00:00.000Z",
+      sessionId: SESSION,
+      archivedAt: "2026-09-14T12:00:00.000Z",
+    });
+    const elsewhere = record({
+      id: "elsewhere",
+      provider: "claude-personal",
+      createdAt: "2026-09-14T10:00:00.000Z",
+      sessionId: "another-session",
+    });
+
+    expect(findLiveSessionHolder(predecessor, [archived, elsewhere, predecessor])).toBeNull();
   });
 });
 

@@ -122,11 +122,12 @@ export function startDaemonVitals(options: StartDaemonVitalsOptions): DaemonVita
         );
         return;
       }
-      // `alert`, not `urgent`: this only goes out once the loop has recovered, so nothing is about
-      // to be lost when it arrives, but agents that stalled through it may need a look.
-      // See docs/notification-policy.md.
+      // `notice`, not `alert`: this only goes out once the loop has recovered, so nothing is
+      // about to be lost, and the stalled-agent sweep already nudges anything that stalled
+      // through it, so nothing is left for a person to do now. Still a daemon defect worth
+      // knowing about. See docs/notification-policy.md.
       void options.pushNotificationSender
-        .send(payload, { level: "alert" })
+        .send(payload, { level: "notice" })
         .catch((err: unknown) => {
           logger.warn({ err }, "Failed to send daemon-wedged push notification");
         });

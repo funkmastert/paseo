@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { describe, expect, test } from "vitest";
-import type { PushNotificationSender } from "../push/index.js";
+import type { PushNotificationSender, PushSendMeta } from "../push/index.js";
 import { createPaseoDaemon } from "../bootstrap.js";
 import { loadConfig } from "../config.js";
 import { createTestAgentClients } from "../test-utils/fake-agent-client.js";
@@ -38,10 +38,15 @@ function captureLogger() {
 }
 
 function captureSender() {
-  const sent: Array<{ title: string; body: string; data?: Record<string, unknown> }> = [];
+  const sent: Array<{
+    title: string;
+    body: string;
+    data?: Record<string, unknown>;
+    meta?: PushSendMeta;
+  }> = [];
   const sender: PushNotificationSender = {
-    async send(payload) {
-      sent.push(payload as (typeof sent)[number]);
+    async send(payload, meta) {
+      sent.push({ ...(payload as (typeof sent)[number]), meta });
     },
   };
   return { sender, sent };
@@ -105,6 +110,10 @@ describe("daemon vitals in an isolated daemon", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]?.data).toMatchObject({ reason: "daemon_event_loop_wedged" });
       expect(sent[0]?.body).toMatch(/wedged for [12]s/);
+      // `notice`, not `alert`: this only fires after the loop has recovered on its own, and the
+      // stalled-agent sweep nudges anything that stalled through it, so nothing is left for a
+      // person to do now. Still a daemon defect worth knowing about (docs/notification-policy.md).
+      expect(sent[0]?.meta).toMatchObject({ level: "notice" });
 
       const wedgeLog = lines.find((line) => line.msg === "Event loop was wedged and has recovered");
       // `cause` is a CPU-share hint and this machine is shared, so it is not asserted here.

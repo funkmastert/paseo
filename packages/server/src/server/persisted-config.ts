@@ -390,6 +390,15 @@ const AgentAccountFailoverSchema = z
     migrateSubagents: z.boolean().optional(),
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
+    collapseToSharedAccount: z.boolean().optional(),
+    // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    // The return leg is gone; a config that still sets these must keep loading.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
   })
   .strict();
 
@@ -470,6 +479,82 @@ const AgentRefocusSchema = z
     onCompaction: z.boolean().optional(),
     scope: z.enum(["all", "topLevelOnly"]).optional(),
     excerptChars: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const RemediationTaskClassSchema = z.enum(["mechanical", "standard", "hard"]);
+
+// Live-toggleable. Unlike its siblings, on unless a rung says otherwise: the remediation ladder
+// exists so the daemon fixes what it can before anyone is told. See docs/remediation.md.
+const AgentRemediationSchema = z
+  .object({
+    remedies: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        provider: z.string().min(1).optional(),
+        taskClass: RemediationTaskClassSchema.optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        cooldownMinutes: z.number().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxPerDay: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    notify: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    conditions: z
+      .record(
+        z.string(),
+        z
+          .object({
+            escalate: z.boolean().optional(),
+            notify: z.boolean().optional(),
+            graceMinutes: z.number().nonnegative().optional(),
+            cooldownMinutes: z.number().positive().optional(),
+            budgetTokens: z.number().int().positive().optional(),
+            taskClass: RemediationTaskClassSchema.optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+    stalledAgents: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        stallMinutes: z.number().positive().optional(),
+        deadAccountStallMinutes: z.number().positive().optional(),
+        recheckMinutes: z.number().positive().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        maxNudgesPerSweep: z.number().int().positive().optional(),
+        snapshot: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        lowFreeGB: z.number().positive().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        growthRoots: z.array(z.string().min(1)).optional(),
+        sampleTimeoutMs: z.number().int().positive().optional(),
+        sampleIntervalMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    workSnapshots: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        sweepMinutes: z.number().positive().optional(),
+        personalOwners: z.array(z.string().min(1)).optional(),
+        bundleDir: z.string().min(1).optional(),
+        maxUntrackedFileBytes: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -653,6 +738,7 @@ export const PersistedConfigSchema = z
         leaderCompaction: AgentLeaderCompactionSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
+        remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),

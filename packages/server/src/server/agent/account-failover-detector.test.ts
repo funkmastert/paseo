@@ -30,6 +30,10 @@ function agent(
     internal: false,
     lifecycle: "error",
     lastError: undefined,
+    title: `Agent ${overrides.id}`,
+    busy: false,
+    pendingPermissionCount: 0,
+    lastActivityAt: null,
     timelineSeq: 7,
     lastTimelineAt: null,
     labels: {},
@@ -108,6 +112,18 @@ describe("isLimitShapedError", () => {
     expect(isLimitShapedError("You've hit your Opus limit · resets 9pm")).toBe(true);
   });
 
+  it("matches the error the stalled-agent sweep leaves when it cancels a dead turn", () => {
+    // Workstream S cancels a turn stuck in running on a capped account and leaves this lastError
+    // so failover resumes the agent as cut off mid-turn. Its wording may change; its shape — it
+    // names the account and the stall and says the account is at its limit — is the contract.
+    expect(
+      isLimitShapedError(
+        "Account claude-backup is at its usage limit or unusable, and this turn stalled in " +
+          "running with no activity; the daemon canceled it so account failover can move the agent.",
+      ),
+    ).toBe(true);
+  });
+
   it("does not match the other API errors that now end a turn as a failure", () => {
     expect(isLimitShapedError("API Error: 529 Overloaded. This is a server-side issue.")).toBe(
       false,
@@ -158,6 +174,37 @@ describe("planAccountFailoverSweep", () => {
     expect(ids(result.candidates)).toEqual(["leader"]);
   });
 
+  it("takes an agent the stalled-agent sweep cancelled: idle, with its limit-shaped error", () => {
+    // The cancel lands the agent idle, not in error. Its lastError is what makes it a turn cut
+    // off mid-way, so it is moved and resumed like any other capped agent.
+    const stalled = agent({
+      id: "stalled",
+      provider: "claude-backup",
+      lifecycle: "idle",
+      lastError:
+        "Account claude-backup is at its usage limit or unusable, and this turn stalled in " +
+        "running with no activity; the daemon canceled it so account failover can move the agent.",
+    });
+
+    const result = plan({ agents: [stalled] });
+
+    expect([...result.deadProviderIds]).toEqual(["claude-backup"]);
+    expect(ids(result.candidates)).toEqual(["stalled"]);
+  });
+
+  it("takes an agent in error on a dead account even when the error is not limit-shaped", () => {
+    // Its turn ended while its account was out; whatever the text, it is resumed where it can run.
+    const errored = agent({ id: "errored", provider: "claude-backup", lastError: "stream closed" });
+    const idle = agent({ id: "idle", provider: "claude-backup", lifecycle: "idle" });
+
+    const dead = plan({ agents: [errored, idle], usage: [usage("claude-backup", [100])] });
+    expect(ids(dead.candidates)).toEqual(["errored"]);
+    // It does not condemn the account by itself: only a limit-shaped error does.
+    const alive = plan({ agents: [errored] });
+    expect(alive.deadProviderIds.size).toBe(0);
+    expect(alive.candidates).toEqual([]);
+  });
+
   it("keeps an account dead on evidence a move left behind, until the TTL runs out", () => {
     const left = new Map([
       ["claude-personal", { error: REAL_LIMIT_MESSAGE, firstSeenMs: 900_000 }],
@@ -206,14 +253,15 @@ describe("planAccountFailoverSweep", () => {
     expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
   });
 
-  it("never makes an idle agent without its own limit failure a candidate", () => {
+  it("never makes an idle agent without its own limit failure a candidate, but takes one in error", () => {
     const failed = agent({ id: "failed", lastError: REAL_LIMIT_MESSAGE });
     const idle = agent({ id: "idle", lifecycle: "idle", lastError: undefined });
     const otherError = agent({ id: "other", lastError: "ECONNRESET" });
 
     const result = plan({ agents: [failed, idle, otherError] });
 
-    expect(ids(result.candidates)).toEqual(["failed"]);
+    // "other" is in error on the account "failed" condemned, so it is resumed too.
+    expect(ids(result.candidates)).toEqual(["failed", "other"]);
   });
 
   it("accepts idle and error lifecycles, never running, closed, or initializing", () => {

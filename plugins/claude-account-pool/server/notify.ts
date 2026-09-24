@@ -137,19 +137,18 @@ function resolveRootLeader(byId: AgentDirectoryIndex, startAgentId: string): Age
 }
 
 /**
- * A row counts as "affected" by a cap only if its session is still live on
- * the daemon at the time we list the directory: not archived, and not
- * `closed` (the daemon's terminal status once a session has fully exited).
- * `error`/`idle`/`running`/`initializing` all still count — in particular
- * the reactive path (a turn failure classified as a cap) fires *because* an
- * agent's turn just errored, so excluding `error` would drop the very agent
- * that triggered detection. `closed` is the only status that means the
- * session itself is gone, which is what made the real incident this fixes
- * misleading: four long-`closed` agents were named as "running there" for
- * a cap event the daemon only rediscovered later, on a fresh usage poll.
+ * A row counts as "affected" by a cap only if it is actually there right now:
+ * `running` (mid-turn) or `initializing` (mid-launch) on the capped account.
+ * `idle` and `error` are sessions that already stopped using the account, so
+ * naming them as "running there" is what made the real incident this fixes
+ * misleading: a leader was told 21 children "were running there" for a cap
+ * event the daemon only rediscovered later, on a fresh usage poll, when most
+ * had long since gone idle or errored out. Excluding `error` does not drop
+ * the reactive path (a turn failure classified as a cap): that fires off the
+ * turn failure itself, before the agent's status has settled to `error`.
  */
 function isAffectedByCapRow(row: AgentDirectoryRow): boolean {
-  return !row.archived && row.status !== "closed";
+  return !row.archived && (row.status === "running" || row.status === "initializing");
 }
 
 /** Groups agents live on `providerId` at listing time by their resolved root leader. */
@@ -180,12 +179,18 @@ function describeChild(row: AgentDirectoryRow): string {
   return `${row.title ?? "untitled"} (${row.id})`;
 }
 
+/**
+ * Informational: account failover already moves these children to the next usable account (or
+ * collapses onto the leader account when no worker is usable) and returns them once this window
+ * resets. There is nothing for the leader to do about the cap itself.
+ */
 function formatCapMessage(event: CapEvent, children: AgentDirectoryRow[]): string {
   const resetPart = event.resetsAt ? ` It resets at ${event.resetsAt.toISOString()}.` : "";
   const childList = children.map(describeChild).join(", ");
   return (
     `Account pool: provider "${event.providerId}" hit its "${event.window}" limit.${resetPart} ` +
-    `Affected children that were running there: ${childList}.`
+    `Children running there are being moved to another account automatically: ${childList}. ` +
+    `This is informational — no action is needed.`
   );
 }
 
@@ -224,9 +229,10 @@ function forgetCappedEpisodes(notified: Set<string>, providerId: string, window:
 /**
  * Said once per collapse, not once per spawn: it is a standing state, and the difference
  * between telling Tyler his budget isolation is gone and burying that in a message per
- * subagent is whether he reads it at all. What it has to carry is what he can act on — that one
- * account now runs everything, that a single cap will now take down the whole fleet, and the
- * three things only a person can do about it.
+ * subagent is whether he reads it at all. Informational, not a call to action: account failover
+ * chose this collapse on its own (there was nowhere else to route to) and undoes it on its own
+ * once another account has budget, so what it has to carry is what changed and that nothing is
+ * being asked of anyone — a single cap now takes down the whole fleet until then.
  */
 function formatPoolCollapsedMessage(episode: PoolCollapsedEpisode): string {
   const shared =
@@ -237,7 +243,7 @@ function formatPoolCollapsedMessage(episode: PoolCollapsedEpisode): string {
   return (
     `Account pool: down to ONE usable account, "${episode.targetProviderId}"${shared}, now running both leaders and their children. ` +
     `Budget isolation is gone — the next cap stops every agent at once.${out} ` +
-    `Sign another Claude account in, raise a limit, or wind the fleet down. ` +
+    `This is informational; account failover chose this automatically. ` +
     `Isolation resumes on its own for new agents once another account has budget.`
   );
 }

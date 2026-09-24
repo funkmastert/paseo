@@ -307,6 +307,14 @@ const MutableAccountFailoverConfigSchema = z
     migrateSubagents: z.boolean().optional(),
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
+    collapseToSharedAccount: z.boolean().optional(),
+    // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
   })
   .passthrough();
 
@@ -396,6 +404,85 @@ const MutableRefocusConfigSchema = z
   .passthrough();
 
 const MutableRefocusPatchSchema = MutableRefocusConfigSchema;
+
+// Live-toggleable like refocus above — same mutable/patch split, same reason. The remediation
+// ladder: deterministic remedy, then one bounded agent, then a person. Escalation is on unless
+// `escalation.enabled` says otherwise. See docs/remediation.md.
+const RemediationTaskClassSchema = z.enum(["mechanical", "standard", "hard"]);
+
+const MutableRemediationConfigSchema = z
+  .object({
+    remedies: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        provider: z.string().min(1).optional(),
+        taskClass: RemediationTaskClassSchema.optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        cooldownMinutes: z.number().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxPerDay: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+    notify: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    conditions: z
+      .record(
+        z.string(),
+        z
+          .object({
+            escalate: z.boolean().optional(),
+            notify: z.boolean().optional(),
+            graceMinutes: z.number().nonnegative().optional(),
+            cooldownMinutes: z.number().positive().optional(),
+            budgetTokens: z.number().int().positive().optional(),
+            taskClass: RemediationTaskClassSchema.optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    stalledAgents: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        stallMinutes: z.number().positive().optional(),
+        deadAccountStallMinutes: z.number().positive().optional(),
+        recheckMinutes: z.number().positive().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        maxNudgesPerSweep: z.number().int().positive().optional(),
+        snapshot: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        lowFreeGB: z.number().positive().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        growthRoots: z.array(z.string().min(1)).optional(),
+        sampleTimeoutMs: z.number().int().positive().optional(),
+        sampleIntervalMinutes: z.number().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+    workSnapshots: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        sweepMinutes: z.number().positive().optional(),
+        personalOwners: z.array(z.string().min(1)).optional(),
+        bundleDir: z.string().min(1).optional(),
+        maxUntrackedFileBytes: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableRemediationPatchSchema = MutableRemediationConfigSchema;
 
 // Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
 // `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
@@ -593,6 +680,8 @@ export const MutableDaemonConfigSchema = z
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
+    // COMPAT(remediation): additive optional config, nothing to remove.
+    remediation: MutableRemediationConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
     mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
@@ -625,6 +714,7 @@ export const MutableDaemonConfigPatchSchema = z
     leaderCompaction: MutableLeaderCompactionPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
+    remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),

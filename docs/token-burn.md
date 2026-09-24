@@ -107,13 +107,19 @@ A budget set too low is worse than no budget: it stops work that was going fine,
 
 ## Account pressure
 
-Off by default (`agents.tokenBurnMonitor.accountPressure`), and **report-only on purpose**. At 90% of a provider usage window it pushes once and does nothing else.
+Off by default (`agents.tokenBurnMonitor.accountPressure`), and **report-only on purpose**. At 90% of a provider usage window it records once and does nothing else.
 
-Acting here would fight two things that already own the decision. The account pool plugin routes new agents away from a hot account, so refusing a caller's `create_agent` on account pressure would block a child the plugin would have placed somewhere healthy anyway. And `AccountFailoverMonitor` already migrates agents off an account at 100% ([docs/account-failover.md](account-failover.md)). Warning before the wall is the gap neither fills.
+Acting here would fight two things that already own the decision. The account pool plugin routes new agents away from a hot account, so refusing a caller's `create_agent` on account pressure would block a child the plugin would have placed somewhere healthy anyway. And `AccountFailoverMonitor` already migrates agents off an account at 100% ([docs/account-failover.md](account-failover.md)). One account nearing its cap is the pool's problem, not a person's, which is why the per-window push is `record`-level (a ledger entry, not a notification) rather than the `urgent` it used to be.
 
 It runs before the empty-agent-list return, like the resource monitor's machine legs: a daemon with no live agents still has accounts about to lapse. Dedup keys on the window's `resetsAt` rounded to the minute, so a window that resets warns afresh and one sitting at 94% all week does not warn again. The rounding is load-bearing: the API's `resets_at` carries microsecond noise that changes on every fetch, and keying on the raw string produced a push every five minutes. The push names the account; the daemon log line `Account pressure: usage window is over the warning threshold` carries provider, window and percentage for attributing it afterwards.
 
 This is a threshold on one number. [Budget pacing](budget-pacing.md) reads the same rows as a rate against the clock and advises running leaders on how hard to fan out; it is the third reader of the usage windows and, like this leg, acts on none of them. [Usage history](usage-history.md) records the same rows and this monitor's per-agent totals, and projects when a window caps; the sampler is one call inside this sweep.
+
+### When the pool cannot route at all
+
+The gap neither the pool nor failover fills: every account they could route work to is hot at once. Reported to the [remediation ladder](remediation.md) as `account-pool-exhausted` (key the same), `remedy: "none"` and no `escalation` — an agent needs an account to do anything, and there is none to give it — so the ladder pushes it straight through at `urgent`, once per episode.
+
+"Every account" means every enabled entry `resolveAccountPoolEntries` (`agent/account-pool-providers.ts`) finds under `agents.providers.<id>.params.accountPool`, both leader and worker roles. With no pool configured, it falls back to every provider the usage poll reports on. A provider missing from that poll counts as unknown, not capped, so the condition never fires on a pool the daemon has incomplete usage for. The evidence lists each capped provider and its hottest window's percentage.
 
 ## Model divergence
 

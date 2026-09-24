@@ -17,7 +17,7 @@ Callers pass `{ level }` as the second argument to `send`. The type is `PushSend
 
 A push with no level is a `notice` and is logged as undeclared. `push-callers.test.ts` fails when a sender in the daemon does not declare one, so the next unranked source is caught when it is written, not after a week of pushes.
 
-**Rank by what happens if the person never reads it.** An agent's token rate spiking costs nothing if it is ignored, so it is a `notice`. A capped account stops every agent on it, so it is `urgent`. Ask that question again for every new sender; "it felt important when I wrote it" is how the stream got flat.
+**Rank by what happens if the person never reads it, after automation has had its turn.** A condition the daemon can fix is not the person's to read about. A monitor with an automatic remedy runs it and records what it did at `record`; it reports the condition to the [remediation ladder](remediation.md), which pushes only when the remedy and one bounded agent both failed or could not act, and picks that push's level from the observation. For everything with no remedy, ask what ignoring it costs: an agent's token rate spiking costs nothing, so it is a `notice`; a capped account stops every agent on it, so it is `urgent`. Ask both questions again for every new sender; "it felt important when I wrote it" is how the stream got flat.
 
 ## Two dials and one mode
 
@@ -71,33 +71,35 @@ Read it with `client.listNotificationLedger({ unreachedOnly: true })`. Settings 
 
 ## Sender inventory
 
-| Sender (reason)                                  | Level                                    | Why                                                                                            |
-| ------------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Agent attention `permission`                     | `alert`                                  | The agent is blocked on you                                                                    |
-| Agent attention `finished`, root agent           | `alert`                                  | The thing you were waiting for                                                                 |
-| Agent attention `finished`, delegated child      | `notice`                                 | Reported to its parent, not to a person; a stuck report escalates separately                   |
-| Terminal `finished` / `needs_input`              | `alert`                                  | Same as an agent; a terminal has no parent to report to                                        |
-| `finish_report_undelivered`                      | `urgent`                                 | A child's result reached no agent and nothing else will say so                                 |
-| `token_burn_account_pressure`                    | `urgent`                                 | The pool is about to cap and every agent on it stops                                           |
-| `token_burn_governor` `pause`, `stopFanOut`      | `alert`                                  | An agent is stopped or blocked until someone acts                                              |
-| `token_burn_governor` `notify`, `downgrade`      | `notice`                                 | News, nothing to do                                                                            |
-| `token_burn_governor`, dry run                   | `record`                                 | Nothing changed                                                                                |
-| `token_burn_rate`, `token_burn_total`, `_multi`  | `notice`                                 | A busy agent reads the same as a runaway ([token-burn.md](token-burn.md)); the row badge stays |
-| `account_failover`, resumed                      | `notice`                                 | Automation handled it                                                                          |
-| `account_failover`, could not restart            | `alert`                                  | The agent is waiting for a message from you                                                    |
-| `model_divergence`                               | `notice`                                 | Costs money slowly; nothing breaks                                                             |
-| `plugin_offline`                                 | `notice`                                 | Monitor already waits past a threshold; plugins restart during development                     |
-| `resource_memory`, `resource_cpu`, `_multi`      | `notice`                                 | Per-agent process trees; the live alert on the row stays                                       |
-| `resource_system_memory`                         | `alert`                                  | Swap pressure freezes the machine                                                              |
-| `resource_orphan_daemons`                        | `notice`                                 | Leftover build daemons; the body names the fix                                                 |
-| `resource_daemons_reaped`, `artifacts_reclaimed` | `record`                                 | Cleanup that worked                                                                            |
-| `disk_space_critical`                            | `urgent`                                 | Writes start failing                                                                           |
-| `disk_sweep_unsafe_orphan`                       | `notice`                                 | A decision, but not a timed one                                                                |
-| `disk_sweep_reclaimed`                           | `record`                                 | Cleanup that worked                                                                            |
-| `done_janitor`                                   | `record`, `notice` if it kept a worktree | Routine tidying, unless it left something behind                                               |
-| `mcp_gateway_needs_auth`, `_multi`               | `alert`                                  | Only a person can sign in again                                                                |
-| `mcp_gateway_error`                              | `notice`                                 | Often recovers on its own                                                                      |
-| `daemon_event_loop_wedged`                       | `alert`                                  | Sent only after the loop recovers; agents that stalled through it may need a look              |
+| Sender (reason)                                               | Level                                                               | Why                                                                                                                                 |
+| ------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Agent attention `permission`                                  | `alert`                                                             | The agent is blocked on you                                                                                                         |
+| Agent attention `finished`, root agent                        | `alert`                                                             | The thing you were waiting for                                                                                                      |
+| Agent attention `finished`, delegated child                   | `notice`                                                            | Reported to its parent, not to a person; a stuck report escalates separately                                                        |
+| Terminal `finished` / `needs_input`                           | `alert`                                                             | Same as an agent; a terminal has no parent to report to                                                                             |
+| `finish_report_undelivered`                                   | `urgent`                                                            | A child's result reached no agent and nothing else will say so                                                                      |
+| `remediation_escalated`                                       | the condition's level ([remediation.md](remediation.md#conditions)) | A monitor's remedy and the remediation agent both failed, or no agent could run                                                     |
+| `remediation_opened`, `_agent_started`, `_fixed`, `_resolved` | `record`                                                            | The ladder handling a condition on its own                                                                                          |
+| `token_burn_account_pressure`                                 | `record`                                                            | One account nearing its cap is the pool's problem to route around, not a person's                                                   |
+| `token_burn_governor` `pause`, `stopFanOut`                   | `alert`                                                             | An agent is stopped or blocked until someone acts                                                                                   |
+| `token_burn_governor` `notify`, `downgrade`                   | `record`                                                            | Automation acted (told the agent, or moved its model) and said so; nothing left to do                                               |
+| `token_burn_governor`, dry run                                | `record`                                                            | Nothing changed                                                                                                                     |
+| `token_burn_rate`, `token_burn_total`, `_multi`               | `notice`                                                            | A busy agent reads the same as a runaway ([token-burn.md](token-burn.md)); the row badge stays                                      |
+| `account_failover`, moved or resumed                          | `record`                                                            | The remedy worked ([account-failover.md](account-failover.md#when-tyler-hears))                                                     |
+| `account_failover`, could not restart                         | `alert`                                                             | The agent is waiting for a message from you                                                                                         |
+| `model_divergence`                                            | `notice`                                                            | No remedy exists; costs money slowly and nothing breaks                                                                             |
+| `plugin_offline`                                              | `notice`                                                            | No remedy exists; monitor already waits past a threshold, and plugins restart during dev                                            |
+| `resource_memory`, `resource_cpu`                             | `record` if steered, `notice` if not                                | Steering the agent already told it to trim itself; an idle agent needs a person's eye                                               |
+| `resource_multi` (batched)                                    | `record` if every agent in it was steered, else `notice`            | Same rule as above, applied across the whole batch                                                                                  |
+| `resource_daemons_reaped`, `artifacts_reclaimed`              | `record`                                                            | Cleanup that worked                                                                                                                 |
+| `disk_sweep_unsafe_orphan`                                    | `record`                                                            | The work-at-risk sweep already snapshots and escalates an orphan holding uncommitted work                                           |
+| `disk_sweep_reclaimed`                                        | `record`                                                            | Cleanup that worked                                                                                                                 |
+| `done_janitor`                                                | `record`                                                            | Routine tidying. A kept worktree is snapshotted and judged by the work-at-risk sweep                                                |
+| `mcp_gateway_needs_auth`, `_multi`                            | `alert`                                                             | No remedy exists; only a person can sign in again                                                                                   |
+| `mcp_gateway_error`                                           | `notice`                                                            | No remedy for a remote server; a local one already restarts itself with backoff                                                     |
+| `daemon_event_loop_wedged`                                    | `notice`                                                            | Sent only after the loop recovers, and the stalled-agent sweep already nudges what stalled through it; still a defect worth knowing |
+
+A monitor with a remedy does not push about its condition: it reports to the [remediation ladder](remediation.md), and the ladder's `remediation_escalated` is the one push a person gets. Each condition's level is in the ladder's condition table.
 
 ## What the phone gets
 
@@ -110,7 +112,9 @@ Settings are edited through `notifications.policy.get|set.request` and read back
 
 ## Adding a sender
 
-Pass `{ level }` (and `dedupeKey` if it can re-fire) on the `send` call, add a row to the inventory above, and put a test on the level if the level depends on state. If it is a monitor, keep the once-per-episode logic; the policy is not a substitute.
+First decide whether something could fix the condition. If a deterministic remedy exists, or an agent could try, the sender is a monitor on the ladder: report through `RemediationSink.observe()` every sweep, record what the remedy did at `record`, and never push about the condition yourself. The ladder owns the one push, its level (`observation.level`) and its dedupe key ([remediation.md](remediation.md#plugging-in-a-monitor)).
+
+Otherwise pass `{ level }` (and `dedupeKey` if it can re-fire) on the `send` call, and put a test on the level if the level depends on state. If it is a monitor, keep the once-per-episode logic; the policy is not a substitute. Either way, add a row to the inventory above.
 
 ## Not built yet
 

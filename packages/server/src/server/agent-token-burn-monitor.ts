@@ -9,6 +9,8 @@ import {
 } from "@getpaseo/protocol/token-burn-notification";
 import type { AgentManager, TokenBurnMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
+import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
+import { NULL_REMEDIATION_SINK, type RemediationSink } from "./remediation/contract.js";
 import {
   evaluateTokenBurn,
   type TokenBurnMonitorConfig as DetectorConfig,
@@ -55,12 +57,14 @@ const DEFAULT_PAUSE_AT_FRACTION = 1.5;
 const DEFAULT_ACCOUNT_PRESSURE_USED_PCT = 90;
 
 /**
- * A warning or a model downgrade is news; a pause or a fan-out block leaves an agent stopped until
- * a person acts. A dry run changed nothing, so it is only recorded.
+ * `notify` and `downgrade` are automation acting on the agent and telling it what happened —
+ * nothing for a person to do, so they are a ledger record. `pause` and `stopFanOut` leave an
+ * agent stopped until someone raises its budget, so they still need a person. A dry run changed
+ * nothing either way.
  */
 function governorNotifyLevel(stage: SpendGovernorStage, dryRun: boolean): NotifyLevel {
   if (dryRun) return "record";
-  return stage === "pause" || stage === "stopFanOut" ? "alert" : "notice";
+  return stage === "pause" || stage === "stopFanOut" ? "alert" : "record";
 }
 
 export interface SpendGovernorStageSettings {
@@ -135,6 +139,11 @@ export interface AgentTokenBurnMonitorOptions {
   /** Provider usage windows for the report-only account-pressure leg. Null when unreadable. */
   readProviderUsage?: () => Promise<readonly ProviderUsage[] | null>;
   /**
+   * Where the account-pool-exhausted condition is reported. The ladder owns the person-facing
+   * push for it; absent, it is observed by no one (docs/remediation.md).
+   */
+  remediationSink?: RemediationSink;
+  /**
    * Records account usage windows and per-agent weighted spend once per sweep, so the daemon can
    * say how fast a window is filling (docs/usage-history.md). Rides this loop rather than adding
    * one. Absent, nothing is recorded.
@@ -147,7 +156,11 @@ export interface AgentTokenBurnMonitorOptions {
    * behaves as it did before, which is what the tests that predate it rely on.
    */
   listProviderModels?: (provider: string) => Promise<readonly string[]>;
-  readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
+  readDaemonConfig: () => {
+    tokenBurnMonitor?: TokenBurnMonitorConfig;
+    /** Read for `resolveAccountPoolEntries`, to detect when the pool cannot route at all. */
+    providers?: Record<string, unknown>;
+  };
   logger: AgentTokenBurnMonitorLogger;
   sweepIntervalMs?: number;
   now?: () => number;
@@ -329,7 +342,8 @@ export class AgentTokenBurnMonitor {
   private readonly readProviderUsage: AgentTokenBurnMonitorOptions["readProviderUsage"];
   private readonly usageHistory: AgentTokenBurnMonitorOptions["usageHistory"];
   private readonly listProviderModels: AgentTokenBurnMonitorOptions["listProviderModels"];
-  private readonly readDaemonConfig: () => { tokenBurnMonitor?: TokenBurnMonitorConfig };
+  private readonly readDaemonConfig: AgentTokenBurnMonitorOptions["readDaemonConfig"];
+  private readonly remediationSink: RemediationSink;
   private readonly logger: AgentTokenBurnMonitorLogger;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
@@ -340,6 +354,8 @@ export class AgentTokenBurnMonitor {
    * at 94% does not re-warn every 60 seconds for the rest of the week.
    */
   private reportedAccountWindows = new Map<string, string>();
+  /** Whether the account-pool-exhausted episode is currently open (docs/remediation.md). */
+  private poolExhaustedEpisodeOpen = false;
   private sweepInFlight = false;
   private readonly modeLog: MonitorModeLog;
 
@@ -353,6 +369,7 @@ export class AgentTokenBurnMonitor {
     this.usageHistory = options.usageHistory;
     this.listProviderModels = options.listProviderModels;
     this.readDaemonConfig = options.readDaemonConfig;
+    this.remediationSink = options.remediationSink ?? NULL_REMEDIATION_SINK;
     this.logger = options.logger;
     this.sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     this.now = options.now ?? Date.now;
@@ -735,6 +752,7 @@ export class AgentTokenBurnMonitor {
       // Evidence is dropped when the leg is off, so turning it back on warns afresh rather
       // than staying silent about a window that crossed while nobody was watching.
       this.reportedAccountWindows.clear();
+      await this.closePoolExhaustedEpisode();
       return;
     }
     const usage = await this.readProviderUsage().catch((error: unknown) => {
@@ -779,16 +797,103 @@ export class AgentTokenBurnMonitor {
             usedPct,
             resetsAt: window.resetsAt,
           }),
-          // The one alert here that costs work if ignored: the account pool is about to cap and
-          // every agent on it stops. It interrupts, and a repeat of the same window inside the
-          // policy's cooldown is counted rather than re-announced.
-          { level: "urgent", dedupeKey: `account-pressure:${key}` },
+          // The pool routes new work off a hot account and failover migrates agents already on
+          // one, so a single account nearing its cap is the pool's problem, not a person's — a
+          // ledger record rather than a push. The pool-cannot-route-at-all condition below is
+          // the one that still needs a person.
+          { level: "record", dedupeKey: `account-pressure:${key}` },
         );
       }
     }
     // Only windows still over threshold are remembered, so one that drops back under and
     // climbs again inside the same cycle warns a second time.
     this.reportedAccountWindows = stillHot;
+
+    await this.reportPoolExhaustion(usage, config);
+  }
+
+  /**
+   * The condition neither the pool nor failover can fix: every account the pool could route to
+   * is over threshold, so there is nowhere left to move work. Reported to the ladder rather than
+   * pushed directly — `remedy: "none"` and no `escalation`, since an agent would need an account
+   * to do anything either. The ladder still dedupes it to one push per episode.
+   */
+  private async reportPoolExhaustion(
+    usage: readonly ProviderUsage[],
+    config: ResolvedAccountPressureConfig,
+  ): Promise<void> {
+    const usageByProvider = new Map(usage.map((provider) => [provider.providerId, provider]));
+    const poolEntries = resolveAccountPoolEntries(this.readDaemonConfig().providers).filter(
+      (entry) => entry.enabled,
+    );
+    const candidateIds =
+      poolEntries.length > 0
+        ? poolEntries.map((entry) => entry.providerId)
+        : [...usageByProvider.keys()];
+
+    const capped: Array<{
+      providerId: string;
+      usedPct: number;
+      windowLabel: string;
+      resetsAt: string | null | undefined;
+    }> = [];
+    let allCapped = candidateIds.length > 0;
+    for (const providerId of candidateIds) {
+      const provider = usageByProvider.get(providerId);
+      const hotWindow = provider?.windows
+        .filter((window) => typeof window.usedPct === "number" && window.usedPct >= config.usedPct)
+        .sort((a, b) => (b.usedPct ?? 0) - (a.usedPct ?? 0))[0];
+      if (!hotWindow) {
+        allCapped = false;
+        continue;
+      }
+      capped.push({
+        providerId,
+        usedPct: hotWindow.usedPct as number,
+        windowLabel: hotWindow.label,
+        resetsAt: hotWindow.resetsAt,
+      });
+    }
+
+    if (!allCapped) {
+      await this.closePoolExhaustedEpisode();
+      return;
+    }
+
+    this.poolExhaustedEpisodeOpen = true;
+    const evidence = capped
+      .map(
+        (row) =>
+          `- ${row.providerId}: ${row.usedPct}% of ${row.windowLabel}` +
+          (row.resetsAt ? `, resets ${row.resetsAt}` : ""),
+      )
+      .join("\n");
+    await this.remediationSink.observe({
+      key: "account-pool-exhausted",
+      kind: "account-pool-exhausted",
+      active: true,
+      remedy: "none",
+      title: "No Claude account can take new work",
+      summary: `Every account the pool could route to is at or above ${config.usedPct}% of a usage window.`,
+      evidence,
+      level: "urgent",
+    });
+  }
+
+  private async closePoolExhaustedEpisode(): Promise<void> {
+    if (!this.poolExhaustedEpisodeOpen) {
+      return;
+    }
+    this.poolExhaustedEpisodeOpen = false;
+    await this.remediationSink.observe({
+      key: "account-pool-exhausted",
+      kind: "account-pool-exhausted",
+      active: false,
+      remedy: "none",
+      title: "No Claude account can take new work",
+      summary: "At least one pool account has budget again.",
+      level: "urgent",
+    });
   }
 
   private async sendPush(

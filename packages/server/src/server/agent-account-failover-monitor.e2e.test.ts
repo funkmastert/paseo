@@ -5,13 +5,15 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
-import type { AgentPromptInput } from "./agent/agent-sdk-types.js";
+import type { AgentAccountAuth, AgentPromptInput } from "./agent/agent-sdk-types.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   HANDOFF_FROM_LABEL,
 } from "./agent/account-failover-detector.js";
 import { createPaseoDaemon, type PaseoDaemon } from "./bootstrap.js";
 import type { PushPayload } from "./push/index.js";
+import type { PushSendMeta } from "./notify-policy/levels.js";
+import type { RemediationObservation } from "./remediation/contract.js";
 import { DaemonClient } from "./test-utils/daemon-client.js";
 import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
 
@@ -25,6 +27,7 @@ const REAL_LIMIT_MESSAGE =
 const REAL_WEEKLY_LIMIT_MESSAGE = "You've hit your weekly limit · resets 7am (America/Los_Angeles)";
 const REACTIVE_TTL_MS = 5 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
+const HOUR_MS = 60 * MINUTE_MS;
 
 const POOL_PROVIDERS = ["claude", "claude-personal", "claude-backup"] as const;
 type PoolProvider = (typeof POOL_PROVIDERS)[number];
@@ -34,10 +37,16 @@ interface Harness {
   client: DaemonClient;
   cwd: string;
   pushes: PushPayload[];
+  /** Every push with the level it was sent at. */
+  sends: Array<{ payload: PushPayload; meta: PushSendMeta | undefined }>;
+  /** What the monitor told the remediation ladder. */
+  observations: RemediationObservation[];
   prompts: Record<PoolProvider, string[]>;
   setUsage(providers: ProviderUsage[]): void;
   /** Make the next `times` resume prompts on `provider` fail the way a busy provider would. */
   failResumes(provider: PoolProvider, times: number): void;
+  /** What `describeAccountAuth` reports for a provider — which Claude login it runs as. */
+  setAccount(provider: PoolProvider, auth: AgentAccountAuth): void;
   advanceClock(ms: number): void;
   setClock(ms: number): void;
   sweep(): Promise<void>;
@@ -79,6 +88,8 @@ async function createHarness(): Promise<Harness> {
   const cwd = await mkdtemp(path.join(tmpdir(), "paseo-failover-cwd-"));
 
   const pushes: PushPayload[] = [];
+  const sends: Harness["sends"] = [];
+  const observations: RemediationObservation[] = [];
   const prompts: Record<PoolProvider, string[]> = {
     claude: [],
     "claude-personal": [],
@@ -89,6 +100,13 @@ async function createHarness(): Promise<Harness> {
     claude: 0,
     "claude-personal": 0,
     "claude-backup": 0,
+  };
+  // "unknown" is what a config dir the CLI never wrote reports, and what every test that does not
+  // care about account identity gets: two shrugs never read as one account.
+  const accounts: Record<PoolProvider, AgentAccountAuth> = {
+    claude: { state: "unknown" },
+    "claude-personal": { state: "unknown" },
+    "claude-backup": { state: "unknown" },
   };
   // Sightings are dated by the failure's timeline row, clamped to the monitor clock. Starting the
   // monitor clock before any real timestamp keeps that clamp in effect, so ages depend only on
@@ -109,6 +127,7 @@ async function createHarness(): Promise<Harness> {
         POOL_PROVIDERS.map((provider) => [
           provider,
           createTestAgentClient(provider, {
+            accountAuth: () => accounts[provider],
             onStartTurn: (prompt) => {
               const text = promptText(prompt);
               if (text.includes("Account handoff") && resumeFailures[provider] > 0) {
@@ -133,8 +152,9 @@ async function createHarness(): Promise<Harness> {
         },
       },
       pushNotificationSender: {
-        send: async (payload) => {
+        send: async (payload, meta) => {
           pushes.push(payload);
+          sends.push({ payload, meta });
         },
       },
       accountFailoverOverrides: {
@@ -146,6 +166,11 @@ async function createHarness(): Promise<Harness> {
         },
         sweepIntervalMs: 60 * MINUTE_MS,
         now: () => clockMs,
+        remediationSink: {
+          observe: async (observation) => {
+            observations.push(observation);
+          },
+        },
       },
       agentStoragePath: path.join(paseoHome, "agents"),
       relayEnabled: false,
@@ -186,9 +211,14 @@ async function createHarness(): Promise<Harness> {
     client,
     cwd,
     pushes,
+    sends,
+    observations,
     prompts,
     failResumes: (provider, times) => {
       resumeFailures[provider] = times;
+    },
+    setAccount: (provider, auth) => {
+      accounts[provider] = auth;
     },
     setUsage: (providers) => {
       usage = providers;
@@ -271,6 +301,20 @@ function providerOf(harness: Harness, agentId: string): string {
   return managed(harness, agentId).provider;
 }
 
+/**
+ * Put the monitor clock far enough past the wall clock that every real agent timestamp reads as
+ * long-settled and every reactive sighting has expired — the state of the pool five hours after a
+ * cap. The other tests deliberately keep the clock *behind* the wall clock so the failure-dating
+ * clamp is in effect.
+ */
+function windowHasReset(harness: Harness): void {
+  harness.setClock(Date.now() + REACTIVE_TTL_MS + HOUR_MS);
+}
+
+async function settle(harness: Harness, agentId: string): Promise<void> {
+  await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("idle");
+}
+
 function assistantText(harness: Harness, agentId: string): string {
   return harness.daemon.agentManager
     .getTimeline(agentId)
@@ -284,6 +328,46 @@ function failoverPushes(harness: Harness): PushPayload[] {
 
 function agentCount(harness: Harness): number {
   return harness.daemon.agentManager.listAgents().length;
+}
+
+function poolExhaustedPushes(harness: Harness): PushPayload[] {
+  return harness.pushes.filter((push) => push.data?.reason === "account_pool_exhausted");
+}
+
+function strandedObservations(harness: Harness): RemediationObservation[] {
+  return harness.observations.filter(
+    (observation) => observation.key === "account-failover-stranded",
+  );
+}
+
+function levelOf(harness: Harness, payload: PushPayload | undefined): string | undefined {
+  return harness.sends.find((send) => send.payload === payload)?.meta?.level;
+}
+
+/** A child of a leader that is not in the pool test, so only the label matters. */
+const PARENT_ID = "parent-leader";
+
+async function createChild(
+  harness: Harness,
+  input: { provider: PoolProvider; title: string; modeId?: string },
+): Promise<string> {
+  return createAgent(harness, { ...input, parentAgentId: PARENT_ID });
+}
+
+/** Same shape as usageRow, with every window resetting at `resetsAt`. */
+function cappedUntil(providerId: string, resetsAt: string): ProviderUsage {
+  const row = usageRow(providerId, [100]);
+  for (const window of row.windows) window.resetsAt = resetsAt;
+  return row;
+}
+
+// The lastError the stalled-agent sweep leaves when it cancels a turn that died on a capped
+// account (workstream S). Failover reads only its shape: limit-shaped, naming the account.
+function stallCancelError(provider: string): string {
+  return (
+    `Account ${provider} is at its usage limit or unusable, and this turn stalled in running ` +
+    "with no activity; the daemon canceled it so account failover can move the agent."
+  );
 }
 
 describe("AccountFailoverMonitor (e2e)", () => {
@@ -348,7 +432,7 @@ describe("AccountFailoverMonitor (e2e)", () => {
   }, 60_000);
 
   test("moves an agent capped by the weekly limit, the cap that stranded agents on 2026-09-18", async () => {
-    const worker = await createAgent(harness, { provider: "claude-personal", title: "Weekly" });
+    const worker = await createChild(harness, { provider: "claude-personal", title: "Weekly" });
     await converse(harness, worker, "WEEKLY-MARKER");
     await failOnLimit(harness, worker, REAL_WEEKLY_LIMIT_MESSAGE);
 
@@ -356,23 +440,6 @@ describe("AccountFailoverMonitor (e2e)", () => {
 
     expect(providerOf(harness, worker)).toBe("claude-backup");
     expect(assistantText(harness, worker)).toContain("WEEKLY-MARKER");
-  }, 60_000);
-
-  test("does not move an idle agent on a capped account until it has failed a turn", async () => {
-    // The gap: the cap is known from usage, and the agent is sitting on it, but a candidate needs
-    // its own limit-shaped failure. Nothing has asked it to do anything, so nothing has failed.
-    harness.setUsage([usageRow("claude-personal", [100]), usageRow("claude-backup", [10])]);
-    const idle = await createAgent(harness, { provider: "claude-personal", title: "Idle leader" });
-    await converse(harness, idle, "IDLE-MARKER");
-
-    await harness.sweep();
-    expect(providerOf(harness, idle)).toBe("claude-personal");
-    expect(failoverPushes(harness)).toEqual([]);
-
-    // Someone prompts it. Only now does it qualify, so the rescue arrives after the turn died.
-    await failOnLimit(harness, idle);
-    await harness.sweep();
-    expect(providerOf(harness, idle)).toBe("claude-backup");
   }, 60_000);
 
   test("retries a resume the target refused, and says nothing extra once it lands", async () => {
@@ -444,7 +511,7 @@ describe("AccountFailoverMonitor (e2e)", () => {
   }, 60_000);
 
   test("keeps the account it left out of rotation until the evidence expires", async () => {
-    const worker = await createAgent(harness, { provider: "claude-personal", title: "Worker" });
+    const worker = await createChild(harness, { provider: "claude-personal", title: "Worker" });
     await failOnLimit(harness, worker);
     await harness.sweep();
     expect(providerOf(harness, worker)).toBe("claude-backup");
@@ -579,7 +646,7 @@ describe("AccountFailoverMonitor (e2e)", () => {
   }, 60_000);
 
   test("hops between accounts on one agent id, with no handles left behind", async () => {
-    const hopper = await createAgent(harness, { provider: "claude-personal", title: "Hopper" });
+    const hopper = await createChild(harness, { provider: "claude-personal", title: "Hopper" });
     await converse(harness, hopper, "HOP-MARKER");
     const session = managed(harness, hopper).persistence?.sessionId;
     const agentsBefore = agentCount(harness);
@@ -588,15 +655,19 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.sweep();
     expect(providerOf(harness, hopper)).toBe("claude-backup");
 
-    // Backup caps too, while personal's cap is still fresh: nowhere to go yet.
+    // Backup caps too, while personal's cap is still fresh: both workers are out, so the pool
+    // collapses onto the leader account rather than leaving the agent stuck on a dead one.
     harness.advanceClock(REACTIVE_TTL_MS - MINUTE_MS);
     await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
     await failOnLimit(harness, hopper);
     await harness.sweep();
-    expect(providerOf(harness, hopper)).toBe("claude-backup");
+    expect(providerOf(harness, hopper)).toBe("claude");
 
-    // Personal's evidence expires; backup's is still fresh. The conversation goes back.
+    // Personal's evidence expires while the leader account caps: the conversation goes back to
+    // an account it already left, on the same id and the same session.
     harness.advanceClock(2 * MINUTE_MS);
+    await expect.poll(() => managed(harness, hopper).lifecycle, { timeout: 10_000 }).toBe("idle");
+    await failOnLimit(harness, hopper);
     await harness.sweep();
 
     expect(providerOf(harness, hopper)).toBe("claude-personal");
@@ -609,14 +680,14 @@ describe("AccountFailoverMonitor (e2e)", () => {
   test("revives a retired handle an earlier import left on the target account", async () => {
     // The shape a pre-move daemon left behind: a retired predecessor on one account and the
     // imported successor on another, both on the same session.
-    const retired = await createAgent(harness, { provider: "claude-personal", title: "Hopper" });
+    const retired = await createChild(harness, { provider: "claude-personal", title: "Hopper" });
     await converse(harness, retired, "IMPORTED-MARKER");
     const session = managed(harness, retired).persistence!.sessionId;
     const successor = await harness.client.importAgent({
       providerId: "claude-backup",
       providerHandleId: session,
       cwd: harness.cwd,
-      labels: { [HANDOFF_FROM_LABEL]: retired },
+      labels: { [HANDOFF_FROM_LABEL]: retired, [PARENT_AGENT_ID_LABEL]: PARENT_ID },
     });
     await harness.client.updateAgent(retired, {
       name: `[MOVED → ${successor.id}, out of budget] Hopper`,
@@ -664,5 +735,307 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await harness.client.patchDaemonConfig({ accountFailover: { enabled: true } });
     await harness.sweep();
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("sends the agent to the account with the most budget left, not the lowest priority number", async () => {
+    // claude-personal is priority 1 and nearly spent; claude-backup is priority 2 and barely
+    // used. Priority order alone sends the agent to the account about to cap.
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [85]),
+      usageRow("claude-backup", [20]),
+    ]);
+    const leader = await createAgent(harness, { provider: "claude", title: "Build failover" });
+    await converse(harness, leader, "CONTEXT-MARKER-42");
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  });
+
+  test("collapses onto the leader account when no worker can take the agent", async () => {
+    // Both workers out for the week, the leader account still has budget. Strict isolation
+    // stranded the agent here; a shared account runs it.
+    harness.setUsage([
+      usageRow("claude", [30]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createAgent(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-77");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude");
+    // Moved in place, conversation intact — not handed to a second agent.
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(assistantText(harness, worker)).toContain("CONTEXT-MARKER-77");
+  });
+
+  test("strands the agent and reports it to the ladder, not as a push of its own", async () => {
+    harness.setUsage([
+      cappedUntil("claude", "2026-09-26T14:00:00.000Z"),
+      cappedUntil("claude-personal", "2026-09-24T22:10:00.000Z"),
+      cappedUntil("claude-backup", "2026-09-26T14:00:00.000Z"),
+    ]);
+    const worker = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-88");
+    await failOnLimit(harness, worker);
+
+    await harness.sweep();
+
+    // Nothing moved: every target would fail on its first turn.
+    expect(providerOf(harness, worker)).toBe("claude-personal");
+    expect(successorOf(harness, worker)).toBeUndefined();
+    expect(failoverPushes(harness)).toHaveLength(0);
+    expect(poolExhaustedPushes(harness)).toHaveLength(0);
+    expect(agentCount(harness)).toBe(1);
+
+    // The ladder owns the one push. No remedy is left and no agent could help: it would need an
+    // account to run on.
+    const [observation] = strandedObservations(harness);
+    expect(observation).toMatchObject({
+      key: "account-failover-stranded",
+      kind: "account-pool-exhausted",
+      active: true,
+      remedy: "none",
+      level: "urgent",
+    });
+    expect(observation?.escalation).toBeUndefined();
+    expect(observation?.evidence).toContain(worker);
+    expect(observation?.evidence).toContain("Worker one");
+    expect(observation?.evidence).toContain("2026-09-24T22:10:00.000Z");
+    expect(observation?.summary).toContain("claude-personal");
+
+    // Repeats while it holds are the contract, and all one episode.
+    await harness.sweep();
+    expect(strandedObservations(harness).every((o) => o.active)).toBe(true);
+    expect(new Set(strandedObservations(harness).map((o) => o.key)).size).toBe(1);
+  });
+
+  test("reports the stranding over once an account recovers and the agent moves", async () => {
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [100]),
+    ]);
+    const worker = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Worker one",
+    });
+    await converse(harness, worker, "CONTEXT-MARKER-99");
+    await failOnLimit(harness, worker);
+    await harness.sweep();
+    expect(strandedObservations(harness)).toHaveLength(1);
+
+    harness.setUsage([
+      usageRow("claude", [100]),
+      usageRow("claude-personal", [100]),
+      usageRow("claude-backup", [10]),
+    ]);
+    await harness.sweep();
+
+    expect(providerOf(harness, worker)).toBe("claude-backup");
+    expect(strandedObservations(harness).at(-1)).toMatchObject({
+      key: "account-failover-stranded",
+      active: false,
+    });
+
+    // Closed once; a quiet pool says nothing more.
+    const count = strandedObservations(harness).length;
+    await harness.sweep();
+    expect(strandedObservations(harness)).toHaveLength(count);
+  });
+
+  test("treats two providers signed into one Claude account as one account", async () => {
+    // Tyler's live shape: ~/.claude-personal and ~/.claude-leader on the same login. Their usage
+    // windows are the same windows, so moving between them buys no budget at all.
+    const shared: AgentAccountAuth = { state: "signed-in", accountLabel: "tyler@example.com" };
+    harness.setAccount("claude", shared);
+    harness.setAccount("claude-personal", { ...shared });
+    harness.setAccount("claude-backup", {
+      state: "signed-in",
+      accountLabel: "worker@example.com",
+    });
+
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
+    // claude-personal is the higher-priority worker, and is skipped: it is the exhausted account
+    // under another name. The rescue goes to the one account that has its own budget.
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  }, 60_000);
+
+  test("moves an idle root off an exhausted account onto the leader account, and sends it nothing", async () => {
+    // 2026-09-24: "Check mobile support needs" sat on claude-backup, out for the week, while the
+    // leader account had nearly all its budget.
+    harness.setUsage([usageRow("claude", [12]), usageRow("claude-backup", [100])]);
+    const root = await createAgent(harness, {
+      provider: "claude-backup",
+      title: "Check mobile support needs",
+    });
+    await converse(harness, root, "ROOT-MARKER");
+    const promptsBefore = harness.prompts.claude.length;
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(assistantText(harness, root)).toContain("ROOT-MARKER");
+    expect(harness.prompts.claude.slice(promptsBefore)).toEqual([]);
+    expect(managed(harness, root).lifecycle).toBe("idle");
+    // The move is on the record, not a push.
+    const [moved] = failoverPushes(harness);
+    expect(moved?.data).toMatchObject({ agentId: root });
+    expect(levelOf(harness, moved)).toBe("record");
+
+    // It answers the next message on the account it moved to.
+    await converse(harness, root, "ANSWERED");
+    expect(harness.prompts.claude.at(-1)).toContain("ANSWERED");
+  }, 60_000);
+
+  test("moves a root cut off mid-turn by the cap to the leader account and resumes it", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "CUT-OFF-MARKER");
+    await failOnLimit(harness, root, REAL_WEEKLY_LIMIT_MESSAGE);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    const resume = harness.prompts.claude.find((prompt) => prompt.includes("Account handoff"));
+    expect(resume).toContain(`You are the same agent (${root})`);
+    expect(levelOf(harness, failoverPushes(harness)[0])).toBe("record");
+  }, 60_000);
+
+  test("resumes a root whose dead turn the stalled-agent sweep cancelled", async () => {
+    // The stalled-agent sweep cancels a turn stuck in running on a capped account and leaves a
+    // limit-shaped lastError. That is a turn cut off mid-way, so it is resumed, not just moved.
+    // (It lands the agent idle rather than in error; the detector unit test covers that.)
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Stalled root" });
+    await converse(harness, root, "STALLED-MARKER");
+    await failOnLimit(harness, root, stallCancelError("claude-backup"));
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude");
+    expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
+  }, 60_000);
+
+  test("leaves an idle child until asked, then rescues it to a worker or the leader account", async () => {
+    harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [30])]);
+    const child = await createChild(harness, { provider: "claude-backup", title: "Child one" });
+    await converse(harness, child, "CHILD-MARKER");
+
+    // A child answers its leader, not Tyler: nothing moves it while nobody asks it anything.
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    await failOnLimit(harness, child);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-personal");
+    expect(
+      harness.prompts["claude-personal"].some((prompt) => prompt.includes("Account handoff")),
+    ).toBe(true);
+
+    // Both workers out: the next rescue collapses onto the leader account.
+    await settle(harness, child);
+    harness.setUsage([usageRow("claude-backup", [100]), usageRow("claude-personal", [100])]);
+    await failOnLimit(harness, child);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude");
+  }, 60_000);
+
+  test("never moves an agent onto an account at 90% or more", async () => {
+    // claude-personal is the first worker by priority and is not dead, but at 92% it would cap
+    // the agent again within a turn or two.
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude-backup", [60])]);
+    const child = await createChild(harness, { provider: "claude", title: "Child" });
+    await failOnLimit(harness, child);
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+
+    // With every other account at 90% or more, nothing can take the next one: it is stranded.
+    const other = await createChild(harness, { provider: "claude-backup", title: "Other" });
+    harness.setUsage([usageRow("claude-personal", [92]), usageRow("claude", [95])]);
+    await failOnLimit(harness, other);
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, other)).toBe("claude-backup");
+    expect(strandedObservations(harness).at(-1)).toMatchObject({ active: true });
+  }, 60_000);
+
+  test("retires a duplicate record the leader account already holds, and never retries it", async () => {
+    // 2026-09-24: three moves failed three times each with "Provider 'claude' already holds
+    // agent Y for session Z". The conversation was already live under another record.
+    const holder = await createAgent(harness, { provider: "claude", title: "Review PR #87" });
+    await converse(harness, holder, "HOLDER-MARKER");
+    const session = managed(harness, holder).persistence!.sessionId;
+    const duplicate = await harness.client.importAgent({
+      provider: "claude-backup",
+      sessionId: session,
+      cwd: harness.cwd,
+    });
+    await failOnLimit(harness, duplicate.id);
+    const agentsBefore = agentCount(harness);
+
+    await harness.sweep();
+
+    expect(successorOf(harness, duplicate.id)).toBe(holder);
+    expect(providerOf(harness, duplicate.id)).toBe("claude-backup");
+    expect(providerOf(harness, holder)).toBe("claude");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(harness.prompts.claude.filter((prompt) => prompt.includes("Account handoff"))).toEqual(
+      [],
+    );
+    // Done, not failed: nobody is told, and nothing is stranded.
+    expect(failoverPushes(harness)).toEqual([]);
+    expect(strandedObservations(harness)).toEqual([]);
+
+    await harness.sweep();
+    expect(successorOf(harness, duplicate.id)).toBe(holder);
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("leaves an idle child on the leader account there while a worker has budget", async () => {
+    // Moving it back would restore isolation at the price of a full cache rebuild on its next turn,
+    // and most idle children never run again. New spawns already land on a worker.
+    const child = await createChild(harness, { provider: "claude", title: "Collapsed child" });
+    await converse(harness, child, "COLLAPSED-MARKER");
+    harness.setUsage([usageRow("claude-personal", [5]), usageRow("claude-backup", [5])]);
+
+    await harness.sweep();
+    harness.advanceClock(6 * HOUR_MS);
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude");
+    expect(failoverPushes(harness)).toEqual([]);
+  }, 60_000);
+
+  test("leaves a rescued root on its worker account after the leader account recovers", async () => {
+    harness.setUsage([usageRow("claude", [100])]);
+    const root = await createAgent(harness, { provider: "claude", title: "Root" });
+    await failOnLimit(harness, root);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude-personal");
+    await settle(harness, root);
+
+    // The leader account resets. The root can run where it is, so it stays.
+    windowHasReset(harness);
+    harness.setUsage([usageRow("claude", [3])]);
+    await harness.sweep();
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude-personal");
+    expect(failoverPushes(harness)).toHaveLength(1);
   }, 60_000);
 });
