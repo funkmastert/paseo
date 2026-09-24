@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import {
   AgentWorkSnapshotSweep,
+  buildWorkSnapshotAgentViews,
+  listPaseoWorktreeDirectories,
   type WorkSnapshotAgentView,
   WORK_AT_RISK_JUDGE_TASK,
 } from "./agent-work-snapshot-sweep.js";
@@ -379,5 +381,77 @@ describe("AgentWorkSnapshotSweep", () => {
     });
     expect(await disabled.sweep.tick()).toBeNull();
     expect(backupRefs(repo)).toEqual([]);
+  });
+});
+
+describe("production readers", () => {
+  test("agent views merge the live summary, the stored record and the live last error", () => {
+    const views = buildWorkSnapshotAgentViews({
+      live: [
+        {
+          id: "live",
+          provider: "claude",
+          cwd: "/w/live",
+          workspaceId: "ws-1",
+          internal: false,
+          lifecycle: "idle",
+          busy: false,
+          pendingPermissionCount: 0,
+          requiresAttention: false,
+          attentionReason: null,
+          hasAlert: false,
+          runningProviderSubagentCount: 0,
+          lastActivityAt: new Date(TWO_HOURS_AGO).toISOString(),
+          labels: {},
+          title: "Live one",
+          sessionId: "s",
+        },
+      ],
+      stored: [
+        {
+          id: "gone",
+          provider: "claude",
+          cwd: "/w/gone",
+          workspaceId: "ws-2",
+          createdAt: new Date(TWO_HOURS_AGO).toISOString(),
+          updatedAt: new Date(TWO_HOURS_AGO).toISOString(),
+          title: "Archived one",
+          labels: {},
+          lastStatus: "idle",
+          archivedAt: new Date(TWO_HOURS_AGO).toISOString(),
+        } as never,
+      ],
+      lastErrors: new Map([["live", UNRESPONSIVE_CANCEL_ERROR]]),
+    });
+    expect(views).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "gone",
+          archived: true,
+          live: false,
+          title: "Archived one",
+          lastError: null,
+        }),
+        expect.objectContaining({
+          id: "live",
+          live: true,
+          lifecycle: "idle",
+          lastError: UNRESPONSIVE_CANCEL_ERROR,
+          lastActivityAtMs: TWO_HOURS_AGO,
+        }),
+      ]),
+    );
+  });
+
+  test("Paseo worktree directories are <root>/<hash>/<slug>, and a missing root is empty", () => {
+    const base = join(root, "wt-root");
+    mkdirSync(join(base, "h1", "a"), { recursive: true });
+    mkdirSync(join(base, "h1", "b"), { recursive: true });
+    mkdirSync(join(base, "h2", "c"), { recursive: true });
+    writeFileSync(join(base, "h2", "file.txt"), "x");
+    expect(listPaseoWorktreeDirectories(base).sort()).toEqual(
+      [join(base, "h1", "a"), join(base, "h1", "b"), join(base, "h2", "c")].sort(),
+    );
+    expect(listPaseoWorktreeDirectories(join(root, "missing"))).toEqual([]);
   });
 });

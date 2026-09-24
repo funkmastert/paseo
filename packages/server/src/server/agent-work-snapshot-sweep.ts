@@ -1,10 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Logger } from "pino";
 import { z } from "zod";
 
 import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
+import type { DoneJanitorAgentSummary } from "./agent/agent-manager.js";
+import type { StoredAgentRecord } from "./agent/agent-storage.js";
 import { UNRESPONSIVE_CANCEL_ERROR } from "./agent/turn-cancel.js";
 import type { DetailedWorktreeSnapshot, WorktreeAssessment } from "./agent/worktree-snapshot.js";
+import { buildAgentViews } from "./agent-done-janitor.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
 import type {
   RemediationObservation,
@@ -513,4 +517,43 @@ function buildObservation(
     escalation: { task: WORK_AT_RISK_JUDGE_TASK, taskClass: "mechanical" },
     ...(singleOwner ? { link: { agentId: singleOwner.id } } : {}),
   };
+}
+
+// ─── Production readers ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Every agent the daemon knows, merged the way the done janitor merges them, plus the live
+ * `lastError` that marks a turn force-cancelled as unresponsive.
+ */
+export function buildWorkSnapshotAgentViews(input: {
+  live: readonly DoneJanitorAgentSummary[];
+  stored: readonly StoredAgentRecord[];
+  lastErrors: ReadonlyMap<string, string | undefined>;
+}): WorkSnapshotAgentView[] {
+  return buildAgentViews(input.live, input.stored, new Set(), new Set()).map((view) => ({
+    id: view.id,
+    title: view.title,
+    cwd: view.cwd,
+    workspaceId: view.workspaceId,
+    archived: view.archived,
+    live: view.live,
+    lifecycle: view.lifecycle,
+    busy: view.busy,
+    lastError: view.live ? (input.lastErrors.get(view.id) ?? null) : null,
+    lastActivityAtMs: view.lastActivityAtMs,
+  }));
+}
+
+/** `<root>/<hash>/<slug>`: every directory a Paseo worktree could live in. */
+export function listPaseoWorktreeDirectories(root: string): string[] {
+  const listDirectories = (dir: string): string[] => {
+    try {
+      return readdirSync(dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => join(dir, entry.name));
+    } catch {
+      return [];
+    }
+  };
+  return listDirectories(root).flatMap(listDirectories);
 }
