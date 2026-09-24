@@ -9,6 +9,7 @@ import {
   type FormPreferences,
   type ProviderPreferences,
 } from "@/hooks/use-form-preferences";
+import { avoidOutOfBudgetAccount, type AccountBudget } from "./account-budget";
 import { findModelByReference } from "./model-catalog";
 
 export interface FormInitialValues {
@@ -76,6 +77,8 @@ interface AgentFormInputs {
   preferences: FormPreferences | null;
   providerModelsByProvider: ProviderModelsByProvider;
   allowedProviderMap: Map<AgentProvider, AgentProviderDefinition>;
+  /** Pooled accounts' usage, once it has loaded. A remembered account that is out isn't a default. */
+  accountBudget?: AccountBudget | null;
 }
 
 export type AgentFormAction =
@@ -87,6 +90,7 @@ export type AgentFormAction =
       preferences: FormPreferences | null;
       providerModelsByProvider: ProviderModelsByProvider;
       allowedProviderMap: Map<AgentProvider, AgentProviderDefinition>;
+      accountBudget?: AccountBudget | null;
     }
   | {
       type: "SET_PROVIDER_AND_MODEL_FROM_USER";
@@ -264,11 +268,23 @@ function resolveProvider(input: {
   userModified: boolean;
   initialValues: FormInitialValues | undefined;
   preferences: FormPreferences | null;
+  allowedProviderMap: Map<AgentProvider, AgentProviderDefinition>;
+  accountBudget: AccountBudget | null | undefined;
 }): AgentProvider | null {
   const { currentProvider, userModified, initialValues, preferences } = input;
   // Discovery readiness does not change the user's saved or explicit choice.
   if (userModified) return currentProvider;
-  return initialValues?.provider ?? preferences?.provider ?? currentProvider;
+  if (initialValues?.provider != null) return initialValues.provider;
+  const remembered = preferences?.provider ?? currentProvider;
+  if (!remembered) return remembered;
+  // A remembered provider is only a default, and a pooled account that is out of budget is not
+  // one worth offering: a chat started there fails on its first turn.
+  return avoidOutOfBudgetAccount({
+    provider: remembered,
+    budget: input.accountBudget ?? null,
+    isSelectable: (provider) => input.allowedProviderMap.has(provider),
+    modelFor: (provider) => preferences?.providerPreferences?.[provider]?.model ?? null,
+  });
 }
 
 function resolveModeId(input: {
@@ -365,6 +381,7 @@ export function resolveFormState(
   userModified: UserModifiedFields,
   currentState: FormState,
   allowedProviderMap: Map<AgentProvider, AgentProviderDefinition>,
+  accountBudget?: AccountBudget | null,
 ): FormState {
   const result = { ...currentState };
 
@@ -373,6 +390,8 @@ export function resolveFormState(
     userModified: userModified.provider,
     initialValues,
     preferences,
+    allowedProviderMap,
+    accountBudget,
   });
 
   const providerDef = result.provider ? allowedProviderMap.get(result.provider) : undefined;
@@ -426,6 +445,7 @@ export function resolveFormStateFromProviderModels(
   userModified: UserModifiedFields,
   currentState: FormState,
   allowedProviderMap: Map<AgentProvider, AgentProviderDefinition>,
+  accountBudget?: AccountBudget | null,
 ): FormState {
   const providerResolved = resolveFormState(
     initialValues,
@@ -434,6 +454,7 @@ export function resolveFormStateFromProviderModels(
     userModified,
     currentState,
     allowedProviderMap,
+    accountBudget,
   );
   const availableModels = providerResolved.provider
     ? (providerModelsByProvider.get(providerResolved.provider) ?? null)
@@ -446,6 +467,7 @@ export function resolveFormStateFromProviderModels(
     userModified,
     currentState,
     allowedProviderMap,
+    accountBudget,
   );
 }
 
@@ -531,6 +553,7 @@ function completeResolution(
     state.userModified,
     state.form,
     action.allowedProviderMap,
+    action.accountBudget,
   );
   const nextState = { ...state, resolution: { status: "completed" } as const };
   if (!hasFormStateChanged(state.form, resolved)) return nextState;
@@ -605,7 +628,48 @@ function receiveInputs(
   }
   if (!active || action.isPreferencesLoading || !action.serverId || !action.hasSnapshot)
     return next;
-  return completeResolution(next, { ...action, type: "COMPLETE_RESOLUTION" });
+  return moveOffOutOfBudgetDefault(
+    completeResolution(next, { ...action, type: "COMPLETE_RESOLUTION" }),
+    action,
+  );
+}
+
+/**
+ * Usage loads on its own clock, so it can land after the form has already resolved onto the
+ * remembered account. Resolution runs once, so without this the out-of-budget default would stick.
+ * Only a provider nobody chose moves: one the user picked, or one the caller passed in, stays.
+ */
+function moveOffOutOfBudgetDefault(
+  state: AgentFormReducerState,
+  action: AgentFormInputs,
+): AgentFormReducerState {
+  const provider = state.form.provider;
+  if (
+    state.resolution.status !== "completed" ||
+    state.userModified.provider ||
+    action.initialValues?.provider != null ||
+    !provider ||
+    !action.accountBudget
+  ) {
+    return state;
+  }
+  const target = avoidOutOfBudgetAccount({
+    provider,
+    budget: action.accountBudget,
+    isSelectable: (candidate) => action.allowedProviderMap.has(candidate),
+    modelFor: (candidate) => action.preferences?.providerPreferences?.[candidate]?.model ?? null,
+  });
+  if (target === provider) return state;
+  const resolved = resolveFormStateFromProviderModels(
+    action.initialValues,
+    action.preferences,
+    action.providerModelsByProvider,
+    state.userModified,
+    { ...state.form, provider: target },
+    action.allowedProviderMap,
+    action.accountBudget,
+  );
+  return hasFormStateChanged(state.form, resolved) ? { ...state, form: resolved } : state;
 }
 
 export function resolveAgentForm(
