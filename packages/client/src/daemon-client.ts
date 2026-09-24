@@ -161,6 +161,7 @@ import {
   normalizeProvidersSnapshotPayload,
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
+import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -2827,6 +2828,52 @@ export class DaemonClient {
       throw new Error(payload.error ?? "setWorkspacePinned rejected");
     }
     return { pinnedAt: payload.pinnedAt };
+  }
+
+  /** Agents the last daemon stop cut off mid-turn. Gate on `features.restartRecovery`. */
+  async getRestartRecoveryPlan(requestId?: string): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.get_plan.response">(
+        {
+          requestId,
+          message: { type: "agent.restart_recovery.get_plan.request" },
+        },
+      );
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Resume the selected entries, or every resumable one, leaders first. */
+  async applyRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.apply.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.apply.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+        // Each depth waits for its agents' runs to start, up to a minute per provider start.
+        timeout: 600_000,
+      });
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Settle the selected pending entries so no later daemon offers them again. */
+  async dismissRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.dismiss.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.dismiss.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+      });
+    return requireRestartRecoveryPlan(payload);
   }
 
   async inspectWorkspaceRecovery(
@@ -6582,4 +6629,14 @@ function resolveAgentConfig(options: CreateAgentRequestOptions): AgentSessionCon
     provider: merged.provider,
     cwd: merged.cwd,
   };
+}
+
+function requireRestartRecoveryPlan(payload: {
+  plan: RestartRecoveryPlan | null;
+  error: string | null;
+}): RestartRecoveryPlan {
+  if (!payload.plan) {
+    throw new Error(payload.error ?? "Restart recovery request failed");
+  }
+  return payload.plan;
 }
