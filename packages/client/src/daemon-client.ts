@@ -99,6 +99,7 @@ import type {
   DaemonGetStatusResponse,
   DaemonGetPairingOfferResponse,
   DaemonConfigReloadResponse,
+  DaemonDoctorResponse,
   DiagnosticsResponse,
   AgentRewindResponseMessage,
   ListTerminalsResponse,
@@ -4921,6 +4922,25 @@ export class DaemonClient {
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId,
       message: { type: "notifications.ledger.list.request", ...filters },
+    });
+  }
+
+  /** True when the connected daemon can run `paseo doctor` itself (`daemon.doctor.request`). */
+  supportsDaemonDoctor(): boolean {
+    // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+    return this.lastServerInfoMessage?.features?.daemonDoctor === true;
+  }
+
+  /** Read-only diagnosis run inside the daemon. Callers gate on `supportsDaemonDoctor()`. */
+  async runDaemonDoctor(options?: {
+    deep?: boolean;
+    requestId?: string;
+    timeout?: number;
+  }): Promise<DaemonDoctorResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "daemon.doctor.request", ...(options?.deep ? { deep: true } : {}) },
+      timeout: options?.timeout,
     });
   }
 

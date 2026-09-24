@@ -31,6 +31,7 @@ import { addAttachOptions, runAttachCommand } from "./commands/agent/attach.js";
 import { addImportOptions, runImportCommand } from "./commands/agent/import.js";
 import { withOutput } from "./output/index.js";
 import { runCloneCommand } from "./commands/clone.js";
+import { runDoctorCommand } from "./commands/doctor.js";
 import { onboardCommand } from "./commands/onboard.js";
 import {
   addDaemonHostOption,
@@ -122,6 +123,19 @@ export function createCli(): Command {
 
   // Top-level local daemon shortcuts
   program.addCommand(onboardCommand());
+  addJsonAndDaemonHostOptions(
+    program
+      .command("doctor")
+      .description(
+        "Diagnose the fork's known failure modes (read-only; prints the fix, changes nothing)",
+      )
+      .option("--home <path>", "Paseo home directory (default: ~/.paseo)")
+      .option(
+        "--deep",
+        "Give the worktree size and reclaim sweep a 5 minute budget instead of 25 s",
+      )
+      .option("--full", "List every check, passing ones included"),
+  ).action(withOutput(runDoctorCommand));
   program.addCommand(daemonStartCommand());
   program.addCommand(createHooksCommand());
 

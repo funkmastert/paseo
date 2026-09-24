@@ -187,6 +187,7 @@ import { ProviderCatalogSession } from "./session/provider/provider-catalog-sess
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
+import { DoctorSession } from "./session/doctor/doctor-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
 import type { DaemonWebSocketRuntimeDiagnosticSnapshot } from "./session/daemon/diagnostics.js";
 import type { HubRelationshipManagement } from "./hub/relationship-controller.js";
@@ -810,6 +811,7 @@ export class Session {
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
   private readonly daemonSession: DaemonSession;
+  private readonly doctorSession: DoctorSession;
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
@@ -1051,6 +1053,29 @@ export class Session {
       logger: this.sessionLogger,
       hubRelationships: options.hubRelationships,
       reloadConfig: () => daemonConfigStore.reload(),
+    });
+    this.doctorSession = new DoctorSession({
+      host: { emit: (msg) => this.emit(msg) },
+      paseoHome: this.paseoHome,
+      daemonVersion,
+      // The worker's own start, not the pid file's: a restart under a live supervisor moves it.
+      getDaemonStartedAt: async () => new Date(Date.now() - process.uptime() * 1000).toISOString(),
+      listAgents: () =>
+        this.agentManager
+          .listAgents()
+          .map((agent) => ({ cwd: agent.cwd, status: agent.lifecycle, archived: false })),
+      listWorkspaces: async () =>
+        (await this.workspaceRegistry.list()).map((workspace) => ({
+          cwd: workspace.cwd,
+          baseBranch: workspace.baseBranch ?? null,
+          archivedAt: workspace.archivedAt ?? null,
+          pinned: Boolean(workspace.pinnedAt),
+        })),
+      listPlugins: () => this.pluginRuntime?.listPlugins() ?? [],
+      getPluginLogs: (id) =>
+        (this.pluginRuntime?.getLogs(id) ?? []).map((entry) => `${entry.stream}: ${entry.message}`),
+      listProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+      logger: this.sessionLogger,
     });
     this.hubExecutionController = options.hubExecutionAgents
       ? new HubExecutionController({
@@ -2601,6 +2626,8 @@ export class Session {
       case "daemon.config.reload.request":
         this.daemonSession.handleConfigReloadRequest(msg);
         return undefined;
+      case "daemon.doctor.request":
+        return this.doctorSession.handleDoctorRequest(msg);
       case "hub.management.daemon.connect.request":
       case "hub.management.daemon.get_status.request":
       case "hub.management.daemon.disconnect.request":
