@@ -429,7 +429,8 @@ export class AccountFailoverMonitor {
       kind: "account-pool-exhausted",
       active,
       remedy: "none",
-      level: "alert",
+      // `urgent`: the pool cannot route at all, so nothing is left for automation to try.
+      level: "urgent",
       title: "No Claude account can take stranded agents",
       summary: active
         ? `${agents} hit a usage limit and cannot be moved: ${accounts} are out of budget or ` +

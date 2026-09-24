@@ -818,7 +818,7 @@ describe("AccountFailoverMonitor (e2e)", () => {
       kind: "account-pool-exhausted",
       active: true,
       remedy: "none",
-      level: "alert",
+      level: "urgent",
     });
     expect(observation?.escalation).toBeUndefined();
     expect(observation?.evidence).toContain(worker);
