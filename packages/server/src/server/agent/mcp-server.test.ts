@@ -254,6 +254,10 @@ function buildAgentManagerSpies() {
     // null is the real "this caller may fan out" answer; a test that wants the refusal path
     // overrides it with a { budgetTokens, spentTokens } pair.
     getSpendFanOutDenial: vi.fn().mockReturnValue(null),
+    // setupFinishNotification registers as a finish observer and asks for the durable ledger
+    // (agent-prompt.ts). No ledger is the real "not wired" answer; the release is a no-op.
+    noteFinishObserver: vi.fn().mockReturnValue(() => {}),
+    getFinishObligations: vi.fn().mockReturnValue(null),
   };
 }
 
