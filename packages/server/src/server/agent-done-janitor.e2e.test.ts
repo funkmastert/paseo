@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { getFullAccessConfig } from "./daemon-e2e/agent-configs.js";
 import type { PushPayload } from "./push/index.js";
+import { DaemonClient } from "./test-utils/daemon-client.js";
 import { createDaemonTestContext, type DaemonTestContext } from "./test-utils/index.js";
 
 // A real daemon on a temp PASEO_HOME and a fixture repository: the janitor's wiring — the
@@ -226,3 +227,66 @@ test("a closed agent archives itself and frees its clean worktree; a pinned work
   expect((await activeWorkspaceIds()).has(dirty.workspaceId)).toBe(true);
   expect(pushes[0]?.body).toMatch(/^Archived 2 dead sessions and deleted 1 worktree, freeing/);
 });
+
+test("an empty project whose directory is gone leaves every connected sidebar without a reload", async () => {
+  const gone = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-gone-")));
+  const alive = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-alive-")));
+  tempRoots.push(gone, alive);
+  const goneProject = (await ctx.client.addProject(gone)).project;
+  const aliveProject = (await ctx.client.addProject(alive)).project;
+  if (!goneProject || !aliveProject) throw new Error("addProject returned no project");
+  rmSync(gone, { recursive: true, force: true });
+
+  // A second client: the update reaches every session, not the one that asked.
+  const other = new DaemonClient({ url: `ws://127.0.0.1:${ctx.daemon.port}/ws` });
+  await other.connect();
+  try {
+    await other.fetchAgents({ subscribe: { subscriptionId: "other-agents" } });
+    const removedBy = new Map<string, string[]>();
+    for (const [name, client] of [
+      ["first", ctx.client],
+      ["second", other],
+    ] as const) {
+      removedBy.set(name, []);
+      client.on("workspace_update", (message) => {
+        if (message.payload.kind === "remove" && message.payload.removedProjectId) {
+          removedBy.get(name)?.push(message.payload.removedProjectId);
+        }
+      });
+      const listing = await client.fetchWorkspaces({
+        subscribe: { subscriptionId: `${name}-workspaces` },
+      });
+      expect(listing.emptyProjects.map((project) => project.projectId)).toContain(
+        goneProject.projectId,
+      );
+    }
+    clockMs += 2 * 60 * 60 * 1000;
+
+    await ctx.client.patchDaemonConfig({ doneJanitor: { enabled: true, dryRun: true } });
+    const dryRun = await sweep();
+    expect(dryRun?.entries).toEqual([
+      expect.objectContaining({ action: "would-remove-project", projectId: goneProject.projectId }),
+    ]);
+    expect(pushes).toEqual([]);
+    expect(removedBy.get("first")).toEqual([]);
+
+    await ctx.client.patchDaemonConfig({ doneJanitor: { dryRun: false } });
+    const live = await sweep();
+
+    expect(live?.removedProjectCount).toBe(1);
+    expect(live?.entries).toEqual([
+      expect.objectContaining({ action: "removed-project", projectId: goneProject.projectId }),
+    ]);
+    await vi.waitFor(() => {
+      expect(removedBy.get("first")).toContain(goneProject.projectId);
+      expect(removedBy.get("second")).toContain(goneProject.projectId);
+    });
+    const after = await other.fetchWorkspaces();
+    expect(after.emptyProjects.map((project) => project.projectId)).toEqual([
+      aliveProject.projectId,
+    ]);
+    expect(pushes.map((push) => push.body)).toEqual(["Removed 1 empty project."]);
+  } finally {
+    await other.close();
+  }
+}, 30_000);

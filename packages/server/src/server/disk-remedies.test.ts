@@ -6,7 +6,7 @@ import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-rem
 const GIB = 1024 ** 3;
 
 function doneReport(entries: DoneJanitorSweepReport["entries"], dryRun = false) {
-  return { dryRun, entries } satisfies DoneJanitorSweepReport;
+  return { dryRun, removedProjectCount: 0, entries } satisfies DoneJanitorSweepReport;
 }
 
 describe("summarizeDoneJanitorRun", () => {

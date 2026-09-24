@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
@@ -31,7 +32,7 @@ import type {
   WorktreeSnapshotRequest,
   WorktreeSnapshotResult,
 } from "./remediation/contract.js";
-import type { PersistedWorkspaceRecord } from "./workspace-registry.js";
+import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
 import { isRealpathInsideRoot } from "../utils/path.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 60_000;
@@ -53,6 +54,18 @@ const DEFAULT_ANSWER_TIMEOUT_MINUTES = 10;
 const DEFAULT_DEAD_QUIET_HOURS = 72;
 /** Archiving is a soft delete and cheap, so this is generous next to the question budget. */
 const DEFAULT_MAX_DEAD_ARCHIVES_PER_SWEEP = 10;
+/**
+ * A project this young may be one someone is adding right now, before its first workspace
+ * exists. Fixed, not configurable: the rule has no other knob.
+ */
+const EMPTY_PROJECT_MIN_AGE_MS = 60 * 60_000;
+/**
+ * Removing a project record is cheap and re-adding the project undoes it, so it does not spend
+ * the archive budget. The cap is a blast-radius limit for the one way the rule can be wrong at
+ * scale: a volume that is not mounted makes every project on it read as ENOENT. 50 is twice the
+ * backlog that motivated the rule, and a larger one drains over the next sweeps.
+ */
+const MAX_PROJECT_REMOVALS_PER_SWEEP = 50;
 
 export interface DoneJanitorConfig {
   enabled?: boolean;
@@ -101,6 +114,7 @@ function resolveConfig(config: DoneJanitorConfig): ResolvedDoneJanitorConfig {
 export type DoneJanitorWorkspace = Pick<
   PersistedWorkspaceRecord,
   | "workspaceId"
+  | "projectId"
   | "kind"
   | "cwd"
   | "displayName"
@@ -114,6 +128,17 @@ export type DoneJanitorWorkspace = Pick<
   | "archivedAt"
   | "pinnedAt"
 >;
+
+export type DoneJanitorProject = Pick<
+  PersistedProjectRecord,
+  "projectId" | "rootPath" | "projectKey" | "createdAt" | "updatedAt" | "archivedAt"
+>;
+
+/** `missing` is ENOENT and nothing else: any other failure to stat is `unknown` and spares the project. */
+export type ProjectRootProbe =
+  | { kind: "exists" }
+  | { kind: "missing" }
+  | { kind: "unknown"; error: string };
 
 export type AskAgentResult =
   | { kind: "answered"; reply: string; usedTools: boolean }
@@ -151,6 +176,14 @@ export interface DoneJanitorDependencies {
    * is deleted.
    */
   snapshotWorktree(request: WorktreeSnapshotRequest): Promise<WorktreeSnapshotResult>;
+  listProjects(): Promise<DoneJanitorProject[]>;
+  probeProjectRoot(rootPath: string): Promise<ProjectRootProbe>;
+  /**
+   * Removes the project record and its custom icon, the same two steps a person's project
+   * removal takes. Every connected client's sidebar follows from the registry's mutation
+   * subscription, not from this call.
+   */
+  removeProject(projectId: string): Promise<void>;
 }
 
 export interface AgentDoneJanitorOptions {
@@ -180,10 +213,14 @@ export interface DoneJanitorReportEntry {
     | "deleted"
     | "kept-workspace"
     | "kept-agent"
-    | "snapshotted";
+    | "snapshotted"
+    | "would-remove-project"
+    | "removed-project"
+    | "kept-project";
   agentId?: string;
   title?: string | null;
   workspaceId?: string;
+  projectId?: string;
   path?: string;
   bytes?: number;
   reason: string;
@@ -191,6 +228,8 @@ export interface DoneJanitorReportEntry {
 
 export interface DoneJanitorSweepReport {
   dryRun: boolean;
+  /** Empty projects removed this sweep; a dry run removes none. */
+  removedProjectCount: number;
   entries: DoneJanitorReportEntry[];
 }
 
@@ -262,7 +301,11 @@ export class AgentDoneJanitor {
     if (raw?.enabled !== true) return null;
     const config = resolveConfig(raw);
     const nowMs = this.now();
-    const report: DoneJanitorSweepReport = { dryRun: config.dryRun, entries: [] };
+    const report: DoneJanitorSweepReport = {
+      dryRun: config.dryRun,
+      removedProjectCount: 0,
+      entries: [],
+    };
     this.snapshotFailures.clear();
 
     let views = await this.loadViews();
@@ -342,9 +385,101 @@ export class AgentDoneJanitor {
       config.maxArchivesPerSweep - archivedCount - dead.deletedWorkspaceIds.size,
     );
 
+    await this.sweepEmptyProjects(report, config);
+
     this.logReport(report);
     if (!config.dryRun) await this.notify(report, archivedCount, dead.archivedAgentCount);
     return report;
+  }
+
+  /**
+   * Removes projects that are sidebar clutter: no workspace of any kind, and a root that is
+   * gone. Runs last so a workspace reclaimed earlier this sweep, which stays on the registry as
+   * archived, keeps its project. Each removal is decided on freshly read state.
+   */
+  private async sweepEmptyProjects(
+    report: DoneJanitorSweepReport,
+    config: ResolvedDoneJanitorConfig,
+  ): Promise<void> {
+    const { logger } = this.options;
+    try {
+      const candidates = await this.listEmptyProjectCandidates();
+      for (const [index, candidate] of candidates.entries()) {
+        if (index >= MAX_PROJECT_REMOVALS_PER_SWEEP) {
+          report.entries.push({
+            action: "kept-project",
+            reason: `${describeProjectBacklog(candidates.length - index)} for the next sweep`,
+          });
+          return;
+        }
+        if (config.dryRun) {
+          report.entries.push(describeEmptyProject(candidate, "would-remove-project"));
+          continue;
+        }
+        await this.removeEmptyProject(report, candidate);
+      }
+    } catch (error) {
+      logger.warn({ err: error }, "Done janitor: the empty project pass failed");
+    }
+  }
+
+  private async listEmptyProjectCandidates(): Promise<DoneJanitorProject[]> {
+    const [projects, workspaces] = await Promise.all([
+      this.deps.listProjects(),
+      this.deps.listWorkspaces(),
+    ]);
+    const candidates: DoneJanitorProject[] = [];
+    for (const project of projects) {
+      if (emptyProjectBlocker(project, workspaces, this.now())) continue;
+      if ((await this.deps.probeProjectRoot(project.rootPath)).kind === "missing") {
+        candidates.push(project);
+      }
+    }
+    return candidates;
+  }
+
+  /**
+   * Re-reads the project, its workspaces and its root, so a project someone created, or whose
+   * worktree is being created, since the sweep's read is left alone. The registry has no
+   * conditional remove, so a workspace created in the milliseconds after this check still loses
+   * its project record; the project comes back with the next `project.add`.
+   */
+  private async removeEmptyProject(
+    report: DoneJanitorSweepReport,
+    candidate: DoneJanitorProject,
+  ): Promise<void> {
+    const { logger } = this.options;
+    const fresh = (await this.deps.listProjects()).find(
+      (project) => project.projectId === candidate.projectId,
+    );
+    // Removed by someone else in the meantime: nothing left to do, nothing to report.
+    if (!fresh) return;
+    const workspaces = await this.deps.listWorkspaces();
+    const changed =
+      emptyProjectBlocker(fresh, workspaces, this.now()) ??
+      describeRootProbe(await this.deps.probeProjectRoot(fresh.rootPath));
+    if (changed) {
+      report.entries.push({
+        ...describeEmptyProject(fresh, "kept-project"),
+        reason: `it was empty and its directory was gone, but then ${changed}`,
+      });
+      return;
+    }
+    try {
+      await this.deps.removeProject(fresh.projectId);
+    } catch (error) {
+      logger.warn(
+        { err: error, projectId: fresh.projectId },
+        "Done janitor: removing an empty project failed",
+      );
+      report.entries.push({
+        ...describeEmptyProject(fresh, "kept-project"),
+        reason: `removal failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    report.removedProjectCount += 1;
+    report.entries.push(describeEmptyProject(fresh, "removed-project"));
   }
 
   /**
@@ -858,7 +993,7 @@ export class AgentDoneJanitor {
   private logReport(report: DoneJanitorSweepReport): void {
     const seen = new Set<string>();
     for (const entry of report.entries) {
-      const subject = entry.agentId ?? entry.workspaceId ?? entry.path ?? "";
+      const subject = entry.agentId ?? entry.workspaceId ?? entry.projectId ?? entry.path ?? "";
       const key = `${subject}:${entry.action.replace(/^would-/, "")}`;
       seen.add(key);
       const line = `${entry.action}:${entry.reason}`;
@@ -881,7 +1016,14 @@ export class AgentDoneJanitor {
     archivedDeadAgentCount: number,
   ): Promise<void> {
     const deleted = report.entries.filter((entry) => entry.action === "deleted");
-    if (archivedAgentCount === 0 && archivedDeadAgentCount === 0 && deleted.length === 0) return;
+    if (
+      archivedAgentCount === 0 &&
+      archivedDeadAgentCount === 0 &&
+      deleted.length === 0 &&
+      report.removedProjectCount === 0
+    ) {
+      return;
+    }
     const sender = this.options.getPushNotificationSender();
     if (!sender) return;
     const keptWorktrees = report.entries.filter(
@@ -894,6 +1036,7 @@ export class AgentDoneJanitor {
           archivedAgentCount,
           archivedDeadAgentCount,
           deletedWorktreeCount: deleted.length,
+          removedProjectCount: report.removedProjectCount,
           reclaimedBytes: deleted.reduce((sum, entry) => sum + (entry.bytes ?? 0), 0),
           keptWorktrees: keptWorktrees.map((entry) => ({
             name: entry.path ?? entry.workspaceId ?? "",
@@ -907,6 +1050,68 @@ export class AgentDoneJanitor {
     } catch (error) {
       this.options.logger.warn({ err: error }, "Done janitor: push notification failed");
     }
+  }
+}
+
+function describeProjectBacklog(count: number): string {
+  return count === 1 ? "1 more empty project waits" : `${count} more empty projects wait`;
+}
+
+const EMPTY_PROJECT_REASON = "it has no workspaces and its directory no longer exists";
+
+function describeEmptyProject(
+  project: DoneJanitorProject,
+  action: "would-remove-project" | "removed-project" | "kept-project",
+): DoneJanitorReportEntry {
+  return {
+    action,
+    projectId: project.projectId,
+    path: project.rootPath,
+    reason: EMPTY_PROJECT_REASON,
+  };
+}
+
+/** A phrase for why an empty project is not (or is no longer) removable, before its root is looked at; null when it is. */
+function emptyProjectBlocker(
+  project: DoneJanitorProject,
+  workspaces: readonly DoneJanitorWorkspace[],
+  nowMs: number,
+): string | null {
+  if (project.archivedAt) return "it is archived";
+  // A remote project's root is a checkout on some other machine's terms; never looked at.
+  if (project.projectKey?.startsWith("remote:") || project.projectId.startsWith("remote:")) {
+    return "it is a remote project";
+  }
+  // Archived workspaces count: they are history someone may still open.
+  if (workspaces.some((workspace) => workspace.projectId === project.projectId)) {
+    return "it gained a workspace";
+  }
+  // stat("") is ENOENT and a relative path resolves against the daemon's cwd: neither is a root.
+  if (!isAbsolute(project.rootPath)) return "its root is not an absolute path";
+  const newestMs = Math.max(parseMs(project.createdAt), parseMs(project.updatedAt));
+  if (!(nowMs - newestMs >= EMPTY_PROJECT_MIN_AGE_MS)) return "it was touched in the last hour";
+  return null;
+}
+
+function describeRootProbe(probe: ProjectRootProbe): string | null {
+  switch (probe.kind) {
+    case "missing":
+      return null;
+    case "exists":
+      return "its directory exists";
+    case "unknown":
+      return `its directory could not be checked (${probe.error})`;
+  }
+}
+
+/** Whether the project's root is gone. Only ENOENT says so; EACCES, ENOTDIR on a parent and the rest say nothing. */
+export async function probeProjectRoot(rootPath: string): Promise<ProjectRootProbe> {
+  try {
+    await stat(rootPath);
+    return { kind: "exists" };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { kind: "missing" };
+    return { kind: "unknown", error: error instanceof Error ? error.message : String(error) };
   }
 }
 

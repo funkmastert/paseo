@@ -227,9 +227,11 @@ import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
 import {
   AgentDoneJanitor,
   askAgentWhetherDone,
+  probeProjectRoot,
   readProviderHealth,
   type DoneJanitorConfig,
 } from "./agent-done-janitor.js";
+import { removeProjectRecord } from "./project-removal.js";
 import {
   startDaemonVitals,
   type DaemonVitals,
@@ -871,6 +873,7 @@ function createDoneJanitor(input: {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   workspaceRegistry: Pick<FileBackedWorkspaceRegistry, "list">;
+  projectRegistry: Pick<FileBackedProjectRegistry, "list" | "remove">;
   scheduleService: Pick<ScheduleService, "list">;
   terminalManager: TerminalManager | null;
   archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
@@ -928,6 +931,15 @@ function createDoneJanitor(input: {
         return { removedDirectory: result.removedDirectory };
       },
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
+      listProjects: () => input.projectRegistry.list(),
+      probeProjectRoot,
+      removeProject: (projectId) =>
+        removeProjectRecord({
+          projectRegistry: input.projectRegistry,
+          paseoHome: input.config.paseoHome,
+          projectId,
+          logger,
+        }),
     },
     getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
     serverId: input.serverId,
@@ -2655,6 +2667,7 @@ export async function createPaseoDaemon(
               agentManager,
               agentStorage,
               workspaceRegistry,
+              projectRegistry,
               scheduleService,
               terminalManager,
               archiveWorkspaceById: archiveWorkspaceByIdExternal,

@@ -639,7 +639,7 @@ describe("WorktreeDiskMonitor — remediation ladder: disk conditions", () => {
 
   test("no condition active: the on-demand janitors are never invoked and nothing is observed", async () => {
     const harness = makeMonitor({
-      runDoneJanitorSweep: async () => ({ dryRun: false, entries: [] }),
+      runDoneJanitorSweep: async () => ({ dryRun: false, removedProjectCount: 0, entries: [] }),
       runArtifactJanitorSweep: async () => ({ dryRun: false, reclaimed: [] }),
       statfs: async () => ({ bavail: 100 * GIB, bsize: 1 }),
     });
@@ -658,6 +658,7 @@ describe("WorktreeDiskMonitor — remediation ladder: disk conditions", () => {
       statfs: async () => ({ bavail: 3 * GIB, bsize: 1 }),
       runDoneJanitorSweep: async () => ({
         dryRun: false,
+        removedProjectCount: 0,
         entries: [
           { action: "archived", reason: "dead", agentId: "a" },
           { action: "deleted", reason: "clean", path: "/w/one", bytes: 2 * GIB },
