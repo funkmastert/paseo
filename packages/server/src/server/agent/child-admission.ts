@@ -344,9 +344,13 @@ export class ChildAdmissionController {
 
   /**
    * On the way down every agent is closed, and a close drops a queued child. That is not the
-   * child's outcome, so the file keeps what was held and the next start re-admits it.
+   * child's outcome, so the file keeps what was held and the next start re-admits it. The held
+   * set is captured now: a write still pending would otherwise read the queue after the closes.
    */
   prepareForShutdown(): void {
+    if (this.persistenceFrozen) return;
+    const held = this.fileContents();
+    this.persist(held);
     this.persistenceFrozen = true;
   }
 
@@ -406,11 +410,12 @@ export class ChildAdmissionController {
     return [...[...this.restoring.values()].filter((turn) => !liveIds.has(turn.agentId)), ...live];
   }
 
-  private persist(): void {
+  /** Queues a write of `held`, or of the queue as it is when the write runs. */
+  private persist(held?: HeldTurn[]): void {
     const filePath = this.options.queueFilePath;
     if (!filePath || this.persistenceFrozen) return;
     this.persistTail = this.persistTail
-      .then(() => writeJsonFileAtomic(filePath, { version: 1, held: this.fileContents() }))
+      .then(() => writeJsonFileAtomic(filePath, { version: 1, held: held ?? this.fileContents() }))
       .catch((error) => {
         this.logger.warn({ err: error, filePath }, "Child admission: failed to save the queue");
       });

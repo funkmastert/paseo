@@ -300,8 +300,10 @@ import {
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
+import { withTimeout } from "../utils/promise-timeout.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
+const ADMISSION_QUEUE_FLUSH_TIMEOUT_MS = 5_000;
 const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -2900,6 +2902,14 @@ export async function createPaseoDaemon(
     finishObligations.prepareForShutdown();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
+    // Held child prompts must be on disk before exit; bounded, so a stuck disk can't hang it.
+    await withTimeout(
+      childAdmission.flush(),
+      ADMISSION_QUEUE_FLUSH_TIMEOUT_MS,
+      "Timed out saving held child turns",
+    ).catch((error: unknown) => {
+      logger.warn({ err: error }, "Held child turns may be missing from the admission queue");
+    });
     await finishObligations.stop().catch(() => undefined);
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);

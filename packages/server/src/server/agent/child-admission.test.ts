@@ -311,6 +311,22 @@ describe("held-turn persistence", () => {
     expect(await loadHeldTurns(file, createTestLogger())).toHaveLength(2);
   });
 
+  test("a prompt queued just before shutdown is in the file even if its write had not run", async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
+    const file = path.join(dir, "admission", "queue.json");
+    const h = harness({ maxConcurrentChildTurns: 1 }, file);
+    h.start("c1", "root");
+    // Queued, and in the same tick shutdown freezes the file and closes every agent. The write
+    // the queueing scheduled has not run yet.
+    h.start("c2", "root");
+    h.controller.prepareForShutdown();
+    h.controller.drop("c2", "closed");
+    await h.controller.flush();
+    expect(await loadHeldTurns(file, createTestLogger())).toEqual([
+      expect.objectContaining({ agentId: "c2", prompt: "task c2" }),
+    ]);
+  });
+
   test("a restart re-admits held turns oldest first, and keeps them on disk until dispatched", async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), "child-admission-"));
     const file = path.join(dir, "admission", "queue.json");
