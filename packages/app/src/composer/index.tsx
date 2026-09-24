@@ -102,7 +102,7 @@ import {
 } from "@/attachments/service";
 import { resolveAgentControlsMode } from "@/composer/agent-controls/mode";
 import { resolveComposerInputMode, type ComposerInputMode } from "@/composer/input-mode";
-import { resolveActiveSendBehavior } from "./input/state";
+import { resolveActiveSendBehavior, toActiveTurnBehavior } from "./input/state";
 import { useKeyboardActionHandler } from "@/hooks/use-keyboard-action-handler";
 import type { KeyboardActionDefinition } from "@/keyboard/keyboard-action-dispatcher";
 import type { MessageInputKeyboardActionKind } from "@/keyboard/actions";
@@ -1457,7 +1457,7 @@ function ComposerContentImpl({
         agentIdRef.current,
         text,
         submitAttachments,
-        appSettings.sendBehavior === "steer" ? "steer" : "interrupt",
+        toActiveTurnBehavior(appSettings.sendBehavior),
       );
     },
     [appSettings.sendBehavior, cwd, onMessageSent, t],
@@ -1863,7 +1863,8 @@ function ComposerContentImpl({
   const handleSendQueuedNow = useCallback(
     async (id: string) => {
       if (!sendAgentMessageRef.current && !onSubmitMessageRef.current) return;
-      // Reuse the regular send path; server-side send atomically interrupts any active run.
+      // Reuse the regular send path. It steers into an active run rather than interrupting it,
+      // so "now" never costs the agent the work it has in flight.
       const result = await sendQueuedComposerMessageNow({
         agentId,
         messageId: id,

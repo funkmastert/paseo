@@ -9,6 +9,7 @@ import type {
   AgentSession,
   AgentStreamEvent,
   AgentRuntimeInfo,
+  SteerActiveTurnOptions,
 } from "./agent-sdk-types.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { findPerDirMcpServer } from "../mcp-gateway/per-dir-stdio.js";
@@ -23,6 +24,7 @@ type OptionalAgentSessionMethodName = {
 }[keyof AgentSession];
 
 const OPTIONAL_AGENT_SESSION_METHOD_NAMES = [
+  "steerActiveTurn",
   "listCommands",
   "setModel",
   "setThinkingOption",
@@ -74,6 +76,11 @@ class FakeSession implements AgentSession {
   async startTurn() {
     this.recordedCalls.push("startTurn");
     return { turnId: "turn-1" };
+  }
+
+  async steerActiveTurn(_prompt: AgentPromptInput, options: SteerActiveTurnOptions) {
+    this.recordedCalls.push(`steerActiveTurn:${options.expectedTurnId}`);
+    return { status: "accepted" as const };
   }
 
   subscribe(_callback: (event: AgentStreamEvent) => void) {
@@ -177,6 +184,11 @@ describe("wrapSessionProvider", () => {
     const session = new FakeSession();
     const wrapped = wrapSessionProvider("custom-claude", session);
 
+    // A derived provider (every account-pool account) that drops this steers nothing: the
+    // manager treats the steer as unavailable and interrupts the running turn instead.
+    await expect(
+      wrapped.steerActiveTurn?.("follow-up", { expectedTurnId: "turn-1" }),
+    ).resolves.toEqual({ status: "accepted" });
     await wrapped.listCommands?.();
     await wrapped.setModel?.("sonnet");
     await wrapped.setThinkingOption?.("high");
@@ -188,6 +200,7 @@ describe("wrapSessionProvider", () => {
     await handler?.run({ emit: () => {} });
 
     expect(session.recordedCalls).toEqual([
+      "steerActiveTurn:turn-1",
       "listCommands",
       "setModel",
       "setThinkingOption",

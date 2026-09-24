@@ -115,8 +115,8 @@ function createFinishNotificationScenario(
   Reflect.set(agentManager, "flagUndeliveredDelegatedOutcome", (_id: string, reason: string) => {
     flaggedOutcomes.push(reason);
   });
-  Reflect.set(agentManager, "hasInFlightRun", () => Boolean(options?.parentPromptError));
-  Reflect.set(agentManager, "steerOrReplaceActiveTurn", async () => {
+  Reflect.set(agentManager, "hasInFlightRun", () => false);
+  Reflect.set(agentManager, "steerIntoActiveTurn", async () => {
     steerAttemptCount += 1;
     return { status: "inactive" };
   });
@@ -124,6 +124,7 @@ function createFinishNotificationScenario(
     parentPrompted = true;
     parentPrompts.push(prompt);
     resolveParentPrompt?.(prompt);
+    if (options?.parentPromptError) throw options.parentPromptError;
     return (async function* noop() {})();
   });
   Reflect.set(agentManager, "replaceAgentRun", async (_agentId: string, prompt: string) => {
@@ -504,7 +505,7 @@ test("follow-up finish notifications do not require a parent relationship", asyn
 test("finish notifications log a rejected parent prompt without an unhandled rejection", async () => {
   const captured = createCapturedLogger();
   const scenario = createFinishNotificationScenario({
-    parentPromptError: new Error("parent provider rejected replacement"),
+    parentPromptError: new Error("parent provider rejected the prompt"),
     logger: captured.logger,
   });
 
@@ -518,7 +519,7 @@ test("finish notifications log a rejected parent prompt without an unhandled rej
       childAgentId: "child-agent",
       callerAgentId: "caller-agent",
       reason: "finished",
-      err: expect.objectContaining({ message: "parent provider rejected replacement" }),
+      err: expect.objectContaining({ message: "parent provider rejected the prompt" }),
     }),
   ]);
 });
@@ -528,7 +529,7 @@ test("a notification the parent never received falls back to flagging the child"
   // When that delivery fails the premise is false, and without this the child's work is finished,
   // nobody has been told, and no flag exists for anyone to find it by.
   const scenario = createFinishNotificationScenario({
-    parentPromptError: new Error("parent provider rejected replacement"),
+    parentPromptError: new Error("parent provider rejected the prompt"),
   });
 
   scenario.startWatchingChild();
@@ -539,7 +540,7 @@ test("a notification the parent never received falls back to flagging the child"
 test("a permission the parent never heard about falls back to flagging the child", async () => {
   // Worse than a stranded finish: the child does not run again until somebody answers.
   const scenario = createFinishNotificationScenario({
-    parentPromptError: new Error("parent provider rejected replacement"),
+    parentPromptError: new Error("parent provider rejected the prompt"),
   });
 
   scenario.startWatchingChild();

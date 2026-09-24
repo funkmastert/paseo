@@ -93,7 +93,7 @@ function createHarness(specs: FakeAgentSpec[], callerAgentId?: string) {
     // Anything that starts or replaces a turn. A broadcast must never reach these directly.
     streamAgent: vi.fn(),
     replaceAgentRun: vi.fn(),
-    steerOrReplaceActiveTurn: vi.fn(),
+    steerIntoActiveTurn: vi.fn(),
   };
   const agentStorage = {
     list: async () => specs.map(record),
@@ -378,7 +378,7 @@ describe("broadcast_agent_prompt", () => {
     expect(promptMocks.sendPromptToAgent).not.toHaveBeenCalled();
     expect(harness.agentManager.streamAgent).not.toHaveBeenCalled();
     expect(harness.agentManager.replaceAgentRun).not.toHaveBeenCalled();
-    expect(harness.agentManager.steerOrReplaceActiveTurn).not.toHaveBeenCalled();
+    expect(harness.agentManager.steerIntoActiveTurn).not.toHaveBeenCalled();
   });
 
   test("a steer the provider cannot take is skipped, never turned into a replacement turn", async () => {

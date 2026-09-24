@@ -7946,11 +7946,14 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      // Only an explicit "interrupt" may cancel the running turn. A client that sends no behavior
+      // predates steering, and a message is not a stop.
+      const activeTurnBehavior = msg.activeTurnBehavior ?? "steer";
       this.sessionLogger.trace(
         {
           agentId,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior,
+          activeTurnBehavior,
           textPrefix: msg.text.slice(0, 80),
         },
         "agent.session.send_agent_message",
@@ -7962,7 +7965,7 @@ export class Session {
           agentId,
           prompt,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+          activeTurnBehavior,
           clearPendingPermissions: true,
           logger: this.sessionLogger,
         });
@@ -7974,7 +7977,7 @@ export class Session {
         await this.agentRequests.send({
           agentId,
           messageId: msg.messageId,
-          request: { prompt, activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt" },
+          request: { prompt, activeTurnBehavior },
           prepare: async () => {
             await ensureAgentLoaded(agentId, {
               agentManager: this.agentManager,

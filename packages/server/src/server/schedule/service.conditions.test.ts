@@ -24,7 +24,7 @@ describe("conditional heartbeats", () => {
   let manager: AgentManager;
   let now: Date;
   let service: ScheduleService;
-  let steerOrReplace: ReturnType<typeof vi.spyOn>;
+  let steer: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), "schedule-conditions-test-"));
@@ -36,7 +36,7 @@ describe("conditional heartbeats", () => {
       clients: createTestAgentClients(),
       registry: agentStorage,
     });
-    steerOrReplace = vi.spyOn(manager, "steerOrReplaceActiveTurn");
+    steer = vi.spyOn(manager, "steerIntoActiveTurn");
     now = new Date();
     const unused = async (): Promise<never> => {
       throw new Error("heartbeats do not create agents or workspaces");
@@ -122,7 +122,7 @@ describe("conditional heartbeats", () => {
     await advanceAndTick(HOUR, MINUTE);
 
     const after = await service.inspect(heartbeat.id);
-    expect(steerOrReplace).not.toHaveBeenCalled();
+    expect(steer).not.toHaveBeenCalled();
     expect(after.runs).toEqual([]);
     expect(after.lastRunAt).toBeNull();
     expect(manager.getTimeline(leader.id)).toHaveLength(timelineBefore);
@@ -146,14 +146,14 @@ describe("conditional heartbeats", () => {
     await advanceAndTick(5 * MINUTE, MINUTE);
 
     const after = await service.inspect(heartbeat.id);
-    expect(steerOrReplace).toHaveBeenCalledTimes(1);
-    expect(steerOrReplace.mock.calls[0]?.[0]).toBe(leader.id);
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(steer.mock.calls[0]?.[0]).toBe(leader.id);
     expect(after.runs).toHaveLength(1);
     expect(after.runs[0]?.status).toBe("succeeded");
 
     // The fire made the leader act after the child finished, so the finish is no longer news.
     await advanceAndTick(HOUR, MINUTE);
-    expect(steerOrReplace).toHaveBeenCalledTimes(1);
+    expect(steer).toHaveBeenCalledTimes(1);
   });
 
   test("a heartbeat with no condition fires on every tick, as it did before conditions", async () => {
@@ -167,7 +167,7 @@ describe("conditional heartbeats", () => {
 
     await advanceAndTick(3 * MINUTE, MINUTE);
 
-    expect(steerOrReplace).toHaveBeenCalledTimes(3);
+    expect(steer).toHaveBeenCalledTimes(3);
     expect((await service.inspect(heartbeat.id)).runs).toHaveLength(3);
   });
 
@@ -182,7 +182,7 @@ describe("conditional heartbeats", () => {
 
     await advanceAndTick(2 * MINUTE, MINUTE);
 
-    expect(steerOrReplace).toHaveBeenCalledTimes(2);
+    expect(steer).toHaveBeenCalledTimes(2);
   });
 
   test("a manual run bypasses the condition", async () => {
@@ -196,7 +196,7 @@ describe("conditional heartbeats", () => {
 
     await service.runOnce(heartbeat.id);
 
-    expect(steerOrReplace).toHaveBeenCalledTimes(1);
+    expect(steer).toHaveBeenCalledTimes(1);
   });
 
   test("a condition is stored, replaced and cleared through update", async () => {

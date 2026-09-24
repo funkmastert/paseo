@@ -202,6 +202,14 @@ export type AgentRunCancellationResult =
   | { status: "settled" }
   | { status: "refused" };
 
+/** The turn a steer was admitted against ended or was replaced before the steer reached it. */
+export class ActiveTurnChangedError extends Error {
+  constructor() {
+    super("Active turn changed before steering could be delivered");
+    this.name = "ActiveTurnChangedError";
+  }
+}
+
 interface PreparedSessionConfig {
   storedConfig: AgentSessionConfig;
   launchConfig: AgentSessionConfig;
@@ -606,15 +614,12 @@ export interface AgentManagerOptions {
   logger: Logger;
 }
 
+/** See `AgentManager.steerIntoActiveTurn`. Nothing about a steer ever cancels the run. */
 export type ActiveTurnSteerDispatchResult =
   | { status: "inactive" | "steered" }
-  | { status: "replaced"; iterator: AsyncGenerator<AgentStreamEvent> };
+  | { status: "busy"; nextOpportunity: Promise<void> };
 
-function stripSteerOptions(options?: AgentSteerOptions): AgentRunOptions | undefined {
-  if (!options) return undefined;
-  const { clearPendingPermissions: _, ...runOptions } = options;
-  return runOptions;
-}
+const MAX_STEER_ADMISSION_ATTEMPTS = 3;
 
 export interface WaitForAgentOptions {
   signal?: AbortSignal;
@@ -4253,7 +4258,111 @@ export class AgentManager {
     if (!expectedTurnId || !agent.session.steerActiveTurn) {
       return { status: "unavailable" };
     }
-    const result = await this.runSteerAdmission(agent, expectedTurnId, async () => {
+    const result = await this.admitSteer(agent, expectedTurnId, prompt, options);
+    // An unavailable answer is only safe to fall back from while this admission
+    // still owns the active turn. Never let an A admission replace a later B.
+    if (result.status === "unavailable" && agent.activeTurnId !== expectedTurnId) {
+      throw new ActiveTurnChangedError();
+    }
+    return result;
+  }
+
+  /**
+   * Joins a prompt to the agent's active turn, and never cancels anything: a message is not a stop.
+   * An interrupt ends the provider's whole request, and in Claude Code that takes every background
+   * Workflow and Agent task in the session down with it.
+   *
+   * `busy` means a run is in flight that the prompt could not join: a start with no turn yet, a
+   * provider that cannot steer, or a prompt the turn refuses (a slash command, a compaction). The
+   * caller waits on `nextOpportunity` and asks again.
+   */
+  async steerIntoActiveTurn(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentSteerOptions,
+  ): Promise<ActiveTurnSteerDispatchResult> {
+    const agent = this.requireSessionAgent(agentId);
+    // A turn that ends or changes mid-admission is not a reason to fail the message: the next
+    // attempt targets whatever owns the agent now. Bounded, because the two turn fields can
+    // briefly disagree, and that must not spin.
+    for (let attempt = 0; attempt < MAX_STEER_ADMISSION_ATTEMPTS; attempt += 1) {
+      const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
+      if (!expectedTurnId) {
+        return this.hasInFlightRun(agentId)
+          ? { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) }
+          : { status: "inactive" };
+      }
+      let admission: SteerResult = { status: "unavailable" };
+      if (agent.session.steerActiveTurn) {
+        try {
+          admission = await this.admitSteer(agent, expectedTurnId, prompt, options);
+        } catch (error) {
+          if (error instanceof ActiveTurnChangedError) continue;
+          throw error;
+        }
+      }
+      if (admission.status === "accepted") {
+        return { status: "steered" };
+      }
+      await this.beforeSteerUnavailableFallback?.({ agentId, expectedTurnId });
+      if ((agent.activeForegroundTurnId ?? agent.activeTurnId) !== expectedTurnId) continue;
+      return { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) };
+    }
+    return { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) };
+  }
+
+  /**
+   * Resolves at the next moment a prompt that could not join the agent's run might be deliverable:
+   * the run settles, a pending turn starts, or the agent's turn or lifecycle moves. Created in the
+   * same tick the caller saw the agent busy, so no transition can fall between the two.
+   */
+  private nextDispatchOpportunity(agentId: string): Promise<void> {
+    const observed = this.readDispatchState(agentId);
+    return new Promise<void>((resolvePromise) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        unsubscribe();
+        resolvePromise();
+      };
+      const unsubscribe = this.subscribe(
+        (event) => {
+          if (event.type === "agent_state" && this.readDispatchState(agentId) !== observed) {
+            finish();
+          }
+        },
+        { agentId, replayState: false },
+      );
+      const run = this.runs.getRun(agentId);
+      if (run) {
+        void run.settledPromise.then(finish);
+      } else if (!this.hasInFlightRun(agentId)) {
+        finish();
+      }
+    });
+  }
+
+  private readDispatchState(agentId: string): string {
+    const agent = this.agents.get(agentId);
+    if (!agent) return "gone";
+    const run = this.runs.getRun(agentId);
+    return [
+      agent.lifecycle,
+      agent.activeTurnId ?? "",
+      agent.activeForegroundTurnId ?? "",
+      run?.token ?? "",
+      this.runs.getTurnId(agentId) ?? "",
+    ].join("|");
+  }
+
+  private async admitSteer(
+    agent: ActiveManagedAgent,
+    expectedTurnId: string,
+    prompt: AgentPromptInput,
+    options: AgentSteerOptions | undefined,
+  ): Promise<SteerResult> {
+    return await this.runSteerAdmission(agent, expectedTurnId, async () => {
       const admission = await agent.session.steerActiveTurn!(prompt, {
         ...options,
         expectedTurnId,
@@ -4263,63 +4372,11 @@ export class AgentManager {
       }
       return admission;
     });
-    // An unavailable answer is only safe to fall back from while this admission
-    // still owns the active turn. Never let an A admission replace a later B.
-    if (result.status === "unavailable" && agent.activeTurnId !== expectedTurnId) {
-      throw new Error("Active turn changed before steering could be delivered");
-    }
-    return result;
-  }
-
-  async steerOrReplaceActiveTurn(
-    agentId: string,
-    prompt: AgentPromptInput,
-    options?: AgentSteerOptions,
-  ): Promise<ActiveTurnSteerDispatchResult> {
-    const agent = this.requireSessionAgent(agentId);
-    const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
-    if (!expectedTurnId) {
-      return { status: "inactive" };
-    }
-
-    const result = agent.session.steerActiveTurn
-      ? await this.runSteerAdmission(agent, expectedTurnId, async () => {
-          const admission = await agent.session.steerActiveTurn!(prompt, {
-            ...options,
-            expectedTurnId,
-          });
-          if (admission.status === "accepted") {
-            await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
-          }
-          return admission;
-        })
-      : { status: "unavailable" as const };
-    if (result.status === "accepted") {
-      return { status: "steered" };
-    }
-
-    // Providers without autonomous steering keep their existing dispatch behavior. The shared
-    // admission may recognize the turn, but only an accepted steer can own it without replacement.
-    if (agent.activeForegroundTurnId === null && agent.activeTurnId === expectedTurnId) {
-      return { status: "inactive" };
-    }
-
-    await this.beforeSteerUnavailableFallback?.({ agentId, expectedTurnId });
-    this.assertSteerAdmissionOwnsTurn(agent, expectedTurnId);
-    return {
-      status: "replaced",
-      iterator: await this.replaceAdmittedForegroundTurn(
-        agent,
-        expectedTurnId,
-        prompt,
-        stripSteerOptions(options),
-      ),
-    };
   }
 
   private assertSteerAdmissionOwnsTurn(agent: ActiveManagedAgent, expectedTurnId: string): void {
     if (agent.activeTurnId !== expectedTurnId) {
-      throw new Error("Active turn changed before steering could be delivered");
+      throw new ActiveTurnChangedError();
     }
   }
 
@@ -4362,30 +4419,6 @@ export class AgentManager {
       if (this.foregroundMutationTails.get(agentId) === tail) {
         this.foregroundMutationTails.delete(agentId);
       }
-    }
-  }
-
-  private async replaceAdmittedForegroundTurn(
-    agent: ActiveManagedAgent,
-    expectedTurnId: string,
-    prompt: AgentPromptInput,
-    options?: AgentRunOptions,
-  ): Promise<AsyncGenerator<AgentStreamEvent>> {
-    this.assertSteerAdmissionOwnsTurn(agent, expectedTurnId);
-    agent.pendingReplacement = true;
-    agent.lifecycle = "running";
-    this.touchUpdatedAt(agent);
-    this.emitState(agent);
-
-    try {
-      await this.cancelAgentRunBefore(agent.id, "replace");
-      return this.streamAgent(agent.id, prompt, options);
-    } catch (error) {
-      const latest = this.agents.get(agent.id);
-      if (latest) {
-        latest.pendingReplacement = false;
-      }
-      throw error;
     }
   }
 
