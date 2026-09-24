@@ -40,6 +40,8 @@ The pool is the `params.accountPool` of each Claude account entry in `agents.pro
 
 A migration target is the enabled worker with the lowest `priority` number that is not dead this sweep and is not the account being left. Ties break by provider id. The leader account is never a target. It can be the account that ran dry, and when it isn't, it holds the budget the pool protects, so there is no "leader as last resort": with no eligible worker, the agent waits and is retried on the next sweep.
 
+Failover rescues an agent after its turn fails. A new root agent should not reach that point: the composer does not default a new chat to a pooled account that is at a cap, and the account-pool plugin moves a root off one at create ([Root agents](../plugins/claude-account-pool/README.md#root-agents)).
+
 ## When an account is dead
 
 Two independent signals, either one sufficient (`account-failover-detector.ts`):
