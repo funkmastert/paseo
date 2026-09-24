@@ -216,7 +216,68 @@ That is a true answer, not a gap: the live path would not have shown a subtitle 
 
 ## Title tracking
 
+Two trackers keep names current at two altitudes: an agent's title says what that session is
+doing, and a workspace's name says what the workspace is about. The workspace one is built on
+top of the agent one — it reads agent titles rather than timelines — so read this section in
+order.
+
+### Agent titles
+
 An agent's title refreshes from two triggers: a turn finishing (`running` -> `idle`), and a periodic sweep every 60 seconds over every non-internal, non-archived agent that is `running` or `idle`. Both routes call an LLM through the same fingerprint — a hash of the agent's newest user message and a digest of its recent activity — so an unchanged agent never costs a second call. The sweep additionally waits at least `agents.metadataGeneration.titleTracking.refreshIntervalMinutes` (default 10) since it last considered an agent before looking at it again. An idle agent costs nothing after its first refresh. An agent that keeps running has new activity at every checkpoint, so it costs one small call per interval for as long as it runs; raise the interval if that adds up across a large fleet. A title the user set explicitly (`titleManuallySet`) is never touched by either trigger. See `agent-title-tracker.ts`.
+
+### Workspace names
+
+A workspace is named once, when its first agent is created, from that agent's opening prompt
+(`workspace-auto-name.ts`). That is right for a worktree cut for one task and wrong for a
+long-lived checkout, which goes on hosting unrelated work for months under the name of whatever
+was asked first. `WorkspaceTitleTracker` is the same machine as the agent tracker one level up:
+a 60-second sweep, a changed-fingerprint gate, the same structured-generation fallback. It
+defaults **on**.
+
+**What it reads.** A workspace is described by its recent agents — the four most recently active,
+newest first — and each one contributes its title and its current activity summary. Agent titles
+are the unit deliberately: the agent tracker already keeps them describing what a session is
+doing now, so the workspace tracker gets a curated summary for free instead of re-reading four
+timelines. Membership is `workspaceId` only; an agent created before ownership stamping has none
+and never names a workspace.
+
+**What makes a rename worth doing.** The fingerprint covers the workspace's current name plus its
+recent agents' ids and titles — **not** their activity summaries, which change on every tool call.
+An agent's title only moves when that session's own work materially moves on, so the workspace
+only costs a call when something at the workspace's altitude changed. The prompt then asks for the
+durable subject and to keep the current name through continuations and refinements. Between the
+default 30-minute interval and that instruction, a name changes a few times a day in a busy
+workspace, not every few minutes.
+
+**Provenance decides scope, not workspace kind.** `titleSource` on the workspace record is `"auto"`
+when Paseo generated the name and `"manual"` when a person or an agent chose it — through the
+rename field or `rename_workspace`. Only `"auto"` is eligible. **Absent means hand-set**: every
+record written before provenance existed reads as manual, because silently renaming something the
+user named is worse than leaving a stale name. A workspace created without a name carries no
+provenance at all — "nobody named this" and "Paseo owns naming this" are different states.
+Renaming a workspace to **empty** produces the second, and is how an existing workspace hands
+naming back to Paseo: the row falls back to the branch or directory name the rename field shows
+as its placeholder, and the tracker names it from there. Provenance is re-read inside the registry write, so a rename that lands
+while the LLM is running wins.
+
+**Cost.** A refresh is one small structured call: about 700 input tokens and 20 output — under a
+tenth of a cent on Haiku. Two gates keep the count down. A workspace with no running-or-idle agent
+active inside `activityWindowMinutes` (default 60) is never swept, so a dormant checkout costs
+nothing and keeps the name of what last happened in it, which is the true answer. And the
+fingerprint means an active workspace whose agents are still on the same work costs nothing
+either. Across a fleet of ~120 workspaces with ~20 active on a given day, expect a few hundred
+calls — well under a dollar a day. The ceiling, every eligible workspace changing subject at every
+interval around the clock, is 48 calls per workspace per day.
+
+Config sits beside the agent title settings; every key is optional and absent means the default.
+
+| Key                                                        | Default | What it paces                                                    |
+| ---------------------------------------------------------- | ------- | ---------------------------------------------------------------- |
+| `agents.metadataGeneration.workspaceTitleTracking.enabled` | `true`  | Turns the sweep off entirely                                     |
+| `...workspaceTitleTracking.refreshIntervalMinutes`         | `30`    | Minimum wait before a workspace is reconsidered                  |
+| `...workspaceTitleTracking.activityWindowMinutes`          | `60`    | How recently an agent must have acted for its workspace to count |
+
+See `workspace-title-tracker.ts`.
 
 ## The subagents track
 

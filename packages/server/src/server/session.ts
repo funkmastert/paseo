@@ -3613,9 +3613,13 @@ export class Session {
       const trimmed = title?.trim() ?? "";
       const nextTitle = trimmed.length === 0 ? null : trimmed;
       const updatedAt = new Date().toISOString();
+      // Clearing the title hands naming back to Paseo: the workspace-title tracker
+      // adopts an "auto" workspace, so an empty rename is how a hand-named workspace
+      // (or one from before provenance existed) opts into tracking.
       const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
         ...existing,
         title: nextTitle,
+        titleSource: nextTitle === null ? ("auto" as const) : ("manual" as const),
         updatedAt,
       }));
       if (!updated) {
@@ -4034,6 +4038,8 @@ export class Session {
           createdWorktree: null,
           cwd: config.cwd,
           initialTitle: input.workspacePromptTitle,
+          // Derived from the first prompt, so the tracker owns it from here.
+          initialTitleSource: "auto",
         }),
         cwd: config.cwd,
       }),
@@ -6466,7 +6472,11 @@ export class Session {
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
-      { expectsInitialAgent: Boolean(request.firstAgentContext) },
+      {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+        // A title the requester typed is theirs; one derived from the first prompt is ours.
+        titleSource: explicitTitle ? "manual" : "auto",
+      },
     );
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
     const descriptor = await this.describeWorkspaceRecord(workspace);

@@ -234,6 +234,15 @@ const AgentMetadataGenerationSchema = z
       })
       .strict()
       .optional(),
+    // Defaults on; see workspace-title-tracker.ts for what each key paces.
+    workspaceTitleTracking: z
+      .object({
+        enabled: z.boolean().optional(),
+        refreshIntervalMinutes: z.number().positive().optional(),
+        activityWindowMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

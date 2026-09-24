@@ -297,7 +297,8 @@ function pickMetadataGenerationPatch(
 ): Pick<SupportedMutableConfigPatch, "metadataGeneration"> {
   if (
     metadataGeneration?.providers === undefined &&
-    metadataGeneration?.titleTracking === undefined
+    metadataGeneration?.titleTracking === undefined &&
+    metadataGeneration?.workspaceTitleTracking === undefined
   ) {
     return {};
   }
@@ -308,6 +309,9 @@ function pickMetadataGenerationPatch(
         : {}),
       ...(metadataGeneration.titleTracking !== undefined
         ? { titleTracking: metadataGeneration.titleTracking }
+        : {}),
+      ...(metadataGeneration.workspaceTitleTracking !== undefined
+        ? { workspaceTitleTracking: metadataGeneration.workspaceTitleTracking }
         : {}),
     },
   };
@@ -780,13 +784,22 @@ function mergeMetadataGenerationForPersist(
   }
   const titleTracking =
     patch?.titleTracking !== undefined ? patch.titleTracking : persisted?.titleTracking;
+  const workspaceTitleTracking =
+    patch?.workspaceTitleTracking !== undefined
+      ? patch.workspaceTitleTracking
+      : persisted?.workspaceTitleTracking;
 
-  if (providers === undefined && titleTracking === undefined) {
+  if (
+    providers === undefined &&
+    titleTracking === undefined &&
+    workspaceTitleTracking === undefined
+  ) {
     return undefined;
   }
   return {
     ...(providers !== undefined ? { providers } : {}),
     ...(titleTracking !== undefined ? { titleTracking } : {}),
+    ...(workspaceTitleTracking !== undefined ? { workspaceTitleTracking } : {}),
   };
 }
 

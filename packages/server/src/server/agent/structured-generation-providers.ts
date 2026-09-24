@@ -18,6 +18,11 @@ export interface StructuredGenerationDaemonConfig {
       thinkingOptionId?: string;
     }>;
     titleTracking?: { enabled?: boolean; refreshIntervalMinutes?: number };
+    workspaceTitleTracking?: {
+      enabled?: boolean;
+      refreshIntervalMinutes?: number;
+      activityWindowMinutes?: number;
+    };
   };
 }
 

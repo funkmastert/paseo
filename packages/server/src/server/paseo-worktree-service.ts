@@ -99,6 +99,9 @@ async function createPaseoWorktreeWithPriority(
       branch: createdWorktree.worktree.branchName || null,
       baseBranch: resolveIntentBaseBranch(createdWorktree.intent),
       title: input.title?.trim() || resolveFirstAgentPromptTitle(input.firstAgentContext),
+      // A title the create request carried is the requester's; one derived from the
+      // first prompt belongs to the auto-namer and the tracker that follows it.
+      titleSource: input.title?.trim() ? "manual" : "auto",
       expectsInitialAgent: Boolean(input.firstAgentContext),
       ...(createdWorktree.intent.kind === "checkout-change-request" &&
       createdWorktree.intent.headRepository

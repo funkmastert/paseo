@@ -174,6 +174,7 @@ interface RenderOptions {
   onClose?: () => void;
   onSubmit?: (value: string) => Promise<void> | void;
   validate?: (value: string) => string | null;
+  allowEmpty?: boolean;
   maxLength?: number;
 }
 
@@ -187,6 +188,7 @@ function renderModal(options: RenderOptions = {}): void {
     onClose = vi.fn(),
     onSubmit = vi.fn(),
     validate,
+    allowEmpty,
     maxLength,
   } = options;
   act(() => {
@@ -200,6 +202,7 @@ function renderModal(options: RenderOptions = {}): void {
         onClose={onClose}
         onSubmit={onSubmit}
         validate={validate}
+        allowEmpty={allowEmpty}
         maxLength={maxLength}
         testID="rename-modal"
       />,
@@ -326,6 +329,38 @@ describe("RenameModal", () => {
     expect(onSubmit).not.toHaveBeenCalled();
     const errorNode = queryError();
     expect(errorNode?.textContent).toContain("Invalid name");
+  });
+
+  it("blocks an emptied name by default", async () => {
+    const onSubmit = vi.fn();
+    renderModal({ initialValue: "main", onSubmit });
+
+    typeInto("");
+    expect(querySubmit()?.disabled).toBe(true);
+
+    pressEnter();
+    await flush();
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(queryError()?.textContent?.length).toBeGreaterThan(0);
+  });
+
+  // How a workspace hands naming back to Paseo: the daemon reads an empty title as
+  // "use the derived name, and keep it current" (docs/agent-lifecycle.md).
+  it("submits an emptied name when the caller allows it", async () => {
+    const onSubmit = vi.fn();
+    const onClose = vi.fn();
+    renderModal({ initialValue: "main", allowEmpty: true, onSubmit, onClose });
+
+    typeInto("");
+    expect(querySubmit()?.disabled).toBe(false);
+
+    pressEnter();
+    await flush();
+
+    expect(onSubmit).toHaveBeenCalledWith("");
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(queryError()).toBeNull();
   });
 
   it("disables the submit button while onSubmit is pending", async () => {
