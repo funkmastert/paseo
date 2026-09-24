@@ -252,6 +252,7 @@ import {
   nudgeStalledAgent,
 } from "./agent-stall-sweep.js";
 import type { ProcessSampler } from "./agent/process-sampler.js";
+import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-remedies.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
@@ -1434,10 +1435,42 @@ export async function createPaseoDaemon(
     workspaceRegistry,
     paseoHome: config.paseoHome,
     worktreesBaseRoot: config.worktreesRoot,
+    homeDir: homedir(),
     serverId,
     getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
-    readDaemonConfig: () => ({ diskSweeper: daemonConfigStore.get().diskSweeper }),
+    readDaemonConfig: () => ({
+      diskSweeper: daemonConfigStore.get().diskSweeper,
+      remediation: daemonConfigStore.get().remediation,
+    }),
     logger,
+    remediationSink,
+    // Lazy: the done janitor is built later than this monitor (docs/disk-pressure.md).
+    getDoneJanitorRunner: () => {
+      if (!doneJanitor) return null;
+      const activeDoneJanitor = doneJanitor;
+      return async () => {
+        const raw = daemonConfigStore.get().doneJanitor;
+        if (raw?.enabled !== true) {
+          return summarizeDoneJanitorRun({ enabled: false, dryRun: false, report: null });
+        }
+        const report = await activeDoneJanitor.tick();
+        return summarizeDoneJanitorRun({ enabled: true, dryRun: raw.dryRun ?? false, report });
+      };
+    },
+    // Same laziness for the artifact janitor's on-demand sweep — it, and the process sampler it
+    // needs `ps` rows from, are both built later than this monitor (both `const`s below; the
+    // closure only resolves them once called, well after bootstrap finishes building them).
+    getArtifactJanitorRunner: () => {
+      return async () => {
+        const raw = daemonConfigStore.get().artifactJanitor;
+        if (raw?.enabled !== true) {
+          return summarizeArtifactJanitorRun({ enabled: false, dryRun: false, result: null });
+        }
+        const rows = await processSampler.sampleProcesses();
+        const result = await testArtifactJanitor.sweep({ rows });
+        return summarizeArtifactJanitorRun({ enabled: true, dryRun: raw.dryRun ?? false, result });
+      };
+    },
   });
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
