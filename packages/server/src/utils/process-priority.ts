@@ -35,3 +35,62 @@ export function lowerProcessPriority(
     return "failed";
   }
 }
+
+export interface ProcessPriorityPolicy {
+  enabled: boolean;
+  /** Nice for agent provider processes, and through inheritance the builds and tests they run. */
+  agentNice: number;
+  /** Nice for the daemon's own periodic subprocesses (forge polling, `git fetch`). */
+  backgroundNice: number;
+}
+
+export const DEFAULT_PROCESS_PRIORITY_POLICY: Readonly<ProcessPriorityPolicy> = Object.freeze({
+  enabled: true,
+  agentNice: BACKGROUND_NICE,
+  backgroundNice: BACKGROUND_NICE,
+});
+
+// Provider and git code has no daemon-config access, so bootstrap keeps this current from the
+// config store (start and every change) and the spawn sites read it at spawn time. Module state
+// like this leaks between test cases; tests call resetProcessPriorityPolicy() in afterEach.
+let currentPolicy: ProcessPriorityPolicy = { ...DEFAULT_PROCESS_PRIORITY_POLICY };
+
+export function getProcessPriorityPolicy(): ProcessPriorityPolicy {
+  return { ...currentPolicy };
+}
+
+/** Replaces the policy; fields the config leaves unset fall back to the defaults. */
+export function setProcessPriorityPolicy(config: Partial<ProcessPriorityPolicy> | undefined): void {
+  currentPolicy = {
+    enabled: config?.enabled ?? DEFAULT_PROCESS_PRIORITY_POLICY.enabled,
+    agentNice: config?.agentNice ?? DEFAULT_PROCESS_PRIORITY_POLICY.agentNice,
+    backgroundNice: config?.backgroundNice ?? DEFAULT_PROCESS_PRIORITY_POLICY.backgroundNice,
+  };
+}
+
+export function resetProcessPriorityPolicy(): void {
+  currentPolicy = { ...DEFAULT_PROCESS_PRIORITY_POLICY };
+}
+
+/** The nice terminals an agent creates should start at, or undefined to leave them normal. */
+export function resolveAgentNice(): number | undefined {
+  return currentPolicy.enabled && currentPolicy.agentNice > 0 ? currentPolicy.agentNice : undefined;
+}
+
+/** Lowers a just-spawned agent provider process (or terminal an agent owns) per the policy. */
+export function lowerAgentProcessPriority(
+  pid: number | undefined,
+  ops: PriorityOps = os,
+): LowerPriorityResult {
+  if (!currentPolicy.enabled) return "unchanged";
+  return lowerProcessPriority(pid, currentPolicy.agentNice, ops);
+}
+
+/** Lowers a just-spawned background subprocess of the daemon per the policy. */
+export function lowerBackgroundProcessPriority(
+  pid: number | undefined,
+  ops: PriorityOps = os,
+): LowerPriorityResult {
+  if (!currentPolicy.enabled) return "unchanged";
+  return lowerProcessPriority(pid, currentPolicy.backgroundNice, ops);
+}

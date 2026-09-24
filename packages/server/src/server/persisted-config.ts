@@ -338,6 +338,16 @@ const AgentResourceMonitorSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.resourceMonitor above. On by default: the structural CPU fix.
+// Nice 0..19 only — the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const AgentProcessPrioritySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
+  })
+  .strict();
+
 // Live-toggleable like agents.resourceMonitor above — same mutable/patch split, same reason.
 // Off by default like the reaper it is modelled on. See docs/device-leases.md.
 const AgentDeviceLeasesSchema = z
@@ -711,6 +721,7 @@ export const PersistedConfigSchema = z
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
+        processPriority: AgentProcessPrioritySchema.optional(),
         deviceLeases: AgentDeviceLeasesSchema.optional(),
         artifactJanitor: AgentArtifactJanitorSchema.optional(),
         accountFailover: AgentAccountFailoverSchema.optional(),

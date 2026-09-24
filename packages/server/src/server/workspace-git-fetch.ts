@@ -35,6 +35,8 @@ export async function fetchWorkspaceGitRemote(
       cwd,
       envOverlay: { GIT_TERMINAL_PROMPT: "0" },
       timeout: 120_000,
+      // Periodic refresh nobody is waiting on: it yields to the agents and Tyler's own work.
+      priority: "background",
     });
   } catch (caught) {
     error ??= caught;

@@ -40,6 +40,22 @@ describe("workspace Git remote refs", () => {
     ]);
   });
 
+  test("runs only the network fetch at background priority", async () => {
+    const priorities: Array<[string, unknown]> = [];
+    const runGitCommand: RunGitCommand = async (args, options) => {
+      priorities.push([args[0] ?? "", options.priority]);
+      return { stdout: "", stderr: "", truncated: false, exitCode: 0, signal: null };
+    };
+
+    await fetchWorkspaceGitRemote("/repo", { onRefSnapshot() {} }, runGitCommand);
+
+    expect(priorities).toEqual([
+      ["for-each-ref", undefined],
+      ["fetch", "background"],
+      ["for-each-ref", undefined],
+    ]);
+  });
+
   test("parses refs for semantic before/after comparison", () => {
     expect(
       parseWorkspaceGitRefs(

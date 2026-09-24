@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { resetProcessPriorityPolicy, setProcessPriorityPolicy } from "./process-priority.js";
 import { runGitCommand } from "./run-git-command.js";
 
 const tempDirs: string[] = [];
@@ -47,5 +48,33 @@ describe("runGitCommand fsmonitor isolation", () => {
     const result = await runGitCommand(["config", "--get", "core.fsmonitor"], { cwd: repo });
 
     expect(result.stdout.trim()).toBe("false");
+  });
+});
+
+describe("runGitCommand priority", () => {
+  afterEach(() => {
+    resetProcessPriorityPolicy();
+  });
+
+  // An alias runs a shell as git's child, so the nice value it prints is what git's children
+  // inherit. The values differ from 10 because the test runner may itself run at nice 10.
+  async function niceSeenByGitChild(priority?: "background"): Promise<number> {
+    const repo = makeTempRepo();
+    await runGitCommand(["init"], { cwd: repo });
+    const { stdout } = await runGitCommand(
+      ["-c", "alias.nice=!sleep 0.2; ps -o ni= -p $$", "nice"],
+      { cwd: repo, priority },
+    );
+    return Number(stdout.trim());
+  }
+
+  it("runs a background git command at backgroundNice", async () => {
+    setProcessPriorityPolicy({ backgroundNice: 15 });
+    expect(await niceSeenByGitChild("background")).toBe(15);
+  });
+
+  it("leaves a git command without the option at the daemon's priority", async () => {
+    setProcessPriorityPolicy({ backgroundNice: 15 });
+    expect(await niceSeenByGitChild()).not.toBe(15);
   });
 });

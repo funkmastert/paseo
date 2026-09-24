@@ -125,6 +125,41 @@ describe("attributeProcessTrees", () => {
     });
   });
 
+  test("counts .NET compiler and build servers and Metro as orphan build daemons, and only the servers", () => {
+    const rows: ProcessSampleRow[] = [
+      row({
+        pid: 600,
+        ppid: 1,
+        rssKb: 900_000,
+        command: "/Users/t/.dotnet/sdk/10.0.200/Roslyn/bincore/VBCSCompiler -pipename:jFFf",
+      }),
+      row({
+        pid: 601,
+        ppid: 1,
+        rssKb: 200_000,
+        command:
+          "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/MSBuild.dll /noautoresponse " +
+          "/nologo /nodemode:1 /nodeReuse:true /low:false",
+      }),
+      row({
+        pid: 602,
+        ppid: 1,
+        rssKb: 100_000,
+        command: "node /Users/t/app/node_modules/.bin/expo start --port 8081",
+      }),
+      row({ pid: 603, ppid: 1, rssKb: 50_000, command: "dotnet build src/Crm.csproj" }),
+      row({ pid: 604, ppid: 1, rssKb: 50_000, command: "node /x/npm-cli.js run start:expo" }),
+    ];
+
+    const result = attributeProcessTrees(rows, []);
+
+    expect(result.orphanBuildDaemons).toEqual({
+      count: 3,
+      rssBytes: 1_200_000 * 1024,
+      pids: [600, 601, 602],
+    });
+  });
+
   test("a ppid-1 process without a build-daemon marker is neither attributed nor counted as orphan", () => {
     const rows: ProcessSampleRow[] = [
       row({ pid: 10, command: "claude ...callerAgentId=agent-1" }),

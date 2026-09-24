@@ -243,6 +243,18 @@ const MutableResourceMonitorConfigSchema = z
 
 const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
 
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason. Nice values
+// stop at 0: the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const MutableProcessPriorityConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
+  })
+  .passthrough();
+
+const MutableProcessPriorityPatchSchema = MutableProcessPriorityConfigSchema;
+
 // Live-toggleable like resourceMonitor above — same mutable/patch split, same reason.
 // See docs/device-leases.md.
 const MutableDeviceLeasesConfigSchema = z
@@ -644,6 +656,8 @@ export const MutableDaemonConfigSchema = z
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
     tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
     resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    // COMPAT(processPriority): additive optional config, nothing to remove.
+    processPriority: MutableProcessPriorityConfigSchema.optional(),
     // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
     deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
     // COMPAT(artifactJanitor): added in v0.8.2, remove nothing — additive optional config.
@@ -681,6 +695,7 @@ export const MutableDaemonConfigPatchSchema = z
     metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
     tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
     resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    processPriority: MutableProcessPriorityPatchSchema.optional(),
     deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
     artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
     accountFailover: MutableAccountFailoverPatchSchema.optional(),

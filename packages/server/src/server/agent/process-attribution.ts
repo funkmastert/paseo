@@ -8,6 +8,7 @@
  * attribution gap we try to paper over.
  */
 
+import { isOrphanBuildDaemonCommand } from "./build-daemon-signatures.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
 export interface AgentProcessTree {
@@ -16,14 +17,6 @@ export interface AgentProcessTree {
   cpuPercent: number;
   pids: number[];
 }
-
-/**
- * Build daemons commonly left running by an agent's tool calls — Gradle and Kotlin's daemons
- * both detach (ppid 1) by design once their parent shell exits, so they can never join an
- * agent's process tree above. Keep this list small and additive: a marker that's too broad
- * risks folding an unrelated process into "orphan build daemon" accounting.
- */
-export const ORPHAN_BUILD_DAEMON_MARKERS = ["GradleDaemon", "KotlinCompileDaemon"] as const;
 
 export interface OrphanBuildDaemonSummary {
   count: number;
@@ -98,15 +91,20 @@ function summarize(rows: readonly ProcessSampleRow[]): {
   return { rssBytes: rssKb * 1024, cpuPercent, pids };
 }
 
+/**
+ * Build daemons commonly left running by an agent's tool calls — Gradle, Kotlin and .NET compiler
+ * servers, MSBuild node-reuse workers and Metro all detach (ppid 1) by design once their parent
+ * shell exits, so they can never join an agent's process tree above. What counts is decided in
+ * build-daemon-signatures.ts, which keeps the list small and exact: a matcher that's too broad
+ * risks folding an unrelated process into "orphan build daemon" accounting.
+ */
 function findOrphanBuildDaemons(
   rows: readonly ProcessSampleRow[],
   attributedPids: ReadonlySet<number>,
 ): OrphanBuildDaemonSummary {
   const daemonRows = rows.filter(
     (row) =>
-      row.ppid === 1 &&
-      !attributedPids.has(row.pid) &&
-      ORPHAN_BUILD_DAEMON_MARKERS.some((marker) => row.command.includes(marker)),
+      row.ppid === 1 && !attributedPids.has(row.pid) && isOrphanBuildDaemonCommand(row.command),
   );
   const { rssBytes, pids } = summarize(daemonRows);
   return { count: daemonRows.length, rssBytes, pids };

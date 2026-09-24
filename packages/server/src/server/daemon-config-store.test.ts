@@ -1074,6 +1074,36 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-updates processPriority and keeps the other persisted keys", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { processPriority: { agentNice: 15 } } }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        processPriority: { agentNice: 15 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ processPriority: { enabled: false } });
+
+    expect(next.processPriority).toEqual({ agentNice: 15, enabled: false });
+    expect(loadPersistedConfig(paseoHome).agents?.processPriority).toEqual({
+      agentNice: 15,
+      enabled: false,
+    });
+  });
+
   test("patch turns the reaper off without losing the rest of its settings on disk", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

@@ -272,6 +272,7 @@ import {
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
+import { setProcessPriorityPolicy } from "../utils/process-priority.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import {
@@ -552,6 +553,7 @@ export interface PaseoDaemonConfig {
       persistSeconds?: number;
     };
   };
+  processPriority?: MutableDaemonConfig["processPriority"];
   resourceMonitor?: {
     enabled?: boolean;
     memoryBytesPerAgent?: number;
@@ -722,6 +724,15 @@ function withResourceMonitorConfig(
   config: Pick<PaseoDaemonConfig, "resourceMonitor">,
 ): Pick<MutableDaemonConfig, "resourceMonitor"> {
   return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
+}
+
+function withProcessPriorityConfig(
+  config: Pick<PaseoDaemonConfig, "processPriority">,
+): Pick<MutableDaemonConfig, "processPriority"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.processPriority !== undefined
+    ? { processPriority: { ...config.processPriority } }
+    : {};
 }
 
 function withDeviceLeasesConfig(
@@ -1084,6 +1095,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     },
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
+    ...withProcessPriorityConfig(config),
     ...withDeviceLeasesConfig(config),
     ...withArtifactJanitorConfig(config),
     ...withAccountFailoverConfig(config),
@@ -1147,6 +1159,12 @@ export async function createPaseoDaemon(
       },
     },
   });
+  // Provider and git spawn sites read this at spawn time (utils/process-priority.ts). Set before
+  // anything can spawn, then kept current on every patch and reload.
+  setProcessPriorityPolicy(daemonConfigStore.get().processPriority);
+  daemonConfigStore.onChange(() =>
+    setProcessPriorityPolicy(daemonConfigStore.get().processPriority),
+  );
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
   void orchestrationSkills.autoUpdate().catch((error) => {
     logger.error({ err: error }, "Failed to maintain orchestration skills at startup");

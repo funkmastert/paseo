@@ -101,11 +101,13 @@ const ORPHAN_DAEMONS_KEY = "orphan-build-daemons";
 const SYSTEM_MEMORY_KEY = "system-memory";
 
 const ORPHAN_DAEMONS_TASK =
-  "Find which orphaned Gradle and Kotlin build daemons are still running on this machine and why " +
-  "the reaper spared them (the evidence lists them). Stop the ones that are safe to stop: run " +
-  "`./gradlew --stop` in the project that owns a daemon, or end an idle daemon whose build is " +
-  "gone. You must never touch a daemon under a running agent's process tree, never a build that " +
-  "is still using CPU, and never any other process.";
+  "Find which orphaned build daemons are still running on this machine and why the reaper " +
+  "spared them (the evidence lists them). They are Gradle and Kotlin daemons, .NET compiler and " +
+  "build servers (VBCSCompiler, MSBuild node-reuse workers, the Razor server) and Metro " +
+  "bundlers. Stop the ones that are safe to stop: run `./gradlew --stop` in the project that " +
+  "owns a Gradle or Kotlin daemon, run `dotnet build-server shutdown` for the .NET servers, or " +
+  "end an idle daemon whose build is gone. You must never touch a daemon under a running " +
+  "agent's process tree, never a build that is still using CPU, and never any other process.";
 
 const SYSTEM_MEMORY_TASK =
   "Find what is holding this machine's memory (the evidence lists the biggest process trees) and " +

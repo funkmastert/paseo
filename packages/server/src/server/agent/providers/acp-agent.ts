@@ -1377,6 +1377,7 @@ export class ACPAgentClient implements AgentClient {
   ): Promise<ACPProcessTransport> {
     const { command, args } = await this.resolveLaunchCommand();
     const child = spawnProcess(command, args, {
+      priority: "agent",
       cwd: process.cwd(),
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,
@@ -2719,6 +2720,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
         runtimeSettings: this.runtimeSettings,
         overlays: commandEnvOverlays,
       }),
+      priority: "agent",
       shell: terminalCommand.shell,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -2807,6 +2809,7 @@ export class ACPAgentSession implements AgentSession, ACPClient {
     const command = prefix.command;
     const args = [...prefix.args, ...this.defaultCommand.slice(1)];
     const child = spawnProcess(command, args, {
+      priority: "agent",
       cwd: this.config.cwd,
       ...createProviderEnvSpec({
         runtimeSettings: this.runtimeSettings,

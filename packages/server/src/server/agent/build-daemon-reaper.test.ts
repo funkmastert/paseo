@@ -200,6 +200,89 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates[0]).toMatchObject({ kind: "kotlin", label: "Kotlin compile daemon" });
   });
 
+  test("reaps every .NET and Metro kind under the same abandonment rules as Gradle", () => {
+    const commands = {
+      vbcscompiler:
+        "/Users/t/.dotnet/sdk/10.0.200/Roslyn/bincore/VBCSCompiler -pipename:jFFfIURcCsGm+nTDd_yF",
+      "msbuild-node":
+        "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/MSBuild.dll /noautoresponse " +
+        "/nologo /nodemode:1 /nodeReuse:true /low:false",
+      "razor-server":
+        "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/Sdks/Microsoft.NET.Sdk.Razor/" +
+        "tools/rzc.dll server -p rzc-4f2a91c0",
+      metro: "/usr/local/bin/node /Users/t/app/node_modules/.bin/expo start --port 8081",
+    } as const;
+    const kinds = Object.keys(commands) as (keyof typeof commands)[];
+
+    const result = runSweeps({
+      sweeps: 20,
+      rowsForSweep: () =>
+        kinds.map((kind, index) => row({ pid: 800 + index, command: commands[kind] })),
+      config: { maxPerSweep: 10 },
+    });
+
+    expect(result.candidates.map((candidate) => candidate.kind).sort()).toEqual([...kinds].sort());
+    expect(result.candidates.map((candidate) => candidate.label).sort()).toEqual([
+      ".NET compiler server (VBCSCompiler)",
+      "MSBuild node",
+      "Metro bundler",
+      "Razor build server",
+    ]);
+  });
+
+  test("an MSBuild worker or Metro whose launcher is still alive is somebody's session", () => {
+    const result = runSweeps({
+      sweeps: 30,
+      rowsForSweep: () => [
+        row({
+          pid: 900,
+          ppid: 45279,
+          command:
+            "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/MSBuild.dll /nodemode:1 " +
+            "/nodeReuse:true",
+        }),
+        row({
+          pid: 901,
+          ppid: 5150,
+          command: "node /Users/t/app/node_modules/.bin/expo start",
+        }),
+      ],
+    });
+
+    expect(result.candidates).toEqual([]);
+    expect(result.memory.size).toBe(0);
+  });
+
+  test("a busy Metro is spared however long it has been orphaned", () => {
+    const result = runSweeps({
+      sweeps: 30,
+      rowsForSweep: () => [
+        row({
+          pid: 901,
+          command: "node /Users/t/app/node_modules/.bin/expo start",
+          cpuPercent: 35,
+        }),
+      ],
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("a ppid-1 dotnet client is reported as not-on-allowlist, never signalled", () => {
+    const result = runSweeps({
+      sweeps: 30,
+      rowsForSweep: () => [
+        row({ pid: 902, command: "grep VBCSCompiler" }),
+        row({ pid: 903, command: "dotnet build src/Crm.csproj" }),
+      ],
+    });
+
+    expect(result.candidates).toEqual([]);
+    expect(result.sightings).toEqual([
+      expect.objectContaining({ pid: 902, verdict: "not-on-allowlist" }),
+    ]);
+  });
+
   test("a sweep signals at most maxPerSweep daemons, the largest first", () => {
     const result = runSweeps({
       sweeps: 20,

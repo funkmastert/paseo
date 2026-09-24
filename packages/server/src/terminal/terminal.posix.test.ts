@@ -1289,4 +1289,33 @@ describe.skipIf(isPlatform("win32"))("terminal POSIX-only", () => {
       session.send({ type: "input", data: "echo test\r" });
     });
   });
+  describe("nice", () => {
+    // The shell prints its own nice after a short sleep, so the value is what a build started in
+    // this terminal inherits. 15 differs from 10 because the test runner may already run at 10.
+    async function niceSeenInside(nice: number | undefined): Promise<string> {
+      const session = trackSession(
+        await createTerminal({
+          workspaceId: "ws-test",
+          cwd: "/tmp",
+          command: "/bin/sh",
+          args: ["-c", "sleep 0.3; echo NICE=$(ps -o ni= -p $$ | tr -d ' ')"],
+          ...(nice !== undefined ? { nice } : {}),
+        }),
+      );
+      let found = "";
+      await waitForState(session, (state) => {
+        found = getLines(state).find((line) => line.startsWith("NICE=")) ?? "";
+        return found !== "";
+      });
+      return found;
+    }
+
+    it("starts a terminal at the requested nice, which its children inherit", async () => {
+      expect(await niceSeenInside(15)).toBe("NICE=15");
+    });
+
+    it("leaves a terminal without a nice at the daemon's priority", async () => {
+      expect(await niceSeenInside(undefined)).not.toBe("NICE=15");
+    });
+  });
 });
