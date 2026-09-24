@@ -71,33 +71,33 @@ Read it with `client.listNotificationLedger({ unreachedOnly: true })`. Settings 
 
 ## Sender inventory
 
-| Sender (reason)                                  | Level                                    | Why                                                                                            |
-| ------------------------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| Agent attention `permission`                     | `alert`                                  | The agent is blocked on you                                                                    |
-| Agent attention `finished`, root agent           | `alert`                                  | The thing you were waiting for                                                                 |
-| Agent attention `finished`, delegated child      | `notice`                                 | Reported to its parent, not to a person; a stuck report escalates separately                   |
-| Terminal `finished` / `needs_input`              | `alert`                                  | Same as an agent; a terminal has no parent to report to                                        |
-| `finish_report_undelivered`                      | `urgent`                                 | A child's result reached no agent and nothing else will say so                                 |
-| `token_burn_account_pressure`                    | `urgent`                                 | The pool is about to cap and every agent on it stops                                           |
-| `token_burn_governor` `pause`, `stopFanOut`      | `alert`                                  | An agent is stopped or blocked until someone acts                                              |
-| `token_burn_governor` `notify`, `downgrade`      | `notice`                                 | News, nothing to do                                                                            |
-| `token_burn_governor`, dry run                   | `record`                                 | Nothing changed                                                                                |
-| `token_burn_rate`, `token_burn_total`, `_multi`  | `notice`                                 | A busy agent reads the same as a runaway ([token-burn.md](token-burn.md)); the row badge stays |
-| `account_failover`, resumed                      | `notice`                                 | Automation handled it                                                                          |
-| `account_failover`, could not restart            | `alert`                                  | The agent is waiting for a message from you                                                    |
-| `model_divergence`                               | `notice`                                 | Costs money slowly; nothing breaks                                                             |
-| `plugin_offline`                                 | `notice`                                 | Monitor already waits past a threshold; plugins restart during development                     |
-| `resource_memory`, `resource_cpu`, `_multi`      | `notice`                                 | Per-agent process trees; the live alert on the row stays                                       |
-| `resource_system_memory`                         | `alert`                                  | Swap pressure freezes the machine                                                              |
-| `resource_orphan_daemons`                        | `notice`                                 | Leftover build daemons; the body names the fix                                                 |
-| `resource_daemons_reaped`, `artifacts_reclaimed` | `record`                                 | Cleanup that worked                                                                            |
-| `disk_space_critical`                            | `urgent`                                 | Writes start failing                                                                           |
-| `disk_sweep_unsafe_orphan`                       | `notice`                                 | A decision, but not a timed one                                                                |
-| `disk_sweep_reclaimed`                           | `record`                                 | Cleanup that worked                                                                            |
-| `done_janitor`                                   | `record`, `notice` if it kept a worktree | Routine tidying, unless it left something behind                                               |
-| `mcp_gateway_needs_auth`, `_multi`               | `alert`                                  | Only a person can sign in again                                                                |
-| `mcp_gateway_error`                              | `notice`                                 | Often recovers on its own                                                                      |
-| `daemon_event_loop_wedged`                       | `alert`                                  | Sent only after the loop recovers; agents that stalled through it may need a look              |
+| Sender (reason)                                  | Level                                    | Why                                                                                                                      |
+| ------------------------------------------------ | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Agent attention `permission`                     | `alert`                                  | The agent is blocked on you                                                                                              |
+| Agent attention `finished`, root agent           | `alert`                                  | The thing you were waiting for                                                                                           |
+| Agent attention `finished`, delegated child      | `notice`                                 | Reported to its parent, not to a person; a stuck report escalates separately                                             |
+| Terminal `finished` / `needs_input`              | `alert`                                  | Same as an agent; a terminal has no parent to report to                                                                  |
+| `finish_report_undelivered`                      | `urgent`                                 | A child's result reached no agent and nothing else will say so                                                           |
+| `token_burn_account_pressure`                    | `urgent`                                 | The pool is about to cap and every agent on it stops                                                                     |
+| `token_burn_governor` `pause`, `stopFanOut`      | `alert`                                  | An agent is stopped or blocked until someone acts                                                                        |
+| `token_burn_governor` `notify`, `downgrade`      | `notice`                                 | News, nothing to do                                                                                                      |
+| `token_burn_governor`, dry run                   | `record`                                 | Nothing changed                                                                                                          |
+| `token_burn_rate`, `token_burn_total`, `_multi`  | `notice`                                 | A busy agent reads the same as a runaway ([token-burn.md](token-burn.md)); the row badge stays                           |
+| `account_failover`, resumed                      | `notice`                                 | Automation handled it                                                                                                    |
+| `account_failover`, could not restart            | `alert`                                  | The agent is waiting for a message from you                                                                              |
+| `model_divergence`                               | `notice`                                 | Costs money slowly; nothing breaks                                                                                       |
+| `plugin_offline`                                 | `notice`                                 | Monitor already waits past a threshold; plugins restart during development                                               |
+| `resource_memory`, `resource_cpu`, `_multi`      | `notice`                                 | Per-agent process trees; the live alert on the row stays                                                                 |
+| `resource_system_memory`                         | `alert`                                  | Swap pressure freezes the machine                                                                                        |
+| `resource_orphan_daemons`                        | `notice`                                 | Leftover build daemons; the body names the fix                                                                           |
+| `resource_daemons_reaped`, `artifacts_reclaimed` | `record`                                 | Cleanup that worked                                                                                                      |
+| `disk_sweep_reclaimed`                           | `record`                                 | Cleanup that worked                                                                                                      |
+| `disk_sweep_unsafe_orphan`                       | `record`                                 | The work-at-risk sweep already snapshots and escalates an orphan holding uncommitted work                                |
+| `disk-critical`, `disk-low`, `disk-falling`      | via the remediation ladder               | No direct push ([disk-pressure.md](disk-pressure.md)); rung 3 pushes `alert`/`urgent` if remedies and an agent both fail |
+| `done_janitor`                                   | `record`, `notice` if it kept a worktree | Routine tidying, unless it left something behind                                                                         |
+| `mcp_gateway_needs_auth`, `_multi`               | `alert`                                  | Only a person can sign in again                                                                                          |
+| `mcp_gateway_error`                              | `notice`                                 | Often recovers on its own                                                                                                |
+| `daemon_event_loop_wedged`                       | `alert`                                  | Sent only after the loop recovers; agents that stalled through it may need a look                                        |
 
 ## What the phone gets
 
