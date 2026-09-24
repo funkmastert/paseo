@@ -368,6 +368,17 @@ const MutableDoneJanitorConfigSchema = z
   .passthrough();
 
 const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
+// Live-toggleable like doneJanitor above — same mutable/patch split, same reason. On unless
+// `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume pacing".
+const MutableAdmissionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableAdmissionPatchSchema = MutableAdmissionConfigSchema;
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/refocus.md.
 const MutableRefocusConfigSchema = z
@@ -656,6 +667,8 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
     budgetPacing: MutableBudgetPacingConfigSchema.optional(),
     doneJanitor: MutableDoneJanitorConfigSchema.optional(),
+    // COMPAT(admission): additive optional config, nothing to remove.
+    admission: MutableAdmissionConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
     // COMPAT(remediation): additive optional config, nothing to remove.
@@ -691,6 +704,7 @@ export const MutableDaemonConfigPatchSchema = z
     accountFailover: MutableAccountFailoverPatchSchema.optional(),
     budgetPacing: MutableBudgetPacingPatchSchema.optional(),
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
+    admission: MutableAdmissionPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
     remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
@@ -1342,6 +1356,13 @@ const AgentMcpServerStatusSchema = z.object({
   status: z.string(),
 });
 
+/** A child turn held by the daemon's child-admission cap (docs/resource-monitor.md). */
+export const AgentTurnQueuedSchema = z.object({
+  queuedAt: z.string(),
+});
+
+export type AgentTurnQueued = z.infer<typeof AgentTurnQueuedSchema>;
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,
@@ -1381,6 +1402,9 @@ export const AgentSnapshotPayloadSchema = z.object({
   // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
   owedFinishReport: OwedFinishReportSchema.optional(),
   modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove. Set while a child's new turn
+  // waits for a machine-wide admission slot; the agent's status reads running meanwhile.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1414,6 +1438,8 @@ export const AgentListItemPayloadSchema = z.object({
   // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
   owedFinishReport: OwedFinishReportSchema.optional(),
   modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

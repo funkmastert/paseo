@@ -276,6 +276,7 @@ export const en = {
       running: "Running",
       error: "Error",
       closed: "Closed",
+      queued: "Queued",
     },
     badges: {
       archived: "Archived",

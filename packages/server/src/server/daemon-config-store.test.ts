@@ -1176,6 +1176,39 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch sets admission.maxConcurrentChildTurns live without disturbing its other fields", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+
+    const configPath = path.join(paseoHome, "config.json");
+    writeFileSync(
+      configPath,
+      `${JSON.stringify({ version: 1, agents: { admission: { bulkResumesPerMinute: 2 } } }, null, 2)}\n`,
+    );
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        admission: { bulkResumesPerMinute: 2 },
+      },
+      undefined,
+    );
+
+    const next = store.patch({ admission: { maxConcurrentChildTurns: 6 } });
+
+    expect(next.admission).toEqual({ bulkResumesPerMinute: 2, maxConcurrentChildTurns: 6 });
+    expect(loadPersistedConfig(paseoHome).agents?.admission).toEqual({
+      bulkResumesPerMinute: 2,
+      maxConcurrentChildTurns: 6,
+    });
+  });
+
   test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

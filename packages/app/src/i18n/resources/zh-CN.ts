@@ -278,6 +278,7 @@ export const zhCN: TranslationResources = {
       running: "运行中",
       error: "错误",
       closed: "已关闭",
+      queued: "排队中",
     },
     badges: {
       archived: "已归档",

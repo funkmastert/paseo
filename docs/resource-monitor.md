@@ -28,6 +28,32 @@ Config lives under `agents.processPriority`, live-patchable. Values outside 0..1
 | `agentNice`      | `10`    | Nice for agent provider processes and the terminals/scripts agents start  |
 | `backgroundNice` | `10`    | Nice for the daemon's periodic `git fetch` and forge polling subprocesses |
 
+## Child admission and resume pacing
+
+The monitor reports load after it happens. Admission keeps child agents from starting it all at once: a machine-wide cap on child turns running at the same time, and a shared pace for the daemon's own bulk restarts. `ChildAdmissionController` (`packages/server/src/server/agent/child-admission.ts`) and `ResumePacer` (`agent/resume-pacer.ts`) own it; config is `agents.admission`, live-patchable and read fresh on every decision.
+
+| Key                       | Default                                   | Meaning                                                     |
+| ------------------------- | ----------------------------------------- | ----------------------------------------------------------- |
+| `enabled`                 | `true`                                    | `false` admits everything queued and stops pacing           |
+| `maxConcurrentChildTurns` | `max(2, floor(cores / 2))`, 8 on 16 cores | Child turns that may run at once                            |
+| `bulkResumesPerMinute`    | `4`                                       | Bulk resumes started per minute; the burst is the same size |
+
+A child is an agent with a `paseo.parent-agent-id` label ([agent-lifecycle.md](agent-lifecycle.md#relationships)). Everything else is a root and is never queued, held or counted.
+
+The cap applies to new turns only, enforced once inside `AgentManager.streamAgent`, the path every new turn takes whoever sends it. Steering into a running turn, out-of-band commands such as `/goal pause`, permission answers, and a replacement of a turn the child is already running never queue: the child already holds its slot. A child past the cap waits FIFO and starts when a child turn ends (idle, error, closed, archived). Slots are counted from lifecycle state, so a turn counts whatever path started it.
+
+A queued child shows `running` with an additive `turnQueued: { queuedAt }` on its payload. Every waiter treats it as pending: `wait_for_agent`, finish reports, the done janitor and failover all read `running`, `waitForAgentRunStart` returns rather than timing out, and the stalled-agent sweep skips it. Cancelling, closing, archiving or deleting a queued child drops it from the queue and settles it as cancelled. A second prompt to a queued child is merged into the held one and keeps its place in line: the held prompt never reached the provider, so replacing it the way a running turn is replaced would lose it. A reload (a model change, an account move) takes the held prompt out of line and puts it back at the same place on the new session, and the agent never shows an idle edge in between.
+
+A running child whose own children are running or queued does not occupy a slot. A sub-leader that delegates waits on its workers; if waiting sub-leaders held every slot, their workers could never run.
+
+`setHold(source, held, reason?)` holds admission for a named source, such as a saturation remedy. Several sources may hold at once, and admission resumes only when none does. While held, new child turns queue and queued ones stay queued; running turns and roots are untouched.
+
+`ResumePacer` is a token bucket for the daemon's bulk restarts: account-failover resume prompts ([account-failover.md](account-failover.md#what-a-migration-does)), stalled-agent nudges ([stalled-agents.md](stalled-agents.md#the-nudge)), "stopped before reporting" deliveries after a restart ([finish-reports.md](finish-reports.md#shutdown-and-restart)), and held turns re-admitted after a restart. One resume is immediate; eleven after a failover drain start over about two minutes. Roots are released before waiting children, and a child the pacer releases still asks for an admission slot. Each path keeps its own retries and idempotency; the pacer only delays the send.
+
+Held prompts are written to `$PASEO_HOME/admission/queue.json` on every change. Shutdown closes every agent, which would drop them, so the file is frozen first. On start the daemon re-sends each held prompt through the pacer, oldest first, with `activeTurnBehavior: "steer"` so a child someone already prompted is joined rather than cancelled; each goes through admission again. An entry stays in the file until it has been re-sent, so a second restart mid-restore loses nothing. A held prompt whose agent is gone or archived is dropped with a warning. Its original place in line is not kept across a restart; the pacer's oldest-first order stands in for it.
+
+`grep '"module":"child-admission"' daemon.log` shows each turn queued, admitted or dropped with the queue length; `"module":"resume-pacer"` shows each resume the pacer delayed.
+
 ## What's attributed, and how
 
 Every 60s, `AgentResourceMonitor` (`packages/server/src/server/agent-resource-monitor.ts`) shells out to `ps -axo pid,ppid,uid,rss,pcpu,etime,cputime,command` and, on macOS/Linux, samples system swap. `uid` exists for the reaper alone — nothing may be signalled without proving it belongs to the user the daemon runs as. Both samples are best-effort with a 15s timeout: a host without `ps` gets one warning and no process legs, never a failing sweep, and a sweep still in flight is not overlapped by the next tick. `process-attribution.ts` finds each live agent's root process by the `callerAgentId=<agentId>` marker `withRuntimePaseoMcpServer` (`agent/runtime-mcp-config.ts`) writes into the Paseo MCP URL at launch, then walks `ppid` to collect every descendant. Memory and CPU are summed across the tree. CPU is the rate since the previous sweep (`process-cpu-rate.ts`: cumulative CPU seconds consumed over wall-clock elapsed), not the `%CPU` column `ps` prints — that one is a decayed lifetime average, so a process that spiked an hour ago reads high all day and a fresh runaway on a long-lived tree reads low for a long time. A pid's first sighting uses the `ps` value, since for a young process the two agree.

@@ -15,6 +15,7 @@ import type {
   AgentStreamEvent,
 } from "./agent/agent-sdk-types.js";
 import { AgentStallSweep, nudgeStalledAgent } from "./agent-stall-sweep.js";
+import type { PacedResume, PaceResume } from "./agent/resume-pacer.js";
 import type { RemediationObservation } from "./remediation/contract.js";
 import { UNAVAILABLE_WORKTREE_SNAPSHOTTER } from "./remediation/contract.js";
 
@@ -142,6 +143,13 @@ describe("a real agent stuck mid-turn", () => {
     void agentManager.streamAgent(agent.id, "run the migration").next();
     await vi.waitFor(() => expect(agentManager.getAgent(agent.id)?.lifecycle).toBe("running"));
 
+    // Records what the shared resume budget was asked for, then lets it through.
+    const paced: PacedResume[] = [];
+    const paceResume: PaceResume = async (resume, fn) => {
+      paced.push(resume);
+      return await fn();
+    };
+
     // The sweep's clock runs an hour ahead, so the real agent's activity reads as long past.
     let nowMs = Date.now() + 60 * MINUTE;
     const observations: RemediationObservation[] = [];
@@ -154,7 +162,8 @@ describe("a real agent stuck mid-turn", () => {
         ],
         getProviderHealth: async () => ({ askable: true }),
         snapshotter: UNAVAILABLE_WORKTREE_SNAPSHOTTER,
-        nudgeAgent: (nudge) => nudgeStalledAgent({ agentManager, agentStorage, logger }, nudge),
+        nudgeAgent: (nudge) =>
+          nudgeStalledAgent({ agentManager, agentStorage, logger, paceResume }, nudge),
         handOffToFailover: async () => ({ kind: "failed", error: "not expected" }),
       },
       sink: { observe: async (observation) => void observations.push(observation) },
@@ -174,6 +183,8 @@ describe("a real agent stuck mid-turn", () => {
     expect(session?.prompts[1]).toMatch(/^<paseo-system>\n/);
     expect(session?.prompts[1]).toContain("Resume from where you left off");
     expect(observations.at(-1)).toMatchObject({ active: true, remedy: "live" });
+    // The nudge went through the resume budget every bulk restart shares, as a root.
+    expect(paced).toEqual([{ agentId: agent.id, root: true, source: "stall-nudge" }]);
 
     // It finished the resumed turn, so the next sweep closes the episode and never nudges again.
     await sweep.tick();

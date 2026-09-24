@@ -282,6 +282,7 @@ export const fr: TranslationResources = {
       running: "En cours d'exécution",
       error: "Erreur",
       closed: "Fermé",
+      queued: "En file",
     },
     badges: {
       archived: "Archivé",

@@ -10,6 +10,7 @@ Every five minutes the sweep looks at each non-internal agent in `running`. It i
 
 - **No pending permission.** A permission is waiting on a person, and a person has already been told.
 - **Not the done janitor's question.** That turn is the janitor's ([done-janitor.md](done-janitor.md)), and it has its own timeout.
+- **Not queued for admission.** A child waiting for a slot shows `running` with no turn started ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)).
 - **No activity for `stallMinutes`.** Activity is the newest of the timestamps the agent manager already holds (timeline rows, turn start, state changes), token usage changing between sweeps, and the activity of any provider subagent still reported running. Usage is compared by the sweep itself because a usage update touches no timestamp. A running subagent counts only by its own activity: a child that hung long ago does not keep its parent looking busy.
 - **An idle process tree.** The agent's process tree (found by `callerAgentId`, as in [resource-monitor.md](resource-monitor.md)) used at most `idleCpuPercent` CPU on every sweep in the window, across at least two samples.
 
@@ -20,7 +21,7 @@ The CPU check is there because the timeline is not enough. A tool call that runs
 When the agent's account is usable (`readProviderHealth`, the done janitor's check), the sweep:
 
 1. Snapshots the worktree through the `WorktreeSnapshotter` ([work-snapshots.md](work-snapshots.md)): a commit under `refs/backup/` that never touches the agent's index, tree or HEAD. A failed snapshot is recorded and does not stop the nudge; the prompt says it failed.
-2. Sends one resume prompt in a `<paseo-system>` envelope through `sendPromptToAgent`, which replaces the stuck run. The prompt says how long the daemon saw no activity, that the account is healthy, and where the snapshot is, and asks the agent to resume or to say what it is waiting on.
+2. Sends one resume prompt in a `<paseo-system>` envelope through `sendPromptToAgent`, which replaces the stuck run. The send waits its turn in the daemon's shared resume pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)), so a sweep that finds several stalls restarts them a few a minute; the sweep waits, and skips ticks while it does. The prompt says how long the daemon saw no activity, that the account is healthy, and where the snapshot is, and asks the agent to resume or to say what it is waiting on.
 3. If the replace fails because the dead session refuses the cancel, it reloads the session and sends the prompt again. If that fails too, the agent cannot be nudged.
 
 One nudge per stall episode. The episode stays open until the agent does something after the nudge; the nudge's own prompt row and turn start, in the two minutes after it, do not count.
@@ -35,7 +36,7 @@ Every stall is reported to the remediation ladder ([remediation.md](remediation.
 
 ## What it never does
 
-- Act on an agent waiting on a permission, answering the done janitor, or with a busy process tree.
+- Act on an agent waiting on a permission, answering the done janitor, queued for admission, or with a busy process tree.
 - Nudge an agent twice in one episode.
 - Move an agent to another account.
 - Write to the agent's worktree, index or HEAD.

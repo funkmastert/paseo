@@ -220,6 +220,13 @@ import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
 import { AgentModelDivergenceMonitor } from "./agent-model-divergence-monitor.js";
 import { AgentResourceMonitor } from "./agent-resource-monitor.js";
+import {
+  ChildAdmissionController,
+  loadHeldTurns,
+  restoreHeldTurns,
+  type ChildAdmissionConfig,
+} from "./agent/child-admission.js";
+import { ResumePacer, type PaceResume } from "./agent/resume-pacer.js";
 import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
 import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
 import { FinishObligationService } from "./agent/finish-obligation-service.js";
@@ -605,6 +612,7 @@ export interface PaseoDaemonConfig {
     now?: () => number;
   };
   doneJanitor?: DoneJanitorConfig;
+  admission?: ChildAdmissionConfig;
   refocus?: RefocusConfig;
   remediation?: RemediationConfig;
   daemonVitals?: DaemonVitalsConfig;
@@ -750,6 +758,12 @@ function withAccountFailoverConfig(
   config: Pick<PaseoDaemonConfig, "accountFailover">,
 ): Pick<MutableDaemonConfig, "accountFailover"> {
   return config.accountFailover !== undefined ? { accountFailover: config.accountFailover } : {};
+}
+
+function withAdmissionConfig(
+  config: Pick<PaseoDaemonConfig, "admission">,
+): Pick<MutableDaemonConfig, "admission"> {
+  return config.admission !== undefined ? { admission: { ...config.admission } } : {};
 }
 
 function withDoneJanitorConfig(
@@ -960,6 +974,7 @@ function createAgentStallSweep(input: {
   sink: RemediationSink;
   snapshotter: WorktreeSnapshotter;
   logger: Logger;
+  paceResume: PaceResume;
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
   return new AgentStallSweep({
@@ -987,7 +1002,11 @@ function createAgentStallSweep(input: {
         });
       },
       snapshotter: input.snapshotter,
-      nudgeAgent: (nudge) => nudgeStalledAgent({ agentManager, agentStorage, logger }, nudge),
+      nudgeAgent: (nudge) =>
+        nudgeStalledAgent(
+          { agentManager, agentStorage, logger, paceResume: input.paceResume },
+          nudge,
+        ),
       handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
     },
     sink: input.sink,
@@ -1003,6 +1022,7 @@ function createFinishObligationService(input: {
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   serverId: string;
   logger: Logger;
+  paceResume: PaceResume;
 }): FinishObligationService {
   const overrides = input.config.finishReportOverrides;
   return new FinishObligationService({
@@ -1012,6 +1032,7 @@ function createFinishObligationService(input: {
     logger: input.logger,
     isAccountFailoverEnabled: () =>
       input.daemonConfigStore.get().accountFailover?.enabled !== false,
+    paceResume: input.paceResume,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     ladder: overrides?.ladder,
     now: overrides?.now,
@@ -1032,6 +1053,7 @@ function createAccountFailoverMonitor(input: {
   remediationSink: RemediationSink;
   serverId: string;
   logger: Logger;
+  paceResume: PaceResume;
 }): AccountFailoverMonitor {
   const overrides = input.config.accountFailoverOverrides;
   return new AccountFailoverMonitor({
@@ -1047,6 +1069,7 @@ function createAccountFailoverMonitor(input: {
       providers: input.daemonConfigStore.get().providers,
     }),
     logger: input.logger,
+    paceResume: input.paceResume,
     sweepIntervalMs: overrides?.sweepIntervalMs,
     now: overrides?.now,
   });
@@ -1100,6 +1123,7 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     ...withAccountFailoverConfig(config),
     ...withBudgetPacingConfig(config),
     ...withDoneJanitorConfig(config),
+    ...withAdmissionConfig(config),
     ...withRefocusConfig(config),
     ...withRemediationConfig(config),
     ...withDiskSweeperConfig(config),
@@ -1650,6 +1674,27 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before any agent can start a turn: the cap on concurrent child turns, and the pacer every
+  // bulk resume path shares (docs/resource-monitor.md, "Child admission and resume pacing").
+  const admissionQueuePath = path.join(config.paseoHome, "admission", "queue.json");
+  const heldTurnsAtBoot = await loadHeldTurns(admissionQueuePath, logger);
+  const childAdmission = new ChildAdmissionController({
+    readConfig: () => daemonConfigStore.get().admission,
+    listAgents: () => agentManager.listAgentsForAdmission(),
+    logger,
+    queueFilePath: admissionQueuePath,
+  });
+  childAdmission.adoptRestored(heldTurnsAtBoot);
+  agentManager.setChildAdmission(childAdmission);
+  // A raised cap or a disable applies to the children already waiting, not only to new ones.
+  daemonConfigStore.onChange(() => childAdmission.pump());
+  const resumePacer = new ResumePacer({
+    readSettings: () => {
+      const settings = childAdmission.settings();
+      return { enabled: settings.enabled, perMinute: settings.bulkResumesPerMinute };
+    },
+    logger,
+  });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
   // the records, so a restart still knows who is waiting to hear back.
   const finishObligations = createFinishObligationService({
@@ -1659,6 +1704,7 @@ export async function createPaseoDaemon(
     daemonConfigStore,
     serverId,
     logger,
+    paceResume: (resume, fn) => resumePacer.run(resume, fn),
   });
   await finishObligations.initialize();
   agentManager.setFinishObligations(finishObligations);
@@ -2640,10 +2686,31 @@ export async function createPaseoDaemon(
               remediationSink,
               serverId,
               logger,
+              paceResume: (resume, fn) => resumePacer.run(resume, fn),
             });
             accountFailoverMonitor.start();
             finishObligations.start({
               pushNotificationSender: wsServer.getPushNotificationSender(),
+            });
+            // Fire-and-forget: the pacer spreads these over minutes, and each goes through
+            // admission again. Steer, so a child someone already prompted is never cancelled.
+            void restoreHeldTurns({
+              controller: childAdmission,
+              pacer: resumePacer,
+              held: heldTurnsAtBoot,
+              dispatch: async (turn) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId: turn.agentId,
+                  prompt: turn.prompt,
+                  ...(turn.runOptions ? { runOptions: turn.runOptions } : {}),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              logger,
             });
             // Advice-only sibling of the two monitors above: it reads the same cached usage rows
             // the failover monitor does and the same steer path, and never acts on either.
@@ -2708,6 +2775,7 @@ export async function createPaseoDaemon(
               sink: remediationSink,
               snapshotter: worktreeSnapshotter,
               logger,
+              paceResume: (resume, fn) => resumePacer.run(resume, fn),
             });
             agentStallSweep = stallSweep;
             stallSweep.start();
@@ -2813,6 +2881,7 @@ export async function createPaseoDaemon(
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    resumePacer.stop();
     // Before the closures below: each one would otherwise read as its child's outcome.
     finishObligations.prepareForShutdown();
     await closeAllAgents(logger, agentManager);

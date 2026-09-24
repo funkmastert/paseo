@@ -3,7 +3,13 @@ import type { Agent } from "@/stores/session-store";
 export type OrchestrationRowBadge = "needs-input" | "failed" | "owes-report" | "report-undelivered";
 
 /** Keys of `agentList.status` — the words the compact row's second line falls back to. */
-export type OrchestrationRowStatusKey = "initializing" | "idle" | "running" | "error" | "closed";
+export type OrchestrationRowStatusKey =
+  | "initializing"
+  | "idle"
+  | "running"
+  | "queued"
+  | "error"
+  | "closed";
 
 export interface OrchestrationRowPresentation {
   /** The one row state that is happening now rather than having happened. */
@@ -24,7 +30,10 @@ export interface OrchestrationRowPresentation {
   statusKey: OrchestrationRowStatusKey;
 }
 
-function resolveStatusKey(status: Agent["status"]): OrchestrationRowStatusKey {
+function resolveStatusKey(agent: Agent): OrchestrationRowStatusKey {
+  // A child waiting for a machine-wide admission slot reads running, but has not started.
+  if (agent.turnQueued) return "queued";
+  const status = agent.status;
   switch (status) {
     case "initializing":
     case "running":
@@ -58,7 +67,7 @@ export function resolveOrchestrationRowPresentation(agent: Agent): Orchestration
     isRunning,
     isClosed: agent.status === "closed",
     badge,
-    showActivity: isRunning && Boolean(agent.lastActivitySummary),
-    statusKey: resolveStatusKey(agent.status),
+    showActivity: isRunning && !agent.turnQueued && Boolean(agent.lastActivitySummary),
+    statusKey: resolveStatusKey(agent),
   };
 }

@@ -458,6 +458,16 @@ const AgentDoneJanitorSchema = z
   })
   .strict();
 
+// On unless `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume
+// pacing".
+const AgentAdmissionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
+  })
+  .strict();
+
 // Off unless `enabled` says otherwise. See docs/refocus.md.
 const AgentRefocusSchema = z
   .object({
@@ -717,6 +727,7 @@ export const PersistedConfigSchema = z
         accountFailover: AgentAccountFailoverSchema.optional(),
         budgetPacing: AgentBudgetPacingSchema.optional(),
         doneJanitor: AgentDoneJanitorSchema.optional(),
+        admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),

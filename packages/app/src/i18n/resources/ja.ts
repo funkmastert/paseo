@@ -281,6 +281,7 @@ export const ja: TranslationResources = {
       running: "実行中",
       error: "エラー",
       closed: "クローズ",
+      queued: "順番待ち",
     },
     badges: {
       archived: "アーカイブ済み",

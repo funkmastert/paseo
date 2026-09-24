@@ -226,6 +226,23 @@ function obligationInLedger(home: Home, agentId: string): FinishObligation | und
   return daemonOf(home).getFinishObligations().getObligations(agentId)[0];
 }
 
+/** Whether any provider session was ever prompted with `text`. */
+function providerSaw(home: Home, text: string): boolean {
+  return home.prompts.some((prompt) => prompt.text.includes(text));
+}
+
+/** How many of these children's reports reached their parent. */
+async function reportsDelivered(
+  home: Home,
+  pairs: readonly { parent: string; child: string }[],
+): Promise<number> {
+  let delivered = 0;
+  for (const { parent, child } of pairs) {
+    if (await reportAbout(home, { to: parent, about: child })) delivered += 1;
+  }
+  return delivered;
+}
+
 async function sweep(home: Home): Promise<void> {
   await daemonOf(home).getFinishObligations().tick();
 }
@@ -308,6 +325,77 @@ describe("finish reports survive a daemon restart (e2e)", () => {
         resolution: `delivered to ${parent}`,
       });
     await expect.poll(() => owedReportOnTheWire(home, child)).toBeUndefined();
+  }, 60_000);
+
+  test("after a restart, reports that each start a turn in their owner go out a few a minute", async () => {
+    const pairs: { parent: string; child: string }[] = [];
+    for (const name of ["A", "B"]) {
+      const parent = await createAgent(home, { title: `Leader ${name}` });
+      await converse(home, parent, `LEADER-${name}-READY`);
+      const child = await createAgent(home, {
+        title: `Worker ${name}`,
+        labels: { [PARENT_AGENT_ID_LABEL]: parent },
+      });
+      await clientOf(home).sendMessage(child, "keep working until interrupted");
+      await expect
+        .poll(() => daemonOf(home).agentManager.getAgent(child)?.lifecycle, { timeout: 10_000 })
+        .toBe("running");
+      watchForParent(home, { child, parent });
+      pairs.push({ parent, child });
+    }
+
+    await restart(home);
+    // One restart report a minute: the first wakes its leader now, the second waits its turn.
+    await clientOf(home).patchDaemonConfig({ admission: { bulkResumesPerMinute: 1 } });
+    await sweep(home);
+    home.clockMs += PARKED_GRACE_MS;
+    // The sweep waits on the budget; cleanup stops the daemon, which lets it go.
+    void sweep(home).catch(() => undefined);
+
+    await expect.poll(() => reportsDelivered(home, pairs), { timeout: 10_000 }).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(await reportsDelivered(home, pairs)).toBe(1);
+  }, 60_000);
+
+  test("a child turn held for an admission slot survives a restart and runs after it", async () => {
+    await clientOf(home).patchDaemonConfig({ admission: { maxConcurrentChildTurns: 1 } });
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const busy = await createAgent(home, {
+      title: "Busy worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    const held = await createAgent(home, {
+      title: "Held worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    await clientOf(home).sendMessage(busy, "keep working until interrupted");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(busy)?.lifecycle, { timeout: 10_000 })
+      .toBe("running");
+    await clientOf(home).sendMessage(held, "respond with exactly: HELD-TASK-RAN");
+    await expect
+      .poll(() => daemonOf(home).agentManager.getAgent(held)?.turnQueued, { timeout: 10_000 })
+      .toBeDefined();
+    // Queued, so the provider never saw it.
+    expect(providerSaw(home, "HELD-TASK-RAN")).toBe(false);
+
+    await stopDaemon(home);
+    const queueFile = JSON.parse(
+      await readFile(path.join(home.paseoHome, "admission", "queue.json"), "utf8"),
+    ) as { held: { agentId: string }[] };
+    expect(queueFile.held.map((turn) => turn.agentId)).toEqual([held]);
+
+    await startDaemon(home);
+    // The busy worker's turn ended with the old daemon, so the held one gets the slot.
+    await expect
+      .poll(() => providerSaw(home, "HELD-TASK-RAN"), {
+        timeout: 10_000,
+      })
+      .toBe(true);
+    await expect
+      .poll(() => daemonOf(home).agentManager.getLastAssistantMessage(held), { timeout: 10_000 })
+      .toBe("HELD-TASK-RAN");
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {
