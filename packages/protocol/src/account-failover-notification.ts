@@ -5,8 +5,15 @@
  */
 export type AccountFailoverNotificationReason = "account_failover";
 
+/**
+ * `data.reason` for the pool-exhausted push: no account is left to move anyone to. Its own
+ * value rather than `account_failover` because there is nothing to open — no migration
+ * happened, and no agent id is the right destination.
+ */
+export type AccountPoolExhaustedNotificationReason = "account_pool_exhausted";
+
 /** Open on purpose: an app must treat an unrecognised hint as "no hint" and read `body`. */
-export type AccountFailoverOutcomeHint = "needs_prompt";
+export type AccountFailoverOutcomeHint = "needs_prompt" | "returned_home";
 
 export interface AccountFailoverNotificationData {
   [key: string]: unknown;
@@ -16,9 +23,10 @@ export interface AccountFailoverNotificationData {
   agentId: string;
   reason: AccountFailoverNotificationReason;
   /**
-   * Present and `"needs_prompt"` only when the move landed but the resume prompt never did, so
-   * the agent is healthy, idle, and waiting for any message. Optional and additive: an app that
-   * does not read it still gets the whole story from `body`, which states it in words.
+   * `"needs_prompt"` when the move landed but the resume prompt never did, so the agent is
+   * healthy, idle, and waiting for any message. `"returned_home"` when the agent went back to
+   * the account it was rescued off. Optional and additive: an app that does not read it still
+   * gets the whole story from `body`, which states it in words.
    */
   outcome?: AccountFailoverOutcomeHint;
 }
@@ -75,6 +83,94 @@ export function buildAccountFailoverNotificationPayload(
       agentId: input.newAgentId,
       reason: "account_failover",
       ...(resumed ? {} : { outcome: "needs_prompt" as const }),
+    },
+  };
+}
+
+export interface AccountPoolExhaustedNotificationData {
+  [key: string]: unknown;
+  serverId: string;
+  reason: AccountPoolExhaustedNotificationReason;
+  /** Every pool account that is out, so the push names what is actually dead. */
+  providerIds: string[];
+  /** How many agents are waiting on one of them. */
+  strandedAgentCount: number;
+}
+
+export interface AccountPoolExhaustedNotificationPayload {
+  title: string;
+  body: string;
+  data: AccountPoolExhaustedNotificationData;
+}
+
+interface BuildAccountPoolExhaustedNotificationPayloadInput {
+  serverId: string;
+  providerIds: readonly string[];
+  strandedAgentCount: number;
+  /** Free text from the provider's own cap message, e.g. "3:10pm (America/Los_Angeles)". */
+  resetHint?: string | null;
+}
+
+/**
+ * Every pooled account is out of budget, so stuck agents have nowhere to go.
+ *
+ * Sent instead of a migration, not alongside one. The monitor deliberately moves nobody here:
+ * the only remaining targets are accounts that would fail on the first turn, and a rescue onto
+ * one of those spends a move and a resume to leave the agent exactly as stuck, on a different
+ * account, with its evidence scattered. Stranded and visible beats moved and still broken.
+ */
+export function buildAccountPoolExhaustedNotificationPayload(
+  input: BuildAccountPoolExhaustedNotificationPayloadInput,
+): AccountPoolExhaustedNotificationPayload {
+  const agents =
+    input.strandedAgentCount === 1 ? "1 agent is" : `${input.strandedAgentCount} agents are`;
+  const reset = input.resetHint ? ` Earliest reset: ${input.resetHint}.` : "";
+  return {
+    title: "Every Claude account is out of budget",
+    body:
+      `${agents} stuck and cannot be moved: ${input.providerIds.join(", ")} are all capped.` +
+      `${reset} Sign another account in or raise a limit — nothing will run until one recovers.`,
+    data: {
+      serverId: input.serverId,
+      reason: "account_pool_exhausted",
+      providerIds: [...input.providerIds],
+      strandedAgentCount: input.strandedAgentCount,
+    },
+  };
+}
+
+interface BuildAccountFailoverReturnNotificationPayloadInput {
+  serverId: string;
+  workspaceId?: string;
+  agentId: string;
+  agentTitle: string | null | undefined;
+  /** The account it was rescued off and has now gone back to. */
+  homeProviderId: string;
+  /** The rescuer it was spending on until now. */
+  fromProviderId: string;
+}
+
+/**
+ * The return leg of a failover: same agent, same conversation, back on the account it started on.
+ * It rides the same `reason` as a rescue because it is the same fact Tyler reads these for — which
+ * account an agent spends on changed — and an app that only knows the rescue still renders it and
+ * taps through to the agent. Hardcoded English for the same reason as the rescue payload.
+ */
+export function buildAccountFailoverReturnNotificationPayload(
+  input: BuildAccountFailoverReturnNotificationPayloadInput,
+): AccountFailoverNotificationPayload {
+  const label = resolveAgentLabel(input.agentTitle);
+  return {
+    title: "Agent returned to its own account",
+    body:
+      `${label} went back to ${input.homeProviderId} from ${input.fromProviderId} now that ` +
+      `${input.homeProviderId}'s usage window has reset.`,
+    data: {
+      serverId: input.serverId,
+      ...(input.workspaceId ? { workspaceId: input.workspaceId } : {}),
+      agentId: input.agentId,
+      reason: "account_failover",
+      outcome: "returned_home",
     },
   };
 }

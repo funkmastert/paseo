@@ -1,5 +1,9 @@
-import { describe, expect, test } from "vitest";
-import { buildAccountFailoverNotificationPayload } from "./account-failover-notification.js";
+import { describe, expect, it, test } from "vitest";
+import {
+  buildAccountFailoverNotificationPayload,
+  buildAccountFailoverReturnNotificationPayload,
+  buildAccountPoolExhaustedNotificationPayload,
+} from "./account-failover-notification.js";
 
 const BASE = {
   serverId: "server-1",
@@ -51,5 +55,91 @@ describe("buildAccountFailoverNotificationPayload", () => {
     });
     expect(payload.body).toContain("moved from agent-old to agent-new on claude-personal");
     expect(payload.body).toContain("could not be restarted");
+  });
+});
+
+describe("buildAccountPoolExhaustedNotificationPayload", () => {
+  it("names the dead accounts, how many agents are stuck, and the wait", () => {
+    const payload = buildAccountPoolExhaustedNotificationPayload({
+      serverId: "server-1",
+      providerIds: ["claude", "claude-personal", "claude-backup"],
+      strandedAgentCount: 3,
+      resetHint: "3:10pm (America/Los_Angeles)",
+    });
+
+    expect(payload.title).toBe("Every Claude account is out of budget");
+    expect(payload.body).toContain("3 agents are stuck");
+    expect(payload.body).toContain("claude, claude-personal, claude-backup");
+    expect(payload.body).toContain("3:10pm (America/Los_Angeles)");
+    expect(payload.data).toEqual({
+      serverId: "server-1",
+      reason: "account_pool_exhausted",
+      providerIds: ["claude", "claude-personal", "claude-backup"],
+      strandedAgentCount: 3,
+    });
+  });
+
+  it("reads naturally for one agent and says nothing about a reset it does not know", () => {
+    const payload = buildAccountPoolExhaustedNotificationPayload({
+      serverId: "server-1",
+      providerIds: ["claude"],
+      strandedAgentCount: 1,
+    });
+
+    expect(payload.body).toContain("1 agent is stuck");
+    expect(payload.body).not.toContain("Earliest reset");
+  });
+
+  it("carries no agentId — there is nothing to open, because nothing moved", () => {
+    const payload = buildAccountPoolExhaustedNotificationPayload({
+      serverId: "server-1",
+      providerIds: ["claude"],
+      strandedAgentCount: 1,
+    });
+
+    expect(payload.data.agentId).toBeUndefined();
+    // Its own reason, so an app cannot mistake it for a migration it can navigate to.
+    expect(payload.data.reason).not.toBe("account_failover");
+  });
+});
+
+describe("buildAccountFailoverReturnNotificationPayload", () => {
+  test("names both ends of the round trip and why it happened now", () => {
+    const payload = buildAccountFailoverReturnNotificationPayload({
+      serverId: "server-1",
+      workspaceId: "ws-1",
+      agentId: "agent-1",
+      agentTitle: "Build failover",
+      homeProviderId: "claude",
+      fromProviderId: "claude-personal",
+    });
+
+    expect(payload.title).toBe("Agent returned to its own account");
+    expect(payload.body).toBe(
+      "Build failover went back to claude from claude-personal now that claude's usage " +
+        "window has reset.",
+    );
+    expect(payload.data).toEqual({
+      serverId: "server-1",
+      workspaceId: "ws-1",
+      agentId: "agent-1",
+      reason: "account_failover",
+      outcome: "returned_home",
+    });
+  });
+
+  test("rides the rescue's reason so an app that never heard of returns still renders it", () => {
+    const payload = buildAccountFailoverReturnNotificationPayload({
+      serverId: "server-1",
+      agentId: "agent-1",
+      agentTitle: null,
+      homeProviderId: "claude",
+      fromProviderId: "claude-backup",
+    });
+
+    expect(payload.data.reason).toBe("account_failover");
+    expect(payload.data.workspaceId).toBeUndefined();
+    // An unrecognised `outcome` reads as no hint, and `body` carries the whole story either way.
+    expect(payload.body).toContain("An agent went back to claude");
   });
 });

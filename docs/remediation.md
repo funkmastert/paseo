@@ -100,13 +100,13 @@ Add a row below for a new kind, and add the kind to `RemediationConditionKind`.
 
 ## Conditions
 
-| Kind                     | Monitor | Remedy (rung 1) | Escalation task (rung 2) | Rung 3 level |
-| ------------------------ | ------- | --------------- | ------------------------ | ------------ |
-| `orphan-build-daemons`   |         |                 |                          |              |
-| `system-memory`          |         |                 |                          |              |
-| `disk-low`               |         |                 |                          |              |
-| `disk-critical`          |         |                 |                          |              |
-| `disk-falling`           |         |                 |                          |              |
-| `stalled-agent`          |         |                 |                          |              |
-| `work-at-risk`           |         |                 |                          |              |
-| `account-pool-exhausted` |         |                 |                          |              |
+| Kind                     | Monitor                                          | Remedy (rung 1) | Escalation task (rung 2)  | Rung 3 level |
+| ------------------------ | ------------------------------------------------ | --------------- | ------------------------- | ------------ |
+| `orphan-build-daemons`   |                                                  |                 |                           |              |
+| `system-memory`          |                                                  |                 |                           |              |
+| `disk-low`               |                                                  |                 |                           |              |
+| `disk-critical`          |                                                  |                 |                           |              |
+| `disk-falling`           |                                                  |                 |                           |              |
+| `stalled-agent`          |                                                  |                 |                           |              |
+| `work-at-risk`           |                                                  |                 |                           |              |
+| `account-pool-exhausted` | [failover](account-failover.md#when-tyler-hears) | none            | none: it needs an account | `alert`      |

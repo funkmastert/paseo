@@ -54,6 +54,30 @@ export function getMigratedToFromLabels(
 }
 
 /**
+ * Set on an agent an in-place move took off its own account, naming that account. It is what makes
+ * failover a round trip: the return leg (account-failover-return.ts) reads it to know where the
+ * agent belongs, and blanks it once the agent is back or once the pointer stops resolving.
+ *
+ * A label rather than monitor state for the same reason `migrated-to` is one, and the reason the
+ * device-lease work chose one: it has to survive a daemon restart. An agent that was rescued at
+ * 2am and whose account resets at 7am will almost certainly be read by a different daemon process
+ * than the one that moved it, and an in-memory map would have forgotten where home was.
+ *
+ * Only the first move writes it. A conversation that hops A -> B -> C belongs to A, not B, so a
+ * later move must not overwrite an existing value — otherwise every hop resets home to the last
+ * rescuer and the isolation the pool exists for is gone one account at a time.
+ */
+export const ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL = "paseo.account-failover.home-provider";
+
+/** A blank value reads as unset, the same convention `migrated-to` uses (no label-removal API). */
+export function getHomeProviderFromLabels(
+  labels: Record<string, string> | null | undefined,
+): string | null {
+  const home = labels?.[ACCOUNT_FAILOVER_HOME_PROVIDER_LABEL];
+  return typeof home === "string" && home.trim().length > 0 ? home.trim() : null;
+}
+
+/**
  * How long one limit-shaped failure keeps its account dead without corroboration. Five hours is
  * the Claude session window, and the default cap TTL the routing plan uses for a reactive cap
  * with no knowable reset (KTD4). Without a bound, a single stuck agent's stale error would mark
@@ -140,9 +164,10 @@ export interface AccountFailoverSweepPlan {
  * also drops its sighting. A provider sighting is the same evidence without an agent to hang it
  * on, left behind by a move, and it expires on the same TTL.
  *
- * A candidate is a non-retired agent that failed on the cap itself (its own limit-shaped error)
- * and is still on a dead account. An idle agent that merely lives on a dead account is not
- * stuck — it fails, and becomes a candidate, only if someone asks it to do something.
+ * A candidate is a non-retired agent on a dead account that failed on the cap itself (its own
+ * limit-shaped error) or is otherwise in error. An idle agent that merely lives on a dead account is not a
+ * candidate: it has nothing to resume, and the idle leg (account-failover-rehome.ts) moves it
+ * without a prompt.
  */
 export function planAccountFailoverSweep(
   input: PlanAccountFailoverSweepInput,
@@ -186,9 +211,12 @@ export function planAccountFailoverSweep(
     if (atCap) deadProviderIds.add(provider.providerId);
   }
 
+  // An agent in error on a dead account is a candidate whatever its error says: its turn ended
+  // while its account was out, and it is resumed where it can run. Only a limit-shaped error
+  // condemns an account, though, so this never makes an account dead by itself.
   const candidates = input.agents.filter(
     (agent) =>
-      sightings.has(agent.id) &&
+      (sightings.has(agent.id) || (agent.lifecycle === "error" && !agent.internal)) &&
       !getMigratedToFromLabels(agent.labels) &&
       deadProviderIds.has(agent.provider) &&
       !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle) &&
