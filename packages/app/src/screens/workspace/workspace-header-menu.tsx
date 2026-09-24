@@ -7,6 +7,7 @@ import {
   Ellipsis,
   Globe,
   Import as ImportIcon,
+  Network,
   Settings,
   SquarePen,
 } from "lucide-react-native";
@@ -39,6 +40,7 @@ const ThemedCopy = withUnistyles(Copy);
 const ThemedSquarePen = withUnistyles(SquarePen);
 const ThemedGlobe = withUnistyles(Globe);
 const ThemedImport = withUnistyles(ImportIcon);
+const ThemedNetwork = withUnistyles(Network);
 const ThemedSettings = withUnistyles(Settings);
 
 const mutedColorMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
@@ -47,6 +49,7 @@ const MENU_NEW_AGENT_ICON = <ThemedSquarePen size={16} uniProps={mutedColorMappi
 const MENU_NEW_BROWSER_ICON = <ThemedGlobe size={16} uniProps={mutedColorMapping} />;
 const MENU_NEW_TERMINAL_ICON = <TerminalProfileIcon iconKey={undefined} size={16} />;
 const MENU_IMPORT_ICON = <ThemedImport size={16} uniProps={mutedColorMapping} />;
+const MENU_ORCHESTRATION_ICON = <ThemedNetwork size={16} uniProps={mutedColorMapping} />;
 const MENU_COPY_ICON = <ThemedCopy size={16} uniProps={mutedColorMapping} />;
 const MENU_SETTINGS_ICON = <ThemedSettings size={16} uniProps={mutedColorMapping} />;
 function WorkspaceHeaderMenuTriggerIcon() {
@@ -207,11 +210,13 @@ export interface WorkspaceHeaderMenuMobileProps extends WorkspaceHeaderWorkspace
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
   onCreateBrowser: () => void;
+  onOpenOrchestration: () => void;
 }
 
 /**
  * Compact layouts have no tab strip to launch from, so new tabs live here alongside the workspace
- * actions.
+ * actions. It is also the phone's way into Orchestration: wide layouts reach it from the Command
+ * Center, which a phone does not have.
  */
 export function WorkspaceHeaderMenuMobile({
   normalizedServerId,
@@ -221,6 +226,7 @@ export function WorkspaceHeaderMenuMobile({
   onCreateTerminal,
   onCreateTerminalWithProfile,
   onCreateBrowser,
+  onOpenOrchestration,
   ...workspaceActions
 }: WorkspaceHeaderMenuMobileProps) {
   const { t } = useTranslation();
@@ -268,6 +274,13 @@ export function WorkspaceHeaderMenuMobile({
             {t("workspace.header.actions.newBrowser")}
           </DropdownMenuItem>
         ) : null}
+        <DropdownMenuItem
+          testID="workspace-header-open-orchestration"
+          leading={MENU_ORCHESTRATION_ICON}
+          onSelect={onOpenOrchestration}
+        >
+          {t("panels.orchestration.label")}
+        </DropdownMenuItem>
         <WorkspaceHeaderWorkspaceActionItems {...workspaceActions} />
         <DropdownMenuSeparator />
         <DropdownMenuLabel>{t("workspace.tabs.actions.terminalProfilesMenu")}</DropdownMenuLabel>

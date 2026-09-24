@@ -191,6 +191,7 @@ import {
 } from "@/panels/panel-instance-attributes";
 import { findAdjacentPane } from "@/utils/split-navigation";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
+import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
@@ -980,6 +981,7 @@ interface WorkspaceHeaderTitleBarProps {
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
   onCreateBrowser: () => void;
+  onOpenOrchestration: () => void;
   onOpenImportSheet: () => void;
   onCopyWorkspacePath: () => void;
   onCopyBranchName: () => void;
@@ -1009,6 +1011,7 @@ function WorkspaceHeaderTitleBar({
   onCreateTerminal,
   onCreateTerminalWithProfile,
   onCreateBrowser,
+  onOpenOrchestration,
   onOpenImportSheet,
   onCopyWorkspacePath,
   onCopyBranchName,
@@ -1047,6 +1050,7 @@ function WorkspaceHeaderTitleBar({
             onCreateTerminal={onCreateTerminal}
             onCreateTerminalWithProfile={onCreateTerminalWithProfile}
             onCreateBrowser={onCreateBrowser}
+            onOpenOrchestration={onOpenOrchestration}
             onOpenImportSheet={onOpenImportSheet}
             onCopyWorkspacePath={onCopyWorkspacePath}
             onCopyBranchName={onCopyBranchName}
@@ -2851,6 +2855,21 @@ function WorkspaceScreenContent({
     openWorkspaceTabFocused(persistenceKey, target, FOCUSED_PANE_PLACEMENT);
   }, [normalizedWorkspaceId, openWorkspaceTabFocused, persistenceKey]);
 
+  // The same open the Command Center's Orchestration action does (command-center/
+  // workspace-registration.tsx): host-wide, no scope agent.
+  const handleOpenOrchestration = useCallback(() => {
+    openOrchestrationTab({
+      isCompact: isMobile,
+      canSplit: supportsDesktopPaneSplits() && !isMobile,
+      workspaceKey: persistenceKey,
+      preferences: openInSidePane,
+      openTab: (target) => {
+        if (!persistenceKey) return;
+        openTab({ workspaceKey: persistenceKey, target, intent: "reveal" });
+      },
+    });
+  }, [isMobile, openInSidePane, openTab, persistenceKey]);
+
   const handleBulkCloseTabs = useCallback(
     async (input: {
       tabsToClose: WorkspaceTabDescriptor[];
@@ -3937,6 +3956,7 @@ function WorkspaceScreenContent({
                 onCreateTerminal={handleCreateTerminal}
                 onCreateTerminalWithProfile={handleCreateTerminalWithProfile}
                 onCreateBrowser={handleCreateBrowserTab}
+                onOpenOrchestration={handleOpenOrchestration}
                 onOpenImportSheet={openImportSheet}
                 onCopyWorkspacePath={handleCopyWorkspacePath}
                 onCopyBranchName={handleCopyBranchName}
@@ -3960,6 +3980,7 @@ function WorkspaceScreenContent({
       handleCreateDraftTab,
       handleCreateTerminal,
       handleCreateTerminalWithProfile,
+      handleOpenOrchestration,
       handleOpenSetupTab,
       handleOpenUrlInBrowserTab,
       handleScriptTerminalStarted,
