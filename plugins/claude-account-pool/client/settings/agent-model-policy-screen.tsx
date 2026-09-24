@@ -9,6 +9,7 @@ import { ModelBudgetSection } from "./model-budget-section";
 import { RefreshModelsButton } from "./refresh-models-button";
 import { RoleCard } from "./role-card";
 import { TestRoleName } from "./test-role-name";
+import { ThinkingSection } from "./thinking-section";
 import { useModelCatalog } from "./use-model-catalog";
 import { useRecentAgentTypes } from "./use-recent-agent-types";
 import { useRoleModelPolicy } from "./use-role-model-policy";
@@ -59,6 +60,8 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
           onAdd={(name) => void model.addRole(name)}
         />
       </SettingsSection>
+
+      <ThinkingSection model={model} state={state} theme={theme} />
 
       <ModelBudgetSection model={model} state={state} theme={theme} />
 
