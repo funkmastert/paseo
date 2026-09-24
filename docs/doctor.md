@@ -29,6 +29,8 @@ A daemon that predates the RPC, or none at all, still gets a run. The CLI (`pack
 | `disk.free`                                     | Free space below `agents.artifactJanitor.diskGuard.minFreeBytes` (default 20 GiB) fails; below 1.5x warns.                                                             |
 | `worktrees.size`, `worktrees.reclaimable`       | Count and size of `<home>/worktrees/*/*`, and which are clean, merged or pushed, unpinned and have no live agent.                                                      |
 
+`paseo doctor --tokens` runs the `tokens` category instead of these: seven checks that measure prefix size and cache behaviour, and run `claude -p /context` and stream transcripts. They are not in the default run because they take about 30 seconds, and they run in the CLI, since they read files and the process table and need no daemon state. See [token-audit.md](token-audit.md).
+
 Every finding carries what is wrong, why it matters and the exact command. A check that finds nothing wrong reports one `ok` line, so a passing run still shows what it looked at (`--full`).
 
 ## Things that are not obvious
