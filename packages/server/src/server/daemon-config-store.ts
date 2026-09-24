@@ -30,6 +30,7 @@ interface SupportedMutableConfigPatch {
   accountFailover?: MutableDaemonConfig["accountFailover"];
   budgetPacing?: MutableDaemonConfig["budgetPacing"];
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
+  admission?: MutableDaemonConfig["admission"];
   refocus?: MutableDaemonConfig["refocus"];
   remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
@@ -212,6 +213,7 @@ const RELOADABLE_PATHS = [
   "agents.accountFailover",
   "agents.budgetPacing",
   "agents.doneJanitor",
+  "agents.admission",
   "agents.refocus",
   "agents.remediation",
   "agents.skills.selection",
@@ -252,6 +254,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.accountFailover", "accountFailover"],
   ["agents.budgetPacing", "budgetPacing"],
   ["agents.doneJanitor", "doneJanitor"],
+  ["agents.admission", "admission"],
   ["agents.refocus", "refocus"],
   ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
@@ -358,6 +361,12 @@ function pickDoneJanitorPatch(
   return doneJanitor === undefined ? {} : { doneJanitor };
 }
 
+function pickAdmissionPatch(
+  admission: MutableDaemonConfigPatch["admission"],
+): Pick<SupportedMutableConfigPatch, "admission"> {
+  return admission === undefined ? {} : { admission };
+}
+
 function pickRefocusPatch(
   refocus: MutableDaemonConfigPatch["refocus"],
 ): Pick<SupportedMutableConfigPatch, "refocus"> {
@@ -401,6 +410,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickAccountFailoverPatch(patch.accountFailover),
     ...pickBudgetPacingPatch(patch.budgetPacing),
     ...pickDoneJanitorPatch(patch.doneJanitor),
+    ...pickAdmissionPatch(patch.admission),
     ...pickRefocusPatch(patch.refocus),
     ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
@@ -902,6 +912,19 @@ function mergeDoneJanitorForPersist(
   return { ...persisted, ...patch };
 }
 
+type PersistedAdmission = NonNullable<PersistedConfig["agents"]>["admission"];
+
+// Flat, like doneJanitor above: every key is a scalar.
+function mergeAdmissionForPersist(
+  persisted: PersistedAdmission,
+  patch: SupportedMutableConfigPatch["admission"],
+): PersistedAdmission {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedAdmission;
+}
+
 type PersistedRemediation = NonNullable<PersistedConfig["agents"]>["remediation"];
 
 // Deep, like resourceMonitor: every rung and sweep is a nested block, so a
@@ -993,6 +1016,7 @@ function touchesAgentConfig(
     patch.accountFailover !== undefined ||
     patch.budgetPacing !== undefined ||
     patch.doneJanitor !== undefined ||
+    patch.admission !== undefined ||
     patch.refocus !== undefined ||
     patch.remediation !== undefined ||
     patch.skills !== undefined ||
@@ -1082,6 +1106,8 @@ function mergeMutableAgentPatch(
   if (metadataGeneration !== undefined) next["metadataGeneration"] = metadataGeneration;
 
   mergeMonitorSectionsForPersist(next, persistedAgents, patch);
+  const admission = mergeAdmissionForPersist(persistedAgents?.admission, patch.admission);
+  if (admission !== undefined) next["admission"] = admission;
 
   if (patch.skills?.selection !== undefined) {
     next["skills"] = { selection: patch.skills.selection };

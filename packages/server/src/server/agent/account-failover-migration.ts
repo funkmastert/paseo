@@ -21,6 +21,7 @@ import {
 import { providersShareAccount } from "./account-failover-return.js";
 import { pickFailoverTarget, type AccountPoolProviderEntry } from "./account-pool-providers.js";
 import { AgentProviderMoveError } from "./provider-move.js";
+import { pacedResume, unpacedResume, type PaceResume } from "./resume-pacer.js";
 
 /**
  * `agentManager`/`agentStorage` are the full types, unlike the sibling monitors' narrow
@@ -48,6 +49,11 @@ export interface MigrateStuckAgentInput {
   agentStorage: AgentStorage;
   workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
   logger: Logger;
+  /**
+   * Runs each resume prompt through the daemon's shared ResumePacer, so a drained account's
+   * agents restart a few a minute instead of all at once. Unset sends immediately.
+   */
+  paceResume?: PaceResume;
 }
 
 /**
@@ -389,8 +395,10 @@ async function moveStuckAgentInPlace(input: {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
   logger: Logger;
+  paceResume?: PaceResume;
 }): Promise<AccountFailoverOutcome | null> {
   const { agent, targetProviderId, agentManager, agentStorage, logger } = input;
+  const paceResume = input.paceResume ?? unpacedResume;
   try {
     await agentManager.moveAgentToProvider(agent.id, targetProviderId);
   } catch (error) {
@@ -429,15 +437,17 @@ async function moveStuckAgentInPlace(input: {
     resetHint: parseResetTimeHint(agent.lastError),
   });
   try {
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
-      agentId: agent.id,
-      prompt,
-      messageId: randomUUID(),
-      unarchive: false,
-      logger,
-    });
+    await paceResume(pacedResume(agent.id, agent.labels, "account-failover"), () =>
+      sendPromptToAgent({
+        agentManager,
+        agentStorage,
+        agentId: agent.id,
+        prompt,
+        messageId: randomUUID(),
+        unarchive: false,
+        logger,
+      }),
+    );
   } catch (error) {
     logger.warn(
       { err: error, agentId: agent.id },
@@ -491,8 +501,10 @@ async function sendResumePrompt(input: {
   successorId: string;
   targetProviderId: string;
   logger: Logger;
+  paceResume?: PaceResume;
 }): Promise<AccountFailoverResume> {
   const { agentManager, agentStorage, agent, successorId, targetProviderId, logger } = input;
+  const paceResume = input.paceResume ?? unpacedResume;
   // State what the successor actually has after restoration, not what was requested.
   const config = agentManager.getAgent(successorId)?.config;
   const prompt = buildResumePrompt({
@@ -505,17 +517,19 @@ async function sendResumePrompt(input: {
     resetHint: parseResetTimeHint(agent.lastError),
   });
   try {
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
-      agentId: successorId,
-      prompt,
-      // A Paseo message id records the prompt as a timeline row, so if this attempt fails with
-      // the same cap text the failure still reads as new (see planAccountFailoverSweep).
-      messageId: randomUUID(),
-      unarchive: false,
-      logger,
-    });
+    await paceResume(pacedResume(successorId, agent.labels, "account-failover"), () =>
+      sendPromptToAgent({
+        agentManager,
+        agentStorage,
+        agentId: successorId,
+        prompt,
+        // A Paseo message id records the prompt as a timeline row, so if this attempt fails with
+        // the same cap text the failure still reads as new (see planAccountFailoverSweep).
+        messageId: randomUUID(),
+        unarchive: false,
+        logger,
+      }),
+    );
     return { prompt, error: null };
   } catch (error) {
     logger.warn(
@@ -709,6 +723,7 @@ export async function migrateStuckAgent(
     agentManager,
     agentStorage,
     logger,
+    paceResume: input.paceResume,
   });
   if (moved) {
     return moved;
@@ -776,6 +791,7 @@ export async function migrateStuckAgent(
     successorId,
     targetProviderId,
     logger,
+    paceResume: input.paceResume,
   });
 
   return {

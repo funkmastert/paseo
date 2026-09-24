@@ -197,6 +197,9 @@ function applyAgentAlerts(payload: AgentSnapshotPayload, agent: ManagedAgent): v
   if (agent.owedFinishReport !== undefined) {
     payload.owedFinishReport = agent.owedFinishReport;
   }
+  if (agent.turnQueued !== undefined) {
+    payload.turnQueued = agent.turnQueued;
+  }
   if (agent.modelDivergenceAlert !== undefined) {
     payload.modelDivergence = agent.modelDivergenceAlert;
   }
@@ -346,6 +349,7 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
     ...(agent.owedFinishReport !== undefined ? { owedFinishReport: agent.owedFinishReport } : {}),
     ...(agent.modelDivergence !== undefined ? { modelDivergence: agent.modelDivergence } : {}),
+    ...(agent.turnQueued !== undefined ? { turnQueued: agent.turnQueued } : {}),
   };
 }
 

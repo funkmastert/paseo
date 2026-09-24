@@ -63,6 +63,10 @@ describe("notStalledReason", () => {
     expect(evaluate(view({ quietTurn: true }))).toMatch(/done janitor/);
   });
 
+  test("a child queued for an admission slot shows running but has no turn to stall", () => {
+    expect(evaluate(view({ turnQueued: true }))).toMatch(/child-admission slot/);
+  });
+
   test("the activity threshold is inclusive: exactly at it stalls, a millisecond short does not", () => {
     expect(evaluate(view({ lastActivityAtMs: NOW - THRESHOLD }))).toBeNull();
     expect(evaluate(view({ lastActivityAtMs: NOW - THRESHOLD + 1 }))).toMatch(/active \d+m ago/);

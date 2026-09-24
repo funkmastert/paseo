@@ -365,6 +365,15 @@ async function createChild(
   return createAgent(harness, { ...input, parentAgentId: PARENT_ID });
 }
 
+/** How many of these agents are on `provider` now. */
+function countOn(harness: Harness, agentIds: readonly string[], provider: PoolProvider): number {
+  let count = 0;
+  for (const agentId of agentIds) {
+    if (providerOf(harness, agentId) === provider) count += 1;
+  }
+  return count;
+}
+
 /** Same shape as usageRow, with every window resetting at `resetsAt`. */
 function cappedUntil(providerId: string, resetsAt: string): ProviderUsage {
   const row = usageRow(providerId, [100]);
@@ -440,6 +449,28 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(agentCount(harness)).toBe(agentsBeforeSweep);
     expect(failoverPushes(harness)).toHaveLength(1);
     expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
+  test("paces the resumes of a mass move through the shared resume budget", async () => {
+    // One resume a minute, burst one: of three capped leaders only the first restarts now.
+    await harness.client.patchDaemonConfig({ admission: { bulkResumesPerMinute: 1 } });
+    const leaders: string[] = [];
+    for (const title of ["First", "Second", "Third"]) {
+      const leader = await createAgent(harness, { provider: "claude", title });
+      await failOnLimit(harness, leader);
+      leaders.push(leader);
+    }
+    const resumes = () =>
+      harness.prompts["claude-personal"].filter((prompt) => prompt.includes("Account handoff"));
+
+    // The sweep waits on the budget; afterEach stops the daemon, which lets it go.
+    void harness.sweep().catch(() => undefined);
+    await expect.poll(() => resumes().length, { timeout: 10_000 }).toBe(1);
+    await expect
+      .poll(() => countOn(harness, leaders, "claude-personal"), { timeout: 10_000 })
+      .toBe(3);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(resumes()).toHaveLength(1);
   }, 60_000);
 
   test("moves an agent capped by the weekly limit, the cap that stranded agents on 2026-09-18", async () => {

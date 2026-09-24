@@ -17,6 +17,8 @@ export interface StallAgentView {
   pendingPermissionCount: number;
   /** The done janitor's question is running; that turn is the janitor's. */
   quietTurn: boolean;
+  /** Waiting for a child-admission slot (child-admission.ts); no turn has started. */
+  turnQueued?: boolean;
   /** The newest activity timestamp the agent manager holds: timeline rows, turn start, state. */
   lastActivityAtMs: number | null;
   /** The newest activity of each provider subagent still reported running. */
@@ -56,6 +58,7 @@ export function notStalledReason(input: {
   if (view.internal) return "internal agent";
   if (view.pendingPermissionCount > 0) return "waiting on a permission";
   if (view.quietTurn) return "answering the done janitor";
+  if (view.turnQueued) return "queued for a child-admission slot";
   const quietForMs = nowMs - newestActivityAtMs(view, signals);
   if (quietForMs < thresholdMs) return `active ${Math.floor(quietForMs / 60_000)}m ago`;
   if (signals.idleCpuSamples < MIN_IDLE_CPU_SAMPLES) {

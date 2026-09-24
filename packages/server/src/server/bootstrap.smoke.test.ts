@@ -361,6 +361,7 @@ describe("paseo daemon bootstrap", () => {
         accountFailover: { enabled: true, migrateSubagents: false, returnHome: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
+        admission: { maxConcurrentChildTurns: 6, bulkResumesPerMinute: 3 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         remediation: {
           escalation: { enabled: true, maxPerDay: 3 },
@@ -408,6 +409,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
+      expect(booted.admission).toEqual(bootPersisted.agents.admission);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
       expect(booted.remediation).toEqual(bootPersisted.agents.remediation);
       expect(monitorModes()).toEqual({
@@ -443,6 +445,7 @@ describe("paseo daemon bootstrap", () => {
           },
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
+          admission: { enabled: false },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           remediation: {
             escalation: { enabled: false },
@@ -457,6 +460,7 @@ describe("paseo daemon bootstrap", () => {
 
       expect(result.appliedPaths).toEqual([
         "agents.accountFailover",
+        "agents.admission",
         "agents.artifactJanitor",
         "agents.budgetPacing",
         "agents.deviceLeases",
@@ -479,6 +483,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
+      expect(reloaded.admission).toEqual(reloadedPersisted.agents.admission);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
       expect(reloaded.remediation).toEqual(reloadedPersisted.agents.remediation);
       // The ladder re-reads its config on every poll; drive one instead of waiting a minute.

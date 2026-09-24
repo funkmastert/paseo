@@ -564,6 +564,7 @@ function resolveAgentMonitorConfig(
   | "accountFailover"
   | "budgetPacing"
   | "doneJanitor"
+  | "admission"
   | "refocus"
   | "remediation"
   | "daemonVitals"
@@ -577,6 +578,7 @@ function resolveAgentMonitorConfig(
     accountFailover: agents?.accountFailover,
     budgetPacing: agents?.budgetPacing,
     doneJanitor: agents?.doneJanitor,
+    admission: agents?.admission,
     refocus: agents?.refocus,
     remediation: agents?.remediation,
     daemonVitals: agents?.daemonVitals,

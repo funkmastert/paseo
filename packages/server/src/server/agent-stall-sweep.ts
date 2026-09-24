@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 
 import type { AgentManager, StallSweepAgentSummary } from "./agent/agent-manager.js";
+import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import { isLimitShapedError } from "./agent/account-failover-detector.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
@@ -544,6 +545,7 @@ function toView(agent: StallSweepAgentSummary): StallAgentView {
     internal: agent.internal,
     pendingPermissionCount: agent.pendingPermissionCount,
     quietTurn: agent.quietTurn,
+    turnQueued: agent.turnQueued === true,
     lastActivityAtMs: Number.isFinite(lastActivityAtMs) ? lastActivityAtMs : null,
     runningSubagentActivityAtMs: agent.runningSubagentActivityAt
       .map((value) => Date.parse(value))
@@ -686,6 +688,26 @@ function errorMessage(error: unknown): string {
  * session and send again. Not a quiet turn: the resumed work finishing is a real finish.
  */
 export async function nudgeStalledAgent(
+  deps: {
+    agentManager: AgentManager;
+    agentStorage: AgentStorage;
+    logger: Logger;
+    /**
+     * The daemon's shared ResumePacer: a sweep that finds several stalled agents after a bad hour
+     * restarts them a few a minute. The sweep waits, and skips ticks while it does.
+     */
+    paceResume?: PaceResume;
+  },
+  input: { agentId: string; prompt: string },
+): Promise<StallNudgeResult> {
+  const paceResume = deps.paceResume ?? unpacedResume;
+  return await paceResume(
+    pacedResume(input.agentId, deps.agentManager.getAgent(input.agentId)?.labels, "stall-nudge"),
+    () => nudgeNow(deps, input),
+  );
+}
+
+async function nudgeNow(
   deps: { agentManager: AgentManager; agentStorage: AgentStorage; logger: Logger },
   input: { agentId: string; prompt: string },
 ): Promise<StallNudgeResult> {
