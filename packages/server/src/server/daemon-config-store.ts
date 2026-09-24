@@ -1173,10 +1173,7 @@ function mergeMonitorSectionsForPersist(
   );
   if (leaderCompaction !== undefined) next["leaderCompaction"] = leaderCompaction;
 
-  const contextMeter = mergeContextMeterForPersist(
-    persisted.contextMeter,
-    patch.contextMeter,
-  );
+  const contextMeter = mergeContextMeterForPersist(persisted.contextMeter, patch.contextMeter);
   if (contextMeter !== undefined) next["contextMeter"] = contextMeter;
 
   const doneJanitor = mergeDoneJanitorForPersist(persisted.doneJanitor, patch.doneJanitor);

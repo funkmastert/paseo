@@ -8,17 +8,35 @@
   "categories": [
     { "id": "system_prompt", "label": "System prompt", "tokens": 203, "kind": "used" },
     { "id": "system_tools", "label": "System tools", "tokens": 14157, "kind": "used" },
-    { "id": "system_tools_deferred", "label": "System tools (deferred)", "tokens": 15940, "kind": "deferred" },
+    {
+      "id": "system_tools_deferred",
+      "label": "System tools (deferred)",
+      "tokens": 15940,
+      "kind": "deferred"
+    },
     { "id": "memory_files", "label": "Memory files", "tokens": 9488, "kind": "used" },
     { "id": "skills", "label": "Skills", "tokens": 1986, "kind": "used" },
     { "id": "messages", "label": "Messages", "tokens": 8, "kind": "used" },
-    { "id": "autocompact_buffer", "label": "Autocompact buffer", "tokens": 33000, "kind": "buffer" },
+    {
+      "id": "autocompact_buffer",
+      "label": "Autocompact buffer",
+      "tokens": 33000,
+      "kind": "buffer"
+    },
     { "id": "free_space", "label": "Free space", "tokens": 141158, "kind": "free" }
   ],
   "memoryFiles": [
     { "path": "/Users/tylerthackray/.claude-personal/CLAUDE.md", "type": "User", "tokens": 2893 },
-    { "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/context-meter/CLAUDE.md", "type": "Project", "tokens": 5974 },
-    { "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md", "type": "AutoMem", "tokens": 621 }
+    {
+      "path": "/Users/tylerthackray/.paseo/worktrees/3jvw4yw6/context-meter/CLAUDE.md",
+      "type": "Project",
+      "tokens": 5974
+    },
+    {
+      "path": "/Users/tylerthackray/.claude-personal/projects/-Users-tylerthackray-paseo/memory/MEMORY.md",
+      "type": "AutoMem",
+      "tokens": 621
+    }
   ],
   "messageBreakdown": {
     "toolCallTokens": 0,

@@ -2201,8 +2201,7 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
-      this.dispatchUsageHistoryMessage(msg) ??
-      this.dispatchContextUsageMessage(msg) ??
+      this.dispatchUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
@@ -2220,6 +2219,11 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  /** Usage reads: the accounts' usage history and an agent's context breakdown. */
+  private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    return this.dispatchUsageHistoryMessage(msg) ?? this.dispatchContextUsageMessage(msg);
   }
 
   private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
