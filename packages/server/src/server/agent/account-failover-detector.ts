@@ -165,8 +165,9 @@ export interface AccountFailoverSweepPlan {
  * on, left behind by a move, and it expires on the same TTL.
  *
  * A candidate is a non-retired agent that failed on the cap itself (its own limit-shaped error)
- * and is still on a dead account. An idle agent that merely lives on a dead account is not
- * stuck — it fails, and becomes a candidate, only if someone asks it to do something.
+ * and is still on a dead account. An idle agent that merely lives on a dead account is not a
+ * candidate: it has nothing to resume, and the idle leg (account-failover-rehome.ts) moves it
+ * without a prompt.
  */
 export function planAccountFailoverSweep(
   input: PlanAccountFailoverSweepInput,

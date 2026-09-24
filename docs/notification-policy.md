@@ -83,8 +83,9 @@ Read it with `client.listNotificationLedger({ unreachedOnly: true })`. Settings 
 | `token_burn_governor` `notify`, `downgrade`      | `notice`                                 | News, nothing to do                                                                            |
 | `token_burn_governor`, dry run                   | `record`                                 | Nothing changed                                                                                |
 | `token_burn_rate`, `token_burn_total`, `_multi`  | `notice`                                 | A busy agent reads the same as a runaway ([token-burn.md](token-burn.md)); the row badge stays |
-| `account_failover`, resumed                      | `notice`                                 | Automation handled it                                                                          |
+| `account_failover`, moved, resumed or returned   | `record`                                 | The remedy worked ([account-failover.md](account-failover.md#when-tyler-hears))                |
 | `account_failover`, could not restart            | `alert`                                  | The agent is waiting for a message from you                                                    |
+| Ladder `account-pool-exhausted`                  | `alert`                                  | No account can take the stranded agents; the ladder sends it once per episode                  |
 | `model_divergence`                               | `notice`                                 | Costs money slowly; nothing breaks                                                             |
 | `plugin_offline`                                 | `notice`                                 | Monitor already waits past a threshold; plugins restart during development                     |
 | `resource_memory`, `resource_cpu`, `_multi`      | `notice`                                 | Per-agent process trees; the live alert on the row stays                                       |

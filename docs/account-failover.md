@@ -1,6 +1,8 @@
 # Account failover
 
-When a Claude account runs out of budget, the agents running on it stop: a turn fails with the limit message and nothing moves them. `AccountFailoverMonitor` (`packages/server/src/server/agent-account-failover-monitor.ts`) puts each stuck agent's conversation on a healthy account in the pool. It moves the agent in place where it can, and imports the session into a new agent where it can't.
+When a Claude account runs out of budget, the agents running on it stop: a turn fails with the limit message and nothing moves them. `AccountFailoverMonitor` (`packages/server/src/server/agent-account-failover-monitor.ts`) puts each stuck agent's conversation on a healthy account in the pool, and moves the idle agents on that account before anyone asks them for anything. It moves an agent in place where it can, and imports the session into a new agent where it can't.
+
+It is rung 1 of the [remediation ladder](remediation.md) for account limits. You hear about a cap only when no account can take the work: see [When Tyler hears](#when-tyler-hears). It replaces the hand-run mover `~/bozeo-ops/rehome.mjs`, which can be retired once a daemon with this build is running.
 
 It is a round trip. A rescued agent remembers the account it was taken off and goes back once that account's window has reset — see [Coming home](#coming-home). Without the return leg the pool decays: a leader account exists so its budget is isolated from the fleet, and one-way failover walks the leaders onto the workers one cap at a time until the isolation is gone.
 
@@ -42,11 +44,14 @@ The pool is the `params.accountPool` of each Claude account entry in `agents.pro
 
 ## Where a rescued agent goes
 
-An enabled account that is not dead this sweep and is not the one being left, preferring a worker, and among equals preferring the one with the most budget left.
+An enabled account that is not dead this sweep and is not the one being left, and among equals the one with the most budget left. Which role comes first depends on the agent:
+
+- **A child** prefers a worker, and collapses onto the leader account when no worker can take it.
+- **A root** prefers the leader account, and goes to the worker with the most budget when the leader account is out. A root is Tyler's own session; isolation only ever protected the leader account from children. On 2026-09-24 a root sat on an exhausted worker for hours while the leader account had nearly all its budget.
 
 **Isolation is a preference, not a rule.** Workers come first — keeping rescued agents off the leader's account is the budget separation the pool exists for, and it stays the normal case. But when no worker can take the agent, the leader account takes it. "The leader is never a target" stranded a leader on 2026-09-15 with the leader account and the primary worker both out for the week and a backup account sitting idle. Everything on one account is worse than isolation and far better than nothing running. The account-pool plugin makes the same choice at spawn time; the two have to agree, or a migration strands a leader on an account placement is happily using for children.
 
-Set `collapseToSharedAccount: false` to get the old strict isolation back, at the cost of that stranding.
+Set `collapseToSharedAccount: false` to get the old strict isolation back for children, at the cost of that stranding. It does not keep a root off the leader account.
 
 ### Ranking by headroom
 
@@ -56,13 +61,11 @@ An account scores as its **tightest window**, because a window is a wall: 95% fr
 
 A provider with no usable reading is treated as full rather than worst: a usage poll that failed must not demote an account below a nearly-capped one. With no readings at all every candidate ties and the configured `priority` decides, which is the order this used before.
 
-Role beats headroom. A leader account with more room left is still the account whose budget the pool is protecting.
+Role beats headroom. For a child, a leader account with more room left is still the account whose budget the pool is protecting.
 
 ### When no account is left
 
-Nothing moves, and Tyler gets one push naming the dead accounts, how many agents are stuck, and the earliest reset. That is the deliberate outcome, not a failure to act: every remaining target would fail on the first turn, so a rescue onto one spends a move and a resume to leave the agent exactly as stuck on a different account, with its evidence scattered across two. Stranded and visible beats moved and still broken — and the agent keeps its conversation, so it continues the moment an account recovers.
-
-The push is once per **episode**, keyed on the set of dead accounts, not once per sweep or per agent: the sweep runs every 60 seconds, and a weekly cap would otherwise produce a push a minute for days. The set changing — an account recovering, or another going down — is a different situation and re-arms it.
+Nothing moves. Every remaining target would fail on the first turn, so a rescue onto one spends a move and a resume to leave the agent exactly as stuck on a different account, with its evidence scattered across two. The agent keeps its conversation and continues the moment an account recovers. This is the one account condition Tyler hears about; see [When Tyler hears](#when-tyler-hears).
 
 The account-pool plugin handles the other half of the same state: it refuses new spawns rather than starting them on a dead account, which is what stops a leader from looping "that one failed, try another" into an instant-death fan-out.
 
@@ -96,22 +99,33 @@ A failure is dated by the agent's newest timeline row (its own error row), not b
 
 ## Which agents move
 
-An agent is migrated when its own last turn failed on the cap, its account is dead, it is not running, closed, or initializing, it has a provider session, and it has not already been retired by an import. Leaders and subagents both move. An idle agent that merely lives on a dead account does not: it has nothing to resume, and becomes a candidate only if someone asks it to do something and that fails. The failed message is not lost, since the resume prompt tells the agent to answer it, but the rescue lands after a failed turn and up to one sweep later.
+Every loaded agent on a dead account that has a provider session and has not been retired, roots and children alike (`migrateSubagents: false` leaves children to their leader). What happens depends on where its turn is:
+
+| State                                                           | What failover does                                                                                                             |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Cut off by the cap: a limit-shaped `lastError`                  | Moves it and sends the resume prompt. This is the rescue below.                                                                |
+| Between turns: `idle`, or `error` for some other reason         | Moves it in place and sends nothing (`account-failover-rehome.ts`). It has nothing to resume, and can answer the next message. |
+| Mid-turn: `running`, `initializing`, or waiting on a permission | Waits. The daemon refuses a mid-turn move, and the turn may finish.                                                            |
+| Mid-turn, but the turn is dead                                  | The [stalled-agent sweep](stalled-agents.md) cancels it and leaves a limit-shaped `lastError`, which makes it the first row.   |
+
+Failover never interrupts a turn itself. A turn stuck in `running` with no progress for `agents.remediation.stalledAgents.deadAccountStallMinutes` (15) on a capped account is cancelled by the stalled-agent sweep with the `account-capped` reason. The error it leaves names the account and the stall and is limit-shaped, so the next sweep moves the agent and resumes it as cut off mid-turn. That is the 15-minute rule the hand-run mover used.
+
+An idle move uses the same targets as a rescue and the same duplicate rule, but never imports: a refused move backs off for `returnRetryBackoffMinutes` and the agent stays put. If it is asked to do something there, it fails on the cap and the rescue takes it.
 
 The sweep covers agents loaded in the daemon. After a restart, a stuck agent is picked up once something loads it (opening it in the app, or sending it a message).
 
 ## What a migration does
 
-1. **Adopt, if already handed off.** If the agent already has a successor, the monitor only retires the predecessor (see [Idempotency](#idempotency)). Nothing is moved, imported, or sent.
+1. **Adopt or retire, if the conversation already lives elsewhere.** If the agent already has a successor, or another live record holds its session, the monitor only retires this record (see [Idempotency](#idempotency) and [Duplicates](#duplicates)). Nothing is moved, imported, or sent.
 2. **Move the agent onto the target account.** Same id, same conversation, same settings, same children.
 3. **Send a resume prompt.** It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
-4. **Push** the agent id → account.
+4. **Record** the agent id → account in the ledger.
 
 A moved agent keeps the parent label and the id its parent holds, so nobody has to be told where it went. Its parent was already told "errored" when the cap hit, so after the resume prompt the monitor re-arms the finish report and the parent hears again when the work finishes ([finish-reports.md](finish-reports.md#successors)).
 
 ### When it falls back to importing
 
-`session_conflict` is the case that happens in practice: the target still holds this conversation's retired handle from an earlier import, and reviving that handle is the right answer anyway. Any other refusal, or an unexpected failure part-way through a move, also falls back — the import path builds a fresh agent from the session id and works even when the moved agent is left closed.
+`session_conflict` from a **retired** holder is the case that happens in practice: the target still holds this conversation's retired handle from an earlier import, and reviving that handle is the right answer anyway. A **live** holder is not an import case; it makes this record a duplicate ([Duplicates](#duplicates)). Any other refusal, or an unexpected failure part-way through a move, also falls back — the import path builds a fresh agent from the session id and works even when the moved agent is left closed.
 
 The import path costs more, which is why it is second:
 
@@ -119,8 +133,8 @@ The import path costs more, which is why it is second:
 2. **Retire the predecessor**: title `[MOVED → <newId>, out of budget] <title>` and label `paseo.account-failover.migrated-to=<newId>`. It is never archived. It may hold watchdogs, and archival is your call.
 3. **Restore model, thinking option, and mode.** Import resets all three to provider defaults.
 4. **Send a resume prompt** stating what actually got restored. It adds a third instruction a move does not need: the agent's existing subagents are still parented to the old id. Their finish reports follow `migrated-to` to the successor, but `list_agents` shows them under the old id.
-5. **Push** old id → new id → account.
-6. **Tell a running parent.** For an imported subagent, the parent gets a steered system message naming the new id, but only while the parent is running. Steering an idle agent starts a new turn nobody is driving, the same trap [resource-monitor.md](resource-monitor.md) describes. An idle parent gets no message; the successor keeps the parent label, so it shows up under the parent in `list_agents`, and you get the push.
+5. **Record** old id → new id → account in the ledger.
+6. **Tell a running parent.** For an imported subagent, the parent gets a steered system message naming the new id, but only while the parent is running. Steering an idle agent starts a new turn nobody is driving, the same trap [resource-monitor.md](resource-monitor.md) describes. An idle parent gets no message; the successor keeps the parent label, so it shows up under the parent in `list_agents`.
 
 Restoration is best-effort: a failure there is logged and does not undo the move or the import.
 
@@ -132,7 +146,7 @@ Nothing else will notice. The move clears the limit error, and a candidate needs
 
 So the monitor watches every migration until its resume demonstrably landed. Each following sweep reads the agent's state: running or idle means it resumed and the watch ends; `error` means re-send, up to three sends including the original. A limit-shaped error ends the watch too — the target is capped as well, which is the detector's job and would otherwise race this queue.
 
-When the attempts run out, the agent keeps its conversation and its place on the new account and is one message away from continuing, so the push says exactly that ("Agent moved but did not restart"). It carries `data.outcome: "needs_prompt"`, which is additive — an app that does not read it still gets the whole story from the body text.
+When the attempts run out, the agent keeps its conversation and its place on the new account and is one message away from continuing, so an `alert` push says exactly that ("Agent moved but did not restart"). It carries `data.outcome: "needs_prompt"`, which is additive — an app that does not read it still gets the whole story from the body text.
 
 ## Idempotency
 
@@ -148,11 +162,29 @@ An import mints a second agent, so it does need bookkeeping, and it lives on age
 
 Before doing anything, the monitor looks for an existing successor: a record whose `handoff-from` names the agent, or a record on the same provider session created after it. This covers a crash between import and retirement, and handoffs someone already did by hand. Without the lookup, a second import onto a different provider would create a duplicate, and one onto the same provider fails with `Provider session is already imported` — it does not return the existing agent. If that rejection fires anyway, because another import won a race, the monitor adopts the winner.
 
-A conversation that has hopped accounts by import eventually needs to return to one it left, where its retired handle still holds the session. The monitor reuses that handle instead of importing again: it blanks `migrated-to` (there is no public label-removal API), strips the title prefix, and points `handoff-from` at the agent it came from. A successor that has handed the conversation back is not counted as a successor during the lookup. A target that holds a non-retired agent for the same session is skipped; that agent is someone else's live copy.
+A conversation that has hopped accounts by import eventually needs to return to one it left, where its retired handle still holds the session. The monitor reuses that handle instead of importing again: it blanks `migrated-to` (there is no public label-removal API), strips the title prefix, and points `handoff-from` at the agent it came from. A successor that has handed the conversation back is not counted as a successor during the lookup.
+
+### Duplicates
+
+One conversation has one live end. When another unarchived record without `migrated-to` holds the same provider session, whichever is older, the agent being moved is a duplicate left over from an earlier handoff (`findLiveSessionHolder`). The monitor retires it the way it retires an adopted predecessor, pointing `migrated-to` at the holder, and moves, imports and sends nothing. It is done, not failed: it is never retried, it is not stranded, and nobody is told. Moving it would be refused on the holder's account (`Provider X already holds agent Y for session Z`), and moving it anywhere else would put two live agents on one transcript. The check runs before a target is picked, and again on a `session_conflict` refusal in case the holder appeared in between.
+
+The rule, by holder:
+
+| The target's record for this session | What it is                               | What failover does                           |
+| ------------------------------------ | ---------------------------------------- | -------------------------------------------- |
+| Live: unarchived, no `migrated-to`   | The conversation's live end              | Retires the agent being moved as a duplicate |
+| Retired: `migrated-to` set           | The handle this conversation left behind | Import path: revives it                      |
+| Archived                             | Nothing; the move does not see it        | Moves in place                               |
+
+The return leg does not apply this rule: a return that is refused by a live holder backs off and leaves both records alone, because the agent being returned is healthy where it is.
 
 ## Coming home
 
-A rescue is one leg. The other puts the agent back on its own account once that account can pay again, so a leader that capped ten minutes before its window rolled spends one window on a worker instead of the rest of the week.
+A rescue is one leg. The other puts the agent back once an account it belongs on can pay again, so a leader that capped ten minutes before its window rolled spends one window on a worker instead of the rest of the week. Where it goes back to depends on the agent:
+
+- **A root** goes back only to the leader account. A root moved onto the leader account off an exhausted worker stays there; its home label is dropped.
+- **A child** on the leader account goes back to a worker: its own if that one has budget, else any other worker, most budget first. Any worker gives it its isolation back. A child already on a worker whose home is the leader account stays on the worker.
+- **A child** on one worker whose home is another worker goes home, as before.
 
 ### The home label
 
@@ -166,7 +198,7 @@ An in-place move writes `paseo.account-failover.home-provider` on the agent, nam
 
 ### When a return happens
 
-Every condition, and all of them (`account-failover-return.ts`):
+Every condition, and all of them (`account-failover-return.ts`). "Home" below is whichever account the agent is going back to:
 
 - **Home still resolves.** It is a pool entry, enabled, and signed in.
 - **Home is not this account under another name.** See [Two providers, one account](#two-providers-one-account).
@@ -198,21 +230,33 @@ The cooldown lives in memory, unlike the label. Forgetting it across a restart c
 
 Home is a pointer, and pointers go stale. When it no longer names an account this agent could use, the label is blanked and the agent stays exactly where it is — on a healthy account it is already working on. Retrying a dead pointer forever would burn a move attempt every sweep and never succeed.
 
-| Reason              | What happened                                                        |
-| ------------------- | -------------------------------------------------------------------- |
-| `already-home`      | The agent is on it. The round trip is done.                          |
-| `not-in-pool`       | The entry lost its `accountPool` params, or left `agents.providers`. |
-| `provider-disabled` | Still configured, `enabled: false`.                                  |
-| `signed-out`        | That config dir has no `oauthAccount` any more.                      |
-| `same-account`      | Home and the current provider are one Claude login.                  |
+| Reason                    | What happened                                                        |
+| ------------------------- | -------------------------------------------------------------------- |
+| `already-home`            | The agent is on it. The round trip is done.                          |
+| `not-in-pool`             | The entry lost its `accountPool` params, or left `agents.providers`. |
+| `provider-disabled`       | Still configured, `enabled: false`.                                  |
+| `signed-out`              | That config dir has no `oauthAccount` any more.                      |
+| `same-account`            | Home and the current provider are one Claude login.                  |
+| `root-belongs-on-leader`  | A root whose home is a worker. Roots stay on the leader account.     |
+| `child-belongs-on-worker` | A child on a worker whose home is the leader account.                |
 
 A drop is decided for any agent, busy or not: a wrong pointer is wrong whatever the agent is doing, and fixing it moves nothing. A retired predecessor is the exception — it is left untouched, label included, because its label is history and moving a dead handle would put a second record on an account its live successor may want back.
 
 A refusal is not a drop. The agent still belongs home; it backs off and tries later.
 
-### What you see
+## When Tyler hears
 
-A push on the same `reason: "account_failover"` channel as a rescue, because it is the same fact you read these for — which account an agent spends on changed. Title "Agent returned to its own account", body naming both ends and why now. It carries `data.outcome: "returned_home"`, additive like `needs_prompt`: an app that does not read `outcome` renders the body and taps through to the agent exactly as before.
+Only when no account can take the work. Everything failover does by itself is the remedy working, so it goes to the ledger at `record` ([notification-policy.md](notification-policy.md#levels)):
+
+| Event                                                     | Level    | How                                                                              |
+| --------------------------------------------------------- | -------- | -------------------------------------------------------------------------------- |
+| A rescue moved and resumed an agent, or an idle one moved | `record` | `reason: "account_failover"` payload                                             |
+| An agent went back to its own account or a worker         | `record` | Same reason, `data.outcome: "returned_home"`                                     |
+| A duplicate was retired                                   | —        | Log line only                                                                    |
+| A moved agent never restarted after three resume sends    | `alert`  | "Agent moved but did not restart", `data.outcome: "needs_prompt"`                |
+| Agents are stranded: no account can take them             | ladder   | `account-pool-exhausted` observation, key `account-failover-stranded`; see below |
+
+The stranded case goes through the [remediation ladder](remediation.md), which owns its one push per episode. The monitor reports it every sweep while any rescue candidate has no target, with `remedy: "none"`, no escalation (an agent would need an account to run on), `level: "alert"`, and evidence naming the dead accounts, the stranded agents and the earliest reset (from the capped windows' `resetsAt`, else the cap message). It reports `active: false` once, on the first sweep where nobody is stranded, which closes the episode. An idle agent with nowhere to go is not stranded: it is doing nothing, and if someone asks it to, it fails on the cap and becomes a rescue candidate.
 
 ## Configuration
 
@@ -224,7 +268,7 @@ A push on the same `reason: "account_failover"` channel as a rescue, because it 
 | `migrateSubagents`        | `true`  | `false` moves leaders only and leaves subagents to their leader.           |
 | `migrationConcurrency`    | `3`     | Migrations run at once per sweep.                                          |
 | `notifyParent`            | `true`  | `false` skips the steered message a running parent gets after an _import_. |
-| `collapseToSharedAccount` | `true`  | `false` bars the leader account as a target, restoring strict isolation.   |
+| `collapseToSharedAccount` | `true`  | `false` bars the leader account as a target for children.                  |
 
 The return leg, all of it optional and absent meaning the default in the [hysteresis table](#the-hysteresis):
 
@@ -234,7 +278,7 @@ The return leg, all of it optional and absent meaning the default in the [hyster
 | `returnMaxHomeUsedPct`      | `50`    | Every home window must be at or under this to return.                                       |
 | `returnMinIdleMinutes`      | `10`    | How long the agent must have been quiet.                                                    |
 | `returnCooldownMinutes`     | `300`   | Per-agent wait after a return. `0` disables the cap.                                        |
-| `returnRetryBackoffMinutes` | `60`    | Per-agent wait after a return home refused.                                                 |
+| `returnRetryBackoffMinutes` | `60`    | Per-agent wait after a refused return, or a refused idle move.                              |
 | `returnMaxUsageAgeMinutes`  | `2`     | How stale the forced usage read may be and still authorise a return.                        |
 
 It is live-toggleable like `tokenBurnMonitor` and `resourceMonitor`: the monitor re-reads it every sweep, and it uses the same mutable/patch schema split so a patch that omits a field doesn't reset it. The sweep interval is fixed at 60 seconds.
