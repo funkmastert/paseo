@@ -6,8 +6,8 @@ problem can fall through to another account.
 
 Two `before("agent.create")` hooks run in order:
 
-1. The **role router** decides *which model* an agent runs, and *which tools
-   it may use*, from the role policy.
+1. The **role router** decides *which model* an agent runs, *how hard it
+   thinks*, and *which tools it may use*, from the role policy.
 2. The **account router** decides *which pooled account* runs it.
 
 They never overlap: the role router never picks an account, and the account
@@ -15,7 +15,8 @@ router never picks a model.
 
 See [Where a spawn lands](#where-a-spawn-lands) for how the account router
 ranks accounts, and [Role policy](#role-policy) for the second half — model
-pools, tool enforcement, the leader role, and the Fable budget gate.
+pools, thinking levels, tool enforcement, the leader role, and the Fable budget
+gate.
 
 ## Operator setup
 
@@ -190,9 +191,10 @@ through. It is a code-level option, not daemon config: an unknown key in
 
 Stored under the top-level `agentModelPolicy` key in daemon config, edited
 from the **Agent Model Policy** settings screen. A role is resolved for every
-`agent.create`, and decides two things: which model the agent runs, and which
-tools it may use. The model half is further split by **task class** — how much
-model the work is worth — described below.
+`agent.create`, and decides three things: which model the agent runs, at what
+thinking level, and which tools it may use. The model and thinking halves are
+further split by **task class** — how much model the work is worth — described
+below.
 
 The policy model (roles, aliases, ordered model pools, explicit agent-type
 mappings, and their precedence) is ported from
@@ -204,15 +206,17 @@ mappings, and their precedence) is ported from
 `classifyAgent` in `server/classifier.ts` is the single authority. It takes
 everything known at `agent.create` — labels, title, initial prompt, whether
 there is a calling agent and what that caller was itself denied, any requested
-provider/model, the policy document, the live catalog, the pool and its health
-— and returns one `AgentDecision`: role, task class, model, account, tool
-profile, **and a sentence per part saying why**.
+provider/model or thinking level, the policy document, the live catalog, the
+pool and its health — and returns one `AgentDecision`: role, task class, model,
+account, tool profile, thinking level, **and a sentence per part saying why**.
+The thinking level is decided after the model, because what a model offers
+bounds it.
 
 Everything that needs the answer calls that one function:
 
 | Consumer | What it does with the decision |
 | --- | --- |
-| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, the tool profile into `config.providerOptions`, the labels recording what happened. |
+| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, `config.thinkingOptionId`, the tool profile into `config.providerOptions`, the labels recording what happened — including `paseo.thinking-overridden-by-policy` when the level that runs isn't the one asked for. |
 | `role-model-policy.explain` (`server/role-policy-rpc-handlers.ts`) | Projects it onto the wire for the settings preview. |
 | `agent_model_policy` (MCP tool, below) | Renders it as text for an agent asking before it spawns. |
 
@@ -253,15 +257,19 @@ The paragraph a fleet prompt should carry, in full:
 > not be sandboxed. Do not set `config.model` to force a better model: policy
 > overrides a request the resolved pool doesn't approve, and labels the agent
 > `paseo.model-overridden-by-policy` — asking for the right task class is the
-> supported way to get a better model. **Opus 5.5 leads**: it heads the leader
-> pool and every `hard` pool. **Fable is in no pool at all** — Opus 5.5
-> supersedes it, so nothing routes there and asking for it gets you overridden.
+> supported way to get a better model. The classifier also picks the thinking
+> level: leaders run Ultra Code and subagents never do, so do not set a
+> thinking option to force Ultra Code on a child — it is replaced and the
+> agent is labelled `paseo.thinking-overridden-by-policy`. **Opus 5.5 leads**:
+> it heads the leader pool and every `hard` pool. **Fable is in no pool at
+> all** — Opus 5.5 supersedes it, so nothing routes there and asking for it
+> gets you overridden.
 > To see what a create would actually produce before you make it, call the
 > `agent_model_policy` tool, which runs the same classifier the daemon does and
-> reports the role, class, model, account and tools you would get, with the
-> reason for each. The pools themselves are operator config, not prose to
-> memorise — this paragraph names the vocabulary, the classifier holds the
-> rules.
+> reports the role, class, model, thinking level, account and tools you would
+> get, with the reason for each. The pools themselves are operator config, not
+> prose to memorise — this paragraph names the vocabulary, the classifier holds
+> the rules.
 
 That is the whole contract. Anything longer is a copy of the code, and a copy
 of the code is a thing that goes stale while still sounding authoritative.
@@ -281,6 +289,53 @@ same ladder the account router walks. Extracting it is what lets a preview
 answer "which account would this land on" without running the create hook.
 The create hook itself deliberately supplies no `nowMs`: the account router
 runs next and owns that decision, episodes and all.
+
+### Thinking level
+
+`agentModelPolicy.thinking` sets how hard each agent thinks. The block is
+optional: a document without it parses with the defaults below, and there was
+no schema version bump.
+
+```json
+"agentModelPolicy": {
+  "thinking": {
+    "leader": "ultracode",
+    "byTaskClass": { "mechanical": "low", "standard": "high", "hard": "xhigh" }
+  }
+}
+```
+
+The rules, in the order they apply:
+
+1. **Leaders run Ultra Code.** The leader tier is a root agent (no calling
+   agent: the app, the CLI, a schedule, a heartbeat) or an agent resolved to
+   the `leader` role. The leader level outranks a level the caller asked for.
+   On a model without Ultra Code, a leader gets the highest effort that model
+   offers. Set `leader` to `null` to switch the rule off; a leader then gets the
+   level it asked for, else its task class's level.
+2. **Subagents never run Ultra Code.** This is an invariant in the classifier,
+   not a policy knob. A subagent that asks for it, or reaches it through the
+   model's own default, gets Extra High (clamped to the model) and the agent is
+   labelled `paseo.thinking-overridden-by-policy`, valued with the level the
+   caller asked for.
+3. **Otherwise a subagent gets the level it asked for, else its task class's
+   level.** The class levels cannot be `null`.
+4. **Every level is clamped to what the model offers.** If the model is missing
+   from the catalog, the level is left as requested, except that a subagent's
+   Ultra Code is removed.
+
+The label appears whenever the level that runs differs from the one requested,
+whatever the reason: the leader rule, the subagent rule, or a level the model
+doesn't offer.
+
+The leader rule outranks what the app's model selector sends. Every root
+session runs Ultra Code on a model that offers it, whatever the selector
+shows, until `leader` is `null`. Only Opus 5.5 preselects Ultra Code for a new
+session; on any other model the selector shows one level and the agent runs
+another, and the label is how you tell.
+
+The classifier only governs creation. A thinking level changed mid-session from
+the app is not re-checked.
 
 ### Model refs are account-agnostic by default
 
@@ -1014,8 +1069,8 @@ need it.
 
 A caller can ask the classifier what a task *should* run as, before it creates
 anything, through an MCP tool named `agent_model_policy`. It takes the labels,
-title, prompt and model you would use, and answers with the whole decision
-plus the labels that would make it explicit rather than guessed.
+title, prompt, model and thinking level you would use, and answers with the
+whole decision plus the labels that would make it explicit rather than guessed.
 
 `@getpaseo/plugin` has no "register an agent tool" API. What a plugin *can* do
 is rewrite `config.mcpServers` on `before("agent.create")`, which the daemon
