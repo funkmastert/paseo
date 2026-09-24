@@ -2485,21 +2485,38 @@ export class AgentManager {
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, overrides, options),
+        this.reloadKeepingHeldTurn(agentId, overrides, options),
       ),
     );
   }
 
-  private async reloadAgentSessionInternal(
+  /**
+   * A queued child has no turn to cancel: its held prompt leaves the line here and goes back in at
+   * the same place on the new session, and the agent never shows an idle edge in between. A
+   * reload that fails anywhere still gives the held prompt back.
+   */
+  private async reloadKeepingHeldTurn(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
     options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    const heldTurn = this.detachQueuedTurn(this.requireSessionAgent(agentId));
+    try {
+      return await this.reloadAgentSessionInternal(agentId, heldTurn, overrides, options);
+    } catch (error) {
+      this.returnHeldTurnAfterFailedReload(heldTurn, error);
+      throw error;
+    }
+  }
+
+  private async reloadAgentSessionInternal(
+    agentId: string,
+    heldTurn: HeldTurn | null,
+    overrides?: Partial<AgentSessionConfig>,
+    options?: ReloadAgentSessionOptions,
+  ): Promise<ManagedAgent> {
     let existing = this.requireSessionAgent(agentId);
-    // A queued child has no turn to cancel: its held prompt leaves the line here and goes back in
-    // at the same place on the new session, and the agent never shows an idle edge in between.
-    const heldTurn = this.detachQueuedTurn(existing);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "reload");
       existing = this.requireSessionAgent(agentId);
@@ -2642,7 +2659,7 @@ export class AgentManager {
     await this.assertProviderCanAdoptSession(agentId, targetProviderId, handle);
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, undefined, { moveToProvider: targetProviderId }),
+        this.reloadKeepingHeldTurn(agentId, undefined, { moveToProvider: targetProviderId }),
       ),
     );
   }
@@ -3928,6 +3945,28 @@ export class AgentManager {
     return held;
   }
 
+  /**
+   * A reload failed after taking a queued child's held turn out of line. While the agent is still
+   * registered (the old session survived) the turn goes back in line at its place; once the old
+   * session is closed there is nothing to queue it on, so it stays in queue.json for the next start.
+   */
+  private returnHeldTurnAfterFailedReload(held: HeldTurn | null, error: unknown): void {
+    if (!held) return;
+    if (this.agents.has(held.agentId)) {
+      this.logger.warn(
+        { err: error, agentId: held.agentId },
+        "Reload failed; putting the queued child turn back in line",
+      );
+      this.requeueHeldTurn(held);
+      return;
+    }
+    this.logger.warn(
+      { err: error, agentId: held.agentId },
+      "Reload failed and closed the agent; keeping its queued child turn for the next start",
+    );
+    this.childAdmission?.retainForRestart(held);
+  }
+
   /** Puts a detached held turn back in line on the agent's new session. */
   private requeueHeldTurn(held: HeldTurn | null): void {
     if (!held) return;
@@ -3941,7 +3980,11 @@ export class AgentManager {
         agent.lifecycle = "idle";
         this.emitState(agent);
       }
-      this.logger.error({ err: error, agentId: held.agentId }, "Could not re-queue a child turn");
+      this.logger.error(
+        { err: error, agentId: held.agentId },
+        "Could not re-queue a child turn; keeping it for the next start",
+      );
+      this.childAdmission?.retainForRestart(held);
       return;
     }
     void (async () => {

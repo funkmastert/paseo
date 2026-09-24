@@ -329,6 +329,15 @@ export class ChildAdmissionController {
     for (const turn of held) this.restoring.set(turn.agentId, turn);
   }
 
+  /**
+   * Keeps a held turn that could not be put back in line (its agent's session is gone) in the file,
+   * so the next start re-sends it like one held across a restart.
+   */
+  retainForRestart(turn: HeldTurn): void {
+    this.restoring.set(turn.agentId, turn);
+    this.persist();
+  }
+
   markRestored(agentId: string): void {
     if (this.restoring.delete(agentId)) this.persist();
   }

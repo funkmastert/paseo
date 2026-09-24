@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
+import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { AgentManager } from "./agent-manager.js";
 import { startAgentRun } from "./agent-prompt.js";
 import { toAgentPayload } from "./agent-projections.js";
@@ -124,6 +125,8 @@ class HeldTurnClient implements AgentClient {
   readonly capabilities = CAPABILITIES;
   readonly sessions: HeldTurnSession[] = [];
   outOfBandRuns = 0;
+  /** The next resume fails, as it does when the target account is logged out or capped. */
+  failNextResume = false;
 
   async isAvailable(): Promise<boolean> {
     return true;
@@ -139,6 +142,10 @@ class HeldTurnClient implements AgentClient {
     _handle: AgentPersistenceHandle,
     config?: Partial<AgentSessionConfig>,
   ): Promise<AgentSession> {
+    if (this.failNextResume) {
+      this.failNextResume = false;
+      throw new Error("account is logged out");
+    }
     return await this.createSession({ provider: "codex", cwd: config?.cwd ?? process.cwd() });
   }
   async fetchCatalog() {
@@ -158,16 +165,27 @@ describe("AgentManager child admission", () => {
   let manager: AgentManager;
   let admission: ChildAdmissionController;
   let config: ChildAdmissionConfig;
+  let failSessionOpen: boolean;
 
   beforeEach(() => {
     workdir = mkdtempSync(join(tmpdir(), "agent-manager-admission-"));
     client = new HeldTurnClient();
-    manager = new AgentManager({ clients: { codex: client }, logger });
+    failSessionOpen = false;
+    // Only the session-open hook is exercised: a reload's launch context runs it.
+    const pluginLifecycle = {
+      before: async (hook: string, request: unknown) => {
+        if (hook === "agent.session_open" && failSessionOpen) throw new Error("plugin failed");
+        return request;
+      },
+      emit: () => undefined,
+    } as unknown as PluginLifecycle;
+    manager = new AgentManager({ clients: { codex: client }, logger, pluginLifecycle });
     config = { maxConcurrentChildTurns: 1 };
     admission = new ChildAdmissionController({
       readConfig: () => config,
       listAgents: () => manager.listAgentsForAdmission(),
       logger,
+      queueFilePath: join(workdir, "queue.json"),
     });
     manager.setChildAdmission(admission);
   });
@@ -395,6 +413,82 @@ describe("AgentManager child admission", () => {
     const reloadedSession = client.sessions.at(-1)!;
     expect(reloadedSession.startedPrompts).toEqual(["queued task"]);
     unsubscribe();
+  });
+
+  describe("a reload that fails keeps a queued child's held prompt", () => {
+    async function queueBehindRunning() {
+      const root = await create(null);
+      const running = await create(root.id);
+      const waiting = await create(root.id);
+      await prompt(running.id, "task");
+      await prompt(waiting.id, "queued task");
+      await flush();
+      const queuedAt = admission.heldTurns()[0]!.queuedAt;
+      return { running, waiting, queuedAt };
+    }
+
+    async function expectRequeuedOnTheSameAgent(input: {
+      running: { session: HeldTurnSession };
+      waiting: { id: string };
+      queuedAt: string;
+    }) {
+      expect(admission.heldTurns()).toEqual([
+        expect.objectContaining({
+          agentId: input.waiting.id,
+          prompt: "queued task",
+          queuedAt: input.queuedAt,
+        }),
+      ]);
+      expect(manager.getAgent(input.waiting.id)?.lifecycle).toBe("running");
+      input.running.session.finishTurn();
+      await flush();
+      const started = client.sessions.flatMap((session) => session.startedPrompts);
+      expect(started).toContain("queued task");
+    }
+
+    test("when the session config can't be prepared", async () => {
+      const queued = await queueBehindRunning();
+      await expect(
+        manager.reloadAgentSession(queued.waiting.id, { cwd: join(workdir, "missing") }),
+      ).rejects.toThrow(/Working directory does not exist/);
+      await expectRequeuedOnTheSameAgent(queued);
+    });
+
+    test("when the launch context can't be built", async () => {
+      const queued = await queueBehindRunning();
+      failSessionOpen = true;
+      await expect(manager.reloadAgentSession(queued.waiting.id)).rejects.toThrow("plugin failed");
+      await expectRequeuedOnTheSameAgent(queued);
+    });
+
+    test("when the provider refuses the MCP servers", async () => {
+      const queued = await queueBehindRunning();
+      await expect(
+        manager.reloadAgentSession(queued.waiting.id, {
+          mcpServers: { external: { type: "stdio", command: "true" } },
+        }),
+      ).rejects.toThrow(/does not support MCP servers/);
+      await expectRequeuedOnTheSameAgent(queued);
+    });
+
+    test("when the new session can't be resumed, it survives in queue.json", async () => {
+      const queued = await queueBehindRunning();
+      client.failNextResume = true;
+      await expect(manager.reloadAgentSession(queued.waiting.id)).rejects.toThrow(
+        "account is logged out",
+      );
+      // The old session is closed and no new one opened, so the next start re-sends it.
+      expect(manager.getAgent(queued.waiting.id)).toBeNull();
+      await admission.flush();
+      const file = JSON.parse(readFileSync(join(workdir, "queue.json"), "utf8"));
+      expect(file.held).toEqual([
+        expect.objectContaining({
+          agentId: queued.waiting.id,
+          prompt: "queued task",
+          queuedAt: queued.queuedAt,
+        }),
+      ]);
+    });
   });
 
   test("turning admission off releases the line", async () => {
