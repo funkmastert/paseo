@@ -50,18 +50,18 @@ describe("resolveContextMeterThresholds", () => {
 
 describe("resolveContextMeterTone", () => {
   it("is neutral below both amber limits", () => {
-    expect(
-      resolveContextMeterTone({ usedTokens: 174_085, maxTokens: 1_000_000 }, thresholds),
-    ).toBe("neutral");
+    expect(resolveContextMeterTone({ usedTokens: 174_085, maxTokens: 1_000_000 }, thresholds)).toBe(
+      "neutral",
+    );
   });
 
   it("goes amber past amberTokens on a big window", () => {
-    expect(
-      resolveContextMeterTone({ usedTokens: 200_001, maxTokens: 1_000_000 }, thresholds),
-    ).toBe("amber");
-    expect(
-      resolveContextMeterTone({ usedTokens: 200_000, maxTokens: 1_000_000 }, thresholds),
-    ).toBe("neutral");
+    expect(resolveContextMeterTone({ usedTokens: 200_001, maxTokens: 1_000_000 }, thresholds)).toBe(
+      "amber",
+    );
+    expect(resolveContextMeterTone({ usedTokens: 200_000, maxTokens: 1_000_000 }, thresholds)).toBe(
+      "neutral",
+    );
   });
 
   it("goes amber at amberPercent of a small window", () => {
@@ -77,12 +77,12 @@ describe("resolveContextMeterTone", () => {
     expect(resolveContextMeterTone({ usedTokens: 160_000, maxTokens: 200_000 }, thresholds)).toBe(
       "red",
     );
-    expect(
-      resolveContextMeterTone({ usedTokens: 400_001, maxTokens: 1_000_000 }, thresholds),
-    ).toBe("red");
-    expect(
-      resolveContextMeterTone({ usedTokens: 400_000, maxTokens: 1_000_000 }, thresholds),
-    ).toBe("amber");
+    expect(resolveContextMeterTone({ usedTokens: 400_001, maxTokens: 1_000_000 }, thresholds)).toBe(
+      "red",
+    );
+    expect(resolveContextMeterTone({ usedTokens: 400_000, maxTokens: 1_000_000 }, thresholds)).toBe(
+      "amber",
+    );
   });
 
   it("falls back to token limits when the window size is unknown", () => {
