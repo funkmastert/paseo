@@ -2651,6 +2651,10 @@ export async function createPaseoDaemon(
               // Same deal for the artifact janitor: it needs the sweep's `ps` rows to prove
               // nothing still references a simulator directory before it deletes one.
               sweepTestArtifacts: (input) => testArtifactJanitor.sweep(input),
+              // The saturation rung holds new child turns until load falls; running turns and
+              // root agents are untouched (docs/resource-monitor.md).
+              holdChildAdmission: (held, reason) =>
+                childAdmission.setHold("cpu-saturation", held, reason),
               sendSystemMessageToAgent: async (agentId, body) => {
                 await sendPromptToAgent({
                   agentManager,
