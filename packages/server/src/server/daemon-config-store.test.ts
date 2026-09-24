@@ -1161,9 +1161,12 @@ describe("DaemonConfigStore", () => {
       undefined,
     );
 
-    const next = store.patch({ resourceMonitor: { saturation: { busyFraction: 0.8 } } });
+    const remedies = { reniceTopTrees: 2, reniceNice: 19, releaseLoadPerCore: 1.2 };
+    const next = store.patch({
+      resourceMonitor: { saturation: { busyFraction: 0.8, ...remedies } },
+    });
 
-    const expected = { loadPerCore: 3, sustainedMinutes: 5, busyFraction: 0.8 };
+    const expected = { loadPerCore: 3, sustainedMinutes: 5, busyFraction: 0.8, ...remedies };
     expect(next.resourceMonitor).toEqual({ saturation: expected });
     expect(loadPersistedConfig(paseoHome).agents?.resourceMonitor).toEqual({
       saturation: expected,

@@ -325,13 +325,20 @@ const AgentResourceMonitorSchema = z
       })
       .strict()
       .optional(),
-    // Machine CPU saturation: detection and the incident ledger. On unless this says otherwise.
+    // Machine CPU saturation: detection, the incident ledger, and its remediation rung. On
+    // unless this says otherwise.
     saturation: z
       .object({
         enabled: z.boolean().optional(),
         loadPerCore: z.number().positive().optional(),
         busyFraction: z.number().positive().max(1).optional(),
         sustainedMinutes: z.number().int().positive().optional(),
+        releaseLoadPerCore: z.number().positive().optional(),
+        releaseBusyFraction: z.number().positive().max(1).optional(),
+        reniceTopTrees: z.number().int().nonnegative().optional(),
+        reniceNice: z.number().int().min(1).max(19).optional(),
+        attributedGraceMinutes: z.number().positive().optional(),
+        unattributedGraceMinutes: z.number().nonnegative().optional(),
       })
       .strict()
       .optional(),

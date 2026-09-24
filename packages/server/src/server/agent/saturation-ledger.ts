@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, rename, stat } from "node:fs/promises";
 import path from "node:path";
+import type { RemedyAttempt } from "../remediation/contract.js";
 import type { SystemMemorySample } from "./process-sampler.js";
 import type { SaturationEvidence } from "./saturation-evidence.js";
 import type { SystemLoadReading, SystemLoadSample } from "./system-load.js";
@@ -34,6 +35,8 @@ export interface SaturationLedgerRecord {
     swapTotalBytes: number | null;
   };
   evidence: SaturationEvidence;
+  /** What the daemon did about it in this sweep. Absent on records written before it acted. */
+  actions?: RemedyAttempt[];
 }
 
 export function buildSaturationLedgerRecord(input: {
@@ -44,6 +47,7 @@ export function buildSaturationLedgerRecord(input: {
   systemLoad: SystemLoadSample;
   systemMemory: SystemMemorySample | undefined;
   evidence: SaturationEvidence;
+  actions?: readonly RemedyAttempt[];
 }): SaturationLedgerRecord {
   return {
     version: 1,
@@ -60,6 +64,7 @@ export function buildSaturationLedgerRecord(input: {
       swapTotalBytes: input.systemMemory?.swapTotalBytes ?? null,
     },
     evidence: input.evidence,
+    ...(input.actions && input.actions.length > 0 ? { actions: [...input.actions] } : {}),
   };
 }
 

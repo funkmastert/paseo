@@ -366,6 +366,8 @@ export interface ResourceMonitorAgentSummary {
   /** Mid-turn right now. Only a running agent can be told about its usage — steering a message
    * into an idle agent would start a new turn on its own (agent-prompt.ts's fallback). */
   isRunning: boolean;
+  /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
+  parentAgentId: string | null;
 }
 
 /**
@@ -1703,6 +1705,7 @@ export class AgentManager {
       workspaceId: agent.workspaceId,
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
     }));
   }
 
