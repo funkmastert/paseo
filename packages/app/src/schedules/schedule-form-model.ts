@@ -4,6 +4,7 @@ import type {
   AgentProvider,
   ProviderSnapshotEntry,
 } from "@getpaseo/protocol/agent-types";
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import type { ScheduleCadence, ScheduleSummary } from "@getpaseo/protocol/schedule/types";
 import type { FormPreferences } from "@/create-agent-preferences/preferences";
 import { formatThinkingOptionLabel } from "@/agent-controls/labels";
@@ -27,6 +28,7 @@ import {
 import { buildProviderDefinitions } from "@/utils/provider-definitions";
 import { shortenPath } from "@/utils/shorten-path";
 import { normalizeScheduleFormCadence } from "./schedule-cadence-options";
+import { conditionFromWake, wakeFromCondition, type HeartbeatWake } from "./schedule-wake";
 import { PROJECT_OPTION_PREFIX, type ScheduleProjectTarget } from "./schedule-project-targets";
 
 export interface ScheduleFormDisplay {
@@ -38,6 +40,7 @@ export interface ScheduleFormHost {
   serverId: string;
   label: string;
   supportsWorkspaceMultiplicity?: boolean;
+  supportsScheduleConditions?: boolean;
 }
 
 export interface ScheduleFormSnapshot {
@@ -63,6 +66,7 @@ export interface ScheduleDisclosureState {
   showModeField: boolean;
   showIsolationField: boolean;
   showArchiveOnFinishField: boolean;
+  showWakeField: boolean;
 }
 
 export interface ScheduleProviderSnapshotRequest {
@@ -89,6 +93,9 @@ export interface ScheduleFormState {
   maxRuns: string;
   cadence: ScheduleCadence;
   submitCadence: CronCadence | undefined;
+  wake: HeartbeatWake;
+  /** Undefined until the user changes the wake choice; null clears the condition. */
+  submitCondition: ScheduleCondition | null | undefined;
   hosts: ScheduleFormHost[];
   projectOptions: ScheduleFormProjectOption[];
   selectedServerId: string | null;
@@ -135,6 +142,7 @@ export interface ScheduleFormModel {
   setPrompt: (value: string) => void;
   setMaxRuns: (value: string) => void;
   setCadence: (value: ScheduleCadence) => void;
+  setWake: (value: HeartbeatWake) => void;
   setIsolation: (value: "local" | "worktree") => void;
   setArchiveOnFinish: (value: boolean) => void;
   setSubmitError: (value: string | null) => void;
@@ -441,6 +449,10 @@ function resolveInitialSubmitCadence(
   return schedule ? undefined : initialCadence;
 }
 
+function resolveInitialWake(schedule: ScheduleFormSnapshot["schedule"]): HeartbeatWake {
+  return wakeFromCondition(schedule?.condition);
+}
+
 function resolveInitialIsolation(input: {
   config: ReturnType<typeof newAgentConfig>;
   preferences: FormPreferences | undefined;
@@ -488,6 +500,16 @@ function selectedHostSupportsWorkspaceMultiplicity(input: {
   );
 }
 
+function selectedHostSupportsScheduleConditions(input: {
+  hosts: readonly ScheduleFormHost[];
+  selectedServerId: string | null;
+}): boolean {
+  return (
+    input.hosts.find((entry) => entry.serverId === input.selectedServerId)
+      ?.supportsScheduleConditions === true
+  );
+}
+
 function resolveEffectiveIsolation(input: {
   isolation: "local" | "worktree";
   canUseWorktreeIsolation: boolean;
@@ -518,6 +540,12 @@ function resolveDisclosure(state: ScheduleFormState): ScheduleDisclosureState {
       showModeField: false,
       showIsolationField: false,
       showArchiveOnFinishField: false,
+      // COMPAT(scheduleConditions): added in v0.8.0, remove gate after 2027-09-23. An older
+      // daemon drops the condition, so offering the field there would silently do nothing.
+      showWakeField: selectedHostSupportsScheduleConditions({
+        hosts: state.hosts,
+        selectedServerId: state.selectedServerId,
+      }),
     };
   }
 
@@ -539,12 +567,13 @@ function resolveDisclosure(state: ScheduleFormState): ScheduleDisclosureState {
         hosts: state.hosts,
         selectedServerId: state.selectedServerId,
       }),
+    showWakeField: false,
   };
 }
 
 function resolveCanSubmit(state: ScheduleFormState): boolean {
   if (state.targetKind === "agent") {
-    return state.submitCadence !== undefined;
+    return state.submitCadence !== undefined || state.submitCondition !== undefined;
   }
   if (state.prompt.trim().length === 0) {
     return false;
@@ -659,6 +688,8 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
     maxRuns: formatInitialMaxRuns(snapshot.schedule),
     cadence: initialCadence,
     submitCadence: resolveInitialSubmitCadence(snapshot.schedule, initialCadence),
+    wake: resolveInitialWake(snapshot.schedule),
+    submitCondition: undefined,
     hosts: [...snapshot.hosts],
     projectOptions: buildProjectOptions(snapshot.defaults.projectTargets, selectedServerId),
     selectedServerId,
@@ -694,6 +725,7 @@ function buildInitialState(snapshot: ScheduleFormSnapshot): ScheduleFormState {
       showModeField: false,
       showIsolationField: false,
       showArchiveOnFinishField: false,
+      showWakeField: false,
     },
     canSubmit: false,
     submitError: null,
@@ -1113,6 +1145,9 @@ export function openScheduleForm(snapshot: ScheduleFormSnapshot): ScheduleFormMo
     setCadence(value) {
       const cadence = normalizeScheduleFormCadence(value, timezone);
       publish({ ...state, cadence, submitCadence: cadence });
+    },
+    setWake(value) {
+      publish({ ...state, wake: value, submitCondition: conditionFromWake(value) });
     },
     setIsolation(value) {
       userModified = { ...userModified, isolation: true };
