@@ -124,6 +124,7 @@ import {
   isUnresponsiveCancelReason,
   UNRESPONSIVE_CANCEL_ERROR,
   UNRESPONSIVE_CANCEL_REASON,
+  formatAccountCappedCancelError,
 } from "./turn-cancel.js";
 import {
   AgentProviderMoveError,
@@ -425,6 +426,19 @@ export interface DoneJanitorAgentSummary {
   sessionId: string | undefined;
 }
 
+/**
+ * Lean per-agent view for AgentStallSweep: the done janitor's view plus the three things a stall
+ * needs that it does not carry. See agent/stall-detector.ts.
+ */
+export interface StallSweepAgentSummary extends DoneJanitorAgentSummary {
+  /** The done janitor's question is the turn now running. */
+  quietTurn: boolean;
+  /** Token usage as last reported, for comparing across sweeps; usage touches no timestamp. */
+  usageFingerprint: string;
+  /** The newest activity of each provider subagent still reported running. */
+  runningSubagentActivityAt: string[];
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -446,6 +460,8 @@ export type AgentCancelReason =
   | "spend-governor"
   | "done-janitor"
   | "hub"
+  /** The stalled-agent sweep, handing a turn stuck on a capped account to account failover. */
+  | "account-capped"
   | "unspecified";
 
 interface ProviderEnabledFlag {
@@ -1690,6 +1706,21 @@ export class AgentManager {
 
   listAgentsForDoneJanitor(): DoneJanitorAgentSummary[] {
     return Array.from(this.agents.values()).map((agent) => this.toDoneJanitorSummary(agent));
+  }
+
+  listAgentsForStallSweep(): StallSweepAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) =>
+      Object.assign(this.toDoneJanitorSummary(agent), {
+        quietTurn: agent.quietTurn === true,
+        usageFingerprint: JSON.stringify(agent.lastUsage ?? null),
+        runningSubagentActivityAt: this.providerSubagents
+          .list(agent.id)
+          .filter((subagent) => subagent.status === "running")
+          .flatMap(
+            (subagent) => this.providerSubagents.lastActivityAt(agent.id, subagent.id) ?? [],
+          ),
+      }),
+    );
   }
 
   getDoneJanitorSummary(agentId: string): DoneJanitorAgentSummary | null {
@@ -4111,7 +4142,27 @@ export class AgentManager {
     agentId: string,
     cancelReason: AgentCancelReason = "unspecified",
   ): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId, cancelReason));
+    return this.runForegroundMutation(agentId, async () => {
+      const result = await this.cancelAgentRunNow(agentId, cancelReason);
+      if (cancelReason === "account-capped" && result.status === "settled") {
+        await this.recordAccountCappedCancel(agentId);
+      }
+      return result;
+    });
+  }
+
+  /**
+   * A cancel clears `lastError`, and failover reads nothing else, so an account-capped cancel
+   * leaves a limit-shaped one. The timeline row dates the failure now: failover dates a failure
+   * by the newest row, and the stuck turn's newest row can be many hours old.
+   */
+  private async recordAccountCappedCancel(agentId: string): Promise<void> {
+    const agent = this.requireSessionAgent(agentId);
+    if (agent.lifecycle === "running") return;
+    agent.lastError = formatAccountCappedCancelError(agent.provider);
+    await this.appendSystemErrorTimelineMessage(agent, agent.provider, agent.lastError);
+    this.touchUpdatedAt(agent);
+    this.emitState(agent);
   }
 
   private async cancelAgentRunNow(

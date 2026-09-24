@@ -362,7 +362,11 @@ describe("paseo daemon bootstrap", () => {
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
-        remediation: { escalation: { enabled: true, maxPerDay: 3 }, notify: { enabled: false } },
+        remediation: {
+          escalation: { enabled: true, maxPerDay: 3 },
+          notify: { enabled: false },
+          stalledAgents: { dryRun: true },
+        },
         daemonVitals: { enabled: true, dryRun: true },
       },
     };
@@ -418,6 +422,7 @@ describe("paseo daemon bootstrap", () => {
         "remediation-notify": { enabled: false, dryRun: undefined },
         "model-divergence": { enabled: true, dryRun: undefined },
         daemonVitals: { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: true, dryRun: true },
       });
 
       const reloadedPersisted = {
@@ -434,7 +439,11 @@ describe("paseo daemon bootstrap", () => {
           budgetPacing: { enabled: false },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
-          remediation: { escalation: { enabled: false }, notify: { enabled: true } },
+          remediation: {
+            escalation: { enabled: false },
+            notify: { enabled: true },
+            stalledAgents: { enabled: false },
+          },
           daemonVitals: { enabled: false },
         },
       };
@@ -478,6 +487,7 @@ describe("paseo daemon bootstrap", () => {
         "remediation-notify": { enabled: true },
         "model-divergence": { enabled: false },
         daemonVitals: { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: false, dryRun: false },
       });
     } finally {
       await client?.close().catch(() => undefined);
