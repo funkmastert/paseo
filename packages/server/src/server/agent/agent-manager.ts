@@ -395,6 +395,30 @@ export interface DoneJanitorAgentSummary {
   sessionId: string | undefined;
 }
 
+/**
+ * Lean per-agent view for AgentLeaderCompactionMonitor's sweep. `busy` has the done janitor's
+ * meaning; the monitor only ever starts a turn when it is false and `lifecycle` is idle.
+ */
+export interface LeaderCompactionAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  /** The built-in provider that owns the transcript; `/compact` exists only in `claude`'s. */
+  sessionFamily: AgentProvider;
+  internal: boolean;
+  isDelegated: boolean;
+  lifecycle: AgentLifecycleStatus;
+  busy: boolean;
+  pendingPermissionCount: number;
+  contextWindowUsedTokens: number | undefined;
+  title: string | null;
+}
+
+/** How a turn started by {@link AgentManager.startTurnIfIdle} ended. */
+export type IdleTurnOutcome =
+  | { status: "completed"; finalText: string }
+  | { status: "canceled" }
+  | { status: "failed"; error: string };
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -1600,6 +1624,79 @@ export class AgentManager {
       title: agent.config.title ?? null,
       sessionId: agent.persistence?.sessionId,
     };
+  }
+
+  listAgentsForLeaderCompaction(): LeaderCompactionAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      provider: agent.provider,
+      sessionFamily: this.resolveProviderSessionFamily(agent.provider),
+      internal: agent.internal ?? false,
+      isDelegated: isDelegatedAgent(agent),
+      lifecycle: agent.lifecycle,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
+      title: agent.config.title ?? null,
+    }));
+  }
+
+  private isAgentBusy(agent: ManagedAgent): boolean {
+    return (
+      Boolean(agent.activeForegroundTurnId) ||
+      Boolean(agent.activeTurnId) ||
+      agent.pendingReplacement ||
+      Boolean(this.runs.getPendingRun(agent.id))
+    );
+  }
+
+  /**
+   * Starts a turn only when nothing else owns the agent, and never touches a turn that does.
+   * Returns null, having done nothing, for an agent that is not idle, is busy, or is waiting on a
+   * permission. `sendPromptToAgent` is the wrong tool for a daemon-initiated turn: it passes
+   * `replaceRunning`, so a prompt that lands a moment after the agent started working cancels
+   * that work, and its steer mode starts a fresh turn on an idle agent. The check and the start
+   * run in one synchronous stretch, so nothing can begin a turn in between.
+   */
+  startTurnIfIdle(agentId: string, prompt: AgentPromptInput): Promise<IdleTurnOutcome> | null {
+    const agent = this.agents.get(agentId);
+    if (
+      !agent ||
+      agent.session === null ||
+      agent.lifecycle !== "idle" ||
+      this.isAgentBusy(agent) ||
+      agent.pendingPermissions.size > 0
+    ) {
+      return null;
+    }
+    const events = this.streamAgent(agentId, prompt);
+    return this.collectIdleTurnOutcome(events);
+  }
+
+  private async collectIdleTurnOutcome(
+    events: AsyncGenerator<AgentStreamEvent>,
+  ): Promise<IdleTurnOutcome> {
+    const timeline: AgentTimelineItem[] = [];
+    let outcome: IdleTurnOutcome | null = null;
+    try {
+      for await (const event of events) {
+        if (event.type === "timeline") {
+          timeline.push(event.item);
+        } else if (event.type === "turn_failed") {
+          outcome = { status: "failed", error: this.formatTurnFailedMessage(event) };
+        } else if (event.type === "turn_canceled") {
+          outcome = { status: "canceled" };
+        }
+      }
+    } catch (error) {
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    return (
+      outcome ?? {
+        status: "completed",
+        finalText: this.getLastAssistantMessageFromTimeline(timeline) ?? "",
+      }
+    );
   }
 
   /** Where the timeline ends now. Null when the agent is not loaded. */
