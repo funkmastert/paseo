@@ -184,6 +184,10 @@ export default function contribute(server: PluginServerContext) {
       },
       onFailOpen: (episode) => notifier?.noteFailOpen(episode),
       onPoolRecovered: () => notifier?.notePoolRecovered(),
+      onRootRerouted: (episode) =>
+        console.error(`[claude-account-pool] router: root agent moved from "${episode.requestedProviderId}" to "${episode.targetProviderId}": ${episode.reason}`),
+      onRootStranded: (episode) =>
+        console.error(`[claude-account-pool] router: root agent left on "${episode.requestedProviderId}" with no budget anywhere: ${episode.reason}`),
     });
 
     const fetchUsage: FetchUsageFn = async () => {

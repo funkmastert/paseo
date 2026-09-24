@@ -1,7 +1,14 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
+import { ACCOUNT_REROUTED_LABEL } from "../shared/role-policy-schema";
 import type { AccountIdentity } from "./account-identity";
 import type { HealthTracker } from "./health";
-import { isAccountHealthy, poolMemberIds, selectPoolAccount, usablePoolMembers } from "./account-select";
+import {
+  describeRootSelection,
+  poolMemberIds,
+  selectPoolAccount,
+  selectRootAccount,
+  usablePoolMembers,
+} from "./account-select";
 import { createIntervalPoller } from "./interval-poller";
 import { createLogThrottle } from "./log-throttle";
 import type { PoolCache } from "./pool";
@@ -118,10 +125,29 @@ export interface PoolExhaustedEpisode {
  * where it fails on its first turn — and a leader that reads that failure as "that one didn't
  * work, try another" spawns the next one straight into the same wall. Refusing costs one clear
  * error instead of an unbounded loop, and the text names the reset so the caller knows whether
- * to wait or to stop. Human-created agents never reach this code (the router only acts on
- * creates that carry a callerAgentId), so this can never lock Tyler out of his own daemon.
+ * to wait or to stop. Root agents never reach this code (a root nothing can serve keeps the
+ * account it asked for; see `routeRootCreate`), so this can never lock Tyler out of his own daemon.
  */
 export class PoolExhaustedError extends Error {}
+
+/** A root agent asked for a pooled account that can't run it and was started on another one. */
+export interface RootRerouteEpisode {
+  requestedProviderId: string;
+  targetProviderId: string;
+  requestedModel: string;
+  /** The capped window that ruled the requested account out. */
+  window: string;
+  resetsAt?: Date;
+  /** The same sentence the classifier gives the settings preview. */
+  reason: string;
+}
+
+/** A root agent asked for a pooled account that can't run it, and nothing else in the pool can either. */
+export interface RootStrandedEpisode {
+  requestedProviderId: string;
+  requestedModel: string;
+  reason: string;
+}
 
 export interface FailOpenEpisode {
   callerAgentId: string;
@@ -159,6 +185,10 @@ export interface RouterOptions {
   onPoolExhausted?: (episode: PoolExhaustedEpisode) => void;
   /** Called whenever routing fails open (never throws or blocks creation). */
   onFailOpen?: (episode: FailOpenEpisode) => void;
+  /** Called when a root agent was moved off an account that couldn't run it. */
+  onRootRerouted?: (episode: RootRerouteEpisode) => void;
+  /** Called when a root agent's account can't run it and no pooled account can. It still starts. */
+  onRootStranded?: (episode: RootStrandedEpisode) => void;
   /** Called when the pool cache transitions from fail-open back to a loaded pool. */
   onPoolRecovered?: () => void;
   /**
@@ -224,8 +254,12 @@ export type AgentCreateRouter = (
  * account serves everything rather than nothing running at all. Only a pool where *nothing* is
  * usable stops a spawn.
  *
- * Human-created requests (no callerAgentId), non-claude-family requests, and every failure mode
- * other than a fully exhausted pool are passthrough.
+ * A root agent (no callerAgentId: the app, the CLI, a schedule) keeps the account it was started
+ * on while that account can run it. Only when that account is at a cap does it move, leader
+ * account first — see `routeRootCreate`. A root is never refused.
+ *
+ * Non-claude-family requests, and every failure mode other than a fully exhausted pool, are
+ * passthrough.
  */
 export function createRouter(options: RouterOptions): AgentCreateRouter {
   let wasFailOpen = false;
@@ -233,6 +267,56 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
   const throttleMs = options.failOpenRefreshThrottleMs ?? 5000;
   const now = options.now ?? Date.now;
   const logThrottle = createLogThrottle({ now });
+
+  /**
+   * A root agent's account. The app remembers the last provider a workspace used, so a new chat
+   * can ask for an account that ran out since — and a root used to keep whatever it asked for,
+   * dying on its first turn while the leader account sat half empty. It moves only when its own
+   * account is at a cap; anything short of that is the person's choice and is respected.
+   */
+  function routeRootCreate(
+    request: PluginBeforeRequests["agent.create"],
+    pool: ReturnType<PoolCache["get"]>["pool"],
+  ): PluginBeforeRequests["agent.create"] | void {
+    const requestedProviderId = request.config.provider;
+    const modelId = request.config.model ?? "";
+    const selection = selectRootAccount(pool, options.health, requestedProviderId, modelId, now());
+    if (selection.kind === "not-pooled" || selection.kind === "kept") {
+      return;
+    }
+    const reason = describeRootSelection(selection, requestedProviderId, modelId);
+    if (selection.kind === "stranded") {
+      options.onRootStranded?.({ requestedProviderId, requestedModel: modelId, reason });
+      return;
+    }
+
+    const targetProviderId = selection.providerId;
+    const providerIds = options.providerIds.get();
+    if (providerIds === null || !providerIds.has(targetProviderId)) {
+      logThrottle(`root-target-missing:${targetProviderId}`, () => {
+        console.error(
+          `[claude-account-pool] router: root agent's reroute target "${targetProviderId}" is not in the provider snapshot; leaving it on "${requestedProviderId}"`,
+        );
+      });
+      return;
+    }
+
+    options.onRootRerouted?.({
+      requestedProviderId,
+      targetProviderId,
+      requestedModel: modelId,
+      window: selection.blockedBy.window,
+      ...(selection.blockedBy.resetsAt ? { resetsAt: selection.blockedBy.resetsAt } : {}),
+      reason,
+    });
+    // TYPE NOTE: labels aren't on the installed SDK's agent.create type; see role-router.ts.
+    const labels = (request as { labels?: Record<string, string> }).labels;
+    return {
+      ...request,
+      config: { ...request.config, provider: targetProviderId },
+      labels: { ...labels, [ACCOUNT_REROUTED_LABEL]: requestedProviderId },
+    } as PluginBeforeRequests["agent.create"];
+  }
 
   return function routeAgentCreate(input) {
     const { request } = input;
@@ -257,7 +341,7 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
     // yet. Read it structurally rather than forking the SDK types.
     const callerAgentId = (request as { callerAgentId?: string }).callerAgentId;
     if (!callerAgentId) {
-      return; // Human-created leaders, and schedule/heartbeat creates: untouched.
+      return poolFailOpen ? undefined : routeRootCreate(request, pool);
     }
 
     // Only claude-family requests are pool members. A codex/gpt/etc. child

@@ -1,5 +1,5 @@
 import { rankByHeadroom, type HeadroomHealth } from "./headroom";
-import type { HealthTracker } from "./health";
+import { relevantWindows, type HealthTracker } from "./health";
 
 /**
  * The account half of "what should this agent be", extracted from
@@ -117,4 +117,133 @@ export function selectPoolAccount(
     return { kind: "no-leader" };
   }
   return { kind: "exhausted", providerIds: poolMemberIds(pool) };
+}
+
+/** A window at its cap, and when it comes back if the source said. */
+export interface CappedWindow {
+  window: string;
+  resetsAt?: Date;
+}
+
+/**
+ * The window that stops `providerId` from running `modelId` at all, or undefined when none does.
+ *
+ * Only a window AT its cap counts. A drained account can still run the request, and a root's
+ * choice of account is respected while it can. With no model named, a model-scoped cap can't be
+ * matched against the model that will actually run, so any capped window counts — the same
+ * convention `isAccountHealthy` uses.
+ */
+export function cappedWindowFor(
+  health: AccountSelectHealth,
+  providerId: string,
+  modelId: string,
+): CappedWindow | undefined {
+  const windows = modelId ? relevantWindows(modelId) : health.windowIds(providerId);
+  for (const window of windows) {
+    const state = health.describeWindow(providerId, window);
+    if (state?.status === "capped") {
+      return state.resetsAt ? { window, resetsAt: state.resetsAt } : { window };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Where a ROOT agent lands.
+ *
+ * - `not-pooled` — it asked for a provider the pool doesn't own; the pool has no say.
+ * - `kept` — its own account can run it, so it stays there. Isolation is a preference, and a
+ *   root's chosen account is respected whenever it can serve.
+ * - `rerouted` — its own account is at a cap, so it starts on `providerId` instead.
+ * - `stranded` — nothing in the pool can run it. A root is never refused (that would lock the
+ *   person out of their own daemon), so it keeps its account and fails on its first turn.
+ */
+export type RootAccountSelection =
+  | { kind: "not-pooled" }
+  | { kind: "kept"; providerId: string }
+  | { kind: "rerouted"; from: string; blockedBy: CappedWindow; providerId: string; target: "leader" | "worker" }
+  | { kind: "stranded"; providerId: string; blockedBy: CappedWindow; providerIds: string[] };
+
+/**
+ * The root ladder. A root agent is a leader by definition, so the leader account comes first
+ * whenever it can run the request, and only then a worker, ranked the same way a child's is:
+ *
+ *   0. the account it asked for, if that account can run it at all;
+ *   1. the leader account;
+ *   2. a worker healthy for the requested model, most headroom first;
+ *   3. a worker that is drained but not capped;
+ *   4. nothing: it keeps the account it asked for.
+ */
+export function selectRootAccount(
+  pool: AccountPool,
+  health: AccountSelectHealth,
+  requestedProviderId: string,
+  modelId: string,
+  nowMs: number,
+): RootAccountSelection {
+  const members = poolMemberIds(pool);
+  if (!members.includes(requestedProviderId)) {
+    return { kind: "not-pooled" };
+  }
+  const blockedBy = cappedWindowFor(health, requestedProviderId, modelId);
+  if (!blockedBy) {
+    return { kind: "kept", providerId: requestedProviderId };
+  }
+
+  const canServe = (providerId: string): boolean =>
+    providerId !== requestedProviderId && cappedWindowFor(health, providerId, modelId) === undefined;
+  const rerouted = (providerId: string, target: "leader" | "worker"): RootAccountSelection => ({
+    kind: "rerouted",
+    from: requestedProviderId,
+    blockedBy,
+    providerId,
+    target,
+  });
+
+  if (pool.leader && canServe(pool.leader.providerId)) {
+    return rerouted(pool.leader.providerId, "leader");
+  }
+  const candidates = pool.workers.filter((worker) => canServe(worker.providerId));
+  const healthy = rankByHeadroom(
+    candidates.filter((worker) => isAccountHealthy(health, worker.providerId, modelId)),
+    health,
+    modelId,
+    nowMs,
+  );
+  const drained = rankByHeadroom(
+    candidates.filter((worker) => !isAccountHealthy(health, worker.providerId, modelId)),
+    health,
+    modelId,
+    nowMs,
+  );
+  const worker = healthy[0] ?? drained[0];
+  if (worker) {
+    return rerouted(worker.providerId, "worker");
+  }
+  return { kind: "stranded", providerId: requestedProviderId, blockedBy, providerIds: members };
+}
+
+function describeCap(providerId: string, blockedBy: CappedWindow, modelId: string): string {
+  const until = blockedBy.resetsAt ? ` until ${blockedBy.resetsAt.toISOString()}` : "";
+  return `${providerId} is out of budget for ${modelId || "this request"} (its ${blockedBy.window} window is at its cap${until})`;
+}
+
+/**
+ * The one sentence for a root's account decision. Shared by the create hook's episode
+ * (server/router.ts) and the classifier's explanation (server/classifier.ts), so the log line
+ * and the settings preview can't say different things.
+ */
+export function describeRootSelection(selection: RootAccountSelection, requestedProviderId: string, modelId: string): string {
+  switch (selection.kind) {
+    case "not-pooled":
+      return `A root agent keeps the account it was started on, and ${requestedProviderId} is not a pooled account.`;
+    case "kept":
+      return `A root agent keeps the account it was started on while that account can serve it, and ${selection.providerId} can run ${modelId || "this request"}.`;
+    case "rerouted":
+      return selection.target === "leader"
+        ? `${describeCap(selection.from, selection.blockedBy, modelId)}, so this root agent starts on the leader account ${selection.providerId} instead. A root keeps the account it was started on only while that account can serve it.`
+        : `${describeCap(selection.from, selection.blockedBy, modelId)} and the leader account can't run it either, so this root agent starts on ${selection.providerId}, the pooled worker with the most headroom. A root keeps the account it was started on only while that account can serve it.`;
+    case "stranded":
+      return `${describeCap(selection.providerId, selection.blockedBy, modelId)}, and so is every other pooled account (${selection.providerIds.join(", ")}). A root agent is never refused, so it keeps ${selection.providerId} and will fail until a window resets.`;
+  }
 }

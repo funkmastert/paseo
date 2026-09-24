@@ -24,6 +24,15 @@ export const TASK_CLASS_LABEL = "paseo.task-class";
 export const MODEL_OVERRIDDEN_LABEL = "paseo.model-overridden-by-policy";
 
 /**
+ * Set by the account router when a ROOT agent's requested pooled account was
+ * out of budget and it was started on another one instead. Value is the
+ * provider id the request asked for, so the UI can show "moved off
+ * claude-backup" instead of silently running somewhere else. See
+ * server/account-select.ts's `selectRootAccount`.
+ */
+export const ACCOUNT_REROUTED_LABEL = "paseo.account-rerouted";
+
+/**
  * Set by the role router when an explicitly requested model was honored even
  * though the provider's advertised catalog doesn't list it (see
  * `allowUnlistedModels`). Value is the ref the caller asked for. The model was

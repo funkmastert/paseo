@@ -749,3 +749,38 @@ describe("explain — an explicit request for a model the catalog doesn't list",
     expect(result).not.toHaveProperty("unadvertisedPoolEntries");
   });
 });
+
+describe("explain — a root agent started on an out-of-budget account", () => {
+  const poolCache = {
+    get: () => ({
+      pool: {
+        workers: [
+          { providerId: "claude-personal", priority: 1 },
+          { providerId: "claude-backup", priority: 2 },
+        ],
+        leader: { providerId: "claude" },
+      },
+      failOpen: false,
+    }),
+    forceRefresh: vi.fn(),
+    stop: vi.fn(),
+  };
+
+  it("previews the move to the leader account, with the classifier's reason", async () => {
+    const health = createHealthTracker();
+    health.reportUsage("claude-backup", [{ window: "weekly", usedPct: 100 }]);
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({ policyCache: fakePolicyCache(DEFAULT_POLICY), poolCache, health }),
+    );
+
+    const result = await handlers.explain({ root: true, requestedProvider: "claude-backup" }, context(fakePaseo({})));
+
+    expect(result.account).toEqual({
+      kind: "leader",
+      providerId: "claude",
+      reroutedFrom: "claude-backup",
+      usableProviderIds: ["claude-personal", "claude"],
+    });
+    expect(result.reasons.account).toContain("claude-backup");
+  });
+});

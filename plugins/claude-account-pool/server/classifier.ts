@@ -9,7 +9,9 @@ import {
 } from "../shared/role-policy-schema";
 import { DEFAULT_TOOL_PROFILE, profileDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import {
+  describeRootSelection,
   selectPoolAccount,
+  selectRootAccount,
   usablePoolMembers,
   type AccountPool,
   type AccountSelectHealth,
@@ -268,13 +270,20 @@ export interface ToolDecision {
 export interface AccountDecision {
   /**
    * - `worker` / `leader` — the pooled account that will run it.
-   * - `exhausted` — every pooled account is out of budget; the create is refused.
-   * - `no-pool` — this request isn't pool-family, or has no caller, so the
-   *   account router leaves it alone.
+   * - `exhausted` — every pooled account is out of budget. A child is
+   *   refused; a root keeps the account it asked for (`providerId`).
+   * - `no-pool` — the account router leaves it alone: a non-pool-family
+   *   request, or a root whose own account can serve it (`providerId`).
    * - `not-evaluated` — no `nowMs` was supplied, so no account was chosen.
    */
   kind: "worker" | "leader" | "exhausted" | "no-pool" | "not-evaluated";
   providerId?: string;
+  /**
+   * Set when a root agent's own account couldn't run it and it was moved:
+   * the provider it asked for. The create hook writes the same value to
+   * `paseo.account-rerouted`.
+   */
+  reroutedFrom?: string;
   /** Every pooled entry that could serve this request. One means isolation has collapsed. */
   usableProviderIds?: string[];
   reason: string;
@@ -585,10 +594,44 @@ function decideTools(world: ClassifierWorld, role: RoleDecision, hasCaller: bool
 }
 
 /**
- * The account half. Only pool-family creates made BY an agent are routed —
- * a human-started agent and a `codex/gpt-5` child both keep the account they
- * were given (see server/router.ts, which owns the episodes and the refusal
- * built on this answer).
+ * The account half for a ROOT agent: it keeps the account it was started on
+ * while that account can run it, and moves — leader account first — only when
+ * that account is at a cap. Never refused. See `selectRootAccount`.
+ */
+function decideRootAccount(input: ClassifierInput, world: ClassifierWorld, model: ModelDecision): AccountDecision {
+  // The provider the account router will actually see: the role router only
+  // rewrites it for a cross-family model.
+  const requestedProviderId =
+    model.crossesRequestedFamily && model.provider !== null ? model.provider : (input.requestedProvider ?? POOL_FAMILY);
+  if (world.nowMs === undefined) {
+    return { kind: "not-evaluated", reason: "No instant was supplied, so account headroom was not scored." };
+  }
+  const modelId = model.model ?? input.requestedModel ?? "";
+  const selection = selectRootAccount(world.pool, world.health, requestedProviderId, modelId, world.nowMs);
+  const reason = describeRootSelection(selection, requestedProviderId, modelId);
+  switch (selection.kind) {
+    case "not-pooled":
+      return { kind: "no-pool", reason };
+    case "kept":
+      return { kind: "no-pool", providerId: selection.providerId, reason };
+    case "rerouted":
+      return {
+        kind: selection.target,
+        providerId: selection.providerId,
+        reroutedFrom: selection.from,
+        usableProviderIds: usablePoolMembers(world.pool, world.health, modelId),
+        reason,
+      };
+    case "stranded":
+      return { kind: "exhausted", providerId: selection.providerId, usableProviderIds: [], reason };
+  }
+}
+
+/**
+ * The account half. Pool-family creates made BY an agent walk the child
+ * ladder; a root agent walks its own (`decideRootAccount`); a `codex/gpt-5`
+ * child keeps the account it was given. server/router.ts owns the episodes
+ * and the refusal built on this answer.
  */
 function decideAccount(
   input: ClassifierInput,
@@ -596,11 +639,11 @@ function decideAccount(
   model: ModelDecision,
   hasCaller: boolean,
 ): AccountDecision {
+  if (!hasCaller) {
+    return decideRootAccount(input, world, model);
+  }
   const effectiveProvider = model.provider ?? input.requestedProvider ?? POOL_FAMILY;
   const family = familyOfProvider(world.pool, effectiveProvider);
-  if (!hasCaller) {
-    return { kind: "no-pool", reason: "A root agent keeps the account it was started on; the pool only routes agent-spawned children." };
-  }
   if (family !== POOL_FAMILY) {
     return { kind: "no-pool", reason: `This is a ${family} request, and the pool only routes ${POOL_FAMILY}-family accounts.` };
   }

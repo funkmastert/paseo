@@ -5,6 +5,7 @@ import {
   type RoleRecord,
 } from "../shared/role-policy-schema";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
+import { createHealthTracker } from "./health";
 import type { ModelCatalog } from "./role-availability";
 
 /**
@@ -497,6 +498,57 @@ describe("classifyAgent — the account", () => {
       at({ policy, catalog: new Map([["codex", new Set(["gpt-5.1"])]]) }),
     );
     expect(codex.account.kind).toBe("no-pool");
+  });
+
+  describe("a root agent on a pooled account", () => {
+    const NOW = new Date("2026-09-24T22:00:00Z");
+    const RESET = new Date("2026-09-26T06:00:00Z");
+    const rootOn = (requestedProvider: string) => ({ title: "new chat", requestedProvider });
+    const healthWith = (readings: Record<string, { window: string; usedPct: number; resetsAt?: Date }[]>) => {
+      const health = createHealthTracker({ now: () => NOW });
+      for (const [providerId, windows] of Object.entries(readings)) {
+        health.reportUsage(providerId, windows);
+      }
+      return health;
+    };
+
+    it("moves to the leader account when its own account is out of budget, and says why", () => {
+      const decision = classifyAgent(
+        rootOn("claude-spare"),
+        at({ nowMs: NOW.getTime(), health: healthWith({ "claude-spare": [{ window: "weekly", usedPct: 100, resetsAt: RESET }] }) }),
+      );
+      expect(decision.account.kind).toBe("leader");
+      expect(decision.account.providerId).toBe("claude-personal");
+      expect(decision.account.reroutedFrom).toBe("claude-spare");
+      expect(decision.account.reason).toContain("claude-spare");
+      expect(decision.account.reason).toContain(RESET.toISOString());
+      expect(decision.account.reason.endsWith(".")).toBe(true);
+    });
+
+    it("keeps its own account while that account can serve it", () => {
+      const decision = classifyAgent(
+        rootOn("claude-spare"),
+        at({ nowMs: NOW.getTime(), health: healthWith({ "claude-spare": [{ window: "weekly", usedPct: 42 }] }) }),
+      );
+      expect(decision.account.kind).toBe("no-pool");
+      expect(decision.account.providerId).toBe("claude-spare");
+      expect(decision.account.reroutedFrom).toBeUndefined();
+      expect(decision.account.reason).toContain("keeps");
+    });
+
+    it("is not refused when nothing can serve it", () => {
+      const capped = { window: "weekly", usedPct: 100 };
+      const decision = classifyAgent(
+        rootOn("claude-spare"),
+        at({
+          nowMs: NOW.getTime(),
+          health: healthWith({ "claude-spare": [capped], "claude-work": [capped], "claude-personal": [capped] }),
+        }),
+      );
+      expect(decision.account.kind).toBe("exhausted");
+      expect(decision.account.providerId).toBe("claude-spare");
+      expect(decision.account.reason).toContain("never refused");
+    });
   });
 });
 

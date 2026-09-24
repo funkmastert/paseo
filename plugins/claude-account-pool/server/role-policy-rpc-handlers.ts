@@ -332,6 +332,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           kind: account.kind,
           ...(account.providerId !== undefined ? { providerId: account.providerId } : {}),
           ...(account.usableProviderIds !== undefined ? { usableProviderIds: account.usableProviderIds } : {}),
+          ...(account.reroutedFrom !== undefined ? { reroutedFrom: account.reroutedFrom } : {}),
         },
         reasons: {
           role: role.reason,

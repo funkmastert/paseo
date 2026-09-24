@@ -120,12 +120,14 @@ export const RoleModelPolicyExplainResultSchema = z.object({
    * Which pooled account would serve it, from the same ladder the account
    * router walks (server/account-select.ts). `not-evaluated` never appears
    * here — the RPC always supplies an instant — but `no-pool` does, for a
-   * root agent or a non-pool-family request.
+   * non-pool-family request or a root agent whose own account can serve it.
    */
   account: z.object({
     kind: z.enum(["worker", "leader", "exhausted", "no-pool", "not-evaluated"]),
     providerId: z.string().optional(),
     usableProviderIds: z.array(z.string()).optional(),
+    /** Set when a root agent's own account is out of budget: the account it asked for, and moved off. */
+    reroutedFrom: z.string().optional(),
   }),
   /**
    * One sentence per part of the decision, written by the classifier itself.
