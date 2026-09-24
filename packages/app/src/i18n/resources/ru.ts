@@ -2059,6 +2059,23 @@ export const ru: TranslationResources = {
     accessibility: "Использовано {{percentage}}% контекстного окна",
     spendTitle: "Расход",
     spendSummary: "{{total}} взвешенных токенов за {{span}}",
+    breakdownLoading: "Чтение контекста…",
+    breakdownPending: "Разбивка появится, когда этот ход завершится.",
+    breakdownUnsupported: "Этот провайдер не может показать разбивку контекста.",
+    breakdownError: "Не удалось прочитать разбивку контекста.",
+    breakdownAsOf: "На {{time}}",
+    breakdownBarAccessibility: "Разбивка контекстного окна",
+    deferredTitle: "Вне окна",
+    messageToolResults: "Результаты инструментов",
+    messageAttachments: "Вложения",
+    messageAssistant: "Ассистент",
+    messageToolCalls: "Вызовы инструментов",
+    messageUser: "Сообщения пользователя",
+    memoryTotalWarning:
+      "Файлы памяти занимают {{tokens}} токенов — больше рекомендуемых {{limit}}.",
+    memoryFileWarning: "{{path}}: {{tokens}} токенов, больше {{limit}}.",
+    reReadAdvice:
+      "Эта сессия перечитывает ~{{tokens}} токенов на каждом ходу. Новая сессия с кратким handoff обойдётся дешевле.",
   },
   review: {
     comment: {

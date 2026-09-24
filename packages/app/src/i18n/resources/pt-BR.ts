@@ -2059,6 +2059,23 @@ export const ptBR: TranslationResources = {
     accessibility: "Janela de contexto {{percentage}}% usada",
     spendTitle: "Gasto",
     spendSummary: "{{total}} tokens ponderados em {{span}}",
+    breakdownLoading: "Lendo o contexto…",
+    breakdownPending: "O detalhamento aparece quando este turno terminar.",
+    breakdownUnsupported: "Este provedor não consegue informar o detalhamento do contexto.",
+    breakdownError: "Não foi possível ler o detalhamento do contexto.",
+    breakdownAsOf: "Em {{time}}",
+    breakdownBarAccessibility: "Detalhamento da janela de contexto",
+    deferredTitle: "Fora da janela",
+    messageToolResults: "Resultados de ferramentas",
+    messageAttachments: "Anexos",
+    messageAssistant: "Assistente",
+    messageToolCalls: "Chamadas de ferramentas",
+    messageUser: "Mensagens do usuário",
+    memoryTotalWarning:
+      "Os arquivos de memória usam {{tokens}} tokens, acima da recomendação de {{limit}}.",
+    memoryFileWarning: "{{path}} tem {{tokens}} tokens, acima de {{limit}}.",
+    reReadAdvice:
+      "Esta sessão relê ~{{tokens}} tokens a cada turno. Uma sessão nova com uma passagem curta de contexto é mais barata.",
   },
   review: {
     comment: {

@@ -2047,6 +2047,22 @@ export const ja: TranslationResources = {
     accessibility: "コンテキストウィンドウ{{percentage}}%使用",
     spendTitle: "消費",
     spendSummary: "{{span}}で加重トークン{{total}}",
+    breakdownLoading: "コンテキストを読み込み中…",
+    breakdownPending: "内訳はこのターンの終了後に表示されます。",
+    breakdownUnsupported: "このプロバイダーはコンテキストの内訳を取得できません。",
+    breakdownError: "コンテキストの内訳を読み込めませんでした。",
+    breakdownAsOf: "{{time}}時点",
+    breakdownBarAccessibility: "コンテキストウィンドウの内訳",
+    deferredTitle: "ウィンドウ外",
+    messageToolResults: "ツール結果",
+    messageAttachments: "添付ファイル",
+    messageAssistant: "アシスタント",
+    messageToolCalls: "ツール呼び出し",
+    messageUser: "ユーザーメッセージ",
+    memoryTotalWarning: "メモリファイルが{{tokens}}トークンで、目安の{{limit}}を超えています。",
+    memoryFileWarning: "{{path}}は{{tokens}}トークンで、{{limit}}を超えています。",
+    reReadAdvice:
+      "このセッションは毎ターン約{{tokens}}トークンを読み直しています。短い引き継ぎで新しいセッションを始める方が安上がりです。",
   },
   review: {
     comment: {
