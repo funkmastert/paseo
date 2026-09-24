@@ -360,6 +360,7 @@ describe("paseo daemon bootstrap", () => {
         },
         accountFailover: { enabled: true, migrateSubagents: false },
         budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
+        leaderCompaction: { enabled: true, dryRun: true, prepareAtTokens: 400_000 },
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
         daemonVitals: { enabled: true, dryRun: true },
@@ -402,6 +403,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
       expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
       expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
+      expect(booted.leaderCompaction).toEqual(bootPersisted.agents.leaderCompaction);
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
       expect(monitorModes()).toEqual({
@@ -414,6 +416,7 @@ describe("paseo daemon bootstrap", () => {
         refocus: { enabled: true, dryRun: true },
         "model-divergence": { enabled: true, dryRun: undefined },
         daemonVitals: { enabled: true, dryRun: true },
+        "leader-compaction": { enabled: true, dryRun: true },
       });
 
       const reloadedPersisted = {
@@ -428,6 +431,7 @@ describe("paseo daemon bootstrap", () => {
           },
           accountFailover: { enabled: true, migrateSubagents: true },
           budgetPacing: { enabled: false },
+          leaderCompaction: { enabled: true, dryRun: false, prepareAtTokens: 400_000 },
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
           daemonVitals: { enabled: false },
@@ -442,6 +446,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.budgetPacing",
         "agents.deviceLeases",
         "agents.doneJanitor",
+        "agents.leaderCompaction",
         "agents.refocus",
         "agents.resourceMonitor",
         "agents.tokenBurnMonitor",
@@ -458,6 +463,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
       expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
       expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
+      expect(reloaded.leaderCompaction).toEqual(reloadedPersisted.agents.leaderCompaction);
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
       expect(monitorModes()).toMatchObject({
@@ -465,6 +471,7 @@ describe("paseo daemon bootstrap", () => {
         "device-cap": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
+        "leader-compaction": { enabled: true, dryRun: false },
         "model-divergence": { enabled: false },
         daemonVitals: { enabled: true, dryRun: true },
       });
