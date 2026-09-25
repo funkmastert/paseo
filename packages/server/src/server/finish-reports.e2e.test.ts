@@ -251,6 +251,12 @@ function providerSaw(home: Home, text: string): boolean {
   return home.prompts.some((prompt) => prompt.text.includes(text));
 }
 
+/** Whether restart recovery has told `agentId` about children it could not resume. */
+async function toldAboutUnresumedChildren(home: Home, agentId: string): Promise<boolean> {
+  const prompts = await promptsTo(home, agentId);
+  return prompts.some((text) => text.includes("Restart recovery could not resume these subagents"));
+}
+
 /** How many restart-recovery resume prompts the provider has seen. */
 function recoveryPromptCount(home: Home): number {
   return home.prompts.filter((prompt) => prompt.text.includes("Restart recovery")).length;
@@ -606,6 +612,39 @@ describe("finish reports survive a daemon restart (e2e)", () => {
     await expect
       .poll(() => reportAbout(home, { to: successor, about: child }))
       .toContain(`Agent ${child} (Worker) stopped before reporting.`);
+  }, 60_000);
+
+  test("a parent restart recovery told about a child it could not resume is not told again", async () => {
+    const parent = await createAgent(home, { title: "Leader" });
+    await converse(home, parent, "LEADER-READY");
+    const child = await createAgent(home, {
+      title: "Worker",
+      labels: { [PARENT_AGENT_ID_LABEL]: parent },
+    });
+    for (const agentId of [parent, child]) {
+      await clientOf(home).sendMessage(agentId, `keep working until interrupted ${agentId}`);
+      await expect
+        .poll(() => daemonOf(home).agentManager.getAgent(agentId)?.lifecycle, { timeout: 10_000 })
+        .toBe("running");
+    }
+    watchForParent(home, { child, parent });
+    await expect.poll(() => obligationOnDisk(home, child)).toMatchObject({ state: "pending" });
+
+    // Both were cut off mid-turn. The leader comes back; the child's session is gone.
+    home.refusedSessions.add(await sessionIdOf(home, child));
+    await restart(home, { restartRecovery: { mode: "resume" } });
+    await expect
+      .poll(() => toldAboutUnresumedChildren(home, parent), { timeout: 10_000 })
+      .toBe(true);
+
+    // That notice was the report: the ladder does not send "stopped before reporting" too.
+    await expect
+      .poll(() => obligationInLedger(home, child)?.state, { timeout: 10_000 })
+      .toBe("released");
+    await sweep(home);
+    home.clockMs += PARKED_GRACE_MS;
+    await sweep(home);
+    expect(await reportAbout(home, { to: parent, about: child })).toBeUndefined();
   }, 60_000);
 
   test("a report the parent cannot take keeps its retry count across a restart, then goes to the orchestrator", async () => {

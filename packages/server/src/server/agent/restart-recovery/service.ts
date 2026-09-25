@@ -376,6 +376,15 @@ export class RestartRecoveryService {
           unarchive: false,
           logger: this.options.logger,
         });
+        // The notice is the report: the finish-report ladder must not tell this parent again
+        // that the same children stopped before reporting.
+        const finishReports = this.options.agentManager.getFinishObligations();
+        for (const child of children) {
+          finishReports?.releaseToldByRestartRecovery({
+            childAgentId: child.agentId,
+            ownerAgentId: parentId,
+          });
+        }
       } catch (error) {
         this.options.logger.warn(
           { err: error, parentId },

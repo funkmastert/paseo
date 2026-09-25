@@ -254,6 +254,33 @@ export class FinishObligationService {
   }
 
   /**
+   * Restart recovery told `ownerAgentId` that it could not bring `childAgentId` back
+   * (docs/restart-recovery.md). That notice is the report, so the ladder's "stopped before
+   * reporting" would say the same thing a second time. Releases the child's unresolved
+   * obligations to that owner and returns how many. An owner the notice did not reach, such as
+   * one further down the tree than the parent recovery resumed, still hears from the ladder.
+   */
+  releaseToldByRestartRecovery(input: { childAgentId: string; ownerAgentId: string }): number {
+    let released = 0;
+    // commit() swaps in a new array, so this one is safe to walk while releasing.
+    for (const obligation of this.index.get(input.childAgentId) ?? []) {
+      if (!isUnresolved(obligation) || obligation.ownerAgentId !== input.ownerAgentId) continue;
+      const next = releaseObligation(obligation, {
+        nowMs: this.now(),
+        resolution: "restart recovery told the owner it could not resume the agent",
+      });
+      if (this.commit(input.childAgentId, obligation, next)) released += 1;
+    }
+    if (released > 0) {
+      this.options.logger.info(
+        { childAgentId: input.childAgentId, ownerAgentId: input.ownerAgentId },
+        "Finish report released: restart recovery already told the owner",
+      );
+    }
+    return released;
+  }
+
+  /**
    * An agent resumes work it had already reported as unfinished — account failover moved it to
    * another account and sent it a resume prompt. Its owner was told "errored"; re-arm so the
    * owner also hears when it actually finishes.
