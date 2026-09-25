@@ -5,12 +5,14 @@ import type { Agent } from "@/stores/session-store";
 import {
   buildAccountBudgetRows,
   countAccountUsage,
+  isClaudeFamilyProviderId,
   resolveAccountPool,
   resolveBudgetProviderIds,
+  resolveHostClaudeAccountIds,
   resolveAccountIcon,
   resolveAccountLabel,
   selectBudgetWindows,
-  selectWorstBudgetWindow,
+  selectAccountWorstWindow,
 } from "./account-budget-strip-model";
 
 const getProviderIconMock = vi.hoisted(() => vi.fn(() => () => null));
@@ -124,13 +126,16 @@ describe("buildAccountBudgetRows", () => {
     ]);
   });
 
-  it("drops a requested provider with no usage entry when it is not in the pool", () => {
+  it("keeps every requested account, as an unavailable row when the usage endpoint has no entry for it", () => {
     const rows = buildAccountBudgetRows(
       [usage({ providerId: "claude" })],
-      ["claude", "opencode"],
+      ["claude", "claude-personal"],
       [],
     );
-    expect(rows.map((row) => row.providerId)).toEqual(["claude"]);
+    expect(rows.map((row) => [row.providerId, row.kind, row.role])).toEqual([
+      ["claude", "available", null],
+      ["claude-personal", "unavailable", null],
+    ]);
   });
 
   it("keeps a pool member the usage endpoint has no entry for, as an unavailable row", () => {
@@ -174,20 +179,13 @@ describe("buildAccountBudgetRows", () => {
   });
 });
 
-describe("selectWorstBudgetWindow", () => {
-  const rowsFor = (...usages: ProviderUsage[]) =>
-    buildAccountBudgetRows(
-      usages,
-      usages.map((u) => u.providerId),
-      undefined,
-    );
+describe("selectAccountWorstWindow", () => {
+  const rowFor = (u: ProviderUsage) => buildAccountBudgetRows([u], [u.providerId], undefined)[0];
 
-  it("picks the fullest window across every account, not the fullest account's first", () => {
-    const worst = selectWorstBudgetWindow(
-      rowsFor(
-        usage({ providerId: "a", windows: [{ id: "five_hour", label: "Session", usedPct: 40 }] }),
+  it("picks the account's fullest window", () => {
+    const worst = selectAccountWorstWindow(
+      rowFor(
         usage({
-          providerId: "b",
           windows: [
             { id: "five_hour", label: "Session", usedPct: 4 },
             { id: "weekly", label: "Weekly", usedPct: 85 },
@@ -195,28 +193,22 @@ describe("selectWorstBudgetWindow", () => {
         }),
       ),
     );
-    expect(worst).toMatchObject({
-      usedPct: 85,
-      window: { id: "weekly" },
-      row: { providerId: "b" },
-    });
+    expect(worst).toMatchObject({ usedPct: 85, window: { id: "weekly" } });
   });
 
   it("reads remaining as used when a window has no used figure", () => {
-    const worst = selectWorstBudgetWindow(
-      rowsFor(usage({ windows: [{ id: "weekly", label: "Weekly", remainingPct: 10 }] })),
+    const worst = selectAccountWorstWindow(
+      rowFor(usage({ windows: [{ id: "weekly", label: "Weekly", remainingPct: 10 }] })),
     );
     expect(worst?.usedPct).toBe(90);
   });
 
-  it("skips unavailable accounts and windows with no reading", () => {
+  it("is null for an unavailable account or a window with no reading", () => {
     expect(
-      selectWorstBudgetWindow(
-        rowsFor(
-          usage({ providerId: "a", status: "unavailable", windows: [] }),
-          usage({ providerId: "b", windows: [{ id: "weekly", label: "Weekly" }] }),
-        ),
-      ),
+      selectAccountWorstWindow(rowFor(usage({ status: "unavailable", windows: [] }))),
+    ).toBeNull();
+    expect(
+      selectAccountWorstWindow(rowFor(usage({ windows: [{ id: "weekly", label: "Weekly" }] }))),
     ).toBeNull();
   });
 });
@@ -257,18 +249,74 @@ describe("resolveAccountPool", () => {
   });
 });
 
+describe("isClaudeFamilyProviderId", () => {
+  it("matches claude and any claude-* account, case-insensitively, and nothing else", () => {
+    expect(isClaudeFamilyProviderId("claude")).toBe(true);
+    expect(isClaudeFamilyProviderId("Claude-Personal")).toBe(true);
+    expect(isClaudeFamilyProviderId("codex")).toBe(false);
+    expect(isClaudeFamilyProviderId("claudette")).toBe(false);
+  });
+});
+
+describe("resolveHostClaudeAccountIds", () => {
+  const entry = (provider: string, enabled = true): ProviderSnapshotEntry => ({
+    provider,
+    status: "ready",
+    enabled,
+  });
+
+  it("lists the Claude-family accounts the usage payload reports, claude first", () => {
+    expect(
+      resolveHostClaudeAccountIds(
+        [
+          usage({ providerId: "codex" }),
+          usage({ providerId: "claude-personal" }),
+          usage({ providerId: "claude" }),
+          usage({ providerId: "claude-backup" }),
+        ],
+        undefined,
+      ),
+    ).toEqual(["claude", "claude-backup", "claude-personal"]);
+  });
+
+  it("adds accounts only the providers snapshot knows, skipping disabled ones and duplicates", () => {
+    expect(
+      resolveHostClaudeAccountIds(
+        [usage({ providerId: "claude" })],
+        [entry("claude"), entry("Claude-Personal"), entry("claude-old", false), entry("codex")],
+      ),
+    ).toEqual(["claude", "Claude-Personal"]);
+  });
+
+  it("falls back to every usage provider on a host with no Claude account", () => {
+    expect(
+      resolveHostClaudeAccountIds(
+        [usage({ providerId: "codex" }), usage({ providerId: "opencode" })],
+        undefined,
+      ),
+    ).toEqual(["codex", "opencode"]);
+  });
+
+  it("is empty before the host has reported anything", () => {
+    expect(resolveHostClaudeAccountIds([], undefined)).toEqual([]);
+  });
+});
+
 describe("resolveBudgetProviderIds", () => {
-  it("lists every pool account whether or not an agent is on it, then the tree's other providers", () => {
-    expect(resolveBudgetProviderIds(POOL, ["codex", "claude"])).toEqual([
+  it("lists every pool account, whether or not an agent is on it", () => {
+    expect(resolveBudgetProviderIds(POOL, ["claude", "claude-other"])).toEqual([
       "claude",
       "claude-personal",
       "claude-backup",
-      "codex",
     ]);
   });
 
-  it("falls back to the tree's providers when the host has no pool", () => {
-    expect(resolveBudgetProviderIds([], ["claude", "codex"])).toEqual(["claude", "codex"]);
+  it("lists the host's Claude accounts when the config is unavailable, never the tree's", () => {
+    expect(resolveBudgetProviderIds([], ["claude", "claude-personal", "claude-backup"])).toEqual([
+      "claude",
+      "claude-personal",
+      "claude-backup",
+    ]);
   });
 });
 
@@ -306,5 +354,33 @@ describe("countAccountUsage", () => {
       row("claude-backup", "error", 1),
     ]);
     expect(counts.size).toBe(0);
+  });
+});
+
+describe("countAccountUsage for one tab", () => {
+  const row = (provider: string, status: Agent["status"], depth: number) =>
+    ({ agent: { provider, status } as Agent, depth }) as const;
+
+  it("counts an idle leader with nothing running below it when the tab is one leader's tree", () => {
+    const counts = countAccountUsage([row("claude", "idle", 0), row("claude-backup", "idle", 1)], {
+      includeIdleLeaders: true,
+    });
+    expect(counts.get("claude")).toEqual({ leaders: 1, workers: 0 });
+    expect(counts.has("claude-backup")).toBe(false);
+  });
+
+  it("splits one leader's workers across accounts", () => {
+    const counts = countAccountUsage(
+      [
+        row("claude", "running", 0),
+        row("claude-personal", "running", 1),
+        row("claude-personal", "running", 1),
+        row("claude-backup", "running", 2),
+      ],
+      { includeIdleLeaders: true },
+    );
+    expect(counts.get("claude")).toEqual({ leaders: 1, workers: 0 });
+    expect(counts.get("claude-personal")).toEqual({ leaders: 0, workers: 2 });
+    expect(counts.get("claude-backup")).toEqual({ leaders: 0, workers: 1 });
   });
 });

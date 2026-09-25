@@ -82,28 +82,36 @@ frozen at the last update is the freshness problem below in a new costume.
 
 ## Budget strip
 
-One entry per account in the daemon's account pool, not per provider that has agents in the tree.
-A strip built from the tree drops the account nobody is using right now, which is the one whose
-headroom decides where the next agent goes.
+Every account, in every tab and at every width. The list never comes from the tree: a strip built
+from the tree shows one or two accounts in a tab that happens to use one or two, and drops the
+account nobody is using right now, which is the one whose headroom decides where the next agent
+goes.
 
-The pool is `providers.<id>.params.accountPool` (`{ role, priority }`) in the daemon config the app
-already holds through `useDaemonConfig`, so it needs no wire field and follows a config change on the
-`daemon_config_changed` push. The leader is the leader, the lowest-priority worker is the primary,
-and every worker after it is a backup. The role badge comes from that config and never from the
-account's label. A host with no pool shows the tree's providers only, as it did before.
+The account list has two sources, in order:
 
-- **A pool member always gets a row.** One the usage endpoint has no reading for renders as
-  unavailable rather than disappearing. Providers outside the pool still show only while they have
-  agents in the tree.
-- **Each row says how many leaders and workers are on the account.** A worker counts while it is
-  running or initializing. A leader counts when it is alive itself or has a live agent below it: it
-  sits idle between turns while its workers run, and an account reading "Not in use" during exactly
-  the work it is orchestrating is wrong. The count is fleet-wide, so a tab scoped to one tree still
-  shows what the whole host is drawing. The row keeps its line when the count is zero ("Not in
-  use") so a first agent arriving does not move the bars.
-- **On a phone the strip collapses to one summary.** It names the fullest window across every
-  account with its role, a meter, the reset, which accounts have agents on them, and the read time.
-  Six full-width bars took most of a screen before the first agent row. A tap opens the rows.
+1. **The pool**, `providers.<id>.params.accountPool` (`{ role, priority }`) in the daemon config the
+   app already holds through `useDaemonConfig`. It needs no wire field and follows a config change
+   on the `daemon_config_changed` push. The leader is the leader, the lowest-priority worker is the
+   primary, and every worker after it is a backup. The role badge comes from that config and never
+   from the account's label.
+2. **What the host reports**, when the config is not available to this client (still loading, not
+   permitted over the relay, an older host): every `claude` / `claude-*` account in the usage payload
+   and the providers snapshot, `claude` first, with no role badge. A host with no Claude account
+   lists whatever its usage payload reports.
+
+- **An account always gets a row.** One the usage endpoint has no reading for, or a usage read that
+  failed, renders as unavailable rather than disappearing.
+- **The role and where the agents are now are different things.** The outlined badge beside the
+  label is what the account is for (leader, primary worker, backup). The dotted chips under it are
+  where this tab's agents are: "Leader here" when the tab's leader is on the account, and a worker
+  count that is always there so a zero reads as a zero and the rows line up.
+- **The counts are this tab's tree**, not the host's. A worker counts while it is running or
+  initializing. A leader counts when it is alive itself or has a live agent below it: it sits idle
+  between turns while its workers run. A tab scoped to one leader counts that leader even when
+  nothing is running, because it is the tab's own.
+- **A phone gets one compact row per account**, not a fold that shows one of them: label, role, the
+  fullest window's percentage, a meter, and the reset time only when the account is near a cap. A
+  wide panel shows both windows as bars.
 
 ## Freshness
 
@@ -184,12 +192,14 @@ closed, modelled on a measured one — in a real browser and writes screenshots 
 | `orchestration-panel-scoped.png`       | one tree, from a tab opened in a session          |
 | `orchestration-panel-scoped-older.png` | the same tab with its older agents shown          |
 | `orchestration-panel-compact.png`      | the phone row: title, then badges, activity, time |
+| `orchestration-account-strip-*.png`    | the budget strip, three accounts, phone and wide  |
 
 Run it before and after a presentation change; the panel's problems only appear at that size, and
 no daemon is reliably in that shape when you want to look at it.
 
 ```bash
 npx vitest run --project browser src/orchestration/orchestration-row.browser.test.tsx
+npx vitest run --project browser src/orchestration/account-budget-strip.browser.test.tsx
 ```
 
 The unistyles stub has no runtime, so the real form-factor hook never reports compact there. The phone
@@ -198,12 +208,13 @@ nothing.
 
 The rows and `orchestration-header-controls.tsx` are captured rather than the whole panel:
 importing the panel pulls `navigateToAgent` and therefore expo-router, which does not bundle for
-the browser project, and the budget strip needs a live host. Keep those two modules free of runtime
-imports that reach the app graph, or the capture stops working. A new lucide icon also needs adding
+the browser project, and the budget strip's poll needs a live host. The strip is captured through
+`account-budget-strip-view.tsx`, which takes rows instead of hooks. Keep those three modules free of
+runtime imports that reach the app graph, or the capture stops working. A new lucide icon also needs adding
 to `packages/app/test-stubs/lucide-react-native.ts`. Do not build JSX at module scope in either: the
 classic runtime reads `React` off the global, which the test stubs only once a test is running, after
 the import.
 
-A fixture cannot show the budget strip or real activity text. To see those, point a dev web build at
+A fixture cannot show real budget readings or real activity text. To see those, point a dev web build at
 the live daemon through a bridge that forwards only read-type frames, and keep the captures out of
 `docs/assets`: they carry agent titles and account emails.

@@ -4,7 +4,6 @@ import { useSessionStore, type Agent } from "@/stores/session-store";
 import {
   buildOrchestrationRowOpenTarget,
   collectFinishedAgentsAcrossRoots,
-  collectOrchestrationProviderIds,
   findOrchestrationNode,
   flattenOrchestrationTree,
   groupAgentsByParent,
@@ -99,19 +98,6 @@ describe("flattenOrchestrationTree", () => {
       ["root-a-child", 1],
       ["root-b", 0],
     ]);
-  });
-});
-
-describe("collectOrchestrationProviderIds", () => {
-  it("returns unique providers across every root's subtree in first-seen order", () => {
-    setAgents([
-      makeAgent({ id: "root-a", provider: "claude" }),
-      makeAgent({ id: "child-a", parentAgentId: "root-a", provider: "codex" }),
-      makeAgent({ id: "root-b", provider: "codex" }),
-      makeAgent({ id: "child-b", parentAgentId: "root-b", provider: "claude" }),
-    ]);
-
-    expect(collectOrchestrationProviderIds(buildTree())).toEqual(["claude", "codex"]);
   });
 });
 

@@ -35,21 +35,6 @@ export function flattenOrchestrationTree(
   return rows;
 }
 
-/** Distinct providers across every root's subtree, first-seen order — the budget strip's input. */
-export function collectOrchestrationProviderIds(roots: readonly OrchestrationTreeNode[]): string[] {
-  const seen = new Set<string>();
-  const ids: string[] = [];
-  const visit = (node: OrchestrationTreeNode) => {
-    if (!seen.has(node.agent.provider)) {
-      seen.add(node.agent.provider);
-      ids.push(node.agent.provider);
-    }
-    for (const child of node.children) visit(child);
-  };
-  for (const root of roots) visit(root);
-  return ids;
-}
-
 /** Whether the tab affordance (panel tab, track-bar pill) should show its attention mark. */
 export function resolveOrchestrationTreeAttention(
   roots: readonly OrchestrationTreeNode[],

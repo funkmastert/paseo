@@ -28,7 +28,6 @@ import {
 import { countAccountUsage } from "@/orchestration/account-budget-strip-model";
 import {
   collectFinishedAgentsAcrossRoots,
-  collectOrchestrationProviderIds,
   flattenOrchestrationTree,
   resolveOrchestrationRowOpenAction,
   resolveOrchestrationTreeAttention,
@@ -175,12 +174,11 @@ function OrchestrationPanel(): ReactElement {
     showOlder: isShowingOlder,
     alwaysKeepAgentId: target.scopeAgentId ?? null,
   });
-  const providerIds = useMemo(() => collectOrchestrationProviderIds(roots), [roots]);
-  // Account usage is fleet-wide, so it counts the whole host's tree even when this tab is scoped
-  // to one leader's.
+  // The strip's indicator is about this tab: its own tree, so a tab scoped to one leader counts
+  // that leader (idle or not) and only the workers under it, not the whole host's.
   const accountUsage = useMemo(
-    () => countAccountUsage(flattenOrchestrationTree(allRoots)),
-    [allRoots],
+    () => countAccountUsage(allRows, { includeIdleLeaders: scope.kind !== "all" }),
+    [allRows, scope.kind],
   );
 
   // Collection rows never independently subscribe to token-rate data — the list owner derives
@@ -284,7 +282,6 @@ function OrchestrationPanel(): ReactElement {
         <OrchestrationStaleNotice serverId={serverId} />
         <AccountBudgetStrip
           serverId={serverId}
-          providerIds={providerIds}
           usage={accountUsage}
           refetchIntervalMs={DEFAULT_REFETCH_INTERVAL_MS}
         />

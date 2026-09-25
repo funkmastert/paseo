@@ -93,22 +93,52 @@ export function resolveAccountPool(
   ];
 }
 
+/** `claude` and every `claude-*` account a host configures; the accounts a pool is made of. */
+export function isClaudeFamilyProviderId(providerId: string): boolean {
+  const id = providerId.toLowerCase();
+  return id === "claude" || id.startsWith("claude-");
+}
+
 /**
- * The strip's accounts: every pool member — an account nobody is using right now is exactly the
- * one whose headroom matters — then any other provider that has agents in the tree.
+ * Every account the host reports when the daemon config is not available to this client (still
+ * loading, not permitted over the relay, an older host): the Claude-family ids in the usage
+ * payload and the providers snapshot, `claude` first. A host with no Claude account at all lists
+ * whatever its usage payload reports, so the strip is not blank there. This never reads the tab's
+ * tree: which accounts exist is a fact about the host, not about which of them this tab is using.
+ */
+export function resolveHostClaudeAccountIds(
+  usageProviders: readonly Pick<ProviderUsage, "providerId">[],
+  entries: readonly Pick<ProviderSnapshotEntry, "provider" | "enabled">[] | undefined,
+): string[] {
+  const claude = new Map<string, string>();
+  const add = (providerId: string) => {
+    if (isClaudeFamilyProviderId(providerId) && !claude.has(providerId.toLowerCase())) {
+      claude.set(providerId.toLowerCase(), providerId);
+    }
+  };
+  for (const provider of usageProviders) add(provider.providerId);
+  for (const entry of entries ?? []) {
+    if (entry.enabled !== false) add(entry.provider);
+  }
+  if (claude.size === 0) return usageProviders.map((provider) => provider.providerId);
+  return [...claude.values()].sort((a, b) => {
+    if (a.toLowerCase() === "claude") return -1;
+    if (b.toLowerCase() === "claude") return 1;
+    return a.localeCompare(b);
+  });
+}
+
+/**
+ * The strip's accounts: every pool member when the config declares a pool — an account nobody is
+ * using right now is exactly the one whose headroom matters — otherwise every account the host
+ * reports. Never the tab's tree, which would show one or two accounts in a tab that happens to use
+ * one or two.
  */
 export function resolveBudgetProviderIds(
   pool: readonly AccountPoolMember[],
-  treeProviderIds: readonly string[],
+  hostAccountIds: readonly string[],
 ): string[] {
-  const ids = pool.map((member) => member.providerId);
-  const seen = new Set(ids.map((id) => id.toLowerCase()));
-  for (const id of treeProviderIds) {
-    if (seen.has(id.toLowerCase())) continue;
-    seen.add(id.toLowerCase());
-    ids.push(id);
-  }
-  return ids;
+  return pool.length > 0 ? pool.map((member) => member.providerId) : [...hostAccountIds];
 }
 
 /**
@@ -117,10 +147,13 @@ export function resolveBudgetProviderIds(
  * the idle majority of a real fleet would make every account look busy. A leader is idle between
  * turns while its workers run, and it is still the session those workers report to, so it counts
  * when it is alive itself or has any live agent below it. `rows` is the depth-first flatten, so a
- * root's subtree is the rows that follow it until the next root.
+ * root's subtree is the rows that follow it until the next root. A tab that is one leader's tree
+ * passes `includeIdleLeaders`: that leader is the tab's own, so it is on its account whether or
+ * not anything is running.
  */
 export function countAccountUsage(
   rows: readonly Pick<OrchestrationFlatRow, "agent" | "depth">[],
+  { includeIdleLeaders = false }: { includeIdleLeaders?: boolean } = {},
 ): Map<string, AccountUsageCount> {
   const counts = new Map<string, AccountUsageCount>();
   const bump = (provider: string, field: keyof AccountUsageCount) => {
@@ -130,7 +163,7 @@ export function countAccountUsage(
   };
   let leader: { provider: string; engaged: boolean } | null = null;
   const closeLeader = () => {
-    if (leader?.engaged) bump(leader.provider, "leaders");
+    if (leader && (leader.engaged || includeIdleLeaders)) bump(leader.provider, "leaders");
   };
   for (const { agent, depth } of rows) {
     const alive = agent.status === "running" || agent.status === "initializing";
@@ -185,9 +218,8 @@ export function buildAccountBudgetRows(
     const key = providerId.toLowerCase();
     const usage = providers.find((candidate) => candidate.providerId.toLowerCase() === key);
     const role = poolRoles.get(key) ?? null;
-    // A pool member the usage endpoint has no entry for still gets a row: dropping it would make
+    // An account the usage endpoint has no entry for still gets a row: dropping it would make
     // the account vanish from the strip in exactly the case a reader is counting on it.
-    if (!usage && role === null) continue;
     const resolvedId = usage?.providerId ?? providerId;
     const base = {
       providerId: resolvedId,
@@ -207,28 +239,22 @@ export function buildAccountBudgetRows(
 }
 
 export interface WorstBudgetWindow {
-  row: Extract<AccountBudgetRowViewModel, { kind: "available" }>;
   window: ProviderUsageWindow;
   usedPct: number;
 }
 
 /**
- * The one window a collapsed strip has room for: the fullest across every account. It is the
- * number that decides whether to hand more work to that account, so it is the one to show when
- * there is space for a single line. Ties keep account order; a window with no reading cannot be
- * the worst.
+ * The one window a one-line account has room for: its fullest. It is the number that decides
+ * whether to hand more work to that account. Ties keep window order; a window with no reading
+ * cannot be the worst.
  */
-export function selectWorstBudgetWindow(
-  rows: AccountBudgetRowViewModel[],
-): WorstBudgetWindow | null {
+export function selectAccountWorstWindow(row: AccountBudgetRowViewModel): WorstBudgetWindow | null {
+  if (row.kind !== "available") return null;
   let worst: WorstBudgetWindow | null = null;
-  for (const row of rows) {
-    if (row.kind !== "available") continue;
-    for (const window of row.windows) {
-      const usedPct = resolveUsedPct(window);
-      if (usedPct == null) continue;
-      if (worst === null || usedPct > worst.usedPct) worst = { row, window, usedPct };
-    }
+  for (const window of row.windows) {
+    const usedPct = resolveUsedPct(window);
+    if (usedPct == null) continue;
+    if (worst === null || usedPct > worst.usedPct) worst = { window, usedPct };
   }
   return worst;
 }
