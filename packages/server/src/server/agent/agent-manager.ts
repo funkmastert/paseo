@@ -4291,6 +4291,8 @@ export class AgentManager {
     agentId: string,
     prompt: AgentPromptInput,
     options?: AgentSteerOptions,
+    /** The re-send of a turn held across a restart, which must not wait on itself. */
+    dispatch?: { resendsHeldTurn?: boolean },
   ): Promise<ActiveTurnSteerDispatchResult> {
     // A child waiting for an admission slot has no turn to join yet. The prompt joins the held one
     // and keeps its place in line, on disk with it (docs/resource-monitor.md), so the turn starts
@@ -4298,6 +4300,14 @@ export class AgentManager {
     const { clearPendingPermissions: _clearPendingPermissions, ...runOptions } = options ?? {};
     if (this.childAdmission?.mergeHeld(agentId, prompt, options ? runOptions : undefined)) {
       return { status: "steered" };
+    }
+    // Its turn held across a restart is being re-sent right now: wait until it is in line or
+    // running, so this message joins or follows it instead of starting ahead of it.
+    const restoring = dispatch?.resendsHeldTurn
+      ? null
+      : this.childAdmission?.restoreInFlight(agentId);
+    if (restoring) {
+      return { status: "busy", nextOpportunity: restoring };
     }
     const agent = this.requireSessionAgent(agentId);
     // A turn that ends or changes mid-admission is not a reason to fail the message: the next

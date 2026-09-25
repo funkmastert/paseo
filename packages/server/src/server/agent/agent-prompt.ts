@@ -125,13 +125,16 @@ async function steerOrWaitForActiveRun(
     return null;
   }
   const queue = promptQueueFor(agentManager, logger);
+  // Only a held turn re-sent after a restart carries admission's queuedAt. It is older than any
+  // message waiting here (those wait for it), so it goes ahead of them.
+  const resendsHeldTurn = Boolean(options.queuedAt);
   // Anything already waiting goes first; a later message must not overtake it.
-  if (!queue.hasWaiting(agentId)) {
-    const result = await agentManager.steerIntoActiveTurn(
-      agentId,
-      prompt,
-      steerOptionsFor(options),
-    );
+  if (resendsHeldTurn || !queue.hasWaiting(agentId)) {
+    const result = resendsHeldTurn
+      ? await agentManager.steerIntoActiveTurn(agentId, prompt, steerOptionsFor(options), {
+          resendsHeldTurn,
+        })
+      : await agentManager.steerIntoActiveTurn(agentId, prompt, steerOptionsFor(options));
     if (result.status === "steered") {
       return { disposition: "steered" };
     }
@@ -139,7 +142,7 @@ async function steerOrWaitForActiveRun(
     if (
       result.status === "inactive" &&
       !agentManager.hasInFlightRun(agentId) &&
-      !queue.hasWaiting(agentId)
+      (resendsHeldTurn || !queue.hasWaiting(agentId))
     ) {
       return {
         disposition: "turn_started",

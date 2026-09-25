@@ -157,6 +157,13 @@ export class ChildAdmissionController {
   private readonly holds = new Map<string, string>();
   /** Held turns read at boot and not yet re-dispatched; kept in the file until they are. */
   private readonly restoring = new Map<string, HeldTurn>();
+  /** Turns kept for the next start because their session is gone; this run never re-sends them. */
+  private readonly retainedForNextStart = new Set<string>();
+  /** Restoring turns whose re-send is under way, each with what waits for it to land. */
+  private readonly redispatching = new Map<
+    string,
+    { settled: Promise<void>; settle: () => void }
+  >();
   private persistTail: Promise<void> = Promise.resolve();
   private persistenceFrozen = false;
   private readonly logger: Logger;
@@ -235,20 +242,34 @@ export class ChildAdmissionController {
   }
 
   /**
-   * A second prompt to a queued child joins the held one and keeps its place in line. Returns
-   * false when the agent is not queued.
+   * A second prompt to a queued child joins the held one and keeps its place in line. So does one
+   * to a child whose turn was held across a restart and has not been re-sent yet: it joins that
+   * turn, which keeps its original `queuedAt`, on disk. Returns false when there is neither.
    */
   mergeHeld(agentId: string, prompt: AgentPromptInput, runOptions?: AgentRunOptions): boolean {
-    const entry = this.queue.find((candidate) => candidate.agentId === agentId);
+    const entry =
+      this.queue.find((candidate) => candidate.agentId === agentId) ??
+      (this.redispatching.has(agentId) || this.retainedForNextStart.has(agentId)
+        ? undefined
+        : this.restoring.get(agentId));
     if (!entry) return false;
     entry.prompt = mergeHeldPrompts(entry.prompt, prompt);
     if (runOptions) entry.runOptions = { ...entry.runOptions, ...runOptions };
     this.logger.info(
-      { agentId, queueLength: this.queue.length },
-      "Queued child turn merged a second prompt",
+      { agentId, queueLength: this.queue.length, restoring: this.restoring.has(agentId) },
+      "Held child turn merged a second prompt",
     );
     this.persist();
     return true;
+  }
+
+  /**
+   * Resolves once the re-send of this child's restored turn has landed (in line, started, or let
+   * go). Null when no re-send is under way. A message that arrives in between waits for it, so it
+   * goes after the older prompt instead of racing it.
+   */
+  restoreInFlight(agentId: string): Promise<void> | null {
+    return this.redispatching.get(agentId)?.settled ?? null;
   }
 
   /** Drops a queued child. Returns false when it was not queued. */
@@ -331,7 +352,27 @@ export class ChildAdmissionController {
    * restart in the middle of a paced restore loses none of them.
    */
   adoptRestored(held: readonly HeldTurn[]): void {
-    for (const turn of held) this.restoring.set(turn.agentId, turn);
+    // Never over an entry already adopted: a message may have merged into it since.
+    for (const turn of held) {
+      if (!this.restoring.has(turn.agentId)) this.restoring.set(turn.agentId, turn);
+    }
+  }
+
+  /**
+   * The restored turn as it stands now, with any prompt merged into it since boot, marked as being
+   * re-sent. Null when it is no longer restoring.
+   */
+  beginRedispatch(agentId: string): HeldTurn | null {
+    const turn = this.restoring.get(agentId);
+    if (!turn) return null;
+    if (!this.redispatching.has(agentId)) {
+      let settle = () => {};
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve;
+      });
+      this.redispatching.set(agentId, { settled, settle });
+    }
+    return turn;
   }
 
   /**
@@ -339,12 +380,17 @@ export class ChildAdmissionController {
    * so the next start re-sends it like one held across a restart.
    */
   retainForRestart(turn: HeldTurn): void {
+    this.retainedForNextStart.add(turn.agentId);
     this.restoring.set(turn.agentId, turn);
     this.persist();
   }
 
   markRestored(agentId: string): void {
+    const redispatch = this.redispatching.get(agentId);
+    this.redispatching.delete(agentId);
+    this.retainedForNextStart.delete(agentId);
     if (this.restoring.delete(agentId)) this.persist();
+    redispatch?.settle();
   }
 
   /**
@@ -449,7 +495,10 @@ export async function restoreHeldTurns(input: RestoreHeldTurnsInput): Promise<vo
   await Promise.all(
     ordered.map((turn) =>
       pacer
-        .run({ agentId: turn.agentId, root: false, source: "restart" }, () => input.dispatch(turn))
+        .run({ agentId: turn.agentId, root: false, source: "restart" }, () =>
+          // Whatever was merged into the turn while it waited goes with it.
+          input.dispatch(controller.beginRedispatch(turn.agentId) ?? turn),
+        )
         .catch((error: unknown) => {
           logger.warn(
             { err: error, agentId: turn.agentId },

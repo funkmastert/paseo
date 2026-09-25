@@ -10,7 +10,13 @@ import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { AgentManager } from "./agent-manager.js";
 import { startAgentRun } from "./agent-prompt.js";
 import { toAgentPayload } from "./agent-projections.js";
-import { ChildAdmissionController, type ChildAdmissionConfig } from "./child-admission.js";
+import {
+  ChildAdmissionController,
+  restoreHeldTurns,
+  type ChildAdmissionConfig,
+  type HeldTurn,
+} from "./child-admission.js";
+import { ResumePacer } from "./resume-pacer.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 import type {
   AgentClient,
@@ -158,6 +164,11 @@ class HeldTurnClient implements AgentClient {
 
 const logger = createTestLogger();
 const flush = () => new Promise((resolve) => setTimeout(resolve, 5));
+
+/** The agents with a held turn, in line order. */
+function heldOrder(controller: ChildAdmissionController): string[] {
+  return controller.heldTurns().map((turn) => turn.agentId);
+}
 
 describe("AgentManager child admission", () => {
   let workdir: string;
@@ -379,6 +390,102 @@ describe("AgentManager child admission", () => {
     await flush();
     expect(restored.session.startedPrompts).toEqual(["held before the restart"]);
     expect(later.session.startedPrompts).toEqual([]);
+  });
+
+  describe("a message racing a turn held across a restart", () => {
+    const heldAt = "2026-09-24T10:00:00.000Z";
+    const unpaced = () =>
+      new ResumePacer({ readSettings: () => ({ enabled: false, perMinute: 4 }), logger });
+    const redispatch = async (turn: HeldTurn) => {
+      await startAgentRun(manager, turn.agentId, turn.prompt, logger, {
+        replaceRunning: true,
+        activeTurnBehavior: "steer",
+        queuedAt: turn.queuedAt,
+        ...(turn.runOptions ? { runOptions: turn.runOptions } : {}),
+      });
+    };
+
+    async function setUp() {
+      const root = await create(null);
+      const running = await create(root.id);
+      const later = await create(root.id);
+      const restored = await create(root.id);
+      await prompt(running.id, "task");
+      await prompt(later.id, "queued after the restart");
+      await flush();
+      const held: HeldTurn[] = [
+        {
+          agentId: restored.id,
+          parentAgentId: root.id,
+          prompt: "held before the restart",
+          queuedAt: heldAt,
+        },
+      ];
+      admission.adoptRestored(held);
+      return { running, later, restored, held };
+    }
+
+    test("before its re-send, the message joins the held turn, which keeps its old place", async () => {
+      const { running, later, restored, held } = await setUp();
+
+      const result = await startAgentRun(manager, restored.id, "sent after the restart", logger, {
+        replaceRunning: true,
+        activeTurnBehavior: "steer",
+      });
+      expect(result.disposition).toBe("steered");
+      await restoreHeldTurns({
+        controller: admission,
+        pacer: unpaced(),
+        held,
+        logger,
+        dispatch: redispatch,
+      });
+      await flush();
+      expect(heldOrder(admission)).toEqual([restored.id, later.id]);
+
+      running.session.finishTurn();
+      await flush();
+      expect(restored.session.startedPrompts).toEqual([
+        "held before the restart\n\nsent after the restart",
+      ]);
+      expect(later.session.startedPrompts).toEqual([]);
+    });
+
+    test("during its re-send, the message waits for it and then joins it", async () => {
+      const { running, later, restored, held } = await setUp();
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const restoring = restoreHeldTurns({
+        controller: admission,
+        pacer: unpaced(),
+        held,
+        logger,
+        dispatch: async (turn) => {
+          await gate;
+          await redispatch(turn);
+        },
+      });
+      await flush();
+
+      const result = await startAgentRun(manager, restored.id, "sent after the restart", logger, {
+        replaceRunning: true,
+        activeTurnBehavior: "steer",
+      });
+      expect(result.disposition).toBe("queued");
+      release();
+      await restoring;
+      await flush();
+      expect(heldOrder(admission)).toEqual([restored.id, later.id]);
+
+      running.session.finishTurn();
+      await flush();
+      expect(restored.session.startedPrompts).toEqual([
+        "held before the restart\n\nsent after the restart",
+      ]);
+      expect(later.session.startedPrompts).toEqual([]);
+    });
   });
 
   test("cancelling a queued child drops it and settles it as cancelled, without a turn", async () => {
