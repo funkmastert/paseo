@@ -42,6 +42,19 @@ const SandboxFilesystemSchema = z
   })
   .strict();
 
+/**
+ * `agents.providers.claude.params`: Paseo-owned knobs for the built-in Claude provider, read once
+ * per client. The object stays open because other owners keep their own keys in the same slot
+ * (the account-pool plugin's `accountPool`). docs/custom-providers.md "Claude `params`".
+ */
+export const ClaudeProviderParamsSchema = z.object({
+  // Default on. Moves cwd, platform, shell and git status out of the system prompt and into
+  // the first user message, so sessions in different worktrees share one cached prefix.
+  excludeDynamicSections: z.boolean().default(true),
+});
+
+export type ClaudeProviderParams = z.infer<typeof ClaudeProviderParamsSchema>;
+
 // Claude Agent SDK Options, maintained against @anthropic-ai/claude-agent-sdk 0.3.246.
 export const ClaudeProviderOptionsSchema = z
   .object({

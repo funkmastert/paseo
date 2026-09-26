@@ -74,7 +74,9 @@ import { appendOrReplaceGrowingAssistantMessage, runProviderTurn } from "../prov
 import {
   applyClaudeToolPolicy,
   ClaudeProviderOptionsSchema,
+  ClaudeProviderParamsSchema,
   type ClaudeProviderOptions,
+  type ClaudeProviderParams,
 } from "./options.js";
 import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
@@ -421,6 +423,8 @@ interface ClaudeAgentClientOptions {
   defaults?: { agents?: Record<string, AgentDefinition> };
   logger: Logger;
   runtimeSettings?: ProviderRuntimeSettings;
+  /** `agents.providers.claude.params`, parsed by `resolveClaudeProviderParams`. */
+  providerParams?: unknown;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary?: () => Promise<string>;
   resolveVersion?: (signal?: AbortSignal) => Promise<string>;
@@ -428,9 +432,23 @@ interface ClaudeAgentClientOptions {
   deviceLaunchGate?: DeviceLaunchGate;
 }
 
+function resolveClaudeProviderParams(raw: unknown, logger: Logger): ClaudeProviderParams {
+  const parsed = ClaudeProviderParamsSchema.safeParse(raw ?? {});
+  if (parsed.success) {
+    return parsed.data;
+  }
+  // A bad value must not stop every Claude launch; run on the defaults and say so.
+  logger.warn(
+    { issues: parsed.error.issues },
+    "Invalid agents.providers.claude.params; using defaults",
+  );
+  return ClaudeProviderParamsSchema.parse({});
+}
+
 interface ClaudeAgentSessionOptions {
   defaults?: { agents?: Record<string, AgentDefinition> };
   runtimeSettings?: ProviderRuntimeSettings;
+  providerParams: ClaudeProviderParams;
   handle?: AgentPersistenceHandle;
   agentId?: string;
   launchEnv?: Record<string, string>;
@@ -1534,6 +1552,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly logger: Logger;
   private readonly runtimeSettings?: ProviderRuntimeSettings;
+  private readonly providerParams: ClaudeProviderParams;
   private readonly queryFactory?: ClaudeQueryFactory;
   private readonly resolveBinary: () => Promise<string>;
   private readonly resolveVersion: (signal?: AbortSignal) => Promise<string>;
@@ -1544,6 +1563,7 @@ export class ClaudeAgentClient implements AgentClient {
     this.defaults = options.defaults;
     this.logger = options.logger.child({ module: "agent", provider: "claude" });
     this.runtimeSettings = options.runtimeSettings;
+    this.providerParams = resolveClaudeProviderParams(options.providerParams, this.logger);
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary ?? (() => resolveClaudeBinary(this.runtimeSettings));
     this.resolveVersion =
@@ -1593,6 +1613,7 @@ export class ClaudeAgentClient implements AgentClient {
     return new ClaudeAgentSession(claudeConfig, {
       defaults: this.defaults,
       runtimeSettings: this.runtimeSettings,
+      providerParams: this.providerParams,
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
       persistSession: options?.persistSession,
@@ -1622,6 +1643,7 @@ export class ClaudeAgentClient implements AgentClient {
     return new ClaudeAgentSession(claudeConfig, {
       defaults: this.defaults,
       runtimeSettings: this.runtimeSettings,
+      providerParams: this.providerParams,
       handle,
       agentId: launchContext?.agentId,
       launchEnv: launchContext?.env,
@@ -2217,6 +2239,7 @@ class ClaudeAgentSession implements AgentSession {
   private readonly agentId?: string;
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly runtimeSettings?: ProviderRuntimeSettings;
+  private readonly providerParams: ClaudeProviderParams;
   private readonly persistSession?: boolean;
   private readonly logger: Logger;
   private readonly queryFactory?: ClaudeQueryFactory;
@@ -2305,6 +2328,7 @@ class ClaudeAgentSession implements AgentSession {
     this.agentId = options.agentId;
     this.defaults = options.defaults;
     this.runtimeSettings = options.runtimeSettings;
+    this.providerParams = options.providerParams;
     this.persistSession = options.persistSession;
     this.logger = options.logger.child({ agentId: this.agentId });
     this.queryFactory = options.queryFactory;
@@ -3524,6 +3548,8 @@ class ClaudeAgentSession implements AgentSession {
         type: "preset",
         preset: "claude_code",
         append: appendedSystemPrompt,
+        // Shared system-prompt prefix across worktrees. docs/custom-providers.md "Claude `params`".
+        ...(this.providerParams.excludeDynamicSections ? { excludeDynamicSections: true } : {}),
       },
       settingSources: CLAUDE_SETTING_SOURCES,
       stderr: (data: string) => {

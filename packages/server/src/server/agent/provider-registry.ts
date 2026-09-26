@@ -201,6 +201,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
     new ClaudeAgentClient({
       logger,
       runtimeSettings,
+      providerParams: options?.providerParams,
       configDir: runtimeSettings?.env?.CLAUDE_CONFIG_DIR,
       deviceLaunchGate: options?.deviceLaunchGate,
     }),
