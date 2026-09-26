@@ -7,6 +7,7 @@ import {
   resolveAccountPool,
   resolveBudgetProviderIds,
   resolveHostClaudeAccountIds,
+  resolveOtherAccountIds,
   type AccountUsageCount,
 } from "./account-budget-strip-model";
 import { AccountBudgetStripView } from "./account-budget-strip-view";
@@ -36,17 +37,26 @@ export function AccountBudgetStrip({
   const pool = useMemo(() => resolveAccountPool(config?.providers), [config]);
 
   const rows = useMemo(() => {
-    // The account list comes from the pool, or from what the host reports; the tab's tree never
+    // The account list comes from the pool, or from what the host reports, then every other
+    // provider with usage; the tab's tree never
     // decides it. Before the first usage read there is nothing to show; after a failed one the
     // accounts still show, as unavailable.
     if (view.kind === "loading") return [];
     const providers = view.kind === "ready" ? view.payload.providers : [];
-    return buildAccountBudgetRows(
-      providers,
-      resolveBudgetProviderIds(pool, resolveHostClaudeAccountIds(providers, entries)),
-      entries,
-      { pool, usage },
+    const claudeIds = resolveBudgetProviderIds(
+      pool,
+      resolveHostClaudeAccountIds(providers, entries),
     );
+    const seen = new Set(claudeIds.map((id) => id.toLowerCase()));
+    // Every other provider the host reports usage for follows the Claude accounts, so an account
+    // outside the pool (the OpenAI one) is on the strip too.
+    const otherIds = resolveOtherAccountIds(providers, entries).filter(
+      (id) => !seen.has(id.toLowerCase()),
+    );
+    return buildAccountBudgetRows(providers, [...claudeIds, ...otherIds], entries, {
+      pool,
+      usage,
+    });
   }, [entries, pool, usage, view]);
   const fetchedAt = useMemo(
     () => (view.kind === "ready" ? new Date(view.fetchedAt) : null),

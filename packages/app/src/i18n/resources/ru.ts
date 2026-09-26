@@ -1912,6 +1912,7 @@ export const ru: TranslationResources = {
       accountLeaderHere: "Лидер здесь",
       accountLeadersHere: "Лидеры {{count}}",
       accountWorkersHere: "Исполнители {{count}}",
+      accountBalanceLeft: "осталось {{amount}}",
       staleTitle: "Не обновляется",
       staleLastSynced: "Последняя синхронизация: {{time}}",
       staleNeverSynced: "Ещё не синхронизировано",

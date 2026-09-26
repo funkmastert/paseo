@@ -1913,6 +1913,7 @@ export const ptBR: TranslationResources = {
       accountLeaderHere: "Líder aqui",
       accountLeadersHere: "Líderes {{count}}",
       accountWorkersHere: "Trabalhadores {{count}}",
+      accountBalanceLeft: "{{amount}} restantes",
       staleTitle: "Sem atualizar",
       staleLastSynced: "Última sincronização {{time}}",
       staleNeverSynced: "Ainda não sincronizado",

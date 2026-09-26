@@ -1881,6 +1881,7 @@ export const ar: TranslationResources = {
       accountLeaderHere: "القائد هنا",
       accountLeadersHere: "القادة {{count}}",
       accountWorkersHere: "العاملون {{count}}",
+      accountBalanceLeft: "المتبقي {{amount}}",
       staleTitle: "لا يتم التحديث",
       staleLastSynced: "آخر مزامنة {{time}}",
       staleNeverSynced: "لم تتم المزامنة بعد",

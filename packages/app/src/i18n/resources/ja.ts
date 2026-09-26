@@ -1900,6 +1900,7 @@ export const ja: TranslationResources = {
       accountLeaderHere: "リーダーあり",
       accountLeadersHere: "リーダー {{count}}",
       accountWorkersHere: "ワーカー {{count}}",
+      accountBalanceLeft: "残り {{amount}}",
       staleTitle: "更新されていません",
       staleLastSynced: "最終同期 {{time}}",
       staleNeverSynced: "まだ同期していません",

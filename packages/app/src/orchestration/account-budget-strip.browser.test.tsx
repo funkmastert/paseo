@@ -77,6 +77,16 @@ const POOL = [
   { providerId: "claude-backup", role: "backup" },
 ] as const;
 
+// The OpenAI account as the daemon reports it: one session window, nearly full, and credits.
+const OPENAI_USAGE: ProviderUsage = {
+  providerId: "codex",
+  displayName: "Codex",
+  status: "available",
+  planLabel: "pro",
+  windows: [{ id: "session", label: "Session", usedPct: 97, resetsAt: hoursFromNow(3) }],
+  balances: [{ id: "credits", label: "Credits", remaining: 4658.87, unit: "usd", tone: "ok" }],
+};
+
 const agent = (provider: string, status: Agent["status"]) => ({ provider, status }) as Agent;
 
 // One tab: its leader is on `claude`, and its workers are split across the other two accounts.
@@ -87,6 +97,8 @@ const TAB_COUNTS = countAccountUsage(
     { agent: agent("claude-personal", "running"), depth: 1 },
     { agent: agent("claude-personal", "running"), depth: 1 },
     { agent: agent("claude-backup", "running"), depth: 1 },
+    { agent: agent("codex", "running"), depth: 1 },
+    { agent: agent("codex", "running"), depth: 1 },
   ],
   { includeIdleLeaders: true },
 );
@@ -96,8 +108,9 @@ const FIXTURE_ROWS = buildAccountBudgetRows(
     account("claude", "Claude", 31, 42),
     account("claude-personal", "Claude Personal", 64, 87),
     account("claude-backup", "Claude Backup", 4, 12),
+    OPENAI_USAGE,
   ],
-  POOL.map((member) => member.providerId),
+  [...POOL.map((member) => member.providerId), "codex"],
   undefined,
   { pool: POOL, usage: TAB_COUNTS },
 );
@@ -111,8 +124,8 @@ function Strip() {
 }
 
 /**
- * The budget strip with three accounts, this tab's leader on one and its workers on the other
- * two. Rows are built from the model directly: the poll behind AccountBudgetStrip needs a live
+ * The budget strip with the three-account Claude pool and the OpenAI account below it, this tab's
+ * leader on one Claude account and its workers spread across the others. Rows are built from the model directly: the poll behind AccountBudgetStrip needs a live
  * host.
  */
 describe.each([
@@ -124,16 +137,37 @@ describe.each([
     return mount(<Strip />, width);
   }
 
-  it("shows all three accounts", () => {
+  it("shows the Claude pool, then the OpenAI account set apart from it", () => {
     const container = mountStrip();
-    const shown = Array.from(container.querySelectorAll('[data-testid^="orchestration-account-c"]'))
+    const shown = Array.from(container.querySelectorAll('[data-testid^="orchestration-account-"]'))
       .map((node) => node.getAttribute("data-testid"))
-      .filter((id) => !id?.includes("usage"));
+      .filter((id) => !id?.includes("usage-") && !id?.includes("balance-"));
     expect(shown).toEqual([
       "orchestration-account-claude",
       "orchestration-account-claude-personal",
       "orchestration-account-claude-backup",
+      "orchestration-account-section-rule",
+      "orchestration-account-codex",
     ]);
+  });
+
+  it("names the OpenAI account and its plan, with no pool role", () => {
+    const text = mountStrip().querySelector(
+      '[data-testid="orchestration-account-codex"]',
+    )?.textContent;
+    expect(text).toContain("OpenAI (Codex)");
+    expect(text).toContain("Pro");
+    expect(text).not.toMatch(/Leader|Primary worker|Backup/);
+  });
+
+  it("shows the OpenAI account at its cap, when it resets, and its credits", () => {
+    const text = mountStrip().querySelector(
+      '[data-testid="orchestration-account-codex"]',
+    )?.textContent;
+    expect(text).toContain("97%");
+    expect(text).toContain("resets 3h");
+    expect(text).toContain("Credits");
+    expect(text).toContain("$4,658.87 left");
   });
 
   it("marks the leader's account and counts the workers on each", () => {
@@ -143,6 +177,7 @@ describe.each([
     expect(text("claude")).toBe("Leader hereWorkers 0");
     expect(text("claude-personal")).toBe("Workers 3");
     expect(text("claude-backup")).toBe("Workers 1");
+    expect(text("codex")).toBe("Workers 2");
   });
 
   it("keeps everything inside the panel", () => {

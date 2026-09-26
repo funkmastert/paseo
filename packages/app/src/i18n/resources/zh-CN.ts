@@ -1860,6 +1860,7 @@ export const zhCN: TranslationResources = {
       accountLeaderHere: "负责人在此",
       accountLeadersHere: "负责人 {{count}}",
       accountWorkersHere: "工作者 {{count}}",
+      accountBalanceLeft: "剩余 {{amount}}",
       staleTitle: "未在更新",
       staleLastSynced: "上次同步 {{time}}",
       staleNeverSynced: "尚未同步",

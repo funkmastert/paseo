@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { Fragment, useMemo } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
@@ -11,6 +11,7 @@ import type { Theme } from "@/styles/theme";
 import {
   resolveAccountIcon,
   selectAccountWorstWindow,
+  type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
   type AccountPoolRole,
   type AccountUsageCount,
@@ -37,13 +38,13 @@ export function AccountBudgetStripView({
   return (
     <View style={styles.strip}>
       <View style={isCompact ? styles.compactContainer : styles.container}>
-        {rows.map((row) => (
-          <AccountBudgetRow
-            key={row.providerId}
-            row={row}
-            serverId={serverId}
-            compact={isCompact}
-          />
+        {rows.map((row, index) => (
+          <Fragment key={row.providerId}>
+            {index > 0 && row.section !== rows[index - 1].section ? (
+              <View style={styles.sectionRule} testID="orchestration-account-section-rule" />
+            ) : null}
+            <AccountBudgetRow row={row} serverId={serverId} compact={isCompact} />
+          </Fragment>
         ))}
       </View>
       <UsageFreshness fetchedAt={fetchedAt} />
@@ -129,6 +130,29 @@ function AccountPresence({ providerId, usage }: { providerId: string; usage: Acc
   );
 }
 
+function AccountBalance({ balance }: { balance: AccountBalanceViewModel }) {
+  const { t } = useTranslation();
+  const amount = balance.remaining
+    ? t("panels.orchestration.accountBalanceLeft", { amount: balance.amount })
+    : balance.amount;
+  return (
+    <View style={styles.balance} testID={`orchestration-account-balance-${balance.id}`}>
+      <Text style={styles.balanceLabel} numberOfLines={1}>
+        {balance.label}
+      </Text>
+      <Text style={[styles.balanceValue, balanceToneStyle(balance.tone)]} numberOfLines={1}>
+        {amount}
+      </Text>
+    </View>
+  );
+}
+
+function balanceToneStyle(tone: AccountBalanceViewModel["tone"]) {
+  if (tone === "warning") return styles.balanceWarning;
+  if (tone === "danger") return styles.balanceDanger;
+  return null;
+}
+
 function AccountBudgetBody({
   row,
   worst,
@@ -144,27 +168,35 @@ function AccountBudgetBody({
   if (row.kind === "unavailable") {
     return <Text style={styles.muted}>{t("panels.orchestration.usageUnavailable")}</Text>;
   }
+  const balances = row.balances.map((balance) => (
+    <AccountBalance key={balance.id} balance={balance} />
+  ));
   if (!compact) {
     return (
       <View style={styles.bars}>
         {row.windows.map((window) => (
           <ProviderUsageWindowBar key={window.id} window={window} />
         ))}
+        {balances}
       </View>
     );
   }
-  if (!worst) return null;
   return (
-    <View style={styles.meterRow}>
-      <View style={styles.meterTrack}>
-        <ProviderUsageMeter window={worst.window} />
-      </View>
-      {reset ? (
-        <Text style={styles.freshness} numberOfLines={1}>
-          {reset}
-        </Text>
+    <>
+      {worst ? (
+        <View style={styles.meterRow}>
+          <View style={styles.meterTrack}>
+            <ProviderUsageMeter window={worst.window} />
+          </View>
+          {reset ? (
+            <Text style={styles.freshness} numberOfLines={1}>
+              {reset}
+            </Text>
+          ) : null}
+        </View>
       ) : null}
-    </View>
+      {balances.length > 0 ? <View style={styles.bars}>{balances}</View> : null}
+    </>
   );
 }
 
@@ -200,6 +232,11 @@ function AccountBudgetRow({
         <Text style={styles.label} numberOfLines={1}>
           {row.label}
         </Text>
+        {row.plan ? (
+          <Text style={styles.plan} numberOfLines={1}>
+            {row.plan}
+          </Text>
+        ) : null}
         {roleLabel ? <StatusBadge label={roleLabel} /> : null}
         {compact && worst ? (
           <Text style={styles.summaryValue} numberOfLines={1}>
@@ -277,6 +314,41 @@ const styles = StyleSheet.create((theme) => ({
   },
   bars: {
     gap: theme.spacing[2],
+  },
+  // Between the Claude pool and the other providers. Full width, so on the wrapping desktop grid
+  // it also forces the next section onto its own line.
+  sectionRule: {
+    width: "100%",
+    height: 1,
+    backgroundColor: theme.colors.border,
+  },
+  plan: {
+    flexShrink: 0,
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  balance: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: theme.spacing[2],
+  },
+  balanceLabel: {
+    flexShrink: 1,
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  balanceValue: {
+    flexShrink: 1,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+  },
+  balanceWarning: {
+    color: theme.colors.statusWarning,
+  },
+  balanceDanger: {
+    color: theme.colors.statusDanger,
   },
   muted: {
     color: theme.colors.foregroundMuted,

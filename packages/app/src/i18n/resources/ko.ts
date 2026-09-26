@@ -1891,6 +1891,7 @@ export const ko: TranslationResources = {
       accountLeaderHere: "리더 있음",
       accountLeadersHere: "리더 {{count}}",
       accountWorkersHere: "워커 {{count}}",
+      accountBalanceLeft: "{{amount}} 남음",
       staleTitle: "업데이트되지 않음",
       staleLastSynced: "마지막 동기화 {{time}}",
       staleNeverSynced: "아직 동기화되지 않음",

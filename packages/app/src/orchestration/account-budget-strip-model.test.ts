@@ -9,6 +9,7 @@ import {
   resolveAccountPool,
   resolveBudgetProviderIds,
   resolveHostClaudeAccountIds,
+  resolveOtherAccountIds,
   resolveAccountIcon,
   resolveAccountLabel,
   selectBudgetWindows,
@@ -122,7 +123,15 @@ describe("buildAccountBudgetRows", () => {
     const rows = buildAccountBudgetRows(providers, ["claude"], []);
 
     expect(rows).toEqual([
-      { kind: "unavailable", providerId: "claude", label: "Claude", role: null, usage: null },
+      {
+        kind: "unavailable",
+        providerId: "claude",
+        section: "claude",
+        label: "Claude",
+        plan: null,
+        role: null,
+        usage: null,
+      },
     ]);
   });
 
@@ -382,5 +391,133 @@ describe("countAccountUsage for one tab", () => {
     expect(counts.get("claude")).toEqual({ leaders: 1, workers: 0 });
     expect(counts.get("claude-personal")).toEqual({ leaders: 0, workers: 2 });
     expect(counts.get("claude-backup")).toEqual({ leaders: 0, workers: 1 });
+  });
+});
+
+function codexUsage(overrides: Partial<ProviderUsage> = {}): ProviderUsage {
+  return {
+    providerId: "codex",
+    displayName: "Codex",
+    status: "available",
+    planLabel: "pro",
+    windows: [
+      { id: "session", label: "Session", usedPct: 97, resetsAt: "2026-09-26T09:21:00.000Z" },
+    ],
+    balances: [{ id: "credits", label: "Credits", remaining: 4658.87, unit: "usd", tone: "ok" }],
+    ...overrides,
+  };
+}
+
+describe("resolveOtherAccountIds", () => {
+  it("lists every non-Claude provider that reports a window or a balance", () => {
+    const ids = resolveOtherAccountIds(
+      [
+        usage({ providerId: "claude" }),
+        codexUsage(),
+        usage({ providerId: "future", windows: [], balances: [] }),
+        usage({ providerId: "balance-only", windows: [], balances: codexUsage().balances }),
+      ],
+      [],
+    );
+    expect(ids).toEqual(["codex", "balance-only"]);
+  });
+
+  it("keeps a provider whose usage fetch failed, so the failure shows instead of the account vanishing", () => {
+    const ids = resolveOtherAccountIds(
+      [codexUsage({ status: "error", windows: [], balances: [], error: "boom" })],
+      [],
+    );
+    expect(ids).toEqual(["codex"]);
+  });
+
+  it("skips a provider that reports no usage support, and one the host has disabled", () => {
+    const ids = resolveOtherAccountIds(
+      [
+        codexUsage({ providerId: "copilot", status: "unavailable", windows: [], balances: [] }),
+        codexUsage(),
+      ],
+      [{ provider: "codex", enabled: false }],
+    );
+    expect(ids).toEqual([]);
+  });
+});
+
+describe("buildAccountBudgetRows for a non-Claude account", () => {
+  const build = (u: ProviderUsage, entries?: ProviderSnapshotEntry[]) =>
+    buildAccountBudgetRows([u], [u.providerId], entries, {
+      pool: POOL,
+      usage: new Map([["codex", { leaders: 0, workers: 2 }]]),
+    })[0];
+
+  it("is included as its own section, with no pool role", () => {
+    expect(build(codexUsage())).toMatchObject({
+      kind: "available",
+      providerId: "codex",
+      section: "other",
+      role: null,
+    });
+  });
+
+  it("is labelled as OpenAI and carries the plan capitalised", () => {
+    expect(build(codexUsage())).toMatchObject({ label: "OpenAI (Codex)", plan: "Pro" });
+  });
+
+  it("does not repeat the vendor when the snapshot label already names it", () => {
+    const entries: ProviderSnapshotEntry[] = [
+      { provider: "codex", status: "ready", enabled: true, label: "OpenAI Codex" },
+    ];
+    expect(build(codexUsage(), entries)).toMatchObject({ label: "OpenAI Codex" });
+  });
+
+  it("uses the display name alone for a provider with no known vendor", () => {
+    expect(build(codexUsage({ providerId: "future", displayName: "Future" }))).toMatchObject({
+      label: "Future",
+      section: "other",
+    });
+  });
+
+  it("keeps every window the provider reports, not only the Claude session and weekly ones", () => {
+    const row = build(codexUsage());
+    expect(row.kind === "available" && row.windows.map((window) => window.id)).toEqual(["session"]);
+    expect(selectAccountWorstWindow(row)).toMatchObject({ usedPct: 97 });
+  });
+
+  it("formats balances compactly, with the tone the provider reports", () => {
+    const row = build(codexUsage());
+    expect(row.kind === "available" && row.balances).toEqual([
+      { id: "credits", label: "Credits", amount: "$4,658.87", remaining: true, tone: "ok" },
+    ]);
+  });
+
+  it("shows used against the limit when a balance has a limit, and a bare figure otherwise", () => {
+    const row = build(
+      codexUsage({
+        balances: [
+          { id: "a", label: "Spend", used: 12, limit: 50, unit: "usd", tone: "warning" },
+          { id: "b", label: "Requests", used: 1200, unit: "requests" },
+          { id: "c", label: "Empty", unit: "tokens" },
+        ],
+      }),
+    );
+    expect(row.kind === "available" && row.balances).toEqual([
+      { id: "a", label: "Spend", amount: "$12.00 / $50.00", remaining: false, tone: "warning" },
+      { id: "b", label: "Requests", amount: "1,200", remaining: false, tone: "default" },
+      { id: "c", label: "Empty", amount: "—", remaining: false, tone: "default" },
+    ]);
+  });
+
+  it("carries no balances for a Claude account that reports none", () => {
+    const row = buildAccountBudgetRows([usage()], ["claude"], undefined)[0];
+    expect(row).toMatchObject({ section: "claude", kind: "available", balances: [] });
+  });
+
+  it("carries the leader and worker counts of the agents running on it", () => {
+    expect(build(codexUsage()).usage).toEqual({ leaders: 0, workers: 2 });
+  });
+
+  it("shows unavailable when its usage fetch failed", () => {
+    const row = build(codexUsage({ status: "error", windows: [], balances: [] }));
+    expect(row).toMatchObject({ kind: "unavailable", providerId: "codex", section: "other" });
+    expect(row.kind === "unavailable" && "balances" in row).toBe(false);
   });
 });

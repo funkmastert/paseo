@@ -1891,6 +1891,7 @@ export const en = {
       accountLeaderHere: "Leader here",
       accountLeadersHere: "Leaders {{count}}",
       accountWorkersHere: "Workers {{count}}",
+      accountBalanceLeft: "{{amount}} left",
       staleTitle: "Not updating",
       staleLastSynced: "Last synced {{time}}",
       staleNeverSynced: "Not synced yet",

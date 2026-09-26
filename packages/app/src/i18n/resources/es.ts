@@ -1927,6 +1927,7 @@ export const es: TranslationResources = {
       accountLeaderHere: "Líder aquí",
       accountLeadersHere: "Líderes {{count}}",
       accountWorkersHere: "Trabajadores {{count}}",
+      accountBalanceLeft: "{{amount}} restantes",
       staleTitle: "Sin actualizar",
       staleLastSynced: "Última sincronización {{time}}",
       staleNeverSynced: "Aún sin sincronizar",

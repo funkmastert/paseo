@@ -99,6 +99,13 @@ The account list has two sources, in order:
    and the providers snapshot, `claude` first, with no role badge. A host with no Claude account
    lists whatever its usage payload reports.
 
+Either way, every other provider the host reports usage for follows the Claude accounts, under a
+rule and with no role badge: any non-Claude provider with a window or a balance, or whose usage
+read failed. Nothing names a provider, so a new one appears on its own; the only name mapping is
+the vendor in its label (`codex` reads "OpenAI (Codex)"). It keeps all of its windows, since it
+does not report Claude's `five_hour` and `weekly`, and renders its balances as a label and a figure
+("Credits $4,658.87 left"), coloured by the balance's tone when it is warning or danger.
+
 - **An account always gets a row.** One the usage endpoint has no reading for, or a usage read that
   failed, renders as unavailable rather than disappearing.
 - **The role and where the agents are now are different things.** The outlined badge beside the
@@ -185,14 +192,14 @@ the order the work was handed out.
 `orchestration-row.browser.test.tsx` renders a fixture fleet — 53 agents, 4 running, 30 idle, 19
 closed, modelled on a measured one — in a real browser and writes screenshots to `docs/assets/`:
 
-| Capture                                | What it shows                                     |
-| -------------------------------------- | ------------------------------------------------- |
-| `orchestration-panel-fleet-*.png`      | every row, unfiltered — the shape the rules fight |
-| `orchestration-panel-default.png`      | the host-wide default view with its hidden count  |
-| `orchestration-panel-scoped.png`       | one tree, from a tab opened in a session          |
-| `orchestration-panel-scoped-older.png` | the same tab with its older agents shown          |
-| `orchestration-panel-compact.png`      | the phone row: title, then badges, activity, time |
-| `orchestration-account-strip-*.png`    | the budget strip, three accounts, phone and wide  |
+| Capture                                | What it shows                                             |
+| -------------------------------------- | --------------------------------------------------------- |
+| `orchestration-panel-fleet-*.png`      | every row, unfiltered — the shape the rules fight         |
+| `orchestration-panel-default.png`      | the host-wide default view with its hidden count          |
+| `orchestration-panel-scoped.png`       | one tree, from a tab opened in a session                  |
+| `orchestration-panel-scoped-older.png` | the same tab with its older agents shown                  |
+| `orchestration-panel-compact.png`      | the phone row: title, then badges, activity, time         |
+| `orchestration-account-strip-*.png`    | the budget strip: Claude pool plus OpenAI, phone and wide |
 
 Run it before and after a presentation change; the panel's problems only appear at that size, and
 no daemon is reliably in that shape when you want to look at it.
