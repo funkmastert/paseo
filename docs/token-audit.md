@@ -57,6 +57,17 @@ A persistent RED escalated the week it appeared and is quiet after that. Otherwi
 
 An escalating report goes to the [remediation ladder](remediation.md#advisory-episodes) as an advisory episode, key `token-audit:<report time>`, kind `token-audit`. The ladder starts one agent labelled `paseo.task-class: mechanical` (so the classifier picks the cheapest model) with `paseo.budget` at `escalation.budgetTokens`. It reads the table of non-GREEN rows and ends with one `RECOMMENDATION:` line. The ladder pushes that line at `notice`, with the report path, under the report's own title. If no agent can run, the push carries the reason instead. The next report closes the previous episode.
 
+## Shared system-prompt cache
+
+The `cache` item counts what agents in different worktrees fail to share. The daemon's `excludeDynamicSections` default ([config](custom-providers.md#claude-params-shared-system-prompt-cache)) removes the per-cwd part of the system prompt. Measured 2026-09-25 with the pinned SDK 0.3.246 `query()`, `claude-haiku-4-5-20251001`, the `claude_code` preset plus a per-pair nonce in `append` (so each pair starts cold), `persistSession: false`, one tiny prompt asking for the working directory, two real worktrees, session 2 launched right after session 1:
+
+| Option | Session 2 `cache_read_input_tokens` | Session 2 `cache_creation_input_tokens` |
+| ------ | ----------------------------------- | --------------------------------------- |
+| off    | 18,681                              | 18,784                                  |
+| on     | 22,496                              | 14,781                                  |
+
+About 3.8K tokens per additional worktree move from write to read. The 14.8K still written comes after the system prompt (the first user message: each checkout's own `CLAUDE.md`, memory index and the moved cwd block), which the option cannot share. Both answers reported the correct directory with the option on. Re-measure after an SDK bump; the split is the bundled CLI's.
+
 ## Adding an item
 
 Add a `TokenAuditCheck` in `session/doctor/tokens/`, register it in `TOKEN_AUDIT_CHECKS` (`tokens/index.ts`) and add its name to `TOKEN_AUDIT_ITEMS`. Give each row a stable `key` built from what the row is about, never from its numbers: the diff matches rows across weeks by it. Put a number the diff should watch in `metrics` and a rule for it in `METRIC_RULES`. The checks are not in `DOCTOR_CHECKS`: a run streams gigabytes and spawns `claude`, so plain `paseo doctor` stays quick.

@@ -47,6 +47,7 @@ function createQueryMock(): Query {
 /** Runs one turn and returns the options handed to the SDK. */
 async function launchOptions(
   config: Omit<AgentSessionConfig, "provider">,
+  providerParams?: unknown,
 ): Promise<ClaudeQueryInput["options"]> {
   let captured: ClaudeQueryInput["options"] | undefined;
   const client = new ClaudeAgentClient({
@@ -56,6 +57,7 @@ async function launchOptions(
       return createQueryMock();
     },
     resolveBinary: async () => "/test/claude/bin",
+    providerParams,
   });
   const session = await client.createSession({ provider: "claude", ...config }, { env: {} });
   try {
@@ -133,5 +135,43 @@ describe("Claude system prompt composition", () => {
     // would hand the Claude CLI an option it does not know.
     expect(options).not.toHaveProperty("appendSystemPrompt");
     expect(options.disallowedTools).toEqual(["Write"]);
+  });
+});
+
+describe("Claude system prompt cache sharing", () => {
+  function preset(options: ClaudeQueryInput["options"]): Record<string, unknown> {
+    const systemPrompt = options.systemPrompt;
+    if (typeof systemPrompt !== "object" || systemPrompt === null || Array.isArray(systemPrompt)) {
+      throw new Error("Claude launches must keep the claude_code preset system prompt");
+    }
+    return systemPrompt;
+  }
+
+  test("excludeDynamicSections is on by default so worktrees share one cached prefix", async () => {
+    const options = await launchOptions({ cwd: process.cwd() });
+
+    expect(preset(options)).toMatchObject({
+      type: "preset",
+      preset: "claude_code",
+      excludeDynamicSections: true,
+    });
+  });
+
+  test("params.excludeDynamicSections: false leaves the option off the SDK preset", async () => {
+    const options = await launchOptions({ cwd: process.cwd() }, { excludeDynamicSections: false });
+
+    expect(preset(options)).not.toHaveProperty("excludeDynamicSections");
+  });
+
+  test("unrelated provider params (accountPool) do not disturb the default", async () => {
+    const options = await launchOptions({ cwd: process.cwd() }, { accountPool: { weight: 1 } });
+
+    expect(preset(options)).toMatchObject({ excludeDynamicSections: true });
+  });
+
+  test("a malformed value falls back to the default rather than failing the launch", async () => {
+    const options = await launchOptions({ cwd: process.cwd() }, { excludeDynamicSections: "no" });
+
+    expect(preset(options)).toMatchObject({ excludeDynamicSections: true });
   });
 });
