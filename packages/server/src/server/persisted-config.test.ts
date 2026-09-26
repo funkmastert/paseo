@@ -21,6 +21,36 @@ function modeOf(filePath: string): number {
   return statSync(filePath).mode & MODE_MASK;
 }
 
+describe("PersistedConfigSchema agents.providerUsage", () => {
+  test("accepts the OpenAI API usage source, which names the key and never holds it", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        providerUsage: {
+          openaiApi: {
+            enabled: true,
+            label: "OpenAI API (image gen)",
+            keyEnv: "OPENAI_API_KEY",
+            adminKeyEnv: "OPENAI_ADMIN_KEY",
+            envFile: "~/.config/openai/env",
+            monthlyBudgetUsd: 50,
+            refreshMinutes: 30,
+          },
+        },
+      },
+    });
+    expect(parsed.agents?.providerUsage?.openaiApi?.monthlyBudgetUsd).toBe(50);
+  });
+
+  test("accepts an empty section and rejects unknown keys, so a pasted key is not kept", () => {
+    expect(PersistedConfigSchema.safeParse({ agents: { providerUsage: {} } }).success).toBe(true);
+    expect(
+      PersistedConfigSchema.safeParse({
+        agents: { providerUsage: { openaiApi: { apiKey: "sk-proj-x" } } },
+      }).success,
+    ).toBe(false);
+  });
+});
+
 describe("PersistedConfigSchema daemon auth config", () => {
   test("accepts optional daemon password hash", () => {
     const hash = "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW";

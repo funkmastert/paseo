@@ -166,7 +166,16 @@ function AccountBudgetBody({
 }) {
   const { t } = useTranslation();
   if (row.kind === "unavailable") {
-    return <Text style={styles.muted}>{t("panels.orchestration.usageUnavailable")}</Text>;
+    return (
+      <View style={styles.bars}>
+        <Text style={styles.muted}>{t("panels.orchestration.usageUnavailable")}</Text>
+        {row.error ? (
+          <Text style={styles.muted} testID={`orchestration-account-error-${row.providerId}`}>
+            {row.error}
+          </Text>
+        ) : null}
+      </View>
+    );
   }
   const balances = row.balances.map((balance) => (
     <AccountBalance key={balance.id} balance={balance} />

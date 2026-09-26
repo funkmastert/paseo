@@ -64,6 +64,8 @@ export type AccountBudgetRowViewModel =
     })
   | (AccountBudgetRowBase & {
       kind: "unavailable";
+      /** The daemon's reason, for a non-Claude account: "Add OPENAI_API_KEY to …" is the fix. */
+      error?: string;
     });
 
 export interface AccountBudgetContext {
@@ -285,11 +287,24 @@ export function selectBudgetWindows(usage: ProviderUsage): ProviderUsageWindow[]
   });
 }
 
+// Accounts that are OpenAI's but not an agent provider of their own, drawn with the OpenAI mark.
+const ICON_ALIASES: Readonly<Record<string, string>> = { "openai-api": "codex" };
+
 // serverId-aware icon lookup so custom provider entries (e.g. claude-personal) resolve
 // their snapshot icon instead of falling back to the generic Bot glyph. card.tsx's
 // ProviderUsageIcon omits serverId; this call path intentionally does not repeat that.
 export function resolveAccountIcon(providerId: string, serverId: string): ProviderIconComponent {
-  return getProviderIcon(providerId, serverId);
+  return getProviderIcon(ICON_ALIASES[providerId.toLowerCase()] ?? providerId, serverId);
+}
+
+// Only a non-Claude account's reason is shown: its own fix ("Add OPENAI_API_KEY to …") is what a
+// reader needs, where a Claude row stays a bare "Usage unavailable".
+function unavailableReason(
+  section: AccountSection,
+  usage: ProviderUsage | undefined,
+): { error?: string } {
+  const error = section === "other" ? usage?.error?.trim() : undefined;
+  return error ? { error } : {};
 }
 
 function buildAccountRow(
@@ -317,7 +332,9 @@ function buildAccountRow(
     role,
     usage: context ? (context.usage.get(resolvedId) ?? { leaders: 0, workers: 0 }) : null,
   };
-  if (!usage || usage.status !== "available") return { ...base, kind: "unavailable" };
+  if (!usage || usage.status !== "available") {
+    return { ...base, kind: "unavailable", ...unavailableReason(section, usage) };
+  }
   return {
     ...base,
     kind: "available",

@@ -632,6 +632,26 @@ const AgentRestartRecoverySchema = z
   })
   .strict();
 
+// The OpenAI platform org's month-to-date spend on the orchestrator's account strip. Names where
+// the key lives (an env var, an env file) and never holds it. Read from config.json on
+// every fetch, so every key is live. See docs/provider-usage.md.
+const AgentProviderUsageSchema = z
+  .object({
+    openaiApi: z
+      .object({
+        enabled: z.boolean().optional(),
+        label: z.string().min(1).optional(),
+        keyEnv: z.string().min(1).optional(),
+        adminKeyEnv: z.string().min(1).optional(),
+        envFile: z.string().min(1).optional(),
+        monthlyBudgetUsd: z.number().positive().optional(),
+        refreshMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 // Read from config.json on every check, so every key is live. `windowDays`, `cwds` and
 // `maxContextRuns` steer the checks themselves. See docs/token-audit.md.
 const AgentTokenAuditSchema = z
@@ -816,6 +836,7 @@ export const PersistedConfigSchema = z
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
+        providerUsage: AgentProviderUsageSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

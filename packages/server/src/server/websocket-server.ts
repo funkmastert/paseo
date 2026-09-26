@@ -88,6 +88,7 @@ import {
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
+import { loadPersistedConfig } from "./persisted-config.js";
 import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
@@ -778,6 +779,15 @@ export class VoiceAssistantWebSocketServer {
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,
       claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
+      // Re-read from config.json each fetch: the key is named there, never stored.
+      readOpenAiApiConfig: () => {
+        try {
+          return loadPersistedConfig(paseoHome).agents?.providerUsage?.openaiApi;
+        } catch {
+          // A config the daemon cannot parse is reported where it loads; this row just stays off.
+          return undefined;
+        }
+      },
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);

@@ -515,6 +515,86 @@ describe("buildAccountBudgetRows for a non-Claude account", () => {
     expect(build(codexUsage()).usage).toEqual({ leaders: 0, workers: 2 });
   });
 
+  describe("the OpenAI API (image gen) account", () => {
+    const openAiApi = (overrides: Partial<ProviderUsage> = {}): ProviderUsage => ({
+      providerId: "openai-api",
+      displayName: "OpenAI API (image gen)",
+      status: "available",
+      planLabel: null,
+      windows: [
+        {
+          id: "month",
+          label: "Month",
+          usedPct: 25,
+          remainingPct: 75,
+          resetsAt: "2026-10-01T00:00:00.000Z",
+          tone: "ok",
+        },
+      ],
+      balances: [{ id: "spend", label: "Spent this month", used: 12.5, limit: 50, unit: "usd" }],
+      ...overrides,
+    });
+
+    it("is listed as an account and keeps its own label, with the vendor named once", () => {
+      expect(resolveOtherAccountIds([openAiApi()], undefined)).toEqual(["openai-api"]);
+      expect(build(openAiApi())).toMatchObject({
+        kind: "available",
+        section: "other",
+        label: "OpenAI API (image gen)",
+        plan: null,
+      });
+    });
+
+    it("shows the spend line, and the month window as the meter when a budget is set", () => {
+      const row = build(openAiApi());
+      expect(row.kind === "available" && row.balances).toEqual([
+        {
+          id: "spend",
+          label: "Spent this month",
+          amount: "$12.50 / $50.00",
+          remaining: false,
+          tone: "default",
+        },
+      ]);
+      expect(selectAccountWorstWindow(row)).toMatchObject({
+        usedPct: 25,
+        window: { id: "month" },
+      });
+    });
+
+    it("shows the spend alone, with no meter, when no budget is set", () => {
+      const row = build(
+        openAiApi({
+          windows: [],
+          balances: [{ id: "spend", label: "Spent this month", used: 12.5, unit: "usd" }],
+        }),
+      );
+      expect(row.kind === "available" && row.balances[0]?.amount).toBe("$12.50");
+      expect(selectAccountWorstWindow(row)).toBeNull();
+    });
+
+    it("carries the daemon's hint on the unavailable row", () => {
+      const row = build(
+        openAiApi({
+          status: "error",
+          windows: [],
+          balances: [],
+          error: "Add OPENAI_API_KEY to ~/.config/openai/env",
+        }),
+      );
+      expect(row).toMatchObject({
+        kind: "unavailable",
+        section: "other",
+        error: "Add OPENAI_API_KEY to ~/.config/openai/env",
+      });
+    });
+
+    it("uses the OpenAI icon rather than the generic one", () => {
+      resolveAccountIcon("openai-api", "server-1");
+      expect(getProviderIconMock).toHaveBeenLastCalledWith("codex", "server-1");
+    });
+  });
+
   it("shows unavailable when its usage fetch failed", () => {
     const row = build(codexUsage({ status: "error", windows: [], balances: [] }));
     expect(row).toMatchObject({ kind: "unavailable", providerId: "codex", section: "other" });

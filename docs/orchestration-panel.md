@@ -105,6 +105,11 @@ read failed. Nothing names a provider, so a new one appears on its own; the only
 the vendor in its label (`codex` reads "OpenAI (Codex)"). It keeps all of its windows, since it
 does not report Claude's `five_hour` and `weekly`, and renders its balances as a label and a figure
 ("Credits $4,658.87 left"), coloured by the balance's tone when it is warning or danger.
+The OpenAI API org's month-to-date spend arrives the same way (`openai-api`, drawn with the OpenAI
+icon; set up in [providers.md](providers.md#openai-api-spend-openai-api)): "Spent this month
+$12.50 / $50.00" and, when a monthly budget is configured, a `month` meter. When its key is missing
+or lacks Usage: Read, the row reads "Usage unavailable" with the daemon's hint beneath it. The hint
+is shown for non-Claude accounts only.
 
 - **An account always gets a row.** One the usage endpoint has no reading for, or a usage read that
   failed, renders as unavailable rather than disappearing.

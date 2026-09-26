@@ -210,6 +210,39 @@ Cursor usage reads the desktop `state.vscdb` token first, then `cursor-agent`'s 
 
 A fetcher reads the provider's credential file and never writes it. On a 401 or 403 it returns `unavailable` and leaves refresh to the provider's own CLI: redeeming a refresh token in the fetcher invalidates the CLI's copy (refresh tokens are single-use), and rewriting the file through the fetcher's Zod schema drops any field the schema does not model, corrupting the file for the CLI.
 
+### OpenAI API spend (`openai-api`)
+
+The one fetcher that is not a coding agent: month-to-date spend of an OpenAI platform org, such as the one behind image generation, shown as an account on the [orchestrator's budget strip](orchestration-panel.md#budget-strip). It reads `GET /v1/organization/costs` (daily buckets from the first of the month, UTC, following `next_page`). Off unless configured, and a disabled fetcher returns `null`, which the service drops, so the row does not exist at all.
+
+```json
+{
+  "agents": {
+    "providerUsage": {
+      "openaiApi": {
+        "enabled": true,
+        "label": "OpenAI API (image gen)",
+        "keyEnv": "OPENAI_API_KEY",
+        "adminKeyEnv": "OPENAI_ADMIN_KEY",
+        "envFile": "~/.config/openai/env",
+        "monthlyBudgetUsd": 50,
+        "refreshMinutes": 30
+      }
+    }
+  }
+}
+```
+
+Only `enabled` is needed; every other key shows its default. Config is read from `config.json` on each fetch, so an edit applies without a restart.
+
+**The key needs Usage: Read, not an admin role.** Costs are gated on the `api.usage.read` scope. A project or restricted key granted **Usage: Read** works, given the owner's org role allows it; a key without it gets a 403 that names the scope, and the strip says "Give this OpenAI key Usage: Read (platform.openai.com → API keys → Permissions)". A 401 reads as an invalid or revoked key. To set it up:
+
+1. On platform.openai.com, open the key's permissions (API keys → the key → Permissions) and set **Usage** to **Read**. Or create a separate restricted key with only that scope.
+2. Put the key where the daemon can read it, as `export OPENAI_API_KEY="…"` in `~/.config/openai/env` (the same line other tools read), or in the daemon's environment. `adminKeyEnv` is looked up first when it is set, for a dedicated usage-only key kept apart from the one your code uses; `keyEnv` is the fallback.
+
+**The key never goes in `config.json`.** Config holds only the names (`keyEnv`, `adminKeyEnv`, `envFile`) and the schema is strict, so a stray `apiKey` field fails to load. The fetcher reads the key at fetch time and sends it only to `api.openai.com`; it is never logged, put in an error string, or sent to the app. The one thing kept from an error body is whether it names `api.usage.read`.
+
+What the row reports: a "Spent this month" balance (`used`, plus `limit` when `monthlyBudgetUsd` is set) and, with a budget, a `month` window whose `usedPct` is spend over budget and whose `resetsAt` is the start of next month, UTC. Without a budget there is a spend figure and no meter. With no key found the row is present with the error "Add OPENAI_API_KEY to ~/.config/openai/env" (naming the configured variable and file), so the strip shows "Usage unavailable" with that hint. Spend is cached for `refreshMinutes`, independent of the usage service's five-minute cache.
+
 ---
 
 ## ACP Provider Checklist
