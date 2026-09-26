@@ -1,4 +1,5 @@
 import type { AgentStreamEvent, AgentTimelineItem } from "../../agent/agent-sdk-types.js";
+import { isUnresponsiveCancelReason, UNRESPONSIVE_CANCEL_ERROR } from "../../agent/turn-cancel.js";
 import { z } from "zod";
 import { CreateAgentRequestMessageSchema } from "@getpaseo/protocol/messages";
 import type {
@@ -28,7 +29,13 @@ export const lifecycleEventNames = [
 export const beforeHookNames = ["agent.create", "agent.session_open", "workspace.create"] as const;
 
 const beforeSchemas = {
-  "agent.create": CreateAgentRequestMessageSchema.pick({ config: true, env: true }).strict(),
+  "agent.create": CreateAgentRequestMessageSchema.pick({
+    config: true,
+    env: true,
+    callerAgentId: true,
+    labels: true,
+    initialPrompt: true,
+  }).strict(),
   "agent.session_open": z
     .object({
       agentId: z.string(),
@@ -86,6 +93,7 @@ export function describeHookAgent(agent: {
     provider: agent.provider,
     cwd: agent.cwd,
     title: agent.title ?? null,
+    labels: agent.labels,
   };
 }
 
@@ -112,11 +120,18 @@ export function publishAgentStream(
       outcome: { kind: "failed", error: { message: event.error, code: event.code } },
     });
   } else if (event.type === "turn_canceled") {
+    // A session that acknowledged an interrupt and then never settled is a failed turn, not a
+    // cancelled one, and plugins that route around dead accounts only look at `failed`: the
+    // account-pool health tracker calls its classifier from that branch alone. Reported as
+    // `canceled` this reached nothing, which is how a logged-out account kept taking work.
+    // Only the outcome changes — the agent's lifecycle stays exactly as it is.
     lifecycle.emit("agent.turn_ended", {
       agent,
       turnId: event.turnId ?? null,
       timeline,
-      outcome: { kind: "canceled", reason: event.reason },
+      outcome: isUnresponsiveCancelReason(event.reason)
+        ? { kind: "failed", error: { message: UNRESPONSIVE_CANCEL_ERROR } }
+        : { kind: "canceled", reason: event.reason },
     });
   } else if (event.type === "permission_requested") {
     lifecycle.emit("agent.permission_requested", { agent, request: event.request });
@@ -154,6 +169,33 @@ export function validateBeforeResult<Name extends keyof PluginBeforeRequests>(
     const next = beforeSchemas["agent.create"].parse(result);
     if (previous.config.cwd !== next.config.cwd) {
       throw new Error("agent.create hooks cannot change the workspace directory");
+    }
+    const outputSpecifiesCallerAgentId =
+      typeof output === "object" && output !== null && "callerAgentId" in output;
+    if (outputSpecifiesCallerAgentId) {
+      if (previous.callerAgentId !== next.callerAgentId) {
+        throw new Error("agent.create hooks cannot change callerAgentId");
+      }
+    } else {
+      (result as { callerAgentId?: string }).callerAgentId = previous.callerAgentId;
+    }
+    // labels and initialPrompt are legitimately mutable by hooks, unlike
+    // callerAgentId, so there's no immutability guard here. But a legacy hook
+    // that returns a fresh object without spreading the original request
+    // (e.g. `{ config, env }`) would otherwise silently wipe them: labels has
+    // a wire-schema default of {}, so an omitted key parses back to {} rather
+    // than staying untouched, and initialPrompt would parse to absent instead
+    // of its original value. Backfill from the original request whenever the
+    // hook's raw output doesn't mention the key at all.
+    const outputSpecifiesLabels =
+      typeof output === "object" && output !== null && "labels" in output;
+    if (!outputSpecifiesLabels) {
+      (result as { labels?: Record<string, string> }).labels = previous.labels;
+    }
+    const outputSpecifiesInitialPrompt =
+      typeof output === "object" && output !== null && "initialPrompt" in output;
+    if (!outputSpecifiesInitialPrompt) {
+      (result as { initialPrompt?: string }).initialPrompt = previous.initialPrompt;
     }
   }
   return result;

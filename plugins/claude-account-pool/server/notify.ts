@@ -1,0 +1,527 @@
+import type { PluginHookContext } from "@getpaseo/plugin/server";
+import type { CapEvent, HealthTracker } from "./health";
+import type { FailOpenEpisode, PoolCollapsedEpisode, PoolDryEpisode, PoolExhaustedEpisode } from "./router";
+
+export type { FailOpenEpisode, PoolCollapsedEpisode, PoolDryEpisode, PoolExhaustedEpisode } from "./router";
+
+/** The subset of PaseoApi this module needs: listing and messaging agents. */
+export type NotifierPaseoApi = Pick<PluginHookContext["paseo"], "agents">;
+
+export interface NotifierOptions {
+  paseo: NotifierPaseoApi;
+  health: Pick<HealthTracker, "onChange">;
+  /**
+   * Defers work off the calling stack so notification sends never happen
+   * synchronously inside a lifecycle hook dispatch. Defaults to
+   * queueMicrotask; tests inject a controllable queue.
+   */
+  schedule?: (fn: () => void | Promise<void>) => void;
+  /**
+   * Injectable clock for tests; defaults to `() => new Date()`. Drives the
+   * resetsAt-in-the-past check that drops a stale cap notification at
+   * delivery time (e.g. one held behind a pending permission until well
+   * after its window already reset).
+   */
+  now?: () => Date;
+}
+
+export interface Notifier {
+  /** Router calls this when it fell back to the leader because every worker was unhealthy. */
+  notePoolDry(episode: PoolDryEpisode): void;
+  /** Router calls this when one account is left serving both leaders and children. */
+  notePoolCollapsed(episode: PoolCollapsedEpisode): void;
+  /** Router calls this when no pooled account can run anything. */
+  notePoolExhausted(episode: PoolExhaustedEpisode): void;
+  /** Router calls this whenever it fails open. */
+  noteFailOpen(episode: FailOpenEpisode): void;
+  /** Router calls this when the pool cache recovers from fail-open, re-arming fail-open episodes. */
+  notePoolRecovered(): void;
+  /** Wire to the agent.permission_requested lifecycle event. */
+  /** Wire to the agent.created lifecycle event: a leader whose creation this
+   * notifier observed is steer-safe from birth (it cannot carry a pending
+   * permission the notifier never saw), so the turn-boundary hold applies
+   * only to agents that pre-date the notifier (e.g. across a plugin reload). */
+  onAgentCreated(agentId: string): void;
+  onPermissionRequested(agentId: string): void;
+  /** Wire to the agent.permission_resolved lifecycle event. */
+  onPermissionResolved(agentId: string): void;
+  /** Wire to the agent.turn_ended lifecycle event: flushes anything held for retry. */
+  onTurnEnded(agentId: string): void;
+  /** Wire to the agent.archived lifecycle event: prunes all per-agent notifier state. */
+  onAgentArchived(agentId: string): void;
+  /** Unsubscribes from the health tracker. Safe to call more than once. */
+  stop(): void;
+}
+
+/** Mirrors the daemon's AgentLifecycleStatus enum (protocol/agent-lifecycle.ts). */
+type AgentLifecycleStatus = "initializing" | "idle" | "running" | "error" | "closed";
+
+interface AgentDirectoryRow {
+  id: string;
+  parentAgentId: string | null;
+  title: string | null;
+  provider: string;
+  archived: boolean;
+  status: AgentLifecycleStatus;
+}
+
+interface QueuedSend {
+  leaderId: string;
+  text: string;
+  /** Cap-notification-only: the window's reset time, re-checked at delivery time. */
+  resetsAt?: Date;
+}
+
+// The daemon's agent list payload does not carry a structural
+// `parentAgentId` property; parentage travels in the row's `labels` record
+// under this key instead (labels are forwarded on the wire). This mirrors
+// the daemon's own PARENT_AGENT_ID_LABEL constant. The structural property
+// is still checked first so this keeps working if a future daemon adds it.
+const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
+
+function resolveParentAgentId(agent: {
+  parentAgentId?: string | null;
+  labels?: Record<string, unknown> | null;
+}): string | null {
+  // TYPE NOTE: neither parentAgentId nor labels is on the installed
+  // @getpaseo/client AgentSnapshotPayload type yet; the daemon adds both to
+  // agent directory rows at runtime, mirroring the callerAgentId accepted on
+  // creation. Read them structurally rather than forking the SDK types.
+  if (typeof agent.parentAgentId === "string" && agent.parentAgentId.length > 0) {
+    return agent.parentAgentId;
+  }
+  const fromLabel = agent.labels?.[PARENT_AGENT_ID_LABEL];
+  return typeof fromLabel === "string" && fromLabel.length > 0 ? fromLabel : null;
+}
+
+async function listAgentDirectory(paseo: NotifierPaseoApi): Promise<AgentDirectoryRow[]> {
+  const result = await paseo.agents.list();
+  return result.entries.map((entry) => {
+    const agent = entry.agent;
+    return {
+      id: agent.id,
+      parentAgentId: resolveParentAgentId(agent),
+      title: agent.title,
+      provider: agent.provider,
+      archived: agent.archivedAt != null,
+      status: agent.status,
+    };
+  });
+}
+
+type AgentDirectoryIndex = Map<string, AgentDirectoryRow>;
+
+function buildAgentDirectoryIndex(rows: AgentDirectoryRow[]): AgentDirectoryIndex {
+  return new Map(rows.map((row) => [row.id, row]));
+}
+
+/** Walks parentAgentId up from startAgentId to the root agent with no parent. */
+function resolveRootLeader(byId: AgentDirectoryIndex, startAgentId: string): AgentDirectoryRow | null {
+  let current = byId.get(startAgentId);
+  if (!current) {
+    return null;
+  }
+  const seen = new Set<string>();
+  while (current.parentAgentId) {
+    if (seen.has(current.id)) {
+      break; // Cycle guard; should never happen against real directory data.
+    }
+    seen.add(current.id);
+    const parent = byId.get(current.parentAgentId);
+    if (!parent) {
+      break;
+    }
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * A row counts as "affected" by a cap only if it is actually there right now:
+ * `running` (mid-turn) or `initializing` (mid-launch) on the capped account.
+ * `idle` and `error` are sessions that already stopped using the account, so
+ * naming them as "running there" is what made the real incident this fixes
+ * misleading: a leader was told 21 children "were running there" for a cap
+ * event the daemon only rediscovered later, on a fresh usage poll, when most
+ * had long since gone idle or errored out. Excluding `error` does not drop
+ * the reactive path (a turn failure classified as a cap): that fires off the
+ * turn failure itself, before the agent's status has settled to `error`.
+ */
+function isAffectedByCapRow(row: AgentDirectoryRow): boolean {
+  return !row.archived && (row.status === "running" || row.status === "initializing");
+}
+
+/** Groups agents live on `providerId` at listing time by their resolved root leader. */
+function groupAffectedChildrenByLeader(
+  byId: AgentDirectoryIndex,
+  providerId: string,
+): Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }> {
+  const byLeader = new Map<string, { leader: AgentDirectoryRow; children: AgentDirectoryRow[] }>();
+  for (const row of byId.values()) {
+    if (row.provider !== providerId || !isAffectedByCapRow(row)) {
+      continue;
+    }
+    const leader = resolveRootLeader(byId, row.id);
+    if (!leader || leader.id === row.id) {
+      continue; // No resolvable leader, or the row is itself a root (not a routed child).
+    }
+    let bucket = byLeader.get(leader.id);
+    if (!bucket) {
+      bucket = { leader, children: [] };
+      byLeader.set(leader.id, bucket);
+    }
+    bucket.children.push(row);
+  }
+  return byLeader;
+}
+
+function describeChild(row: AgentDirectoryRow): string {
+  return `${row.title ?? "untitled"} (${row.id})`;
+}
+
+/**
+ * Informational: account failover already moves these children to the next usable account (or
+ * collapses onto the leader account when no worker is usable) and returns them once this window
+ * resets. There is nothing for the leader to do about the cap itself.
+ */
+function formatCapMessage(event: CapEvent, children: AgentDirectoryRow[]): string {
+  const resetPart = event.resetsAt ? ` It resets at ${event.resetsAt.toISOString()}.` : "";
+  const childList = children.map(describeChild).join(", ");
+  return (
+    `Account pool: provider "${event.providerId}" hit its "${event.window}" limit.${resetPart} ` +
+    `Children running there are being moved to another account automatically: ${childList}. ` +
+    `This is informational — no action is needed.`
+  );
+}
+
+function formatPoolDryMessage(episode: PoolDryEpisode): string {
+  return (
+    `Account pool: every worker is capped for model "${episode.requestedModel}". ` +
+    `New spawns are falling back to the leader account "${episode.leaderProviderId}".`
+  );
+}
+
+/**
+ * Identifies one (leader, cap episode) pair, or null when the event carries
+ * no `resetsAt` to key on. `health.ts` always sets `resetsAt` for a
+ * "capped" `CapEvent` (falling back to its internal cap-expiry estimate
+ * when the source gave no reset time), so null is defensive rather than a
+ * path this notifier expects to hit; when it does, skip suppression
+ * entirely rather than risk keying two unrelated caps together and
+ * silently dropping a real one.
+ */
+function cappedEpisodeKey(leaderId: string, event: CapEvent): string | null {
+  if (!event.resetsAt) {
+    return null;
+  }
+  return `${event.providerId}::${event.window}::${event.resetsAt.toISOString()}::${leaderId}`;
+}
+
+function forgetCappedEpisodes(notified: Set<string>, providerId: string, window: string): void {
+  const prefix = `${providerId}::${window}::`;
+  for (const key of notified) {
+    if (key.startsWith(prefix)) {
+      notified.delete(key);
+    }
+  }
+}
+
+/**
+ * Said once per collapse, not once per spawn: it is a standing state, and the difference
+ * between telling Tyler his budget isolation is gone and burying that in a message per
+ * subagent is whether he reads it at all. Informational, not a call to action: account failover
+ * chose this collapse on its own (there was nowhere else to route to) and undoes it on its own
+ * once another account has budget, so what it has to carry is what changed and that nothing is
+ * being asked of anyone — a single cap now takes down the whole fleet until then.
+ */
+function formatPoolCollapsedMessage(episode: PoolCollapsedEpisode): string {
+  const shared =
+    episode.sharedProviderIds.length > 1
+      ? ` (entries ${episode.sharedProviderIds.join(", ")} are the same account)`
+      : "";
+  const out = episode.exhaustedProviderIds.length > 0 ? ` Out of budget: ${episode.exhaustedProviderIds.join(", ")}.` : "";
+  return (
+    `Account pool: down to ONE usable account, "${episode.targetProviderId}"${shared}, now running both leaders and their children. ` +
+    `Budget isolation is gone — the next cap stops every agent at once.${out} ` +
+    `This is informational; account failover chose this automatically. ` +
+    `Isolation resumes on its own for new agents once another account has budget.`
+  );
+}
+
+function formatPoolExhaustedMessage(episode: PoolExhaustedEpisode): string {
+  const when = episode.earliestResetAt
+    ? ` The earliest window reset is ${episode.earliestResetAt.toISOString()}.`
+    : " No account reported a reset time.";
+  return (
+    `Account pool: EVERY Claude account is out of budget (${episode.exhaustedProviderIds.join(", ")}). ` +
+    `New agents are being refused rather than started on a dead account.${when} ` +
+    `Nothing will run until an account resets or another one is signed in.`
+  );
+}
+
+function formatFailOpenMessage(episode: FailOpenEpisode): string {
+  const target = episode.targetProviderId ? ` (target "${episode.targetProviderId}")` : "";
+  return (
+    `Account pool: routing failed open (${episode.reason}${target}). ` +
+    `Requests are proceeding without pool routing until this clears.`
+  );
+}
+
+export function createNotifier(options: NotifierOptions): Notifier {
+  const { paseo, health } = options;
+  const schedule = options.schedule ?? ((fn: () => void | Promise<void>) => queueMicrotask(fn));
+  const now = options.now ?? (() => new Date());
+
+  const poolDryNotifiedLeaders = new Set<string>();
+  const poolCollapsedNotifiedLeaders = new Set<string>();
+  const poolExhaustedNotifiedLeaders = new Set<string>();
+  const failOpenNotifiedLeaders = new Set<string>();
+  /**
+   * (leaderId, cap episode) pairs already notified. A cap episode is
+   * provider + window + that window's `resetsAt`: the daemon rediscovers a
+   * still-open cap from the next usage poll after every plugin restart
+   * (health tracker state is in-memory too), which would otherwise re-emit
+   * a "capped" transition and re-send the identical notification. Keying on
+   * `resetsAt` rather than just (provider, window) still lets a genuinely
+   * new cap — one with a different reset time — notify again once the old
+   * episode has actually ended.
+   *
+   * This state is in-memory only and does NOT survive a plugin restart: the
+   * plugin SDK gives a plugin no durable store it can write to on its own.
+   * The one persistence primitive it exposes (`registerSettings`, backed by
+   * `PluginSettingsStore`) only answers read/write/reset RPCs that a
+   * client — e.g. a settings screen — initiates with its own revision
+   * token; plugin backend code never gets a handle back to call it
+   * directly. And `paseo.config` (`~/.paseo/config.json`) is off-limits
+   * here regardless. So a restart still re-arms this Set: it can still
+   * produce one fresh notification per cap episode that's still open when
+   * the plugin comes back up. That's an accepted limit of this fix, not
+   * eliminated by it. What this Set does eliminate is the case reachable
+   * without a restart: the same episode (same resetsAt) re-emitting a
+   * "capped" transition on its own, e.g. cap -> probation -> capped-again
+   * flapping while the daemon has no fresher reset time to report.
+   */
+  const cappedEpisodesNotified = new Set<string>();
+  const pendingPermissionCounts = new Map<string, number>();
+  const heldSends = new Map<string, QueuedSend[]>();
+  // Leaders for which this notifier instance has seen a turn boundary
+  // (turn_ended or permission_resolved). A fresh instance (e.g. after a plugin
+  // reload) knows nothing about in-flight permission prompts, so steering is
+  // withheld until a boundary proves the leader is safe to steer.
+  const boundaryObservedLeaders = new Set<string>();
+
+  function hasPendingPermission(agentId: string): boolean {
+    return (pendingPermissionCounts.get(agentId) ?? 0) > 0;
+  }
+
+  function queueHeld(leaderId: string, text: string, resetsAt?: Date): void {
+    const list = heldSends.get(leaderId) ?? [];
+    list.push({ leaderId, text, resetsAt });
+    heldSends.set(leaderId, list);
+  }
+
+  async function deliver(leaderId: string, text: string, resetsAt?: Date): Promise<void> {
+    if (resetsAt && resetsAt.getTime() <= now().getTime()) {
+      // The window this notification was about already reset — e.g. it sat
+      // behind a pending permission (or a rejected steer) until after
+      // resetsAt passed. Drop it rather than deliver a stale duplicate.
+      console.debug(
+        `[claude-account-pool] notify: dropping stale cap notification for leader "${leaderId}" (resetsAt ${resetsAt.toISOString()} already passed)`,
+      );
+      return;
+    }
+    if (!boundaryObservedLeaders.has(leaderId) || hasPendingPermission(leaderId)) {
+      queueHeld(leaderId, text, resetsAt);
+      return;
+    }
+    try {
+      const handle = paseo.agents.ref(leaderId);
+      // TYPE NOTE: activeTurnBehavior isn't on the installed @getpaseo/client
+      // PaseoAgentSendOptions type yet; the daemon adds runtime support for
+      // steering an active turn. Cast structurally rather than forking the
+      // SDK types.
+      await handle.send(text, { activeTurnBehavior: "steer" } as unknown as Parameters<typeof handle.send>[1]);
+    } catch {
+      queueHeld(leaderId, text, resetsAt); // Retried on this leader's next turn_ended.
+    }
+  }
+
+  function flushHeld(leaderId: string): void {
+    const list = heldSends.get(leaderId);
+    if (!list || list.length === 0) {
+      return;
+    }
+    heldSends.delete(leaderId);
+    for (const item of list) {
+      schedule(() => deliver(item.leaderId, item.text, item.resetsAt));
+    }
+  }
+
+  async function safeListDirectory(): Promise<AgentDirectoryRow[] | null> {
+    try {
+      return await listAgentDirectory(paseo);
+    } catch (error) {
+      console.error("[claude-account-pool] notify: failed to list agents for a notification", error);
+      return null;
+    }
+  }
+
+  // Serializes the process* functions so two episodes for the same leader
+  // can't interleave across their internal awaits and both pass the
+  // once-per-episode check.
+  let processingTail: Promise<void> = Promise.resolve();
+  function enqueue(fn: () => Promise<void>): Promise<void> {
+    const result = processingTail.then(fn);
+    processingTail = result.catch(() => {});
+    return result;
+  }
+
+  async function processPoolDry(episode: PoolDryEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || poolDryNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolDryNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolDryMessage(episode));
+  }
+
+  async function processPoolCollapsed(episode: PoolCollapsedEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || poolCollapsedNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolCollapsedNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolCollapsedMessage(episode));
+  }
+
+  async function processPoolExhausted(episode: PoolExhaustedEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || poolExhaustedNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    poolExhaustedNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatPoolExhaustedMessage(episode));
+  }
+
+  async function processFailOpen(episode: FailOpenEpisode): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    const leader = resolveRootLeader(buildAgentDirectoryIndex(rows), episode.callerAgentId);
+    if (!leader || failOpenNotifiedLeaders.has(leader.id)) {
+      return;
+    }
+    failOpenNotifiedLeaders.add(leader.id);
+    await deliver(leader.id, formatFailOpenMessage(episode));
+  }
+
+  async function processCapped(event: CapEvent): Promise<void> {
+    const rows = await safeListDirectory();
+    if (!rows) {
+      return;
+    }
+    // A leader whose bucket exists here already has at least one live
+    // affected child (groupAffectedChildrenByLeader only creates a bucket
+    // for rows that pass isAffectedByCapRow) — so a provider-wide cap with
+    // no live affected agents anywhere yields an empty `groups` and steers
+    // nobody, rather than surfacing a stale-looking alert into every leader.
+    const groups = groupAffectedChildrenByLeader(buildAgentDirectoryIndex(rows), event.providerId);
+    const deliveries: Promise<void>[] = [];
+    for (const { leader, children } of groups.values()) {
+      const key = cappedEpisodeKey(leader.id, event);
+      if (key) {
+        if (cappedEpisodesNotified.has(key)) {
+          continue; // Already notified this leader for this exact cap episode.
+        }
+        cappedEpisodesNotified.add(key);
+      }
+      deliveries.push(deliver(leader.id, formatCapMessage(event, children), event.resetsAt));
+    }
+    await Promise.allSettled(deliveries);
+  }
+
+  const unsubscribeHealth = health.onChange((event: CapEvent) => {
+    if (event.kind === "capped") {
+      schedule(() => enqueue(() => processCapped(event)));
+    } else {
+      // A pool account transitioning back to healthy re-arms the pool-dry episode, and with it
+      // the collapse and exhaustion ones: capacity coming back is exactly when isolation resumes
+      // for new placements, so the next time it is lost is a new thing to say.
+      poolDryNotifiedLeaders.clear();
+      poolCollapsedNotifiedLeaders.clear();
+      poolExhaustedNotifiedLeaders.clear();
+      forgetCappedEpisodes(cappedEpisodesNotified, event.providerId, event.window);
+    }
+  });
+
+  return {
+    notePoolDry(episode) {
+      schedule(() => enqueue(() => processPoolDry(episode)));
+    },
+    notePoolCollapsed(episode) {
+      schedule(() => enqueue(() => processPoolCollapsed(episode)));
+    },
+    notePoolExhausted(episode) {
+      schedule(() => enqueue(() => processPoolExhausted(episode)));
+    },
+    noteFailOpen(episode) {
+      schedule(() => enqueue(() => processFailOpen(episode)));
+    },
+    notePoolRecovered() {
+      failOpenNotifiedLeaders.clear();
+    },
+    onAgentCreated(agentId) {
+      boundaryObservedLeaders.add(agentId);
+    },
+    onPermissionRequested(agentId) {
+      pendingPermissionCounts.set(agentId, (pendingPermissionCounts.get(agentId) ?? 0) + 1);
+    },
+    onPermissionResolved(agentId) {
+      boundaryObservedLeaders.add(agentId);
+      const count = (pendingPermissionCounts.get(agentId) ?? 0) - 1;
+      if (count <= 0) {
+        pendingPermissionCounts.delete(agentId);
+        flushHeld(agentId);
+      } else {
+        pendingPermissionCounts.set(agentId, count);
+      }
+    },
+    onTurnEnded(agentId) {
+      boundaryObservedLeaders.add(agentId);
+      flushHeld(agentId);
+    },
+    onAgentArchived(agentId) {
+      // The agent is gone: drop any held sends rather than deliver them, and
+      // forget it entirely so its state doesn't linger past archival.
+      poolDryNotifiedLeaders.delete(agentId);
+      poolCollapsedNotifiedLeaders.delete(agentId);
+      poolExhaustedNotifiedLeaders.delete(agentId);
+      failOpenNotifiedLeaders.delete(agentId);
+      pendingPermissionCounts.delete(agentId);
+      heldSends.delete(agentId);
+      boundaryObservedLeaders.delete(agentId);
+      const leaderSuffix = `::${agentId}`;
+      for (const key of cappedEpisodesNotified) {
+        if (key.endsWith(leaderSuffix)) {
+          cappedEpisodesNotified.delete(key);
+        }
+      }
+    },
+    stop() {
+      unsubscribeHealth();
+    },
+  };
+}

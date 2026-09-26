@@ -310,6 +310,7 @@ describe("runAsyncWorktreeBootstrap", () => {
     name?: string;
     title?: string;
     env?: Record<string, string>;
+    nice?: number;
   }
 
   interface StubTerminalRecord {
@@ -540,6 +541,30 @@ describe("runAsyncWorktreeBootstrap", () => {
       exitCode: null,
       terminalId: "term-1",
     });
+  });
+
+  it("starts a script terminal at the requested nice only when one is given", async () => {
+    commitPaseoScripts({ web: { command: "npm run dev" }, api: { command: "npm run api" } });
+    const createTerminalCalls: CreateTerminalCall[] = [];
+    const run = (scriptName: string, nice?: number) =>
+      spawnWorkspaceScript({
+        repoRoot: repoDir,
+        workspaceId: repoDir,
+        projectSlug: "repo",
+        branchName: "feature-nice",
+        scriptName,
+        ...(nice !== undefined ? { nice } : {}),
+        daemonPort: null,
+        serviceProxy: new ScriptRouteStore(),
+        runtimeStore: new WorkspaceScriptRuntimeStore(),
+        terminalManager: createStubTerminalManager(createTerminalCalls, []),
+      });
+
+    await run("web", 10);
+    await run("api");
+
+    expect(createTerminalCalls[0]).toMatchObject({ name: "web", nice: 10 });
+    expect(createTerminalCalls[1]).not.toHaveProperty("nice");
   });
 
   it("records plain script exit codes from shell command completion without terminal exit", async () => {

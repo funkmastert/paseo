@@ -1,6 +1,15 @@
 import type { Command } from "commander";
 import { createRequire } from "node:module";
-import { getOrCreateServerId, findExecutable, execCommand } from "@getpaseo/server";
+import {
+  getOrCreateServerId,
+  findExecutable,
+  execCommand,
+  readDaemonVitals,
+  deriveVitalsVerdict,
+  describeVitalsVerdict,
+  lastWedge,
+  readLastShutdownReceipt,
+} from "@getpaseo/server";
 import { connectToDaemon } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema } from "../../output/index.js";
 import { resolveLocalDaemonState } from "./local-daemon.js";
@@ -32,6 +41,10 @@ interface DaemonStatus {
   cliVersion: string;
   daemonVersion: string | null;
   desktopManaged: boolean;
+  /** From the daemon's heartbeat file, so it answers even when the websocket cannot. */
+  eventLoop: string | null;
+  lastWedge: string | null;
+  lastShutdown: string | null;
   providers: ProviderBinaryStatus[];
   note?: string;
 }
@@ -99,6 +112,11 @@ function createStatusSchema(status: DaemonStatus): OutputSchema<StatusRow> {
             if (item.value === "not_probed" || item.value === "auth_required") return "yellow";
             return "red";
           }
+          if (item.key === "Event Loop") {
+            if (item.value === "healthy") return "green";
+            if (item.value === "not reporting") return undefined;
+            return "yellow";
+          }
           if (item.key.startsWith("  ")) {
             if (item.value === "not found" || item.value === "not found (daemon)") return "red";
             if (item.value.endsWith("(--version failed)")) return "yellow";
@@ -130,6 +148,10 @@ function toStatusRows(status: DaemonStatus): StatusRow[] {
     { key: "CLI", value: status.cliVersion },
     { key: "Daemon Version", value: status.daemonVersion ?? "-" },
   ];
+
+  if (status.eventLoop) rows.push({ key: "Event Loop", value: status.eventLoop });
+  if (status.lastWedge) rows.push({ key: "Last Wedge", value: status.lastWedge });
+  if (status.lastShutdown) rows.push({ key: "Last Shutdown", value: status.lastShutdown });
 
   if (status.note) {
     rows.push({ key: "Note", value: status.note });
@@ -378,6 +400,66 @@ export function selectRelayStatus(input: {
   return `${scheme}://${relay.publicEndpoint}`;
 }
 
+interface VitalsRows {
+  eventLoop: string | null;
+  lastWedge: string | null;
+  lastShutdown: string | null;
+  /** The loop is slow, wedged or silent: the reason a probe may have timed out. */
+  blocked: boolean;
+}
+
+/**
+ * Reads the heartbeat file and the shutdown receipt straight off disk. "Slow" and "wedged" come
+ * from the loop metric the daemon's watchdog thread keeps current, never from how long a probe
+ * waited, so a busy daemon is not reported down.
+ */
+export function resolveVitalsRows(input: {
+  home: string;
+  running: boolean;
+  /** When the running daemon's supervisor started. The worker, and its file, start after it. */
+  daemonStartedAt: string | null;
+}): VitalsRows {
+  const read = readDaemonVitals(input.home);
+  // A file from an earlier run (this one has the vitals off) describes a process that is gone.
+  // The pid file names the supervisor and the file names the worker, so compare start times.
+  const file =
+    read.status === "ok" && !isBefore(read.file.startedAt, input.daemonStartedAt)
+      ? read.file
+      : null;
+  const verdict = input.running ? deriveVitalsVerdict(file, Date.now()) : null;
+  const wedge = lastWedge(file);
+  const shutdown = readLastShutdownReceipt(input.home, input.running);
+  return {
+    eventLoop: verdict && verdict.state !== "stopped" ? describeVitalsVerdict(verdict) : null,
+    lastWedge:
+      input.running && wedge
+        ? `${wedge.endedAt} (${Math.round(wedge.blockedMs / 1000)}s, ${wedge.cause})`
+        : null,
+    lastShutdown:
+      shutdown.status === "ok"
+        ? `${shutdown.receipt.outcome} (${shutdown.receipt.reason}) at ${shutdown.receipt.completedAt}`
+        : null,
+    blocked:
+      verdict !== null &&
+      (verdict.state === "slow" || verdict.state === "wedged" || verdict.state === "silent"),
+  };
+}
+
+function isBefore(candidate: string, reference: string | null): boolean {
+  if (reference === null) return false;
+  const candidateMs = Date.parse(candidate);
+  const referenceMs = Date.parse(reference);
+  return Number.isFinite(candidateMs) && Number.isFinite(referenceMs) && candidateMs < referenceMs;
+}
+
+function describeBlockedLoop(
+  localDaemon: DaemonStatus["localDaemon"],
+  vitals: VitalsRows,
+): string | undefined {
+  if (localDaemon !== "unresponsive" || !vitals.blocked) return undefined;
+  return `Event loop: ${vitals.eventLoop}. The process is alive, not down`;
+}
+
 export type StatusResult = ListResult<StatusRow>;
 
 export async function runStatusCommand(
@@ -433,6 +515,13 @@ export async function runStatusCommand(
     note = appendNote(note, serverIdResult.error);
   }
 
+  const vitals = resolveVitalsRows({
+    home: state.home,
+    running: state.running,
+    daemonStartedAt: state.pidInfo?.startedAt ?? null,
+  });
+  note = appendNote(note, describeBlockedLoop(localDaemon, vitals));
+
   const providers = daemonProviders ?? (await checkProviderBinaries());
 
   const daemonStatus: DaemonStatus = {
@@ -452,6 +541,9 @@ export async function runStatusCommand(
     cliVersion,
     daemonVersion,
     desktopManaged: state.pidInfo?.desktopManaged === true,
+    eventLoop: vitals.eventLoop,
+    lastWedge: vitals.lastWedge,
+    lastShutdown: vitals.lastShutdown,
     providers,
     note,
   };

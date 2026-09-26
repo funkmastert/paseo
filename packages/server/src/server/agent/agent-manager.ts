@@ -1,9 +1,12 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
+import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { PromptInterception } from "./agent-refocus.js";
 import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
 import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
+import { isDeepStrictEqual } from "node:util";
 import {
   AGENT_LIFECYCLE_STATUSES,
   type AgentLifecycleStatus,
@@ -16,19 +19,28 @@ import {
   PARENT_AGENT_ID_LABEL,
 } from "@getpaseo/protocol/agent-labels";
 import type { Logger } from "pino";
-import type { ProviderOptions, ToolPolicy } from "@getpaseo/protocol/agent-types";
+import type {
+  ProviderOptions,
+  ToolPolicy,
+  ModelDivergenceAlert,
+  TokenBurnAlert,
+  ResourceAlert,
+  OwedFinishReport,
+} from "@getpaseo/protocol/agent-types";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { z } from "zod";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 
 import {
   getAgentStreamEventTurnId,
+  type AgentAccountAuth,
   type AgentCapabilityFlags,
   type AgentClient,
   type AgentCreateSessionOptions,
   type AgentResumeSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentSlashCommand,
   type AgentMode,
   type AgentPermissionRequest,
@@ -46,6 +58,7 @@ import {
   type SteerResult,
   type AgentStreamEvent,
   type AgentTimelineItem,
+  type AgentTokenRateBucket,
   type AgentUsage,
   type AgentRuntimeInfo,
   type ImportedTimelineEntry,
@@ -77,8 +90,16 @@ import {
 } from "./agent-run-state.js";
 import { invokeRewindCapability, type RewindMode } from "./rewind/rewind.js";
 import { isSystemInjectedEnvelope } from "./agent-prompt.js";
+import { recoverLatestActivitySummary, summarizeLatestActivityItem } from "./activity-curator.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { stripInternalPaseoMcpServer, withRuntimePaseoMcpServer } from "./runtime-mcp-config.js";
+import {
+  stripInternalPaseoMcpServer,
+  withRuntimeMcpGatewayServers,
+  withRuntimePaseoMcpServer,
+} from "./runtime-mcp-config.js";
+import type { McpGateway, McpGatewaySnapshotEntry } from "../mcp-gateway/gateway.js";
+import { findPerDirMcpServer, type PerDirMcpServerLookup } from "../mcp-gateway/per-dir-stdio.js";
+import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { resolveCreateAgentTitles } from "./create-agent-title.js";
 import type { PaseoToolCatalogFactory } from "./tools/types.js";
 import { isPaseoToolPolicyEnabled } from "./paseo-tool-policy.js";
@@ -88,10 +109,46 @@ import {
   type ProviderSubagentStoreEvent,
 } from "./provider-subagents/store.js";
 import { withTimeout } from "../../utils/promise-timeout.js";
+import { computeTokenRate, recordTokenDelta } from "./token-rate-tracker.js";
+import type { TokenBurnMonitorState } from "./token-burn-detector.js";
+import {
+  noteConfiguredModelChange,
+  recordModelObservation,
+  type ModelDivergence,
+  type ModelDivergenceState,
+} from "./model-divergence.js";
+import { isFanOutBlocked, type SpendGovernorState } from "./spend-governor.js";
+import { summarizeOwedFinishReport } from "./finish-obligation.js";
+import type { FinishObligationService } from "./finish-obligation-service.js";
+import type {
+  AdmissionAgentView,
+  AdmissionOutcome,
+  ChildAdmissionController,
+  HeldTurn,
+} from "./child-admission.js";
+import type { PromptQueue } from "./prompt-queue.js";
+import type { AgentResourceMonitorState } from "./resource-monitor-detector.js";
+import {
+  isUnresponsiveCancelReason,
+  UNRESPONSIVE_CANCEL_ERROR,
+  UNRESPONSIVE_CANCEL_REASON,
+  formatAccountCappedCancelError,
+} from "./turn-cancel.js";
+import {
+  AgentProviderMoveError,
+  checkAgentProviderMove,
+  resolveProviderSessionFamily,
+} from "./provider-move.js";
+import { getErrorMessage } from "@getpaseo/protocol/error-utils";
+import { RunMarkerTracker } from "./restart-recovery/run-marker.js";
 
 const RELOAD_SESSION_CLOSE_TIMEOUT_MS = 3_000;
 const INTERRUPT_SESSION_TIMEOUT_MS = 2_000;
 const IMPORTABLE_SESSION_LIST_TIMEOUT_MS = 90_000;
+// Reconciliation for provider subagents stuck "running" because their terminal SDK event never
+// arrived (docs/agent-lifecycle.md caveats). See docs/plans/2026-09-12-003-fix-subagent-list-accuracy-plan.md.
+const DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS = 5 * 60 * 1000;
+const DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS = 15 * 60 * 1000;
 const STORED_AGENT_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: false,
   supportsSessionPersistence: true,
@@ -116,6 +173,15 @@ function submittedPromptText(prompt: AgentPromptInput): string {
     .trim();
 }
 
+/**
+ * How the AgentManager reaches the device cap: read a snapshot, hear about changes. Narrow on
+ * purpose — nothing here can acquire or release a slot.
+ */
+export interface DeviceLeaseStatusSource {
+  getSnapshot(): Promise<DeviceStatusSnapshot>;
+  subscribe(listener: () => void): () => void;
+}
+
 export class AgentManagerShuttingDownError extends Error {
   constructor() {
     super("Agent manager is shutting down");
@@ -136,6 +202,14 @@ export type AgentRunCancellationResult =
   | { status: "not_running" }
   | { status: "settled" }
   | { status: "refused" };
+
+/** The turn a steer was admitted against ended or was replaced before the steer reached it. */
+export class ActiveTurnChangedError extends Error {
+  constructor() {
+    super("Active turn changed before steering could be delivered");
+    this.name = "ActiveTurnChangedError";
+  }
+}
 
 interface PreparedSessionConfig {
   storedConfig: AgentSessionConfig;
@@ -210,6 +284,11 @@ export type AgentManagerEvent =
 
 export type AgentSubscriber = (event: AgentManagerEvent) => void;
 
+export type PromptDispatchInterceptor = (
+  agentId: string,
+  prompt: AgentPromptInput,
+) => PromptInterception | null;
+
 export interface SubscribeOptions {
   agentId?: string;
   replayState?: boolean;
@@ -251,6 +330,187 @@ export type AgentAttentionCallback = (params: {
 
 export type AgentArchivedCallback = (agentId: string) => Promise<void> | void;
 
+/**
+ * Lean per-agent view for AgentTokenBurnMonitor's sweep — deliberately not a full ManagedAgent
+ * clone (Object.assign in listAgents() copies pending permissions, session handles, etc. the
+ * monitor never touches). Includes internal agents, unlike listAgents(): the monitor decides
+ * for itself whether internal agents are in scope.
+ */
+export interface TokenBurnMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  isDelegated: boolean;
+  /** Mid-turn right now. The monitor only lets running agents breach the rate leg. */
+  isRunning: boolean;
+  tokenRate: number | undefined;
+  totalTokens: number | undefined;
+  /** Carries the budget declared for this agent alone (spend-governor.ts's SPEND_BUDGET_LABEL). */
+  labels: Record<string, string>;
+  /** So the governor's downgrade stage can skip an agent already on the target model. */
+  model: string | undefined;
+  /** So the governor can check its target model against the right provider's catalog. */
+  provider: string;
+}
+
+/**
+ * Lean per-agent view for AgentModelDivergenceMonitor's sweep, mirroring the summaries around it.
+ * `divergence` is the state's verdict for the agent right now; `shownAlert` is what the monitor
+ * last put on the wire, so a sweep can tell a new finding from one it already raised.
+ */
+export interface ModelDivergenceMonitorAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  title: string | null;
+  divergence: ModelDivergence | undefined;
+  shownAlert: ModelDivergenceAlert | undefined;
+}
+
+/**
+ * Lean per-agent view for AgentResourceMonitor's sweep, mirroring TokenBurnMonitorAgentSummary
+ * above. Resource usage is attributed from an OS-level `ps` sample keyed by agent id
+ * (process-attribution.ts), not from anything AgentManager tracks itself — this summary exists
+ * only to tell the monitor which agent ids to attribute against and whether each is in scope.
+ */
+export interface ResourceMonitorAgentSummary {
+  id: string;
+  /** Which agent runtime this is. The device cap reads it to know whether it can refuse. */
+  provider: AgentProvider;
+  workspaceId: string | undefined;
+  internal: boolean;
+  /** Mid-turn right now. Only a running agent can be told about its usage — steering a message
+   * into an idle agent would start a new turn on its own (agent-prompt.ts's fallback). */
+  isRunning: boolean;
+  /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
+  parentAgentId: string | null;
+}
+
+/**
+ * Lean per-agent view for AgentAccountFailoverMonitor's sweep, mirroring
+ * TokenBurnMonitorAgentSummary/ResourceMonitorAgentSummary above. Unlike those two, this
+ * carries enough for the monitor to decide candidacy without a second round-trip per agent:
+ * `provider` (which account it's stuck on), `lifecycle` (never migrate a running agent),
+ * `lastError` (the reactive cap-text signal), `labels` (parent lookup and the
+ * already-migrated marker), and the session/model/mode fields the migration action restores
+ * on the successor. `model` is what to restore rather than what is running: see
+ * toAccountFailoverSummary.
+ */
+export interface AccountFailoverAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  cwd: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  lastError: string | undefined;
+  title: string | null;
+  /** A foreground turn, a pending run, or a replacement in flight. Same expression the done
+   * janitor reads: failover must not take the account out from under live work. */
+  busy: boolean;
+  pendingPermissionCount: number;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
+  /** Timeline generation: moves on every appended row, so a repeat failure with identical text
+   * is still distinguishable from the old one. Null before the timeline is initialized. */
+  timelineSeq: number | null;
+  /** Timestamp of the newest timeline row. For an agent whose turn just failed, that is the
+   * failure's own system-error row. Null when the timeline is empty or not initialized. */
+  lastTimelineAt: string | null;
+  labels: Record<string, string>;
+  sessionId: string | undefined;
+  model: string | undefined;
+  modeId: string | undefined;
+  thinkingOptionId: string | undefined;
+}
+
+/**
+ * Lean per-agent view for AgentDoneJanitor's sweep. Only live agents are here: a closed agent has
+ * no runtime, so the janitor reads its stored record instead. Every field is a reason the agent
+ * might not be finished; see agent/done-janitor-detector.ts for how each one is used.
+ */
+export interface DoneJanitorAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  cwd: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  /** A foreground turn, a pending run, or a replacement in flight. */
+  busy: boolean;
+  pendingPermissionCount: number;
+  requiresAttention: boolean;
+  attentionReason: "finished" | "error" | "permission" | null;
+  /** A live token-burn, spend-governor or resource alert. Never persisted. */
+  hasAlert: boolean;
+  /** Provider-native children (Task subagents, workflows) still reported running. */
+  runningProviderSubagentCount: number;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
+  labels: Record<string, string>;
+  title: string | null;
+  sessionId: string | undefined;
+}
+
+/**
+ * Lean per-agent view for WorkspaceTitleTracker's sweep, mirroring the monitor summaries
+ * above. `title` and `lastActivitySummary` are what a workspace name is derived from: the
+ * agent title tracker already keeps `title` describing what the session is doing now, so a
+ * workspace can be named from its agents' titles instead of re-reading every timeline.
+ * `workspaceId` is the only membership signal used — a legacy agent created before ownership
+ * stamping has none, and never drives a workspace's name.
+ */
+export interface WorkspaceTitleTrackerAgentSummary {
+  id: string;
+  workspaceId: string | undefined;
+  internal: boolean;
+  lifecycle: AgentLifecycleStatus;
+  title: string | null;
+  /** Live-only, so absent until the agent's next timeline item after a daemon restart. */
+  lastActivitySummary: string | null;
+  /** The newest of every activity timestamp the manager holds, or null if none parses. */
+  lastActivityAt: string | null;
+}
+
+/**
+ * Lean per-agent view for AgentLeaderCompactionMonitor's sweep. `busy` has the done janitor's
+ * meaning; the monitor only ever starts a turn when it is false and `lifecycle` is idle.
+ */
+export interface LeaderCompactionAgentSummary {
+  id: string;
+  provider: AgentProvider;
+  /** The built-in provider that owns the transcript; `/compact` exists only in `claude`'s. */
+  sessionFamily: AgentProvider;
+  internal: boolean;
+  isDelegated: boolean;
+  lifecycle: AgentLifecycleStatus;
+  busy: boolean;
+  pendingPermissionCount: number;
+  contextWindowUsedTokens: number | undefined;
+  title: string | null;
+}
+
+/** How a turn started by {@link AgentManager.startTurnIfIdle} ended. */
+export type IdleTurnOutcome =
+  | { status: "completed"; finalText: string }
+  | { status: "canceled" }
+  | { status: "failed"; error: string };
+
+/**
+ * Lean per-agent view for AgentStallSweep: the done janitor's view plus the three things a stall
+ * needs that it does not carry. See agent/stall-detector.ts.
+ */
+export interface StallSweepAgentSummary extends DoneJanitorAgentSummary {
+  /** The done janitor's question is the turn now running. */
+  quietTurn: boolean;
+  /** Waiting for a child-admission slot: `running` with no turn, so silence is expected. */
+  turnQueued?: boolean;
+  /** Token usage as last reported, for comparing across sweeps; usage touches no timestamp. */
+  usageFingerprint: string;
+  /** The newest activity of each provider subagent still reported running. */
+  runningSubagentActivityAt: string[];
+}
+
 export interface ProviderAvailability {
   provider: AgentProvider;
   available: boolean;
@@ -261,6 +521,22 @@ interface AgentManagerRescueTimeouts {
   reloadSessionCloseMs?: number;
   interruptSessionMs?: number;
 }
+
+/** Who asked for a turn to stop. Logged, never persisted, never on the wire. */
+export type AgentCancelReason =
+  | "user"
+  | "reload"
+  | "replace"
+  | "rewind"
+  | "archive"
+  | "spend-governor"
+  | "done-janitor"
+  | "hub"
+  /** The stalled-agent sweep, handing a turn stuck on a capped account to account failover. */
+  | "account-capped"
+  /** The remediation ladder, cancelling a timed-out or over-budget escalation agent. */
+  | "remediation"
+  | "unspecified";
 
 interface ProviderEnabledFlag {
   enabled: boolean;
@@ -287,6 +563,9 @@ export interface CreateAgentOptions {
   // undefined is an explicit decision: the agent never appears in the sidebar.
   workspaceId: string | undefined;
   owner?: AgentOwner;
+  // The agent that initiated this create, if any. Threaded into the
+  // agent.create plugin hook read-only; absent for human-initiated creates.
+  callerAgentId?: string;
 }
 
 export interface AgentManagerOptions {
@@ -297,10 +576,27 @@ export interface AgentManagerOptions {
   registry?: AgentStorage;
   onAgentAttention?: AgentAttentionCallback;
   onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  // Fired once per running->idle transition (a finished turn), skipping
+  // internal agents. Independent of attention tracking — see emitState().
+  onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   durableTimelineStore?: AgentTimelineStore;
   terminalManager?: TerminalManager | null;
   mcpBaseUrl?: string;
   mcpAuthToken?: string;
+  /** U3: the gateway instance whose enabled state and server names drive brokered injection. */
+  mcpGateway?: Pick<
+    McpGateway,
+    | "enabled"
+    | "sessionMode"
+    | "getServerNames"
+    | "getSnapshot"
+    | "on"
+    | "off"
+    | "startAuthorization"
+    | "adoptServer"
+  >;
+  /** The gateway's own distinct capability token (KTD1) — never the `/mcp/agents` token. */
+  mcpGatewayAuthToken?: string;
   paseoToolsEnabled?: boolean;
   paseoToolCatalogFactory?: PaseoToolCatalogFactory;
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
@@ -311,18 +607,20 @@ export interface AgentManagerOptions {
     agentId: string;
     expectedTurnId: string;
   }) => Promise<void>;
+  /** How often `sweepStaleProviderSubagents` runs once `startProviderSubagentSweep` is called. */
+  staleProviderSubagentSweepIntervalMs?: number;
+  /** How long a "running" provider subagent may go without timeline/descriptor activity before
+   * the sweep terminalizes it, even while its parent agent stays open. */
+  staleProviderSubagentLivenessMs?: number;
   logger: Logger;
 }
 
+/** See `AgentManager.steerIntoActiveTurn`. Nothing about a steer ever cancels the run. */
 export type ActiveTurnSteerDispatchResult =
   | { status: "inactive" | "steered" }
-  | { status: "replaced"; iterator: AsyncGenerator<AgentStreamEvent> };
+  | { status: "busy"; nextOpportunity: Promise<void> };
 
-function stripSteerOptions(options?: AgentSteerOptions): AgentRunOptions | undefined {
-  if (!options) return undefined;
-  const { clearPendingPermissions: _, ...runOptions } = options;
-  return runOptions;
-}
+const MAX_STEER_ADMISSION_ATTEMPTS = 3;
 
 export interface WaitForAgentOptions {
   signal?: AbortSignal;
@@ -395,6 +693,20 @@ interface ManagedAgentBase {
   >;
   inFlightPermissionResponses: Set<string>;
   pendingReplacement: boolean;
+  /**
+   * Set when this agent's turn ended by cancellation rather than by finishing. Consumed at the
+   * `running` -> `idle` edge in `checkAndSetAttention`, in the same synchronous `emitState` that
+   * observes the edge, so it cannot leak into a later genuine finish. Live-only, never persisted:
+   * it describes one turn, not the agent.
+   */
+  turnCanceled?: boolean;
+  /**
+   * Set by `markQuietTurn` before the done janitor asks an idle agent whether it is finished.
+   * Consumed at the next edge out of `running`, so the answer to that question raises no
+   * `finished` attention, sends no push and does not refresh the title: the janitor asking is not
+   * the agent finishing work. An error on that turn still flags. Live-only, never persisted.
+   */
+  quietTurn?: boolean;
   persistence: AgentPersistenceHandle | null;
   historyPrimed: boolean;
   lastUserMessageAt: Date | null;
@@ -402,6 +714,88 @@ interface ManagedAgentBase {
   activeTurnStartedAt: Date | null;
   lastUsage?: AgentUsage;
   lastError?: string;
+  /**
+   * One-line "what is this agent doing right now" summary, computed
+   * server-side from the latest timeline item. Live-only: not persisted to
+   * disk (see agent-storage.ts's StoredAgentRecord), so it starts absent
+   * again after a daemon restart until the next timeline item arrives.
+   */
+  lastActivitySummary?: string;
+  /**
+   * Provider-reported MCP server statuses from the SDK's init message (KTD8), captured
+   * verbatim each turn. Live-only like `lastActivitySummary`: not persisted, not in
+   * `toStoredAgentRecord`, cleared on rewind. There is no SDK push event for later
+   * changes, so this is only as fresh as the most recent turn's init message — it
+   * covers stdio/pass-through servers; the gateway's own state is authoritative for
+   * brokered ones (see mcp-gateway/gateway.ts's `getSnapshot`/"change" event).
+   */
+  mcpServerStatuses?: AgentMcpServerStatus[];
+  /**
+   * Trailing-window token-burn ring buffer, fed by provider-local `turnTokenDelta` on
+   * `turn_completed` (Claude only in phase 1). Live-only like `lastActivitySummary`: not
+   * persisted, not in `toStoredAgentRecord`, cleared on rewind. Lazily created on first turn —
+   * an idle agent costs nothing. Rate is derived from this at read time (agent-projections.ts),
+   * never stored directly. See token-rate-tracker.ts and
+   * docs/plans/2026-09-12-005-feat-token-burn-indicator-plan.md.
+   */
+  tokenRateBuckets?: AgentTokenRateBucket[];
+  /** Live-only lifetime token total, alongside tokenRateBuckets — same clearing rules. */
+  totalTokens?: number;
+  /**
+   * Live-only breach state set by AgentTokenBurnMonitor via setTokenBurnAlert/clearTokenBurnAlert.
+   * Not persisted, cleared on rewind alongside tokenRateBuckets/totalTokens. Deliberately not
+   * part of `attention`/attentionReason — see TokenBurnAlert's doc comment.
+   */
+  tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * Live-only per-agent bookkeeping (consecutive-sweep counters, ratchet threshold, re-arm
+   * state) the monitor threads between sweeps. Never projected to the wire, never persisted.
+   * See token-burn-detector.ts.
+   */
+  tokenBurnMonitorState?: TokenBurnMonitorState;
+  /**
+   * Live-only per-agent spend-governor bookkeeping (which ladder stages have fired against
+   * which budget). Never projected to the wire, never persisted, cleared on rewind alongside
+   * totalTokens — a rewind erases the spend the stages were fired against, so keeping them
+   * would leave an agent blocked for tokens it no longer shows. See spend-governor.ts.
+   */
+  spendGovernorState?: SpendGovernorState;
+  /**
+   * Live-only breach state set by AgentResourceMonitor via setResourceAlert/clearResourceAlert.
+   * Not persisted, cleared on rewind alongside tokenBurnAlert — same reasons. See
+   * ResourceAlert's doc comment and docs/resource-monitor.md.
+   */
+  resourceAlert?: ResourceAlert;
+  /**
+   * Live-only per-agent bookkeeping (consecutive-sweep counters for the memory and CPU legs)
+   * the monitor threads between sweeps. Never projected to the wire, never persisted. See
+   * resource-monitor-detector.ts.
+   */
+  resourceMonitorState?: AgentResourceMonitorState;
+  /**
+   * Set while this child's new turn waits for a slot under ChildAdmissionController. The agent
+   * shows `running` meanwhile, so every waiter treats it as pending rather than finished.
+   * Live-only: the held prompt itself is persisted by the controller.
+   */
+  turnQueued?: { queuedAt: string };
+  /**
+   * Mirror of the finish report this agent still owes, kept by FinishObligationService from the
+   * stored obligation so the snapshot can carry it (docs/finish-reports.md). Never persisted
+   * from here: the obligation itself lives on the record.
+   */
+  owedFinishReport?: OwedFinishReport;
+  /**
+   * Live-only comparison of the model this agent's responses report with the model it was
+   * configured with (model-divergence.ts). Tracked whether or not anyone is watching, since it
+   * is a string compare per response; only its surfacing is opt-in. Never projected or persisted,
+   * and not carried across a session reload: the new session's responses are the evidence.
+   */
+  modelDivergenceState?: ModelDivergenceState;
+  /**
+   * The finding as shown to a client, set and cleared by AgentModelDivergenceMonitor. Kept apart
+   * from the state above so a daemon that has the monitor off never puts it on the wire.
+   */
+  modelDivergenceAlert?: ModelDivergenceAlert;
   attention: AttentionState;
   foregroundTurnWaiters: Set<ForegroundTurnWaiter>;
   finalizedForegroundTurnIds: Set<string>;
@@ -523,6 +917,101 @@ interface AgentMetadataPatch {
 }
 
 const SYSTEM_ERROR_PREFIX = "[System Error]";
+
+export interface ReloadAgentSessionOptions {
+  rehydrateFromDisk?: boolean;
+  /**
+   * Re-open the session under this provider instead of the one its handle names — a provider
+   * move. The handle, the session config, and therefore the stored record all follow.
+   */
+  moveToProvider?: AgentProvider;
+}
+
+/**
+ * The live-only spend ledger (docs/token-burn.md). It belongs to the agent, not to the session
+ * carrying it: a reload closes one session and opens another for the same agent, and the
+ * governor's budget is for the task, so the spend and the ladder's fired stages have to come
+ * across. Without this a reload zeroed the counter — on the live daemon, an agent that had spent
+ * 51M against a 40M budget read 26.7M and was never told, because it had been reloaded mid-life.
+ */
+interface CarriedSpendLedger {
+  tokenRateBuckets?: AgentTokenRateBucket[];
+  totalTokens?: number;
+  tokenBurnAlert?: TokenBurnAlert;
+  tokenBurnMonitorState?: TokenBurnMonitorState;
+  spendGovernorState?: SpendGovernorState;
+}
+
+/** The CLI's own resolution of the configured model, reported at session init. */
+function readRuntimeModel(runtimeInfo: AgentRuntimeInfo | undefined): string | null {
+  const runtimeModel = runtimeInfo?.extra?.["runtimeModel"];
+  return typeof runtimeModel === "string" ? runtimeModel : null;
+}
+
+function carrySpendLedger(existing: ActiveManagedAgent): CarriedSpendLedger {
+  const ledger: CarriedSpendLedger = {};
+  if (existing.tokenRateBuckets !== undefined) ledger.tokenRateBuckets = existing.tokenRateBuckets;
+  if (existing.totalTokens !== undefined) ledger.totalTokens = existing.totalTokens;
+  if (existing.tokenBurnAlert !== undefined) ledger.tokenBurnAlert = existing.tokenBurnAlert;
+  if (existing.tokenBurnMonitorState !== undefined) {
+    ledger.tokenBurnMonitorState = existing.tokenBurnMonitorState;
+  }
+  if (existing.spendGovernorState !== undefined) {
+    ledger.spendGovernorState = existing.spendGovernorState;
+  }
+  return ledger;
+}
+
+interface CarriedAgentState {
+  handle: AgentPersistenceHandle | null;
+  provider: AgentProvider;
+  historyPrimed: boolean;
+  lastUsage: AgentUsage | undefined;
+  lastError: string | undefined;
+  attention: AttentionState;
+  spend: CarriedSpendLedger;
+}
+
+/**
+ * What survives closing and re-opening an agent's session. A provider move differs in two places:
+ * the handle is re-addressed to the target account, and the failure is left behind with the
+ * account that produced it — carried onto the new account it would read as that account's own cap
+ * to the failover monitor.
+ */
+function carryAgentStateAcrossRefresh(
+  existing: ActiveManagedAgent,
+  options: ReloadAgentSessionOptions | undefined,
+): CarriedAgentState {
+  const moveToProvider = options?.moveToProvider ?? null;
+  const handle = retargetPersistenceHandle(existing.persistence, moveToProvider);
+  return {
+    handle,
+    provider: handle?.provider ?? moveToProvider ?? existing.provider,
+    historyPrimed: existing.historyPrimed,
+    lastUsage: existing.lastUsage,
+    lastError: moveToProvider ? undefined : existing.lastError,
+    attention: existing.attention,
+    spend: carrySpendLedger(existing),
+  };
+}
+
+/** The same session, addressed to another account. Metadata carries the provider on reload too. */
+function retargetPersistenceHandle(
+  handle: AgentPersistenceHandle | null | undefined,
+  targetProvider: AgentProvider | null,
+): AgentPersistenceHandle | null {
+  if (!handle) {
+    return null;
+  }
+  if (!targetProvider) {
+    return handle;
+  }
+  return {
+    ...handle,
+    provider: targetProvider,
+    metadata: { ...handle.metadata, provider: targetProvider },
+  };
+}
 
 function attachPersistenceCwd(
   handle: AgentPersistenceHandle | null,
@@ -693,6 +1182,13 @@ export class AgentManager {
   private readonly pluginLifecycle: PluginLifecycle | undefined;
   private readonly clients = new Map<AgentProvider, AgentClient>();
   private readonly providerEnabled = new Map<AgentProvider, boolean>();
+  /**
+   * Children with a live notify-on-finish observer, and how many watch each. Set by
+   * `setupFinishNotification` so `broadcastAgentAttention` can tell whether a blocked delegated
+   * agent has anyone to answer it. In-memory on purpose: it mirrors the observers, which are
+   * themselves closures that do not survive a restart.
+   */
+  private readonly finishObservers = new Map<string, number>();
   private readonly providerDefinitions = new Map<AgentProvider, ProviderEnabledFlag>();
   private readonly agents = new Map<string, LiveManagedAgent>();
   private readonly timelineStore = new InMemoryAgentTimelineStore();
@@ -715,9 +1211,31 @@ export class AgentManager {
   private readonly agentStreamCoalescer: AgentStreamCoalescer;
   private mcpBaseUrl: string | null;
   private readonly mcpAuthToken: string | null;
+  private mcpGateway: Pick<
+    McpGateway,
+    | "enabled"
+    | "sessionMode"
+    | "getServerNames"
+    | "getSnapshot"
+    | "on"
+    | "off"
+    | "startAuthorization"
+    | "adoptServer"
+  > | null = null;
+  private mcpGatewayAuthToken: string | null = null;
+  private mcpGatewayBaseUrl: string | null = null;
+  private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
+  private finishObligations: FinishObligationService | null = null;
+  private childAdmission: ChildAdmissionController | null = null;
+  /** What each admitted stream started with, for a caller that has to retry the same turn. */
+  private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
+  private promptQueue: PromptQueue | null = null;
+  private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
+  /** Per agent, the gateway servers its current launch was given (docs/mcp-gateway.md). */
+  private readonly brokeredMcpServerNames = new Map<string, ReadonlySet<string>>();
   private readonly resolvePaseoToolPolicy: (
     provider: AgentProvider,
   ) => ProviderPaseoToolsPolicy | undefined;
@@ -725,10 +1243,16 @@ export class AgentManager {
   private onAgentAttention?: AgentAttentionCallback;
   private onAgentArchived?: AgentArchivedCallback;
   private onWorkspaceStateMayHaveChanged?: (params: { cwd: string }) => void;
+  private onAgentTurnFinished?: (params: { agentId: string; cwd: string }) => void;
   private logger: Logger;
   private readonly rescueTimeouts: Required<AgentManagerRescueTimeouts>;
   private readonly beforeSteerUnavailableFallback?: AgentManagerOptions["beforeSteerUnavailableFallback"];
   private acceptingAgentRegistrations = true;
+  /** Restart recovery's mid-turn marker; see docs/restart-recovery.md. */
+  private readonly runMarkers: RunMarkerTracker;
+  private readonly staleProviderSubagentSweepIntervalMs: number;
+  private readonly staleProviderSubagentLivenessMs: number;
+  private staleProviderSubagentSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: AgentManagerOptions) {
     this.pluginLifecycle = options.pluginLifecycle;
@@ -737,12 +1261,19 @@ export class AgentManager {
     this.durableTimelineStore = options?.durableTimelineStore;
     this.onAgentAttention = options?.onAgentAttention;
     this.onWorkspaceStateMayHaveChanged = options?.onWorkspaceStateMayHaveChanged;
+    this.onAgentTurnFinished = options.onAgentTurnFinished;
     this.mcpBaseUrl = options?.mcpBaseUrl ?? null;
     this.mcpAuthToken = options?.mcpAuthToken ?? null;
+    this.configureMcpGateway(options);
     this.configurePaseoTools(options);
     this.resolvePaseoToolPolicy = options.resolvePaseoToolPolicy ?? (() => undefined);
     this.appendSystemPrompt = options.appendSystemPrompt ?? "";
     this.logger = options.logger.child({ module: "agent", component: "agent-manager" });
+    this.runMarkers = new RunMarkerTracker({
+      store: this.registry,
+      logger: this.logger,
+      track: (task) => this.trackBackgroundTask(task),
+    });
     this.rescueTimeouts = {
       reloadSessionCloseMs:
         options.rescueTimeouts?.reloadSessionCloseMs ?? RELOAD_SESSION_CLOSE_TIMEOUT_MS,
@@ -750,6 +1281,9 @@ export class AgentManager {
         options.rescueTimeouts?.interruptSessionMs ?? INTERRUPT_SESSION_TIMEOUT_MS,
     };
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
+    const providerSubagentSweepConfig = this.resolveProviderSubagentSweepConfig(options);
+    this.staleProviderSubagentSweepIntervalMs = providerSubagentSweepConfig.sweepIntervalMs;
+    this.staleProviderSubagentLivenessMs = providerSubagentSweepConfig.livenessMs;
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
       timers: { setTimeout, clearTimeout },
@@ -764,9 +1298,27 @@ export class AgentManager {
     });
   }
 
+  private resolveProviderSubagentSweepConfig(options: AgentManagerOptions): {
+    sweepIntervalMs: number;
+    livenessMs: number;
+  } {
+    return {
+      sweepIntervalMs:
+        options.staleProviderSubagentSweepIntervalMs ??
+        DEFAULT_STALE_PROVIDER_SUBAGENT_SWEEP_INTERVAL_MS,
+      livenessMs:
+        options.staleProviderSubagentLivenessMs ?? DEFAULT_STALE_PROVIDER_SUBAGENT_LIVENESS_MS,
+    };
+  }
+
   private configurePaseoTools(options: AgentManagerOptions): void {
     this.paseoToolsEnabled = options.paseoToolsEnabled ?? true;
     this.paseoToolCatalogFactory = options.paseoToolCatalogFactory ?? null;
+  }
+
+  private configureMcpGateway(options: AgentManagerOptions): void {
+    this.mcpGateway = options?.mcpGateway ?? null;
+    this.mcpGatewayAuthToken = options?.mcpGatewayAuthToken ?? null;
   }
 
   registerClient(provider: AgentProvider, client: AgentClient): void {
@@ -811,6 +1363,49 @@ export class AgentManager {
     return Array.from(this.clients.keys());
   }
 
+  /**
+   * Which account a provider's sessions run as, asked of its client. `null` when the provider is
+   * not registered or its client cannot tell — two providers are only ever treated as the same
+   * account on a positive, equal answer, never on a pair of shrugs.
+   *
+   * The account failover monitor uses it to notice that two pool entries point at one Claude
+   * login, which happens whenever two `CLAUDE_CONFIG_DIR`s are signed into the same email: their
+   * usage windows are then literally the same window, so moving between them changes no budget.
+   */
+  async describeProviderAccount(providerId: AgentProvider): Promise<AgentAccountAuth | null> {
+    const client = this.clients.get(providerId);
+    if (!client?.describeAccountAuth) {
+      return null;
+    }
+    try {
+      return await client.describeAccountAuth();
+    } catch (error) {
+      this.logger.debug({ err: error, providerId }, "Could not read a provider's account");
+      return null;
+    }
+  }
+
+  /** Registers a notify-on-finish observer for `childAgentId`; returns its release function. */
+  noteFinishObserver(childAgentId: string): () => void {
+    this.finishObservers.set(childAgentId, (this.finishObservers.get(childAgentId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (this.finishObservers.get(childAgentId) ?? 1) - 1;
+      if (remaining > 0) {
+        this.finishObservers.set(childAgentId, remaining);
+      } else {
+        this.finishObservers.delete(childAgentId);
+      }
+    };
+  }
+
+  /** Whether any caller is being notified about this agent's turns. */
+  hasFinishObserver(childAgentId: string): boolean {
+    return (this.finishObservers.get(childAgentId) ?? 0) > 0;
+  }
+
   setAgentAttentionCallback(callback: AgentAttentionCallback): void {
     this.onAgentAttention = callback;
   }
@@ -823,8 +1418,238 @@ export class AgentManager {
     this.mcpBaseUrl = url;
   }
 
+  /**
+   * Wires the gateway instance + its distinct capability token in after both are constructed
+   * (bootstrap builds the gateway after the agent manager, mirroring `setPaseoToolCatalogFactory`'s
+   * deferred-wiring pattern rather than a constructor-order dependency).
+   */
+  setMcpGateway(
+    gateway: Pick<
+      McpGateway,
+      | "enabled"
+      | "sessionMode"
+      | "getServerNames"
+      | "getSnapshot"
+      | "on"
+      | "off"
+      | "startAuthorization"
+      | "adoptServer"
+    > | null,
+    authToken: string | null,
+  ): void {
+    this.mcpGateway = gateway;
+    this.mcpGatewayAuthToken = authToken;
+  }
+
+  /**
+   * The device cap's status source (docs/device-leases.md), set by bootstrap. Hung off the
+   * AgentManager for the same reason the MCP gateway's is: Session already has one, and the
+   * WebSocket server's constructor does not need a forty-first parameter to carry a snapshot.
+   */
+  setDeviceLeaseStatusSource(source: DeviceLeaseStatusSource | null): void {
+    this.deviceLeaseStatusSource = source;
+  }
+
+  /**
+   * The durable finish-report ledger (docs/finish-reports.md), set by bootstrap. Hung off the
+   * manager so `setupFinishNotification` reaches it from every call site without a new
+   * parameter; unset in unit tests, which keeps the in-memory-only behavior they cover.
+   */
+  setFinishObligations(service: FinishObligationService | null): void {
+    this.finishObligations = service;
+  }
+
+  getFinishObligations(): FinishObligationService | null {
+    return this.finishObligations;
+  }
+
+  /**
+   * The machine-wide cap on child turns (child-admission.ts), set by bootstrap. Every new turn
+   * passes through streamAgent, so this is the one place it is enforced. Unset in unit tests
+   * that don't exercise it.
+   */
+  setChildAdmission(controller: ChildAdmissionController | null): void {
+    this.childAdmission = controller;
+  }
+
+  getChildAdmission(): ChildAdmissionController | null {
+    return this.childAdmission;
+  }
+
+  listAgentsForAdmission(): AdmissionAgentView[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      lifecycle: agent.lifecycle,
+    }));
+  }
+
+  /** Messages waiting for a busy agent, kept on the agent records (prompt-queue.ts). */
+  setPromptQueue(queue: PromptQueue | null): void {
+    this.promptQueue = queue;
+  }
+
+  getPromptQueue(): PromptQueue | null {
+    return this.promptQueue;
+  }
+
+  /** Sets the owed-report mirror and broadcasts the snapshot when it changed. */
+  setOwedFinishReport(agentId: string, report: OwedFinishReport | undefined): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (isSameOwedFinishReport(agent.owedFinishReport, report)) return;
+    if (report) {
+      agent.owedFinishReport = report;
+    } else {
+      delete agent.owedFinishReport;
+    }
+    this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Re-broadcast an agent that is not loaded, from its stored record. A live agent broadcasts
+   * through its own state changes; a closed one has nothing else that would tell clients.
+   */
+  async broadcastStoredAgentState(agentId: string): Promise<void> {
+    if (this.agents.has(agentId) || !this.registry) return;
+    const record = await this.registry.get(agentId);
+    if (!record || record.internal) return;
+    this.dispatchStoredAgentState(record);
+  }
+
+  /**
+   * Refocus (agent-refocus.ts, docs/refocus.md) adds to prompts other surfaces are already
+   * sending. Set by bootstrap; `startAgentRun` consults it for every prompt it dispatches.
+   */
+  setPromptDispatchInterceptor(interceptor: PromptDispatchInterceptor | null): void {
+    this.promptDispatchInterceptor = interceptor;
+  }
+
+  interceptPromptForDispatch(agentId: string, prompt: AgentPromptInput): PromptInterception | null {
+    return this.promptDispatchInterceptor?.(agentId, prompt) ?? null;
+  }
+
+  /** Current device-cap snapshot, or null when no cap is wired. */
+  async getDeviceStatusSnapshot(): Promise<DeviceStatusSnapshot | null> {
+    return (await this.deviceLeaseStatusSource?.getSnapshot()) ?? null;
+  }
+
+  /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
+  onDeviceStatusChange(listener: () => void): () => void {
+    return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
+  setMcpGatewayBaseUrl(url: string | null): void {
+    this.mcpGatewayBaseUrl = url;
+  }
+
+  /** Current per-server gateway status snapshot (U4/KTD7's `mcp_status_update` wire surface). */
+  getMcpGatewaySnapshot(): McpGatewaySnapshotEntry[] {
+    return this.mcpGateway?.getSnapshot() ?? [];
+  }
+
+  /** Subscribes to gateway status changes; returns an unsubscribe function. No-ops when disabled. */
+  onMcpGatewayStatusChange(listener: (snapshot: McpGatewaySnapshotEntry[]) => void): () => void {
+    const gateway = this.mcpGateway;
+    if (!gateway) return () => {};
+    gateway.on("change", listener);
+    return () => gateway.off("change", listener);
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered server (U6/KTD3's auth RPC), delegating to the
+   * gateway's own validation (unknown server, static-auth server) — this just adds the
+   * "no gateway configured at all" case the wire handler can't see otherwise.
+   */
+  async startMcpGatewayAuthorization(name: string): Promise<{ authorizationUrl: string }> {
+    if (!this.mcpGateway) {
+      throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
+    }
+    return this.mcpGateway.startAuthorization(name);
+  }
+
+  /**
+   * Brokers a server an agent reported from its own per-dir config and, when it needs OAuth,
+   * starts sign-in in the same call — the strip's adopt action (docs/mcp-gateway.md). The
+   * reporting agent's provider says which config dir and project to read.
+   */
+  async adoptMcpGatewayServer(input: {
+    name: string;
+    agentId: string;
+  }): Promise<{ authorizationUrl: string | null }> {
+    const gateway = this.mcpGateway;
+    if (!gateway) {
+      throw new McpGatewayActionError("gateway_disabled", "MCP gateway is not enabled");
+    }
+    const agent = this.getAgent(input.agentId);
+    if (!agent) {
+      throw new McpGatewayActionError("unknown_agent", `Unknown agent "${input.agentId}"`);
+    }
+    const client = this.clients.get(agent.provider);
+    const scope = client?.resolveMcpConfigScope?.(agent.cwd);
+    if (!client || !scope) {
+      throw new McpGatewayActionError(
+        "provider_has_no_config",
+        `Sessions on provider "${agent.provider}" don't expose an MCP config the gateway can adopt`,
+      );
+    }
+    const lookup = findPerDirMcpServer({ ...scope, name: input.name, logger: this.logger });
+    if (lookup.kind !== "remote") {
+      throw await this.explainMissingMcpServer({ name: input.name, client, scope, lookup });
+    }
+
+    let adopted: Awaited<ReturnType<McpGateway["adoptServer"]>>;
+    try {
+      adopted = await gateway.adoptServer({ name: input.name, ...lookup.server });
+    } catch (error) {
+      throw new McpGatewayActionError("adopt_failed", getErrorMessage(error));
+    }
+    if (adopted.auth === "static" || adopted.status === "connected") {
+      return { authorizationUrl: null };
+    }
+    try {
+      return await gateway.startAuthorization(input.name);
+    } catch (error) {
+      throw new McpGatewayActionError("authorization_failed", getErrorMessage(error));
+    }
+  }
+
+  /**
+   * Why the config Paseo reads has no brokerable entry. A local entry is decided about this
+   * server and wins. Otherwise the account may simply not be signed in — which is not provably
+   * why this one name is missing, but is the more upstream fact and the one with a fix, so it
+   * is what the caller hears.
+   */
+  private async explainMissingMcpServer(input: {
+    name: string;
+    client: AgentClient;
+    scope: { configDir: string; projectDir: string };
+    lookup: PerDirMcpServerLookup;
+  }): Promise<McpGatewayActionError> {
+    if (input.lookup.kind === "local") {
+      return new McpGatewayActionError(
+        "server_is_local",
+        `MCP server "${input.name}" runs as a local command; only http and sse servers can be brokered`,
+      );
+    }
+    const auth = await input.client.describeAccountAuth?.().catch(() => undefined);
+    if (auth?.state === "signed-out") {
+      return new McpGatewayActionError(
+        "account_signed_out",
+        `The account in ${input.scope.configDir} is not signed in`,
+        auth.signInCommand ? { command: auth.signInCommand } : {},
+      );
+    }
+    return new McpGatewayActionError(
+      "server_not_in_config",
+      `No remote MCP server named "${input.name}" in ${input.scope.configDir}/.claude.json or ${input.scope.projectDir}/.mcp.json`,
+    );
+  }
+
   prepareForShutdown(): void {
     this.acceptingAgentRegistrations = false;
+    this.childAdmission?.prepareForShutdown();
   }
 
   setPaseoToolsEnabled(enabled: boolean): void {
@@ -965,6 +1790,275 @@ export class AgentManager {
       .map((agent) => Object.assign({}, agent));
   }
 
+  listAgentsForTokenBurnMonitor(nowMs: number): TokenBurnMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      isDelegated: isDelegatedAgent(agent),
+      isRunning: agent.lifecycle === "running",
+      tokenRate: computeTokenRate(agent.tokenRateBuckets, nowMs)?.tokensPerMinute,
+      totalTokens: agent.totalTokens,
+      labels: agent.labels,
+      model: agent.config.model,
+      provider: agent.provider,
+    }));
+  }
+
+  listAgentsForResourceMonitor(): ResourceMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      provider: agent.provider,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      isRunning: agent.lifecycle === "running",
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+    }));
+  }
+
+  listAgentsForModelDivergenceMonitor(): ModelDivergenceMonitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      title: agent.config.title ?? null,
+      divergence: agent.modelDivergenceState?.divergence,
+      shownAlert: agent.modelDivergenceAlert,
+    }));
+  }
+
+  /** Sets the live finding badge and broadcasts the new snapshot. Mirrors setTokenBurnAlert. */
+  setModelDivergenceAlert(agentId: string, alert: ModelDivergenceAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.modelDivergenceAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearModelDivergenceAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.modelDivergenceAlert) return;
+    delete agent.modelDivergenceAlert;
+    this.emitState(agent, { persist: false });
+  }
+
+  listAgentsForAccountFailover(): AccountFailoverAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => this.toAccountFailoverSummary(agent));
+  }
+
+  listAgentsForDoneJanitor(): DoneJanitorAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => this.toDoneJanitorSummary(agent));
+  }
+
+  listAgentsForStallSweep(): StallSweepAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) =>
+      Object.assign(this.toDoneJanitorSummary(agent), {
+        quietTurn: agent.quietTurn === true,
+        turnQueued: agent.turnQueued !== undefined,
+        usageFingerprint: JSON.stringify(agent.lastUsage ?? null),
+        runningSubagentActivityAt: this.providerSubagents
+          .list(agent.id)
+          .filter((subagent) => subagent.status === "running")
+          .flatMap(
+            (subagent) => this.providerSubagents.lastActivityAt(agent.id, subagent.id) ?? [],
+          ),
+      }),
+    );
+  }
+
+  getDoneJanitorSummary(agentId: string): DoneJanitorAgentSummary | null {
+    const agent = this.agents.get(agentId);
+    return agent ? this.toDoneJanitorSummary(agent) : null;
+  }
+
+  listAgentsForWorkspaceTitleTracker(): WorkspaceTitleTrackerAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      title: agent.config.title ?? null,
+      lastActivitySummary: agent.lastActivitySummary ?? null,
+      lastActivityAt: this.lastActivityAtOf(agent),
+    }));
+  }
+
+  /** The newest activity timestamp the manager holds for an agent, or null if none parses. */
+  private lastActivityAtOf(agent: ManagedAgent): string | null {
+    const timestamps = [
+      agent.updatedAt.getTime(),
+      agent.lastUserMessageAt?.getTime(),
+      agent.activeTurnStartedAt?.getTime(),
+      this.timelineStore.has(agent.id)
+        ? Date.parse(this.timelineStore.getLastRowTimestamp(agent.id) ?? "")
+        : undefined,
+    ].filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+    return timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : null;
+  }
+
+  private toDoneJanitorSummary(agent: ManagedAgent): DoneJanitorAgentSummary {
+    return {
+      id: agent.id,
+      provider: agent.provider,
+      cwd: agent.cwd,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      requiresAttention: agent.attention.requiresAttention,
+      attentionReason: agent.attention.requiresAttention ? agent.attention.attentionReason : null,
+      hasAlert: Boolean(agent.tokenBurnAlert) || Boolean(agent.resourceAlert),
+      runningProviderSubagentCount: this.providerSubagents
+        .list(agent.id)
+        .filter((subagent) => subagent.status === "running").length,
+      lastActivityAt: this.lastActivityAtOf(agent),
+      labels: agent.labels,
+      title: agent.config.title ?? null,
+      sessionId: agent.persistence?.sessionId,
+    };
+  }
+
+  listAgentsForLeaderCompaction(): LeaderCompactionAgentSummary[] {
+    return Array.from(this.agents.values()).map((agent) => ({
+      id: agent.id,
+      provider: agent.provider,
+      sessionFamily: this.resolveProviderSessionFamily(agent.provider),
+      internal: agent.internal ?? false,
+      isDelegated: isDelegatedAgent(agent),
+      lifecycle: agent.lifecycle,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      contextWindowUsedTokens: agent.lastUsage?.contextWindowUsedTokens,
+      title: agent.config.title ?? null,
+    }));
+  }
+
+  private isAgentBusy(agent: ManagedAgent): boolean {
+    return (
+      Boolean(agent.activeForegroundTurnId) ||
+      Boolean(agent.activeTurnId) ||
+      agent.pendingReplacement ||
+      Boolean(this.runs.getPendingRun(agent.id))
+    );
+  }
+
+  /**
+   * Starts a turn only when nothing else owns the agent, and never touches a turn that does.
+   * Returns null, having done nothing, for an agent that is not idle, is busy, or is waiting on a
+   * permission. `sendPromptToAgent` is the wrong tool for a daemon-initiated turn: it passes
+   * `replaceRunning`, so a prompt that lands a moment after the agent started working cancels
+   * that work, and its steer mode starts a fresh turn on an idle agent. The check and the start
+   * run in one synchronous stretch, so nothing can begin a turn in between.
+   */
+  startTurnIfIdle(agentId: string, prompt: AgentPromptInput): Promise<IdleTurnOutcome> | null {
+    const agent = this.agents.get(agentId);
+    if (
+      !agent ||
+      agent.session === null ||
+      agent.lifecycle !== "idle" ||
+      this.isAgentBusy(agent) ||
+      agent.pendingPermissions.size > 0
+    ) {
+      return null;
+    }
+    const events = this.streamAgent(agentId, prompt);
+    return this.collectIdleTurnOutcome(events);
+  }
+
+  private async collectIdleTurnOutcome(
+    events: AsyncGenerator<AgentStreamEvent>,
+  ): Promise<IdleTurnOutcome> {
+    const timeline: AgentTimelineItem[] = [];
+    let outcome: IdleTurnOutcome | null = null;
+    try {
+      for await (const event of events) {
+        if (event.type === "timeline") {
+          timeline.push(event.item);
+        } else if (event.type === "turn_failed") {
+          outcome = { status: "failed", error: this.formatTurnFailedMessage(event) };
+        } else if (event.type === "turn_canceled") {
+          outcome = { status: "canceled" };
+        }
+      }
+    } catch (error) {
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    }
+    return (
+      outcome ?? {
+        status: "completed",
+        finalText: this.getLastAssistantMessageFromTimeline(timeline) ?? "",
+      }
+    );
+  }
+
+  /** Where the timeline ends now. Null when the agent is not loaded. */
+  getTimelineCursor(agentId: string): number | null {
+    if (!this.agents.has(agentId) || !this.timelineStore.has(agentId)) return null;
+    return this.timelineStore.getNextSeq(agentId);
+  }
+
+  /** What the agent said and did at or after `cursor`: its assistant text and every row type. */
+  readTimelineSince(
+    agentId: string,
+    cursor: number,
+  ): { assistantText: string; itemTypes: AgentTimelineItem["type"][] } | null {
+    if (!this.agents.has(agentId) || !this.timelineStore.has(agentId)) return null;
+    const rows = this.timelineStore.getRows(agentId).filter((row) => row.seq >= cursor);
+    return {
+      assistantText: rows
+        .flatMap((row) => (row.item.type === "assistant_message" ? [row.item.text] : []))
+        .join(""),
+      itemTypes: rows.map((row) => row.item.type),
+    };
+  }
+
+  /**
+   * Marks the next turn of a loaded agent as the done janitor's question, so its finish is not
+   * reported as the agent finishing. Returns false when the agent is not loaded.
+   */
+  markQuietTurn(agentId: string): boolean {
+    const agent = this.agents.get(agentId);
+    if (!agent) return false;
+    agent.quietTurn = true;
+    return true;
+  }
+
+  getAccountFailoverSummary(agentId: string): AccountFailoverAgentSummary | null {
+    const agent = this.agents.get(agentId);
+    return agent ? this.toAccountFailoverSummary(agent) : null;
+  }
+
+  private toAccountFailoverSummary(agent: ManagedAgent): AccountFailoverAgentSummary {
+    return {
+      id: agent.id,
+      provider: agent.provider,
+      cwd: agent.cwd,
+      workspaceId: agent.workspaceId,
+      internal: agent.internal ?? false,
+      lifecycle: agent.lifecycle,
+      lastError: agent.lastError,
+      title: agent.config.title ?? null,
+      busy: this.isAgentBusy(agent),
+      pendingPermissionCount: agent.pendingPermissions.size,
+      lastActivityAt: this.lastActivityAtOf(agent),
+      timelineSeq: this.timelineStore.getNextSeq(agent.id),
+      lastTimelineAt: this.timelineStore.has(agent.id)
+        ? this.timelineStore.getLastRowTimestamp(agent.id)
+        : null,
+      labels: agent.labels,
+      sessionId: agent.persistence?.sessionId,
+      // The model the successor should come up on, which is not always the one running now. A
+      // migrated agent inherits its predecessor's model but starts with its spend at zero, so
+      // an agent the spend governor had downgraded would come back cheap on a budget it is
+      // nowhere near — and the fresh episode marks `downgrade` done on sight, because the
+      // agent is already on the target. Restore what it was on before the governor moved it.
+      model: agent.spendGovernorState?.modelBeforeDowngrade ?? agent.config.model,
+      modeId: agent.config.modeId,
+      thinkingOptionId: agent.config.thinkingOptionId,
+    };
+  }
+
   async listImportableSessions(
     options?: ImportablePersistedAgentQueryOptions,
   ): Promise<ManagedImportableSessionsResult> {
@@ -1066,6 +2160,19 @@ export class AgentManager {
     }
   }
 
+  /**
+   * Whether `provider` can read this session from its own account. Null when the client cannot
+   * tell. A read-only probe: restart recovery's plan asks it before anything is resumed.
+   */
+  async canProviderResumeSession(
+    provider: AgentProvider,
+    handle: AgentPersistenceHandle,
+  ): Promise<boolean | null> {
+    const client = this.clients.get(provider);
+    if (!client?.canResumeHandle) return null;
+    return await client.canResumeHandle(handle);
+  }
+
   async listDraftCommands(config: AgentSessionConfig): Promise<AgentSlashCommand[]> {
     const normalizedConfig = await this.normalizeConfig(config, { resolveDefaultModel: false });
     const client = this.requireClient(normalizedConfig.provider);
@@ -1138,6 +2245,88 @@ export class AgentManager {
   getAgent(id: string): ManagedAgent | null {
     const agent = this.agents.get(id);
     return agent ? { ...agent } : null;
+  }
+
+  /** Read-modify-write slot for AgentTokenBurnMonitor's per-agent consecutive-sweep bookkeeping. */
+  getTokenBurnMonitorState(agentId: string): TokenBurnMonitorState | undefined {
+    return this.agents.get(agentId)?.tokenBurnMonitorState;
+  }
+
+  setTokenBurnMonitorState(agentId: string, state: TokenBurnMonitorState): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnMonitorState = state;
+  }
+
+  /** Sets the live breach badge and broadcasts the new snapshot. See TokenBurnAlert's doc comment. */
+  setTokenBurnAlert(agentId: string, alert: TokenBurnAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.tokenBurnAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearTokenBurnAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.tokenBurnAlert) return;
+    delete agent.tokenBurnAlert;
+    this.emitState(agent, { persist: false });
+  }
+
+  /** Read-modify-write slot for the spend governor's per-agent fired-stage bookkeeping. */
+  getSpendGovernorState(agentId: string): SpendGovernorState | undefined {
+    return this.agents.get(agentId)?.spendGovernorState;
+  }
+
+  setSpendGovernorState(agentId: string, state: SpendGovernorState | undefined): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    if (state === undefined) {
+      delete agent.spendGovernorState;
+      return;
+    }
+    agent.spendGovernorState = state;
+  }
+
+  /**
+   * What `create_agent` needs to refuse a caller the governor has cut off, or null when it may
+   * fan out. Read by the Paseo tool catalog at call time rather than pushed to it: the gate has
+   * to hold between the governor's 60s sweeps, and the moment the agent asks is the only moment
+   * it matters. Mirrors getPaseoToolPolicy's shape. See spend-governor.ts.
+   */
+  getSpendFanOutDenial(agentId: string): { budgetTokens: number; spentTokens: number } | null {
+    const agent = this.agents.get(agentId);
+    if (!agent || !isFanOutBlocked(agent.spendGovernorState)) return null;
+    return {
+      budgetTokens: agent.spendGovernorState!.budgetTokens,
+      spentTokens: agent.totalTokens ?? 0,
+    };
+  }
+
+  /** Read-modify-write slot for AgentResourceMonitor's per-agent consecutive-sweep bookkeeping. */
+  getResourceMonitorState(agentId: string): AgentResourceMonitorState | undefined {
+    return this.agents.get(agentId)?.resourceMonitorState;
+  }
+
+  setResourceMonitorState(agentId: string, state: AgentResourceMonitorState): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.resourceMonitorState = state;
+  }
+
+  /** Sets the live breach badge and broadcasts the new snapshot. See ResourceAlert's doc comment. */
+  setResourceAlert(agentId: string, alert: ResourceAlert): void {
+    const agent = this.agents.get(agentId);
+    if (!agent) return;
+    agent.resourceAlert = alert;
+    this.emitState(agent, { persist: false });
+  }
+
+  clearResourceAlert(agentId: string): void {
+    const agent = this.agents.get(agentId);
+    if (!agent?.resourceAlert) return;
+    delete agent.resourceAlert;
+    this.emitState(agent, { persist: false });
   }
 
   async waitForAgentClose(agentId: string): Promise<void> {
@@ -1216,9 +2405,16 @@ export class AgentManager {
       const request = await this.pluginLifecycle.before("agent.create", {
         config,
         env: options.env,
+        callerAgentId: options.callerAgentId,
+        labels: options.labels,
+        initialPrompt: options.initialPrompt,
       });
       config = { ...request.config, internal: config.internal };
-      options = { ...options, env: request.env };
+      // labels are mutable by design; initialPrompt is read-only context for
+      // the hook — the actual prompt was already resolved by the caller and
+      // is sent independently after this create completes, so a hook's
+      // mutation of it here is intentionally dropped rather than applied.
+      options = { ...options, env: request.env, labels: request.labels };
     }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
@@ -1441,33 +2637,49 @@ export class AgentManager {
   reloadAgentSession(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     return this.trackAgentRegistrationOperation(
       this.runLifecycleMutation(agentId, () =>
-        this.reloadAgentSessionInternal(agentId, overrides, options),
+        this.reloadKeepingHeldTurn(agentId, overrides, options),
       ),
     );
   }
 
-  private async reloadAgentSessionInternal(
+  /**
+   * A queued child has no turn to cancel: its held prompt leaves the line here and goes back in at
+   * the same place on the new session, and the agent never shows an idle edge in between. A
+   * reload that fails anywhere still gives the held prompt back.
+   */
+  private async reloadKeepingHeldTurn(
     agentId: string,
     overrides?: Partial<AgentSessionConfig>,
-    options?: { rehydrateFromDisk?: boolean },
+    options?: ReloadAgentSessionOptions,
   ): Promise<ManagedAgent> {
     this.assertAcceptingAgentRegistrations();
+    const heldTurn = this.detachQueuedTurn(this.requireSessionAgent(agentId));
+    try {
+      return await this.reloadAgentSessionInternal(agentId, heldTurn, overrides, options);
+    } catch (error) {
+      this.returnHeldTurnAfterFailedReload(heldTurn, error);
+      throw error;
+    }
+  }
+
+  private async reloadAgentSessionInternal(
+    agentId: string,
+    heldTurn: HeldTurn | null,
+    overrides?: Partial<AgentSessionConfig>,
+    options?: ReloadAgentSessionOptions,
+  ): Promise<ManagedAgent> {
     let existing = this.requireSessionAgent(agentId);
     if (this.hasInFlightRun(agentId)) {
       await this.cancelAgentRunBefore(agentId, "reload");
       existing = this.requireSessionAgent(agentId);
     }
     const rehydrateFromDisk = options?.rehydrateFromDisk ?? false;
-    const preservedHistoryPrimed = existing.historyPrimed;
-    const preservedLastUsage = existing.lastUsage;
-    const preservedLastError = existing.lastError;
-    const preservedAttention = existing.attention;
-    const handle = existing.persistence;
-    const provider = handle?.provider ?? existing.provider;
+    const carried = carryAgentStateAcrossRefresh(existing, options);
+    const { handle, provider } = carried;
     const client = this.requireClient(provider);
     const refreshConfig = {
       ...existing.config,
@@ -1526,18 +2738,25 @@ export class AgentManager {
 
       // Preserve existing labels and timeline during reload.
       handedToRegistration = true;
-      return this.registerSession(session, storedConfig, agentId, {
+      const registered = await this.registerSession(session, storedConfig, agentId, {
         labels: existing.labels,
         workspaceId: existing.workspaceId,
         owner: existing.owner,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
         lastUserMessageAt: existing.lastUserMessageAt,
-        historyPrimed: rehydrateFromDisk ? false : preservedHistoryPrimed,
-        lastUsage: preservedLastUsage,
-        lastError: preservedLastError,
-        attention: preservedAttention,
+        historyPrimed: rehydrateFromDisk ? false : carried.historyPrimed,
+        lastUsage: carried.lastUsage,
+        ...(carried.lastError === undefined ? {} : { lastError: carried.lastError }),
+        attention: carried.attention,
+        spend: carried.spend,
+        // The record's provider is what a later load resumes with, and it reads the handle
+        // first (persistence-hooks.ts). A move has to land on both, so it is stated here.
+        ...(handle ? { persistence: handle } : {}),
+        carriesQueuedTurn: heldTurn !== null,
       });
+      this.requeueHeldTurn(heldTurn);
+      return registered;
     } catch (error) {
       if (closedExisting) {
         this.emitClosedAgent(closedExisting, { persist: false });
@@ -1559,6 +2778,96 @@ export class AgentManager {
         }
       }
     }
+  }
+
+  /**
+   * Move a live agent onto another provider in place: same id, same conversation, same labels and
+   * parent/child links. The provider picks the account (`CLAUDE_CONFIG_DIR` and friends), so the
+   * session file lives under a different account directory and the move is a close-and-resume of
+   * the same handle against the target's client — a persisted thread has one writer, and the
+   * record's provider alone decides nothing. Throws `AgentProviderMoveError` on every refusal.
+   * See docs/account-failover.md.
+   */
+  async moveAgentToProvider(
+    agentId: string,
+    targetProviderId: AgentProvider,
+  ): Promise<ManagedAgent> {
+    const existing = this.requireSessionAgent(agentId);
+    const refusal = checkAgentProviderMove({
+      agentId,
+      sourceProviderId: existing.provider,
+      targetProviderId,
+      registeredProviderIds: this.getRegisteredProviderIds(),
+      targetEnabled: this.providerEnabled.get(targetProviderId) !== false,
+      sourceFamily: this.resolveProviderSessionFamily(existing.provider),
+      targetFamily: this.resolveProviderSessionFamily(targetProviderId),
+      sessionId: existing.persistence?.sessionId ?? null,
+      lifecycle: existing.lifecycle,
+      hasInFlightRun: this.hasInFlightRun(agentId),
+    });
+    if (refusal) {
+      throw refusal;
+    }
+    const handle = retargetPersistenceHandle(existing.persistence, targetProviderId);
+    if (!handle) {
+      throw new Error(`Agent ${agentId} lost its persistence handle while moving`);
+    }
+    await this.assertProviderCanAdoptSession(agentId, targetProviderId, handle);
+    return this.trackAgentRegistrationOperation(
+      this.runLifecycleMutation(agentId, () =>
+        this.reloadKeepingHeldTurn(agentId, undefined, { moveToProvider: targetProviderId }),
+      ),
+    );
+  }
+
+  private async assertProviderCanAdoptSession(
+    agentId: string,
+    targetProviderId: AgentProvider,
+    handle: AgentPersistenceHandle,
+  ): Promise<void> {
+    let client: AgentClient;
+    try {
+      client = await this.requireAvailableClient({ provider: targetProviderId });
+    } catch (error) {
+      throw new AgentProviderMoveError(
+        "provider_unavailable",
+        agentId,
+        targetProviderId,
+        getErrorMessage(error),
+      );
+    }
+
+    const claimed = (
+      await this.requireRegistry().listByProviderSession(targetProviderId, handle.sessionId)
+    ).find((record) => record.id !== agentId && !record.archivedAt);
+    if (claimed) {
+      throw new AgentProviderMoveError(
+        "session_conflict",
+        agentId,
+        targetProviderId,
+        `Provider '${targetProviderId}' already holds agent ${claimed.id} for session ` +
+          `${handle.sessionId}. Archive or move that agent first.`,
+      );
+    }
+
+    // A client that cannot tell says nothing; only an explicit "no" refuses.
+    if ((await client.canResumeHandle?.(handle)) === false) {
+      throw new AgentProviderMoveError(
+        "session_unreachable",
+        agentId,
+        targetProviderId,
+        `Provider '${targetProviderId}' cannot read session ${handle.sessionId}. Its account ` +
+          "directory does not share a transcript store with the account the agent is on.",
+      );
+    }
+  }
+
+  /** The built-in provider whose client owns the transcript format — derived accounts share it. */
+  private resolveProviderSessionFamily(providerId: AgentProvider): AgentProvider {
+    return resolveProviderSessionFamily(
+      providerId,
+      (id) => this.providerDefinitions.get(id)?.derivedFromProviderId,
+    );
   }
 
   private async closeReloadedSession(session: AgentSession, agentId: string): Promise<void> {
@@ -1694,6 +3003,115 @@ export class AgentManager {
       });
       this.dispatch({ type: "provider_subagent", event });
     }
+  }
+
+  /**
+   * Periodic reconciliation for provider subagents that `cancelRunningProviderSubagents` never
+   * reaches: it only fires from `closeAgentRuntime`, so a descriptor whose terminal SDK event was
+   * dropped stays "running" forever while its parent sits open (root cause #2 in the fix plan).
+   * Runs on an interval independent of any single agent's lifecycle — see
+   * `startProviderSubagentSweep`.
+   */
+  startProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void this.sweepStaleProviderSubagents().catch((error) => {
+        this.logger.error({ err: error }, "Failed to sweep stale provider subagents");
+      });
+    }, this.staleProviderSubagentSweepIntervalMs);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    this.staleProviderSubagentSweepTimer = timer;
+  }
+
+  stopProviderSubagentSweep(): void {
+    if (this.staleProviderSubagentSweepTimer) {
+      clearInterval(this.staleProviderSubagentSweepTimer);
+      this.staleProviderSubagentSweepTimer = null;
+    }
+  }
+
+  /**
+   * Terminalizes "running" provider-subagent descriptors that can be positively evaluated as
+   * stuck, via two independent signals:
+   *  - the owning agent is closed (no longer live) or archived — defense-in-depth for a
+   *    `cancelRunningProviderSubagents` call that was skipped or lost.
+   *  - no descriptor or timeline activity for `staleProviderSubagentLivenessMs`, even though the
+   *    parent agent is still open — the case `cancelRunningProviderSubagents` structurally can't
+   *    catch, since nothing closes the parent.
+   * A descriptor this can't positively evaluate (registry unavailable/erroring, no activity
+   * timestamp to read) is left alone rather than guessed at — false terminalization is worse than
+   * a late one.
+   */
+  async sweepStaleProviderSubagents(now: Date = new Date()): Promise<void> {
+    const runningByParent = new Map<string, ProviderSubagentDescriptor[]>();
+    for (const subagent of this.providerSubagents.listAll()) {
+      if (subagent.status !== "running") {
+        continue;
+      }
+      const siblings = runningByParent.get(subagent.parentAgentId);
+      if (siblings) {
+        siblings.push(subagent);
+      } else {
+        runningByParent.set(subagent.parentAgentId, [subagent]);
+      }
+    }
+    if (runningByParent.size === 0) {
+      return;
+    }
+
+    for (const [parentAgentId, subagents] of runningByParent) {
+      const parentClosed = await this.isProviderSubagentParentClosed(parentAgentId);
+      for (const subagent of subagents) {
+        if (parentClosed) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+          continue;
+        }
+        const lastActivityAt = this.providerSubagents.lastActivityAt(parentAgentId, subagent.id);
+        if (!lastActivityAt) {
+          continue;
+        }
+        const lastActivityMs = Date.parse(lastActivityAt);
+        if (Number.isNaN(lastActivityMs)) {
+          continue;
+        }
+        if (now.getTime() - lastActivityMs >= this.staleProviderSubagentLivenessMs) {
+          this.terminalizeStaleProviderSubagent(parentAgentId, subagent);
+        }
+      }
+    }
+  }
+
+  /** `true` only once positively confirmed closed/archived; `false` for a live or unresolvable
+   * agent so the caller falls back to the liveness check instead of guessing. */
+  private async isProviderSubagentParentClosed(parentAgentId: string): Promise<boolean> {
+    if (this.agents.has(parentAgentId)) {
+      return false;
+    }
+    if (!this.registry) {
+      return false;
+    }
+    try {
+      const record = await this.registry.get(parentAgentId);
+      // Mirrors sweepOrphanedSchedules: a missing or archived record is the positive signal that
+      // the agent is gone for good.
+      return !record || Boolean(record.archivedAt);
+    } catch {
+      return false;
+    }
+  }
+
+  private terminalizeStaleProviderSubagent(
+    parentAgentId: string,
+    subagent: ProviderSubagentDescriptor,
+  ): void {
+    const event = this.providerSubagents.apply(parentAgentId, subagent.provider, {
+      type: "upsert",
+      id: subagent.id,
+      status: "canceled",
+    });
+    this.dispatch({ type: "provider_subagent", event });
   }
 
   async archiveAgent(agentId: string): Promise<{ archivedAt: string }> {
@@ -1861,6 +3279,7 @@ export class AgentManager {
         attention,
         internal: record.internal,
         labels: record.labels,
+        ...optionalOwedFinishReport(summarizeOwedFinishReport(record.finishObligations)),
       },
     });
   }
@@ -1891,6 +3310,14 @@ export class AgentManager {
     }
     await this.drainSessionEvents(agentId);
 
+    // An intentional change: the response already in flight still comes from the old model, and
+    // a finding raised against it is moot (model-divergence.ts).
+    agent.modelDivergenceState = noteConfiguredModelChange(agent.modelDivergenceState ?? {}, {
+      fromModel: agent.config.model,
+      fromInitModel: readRuntimeModel(agent.runtimeInfo),
+      toModel: normalizedModelId,
+      at: Date.now(),
+    });
     agent.config.model = normalizedModelId ?? undefined;
     if (agent.runtimeInfo) {
       agent.runtimeInfo = { ...agent.runtimeInfo, model: normalizedModelId };
@@ -1955,8 +3382,42 @@ export class AgentManager {
       return;
     }
     this.touchUpdatedAt(agent);
-    await this.persistSnapshot(agent, { title: normalizedTitle });
+    await this.persistSnapshot(agent, { title: normalizedTitle, titleManuallySet: true });
     this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Applies a background-generated title (see AgentTitleTracker). Unlike
+   * setTitle(), this never marks the title manually set, and re-checks
+   * titleManuallySet/unchanged-title against storage at write time so a
+   * rename racing an in-flight refresh always wins.
+   */
+  async applyGeneratedTitle(agentId: string, title: string): Promise<boolean> {
+    const trimmed = title.trim();
+    if (!trimmed) {
+      return false;
+    }
+    const agent = this.agents.get(agentId);
+    if (!agent) {
+      return false;
+    }
+    const record = this.registry ? await this.registry.get(agentId) : null;
+    if (record?.titleManuallySet) {
+      return false;
+    }
+    if (record?.title === trimmed) {
+      return false;
+    }
+    this.touchUpdatedAt(agent);
+    const applied = await this.persistSnapshot(agent, {
+      title: trimmed,
+      skipIfTitleManuallySet: true,
+    });
+    if (!applied) {
+      return false;
+    }
+    this.emitState(agent, { persist: false });
+    return true;
   }
 
   async setLabels(agentId: string, labels: Record<string, string>): Promise<void> {
@@ -1993,7 +3454,7 @@ export class AgentManager {
 
     const nextRecord = {
       ...record,
-      ...(patch.title ? { title: patch.title } : {}),
+      ...(patch.title ? { title: patch.title, titleManuallySet: true } : {}),
       ...(patch.labels ? { labels: applyLabelPatch(record.labels, patch.labels) } : {}),
       updatedAt: this.nextStoredUpdatedAt(record),
     };
@@ -2371,6 +3832,9 @@ export class AgentManager {
       }
       return result.turnId;
     } catch (error) {
+      // A failed start gives the admitted slot back. Here rather than in a wrapper: an extra
+      // await between admission and the start would reorder turns against concurrent steers.
+      this.childAdmission?.settleStart(agentId);
       if (pendingRun.settled) {
         throw error;
       }
@@ -2395,10 +3859,30 @@ export class AgentManager {
     }
   }
 
+  /** `queuedAt` puts a child turn held across a restart back in line at its old place. */
   streamAgent(
     agentId: string,
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
+    queuedAt?: string,
+  ): AsyncGenerator<AgentStreamEvent> {
+    return this.streamAgentInternal(agentId, prompt, options, queuedAt);
+  }
+
+  /**
+   * The prompt and options a stream from `streamAgent` actually started its turn with: a queued
+   * child's held prompt may have had later prompts merged in. Undefined until it is admitted.
+   */
+  getAdmittedTurn(stream: AsyncGenerator<AgentStreamEvent>): AdmittedTurn | undefined {
+    return this.admittedTurns.get(stream);
+  }
+
+  /** `queuedAt` puts a held child turn back in line at its old place (reload, restart). */
+  private streamAgentInternal(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentRunOptions,
+    queuedAt?: string,
   ): AsyncGenerator<AgentStreamEvent> {
     const existingAgent = this.requireSessionAgent(agentId);
     this.logger.trace(
@@ -2436,15 +3920,30 @@ export class AgentManager {
 
     const pendingRun = this.runs.createPendingRun(agentId);
 
-    const streamForwarder = async function* streamForwarder(this: AgentManager) {
+    // Named apart from the function: inside its body `streamForwarder` is the function itself.
+    const stream = async function* streamForwarder(this: AgentManager) {
       let turnId: string;
       let turnStream: ReturnType<AgentRunState["createTurnStream"]> | null = null;
+      // Synchronous unless the turn is queued: an extra await here would reorder every turn start
+      // against concurrent steers and replacements, queued or not.
+      const admission = this.admitForegroundTurn({
+        agent,
+        pendingRun,
+        prompt,
+        options,
+        keepsSlot: isReplacement,
+        queuedAt,
+      });
+      const admitted = admission instanceof Promise ? await admission : admission;
+      if (!admitted) return;
+      this.admittedTurns.set(stream, admitted);
+      const { prompt: admittedPrompt, options: admittedOptions } = admitted;
       turnId = await this.startPendingForegroundTurn({
         agent,
         agentId,
         pendingRun,
-        prompt,
-        options,
+        prompt: admittedPrompt,
+        options: admittedOptions,
       });
 
       if (isReplacement) {
@@ -2455,6 +3954,8 @@ export class AgentManager {
       agent.activeForegroundTurnId = turnId;
       this.openActiveTurn(agent, turnId, turnStartedAt);
       agent.lifecycle = "running";
+      // Lifecycle now counts this turn, so the admitted-but-starting mark can go.
+      this.childAdmission?.settleStart(agentId);
       this.touchUpdatedAt(agent);
       // AgentManager owns the accepted-turn boundary. Publish liveness before the canonical
       // prompt so clients can retire optimistic activity without painting an idle frame.
@@ -2464,17 +3965,18 @@ export class AgentManager {
         { type: "turn_started", provider: agent.provider, turnId },
         { timestamp: turnStartedAt.toISOString() },
       );
-      const stagedSubmittedPromptEcho = options?.clientMessageId
+      const clientMessageId = admittedOptions?.clientMessageId;
+      const stagedSubmittedPromptEcho = clientMessageId
         ? pendingRun.stagedEvents.find(
             (event): event is Extract<AgentStreamEvent, { type: "timeline" }> =>
               event.type === "timeline" &&
               event.item.type === "user_message" &&
-              event.item.clientMessageId === options.clientMessageId,
+              event.item.clientMessageId === clientMessageId,
           )
         : undefined;
-      if (options?.clientMessageId) {
-        this.recordSubmittedPrompt(agent, prompt, options.clientMessageId, {
-          messageId: options.clientMessageId,
+      if (clientMessageId) {
+        this.recordSubmittedPrompt(agent, admittedPrompt, clientMessageId, {
+          messageId: clientMessageId,
           turnId,
           providerMessageId:
             stagedSubmittedPromptEcho?.item.type === "user_message"
@@ -2527,7 +4029,129 @@ export class AgentManager {
       }
     }.call(this);
 
-    return streamForwarder;
+    return stream;
+  }
+
+  /**
+   * Asks ChildAdmissionController for a slot before a new turn starts. Returns what to start
+   * with (a queued child may have had a second prompt merged in), or null when the queued turn
+   * was dropped and must end without starting. Roots, replacements of a running turn and a
+   * daemon without the controller pass straight through.
+   */
+  private admitForegroundTurn(params: {
+    agent: ActiveManagedAgent;
+    pendingRun: PendingForegroundRun;
+    prompt: AgentPromptInput;
+    options?: AgentRunOptions;
+    keepsSlot: boolean;
+    queuedAt?: string;
+  }): AdmittedTurn | Promise<AdmittedTurn | null> {
+    const { agent, pendingRun, prompt, options } = params;
+    const controller = this.childAdmission;
+    if (!controller) return { prompt, options };
+    const request = controller.request({
+      agentId: agent.id,
+      parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      prompt,
+      ...(options ? { runOptions: options } : {}),
+      keepsSlot: params.keepsSlot,
+      ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
+    });
+    if (request.status === "admitted") return { prompt, options };
+
+    // Queued: show running so wait_for_agent, finish notifications and the done janitor all
+    // treat the child as pending, and waitForAgentRunStart returns instead of timing out.
+    agent.turnQueued = { queuedAt: request.queuedAt };
+    agent.lifecycle = "running";
+    this.touchUpdatedAt(agent);
+    this.emitState(agent);
+    return this.awaitQueuedTurn(agent, pendingRun, request.result);
+  }
+
+  private async awaitQueuedTurn(
+    agent: ActiveManagedAgent,
+    pendingRun: PendingForegroundRun,
+    result: Promise<AdmissionOutcome>,
+  ): Promise<AdmittedTurn | null> {
+    const outcome = await result;
+    delete agent.turnQueued;
+    if (outcome.outcome === "admitted") {
+      return { prompt: outcome.prompt, options: outcome.runOptions };
+    }
+    this.runs.settleForegroundRun(agent.id, pendingRun.token);
+    if (outcome.reason === "reloaded") {
+      // The reload re-registers the agent in `running` and re-queues the prompt; no edge here.
+      agent.lifecycle = "idle";
+      return null;
+    }
+    if (this.agents.get(agent.id) === agent && !agent.activeForegroundTurnId) {
+      agent.lifecycle = "idle";
+      agent.turnCanceled = true;
+      this.touchUpdatedAt(agent);
+      this.emitState(agent);
+    }
+    return null;
+  }
+
+  /** Takes a queued child's held turn out of line before its session is swapped. */
+  private detachQueuedTurn(agent: ActiveManagedAgent): HeldTurn | null {
+    const held = this.childAdmission?.detach(agent.id) ?? null;
+    if (held) {
+      delete agent.turnQueued;
+      agent.lifecycle = "idle";
+    }
+    return held;
+  }
+
+  /**
+   * A reload failed after taking a queued child's held turn out of line. While the agent is still
+   * registered (the old session survived) the turn goes back in line at its place; once the old
+   * session is closed there is nothing to queue it on, so it stays in queue.json for the next start.
+   */
+  private returnHeldTurnAfterFailedReload(held: HeldTurn | null, error: unknown): void {
+    if (!held) return;
+    if (this.agents.has(held.agentId)) {
+      this.logger.warn(
+        { err: error, agentId: held.agentId },
+        "Reload failed; putting the queued child turn back in line",
+      );
+      this.requeueHeldTurn(held);
+      return;
+    }
+    this.logger.warn(
+      { err: error, agentId: held.agentId },
+      "Reload failed and closed the agent; keeping its queued child turn for the next start",
+    );
+    this.childAdmission?.retainForRestart(held);
+  }
+
+  /** Puts a detached held turn back in line on the agent's new session. */
+  private requeueHeldTurn(held: HeldTurn | null): void {
+    if (!held) return;
+    let stream: AsyncGenerator<AgentStreamEvent>;
+    try {
+      stream = this.streamAgentInternal(held.agentId, held.prompt, held.runOptions, held.queuedAt);
+    } catch (error) {
+      // Registered in `running` for this turn; without it the agent has to come back to idle.
+      const agent = this.agents.get(held.agentId);
+      if (agent && !agent.activeForegroundTurnId) {
+        agent.lifecycle = "idle";
+        this.emitState(agent);
+      }
+      this.logger.error(
+        { err: error, agentId: held.agentId },
+        "Could not re-queue a child turn; keeping it for the next start",
+      );
+      this.childAdmission?.retainForRestart(held);
+      return;
+    }
+    void (async () => {
+      for await (const _event of stream) {
+        // Events are broadcast via subscribers.
+      }
+    })().catch((error) => {
+      this.logger.error({ err: error, agentId: held.agentId }, "Re-queued child turn failed");
+    });
   }
 
   private finalizeForegroundTurn(agent: ActiveManagedAgent, turnId?: string): void {
@@ -2538,11 +4162,17 @@ export class AgentManager {
     mutableAgent.activeForegroundTurnId = null;
     this.applyActiveTurnTerminal(mutableAgent, turnId);
     const terminalError = mutableAgent.lastError;
+    // `lastError` was this method's only outcome signal, which conflated "something went wrong"
+    // with "the agent is in an error state". An unresponsive cancel is the case that separates
+    // them: the cause has to survive for the failover detector to read, and the lifecycle has
+    // to stay exactly where a cancel leaves it, or the app and the monitors start treating a
+    // stopped turn as an errored agent.
+    const canceled = mutableAgent.turnCanceled === true;
     const shouldHoldBusyForReplacement = mutableAgent.pendingReplacement && !terminalError;
     let nextLifecycle: "running" | "error" | "idle";
     if (shouldHoldBusyForReplacement) {
       nextLifecycle = "running";
-    } else if (terminalError) {
+    } else if (terminalError && !canceled) {
       nextLifecycle = "error";
     } else {
       nextLifecycle = "idle";
@@ -2597,6 +4227,11 @@ export class AgentManager {
     prompt: AgentPromptInput,
     options?: AgentRunOptions,
   ): Promise<AsyncGenerator<AgentStreamEvent>> {
+    // A queued child has no turn to replace. The second prompt joins the held one and keeps its
+    // place in line; the turn already waiting starts with both.
+    if (this.childAdmission?.mergeHeld(agentId, prompt, options)) {
+      return emptyAgentStream();
+    }
     const snapshot = this.requireAgent(agentId);
     if (
       snapshot.lifecycle !== "running" &&
@@ -2634,7 +4269,128 @@ export class AgentManager {
     if (!expectedTurnId || !agent.session.steerActiveTurn) {
       return { status: "unavailable" };
     }
-    const result = await this.runSteerAdmission(agent, expectedTurnId, async () => {
+    const result = await this.admitSteer(agent, expectedTurnId, prompt, options);
+    // An unavailable answer is only safe to fall back from while this admission
+    // still owns the active turn. Never let an A admission replace a later B.
+    if (result.status === "unavailable" && agent.activeTurnId !== expectedTurnId) {
+      throw new ActiveTurnChangedError();
+    }
+    return result;
+  }
+
+  /**
+   * Joins a prompt to the agent's active turn, and never cancels anything: a message is not a stop.
+   * An interrupt ends the provider's whole request, and in Claude Code that takes every background
+   * Workflow and Agent task in the session down with it.
+   *
+   * `busy` means a run is in flight that the prompt could not join: a start with no turn yet, a
+   * provider that cannot steer, or a prompt the turn refuses (a slash command, a compaction). The
+   * caller waits on `nextOpportunity` and asks again.
+   */
+  async steerIntoActiveTurn(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: AgentSteerOptions,
+    /** The re-send of a turn held across a restart, which must not wait on itself. */
+    dispatch?: { resendsHeldTurn?: boolean },
+  ): Promise<ActiveTurnSteerDispatchResult> {
+    // A child waiting for an admission slot has no turn to join yet. The prompt joins the held one
+    // and keeps its place in line, on disk with it (docs/resource-monitor.md), so the turn starts
+    // with both and nothing waits in memory.
+    const { clearPendingPermissions: _clearPendingPermissions, ...runOptions } = options ?? {};
+    if (this.childAdmission?.mergeHeld(agentId, prompt, options ? runOptions : undefined)) {
+      return { status: "steered" };
+    }
+    // Its turn held across a restart is being re-sent right now: wait until it is in line or
+    // running, so this message joins or follows it instead of starting ahead of it.
+    const restoring = dispatch?.resendsHeldTurn
+      ? null
+      : this.childAdmission?.restoreInFlight(agentId);
+    if (restoring) {
+      return { status: "busy", nextOpportunity: restoring };
+    }
+    const agent = this.requireSessionAgent(agentId);
+    // A turn that ends or changes mid-admission is not a reason to fail the message: the next
+    // attempt targets whatever owns the agent now. Bounded, because the two turn fields can
+    // briefly disagree, and that must not spin.
+    for (let attempt = 0; attempt < MAX_STEER_ADMISSION_ATTEMPTS; attempt += 1) {
+      const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
+      if (!expectedTurnId) {
+        return this.hasInFlightRun(agentId)
+          ? { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) }
+          : { status: "inactive" };
+      }
+      let admission: SteerResult = { status: "unavailable" };
+      if (agent.session.steerActiveTurn) {
+        try {
+          admission = await this.admitSteer(agent, expectedTurnId, prompt, options);
+        } catch (error) {
+          if (error instanceof ActiveTurnChangedError) continue;
+          throw error;
+        }
+      }
+      if (admission.status === "accepted") {
+        return { status: "steered" };
+      }
+      await this.beforeSteerUnavailableFallback?.({ agentId, expectedTurnId });
+      if ((agent.activeForegroundTurnId ?? agent.activeTurnId) !== expectedTurnId) continue;
+      return { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) };
+    }
+    return { status: "busy", nextOpportunity: this.nextDispatchOpportunity(agentId) };
+  }
+
+  /**
+   * Resolves at the next moment a prompt that could not join the agent's run might be deliverable:
+   * the run settles, a pending turn starts, or the agent's turn or lifecycle moves. Created in the
+   * same tick the caller saw the agent busy, so no transition can fall between the two.
+   */
+  private nextDispatchOpportunity(agentId: string): Promise<void> {
+    const observed = this.readDispatchState(agentId);
+    return new Promise<void>((resolvePromise) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        unsubscribe();
+        resolvePromise();
+      };
+      const unsubscribe = this.subscribe(
+        (event) => {
+          if (event.type === "agent_state" && this.readDispatchState(agentId) !== observed) {
+            finish();
+          }
+        },
+        { agentId, replayState: false },
+      );
+      const run = this.runs.getRun(agentId);
+      if (run) {
+        void run.settledPromise.then(finish);
+      } else if (!this.hasInFlightRun(agentId)) {
+        finish();
+      }
+    });
+  }
+
+  private readDispatchState(agentId: string): string {
+    const agent = this.agents.get(agentId);
+    if (!agent) return "gone";
+    const run = this.runs.getRun(agentId);
+    return [
+      agent.lifecycle,
+      agent.activeTurnId ?? "",
+      agent.activeForegroundTurnId ?? "",
+      run?.token ?? "",
+      this.runs.getTurnId(agentId) ?? "",
+    ].join("|");
+  }
+
+  private async admitSteer(
+    agent: ActiveManagedAgent,
+    expectedTurnId: string,
+    prompt: AgentPromptInput,
+    options: AgentSteerOptions | undefined,
+  ): Promise<SteerResult> {
+    return await this.runSteerAdmission(agent, expectedTurnId, async () => {
       const admission = await agent.session.steerActiveTurn!(prompt, {
         ...options,
         expectedTurnId,
@@ -2644,63 +4400,11 @@ export class AgentManager {
       }
       return admission;
     });
-    // An unavailable answer is only safe to fall back from while this admission
-    // still owns the active turn. Never let an A admission replace a later B.
-    if (result.status === "unavailable" && agent.activeTurnId !== expectedTurnId) {
-      throw new Error("Active turn changed before steering could be delivered");
-    }
-    return result;
-  }
-
-  async steerOrReplaceActiveTurn(
-    agentId: string,
-    prompt: AgentPromptInput,
-    options?: AgentSteerOptions,
-  ): Promise<ActiveTurnSteerDispatchResult> {
-    const agent = this.requireSessionAgent(agentId);
-    const expectedTurnId = agent.activeForegroundTurnId ?? agent.activeTurnId;
-    if (!expectedTurnId) {
-      return { status: "inactive" };
-    }
-
-    const result = agent.session.steerActiveTurn
-      ? await this.runSteerAdmission(agent, expectedTurnId, async () => {
-          const admission = await agent.session.steerActiveTurn!(prompt, {
-            ...options,
-            expectedTurnId,
-          });
-          if (admission.status === "accepted") {
-            await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
-          }
-          return admission;
-        })
-      : { status: "unavailable" as const };
-    if (result.status === "accepted") {
-      return { status: "steered" };
-    }
-
-    // Providers without autonomous steering keep their existing dispatch behavior. The shared
-    // admission may recognize the turn, but only an accepted steer can own it without replacement.
-    if (agent.activeForegroundTurnId === null && agent.activeTurnId === expectedTurnId) {
-      return { status: "inactive" };
-    }
-
-    await this.beforeSteerUnavailableFallback?.({ agentId, expectedTurnId });
-    this.assertSteerAdmissionOwnsTurn(agent, expectedTurnId);
-    return {
-      status: "replaced",
-      iterator: await this.replaceAdmittedForegroundTurn(
-        agent,
-        expectedTurnId,
-        prompt,
-        stripSteerOptions(options),
-      ),
-    };
   }
 
   private assertSteerAdmissionOwnsTurn(agent: ActiveManagedAgent, expectedTurnId: string): void {
     if (agent.activeTurnId !== expectedTurnId) {
-      throw new Error("Active turn changed before steering could be delivered");
+      throw new ActiveTurnChangedError();
     }
   }
 
@@ -2743,30 +4447,6 @@ export class AgentManager {
       if (this.foregroundMutationTails.get(agentId) === tail) {
         this.foregroundMutationTails.delete(agentId);
       }
-    }
-  }
-
-  private async replaceAdmittedForegroundTurn(
-    agent: ActiveManagedAgent,
-    expectedTurnId: string,
-    prompt: AgentPromptInput,
-    options?: AgentRunOptions,
-  ): Promise<AsyncGenerator<AgentStreamEvent>> {
-    this.assertSteerAdmissionOwnsTurn(agent, expectedTurnId);
-    agent.pendingReplacement = true;
-    agent.lifecycle = "running";
-    this.touchUpdatedAt(agent);
-    this.emitState(agent);
-
-    try {
-      await this.cancelAgentRunBefore(agent.id, "replace");
-      return this.streamAgent(agent.id, prompt, options);
-    } catch (error) {
-      const latest = this.agents.get(agent.id);
-      if (latest) {
-        latest.pendingReplacement = false;
-      }
-      throw error;
     }
   }
 
@@ -2938,11 +4618,43 @@ export class AgentManager {
     }
   }
 
-  async cancelAgentRun(agentId: string): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, () => this.cancelAgentRunNow(agentId));
+  /** `cancelReason` is for the log only — who stopped this turn, which nothing else records. */
+  async cancelAgentRun(
+    agentId: string,
+    cancelReason: AgentCancelReason = "unspecified",
+  ): Promise<AgentRunCancellationResult> {
+    return this.runForegroundMutation(agentId, async () => {
+      if (this.childAdmission?.drop(agentId, "canceled")) {
+        // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
+        await this.runs.getRun(agentId)?.settledPromise;
+        return { status: "settled" };
+      }
+      const result = await this.cancelAgentRunNow(agentId, cancelReason);
+      if (cancelReason === "account-capped" && result.status === "settled") {
+        await this.recordAccountCappedCancel(agentId);
+      }
+      return result;
+    });
   }
 
-  private async cancelAgentRunNow(agentId: string): Promise<AgentRunCancellationResult> {
+  /**
+   * A cancel clears `lastError`, and failover reads nothing else, so an account-capped cancel
+   * leaves a limit-shaped one. The timeline row dates the failure now: failover dates a failure
+   * by the newest row, and the stuck turn's newest row can be many hours old.
+   */
+  private async recordAccountCappedCancel(agentId: string): Promise<void> {
+    const agent = this.requireSessionAgent(agentId);
+    if (agent.lifecycle === "running") return;
+    agent.lastError = formatAccountCappedCancelError(agent.provider);
+    await this.appendSystemErrorTimelineMessage(agent, agent.provider, agent.lastError);
+    this.touchUpdatedAt(agent);
+    this.emitState(agent);
+  }
+
+  private async cancelAgentRunNow(
+    agentId: string,
+    cancelReason: AgentCancelReason,
+  ): Promise<AgentRunCancellationResult> {
     const agent = this.requireSessionAgent(agentId);
     const run =
       this.runs.getRun(agentId) ??
@@ -2950,6 +4662,22 @@ export class AgentManager {
     if (!run) {
       return { status: "not_running" };
     }
+
+    // A cancel is the one turn outcome that leaves no trace of itself: it clears lastError and
+    // lands idle, so afterwards nothing says the turn was stopped, let alone by what. Four
+    // agents were cancelled on one machine and the log could not answer either question.
+    this.logger.info(
+      {
+        agentId,
+        provider: agent.provider,
+        sessionId: agent.persistence?.sessionId ?? undefined,
+        turnId: this.runs.getTurnId(agentId) ?? undefined,
+        runKind: run.kind,
+        lifecycle: agent.lifecycle,
+        cancelReason,
+      },
+      "Canceling agent run",
+    );
 
     const interruptAcknowledged = await this.interruptSession(agent.session, agentId);
     const settlement = await this.waitWithTimeout({
@@ -2972,7 +4700,10 @@ export class AgentManager {
       await this.dispatchSessionEvent(agent, {
         type: "turn_canceled",
         provider: agent.provider,
-        reason: "interrupted",
+        // Distinguished from a plain "interrupted": the session acknowledged the interrupt and
+        // then never settled. That is a dead session, and the layers that route around dead
+        // accounts have to be able to tell it from a person pressing stop.
+        reason: UNRESPONSIVE_CANCEL_REASON,
         turnId: runTurnId,
       });
       await run.settledPromise;
@@ -2983,6 +4714,10 @@ export class AgentManager {
       );
       this.runs.settleForegroundRun(agentId, run.token);
       if (!agent.pendingReplacement) {
+        // This branch bypasses the turn-event path entirely, so a fix that only handles
+        // `turn_canceled` would miss it — and it is the unresponsive-session case exactly.
+        agent.turnCanceled = true;
+        agent.lastError = UNRESPONSIVE_CANCEL_ERROR;
         agent.lifecycle = "idle";
         this.touchUpdatedAt(agent);
         this.emitState(agent);
@@ -3011,7 +4746,7 @@ export class AgentManager {
     agentId: string,
     action: "reload" | "replace" | "rewind",
   ): Promise<void> {
-    const result = await this.cancelAgentRun(agentId);
+    const result = await this.cancelAgentRun(agentId, action);
     if (result.status === "refused") {
       throw new AgentRunCancellationError(agentId, action);
     }
@@ -3102,6 +4837,21 @@ export class AgentManager {
           agentId,
           epoch: this.timelineStore.getEpoch(agentId),
         });
+        // The replaced timeline may no longer contain the item the summary
+        // was derived from; drop it rather than show a summary of deleted content.
+        delete agent.lastActivitySummary;
+        // Stale until the next turn's init message re-reports it (KTD8) — drop rather
+        // than show statuses captured before the rewind.
+        delete agent.mcpServerStatuses;
+        // The rewound-away turns' token burn no longer reflects what's ahead; start the
+        // trailing-window tracker fresh rather than report a rate computed from erased history.
+        delete agent.tokenRateBuckets;
+        delete agent.totalTokens;
+        delete agent.tokenBurnAlert;
+        delete agent.tokenBurnMonitorState;
+        delete agent.spendGovernorState;
+        delete agent.resourceAlert;
+        delete agent.resourceMonitorState;
       }
       // Rewind stages provider events under the run lock; publish its final state directly.
       this.refreshSessionPersistence(agent);
@@ -3378,10 +5128,13 @@ export class AgentManager {
       lastUsage?: AgentUsage;
       lastError?: string;
       attention?: AttentionState;
+      spend?: CarriedSpendLedger;
       initialTitle?: string | null;
       publishWhenReady?: boolean;
       workspaceId?: string;
       owner?: AgentOwner;
+      /** A reload is carrying a queued turn: land in `running`, never idle, so no waiter settles. */
+      carriesQueuedTurn?: boolean;
     },
   ): Promise<ManagedAgent> {
     let registered = false;
@@ -3430,7 +5183,7 @@ export class AgentManager {
 
       await this.refreshSessionState(managed, { emit: false });
       this.assertAgentRegistrationActive(managed);
-      managed.lifecycle = "idle";
+      managed.lifecycle = options?.carriesQueuedTurn ? "running" : "idle";
       this.touchUpdatedAt(managed);
       await this.persistSnapshot(managed);
       this.assertAgentRegistrationActive(managed);
@@ -3530,6 +5283,7 @@ export class AgentManager {
           lastUsage?: AgentUsage;
           lastError?: string;
           attention?: AttentionState;
+          spend?: CarriedSpendLedger;
           persistence?: AgentPersistenceHandle;
           workspaceId?: string;
           owner?: AgentOwner;
@@ -3573,6 +5327,7 @@ export class AgentManager {
       attention: resolveInitialAttention(options?.attention),
       internal: config.internal ?? false,
       labels: options?.labels ?? {},
+      ...options?.spend,
     } as ActiveManagedAgent;
   }
 
@@ -3594,8 +5349,11 @@ export class AgentManager {
     cancelReason: string,
   ): ManagedAgentClosed {
     this.agentStreamCoalescer.flushAndDiscard(agent.id);
+    // Close, archive and delete all end here. A reload detached its held turn already.
+    this.childAdmission?.drop(agent.id, "closed");
     this.agents.delete(agent.id);
     this.previousStatuses.delete(agent.id);
+    this.brokeredMcpServerNames.delete(agent.id);
     if (agent.unsubscribeSession) {
       agent.unsubscribeSession();
       agent.unsubscribeSession = null;
@@ -3789,16 +5547,21 @@ export class AgentManager {
 
   private async persistSnapshot(
     agent: ManagedAgent,
-    options?: { title?: string | null; internal?: boolean },
-  ): Promise<void> {
+    options?: {
+      title?: string | null;
+      internal?: boolean;
+      titleManuallySet?: boolean;
+      skipIfTitleManuallySet?: boolean;
+    },
+  ): Promise<boolean> {
     if (!this.registry) {
-      return;
+      return false;
     }
     // Don't persist internal agents - they're ephemeral system tasks
     if (agent.internal) {
-      return;
+      return false;
     }
-    await this.registry.applySnapshot(agent, options);
+    return this.registry.applySnapshot(agent, options);
   }
 
   private requireRegistry(): AgentStorage {
@@ -3880,10 +5643,38 @@ export class AgentManager {
         typeof broadcast === "function" ? broadcast() : broadcast,
         typeof broadcastTimeline === "function" ? broadcastTimeline() : broadcastTimeline,
       );
+      this.recoverActivitySummary(agent);
       return;
     }
 
     await this.primeTimelineFromLegacyProviderHistory(agent, broadcast);
+    this.recoverActivitySummary(agent);
+  }
+
+  /**
+   * Restores "what is this agent doing" after a restart. The field is computed live from each
+   * discrete timeline item and deliberately never persisted — it changes on every tool call, so
+   * writing it would mean an agent snapshot per tool call across the whole fleet. It does not
+   * need to be written: hydration has just replayed the provider's own transcript into the
+   * in-memory timeline, so the item it is derived from is already here and recovering it is a
+   * backwards walk over rows in memory, with no read and no write of its own.
+   *
+   * Without this, every agent came back from a restart with a blank subtitle until its next
+   * tool call — 49 of 53 rows on one measured fleet, because the panel is mostly read between
+   * turns rather than during them.
+   */
+  private recoverActivitySummary(agent: ActiveManagedAgent): void {
+    if (agent.lastActivitySummary !== undefined) {
+      return;
+    }
+    const items = this.timelineStore.getRows(agent.id).map((row) => row.item);
+    const summary = recoverLatestActivitySummary(items);
+    if (summary === undefined) {
+      return;
+    }
+    agent.lastActivitySummary = summary;
+    // Same as the live path: live-only, so never ask for a snapshot write.
+    this.emitState(agent, { persist: false });
   }
 
   private async forceHydrateTimelineFromLegacyProviderHistory(
@@ -4173,13 +5964,6 @@ export class AgentManager {
     const { agent, event, options, isForegroundEvent, eventTurnId, terminalDisposition, flags } =
       params;
     switch (event.type) {
-      case "thread_started":
-        this.onStreamThreadStarted(agent);
-        return undefined;
-      case "usage_updated":
-        agent.lastUsage = event.usage;
-        this.emitState(agent);
-        return undefined;
       case "mode_changed":
         agent.currentModeId = event.currentModeId;
         agent.availableModes = event.availableModes;
@@ -4251,9 +6035,90 @@ export class AgentManager {
       case "permission_resolved":
         this.onStreamPermissionResolved({ agent, event, options, flags });
         return undefined;
+      case "mcp_server_statuses":
+        this.onStreamMcpServerStatuses(agent, event);
+        return undefined;
       default:
+        this.onStreamBookkeepingEvent(agent, event, flags);
         return undefined;
     }
+  }
+  /**
+   * Events that only touch live agent bookkeeping and never the turn lifecycle. Kept out of
+   * dispatchStreamEventByType's switch so that method stays under the complexity ceiling.
+   */
+  private onStreamBookkeepingEvent(
+    agent: ActiveManagedAgent,
+    event: AgentStreamEvent,
+    flags: StreamEventFlags,
+  ): void {
+    switch (event.type) {
+      case "thread_started":
+        this.onStreamThreadStarted(agent);
+        return;
+      case "usage_updated":
+        // One of these lands per API request per agent (message_start / message_delta). Dedupe
+        // like mcp_server_statuses and skip the snapshot write like lastActivitySummary: the
+        // stored record doesn't carry lastUsage, so the write only rewrote an unchanged file,
+        // and with a dozen streaming agents that was a steady share of daemon I/O and of every
+        // client's store churn (docs/agent-stream-performance.md, "Agent state emits").
+        if (isDeepStrictEqual(agent.lastUsage, event.usage)) return;
+        agent.lastUsage = event.usage;
+        this.emitState(agent, { persist: false });
+        return;
+      case "model_observed":
+        // Daemon-internal, like token_burn_delta below: one compare per response, no state emit.
+        // The monitor surfaces a finding on its own sweep, so nothing here repaints a client.
+        agent.modelDivergenceState = recordModelObservation(agent.modelDivergenceState ?? {}, {
+          observedModel: event.model,
+          at: Date.now(),
+          configuredModel: agent.config.model,
+          initModel: readRuntimeModel(agent.runtimeInfo),
+        });
+        flags.shouldDispatchEvent = false;
+        return;
+      case "token_burn_delta":
+        // Daemon-internal: feeds the burn ring the monitor reads straight off ManagedAgent.
+        // No emitState — the app's badge repaints on the next state emit anyway — and never
+        // forwarded, so no wire consumer has to learn a new stream event type.
+        this.recordTokenBurn(agent, event.tokens);
+        flags.shouldDispatchEvent = false;
+        return;
+      default:
+        return;
+    }
+  }
+
+  private onStreamMcpServerStatuses(
+    agent: ActiveManagedAgent,
+    event: Extract<AgentStreamEvent, { type: "mcp_server_statuses" }>,
+  ): void {
+    // Avoid an emitState storm on every turn: only broadcast (and skip persisting,
+    // live-only like lastActivitySummary) when the reported statuses actually changed.
+    const statuses = this.withoutStaleBrokeredNeedsAuth(agent.id, event.statuses);
+    if (isDeepStrictEqual(agent.mcpServerStatuses, statuses)) return;
+    agent.mcpServerStatuses = statuses;
+    this.emitState(agent, { persist: false });
+  }
+
+  /**
+   * Drops a session's `needs-auth` for a server its launch brokered. That entry carries the
+   * gateway's own bearer header and never runs OAuth, so the CLI only reports it needs-auth off
+   * the account's name-keyed `mcp-needs-auth-cache.json`, stamped when the same name was last
+   * loaded from per-dir config and failed. That is the account's stale login, not the server's
+   * state: the gateway's snapshot is the status for brokered servers (docs/mcp-gateway.md).
+   */
+  private withoutStaleBrokeredNeedsAuth(
+    agentId: string,
+    statuses: AgentMcpServerStatus[],
+  ): AgentMcpServerStatus[] {
+    const brokered = this.brokeredMcpServerNames.get(agentId);
+    if (!brokered || brokered.size === 0) {
+      return statuses;
+    }
+    return statuses.filter(
+      (status) => !(status.status === "needs-auth" && brokered.has(status.name)),
+    );
   }
 
   private onStreamThreadStarted(agent: ActiveManagedAgent): void {
@@ -4316,6 +6181,15 @@ export class AgentManager {
     flags.shouldNotifyWaiters = true;
   }
 
+  /** Live-only ring + lifetime total (docs/token-burn.md); cleared on rewind, never persisted. */
+  private recordTokenBurn(agent: ActiveManagedAgent, tokens: number): void {
+    if (!Number.isFinite(tokens) || tokens <= 0) {
+      return;
+    }
+    agent.tokenRateBuckets = recordTokenDelta(agent.tokenRateBuckets ?? [], tokens, Date.now());
+    agent.totalTokens = (agent.totalTokens ?? 0) + tokens;
+  }
+
   private onStreamTurnCompleted(params: {
     agent: ActiveManagedAgent;
     event: Extract<AgentStreamEvent, { type: "turn_completed" }>;
@@ -4342,6 +6216,9 @@ export class AgentManager {
     // If no usage on turn_completed, keep lastUsage as-is so context window
     // data accumulated during streaming isn't lost when the provider omits
     // it from the completion event.
+    if (typeof event.turnTokenDelta === "number") {
+      this.recordTokenBurn(agent, event.turnTokenDelta);
+    }
     agent.lastError = undefined;
     if (
       !isForegroundEvent &&
@@ -4422,10 +6299,17 @@ export class AgentManager {
       "agent.manager.turn.canceled",
     );
     if (terminalDisposition === "stale") return;
+    agent.turnCanceled = true;
     if (!isForegroundEvent && !agent.activeForegroundTurnId && !agent.pendingReplacement) {
       agent.lifecycle = "idle";
     }
-    agent.lastError = undefined;
+    // A person pressing stop leaves nothing wrong with the agent, so its error clears. A
+    // session that stopped answering is a failure, and `lastError` is the only thing the
+    // account-failover detector reads — clearing it there is what made an account outage
+    // invisible to the feature built to route around one. Lifecycle is untouched either way.
+    agent.lastError = isUnresponsiveCancelReason(event.reason)
+      ? UNRESPONSIVE_CANCEL_ERROR
+      : undefined;
     this.resolvePendingPermissionsForAgent(agent, event.provider, options, "Interrupted");
     if (!isForegroundEvent && !agent.activeForegroundTurnId) {
       this.emitState(agent);
@@ -4537,14 +6421,38 @@ export class AgentManager {
       timestamp: row.timestamp,
     });
 
-    if (
-      item.type === "tool_call" &&
-      item.status === "completed" &&
-      item.detail?.type === "shell" &&
-      commandMayHaveChangedExternalState(item.detail.command)
-    ) {
-      const agent = this.agents.get(agentId);
-      if (agent) {
+    // Single choke point for every timeline item, regardless of which path
+    // dispatched it: coalesced assistant/reasoning/tool_call flushes (the
+    // AgentStreamCoalescer's onFlush callback) never reach onStreamTimelineEvent,
+    // so the summary is computed here instead — per timeline ITEM, never per
+    // streamed delta, since coalescing already collapsed same-window chunks
+    // before this call.
+    //
+    // assistant_message/reasoning are excluded: the coalescer flushes them on
+    // a ~60ms timer with only that window's text, so every flush is a
+    // different mid-message fragment and would otherwise emit+persist a full
+    // agent snapshot every ~60ms while streaming. tool_call/todo/error/
+    // compaction/user_message items are discrete and drive the summary instead.
+    const agent = this.agents.get(agentId);
+    if (agent) {
+      const activitySummary =
+        item.type === "assistant_message" || item.type === "reasoning"
+          ? undefined
+          : summarizeLatestActivityItem(item);
+      if (activitySummary !== undefined && activitySummary !== agent.lastActivitySummary) {
+        agent.lastActivitySummary = activitySummary;
+        // Avoid an emitState storm: only broadcast when the summary actually
+        // changed, not on every coalesced item. lastActivitySummary is
+        // live-only (never persisted), so skip the snapshot write too.
+        this.emitState(agent, { persist: false });
+      }
+
+      if (
+        item.type === "tool_call" &&
+        item.status === "completed" &&
+        item.detail?.type === "shell" &&
+        commandMayHaveChangedExternalState(item.detail.command)
+      ) {
         this.onWorkspaceStateMayHaveChanged?.({ cwd: agent.cwd });
       }
     }
@@ -4670,8 +6578,30 @@ export class AgentManager {
   }
 
   private emitState(agent: ManagedAgent, options?: { persist?: boolean }): void {
+    this.runMarkers.observe(agent, { shuttingDown: !this.acceptingAgentRegistrations });
+    // Capture the pre-transition status independently of checkAndSetAttention:
+    // that method early-returns once attention is already unread, which would
+    // otherwise swallow a turn-2 finish while turn 1's attention is uncleared.
+    const previousStatus = this.previousStatuses.get(agent.id);
+    // Captured before checkAndSetAttention consumes it, so the snapshot subscribers receive
+    // still carries this turn's outcome — notify-on-finish reads it to tell a parent its
+    // delegation was cancelled rather than finished.
+    const turnCanceled = agent.turnCanceled === true;
+    // Consumed on the first edge out of running, like turnCanceled, so it cannot outlive the
+    // janitor's question and silence a later genuine finish.
+    const quietTurn =
+      agent.quietTurn === true && previousStatus === "running" && agent.lifecycle !== "running";
+    if (quietTurn) agent.quietTurn = false;
     // Keep attention as an edge-triggered unread signal, not a level signal.
-    this.checkAndSetAttention(agent);
+    this.checkAndSetAttention(agent, { quietTurn });
+    if (
+      previousStatus === "running" &&
+      agent.lifecycle === "idle" &&
+      !agent.internal &&
+      !quietTurn
+    ) {
+      this.onAgentTurnFinished?.({ agentId: agent.id, cwd: agent.cwd });
+    }
     if (options?.persist !== false) {
       this.enqueueBackgroundPersist(agent);
     }
@@ -4694,8 +6624,10 @@ export class AgentManager {
 
     this.dispatch({
       type: "agent_state",
-      agent: { ...agent },
+      agent: { ...agent, turnCanceled },
     });
+    // A child turn ending (idle, error, closed) frees a slot; this is the edge that notices.
+    this.childAdmission?.pump();
   }
 
   private syncFeaturesFromSession(agent: ManagedAgent): void {
@@ -4704,12 +6636,18 @@ export class AgentManager {
     }
   }
 
-  private checkAndSetAttention(agent: ManagedAgent): void {
+  private checkAndSetAttention(agent: ManagedAgent, options?: { quietTurn?: boolean }): void {
     const previousStatus = this.previousStatuses.get(agent.id);
     const currentStatus = agent.lifecycle;
 
     // Track the new status
     this.previousStatuses.set(agent.id, currentStatus);
+
+    // A turn that was cancelled did not finish. Read and cleared before every early return
+    // below, so the flag can never outlive the turn that set it and suppress a later genuine
+    // finish — which would lose real signal, the one failure worse than the noise.
+    const canceled = agent.turnCanceled === true;
+    agent.turnCanceled = false;
 
     // Skip attention tracking for internal agents
     if (agent.internal) {
@@ -4723,6 +6661,18 @@ export class AgentManager {
 
     // Check if agent transitioned from running to idle (finished)
     if (previousStatus === "running" && currentStatus === "idle") {
+      if (canceled || options?.quietTurn) {
+        return;
+      }
+      // A delegated agent finishing is the normal case and is already delivered: its parent
+      // gets the result in-band through the tool call that spawned it. Flagging it too left a
+      // signal nobody surfaces — broadcastAgentAttention has skipped delegated agents since
+      // #1293 — and nobody clears, because a human never opens a subagent to read it. On one
+      // live daemon that was 27 of 34 outstanding flags, the oldest three weeks old. Errors
+      // still flag: a subagent that failed is not the normal case.
+      if (isDelegatedAgent(agent)) {
+        return;
+      }
       agent.attention = {
         requiresAttention: true,
         attentionReason: "finished",
@@ -4745,9 +6695,11 @@ export class AgentManager {
   }
 
   private enqueueBackgroundPersist(agent: ManagedAgent): void {
-    const task = this.persistSnapshot(agent).catch((err) => {
-      this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
-    });
+    const task = this.persistSnapshot(agent)
+      .then(() => undefined)
+      .catch((err) => {
+        this.logger.error({ err, agentId: agent.id }, "Failed to persist agent snapshot");
+      });
     this.trackBackgroundTask(task);
   }
 
@@ -4845,7 +6797,7 @@ export class AgentManager {
     agent: ManagedAgent,
     reason: "finished" | "error" | "permission",
   ): void {
-    if (isDelegatedAgent(agent)) {
+    if (isDelegatedAgent(agent) && !this.isUnansweredDelegatedPermission(agent, reason)) {
       return;
     }
 
@@ -4854,6 +6806,53 @@ export class AgentManager {
       provider: agent.provider,
       reason,
     });
+  }
+
+  /**
+   * A delegated agent blocked on a permission with nobody watching it. Its finishes and errors
+   * stay silent (#1293): the parent has those in-band. A permission is different — the child
+   * does not run until someone answers, and if no observer exists nobody ever will. That is a
+   * permanent hang rather than a delay, so it is the one delegated case worth a person's
+   * attention. An observer that is alive answers it instead, through `respond_to_permission`,
+   * which is why this only fires when there is none.
+   */
+  private isUnansweredDelegatedPermission(
+    agent: ManagedAgent,
+    reason: "finished" | "error" | "permission",
+  ): boolean {
+    return reason === "permission" && !this.hasFinishObserver(agent.id);
+  }
+
+  /**
+   * Raise attention on a delegated agent whose parent could not be told what happened.
+   *
+   * `checkAndSetAttention` suppresses a delegated agent's finish on the premise that the parent
+   * receives the outcome in-band, and `broadcastAgentAttention` suppresses the push for the same
+   * reason. When the delivery itself fails — the parent is closed, or its session is gone — that
+   * premise is false, and the agent goes quiet with nobody informed: on a finish the result is
+   * stranded, on a permission the child never runs again. Only a person can act, so this bypasses
+   * both suppressions rather than routing through them.
+   */
+  flagUndeliveredDelegatedOutcome(
+    agentId: string,
+    reason: "finished" | "permission",
+    options?: { push?: boolean },
+  ): void {
+    const agent = this.agents.get(agentId);
+    if (!agent || agent.internal || agent.attention.requiresAttention) {
+      return;
+    }
+    agent.attention = {
+      requiresAttention: true,
+      attentionReason: reason,
+      attentionTimestamp: new Date(),
+    };
+    // The finish-report ladder sends its own push, which says what went wrong; a second,
+    // generic "finished" push for the same event would only be noise.
+    if (options?.push !== false) {
+      this.onAgentAttention?.({ agentId: agent.id, provider: agent.provider, reason });
+    }
+    this.emitState(agent);
   }
 
   private dispatchStream(
@@ -5043,18 +7042,46 @@ export class AgentManager {
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
+    const brokersMcpServers = this.clientAcceptsMcpGatewayServers(storedConfig.provider);
+    const brokeredServerNames = brokersMcpServers ? (this.mcpGateway?.getServerNames() ?? []) : [];
     const launchConfig = this.applyDaemonAppendSystemPrompt(
-      withRuntimePaseoMcpServer({
-        config: storedConfig,
-        agentId,
-        mcpBaseUrl:
-          this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
-            ? this.mcpBaseUrl
-            : null,
-        mcpAuthToken: this.mcpAuthToken,
+      withRuntimeMcpGatewayServers({
+        config: withRuntimePaseoMcpServer({
+          config: storedConfig,
+          agentId,
+          mcpBaseUrl:
+            this.paseoToolsEnabled && isPaseoToolPolicyEnabled(paseoToolPolicy)
+              ? this.mcpBaseUrl
+              : null,
+          mcpAuthToken: this.mcpAuthToken,
+        }),
+        enabled: brokersMcpServers,
+        gatewayBaseUrl: this.mcpGatewayBaseUrl,
+        serverNames: brokeredServerNames,
+        gatewayAuthToken: this.mcpGatewayAuthToken,
+        sessionMode: this.mcpGateway?.sessionMode,
       }),
     );
+    if (launchConfig.mcpGatewayEnabled) {
+      this.brokeredMcpServerNames.set(agentId, new Set(brokeredServerNames));
+    } else {
+      this.brokeredMcpServerNames.delete(agentId);
+    }
     return { storedConfig, launchConfig, paseoToolPolicy };
+  }
+
+  /**
+   * Whether sessions on this provider get the gateway's brokered servers. Read off the client,
+   * not the provider id: an account-pool provider is `claude-personal` with `extends: "claude"`,
+   * and gating on the literal id left every one of them loading its own per-dir login instead.
+   * v1 targets the Claude adapter only — strictMcpConfig's stdio drop only has a re-injection
+   * counterpart there.
+   */
+  private clientAcceptsMcpGatewayServers(provider: AgentProvider): boolean {
+    if (!this.mcpGateway?.enabled) {
+      return false;
+    }
+    return this.clients.get(provider)?.acceptsMcpGatewayServers === true;
   }
 
   private applyDaemonAppendSystemPrompt(config: AgentSessionConfig): AgentSessionConfig {
@@ -5250,4 +7277,32 @@ export function commandMayHaveChangedExternalState(command: string): boolean {
     // ahead/behind counts can drift stale until the next refresh.
     /\bgit\s+fetch\b/.test(normalized)
   );
+}
+
+function isSameOwedFinishReport(
+  a: OwedFinishReport | undefined,
+  b: OwedFinishReport | undefined,
+): boolean {
+  if (!a || !b) return a === b;
+  return (
+    a.ownerAgentId === b.ownerAgentId &&
+    a.state === b.state &&
+    a.since === b.since &&
+    a.attempts === b.attempts
+  );
+}
+
+function optionalOwedFinishReport(report: OwedFinishReport | undefined): {
+  owedFinishReport?: OwedFinishReport;
+} {
+  return report ? { owedFinishReport: report } : {};
+}
+
+/** What replaceAgentRun returns when a second prompt merged into a queued turn: no new turn. */
+async function* emptyAgentStream(): AsyncGenerator<AgentStreamEvent> {}
+
+/** What a new turn starts with once admitted; a queued child may have had a prompt merged in. */
+export interface AdmittedTurn {
+  prompt: AgentPromptInput;
+  options?: AgentRunOptions;
 }

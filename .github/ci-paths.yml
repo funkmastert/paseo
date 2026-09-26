@@ -82,5 +82,9 @@ browser:
 relay:
   - "packages/relay/**"
 
+plugin:
+  - "plugins/claude-account-pool/**"
+  - "packages/plugin/**"
+
 cli:
   - "packages/cli/**"

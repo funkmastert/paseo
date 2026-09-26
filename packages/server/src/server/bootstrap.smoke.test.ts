@@ -22,6 +22,7 @@ import {
   snapshotGitCommandRuntimeMetrics,
 } from "../utils/run-git-command.js";
 import { DEFAULT_GIT_PROCESS_POLICY } from "../utils/git-process-scheduler.js";
+import { getProcessPriorityPolicy, resetProcessPriorityPolicy } from "../utils/process-priority.js";
 import type {
   HubEnrollment,
   HubEnrollmentResult,
@@ -330,6 +331,214 @@ describe("paseo daemon bootstrap", () => {
         rm(staticDir, { recursive: true, force: true }),
         rm(agentCwd, { recursive: true, force: true }),
       ]);
+    }
+  });
+
+  // Every agents.* monitor section is off unless config.json turns it on, so a section that never
+  // reaches its monitor is indistinguishable from "configured off". This goes the whole way a real
+  // daemon does — config.json on disk, loadConfig, createPaseoDaemon, then `paseo daemon reload` —
+  // and reads each section back over the daemon's config RPC and from the monitors' mode lines.
+  // A new agents.* section belongs in both halves of this test.
+  test("monitor sections in config.json reach the running monitors at boot and on reload", async () => {
+    const paseoHomeRoot = await mkdtemp(path.join(os.tmpdir(), "paseo-monitor-config-"));
+    const paseoHome = path.join(paseoHomeRoot, ".paseo");
+    await mkdir(paseoHome, { recursive: true });
+    const configPath = path.join(paseoHome, "config.json");
+    const bootPersisted = {
+      version: 1 as const,
+      daemon: {
+        listen: "127.0.0.1:0",
+        relay: { enabled: false },
+      },
+      agents: {
+        resourceMonitor: { reaper: { enabled: true, dryRun: true } },
+        processPriority: { agentNice: 12 },
+        deviceLeases: { enabled: true, dryRun: true, pendingTtlMinutes: 25 },
+        artifactJanitor: { enabled: true, dryRun: true, diskGuard: { enabled: true } },
+        tokenBurnMonitor: {
+          governor: { enabled: true, dryRun: true },
+          modelDivergence: { enabled: true },
+          usageHistory: { enabled: true },
+        },
+        accountFailover: { enabled: true, migrateSubagents: false, returnHome: false },
+        budgetPacing: { enabled: true, dryRun: true, speedUp: { horizonMinutes: 90 } },
+        leaderCompaction: { enabled: true, dryRun: true, prepareAtTokens: 400_000 },
+        contextMeter: { amberTokens: 150_000, redPercent: 75 },
+        doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
+        admission: { maxConcurrentChildTurns: 6, bulkResumesPerMinute: 3 },
+        refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
+        remediation: {
+          escalation: { enabled: true, maxPerDay: 3 },
+          notify: { enabled: false },
+          stalledAgents: { dryRun: true },
+        },
+        daemonVitals: { enabled: true, dryRun: true },
+        restartRecovery: { mode: "off" as const },
+      },
+    };
+    await writeFile(configPath, `${JSON.stringify(bootPersisted, null, 2)}\n`, "utf-8");
+    const config = loadConfig(paseoHome, { env: {} });
+    config.agentClients = createTestAgentClients();
+    config.agentStoragePath = path.join(paseoHome, "agents");
+    config.isDev = true;
+    const logLines: Array<Record<string, unknown>> = [];
+    const logger = pino(
+      { level: "info" },
+      {
+        write: (line: string) => {
+          logLines.push(JSON.parse(line) as Record<string, unknown>);
+        },
+      },
+    );
+    const monitorModes = () =>
+      Object.fromEntries(
+        logLines
+          .filter((line) => line.msg === "Monitor mode")
+          .map((line) => [line.monitor, { enabled: line.enabled, dryRun: line.dryRun }]),
+      );
+    const daemon = await createPaseoDaemon(config, logger);
+    let client: DaemonClient | null = null;
+
+    try {
+      await daemon.start();
+      const target = daemon.getListenTarget();
+      if (!target || target.type !== "tcp") throw new Error("Expected a TCP listener");
+      client = new DaemonClient({ url: `ws://127.0.0.1:${target.port}/ws`, appVersion: "0.4.0" });
+      await client.connect();
+
+      const booted = (await client.getDaemonConfig()).config;
+      expect(booted.resourceMonitor).toEqual(bootPersisted.agents.resourceMonitor);
+      expect(booted.processPriority).toEqual(bootPersisted.agents.processPriority);
+      // The spawn sites read the holder, not the config store.
+      expect(getProcessPriorityPolicy()).toEqual({
+        enabled: true,
+        agentNice: 12,
+        backgroundNice: 10,
+      });
+      expect(booted.deviceLeases).toEqual(bootPersisted.agents.deviceLeases);
+      expect(booted.artifactJanitor).toEqual(bootPersisted.agents.artifactJanitor);
+      expect(booted.tokenBurnMonitor).toEqual(bootPersisted.agents.tokenBurnMonitor);
+      expect(booted.accountFailover).toEqual(bootPersisted.agents.accountFailover);
+      expect(booted.budgetPacing).toEqual(bootPersisted.agents.budgetPacing);
+      expect(booted.leaderCompaction).toEqual(bootPersisted.agents.leaderCompaction);
+      expect(booted.contextMeter).toEqual(bootPersisted.agents.contextMeter);
+      expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
+      expect(booted.admission).toEqual(bootPersisted.agents.admission);
+      expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
+      // Startup-only: it reaches the running service, not the mutable config.
+      expect((await client.getRestartRecoveryPlan()).mode).toBe("off");
+      expect(booted.remediation).toEqual(bootPersisted.agents.remediation);
+      expect(monitorModes()).toEqual({
+        "resource-monitor": { enabled: true, dryRun: undefined },
+        reaper: { enabled: true, dryRun: true },
+        "device-cap": { enabled: true, dryRun: true },
+        "token-burn": { enabled: true, dryRun: undefined },
+        "spend-governor": { enabled: true, dryRun: true },
+        "account-pressure": { enabled: false, dryRun: undefined },
+        refocus: { enabled: true, dryRun: true },
+        "remediation-escalation": { enabled: true, dryRun: undefined },
+        "remediation-notify": { enabled: false, dryRun: undefined },
+        "model-divergence": { enabled: true, dryRun: undefined },
+        daemonVitals: { enabled: true, dryRun: true },
+        "leader-compaction": { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: true, dryRun: true },
+        // Read from config.json on every tick, not the mutable config; on unless it says false.
+        "token-audit": { enabled: true, dryRun: undefined },
+      });
+
+      const reloadedPersisted = {
+        ...bootPersisted,
+        agents: {
+          resourceMonitor: { reaper: { enabled: true, dryRun: false } },
+          processPriority: { enabled: false, agentNice: 14 },
+          deviceLeases: { enabled: false },
+          artifactJanitor: { enabled: true, dryRun: false },
+          tokenBurnMonitor: {
+            governor: { enabled: true, dryRun: false },
+            usageHistory: { enabled: false },
+          },
+          accountFailover: {
+            enabled: true,
+            migrateSubagents: true,
+            returnHome: true,
+            returnMinIdleMinutes: 20,
+          },
+          budgetPacing: { enabled: false },
+          leaderCompaction: { enabled: true, dryRun: false, prepareAtTokens: 400_000 },
+          contextMeter: { amberTokens: 250_000 },
+          doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
+          admission: { enabled: false },
+          refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
+          remediation: {
+            escalation: { enabled: false },
+            notify: { enabled: true },
+            stalledAgents: { enabled: false },
+          },
+          daemonVitals: { enabled: false },
+          restartRecovery: { mode: "off" as const },
+        },
+      };
+      await writeFile(configPath, `${JSON.stringify(reloadedPersisted, null, 2)}\n`, "utf-8");
+      const result = await client.reloadDaemonConfig("monitor-sections");
+
+      expect(result.appliedPaths).toEqual([
+        "agents.accountFailover",
+        "agents.admission",
+        "agents.artifactJanitor",
+        "agents.budgetPacing",
+        "agents.contextMeter",
+        "agents.deviceLeases",
+        "agents.doneJanitor",
+        "agents.leaderCompaction",
+        "agents.processPriority",
+        "agents.refocus",
+        "agents.remediation",
+        "agents.resourceMonitor",
+        "agents.tokenBurnMonitor",
+      ]);
+      // Daemon vitals is read once at boot (docs/daemon-vitals.md): a reload flags it, and the
+      // running detector keeps its boot mode.
+      expect(
+        result.restartRequiredPaths.filter((changed) => changed.startsWith("agents.daemonVitals")),
+      ).not.toEqual([]);
+      const reloaded = (await client.getDaemonConfig()).config;
+      expect(reloaded.resourceMonitor).toEqual(reloadedPersisted.agents.resourceMonitor);
+      expect(reloaded.processPriority).toEqual(reloadedPersisted.agents.processPriority);
+      expect(getProcessPriorityPolicy()).toEqual({
+        enabled: false,
+        agentNice: 14,
+        backgroundNice: 10,
+      });
+      expect(reloaded.tokenBurnMonitor).toEqual(reloadedPersisted.agents.tokenBurnMonitor);
+      expect(reloaded.deviceLeases).toEqual(reloadedPersisted.agents.deviceLeases);
+      expect(reloaded.artifactJanitor).toEqual(reloadedPersisted.agents.artifactJanitor);
+      expect(reloaded.accountFailover).toEqual(reloadedPersisted.agents.accountFailover);
+      expect(reloaded.budgetPacing).toEqual(reloadedPersisted.agents.budgetPacing);
+      expect(reloaded.leaderCompaction).toEqual(reloadedPersisted.agents.leaderCompaction);
+      expect(reloaded.contextMeter).toEqual(reloadedPersisted.agents.contextMeter);
+      expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
+      expect(reloaded.admission).toEqual(reloadedPersisted.agents.admission);
+      expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
+      expect(reloaded.remediation).toEqual(reloadedPersisted.agents.remediation);
+      // The ladder re-reads its config on every poll; drive one instead of waiting a minute.
+      await daemon.getRemediationLadder()?.tick();
+      expect(monitorModes()).toMatchObject({
+        reaper: { enabled: true, dryRun: false },
+        "device-cap": { enabled: false, dryRun: false },
+        "spend-governor": { enabled: true, dryRun: false },
+        refocus: { enabled: true, dryRun: false },
+        "leader-compaction": { enabled: true, dryRun: false },
+        "remediation-escalation": { enabled: false },
+        "remediation-notify": { enabled: true },
+        "model-divergence": { enabled: false },
+        daemonVitals: { enabled: true, dryRun: true },
+        "stalled-agent-sweep": { enabled: false, dryRun: false },
+      });
+    } finally {
+      await client?.close().catch(() => undefined);
+      await daemon.stop().catch(() => undefined);
+      resetProcessPriorityPolicy();
+      await rm(paseoHomeRoot, { recursive: true, force: true });
     }
   });
 

@@ -1,3 +1,5 @@
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
+
 export type ScheduleStatus = "active" | "paused" | "completed";
 
 export type ScheduleCadence =
@@ -58,6 +60,7 @@ export interface ScheduleRecord {
   pausedAt: string | null;
   expiresAt: string | null;
   maxRuns: number | null;
+  condition?: ScheduleCondition;
   runs: ScheduleRunRecord[];
 }
 
@@ -84,6 +87,7 @@ export interface CreateScheduleInput {
   maxRuns?: number;
   expiresAt?: string;
   runOnCreate?: boolean;
+  condition?: ScheduleCondition;
 }
 
 export interface ScheduleCreatePayload {
@@ -149,6 +153,8 @@ export interface UpdateScheduleInput {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  /** Null clears the condition. */
+  condition?: ScheduleCondition | null;
 }
 
 export interface ScheduleUpdatePayload {
@@ -167,5 +173,6 @@ export interface ScheduleDaemonClient {
   scheduleDelete(input: { id: string }): Promise<ScheduleDeletePayload>;
   scheduleRunOnce(input: { id: string }): Promise<ScheduleRunOncePayload>;
   scheduleUpdate(input: UpdateScheduleInput): Promise<ScheduleUpdatePayload>;
+  getLastServerInfoMessage(): { features?: { scheduleConditions?: boolean } } | null;
   close(): Promise<void>;
 }

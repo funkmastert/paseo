@@ -115,7 +115,7 @@ async function readClaudeSettingsModels(
   return models;
 }
 
-function resolveClaudeConfigDir(configDir?: string): string {
+export function resolveClaudeConfigDir(configDir?: string): string {
   return configDir ?? process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
 }
 

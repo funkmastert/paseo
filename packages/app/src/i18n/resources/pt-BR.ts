@@ -246,6 +246,16 @@ export const ptBR: TranslationResources = {
       unarchive: "Desarquivar",
     },
   },
+  agentIdChip: {
+    copiedLabel: "ID do agente",
+  },
+  pinnedGrid: {
+    title: "Fixados ({{count}})",
+    close: "Fechar grade",
+    openWorkspace: "Abrir espaço de trabalho",
+    noChat: "Ainda não há chat neste espaço de trabalho",
+    empty: "Nenhum chat fixado",
+  },
   sessions: {
     title: "Histórico de agentes",
     empty: "Nenhuma sessão ainda",
@@ -274,12 +284,21 @@ export const ptBR: TranslationResources = {
       running: "Em execução",
       error: "Erro",
       closed: "Fechada",
+      queued: "Na fila",
     },
     badges: {
       archived: "Arquivado",
       pending: "{{count}} pendente(s)",
       attention: "Atenção",
+      needsInput: "Precisa de resposta",
+      failed: "Com erro",
+      owesReport: "Deve relatório",
+      reportUndelivered: "Relatório não entregue",
+      tokenBurnWarning: "Consumo alto",
+      tokenBurnDanger: "Consumo muito alto",
+      modelDiverged: "Modelo diferente",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
       hostOffline: "Host offline",
       runningAgent: "Este agente ainda está em execução. Arquivá-lo interromperá o agente.",
@@ -706,6 +725,10 @@ export const ptBR: TranslationResources = {
         workspacePathCopiedLabel: "Caminho do workspace",
         branchNameCopiedLabel: "Nome da branch",
       },
+      history: {
+        recentMenu: "Recentes",
+        empty: "Nenhum histórico recente",
+      },
     },
     scripts: {
       title: "Scripts",
@@ -855,7 +878,7 @@ export const ptBR: TranslationResources = {
           mergePrNoGithub:
             "Merge da PR não está disponível agora porque o GitHub não está conectado",
           archiveNotWorktree:
-            "Arquivar não está disponível aqui porque este workspace não foi criado como um worktree do Paseo",
+            "Arquivar não está disponível aqui porque este workspace não foi criado como um worktree do Bozeo",
           mergePrNoForge:
             "Merge da {{noun}} não está disponível agora porque o {{brand}} não está conectado",
           mergePrMissing: "Merge da PR não está disponível porque ainda não há uma pull request",
@@ -1021,6 +1044,9 @@ export const ptBR: TranslationResources = {
         generic: "Configure o {{brand}} neste host para usar seus recursos.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · medido há {{timeAgo}}",
+    },
   },
   workspaceLabels: {
     title: "Etiquetas",
@@ -1100,6 +1126,7 @@ export const ptBR: TranslationResources = {
         changeRequest: "Pull request",
         checks: "Verificações",
         services: "Serviços",
+        diskUsage: "Uso de disco",
         labels: "Etiquetas",
         diff: "Estatísticas de diff",
         timestamp: "Última atividade",
@@ -1125,6 +1152,7 @@ export const ptBR: TranslationResources = {
     },
     pinned: {
       title: "Fixados",
+      openGrid: "Abrir os chats fixados em uma grade",
     },
     host: {
       noHost: "Nenhum host",
@@ -1147,7 +1175,7 @@ export const ptBR: TranslationResources = {
       discord: "Discord",
       github: "Criar issue no GitHub",
       whatsNew: "Novidades",
-      appName: "Paseo",
+      appName: "Bozeo",
     },
     sections: {
       sessions: "Histórico",
@@ -1294,7 +1322,7 @@ export const ptBR: TranslationResources = {
       close: "Fechar janela",
     },
     quitting: {
-      title: "Saindo do Paseo...",
+      title: "Saindo do Bozeo...",
       detail: "Parando o daemon local.",
     },
     daemon: {
@@ -1308,20 +1336,31 @@ export const ptBR: TranslationResources = {
       },
       management: {
         title: "Gerenciar daemon integrado",
-        hint: "Permitir que o Paseo inicie e pare o daemon integrado",
+        hint: "Permitir que o Bozeo inicie e pare o daemon integrado",
         pauseTitle: "Pausar daemon integrado",
         pauseMessage:
           "Isso vai parar o daemon integrado imediatamente. Agentes e terminais em execução conectados ao daemon integrado serão interrompidos.",
         pauseAndStop: "Pausar e parar",
         registrationFailed:
-          "O daemon integrado foi iniciado, mas o Paseo não conseguiu salvar a conexão localhost. Desative e reative o gerenciamento do daemon ou adicione localhost manualmente.",
+          "O daemon integrado foi iniciado, mas o Bozeo não conseguiu salvar a conexão localhost. Desative e reative o gerenciamento do daemon ou adicione localhost manualmente.",
         pausedStopFailed:
-          "O gerenciamento do daemon integrado foi pausado, mas o Paseo não conseguiu parar o daemon.",
+          "O gerenciamento do daemon integrado foi pausado, mas o Bozeo não conseguiu parar o daemon.",
         updateFailed: "Não foi possível atualizar o gerenciamento do daemon integrado.",
       },
       keepRunning: {
         title: "Manter daemon em execução ao sair",
-        hint: "O daemon continua em execução quando você sai do Paseo",
+        hint: "O daemon continua em execução quando você sai do Bozeo",
+      },
+      keepAwake: {
+        title: "Manter o Mac acordado",
+        hint: "Impede que o Mac entre em repouso enquanto o Bozeo estiver aberto, para que os agentes continuem rodando",
+      },
+      keepDisplayAwake: {
+        title: "Manter a tela ligada",
+        hint: "A tela ligada gasta a bateria mais rápido",
+        always: "Sempre",
+        onPowerAdapter: "Na tomada",
+        never: "Nunca",
       },
       logs: {
         title: "Arquivo de log",
@@ -1391,7 +1430,7 @@ export const ptBR: TranslationResources = {
     },
     rosetta: {
       title: "Baixar a build para Apple Silicon",
-      runningIntel: "Você está executando a build Intel do Paseo pelo Rosetta no Apple Silicon.",
+      runningIntel: "Você está executando a build Intel do Bozeo pelo Rosetta no Apple Silicon.",
       highCpu: "Isso causa alto uso de CPU. Baixe a build para Apple Silicon para corrigir.",
       download: "Baixar",
     },
@@ -1433,7 +1472,7 @@ export const ptBR: TranslationResources = {
         microphone: "O status do microfone ainda não foi verificado.",
       },
       testNotification: {
-        title: "Teste de notificação do Paseo",
+        title: "Teste de notificação do Bozeo",
         body: "Se você consegue ver isto, as notificações desktop funcionam.",
         notDelivered:
           "A notificação não foi entregue. Verifique Ajustes do Sistema > Notificações.",
@@ -1448,7 +1487,7 @@ export const ptBR: TranslationResources = {
     },
   },
   rootError: {
-    title: "O Paseo encontrou um problema.",
+    title: "O Bozeo encontrou um problema.",
     body: "Tente novamente para recarregar o app. Se isso continuar acontecendo, inclua os detalhes abaixo ao relatar o problema.",
     details: "Detalhes",
   },
@@ -1543,7 +1582,7 @@ export const ptBR: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Bem-vindo ao Paseo",
+    title: "Bem-vindo ao Bozeo",
     subtitle: "Conecte seu computador para começar",
     actions: {
       settings: "Configurações",
@@ -1631,7 +1670,7 @@ export const ptBR: TranslationResources = {
     },
     direct: {
       title: "Conexão direta",
-      helper: "Informe o endereço de um servidor Paseo.",
+      helper: "Informe o endereço de um servidor Bozeo.",
       fields: {
         host: "Host",
         port: "Porta",
@@ -1674,7 +1713,7 @@ export const ptBR: TranslationResources = {
     },
     remoteSsh: {
       title: "SSH remoto",
-      helper: "Conecte-se a um daemon Paseo no host remoto.",
+      helper: "Conecte-se a um daemon Bozeo no host remoto.",
       fields: {
         target: "Host SSH",
       },
@@ -1731,15 +1770,15 @@ export const ptBR: TranslationResources = {
       enableDescription:
         "O relay permite conectar este dispositivo de qualquer lugar. O tráfego de pareamento é criptografado de ponta a ponta.",
       relayDocs: "Como o relay funciona",
-      relayDocsAccessibility: "Leia como o relay do Paseo funciona",
+      relayDocsAccessibility: "Leia como o relay do Bozeo funciona",
       enableRelay: "Ativar relay",
       enablingRelay: "Ativando...",
       notNow: "Agora não",
       directConnectionHint:
         "Sem relay, conecte diretamente por TCP, Tailscale ou outra VPN. Nenhum código QR é criado.",
-      updateRequired: "Atualize o host para ativar o relay pelo Paseo Desktop.",
+      updateRequired: "Atualize o host para ativar o relay pelo Bozeo Desktop.",
       unavailable: "Oferta de pareamento indisponível.",
-      hint: "Escaneie este QR code com o Paseo no seu celular ou copie o link abaixo.",
+      hint: "Escaneie este QR code com o Bozeo no seu celular ou copie o link abaixo.",
       securityWarning:
         "Trate este link de pareamento como uma senha. Qualquer pessoa com o link pode acessar este daemon.",
       qrUnavailable: "QR code indisponível.",
@@ -1774,7 +1813,7 @@ export const ptBR: TranslationResources = {
   serviceUrl: {
     title: "Abrir URL do serviço",
     message: "Abrir {{url}}?",
-    inPaseo: "No Paseo",
+    inBozeo: "No Bozeo",
     externalBrowser: "Navegador externo",
     dontAskAgain: "Não perguntar novamente",
   },
@@ -1852,6 +1891,33 @@ export const ptBR: TranslationResources = {
       emptyTitle: "Ainda não há pull request",
       emptyDescription: "Crie um pull request para este checkout para ver os detalhes aqui.",
     },
+    orchestration: {
+      label: "Orquestração",
+      subtitle: "Árvore de agentes",
+      tooltip: "Ver a árvore do agente líder e dos subagentes",
+      emptyState: "Ainda não há agentes neste host",
+      labelAll: "Orquestração: todos os agentes",
+      subtitleAll: "Todos os agentes",
+      subtitleLeader: "Esta árvore",
+      scopeLeader: "Esta árvore",
+      scopeAll: "Todos",
+      scopeMissing: "Esta árvore não existe mais. Mude para Todos para ver o restante.",
+      emptyStateFiltered: "Nada ativo. {{count}} agentes mais antigos estão ocultos.",
+      showOlder: "Mostrar {{count}} mais antigos",
+      hideOlder: "Ocultar mais antigos",
+      usageUnavailable: "Uso indisponível",
+      usageAsOf: "Uso em {{time}}",
+      accountRoleLeader: "Líder",
+      accountRolePrimary: "Trabalhador principal",
+      accountRoleBackup: "Reserva",
+      accountLeaderHere: "Líder aqui",
+      accountLeadersHere: "Líderes {{count}}",
+      accountWorkersHere: "Trabalhadores {{count}}",
+      accountBalanceLeft: "{{amount}} restantes",
+      staleTitle: "Sem atualizar",
+      staleLastSynced: "Última sincronização {{time}}",
+      staleNeverSynced: "Ainda não sincronizado",
+    },
     diff: {
       changesLabel: "Alterações",
       diffLabel: "Diff",
@@ -1906,12 +1972,129 @@ export const ptBR: TranslationResources = {
   sidebarCallout: {
     dismiss: "Dispensar",
   },
+  restartRecovery: {
+    summary_one: "{{count}} agente foi interrompido no meio do turno",
+    summary_other: "{{count}} agentes foram interrompidos no meio do turno",
+    resumeAll: "Retomar todos",
+    dismissAll: "Descartar",
+    state: {
+      pending: "Aguardando",
+      resuming: "Retomando",
+      failed: "Falha ao retomar",
+    },
+    notRestorable: "Não é possível retomar",
+    error: "A recuperação falhou: {{error}}",
+    expand: "Expandir recuperação após reinício",
+    collapse: "Recolher recuperação após reinício",
+  },
+  deviceStatus: {
+    summary: "{{used}} de {{total}} dispositivos",
+    summaryCapOff: "{{used}} dispositivos em execução",
+    dryRun: "simulação",
+    platform: {
+      ios: "Simulador",
+      android: "Emulador",
+    },
+    heldBy: "Em uso por {{agent}}",
+    unleased: "Sem reserva",
+    starting: "Iniciando",
+    waiting_one: "{{count}} agente aguardando uma vaga",
+    waiting_other: "{{count}} agentes aguardando uma vaga",
+    unleasedCount_one: "{{count}} dispositivo sem reserva",
+    unleasedCount_other: "{{count}} dispositivos sem reserva",
+    unenforced: "Limite não aplicado a: {{providers}}",
+    enforcement: {
+      asks: "pode não ser recusado",
+      observes: "não pode ser recusado",
+    },
+    expand: "Expandir status dos dispositivos",
+    collapse: "Recolher status dos dispositivos",
+  },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "Servidores MCP conectados",
+      issues: "Problemas de MCP: {{names}}",
+    },
+    status: {
+      connected: "Conectado",
+      connecting: "Conectando",
+      needsAuth: "Requer autenticação",
+      error: "Erro",
+      disabled: "Desativado",
+      sessionReported: "Problema de sessão",
+      claudeAiConnector: "Entre em cada conta do Claude",
+    },
+    authAction: "Autenticar",
+    reauthAction: "Reautenticar",
+    adoptAction: "Intermediar e entrar",
+    openClaudeAiAction: "Abrir claude.ai",
+    authError: "Falha na autenticação: {{error}}",
+    failure: {
+      gatewayDisabled: "O gateway MCP está desativado neste host.",
+      unknownAgent: "O agente que reportou isso não está mais aberto. Abra um que o use.",
+      providerHasNoConfig:
+        "O Paseo não consegue ler a configuração MCP de {{provider}}, então não pode intermediá-lo.",
+      accountSignedOut: "{{provider}} não está conectado. Execute isto no host e tente de novo:",
+      serverNotInConfig:
+        "{{name}} não está na configuração MCP que o Paseo lê para {{provider}}. O agente o carrega de outro lugar, e o Paseo não sabe qual.",
+      serverIsLocal:
+        "{{name}} roda como um comando local. Só servidores http e sse podem ser intermediados.",
+      adoptFailed: "Não foi possível intermediar {{name}}: {{error}}",
+      unknownServer: "O gateway não intermedia nenhum servidor chamado {{name}}.",
+      staticAuth: "{{name}} entra com um cabeçalho salvo, então não há nada a autorizar.",
+      noRedirectUrl:
+        "Este host não tem um endereço acessível para {{name}} devolver você. Defina a URL pública do daemon e tente de novo.",
+      clientNotRegistered:
+        "Registre você mesmo um app OAuth para {{name}} e adicione o client id e o segredo ao arquivo de tokens do host. {{name}} não oferece registro automático, então o Paseo não pode fazer isso por você.",
+      clientRegistrationRefused:
+        "O {{name}} não registra o Paseo como cliente, então o login não pode começar. Alguns provedores só aceitam clientes MCP da própria lista, e nada que você configure aqui muda isso. Veja se o {{name}} oferece um servidor local para apontar esta entrada.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
+      authorizationFailed: "Falha ao entrar: {{error}}",
+      unknown: "Não foi possível intermediar {{name}}: {{error}}",
+    },
+    remedy: {
+      redirectUrl: "URI de redirecionamento a registrar",
+      path: "Arquivo no host",
+      snippet: "Adicione",
+      command: "Execute no host",
+    },
+    showFullError: "Ver a mensagem inteira",
+    showLessError: "Encurtar a mensagem",
+    copyError: "Copiar a mensagem",
+    copiedError: "Copiado",
+    reportedBy: "Reportado por {{agent}}",
+    reportedByOn: "{{agent}} em {{provider}}",
+    reportedByCount: "Reportado por {{count}} agentes",
+    reportedOn: "Em {{provider}}",
+    expand: "Expandir status do MCP",
+    collapse: "Recolher status do MCP",
+  },
   contextWindow: {
     title: "Janela de contexto",
     used: "{{percentage}}% usado",
     tokens: "{{used}} / {{max}} tokens",
     sessionCost: "Custo da sessão {{cost}}",
     accessibility: "Janela de contexto {{percentage}}% usada",
+    spendTitle: "Gasto",
+    spendSummary: "{{total}} tokens ponderados em {{span}}",
+    breakdownLoading: "Lendo o contexto…",
+    breakdownPending: "O detalhamento aparece quando este turno terminar.",
+    breakdownUnsupported: "Este provedor não consegue informar o detalhamento do contexto.",
+    breakdownError: "Não foi possível ler o detalhamento do contexto.",
+    breakdownAsOf: "Em {{time}}",
+    breakdownBarAccessibility: "Detalhamento da janela de contexto",
+    deferredTitle: "Fora da janela",
+    messageToolResults: "Resultados de ferramentas",
+    messageAttachments: "Anexos",
+    messageAssistant: "Assistente",
+    messageToolCalls: "Chamadas de ferramentas",
+    messageUser: "Mensagens do usuário",
+    memoryTotalWarning:
+      "Os arquivos de memória usam {{tokens}} tokens, acima da recomendação de {{limit}}.",
+    memoryFileWarning: "{{path}} tem {{tokens}} tokens, acima de {{limit}}.",
+    reReadAdvice:
+      "Esta sessão relê ~{{tokens}} tokens a cada turno. Uma sessão nova com uma passagem curta de contexto é mais barata.",
   },
   review: {
     comment: {
@@ -1976,7 +2159,7 @@ export const ptBR: TranslationResources = {
       send: "Enviar",
       sending: "Enviando...",
       sentTitle: "Notificação de teste enviada",
-      sentDescription: "O Paseo entregou a notificação ao sistema operacional.",
+      sentDescription: "O Bozeo entregou a notificação ao sistema operacional.",
       sendFailedTitle: "Não foi possível enviar a notificação de teste",
     },
     hostSections: {
@@ -1995,14 +2178,14 @@ export const ptBR: TranslationResources = {
     metadataGeneration: {
       title: "Geração de metadados",
       description:
-        "Escolha o modelo usado pelo Paseo para títulos de espaços de trabalho, nomes de branches, mensagens de commit e rascunhos de pull request",
+        "Escolha o modelo usado pelo Bozeo para títulos de espaços de trabalho, nomes de branches, mensagens de commit e rascunhos de pull request",
       selection: "Seleção de modelo",
       automatic: "Automática",
       preferred: "Manual",
-      automaticHint: "O Paseo escolhe um modelo rápido disponível",
-      preferredHint: "Escolha o modelo que o Paseo usa",
+      automaticHint: "O Bozeo escolhe um modelo rápido disponível",
+      preferredHint: "Escolha o modelo que o Bozeo usa",
       model: "Modelo",
-      fallbackHint: "Se ele não estiver disponível, o Paseo usa outro modelo disponível",
+      fallbackHint: "Se ele não estiver disponível, o Bozeo usa outro modelo disponível",
       docs: "Documentação",
       saveError: "Não foi possível atualizar a geração de metadados",
     },
@@ -2011,7 +2194,7 @@ export const ptBR: TranslationResources = {
       browserData: {
         title: "Dados do navegador",
         siteData: "Cookies e dados de sites",
-        description: "As abas do navegador compartilham logins e dados de sites no Paseo.",
+        description: "As abas do navegador compartilham logins e dados de sites no Bozeo.",
         clear: "Limpar dados do navegador",
         clearing: "Limpando...",
         confirmTitle: "Limpar dados do navegador?",
@@ -2040,7 +2223,7 @@ export const ptBR: TranslationResources = {
         description: "Onde abrir URLs de scripts em execução",
         options: {
           ask: "Perguntar",
-          inApp: "No Paseo",
+          inApp: "No Bozeo",
           external: "Navegador externo",
         },
       },
@@ -2126,7 +2309,7 @@ export const ptBR: TranslationResources = {
         label: "Atualizações do app",
         readyToInstall: "Pronta para instalar: {{version}}",
         installTitle: "Instalar atualização desktop",
-        installMessage: "Isso atualiza o Paseo neste computador",
+        installMessage: "Isso atualiza o Bozeo neste computador",
         installConfirm: "Instalar atualização",
         update: "Atualizar",
         updateTo: "Atualizar para {{version}}",
@@ -2244,6 +2427,8 @@ export const ptBR: TranslationResources = {
         closePane: "Fechar painel",
         newTerminal: "Novo terminal",
         searchFiles: "Pesquisar arquivos",
+        historyBack: "Voltar",
+        historyForward: "Avançar",
         toggleCommandCenter: "Alternar central de comandos",
         showKeyboardShortcuts: "Mostrar atalhos de teclado",
         toggleLeftSidebar: "Alternar barra lateral esquerda",
@@ -2296,6 +2481,68 @@ export const ptBR: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "Notificações",
+        info: "Escolha o que chega ao dispositivo na hora e o que espera por um resumo. Alertas precisam de você; avisos são úteis, mas podem esperar.",
+        loadError: "Não foi possível carregar as configurações de notificação",
+        unsupported: "Atualize este host para alterar as configurações de notificação",
+        availability: {
+          label: "Disponibilidade",
+          options: {
+            available: "Disponível",
+            focus: "Foco",
+            away: "Ausente",
+            off: "Desligado",
+          },
+          hints: {
+            available: "Alertas interrompem; avisos chegam em um resumo",
+            focus: "Só alertas urgentes fazem barulho; avisos esperam",
+            away: "Alertas ainda interrompem; avisos esperam até você voltar",
+            off: "Nada faz barulho; tudo é entregue em silêncio",
+          },
+        },
+        duration: {
+          label: "Por",
+          options: {
+            oneHour: "1 hora",
+            fourHours: "4 horas",
+            untilChanged: "Até eu mudar",
+          },
+          endsAt: "Até {{time}}",
+        },
+        interrupt: {
+          label: "Me interromper por",
+          hint: "O resto espera por um resumo",
+          options: {
+            urgent: "Só urgentes",
+            alert: "Alertas e urgentes",
+            notice: "Tudo",
+          },
+        },
+        notices: {
+          label: "Avisos",
+          hint: "Bom saber, mas nada que exija ação agora",
+          options: {
+            digest: "Resumo",
+            off: "Desligado",
+          },
+        },
+        digestInterval: {
+          label: "Enviar resumo a cada",
+          options: {
+            m15: "15 min",
+            m30: "30 min",
+            m60: "1 hora",
+            m180: "3 horas",
+          },
+        },
+        status: {
+          held: "Aguardando o próximo resumo",
+          unreached: "Não entregues ({{count}})",
+          unreachedHint:
+            "Notificações recusadas pelo provedor ou enviadas sem nenhum dispositivo registrado",
+        },
+      },
       appearance: {
         title: "Aparência",
         name: {
@@ -2357,11 +2604,11 @@ export const ptBR: TranslationResources = {
         title: "Skills de orquestração",
         description: "Ensine seus agentes a orquestrar pela CLI",
         updateAvailable: "Atualização disponível",
-        updateTitle: "Atualizar Paseo skills?",
+        updateTitle: "Atualizar Bozeo skills?",
         updateFallback: "Sincronize as skills incluídas com sua máquina.",
-        uninstallTitle: "Desinstalar Paseo skills?",
+        uninstallTitle: "Desinstalar Bozeo skills?",
         uninstallMessage:
-          "Remove todas as skills de orquestração do Paseo de ~/.agents, ~/.claude e ~/.codex.",
+          "Remove todas as skills de orquestração do Bozeo de ~/.agents, ~/.claude e ~/.codex.",
         choose: "Escolher skills",
         chooseAll: "Todas as skills",
         chooseAllHint:
@@ -2505,15 +2752,15 @@ export const ptBR: TranslationResources = {
             "Este host não está conectado. Aguarde até ele ficar online antes de reiniciar.",
           offlineTitle: "Host offline",
           offlineMessage:
-            "Este host está offline. O Paseo reconecta automaticamente. Aguarde ele voltar a ficar online antes de reiniciar.",
+            "Este host está offline. O Bozeo reconecta automaticamente. Aguarde ele voltar a ficar online antes de reiniciar.",
           requestFailedTitle: "Erro",
           requestFailedMessage:
-            "Falha ao enviar a solicitação de reinício. O Paseo reconecta automaticamente. Tente novamente quando o host aparecer como online.",
+            "Falha ao enviar a solicitação de reinício. O Bozeo reconecta automaticamente. Tente novamente quando o host aparecer como online.",
           dialogFailedMessage: "Não foi possível abrir o diálogo de confirmação de reinício.",
         },
         update: {
           desktopManagedHint:
-            "Este daemon é gerenciado pelo Paseo Desktop. Atualize o Paseo Desktop no host.",
+            "Este daemon é gerenciado pelo Bozeo Desktop. Atualize o Bozeo Desktop no host.",
           title: "Atualizar daemon",
           hint: "Atualiza o daemon para a versão mais recente e o reinicia",
           confirm: "Atualizar",
@@ -2675,7 +2922,7 @@ export const ptBR: TranslationResources = {
         newScript: "Novo script",
         editScript: "Editar {{name}}",
         runAsService: "Executar como serviço",
-        serviceHint: "O Paseo supervisiona o processo e atribui uma porta via $PASEO_PORT",
+        serviceHint: "O Bozeo supervisiona o processo e atribui uma porta via $PASEO_PORT",
         actions: {
           add: "Adicionar script",
           edit: "Editar",
@@ -2684,7 +2931,7 @@ export const ptBR: TranslationResources = {
       },
       metadata: {
         title: "Geração de metadados",
-        info: "Instruções específicas do projeto injetadas nos prompts de IA que o Paseo usa para gerar metadados. Use-as para aplicar convenções da sua equipe, como nomes de branch, estilo de commit ou formato de PR",
+        info: "Instruções específicas do projeto injetadas nos prompts de IA que o Bozeo usa para gerar metadados. Use-as para aplicar convenções da sua equipe, como nomes de branch, estilo de commit ou formato de PR",
         branchName: "Nomes de branch",
         branchNamePlaceholder: "Prefixe branches com feat/ ou fix/, mb/ para branches pessoais",
         commitMessage: "Mensagens de commit",

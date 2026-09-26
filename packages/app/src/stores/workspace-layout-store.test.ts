@@ -16,7 +16,11 @@ vi.mock("@react-native-async-storage/async-storage", () => {
 });
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { buildWorkspaceTabPersistenceKey, type WorkspaceTab } from "@/workspace-tabs/model";
+import {
+  buildWorkspaceTabPersistenceKey,
+  type WorkspaceTab,
+  type WorkspaceTabTarget,
+} from "@/workspace-tabs/model";
 import { defaultChangesState, type ChangesState } from "@/panels/changes/state";
 import { defaultFileState, type FileState } from "@/panels/file/state";
 import {
@@ -36,6 +40,7 @@ import {
   removePaneFromTree,
   removeTabFromTree,
   stripEphemeralTabsFromLayout,
+  WorkspaceTabTargetStorageSchema,
   type SplitNode,
   type SplitPane,
 } from "@/stores/workspace-layout-store";
@@ -1184,6 +1189,60 @@ describe("workspace-layout-store actions", () => {
       "pull_request",
     ]);
     expect(state.explorerSidebarPaneIdByWorkspace[workspaceKey]).toBe(explorerSidebarPaneId);
+  });
+
+  it("persists and rehydrates the orchestration tab target", async () => {
+    await AsyncStorage.removeItem("workspace-layout-state");
+    const workspaceKey = createWorkspaceKey();
+    const source = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+    await source.persist.rehydrate();
+
+    source.getState().openTab({
+      workspaceKey: workspaceKey,
+      target: { kind: "orchestration" },
+      intent: "reveal",
+    });
+
+    await vi.waitFor(async () => {
+      expect(await AsyncStorage.getItem("workspace-layout-state")).not.toBeNull();
+    });
+
+    const restored = createWorkspaceLayoutStore(createDeterministicWorkspaceLayoutIds());
+    await restored.persist.rehydrate();
+    const layout = restored.getState().layoutByWorkspace[workspaceKey];
+    expect(collectAllTabs(layout.root).map((tab) => tab.target.kind)).toContain("orchestration");
+  });
+
+  it("accepts a minimal target for every WorkspaceTabTarget kind in the storage schema", () => {
+    // Exhaustive fixture keyed by kind: adding a new WorkspaceTabTarget kind without a matching
+    // fixture (and, transitively, a matching schema branch) fails to compile.
+    const minimalTargetByKind = {
+      new_tab: { kind: "new_tab" },
+      draft: { kind: "draft", draftId: "draft-1" },
+      agent: { kind: "agent", agentId: "agent-1" },
+      provider_subagent: {
+        kind: "provider_subagent",
+        parentAgentId: "agent-1",
+        subagentId: "subagent-1",
+      },
+      terminal: { kind: "terminal", terminalId: "terminal-1" },
+      browser: { kind: "browser", browserId: "browser-1" },
+      changes_tree: { kind: "changes_tree" },
+      files: { kind: "files" },
+      pull_request: { kind: "pull_request" },
+      orchestration: { kind: "orchestration" },
+      file: { kind: "file", path: "src/a.ts" },
+      working_diff: { kind: "working_diff" },
+      plugin: { kind: "plugin", pluginId: "plugin-1", panelId: "panel-1", context: "workspace" },
+      setup: { kind: "setup", workspaceId: WORKSPACE_ID },
+      commit_diff: { kind: "commit_diff", sha: "abc123" },
+    } satisfies {
+      [K in WorkspaceTabTarget["kind"]]: Extract<WorkspaceTabTarget, { kind: K }>;
+    };
+
+    for (const target of Object.values(minimalTargetByKind)) {
+      expect(WorkspaceTabTargetStorageSchema.safeParse(target).success).toBe(true);
+    }
   });
 
   it("persists and rehydrates independent Changes state through validated storage", async () => {

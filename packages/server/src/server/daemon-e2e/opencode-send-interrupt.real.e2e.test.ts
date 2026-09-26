@@ -309,7 +309,9 @@ describe("daemon E2E (real opencode) - send while working and interrupt", () => 
       await waitForRunningBashToolCall(client, collector, agent.id);
 
       collector.clear();
-      await client.sendMessage(agent.id, `Reply with exactly: ${followUpToken}`);
+      await client.sendMessage(agent.id, `Reply with exactly: ${followUpToken}`, {
+        activeTurnBehavior: "interrupt",
+      });
 
       const finish = await waitForIdleResolvingPermissions(client, agent.id, 240_000);
       expect(finish.status).toBe("idle");

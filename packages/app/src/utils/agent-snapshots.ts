@@ -57,6 +57,20 @@ export function derivePendingPermissionKey(
   return `${agentId}:${fallbackId}`;
 }
 
+function projectAgentAlerts(
+  agent: Agent,
+): Pick<
+  AgentSnapshotPayload,
+  "tokenBurnAlert" | "owedFinishReport" | "modelDivergence" | "turnQueued"
+> {
+  return {
+    ...(agent.tokenBurnAlert ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
+    ...(agent.owedFinishReport ? { owedFinishReport: agent.owedFinishReport } : {}),
+    ...(agent.turnQueued ? { turnQueued: agent.turnQueued } : {}),
+    ...(agent.modelDivergence ? { modelDivergence: agent.modelDivergence } : {}),
+  };
+}
+
 export function projectAgentSnapshot(agent: Agent): AgentSnapshotPayload {
   return {
     id: agent.id,
@@ -79,6 +93,11 @@ export function projectAgentSnapshot(agent: Agent): AgentSnapshotPayload {
     ...(agent.runtimeInfo ? { runtimeInfo: agent.runtimeInfo } : {}),
     ...(agent.lastUsage ? { lastUsage: agent.lastUsage } : {}),
     ...(agent.lastError ? { lastError: agent.lastError } : {}),
+    ...(agent.lastActivitySummary ? { lastActivitySummary: agent.lastActivitySummary } : {}),
+    ...(agent.mcpServerStatuses ? { mcpServerStatuses: agent.mcpServerStatuses } : {}),
+    ...(agent.recentTokenRate ? { recentTokenRate: agent.recentTokenRate } : {}),
+    ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
+    ...projectAgentAlerts(agent),
     title: agent.title,
     labels: agent.labels,
     requiresAttention: agent.requiresAttention ?? false,
@@ -122,6 +141,14 @@ export function normalizeAgentSnapshot(snapshot: AgentSnapshotPayload, serverId:
     runtimeInfo: snapshot.runtimeInfo,
     lastUsage: snapshot.lastUsage,
     lastError: snapshot.lastError ?? null,
+    lastActivitySummary: snapshot.lastActivitySummary,
+    mcpServerStatuses: snapshot.mcpServerStatuses,
+    recentTokenRate: snapshot.recentTokenRate,
+    totalTokens: snapshot.totalTokens,
+    tokenBurnAlert: snapshot.tokenBurnAlert,
+    owedFinishReport: snapshot.owedFinishReport,
+    turnQueued: snapshot.turnQueued,
+    modelDivergence: snapshot.modelDivergence,
     title: snapshot.title ?? null,
     cwd: snapshot.cwd,
     workspaceId: snapshot.workspaceId,

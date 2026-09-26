@@ -92,8 +92,35 @@ describe("working diff tab identity", () => {
   });
 });
 
+describe("orchestration tab identity", () => {
+  it("keeps the scoped tab and the host-wide tab apart", () => {
+    const scoped = { kind: "orchestration", scopeAgentId: "leader-1" } as const;
+    const hostWide = { kind: "orchestration" } as const;
+
+    expect(buildDeterministicWorkspaceTabId(scoped)).toBe("orchestration_leader-1");
+    expect(buildDeterministicWorkspaceTabId(hostWide)).toBe("orchestration");
+    expect(workspaceTabTargetsEqual(scoped, hostWide)).toBe(false);
+    expect(
+      workspaceTabTargetsEqual(scoped, { kind: "orchestration", scopeAgentId: "leader-2" }),
+    ).toBe(false);
+    expect(workspaceTabTargetsEqual(scoped, { ...scoped })).toBe(true);
+  });
+
+  it("normalizes an unusable scope down to the host-wide tab rather than dropping it", () => {
+    expect(normalizeWorkspaceTabTarget({ kind: "orchestration", scopeAgentId: "  " })).toEqual({
+      kind: "orchestration",
+    });
+    expect(
+      normalizeWorkspaceTabTarget({ kind: "orchestration", scopeAgentId: "leader-1" }),
+    ).toEqual({
+      kind: "orchestration",
+      scopeAgentId: "leader-1",
+    });
+  });
+});
+
 describe("workspace utility panel identity", () => {
-  it.each(["files", "pull_request"] as const)(
+  it.each(["files", "pull_request", "orchestration"] as const)(
     "normalizes and deterministically keys %s",
     (kind) => {
       const target = { kind };

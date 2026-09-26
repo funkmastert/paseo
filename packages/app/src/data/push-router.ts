@@ -16,11 +16,16 @@ import {
   providersSnapshotQueryKey,
   providersSnapshotQueryRoot,
 } from "@/data/providers-snapshot";
+import { mcpStatusQueryKey, type McpStatusPayload } from "@/mcp-status/use-mcp-status";
+import { deviceStatusQueryKey, type DeviceStatusPayload } from "@/device-status/use-device-status";
+import { refreshProviderSubagents } from "@/subagents/provider-store";
 
 type ProvidersSnapshotUpdateMessage = Extract<
   SessionOutboundMessage,
   { type: "providers_snapshot_update" }
 >;
+type McpStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "mcp_status_update" }>;
+type DeviceStatusUpdateMessage = Extract<SessionOutboundMessage, { type: "device_status_update" }>;
 type CheckoutDiffUpdateMessage = Extract<SessionOutboundMessage, { type: "checkout_diff_update" }>;
 type SubscribeCheckoutDiffResponseMessage = Extract<
   SessionOutboundMessage,
@@ -30,6 +35,8 @@ type StatusMessage = Extract<SessionOutboundMessage, { type: "status" }>;
 type TerminalsChangedMessage = Extract<SessionOutboundMessage, { type: "terminals_changed" }>;
 type ServerDataEventType =
   | "providers_snapshot_update"
+  | "mcp_status_update"
+  | "device_status_update"
   | "checkout_diff_update"
   | "subscribe_checkout_diff_response"
   | "status"
@@ -139,6 +146,63 @@ const RECONNECT_REPAIR_POLICIES: ReconnectRepairPolicy[] = [
 ];
 const reconnectSubscriptionRepairsByServerId = new Map<string, Set<() => void>>();
 
+type ProviderSubagentsRefreshClient = Pick<
+  import("@getpaseo/client/internal/daemon-client").DaemonClient,
+  "listProviderSubagents"
+>;
+
+// Reconnect repair for the provider-subagent list lives outside `RECONNECT_REPAIR_POLICIES`
+// because it re-issues an RPC (`refreshProviderSubagents`) rather than invalidating a
+// react-query cache entry — the descriptor store is a plain zustand map, not a query. The active
+// set is refcounted so multiple mounted consumers of the same (serverId, parentAgentId) — e.g.
+// `useSubagentsForParent` and `provider-subagent-panel.tsx` — don't clobber each other's tracking
+// on unmount.
+const activeProviderSubagentParentsByServerId = new Map<string, Map<string, number>>();
+
+/** Registers a mounted consumer's interest in a parent's provider-subagent list so a later
+ * reconnect can re-fetch it. Returns the matching unregister function; call it on unmount or
+ * before re-registering for a different parent. */
+export function trackActiveProviderSubagentParent(
+  serverId: string,
+  parentAgentId: string,
+): () => void {
+  let parents = activeProviderSubagentParentsByServerId.get(serverId);
+  if (!parents) {
+    parents = new Map();
+    activeProviderSubagentParentsByServerId.set(serverId, parents);
+  }
+  parents.set(parentAgentId, (parents.get(parentAgentId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const current = activeProviderSubagentParentsByServerId.get(serverId);
+    const count = current?.get(parentAgentId);
+    if (!current || count === undefined) return;
+    if (count <= 1) {
+      current.delete(parentAgentId);
+      if (current.size === 0) {
+        activeProviderSubagentParentsByServerId.delete(serverId);
+      }
+    } else {
+      current.set(parentAgentId, count - 1);
+    }
+  };
+}
+
+function repairProviderSubagentsAfterReconnect(input: {
+  serverId: string;
+  client: ProviderSubagentsRefreshClient;
+}): void {
+  const parents = activeProviderSubagentParentsByServerId.get(input.serverId);
+  if (!parents) return;
+  for (const parentAgentId of parents.keys()) {
+    void refreshProviderSubagents(input.client, input.serverId, parentAgentId).catch(
+      () => undefined,
+    );
+  }
+}
+
 export function checkoutDiffPushRoute(input: {
   enabled: boolean;
   serverId: string;
@@ -178,6 +242,8 @@ export function workspaceTerminalsPushRoute(input: {
 export function invalidateServerDataQueriesAfterReconnect(input: {
   queryClient: QueryClient;
   serverId: string;
+  /** When present, also re-issues `listProviderSubagents` for every tracked parent (Fix 1). */
+  client?: ProviderSubagentsRefreshClient | null;
 }): void {
   for (const policy of RECONNECT_REPAIR_POLICIES) {
     policy.invalidate(input);
@@ -185,6 +251,9 @@ export function invalidateServerDataQueriesAfterReconnect(input: {
   for (const repairSubscriptions of reconnectSubscriptionRepairsByServerId.get(input.serverId) ??
     []) {
     repairSubscriptions();
+  }
+  if (input.client) {
+    repairProviderSubagentsAfterReconnect({ serverId: input.serverId, client: input.client });
   }
 }
 
@@ -223,6 +292,37 @@ export async function applyProvidersSnapshotUpdate(input: {
       exact: false,
     });
   }
+}
+
+/**
+ * Applies an `mcp_status_update` push straight into the query cache (KTD7). Unlike the
+ * providers-snapshot flow, the payload already carries the full current state — no RPC
+ * round trip is needed to fill in the rest.
+ */
+export function applyMcpStatusUpdate(input: {
+  queryClient: QueryClient;
+  serverId: string;
+  message: McpStatusUpdateMessage;
+}): void {
+  input.queryClient.setQueryData<McpStatusPayload>(
+    mcpStatusQueryKey(input.serverId),
+    input.message.payload,
+  );
+}
+
+/**
+ * Applies a `device_status_update` push into the query cache, like the MCP status one above:
+ * the payload is the whole current picture, so there is no RPC to follow it with.
+ */
+export function applyDeviceStatusUpdate(input: {
+  queryClient: QueryClient;
+  serverId: string;
+  message: DeviceStatusUpdateMessage;
+}): void {
+  input.queryClient.setQueryData<DeviceStatusPayload>(
+    deviceStatusQueryKey(input.serverId),
+    input.message.payload,
+  );
 }
 
 export function mountServerDataPushRouter(input: PushRouterInput): () => void {
@@ -301,6 +401,12 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
       /* Query state owns fetch failures; reconnect/refetch repairs them. */
     });
   });
+  const unsubscribeMcpStatus = input.client.on("mcp_status_update", (message) => {
+    applyMcpStatusUpdate({ queryClient: input.queryClient, serverId: input.serverId, message });
+  });
+  const unsubscribeDeviceStatus = input.client.on("device_status_update", (message) => {
+    applyDeviceStatusUpdate({ queryClient: input.queryClient, serverId: input.serverId, message });
+  });
   const unsubscribeDaemonConfig = input.client.on("status", (message) => {
     applyDaemonConfigStatus({ queryClient: input.queryClient, serverId: input.serverId, message });
   });
@@ -349,6 +455,8 @@ export function mountServerDataPushRouter(input: PushRouterInput): () => void {
     }
     unsubscribeQueryCache();
     unsubscribeProviders();
+    unsubscribeMcpStatus();
+    unsubscribeDeviceStatus();
     unsubscribeDaemonConfig();
     unsubscribeCheckoutDiffUpdate();
     unsubscribeCheckoutDiffResponse();

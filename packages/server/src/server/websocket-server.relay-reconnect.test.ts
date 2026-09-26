@@ -4,7 +4,7 @@ import type pino from "pino";
 import type { AgentManager } from "./agent/agent-manager.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
 import type { DownloadTokenStore } from "./file-download/token-store.js";
-import type { DaemonConfigStore } from "./daemon-config-store.js";
+import { createTestDaemonConfigStore } from "./test-utils/daemon-config-store.js";
 import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
@@ -98,6 +98,8 @@ vi.mock("./push/index.js", () => ({
     renew: () => undefined,
     revoke: () => undefined,
     send: async () => undefined,
+    start: async () => undefined,
+    stop: () => undefined,
   }),
 }));
 
@@ -230,10 +232,6 @@ function createServer(options?: {
   startPaused?: boolean;
 }) {
   const speechReadiness = options?.speechReadiness ?? null;
-  const daemonConfigStore = {
-    onApply: vi.fn(() => () => {}),
-    onChange: vi.fn(() => () => {}),
-  };
   const logger = options?.logger ?? createLogger();
   return new VoiceAssistantWebSocketServer(
     createStub<HTTPServer>({}),
@@ -254,7 +252,7 @@ function createServer(options?: {
     createStub<AgentStorage>({}),
     createStub<DownloadTokenStore>({}),
     "/tmp/paseo-test",
-    createStub<DaemonConfigStore>(daemonConfigStore),
+    createTestDaemonConfigStore(),
     null,
     { allowedOrigins: new Set(), startPaused: options?.startPaused },
     createWorkspaceAutoNameStub(),

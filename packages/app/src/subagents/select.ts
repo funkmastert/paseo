@@ -3,8 +3,10 @@ import { usePendingArchiveAgentIds } from "@/hooks/use-archive-agent";
 import equal from "fast-deep-equal";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { useSessionStore, type Agent } from "@/stores/session-store";
+import { trackActiveProviderSubagentParent } from "@/data/push-router";
 import { refreshProviderSubagents, useProviderSubagentStore } from "./provider-store";
 import type { ProviderSubagentDescriptorPayload } from "@getpaseo/protocol/messages";
+import type { AgentTokenRate } from "@getpaseo/protocol/agent-types";
 
 export interface PaseoSubagentRow {
   kind: "paseo";
@@ -13,11 +15,14 @@ export interface PaseoSubagentRow {
   title: Agent["title"];
   /** Managed agents have a real title, so the union's task line is always absent for them. */
   description: null;
-  subtitle: null;
+  /** The agent's current-activity summary, when the daemon has computed one. */
+  subtitle: string | null;
   status: Agent["status"];
   turn: Agent["turn"];
-  requiresAttention: Agent["requiresAttention"];
+  requiresAttention: boolean;
   createdAt: Agent["createdAt"];
+  /** Raw wire value, passed through for the list owner's token-burn-tone-model computation. */
+  recentTokenRate?: AgentTokenRate;
 }
 
 export interface ProviderSubagentRow {
@@ -52,18 +57,24 @@ interface SelectSubagentsParams {
 const EMPTY_SUBAGENT_ROWS: SubagentRow[] = [];
 const EMPTY_PROVIDER_SUBAGENT_ROWS: ProviderSubagentRow[] = [];
 
-function toSubagentRow(agent: Agent): SubagentRow {
+/**
+ * Adapts a managed `Agent` into the row shape every subagent/orchestration list renders. The
+ * single adapter for this mapping — `orchestration/select.ts` and `orchestration-panel-model.ts`
+ * both reuse it rather than re-declaring the same literal with their own defaults.
+ */
+export function toSubagentRow(agent: Agent): PaseoSubagentRow {
   return {
     kind: "paseo",
     id: agent.id,
     provider: agent.provider,
     title: agent.title,
     description: null,
-    subtitle: null,
+    subtitle: agent.lastActivitySummary ?? null,
     status: agent.status,
     turn: agent.turn,
-    requiresAttention: agent.requiresAttention,
+    requiresAttention: agent.requiresAttention ?? false,
     createdAt: agent.createdAt,
+    ...(agent.recentTokenRate ? { recentTokenRate: agent.recentTokenRate } : {}),
   };
 }
 
@@ -159,6 +170,16 @@ export function useSubagentsForParent(params: SelectSubagentsParams): SubagentRo
       () => undefined,
     );
   }, [client, params.parentAgentId, params.serverId, supported]);
+
+  // Registers this mount's interest in the parent's provider-subagent list so a reconnect can
+  // repair it (`invalidateServerDataQueriesAfterReconnect` in push-router.ts) even though the
+  // `DaemonClient` instance never changes identity across reconnects and this effect above never
+  // refires on its own. Refcounted so multiple mounted parents (nested panels, tab switches)
+  // don't drop tracking for each other on unmount.
+  useEffect(() => {
+    if (!supported) return;
+    return trackActiveProviderSubagentParent(params.serverId, params.parentAgentId);
+  }, [params.parentAgentId, params.serverId, supported]);
 
   return useMemo(() => {
     if (params.providerParentSubagentId) return providerRows;

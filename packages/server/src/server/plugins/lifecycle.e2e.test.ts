@@ -218,6 +218,66 @@ export default function contribute(server) {
   }
 }, 60_000);
 
+test("agent.create hook sees callerAgentId for a CLI/session-shaped create carrying one, and omits it otherwise", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "paseo-agent-hooks-caller-"));
+  const daemon = await createTestPaseoDaemon({ daemonVersion: "0.8.0" });
+  const client = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws`, appVersion: "0.8.0" });
+  try {
+    await writeFile(
+      path.join(directory, "paseo-plugin.json"),
+      JSON.stringify({ id: "caller-hooks", requirements: { paseo: ">=0.8.0" } }),
+    );
+    await writeFile(
+      path.join(directory, "index.server.ts"),
+      `
+export default function contribute(server) {
+  server.before("agent.create", ({ request }) => {
+    console.log(JSON.stringify({ hook: "agent.create", callerAgentId: request.callerAgentId ?? null }));
+    return request;
+  });
+  return () => {};
+}
+`,
+    );
+    await client.connect();
+    await client.fetchAgents({ subscribe: { subscriptionId: "caller-hooks" } });
+    await client.patchDaemonConfig({ pluginsEnabled: true });
+    await client.installDirectoryPlugin(directory);
+
+    const parent = await client.createAgent({
+      provider: "claude",
+      cwd: directory,
+      title: "Parent",
+    });
+
+    const child = await client.createAgent({
+      provider: "claude",
+      cwd: directory,
+      title: "Managed CLI child",
+      callerAgentId: parent.id,
+    });
+
+    await expect
+      .poll(async () => {
+        const logs = await client.getPluginLogs("caller-hooks");
+        return logs
+          .filter((entry) => entry.message.startsWith('{"hook":"agent.create"'))
+          .map((entry) => JSON.parse(entry.message));
+      })
+      .toEqual([
+        { hook: "agent.create", callerAgentId: null },
+        { hook: "agent.create", callerAgentId: parent.id },
+      ]);
+
+    await client.archiveAgent(child.id);
+    await client.archiveAgent(parent.id);
+  } finally {
+    await client.close();
+    await daemon.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 60_000);
+
 test("invalid output from an untyped plugin rejects creation before later callbacks run", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "paseo-invalid-hook-"));
   const daemon = await createTestPaseoDaemon({ daemonVersion: "0.8.0" });

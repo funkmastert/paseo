@@ -1,4 +1,5 @@
 import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
 import { v4 as uuidv4 } from "uuid";
@@ -19,11 +20,14 @@ import {
   type WorkspaceScriptListRequest,
   type WorkspaceScriptStartRequest,
   type WorkspaceScriptStopRequest,
+  type McpGatewayAuthStartRequest,
+  type McpGatewayServerAdoptRequest,
   type CloseItemsRequest,
   type DirectorySuggestionsRequest,
   type ProjectPlacementPayload,
   type WorkspaceSetupSnapshot,
   type WorkspaceDescriptorPayload,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import type {
   TerminalManager,
@@ -43,6 +47,9 @@ import {
   toAgentPersistenceHandle,
 } from "./persistence-hooks.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent/agent-loading.js";
+import { AgentProviderMoveError } from "./agent/provider-move.js";
+import { McpGatewayActionError } from "./mcp-gateway/action-failure.js";
+import type { McpGatewayRemedy } from "./mcp-gateway/action-failure.js";
 import {
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
@@ -159,11 +166,8 @@ import {
 } from "./workspace-registry.js";
 import { wrapSpokenInput } from "./voice-config.js";
 import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
-import {
-  ProjectIconReader,
-  removeProjectCustomIcon,
-  setProjectCustomIcon,
-} from "../utils/project-custom-icon.js";
+import { ProjectIconReader, setProjectCustomIcon } from "../utils/project-custom-icon.js";
+import { removeProjectRecord } from "./project-removal.js";
 import { VoiceSession } from "./session/voice/voice-session.js";
 import { CheckoutSession } from "./session/checkout/checkout-session.js";
 import {
@@ -174,11 +178,25 @@ import {
   createAgentStructuredTextGeneration,
   createGitMetadataGenerator,
 } from "./session/checkout/git-metadata-generator.js";
+import { NotifyPolicySession } from "./session/notify-policy/notify-policy-session.js";
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
+import { RestartRecoverySession } from "./session/restart-recovery/restart-recovery-session.js";
+import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
+import {
+  createUsageHistorySession,
+  type UsageHistorySession,
+} from "./session/usage-history/usage-history-session.js";
+import type { UsageHistoryStore } from "./usage-history/usage-history-store.js";
+import {
+  createContextUsageSession,
+  type ContextUsageSession,
+} from "./session/context-usage/context-usage-session.js";
+import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
+import { DoctorSession } from "./session/doctor/doctor-session.js";
 import { DaemonSession, type DaemonRuntimeConfig } from "./session/daemon/daemon-session.js";
 import type { DaemonWebSocketRuntimeDiagnosticSnapshot } from "./session/daemon/diagnostics.js";
 import type { HubRelationshipManagement } from "./hub/relationship-controller.js";
@@ -338,6 +356,27 @@ function beginAgentDeleteIfSupported(agentStorage: AgentStorage, agentId: string
 
 const FETCH_AGENTS_SORT_KEYS = ["status_priority", "created_at", "updated_at", "title"] as const;
 
+/**
+ * Broadcasts a client only receives once it has explicitly subscribed (SessionEventSubscription).
+ * Kept as a set rather than a chain of `||` in `emit` so adding one is a one-line change that
+ * cannot push that method over its complexity budget.
+ */
+const SUBSCRIPTION_GATED_EVENTS = new Set<SessionEventSubscription>([
+  "project.update",
+  "providers_snapshot_update",
+  "mcp_status_update",
+  "device_status_update",
+  "agent_attention_required",
+  "agent_permission_request",
+  "agent_permission_resolved",
+]);
+
+function isSubscriptionGatedEvent(
+  type: SessionOutboundMessage["type"],
+): type is SessionEventSubscription {
+  return SUBSCRIPTION_GATED_EVENTS.has(type as SessionEventSubscription);
+}
+
 export function resolveWaitForFinishError(options: {
   status: "permission" | "error" | "idle";
   final: AgentSnapshotPayload | null;
@@ -471,6 +510,8 @@ export interface SessionOptions {
   workspaceLabelService?: WorkspaceLabelService;
   filesystem?: SessionFileSystem;
   scheduleService: ScheduleService;
+  /** Absent when the daemon runs without restart recovery (tests, older wiring). */
+  restartRecovery?: RestartRecoveryService;
   checkoutDiffManager: CheckoutDiffManager;
   github?: ForgeService;
   createAgentMcpTransport?: AgentMcpTransportFactory;
@@ -480,6 +521,10 @@ export interface SessionOptions {
   workspaceGitService: WorkspaceGitService;
   workspaceAutoName: WorkspaceAutoName;
   daemonConfigStore: DaemonConfigStore;
+  /** Reads the daemon-wide WorktreeDiskMonitor's last sample for a workspace, if any. */
+  getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  /** Fire-and-forget: asks the monitor to sample a workspace outside its normal rotation. */
+  requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   pluginRuntime?: {
     before: import("./plugins/lifecycle/index.js").PluginLifecycle["before"];
     emit: import("./plugins/lifecycle/index.js").PluginLifecycle["emit"];
@@ -518,6 +563,8 @@ export interface SessionOptions {
   terminalManager: TerminalManager | null;
   providerSnapshotManager: ProviderSnapshotManager;
   providerUsageService: ProviderUsageService;
+  usageHistory?: UsageHistoryStore;
+  contextUsage?: AgentContextUsageService;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -654,6 +701,26 @@ function workspaceLabelErrorCode(error: unknown): string {
   return "workspace_label_failed";
 }
 
+interface GatewayRemedyPayload {
+  remedyCommand: string | null;
+  remedyPath: string | null;
+  remedyRedirectUrl: string | null;
+}
+
+/** Flattens a failure's remedy onto the wire; every field null when there is nothing to do. */
+function gatewayRemedyPayload(failure: { remedy: McpGatewayRemedy } | null): GatewayRemedyPayload {
+  const remedy = failure?.remedy;
+  return {
+    remedyCommand: remedy?.command ?? null,
+    remedyPath: remedy?.path ?? null,
+    remedyRedirectUrl: remedy?.redirectUrl ?? null,
+  };
+}
+
+function emptyGatewayRemedy(): GatewayRemedyPayload {
+  return gatewayRemedyPayload(null);
+}
+
 export class Session {
   private readonly clientId: string;
   private readonly authorization: SessionAuthorization;
@@ -693,6 +760,8 @@ export class Session {
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly workspaceRecovery: WorkspaceRecoveryService;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
@@ -700,6 +769,8 @@ export class Session {
   private unsubscribeProjectMutations: (() => void) | null = null;
   private unsubscribePluginChanges: (() => void) | null = null;
   private unsubscribeWorkspaceMutations: (() => void) | null = null;
+  private unsubscribeMcpGatewayStatus: (() => void) | null = null;
+  private unsubscribeDeviceStatus: (() => void) | null = null;
   private registryMutationQueue: Promise<void> = Promise.resolve();
   private projectUpdateQueue: Promise<void> = Promise.resolve();
   private isCleanedUp = false;
@@ -747,11 +818,16 @@ export class Session {
   private readonly voiceSession: VoiceSession;
   private readonly checkoutSession: CheckoutSession;
   private readonly scheduleSession: ScheduleSession;
+  private readonly notifyPolicySession: NotifyPolicySession;
+  private readonly restartRecoverySession: RestartRecoverySession;
   private readonly providerCatalogSession: ProviderCatalogSession;
+  private readonly usageHistorySession: UsageHistorySession | null;
+  private readonly contextUsageSession: ContextUsageSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
   private readonly daemonSession: DaemonSession;
+  private readonly doctorSession: DoctorSession;
   private readonly hubExecutionController: HubExecutionController | null;
   private readonly workspaceScripts: WorkspaceScriptsService;
   private readonly agentRequests: Pick<AgentRequests, "create" | "send">;
@@ -789,6 +865,8 @@ export class Session {
       workspaceGitService,
       workspaceAutoName,
       daemonConfigStore,
+      getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample,
       pluginRuntime,
       orchestrationSkills,
       stt,
@@ -797,6 +875,8 @@ export class Session {
       terminalManager,
       providerSnapshotManager,
       providerUsageService,
+      usageHistory,
+      contextUsage,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -918,9 +998,19 @@ export class Session {
       onBranchChanged,
       logger: this.sessionLogger,
     });
+    this.notifyPolicySession = new NotifyPolicySession({
+      host: { emit: (msg) => this.emit(msg) },
+      getNotifyPolicy: () => this.pushNotifications.policy,
+      logger: this.sessionLogger,
+    });
     this.scheduleSession = new ScheduleSession({
       host: { emit: (msg) => this.emit(msg) },
       scheduleService,
+      logger: this.sessionLogger,
+    });
+    this.restartRecoverySession = new RestartRecoverySession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: options.restartRecovery,
       logger: this.sessionLogger,
     });
     this.providerCatalogSession = new ProviderCatalogSession({
@@ -937,6 +1027,23 @@ export class Session {
       },
       providerSnapshotManager,
       providerUsageService,
+      logger: this.sessionLogger,
+    });
+    this.usageHistorySession = createUsageHistorySession({
+      host: { emit: (msg) => this.emit(msg) },
+      store: usageHistory,
+      logger: this.sessionLogger,
+    });
+    this.contextUsageSession = createContextUsageSession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: contextUsage,
+      loadAgent: async (agentId) => {
+        await ensureUnarchivedAgentLoaded(agentId, {
+          agentManager: this.agentManager,
+          agentStorage: this.agentStorage,
+          logger: this.sessionLogger,
+        });
+      },
       logger: this.sessionLogger,
     });
     this.agentConfigSession = new AgentConfigSession({
@@ -987,6 +1094,29 @@ export class Session {
       hubRelationships: options.hubRelationships,
       reloadConfig: () => daemonConfigStore.reload(),
     });
+    this.doctorSession = new DoctorSession({
+      host: { emit: (msg) => this.emit(msg) },
+      paseoHome: this.paseoHome,
+      daemonVersion,
+      // The worker's own start, not the pid file's: a restart under a live supervisor moves it.
+      getDaemonStartedAt: async () => new Date(Date.now() - process.uptime() * 1000).toISOString(),
+      listAgents: () =>
+        this.agentManager
+          .listAgents()
+          .map((agent) => ({ cwd: agent.cwd, status: agent.lifecycle, archived: false })),
+      listWorkspaces: async () =>
+        (await this.workspaceRegistry.list()).map((workspace) => ({
+          cwd: workspace.cwd,
+          baseBranch: workspace.baseBranch ?? null,
+          archivedAt: workspace.archivedAt ?? null,
+          pinned: Boolean(workspace.pinnedAt),
+        })),
+      listPlugins: () => this.pluginRuntime?.listPlugins() ?? [],
+      getPluginLogs: (id) =>
+        (this.pluginRuntime?.getLogs(id) ?? []).map((entry) => `${entry.stream}: ${entry.message}`),
+      listProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+      logger: this.sessionLogger,
+    });
     this.hubExecutionController = options.hubExecutionAgents
       ? new HubExecutionController({
           agents: options.hubExecutionAgents,
@@ -996,6 +1126,8 @@ export class Session {
         })
       : null;
     this.daemonConfigStore = daemonConfigStore;
+    this.getWorktreeDiskUsage = getWorktreeDiskUsage;
+    this.requestWorktreeDiskUsageSample = requestWorktreeDiskUsageSample;
     this.terminalManager = terminalManager;
     this.terminalController = new TerminalSessionController({
       terminalManager,
@@ -1088,6 +1220,9 @@ export class Session {
       listTerminalActivityContributions: () => this.listTerminalActivityContributions(),
       isProviderVisibleToClient: (provider) => this.isProviderVisibleToClient(provider),
       buildWorkspaceDescriptor: (input) => this.buildWorkspaceDescriptor(input),
+      getDiskUsage: (workspaceId) => this.getWorktreeDiskUsage?.(workspaceId),
+      requestDiskUsageSample: (workspaceId, cwd) =>
+        this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
     });
 
     this.voiceSession = new VoiceSession({
@@ -1471,7 +1606,7 @@ export class Session {
     );
 
     const t0 = Date.now();
-    const cancellation = await this.agentManager.cancelAgentRun(agentId);
+    const cancellation = await this.agentManager.cancelAgentRun(agentId, "user");
     this.sessionLogger.debug(
       { agentId, cancellation: cancellation.status, durationMs: Date.now() - t0 },
       "interruptAgentIfRunning: cancelAgentRun completed",
@@ -1523,6 +1658,64 @@ export class Session {
         });
     }
     this.providerCatalogSession.start();
+    // COMPAT(mcpStatus): copies providers_snapshot_update's push pattern (KTD7) —
+    // gated by the same explicit-subscription mechanism, so old clients never receive it.
+    this.unsubscribeMcpGatewayStatus = this.agentManager.onMcpGatewayStatusChange((snapshot) => {
+      if (!this.wantsEvent("mcp_status_update")) return;
+      this.emit(this.mcpStatusUpdateMessage(snapshot));
+    });
+  }
+
+  /**
+   * Subscribes to the device cap's changes the first time a client asks for them
+   * (docs/device-leases.md). On demand rather than at construction: a session that never
+   * subscribes to `device_status_update` — every CLI call, every old client — has no reason to
+   * hold a listener on the cap.
+   */
+  private ensureDeviceStatusSubscription(): void {
+    if (this.unsubscribeDeviceStatus) return;
+    this.unsubscribeDeviceStatus = this.agentManager.onDeviceStatusChange(() => {
+      if (!this.wantsEvent("device_status_update")) return;
+      void this.emitDeviceStatusUpdate();
+    });
+  }
+
+  /**
+   * Snapshots the device cap and pushes it. Reads the cap's cached `ps` sample rather than
+   * taking a new one, so a burst of lease changes costs nothing; the numbers are still the
+   * process scan's, only up to one sweep old.
+   */
+  private async emitDeviceStatusUpdate(source?: object): Promise<void> {
+    try {
+      const snapshot = await this.agentManager.getDeviceStatusSnapshot();
+      if (!snapshot) return;
+      const message = {
+        type: "device_status_update" as const,
+        payload: {
+          enabled: snapshot.enabled,
+          dryRun: snapshot.dryRun,
+          totalSlots: snapshot.totalSlots,
+          slotsPerPlatform: snapshot.slotsPerPlatform,
+          used: snapshot.used,
+          devices: snapshot.devices,
+          waiting: snapshot.waiting,
+          blocked: snapshot.blocked,
+          enforcement: snapshot.enforcement,
+          generatedAt: snapshot.generatedAt,
+        },
+      };
+      if (source) this.emitForSource(message, source);
+      else this.emit(message);
+    } catch (error) {
+      this.sessionLogger.warn({ err: error }, "Failed to emit device status update");
+    }
+  }
+
+  private mcpStatusUpdateMessage(servers: McpGatewaySnapshotEntry[]) {
+    return {
+      type: "mcp_status_update" as const,
+      payload: { servers, generatedAt: new Date().toISOString() },
+    };
   }
 
   private subscribeToRegistryMutations(): void {
@@ -2008,11 +2201,13 @@ export class Session {
       this.dispatchWorkspaceLifecycleMessage(msg) ??
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
+      this.dispatchUsageMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
+      this.dispatchRestartRecoveryMessage(msg) ??
       this.dispatchMiscMessage(msg);
     if (promise) await promise;
   }
@@ -2024,6 +2219,23 @@ export class Session {
       this.dispatchWorkspaceSetupMessage(msg) ??
       this.dispatchWorkspaceAndProjectMessage(msg)
     );
+  }
+
+  /** Usage reads: the accounts' usage history and an agent's context breakdown. */
+  private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    return this.dispatchUsageHistoryMessage(msg) ?? this.dispatchContextUsageMessage(msg);
+  }
+
+  private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "agent.context_usage.read.request" || !this.contextUsageSession) {
+      return undefined;
+    }
+    return this.contextUsageSession.handleReadRequest(msg);
+  }
+
+  private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "usage.history.get.request" || !this.usageHistorySession) return undefined;
+    return this.usageHistorySession.handleGetRequest(msg);
   }
 
   private dispatchOrchestrationSkillsMessage(
@@ -2314,6 +2526,8 @@ export class Session {
     switch (msg.type) {
       case "agent.detach.request":
         return this.handleDetachAgentRequest(msg.agentId, msg.requestId);
+      case "agent.provider.move.request":
+        return this.handleAgentProviderMoveRequest(msg);
       default:
         return undefined;
     }
@@ -2346,6 +2560,22 @@ export class Session {
           },
           source,
         );
+        // COMPAT(mcpStatus): the gateway only pushes on state changes, so a client that
+        // connects after the gateway has settled would see an empty strip until the next
+        // real transition. Hand the newly-subscribing source the current snapshot eagerly;
+        // skipped when empty so gateway-less daemons emit nothing (R10).
+        if (msg.events.includes("mcp_status_update")) {
+          const snapshot = this.agentManager.getMcpGatewaySnapshot();
+          if (snapshot.length > 0) {
+            this.emitForSource(this.mcpStatusUpdateMessage(snapshot), source);
+          }
+        }
+        // Same eager hand-off as above: the cap only pushes on change, so a client connecting
+        // to a settled daemon would otherwise see nothing until a device came or went.
+        if (msg.events.includes("device_status_update")) {
+          this.ensureDeviceStatusSubscription();
+          void this.emitDeviceStatusUpdate(source);
+        }
         return undefined;
       }
       case "agent.timeline.set_subscription.request": {
@@ -2455,6 +2685,8 @@ export class Session {
       case "daemon.config.reload.request":
         this.daemonSession.handleConfigReloadRequest(msg);
         return undefined;
+      case "daemon.doctor.request":
+        return this.doctorSession.handleDoctorRequest(msg);
       case "hub.management.daemon.connect.request":
       case "hub.management.daemon.get_status.request":
       case "hub.management.daemon.disconnect.request":
@@ -2708,6 +2940,17 @@ export class Session {
     }
   }
 
+  private dispatchRestartRecoveryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "agent.restart_recovery.get_plan.request":
+      case "agent.restart_recovery.apply.request":
+      case "agent.restart_recovery.dismiss.request":
+        return this.restartRecoverySession.handle(msg);
+      default:
+        return undefined;
+    }
+  }
+
   private dispatchScheduleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     switch (msg.type) {
       case "schedule/create":
@@ -2738,8 +2981,21 @@ export class Session {
       case "list_commands_request":
         await this.handleListCommandsRequest(msg);
         return;
+      case "mcp_gateway.auth.start.request":
+        await this.handleMcpGatewayAuthStartRequest(msg);
+        return;
+      case "mcp_gateway.server.adopt.request":
+        await this.handleMcpGatewayServerAdoptRequest(msg);
+        return;
       case "register_push_token":
         this.handleRegisterPushToken(msg.token);
+        return;
+      case "notifications.policy.get.request":
+      case "notifications.policy.set.request":
+        await this.notifyPolicySession.handlePolicyRequest(msg);
+        return;
+      case "notifications.ledger.list.request":
+        this.notifyPolicySession.handleLedgerListRequest(msg);
         return;
       case "push.unregister.request":
         this.pushNotifications.revoke(msg.token);
@@ -2958,6 +3214,52 @@ export class Session {
           agentId,
           accepted: false,
           error: message,
+        },
+      });
+    }
+  }
+
+  private async handleAgentProviderMoveRequest(
+    msg: Extract<SessionInboundMessage, { type: "agent.provider.move.request" }>,
+  ): Promise<void> {
+    const { agentId, providerId, requestId } = msg;
+    this.sessionLogger.info({ agentId, providerId, requestId }, "Moving agent to another provider");
+    try {
+      await ensureUnarchivedAgentLoaded(agentId, {
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        logger: this.sessionLogger,
+      });
+      const moved = await this.agentManager.moveAgentToProvider(agentId, providerId);
+      if (moved.workspaceId) {
+        await this.emitWorkspaceUpdatesForWorkspaceIds(new Set([moved.workspaceId]));
+      }
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: true,
+          providerId: moved.provider,
+          code: null,
+          error: null,
+        },
+      });
+    } catch (error) {
+      const refusal = error instanceof AgentProviderMoveError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, agentId, providerId, requestId, code: refusal?.code },
+        "Failed to move agent to another provider",
+      );
+      this.emit({
+        type: "agent.provider.move.response",
+        payload: {
+          requestId,
+          agentId,
+          accepted: false,
+          providerId: this.agentManager.getAgent(agentId)?.provider ?? providerId,
+          code: refusal?.code ?? "move_failed",
+          error: getErrorMessageOr(error, "Failed to move agent to another provider"),
         },
       });
     }
@@ -3287,15 +3589,11 @@ export class Session {
           removedWorkspaceIds.push(workspaceId);
         }
 
-        await this.projectRegistry.remove(resolvedProjectId);
-        await removeProjectCustomIcon({
+        await removeProjectRecord({
+          projectRegistry: this.projectRegistry,
           paseoHome: this.paseoHome,
           projectId: resolvedProjectId,
-        }).catch((error) => {
-          this.sessionLogger.warn(
-            { err: error, projectId: resolvedProjectId },
-            "Failed to clean up removed project icon",
-          );
+          logger: this.sessionLogger,
         });
       } finally {
         if (activeWorkspaceIds.length > 0) {
@@ -3362,9 +3660,13 @@ export class Session {
       const trimmed = title?.trim() ?? "";
       const nextTitle = trimmed.length === 0 ? null : trimmed;
       const updatedAt = new Date().toISOString();
+      // Clearing the title hands naming back to Paseo: the workspace-title tracker
+      // adopts an "auto" workspace, so an empty rename is how a hand-named workspace
+      // (or one from before provenance existed) opts into tracking.
       const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
         ...existing,
         title: nextTitle,
+        titleSource: nextTitle === null ? ("auto" as const) : ("manual" as const),
         updatedAt,
       }));
       if (!updated) {
@@ -3700,6 +4002,7 @@ export class Session {
           agentId,
           config: resolvedIntent.config,
           workspaceId: resolvedIntent.intent.workspaceId,
+          callerAgentId: msg.callerAgentId,
           worktreeName,
           initialPrompt,
           clientMessageId,
@@ -3782,6 +4085,8 @@ export class Session {
           createdWorktree: null,
           cwd: config.cwd,
           initialTitle: input.workspacePromptTitle,
+          // Derived from the first prompt, so the tracker owns it from here.
+          initialTitleSource: "auto",
         }),
         cwd: config.cwd,
       }),
@@ -4327,8 +4632,85 @@ export class Session {
   }
 
   /**
-   * Handle list commands request for an agent
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Never throws to the caller — `AgentManager.startMcpGatewayAuthorization` rejects
+   * for an unknown server, a static-auth server (nothing to authorize interactively), or a
+   * disabled/unconfigured gateway, and all three land in the response's `error` field rather
+   * than an `rpc_error`, matching the workspace-script RPCs' error-in-payload convention.
    */
+  private async handleMcpGatewayAuthStartRequest(
+    request: McpGatewayAuthStartRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.startMcpGatewayAuthorization(
+        request.name,
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          ...emptyGatewayRemedy(),
+        },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, reason: failure?.reason },
+        "Failed to start MCP gateway authorization",
+      );
+      this.emit({
+        type: "mcp_gateway.auth.start.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to start MCP gateway authorization"),
+          reason: failure?.reason ?? null,
+          ...gatewayRemedyPayload(failure),
+        },
+      });
+    }
+  }
+
+  private async handleMcpGatewayServerAdoptRequest(
+    request: McpGatewayServerAdoptRequest,
+  ): Promise<void> {
+    try {
+      const { authorizationUrl } = await this.agentManager.adoptMcpGatewayServer({
+        name: request.name,
+        agentId: request.agentId,
+      });
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl,
+          error: null,
+          reason: null,
+          ...emptyGatewayRemedy(),
+        },
+      });
+    } catch (error) {
+      const failure = error instanceof McpGatewayActionError ? error : null;
+      this.sessionLogger.warn(
+        { err: error, name: request.name, agentId: request.agentId, reason: failure?.reason },
+        "Failed to broker the MCP server",
+      );
+      this.emit({
+        type: "mcp_gateway.server.adopt.response",
+        payload: {
+          requestId: request.requestId,
+          authorizationUrl: null,
+          error: getErrorMessageOr(error, "Failed to broker the MCP server"),
+          reason: failure?.reason ?? null,
+          ...gatewayRemedyPayload(failure),
+        },
+      });
+    }
+  }
+
   private async handleListCommandsRequest(
     msg: Extract<SessionInboundMessage, { type: "list_commands_request" }>,
   ): Promise<void> {
@@ -4526,6 +4908,8 @@ export class Session {
         markWorkspaceArchiving: (workspaceIds, archivingAt) =>
           this.markWorkspaceArchiving(workspaceIds, archivingAt),
         clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+        requestDiskUsageSample: (workspaceId, cwd) =>
+          this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
         killTerminalsForWorkspace: (workspaceId) =>
           this.terminalController.killTerminalsForWorkspace(workspaceId),
         sessionLogger: this.sessionLogger,
@@ -6135,7 +6519,11 @@ export class Session {
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
-      { expectsInitialAgent: Boolean(request.firstAgentContext) },
+      {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+        // A title the requester typed is theirs; one derived from the first prompt is ours.
+        titleSource: explicitTitle ? "manual" : "auto",
+      },
     );
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
     const descriptor = await this.describeWorkspaceRecord(workspace);
@@ -6851,6 +7239,8 @@ export class Session {
           markWorkspaceArchiving: (workspaceIds, archivingAt) =>
             this.markWorkspaceArchiving(workspaceIds, archivingAt),
           clearWorkspaceArchiving: (workspaceIds) => this.clearWorkspaceArchiving(workspaceIds),
+          requestDiskUsageSample: (workspaceId, cwd) =>
+            this.requestWorktreeDiskUsageSample?.(workspaceId, cwd),
           assertWorkspaceAutomationAllowed: (workspaceId) =>
             assertWorkspaceAutomationAllowedForWorkspace(this.workspaceRegistry, workspaceId),
           killTerminalsForWorkspace: (workspaceId) =>
@@ -7588,11 +7978,14 @@ export class Session {
       const agentId = resolved.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
+      // Only an explicit "interrupt" may cancel the running turn. A client that sends no behavior
+      // predates steering, and a message is not a stop.
+      const activeTurnBehavior = msg.activeTurnBehavior ?? "steer";
       this.sessionLogger.trace(
         {
           agentId,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior,
+          activeTurnBehavior,
           textPrefix: msg.text.slice(0, 80),
         },
         "agent.session.send_agent_message",
@@ -7604,7 +7997,7 @@ export class Session {
           agentId,
           prompt,
           messageId: msg.messageId,
-          activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt",
+          activeTurnBehavior,
           clearPendingPermissions: true,
           logger: this.sessionLogger,
         });
@@ -7616,7 +8009,7 @@ export class Session {
         await this.agentRequests.send({
           agentId,
           messageId: msg.messageId,
-          request: { prompt, activeTurnBehavior: msg.activeTurnBehavior ?? "interrupt" },
+          request: { prompt, activeTurnBehavior },
           prepare: async () => {
             await ensureAgentLoaded(agentId, {
               agentManager: this.agentManager,
@@ -7800,13 +8193,7 @@ export class Session {
     if (!this.authorization.allowsOutbound(msg)) {
       return;
     }
-    if (
-      msg.type === "project.update" ||
-      msg.type === "providers_snapshot_update" ||
-      msg.type === "agent_attention_required" ||
-      msg.type === "agent_permission_request" ||
-      msg.type === "agent_permission_resolved"
-    ) {
+    if (isSubscriptionGatedEvent(msg.type)) {
       if (this.clientCapabilitiesBySource.size > 0 && this.onMessageToSource) {
         for (const source of this.clientCapabilitiesBySource.keys()) {
           if (this.wantsEvent(msg.type, source)) this.onMessageToSource(source, msg);
@@ -7908,6 +8295,10 @@ export class Session {
     this.unsubscribePluginChanges = null;
     this.unsubscribeWorkspaceMutations?.();
     this.unsubscribeWorkspaceMutations = null;
+    this.unsubscribeMcpGatewayStatus?.();
+    this.unsubscribeMcpGatewayStatus = null;
+    this.unsubscribeDeviceStatus?.();
+    this.unsubscribeDeviceStatus = null;
     this.workspaceLabelSubscription?.unsubscribe();
     this.workspaceLabelSubscription = null;
     this.agentUpdates.dispose();

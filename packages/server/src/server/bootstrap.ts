@@ -4,7 +4,7 @@ import { createServer as createHTTPServer, type IncomingMessage, type ServerResp
 import { constants, existsSync, unlinkSync } from "fs";
 import { open, rm } from "fs/promises";
 import { randomUUID } from "node:crypto";
-import { hostname as getHostname } from "node:os";
+import { homedir, hostname as getHostname } from "node:os";
 import path from "node:path";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Logger } from "pino";
@@ -121,8 +121,13 @@ import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
 import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
 import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
+import type { ProviderUsageService } from "../services/quota-fetcher/service.js";
+import { UsageHistorySampler } from "./usage-history/usage-history-sampler.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
-import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
+import {
+  createWorkspaceProvisioningService,
+  type WorkspaceProvisioningService,
+} from "./session/workspace-provisioning/workspace-provisioning-service.js";
 import { createPaseoWorktreeWorkflow } from "./worktree-session.js";
 import { DownloadTokenStore } from "./file-download/token-store.js";
 import type { OpenAiSpeechProviderConfig } from "./speech/providers/openai/config.js";
@@ -133,6 +138,8 @@ import { AgentManager } from "./agent/agent-manager.js";
 import { AgentStorage } from "./agent/agent-storage.js";
 import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
+import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
+import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
@@ -161,6 +168,7 @@ import {
   archivePersistedWorkspaceRecord,
   killTerminalsForWorkspace,
   type ActiveWorkspaceRef,
+  type ArchiveResult,
 } from "./workspace-archive-service.js";
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
 import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
@@ -207,9 +215,86 @@ import {
 } from "./auth.js";
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { AgentTitleTracker } from "./agent-title-tracker.js";
+import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
+import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
+import { AgentTokenBurnMonitor } from "./agent-token-burn-monitor.js";
+import { AgentModelDivergenceMonitor } from "./agent-model-divergence-monitor.js";
+import { AgentResourceMonitor } from "./agent-resource-monitor.js";
+import {
+  ChildAdmissionController,
+  loadHeldTurns,
+  restoreHeldTurns,
+  type ChildAdmissionConfig,
+} from "./agent/child-admission.js";
+import { ResumePacer, type PaceResume } from "./agent/resume-pacer.js";
+import { PluginConnectionMonitor } from "./plugin-connection-monitor.js";
+import { AccountFailoverMonitor } from "./agent-account-failover-monitor.js";
+import { FinishObligationService } from "./agent/finish-obligation-service.js";
+import type { FinishReportLadderConfig } from "./agent/finish-obligation.js";
+import {
+  RestartRecoveryService,
+  type RestartRecoveryConfig,
+} from "./agent/restart-recovery/service.js";
+import {
+  AgentDoneJanitor,
+  askAgentWhetherDone,
+  probeProjectRoot,
+  readProviderHealth,
+  type DoneJanitorConfig,
+} from "./agent-done-janitor.js";
+import { removeProjectRecord } from "./project-removal.js";
+import {
+  startDaemonVitals,
+  type DaemonVitals,
+  type DaemonVitalsConfig,
+} from "./daemon-vitals/daemon-vitals.js";
+import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
+import type { RemediationConfig } from "./remediation/config.js";
+import {
+  createForwardingRemediationSink,
+  type RemediationSink,
+  type WorktreeSnapshotter,
+} from "./remediation/contract.js";
+import { findEscalationAccountBlocker } from "./remediation/escalation.js";
+import { RemediationLadder } from "./remediation/ladder.js";
+import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
+import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
+import { TokenAuditJob } from "./token-audit/token-audit-job.js";
+import { resolveAccountPoolEntries } from "./agent/account-pool-providers.js";
+import {
+  AgentStallSweep,
+  handOffStalledAgentToFailover,
+  nudgeStalledAgent,
+} from "./agent-stall-sweep.js";
+import type { ProcessSampler } from "./agent/process-sampler.js";
+import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-remedies.js";
+import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
+import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
+import { createSystemProcessSampler } from "./agent/process-sampler.js";
+import { createSaturationLedger } from "./agent/saturation-ledger.js";
+import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
+import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
+import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import {
+  createPromptQueue,
+  formatSystemNotificationPrompt,
+  sendPromptToAgent,
+} from "./agent/agent-prompt.js";
+import { WorktreeDiskMonitor } from "./worktree-disk-monitor.js";
+import { resolveWorkSnapshotsConfig } from "./remediation/config.js";
+import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
+import {
+  AgentWorkSnapshotSweep,
+  buildWorkSnapshotAgentViews,
+  listPaseoWorktreeDirectories,
+} from "./agent-work-snapshot-sweep.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
+import { setProcessPriorityPolicy } from "../utils/process-priority.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import {
@@ -230,8 +315,10 @@ import {
 import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
+import { withTimeout } from "../utils/promise-timeout.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
+const ADMISSION_QUEUE_FLUSH_TIMEOUT_MS = 5_000;
 const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
@@ -259,6 +346,34 @@ function createAgentMcpBaseUrl(listenTarget: ListenTarget | null): string | null
     "/mcp/agents",
     `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`,
   ).toString();
+}
+
+// KTD3: the MCP gateway's OAuth redirect_uri must be the daemon's own stable reachable base
+// URL, never a literal loopback, when reachable from elsewhere (e.g. a phone's browser). This
+// loopback form is the fallback when no such public base URL is configured — the strip's auth
+// action is responsible for saying so when that's the case (U7).
+function createMcpGatewayLoopbackBaseUrl(listenTarget: ListenTarget | null): string | null {
+  if (!listenTarget || listenTarget.type !== "tcp") {
+    return null;
+  }
+  const host = resolveAgentMcpClientHost(listenTarget.host);
+  return `http://${formatHostForHttpUrl(host)}:${listenTarget.port}`;
+}
+
+function resolveMcpGatewayConfig(config: MutableDaemonConfig["mcpGateway"]): McpGatewayConfig {
+  return config ?? { enabled: false };
+}
+
+/** Broken out so its branches don't add to createPaseoDaemon's/logAndResolve's own complexity. */
+function applyMcpGatewayOAuthRedirectBaseUrl(
+  gateway: McpGateway,
+  serviceProxyPublicBaseUrl: string | null,
+  boundListenTarget: ListenTarget | null,
+): void {
+  const baseUrl = serviceProxyPublicBaseUrl ?? createMcpGatewayLoopbackBaseUrl(boundListenTarget);
+  if (baseUrl) {
+    gateway.setOAuthRedirectBaseUrl(baseUrl);
+  }
 }
 
 function createTerminalActivityUrl(listenTarget: ListenTarget | null): string | null {
@@ -395,6 +510,7 @@ export interface PaseoDaemonConfig {
   trustedProxies?: true | string[];
   mcpEnabled?: boolean;
   mcpInjectIntoAgents?: boolean;
+  mcpGateway?: MutableDaemonConfig["mcpGateway"];
   browserToolsEnabled?: boolean;
   git?: {
     maxProcessesPerSecond: number;
@@ -444,6 +560,119 @@ export interface PaseoDaemonConfig {
       model?: string;
       thinkingOptionId?: string;
     }>;
+    // Forwarded verbatim into the mutable config below. Both tracker sections used to be
+    // dropped here, so `agents.metadataGeneration.titleTracking` in config.json only took
+    // effect on a later reload, never at boot.
+    titleTracking?: { enabled?: boolean; refreshIntervalMinutes?: number };
+    workspaceTitleTracking?: {
+      enabled?: boolean;
+      refreshIntervalMinutes?: number;
+      activityWindowMinutes?: number;
+    };
+  };
+  tokenBurnMonitor?: {
+    enabled?: boolean;
+    ratePerMinute?: number;
+    sustainedMinutes?: number;
+    totalTokens?: number;
+    scope?: "all" | "topLevelOnly";
+    breachBatchThreshold?: number;
+    usageHistory?: {
+      enabled?: boolean;
+    };
+    modelDivergence?: {
+      enabled?: boolean;
+      persistResponses?: number;
+      persistSeconds?: number;
+    };
+  };
+  processPriority?: MutableDaemonConfig["processPriority"];
+  resourceMonitor?: {
+    enabled?: boolean;
+    memoryBytesPerAgent?: number;
+    cpuPercentPerAgent?: number;
+    sustainedMinutes?: number;
+    systemSwapUsedRatio?: number;
+    orphanBuildDaemonBytes?: number;
+    notifyAgent?: boolean;
+    reaper?: {
+      enabled?: boolean;
+      dryRun?: boolean;
+      idleCpuPercent?: number;
+      idleMinutes?: number;
+      minIdleSweeps?: number;
+      maxPerSweep?: number;
+      graceMs?: number;
+    };
+  };
+  deviceLeases?: MutableDaemonConfig["deviceLeases"];
+  artifactJanitor?: MutableDaemonConfig["artifactJanitor"];
+  accountFailover?: {
+    enabled?: boolean;
+    migrateSubagents?: boolean;
+    migrationConcurrency?: number;
+    notifyParent?: boolean;
+    collapseToSharedAccount?: boolean;
+  };
+  // Wire-shaped like mcpGateway above rather than restated as a literal: the monitor's own
+  // settings interface would not carry the passthrough index signature this has to accept.
+  budgetPacing?: MutableDaemonConfig["budgetPacing"];
+  leaderCompaction?: MutableDaemonConfig["leaderCompaction"];
+  contextMeter?: MutableDaemonConfig["contextMeter"];
+  /**
+   * Test seams for AccountFailoverMonitor; production leaves this unset. Tests inject a fake usage
+   * source (no real usage API call), push the timer past their own runtime and drive sweeps with
+   * `getAccountFailoverMonitor().tick()`, and advance `now` to expire reactive evidence.
+   */
+  accountFailoverOverrides?: {
+    providerUsage?: Pick<ProviderUsageService, "listUsage">;
+    sweepIntervalMs?: number;
+    now?: () => number;
+    remediationSink?: RemediationSink;
+    /** Stands in for restart recovery's claims, which only a real restart produces. */
+    isClaimedByRestartRecovery?: (agentId: string) => boolean;
+  };
+  /**
+   * Test seams for FinishObligationService; production leaves this unset. Tests push the timer
+   * past their own runtime, drive sweeps with `getFinishObligations().tick()`, shorten the ladder
+   * and advance `now`.
+   */
+  finishReportOverrides?: {
+    sweepIntervalMs?: number;
+    ladder?: Partial<FinishReportLadderConfig>;
+    now?: () => number;
+    /** Stands in for restart recovery's claims, which only a real restart produces. */
+    isClaimedByRestartRecovery?: (agentId: string) => boolean;
+  };
+  doneJanitor?: DoneJanitorConfig;
+  admission?: ChildAdmissionConfig;
+  refocus?: RefocusConfig;
+  remediation?: RemediationConfig;
+  daemonVitals?: DaemonVitalsConfig;
+  /** Startup-only: read once at boot. See docs/restart-recovery.md. */
+  restartRecovery?: RestartRecoveryConfig;
+  /**
+   * Test seams for AgentDoneJanitor; production leaves this unset. Tests push the timer past
+   * their own runtime and drive sweeps with `getDoneJanitor().tick()`.
+   */
+  doneJanitorOverrides?: {
+    sweepIntervalMs?: number;
+    now?: () => number;
+  };
+  /**
+   * Test seam for AgentLeaderCompactionMonitor; production leaves this unset. Tests push the
+   * timer past their own runtime and drive sweeps with `getLeaderCompactionMonitor().tick()`.
+   */
+  leaderCompactionOverrides?: {
+    sweepIntervalMs?: number;
+  };
+  diskSweeper?: {
+    enabled?: boolean;
+    sweepIntervalMs?: number;
+    retentionDays?: number;
+    maxDeletionsPerTick?: number;
+    minFreeGB?: number;
+    sampleTimeoutMs?: number;
   };
   providerOverrides?: Record<string, ProviderOverride>;
   log?: PersistedConfig["log"];
@@ -467,9 +696,22 @@ export interface PaseoDaemon {
   serviceProxy: ServiceProxySubsystem;
   scriptRuntimeStore: WorkspaceScriptRuntimeStore;
   browserToolsBroker: BrowserToolsBroker;
+  mcpGateway: McpGateway;
+  getMcpGatewayAuthToken(): string;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
+  /** Null until start() has constructed it (it needs the WebSocket server's push sender). */
+  getAccountFailoverMonitor(): AccountFailoverMonitor | null;
+  /** Null until start() has constructed it, like the account-failover monitor. */
+  getDoneJanitor(): AgentDoneJanitor | null;
+  /** Null until start() has constructed it, like the done janitor (docs/remediation.md). */
+  getRemediationLadder(): RemediationLadder | null;
+  /** The durable finish-report ledger (docs/finish-reports.md). */
+  getFinishObligations(): FinishObligationService;
+  /** Null until start() has constructed it, like the account-failover monitor. */
+  getLeaderCompactionMonitor(): AgentLeaderCompactionMonitor | null;
+  getRestartRecovery(): RestartRecoveryService;
 }
 
 export interface PaseoDaemonDependencies {
@@ -524,7 +766,412 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
-function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
+function withTokenBurnMonitorConfig(
+  config: Pick<PaseoDaemonConfig, "tokenBurnMonitor">,
+): Pick<MutableDaemonConfig, "tokenBurnMonitor"> {
+  return config.tokenBurnMonitor !== undefined ? { tokenBurnMonitor: config.tokenBurnMonitor } : {};
+}
+
+function withResourceMonitorConfig(
+  config: Pick<PaseoDaemonConfig, "resourceMonitor">,
+): Pick<MutableDaemonConfig, "resourceMonitor"> {
+  return config.resourceMonitor !== undefined ? { resourceMonitor: config.resourceMonitor } : {};
+}
+
+function withProcessPriorityConfig(
+  config: Pick<PaseoDaemonConfig, "processPriority">,
+): Pick<MutableDaemonConfig, "processPriority"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.processPriority !== undefined
+    ? { processPriority: { ...config.processPriority } }
+    : {};
+}
+
+function withDeviceLeasesConfig(
+  config: Pick<PaseoDaemonConfig, "deviceLeases">,
+): Pick<MutableDaemonConfig, "deviceLeases"> {
+  return config.deviceLeases !== undefined ? { deviceLeases: config.deviceLeases } : {};
+}
+
+function withArtifactJanitorConfig(
+  config: Pick<PaseoDaemonConfig, "artifactJanitor">,
+): Pick<MutableDaemonConfig, "artifactJanitor"> {
+  return config.artifactJanitor !== undefined ? { artifactJanitor: config.artifactJanitor } : {};
+}
+
+function withAccountFailoverConfig(
+  config: Pick<PaseoDaemonConfig, "accountFailover">,
+): Pick<MutableDaemonConfig, "accountFailover"> {
+  return config.accountFailover !== undefined ? { accountFailover: config.accountFailover } : {};
+}
+
+function withAdmissionConfig(
+  config: Pick<PaseoDaemonConfig, "admission">,
+): Pick<MutableDaemonConfig, "admission"> {
+  return config.admission !== undefined ? { admission: { ...config.admission } } : {};
+}
+
+function withDoneJanitorConfig(
+  config: Pick<PaseoDaemonConfig, "doneJanitor">,
+): Pick<MutableDaemonConfig, "doneJanitor"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.doneJanitor !== undefined ? { doneJanitor: { ...config.doneJanitor } } : {};
+}
+
+function withRefocusConfig(
+  config: Pick<PaseoDaemonConfig, "refocus">,
+): Pick<MutableDaemonConfig, "refocus"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.refocus !== undefined ? { refocus: { ...config.refocus } } : {};
+}
+
+function withRemediationConfig(
+  config: Pick<PaseoDaemonConfig, "remediation">,
+): Pick<MutableDaemonConfig, "remediation"> {
+  // Spread: an interface carries no index signature, and the wire schema is passthrough.
+  return config.remediation !== undefined ? { remediation: { ...config.remediation } } : {};
+}
+
+/** One account's health right now, shared by the done janitor and the remediation ladder. */
+function readProviderHealthNow(input: {
+  agentManager: AgentManager;
+  wsServer: Pick<VoiceAssistantWebSocketServer, "getProviderUsageService">;
+  provider: string;
+}): ReturnType<typeof readProviderHealth> {
+  const { agentManager } = input;
+  const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
+  for (const agent of agentManager.listAgentsForAccountFailover()) {
+    const errors = lastErrorsByProvider.get(agent.provider) ?? [];
+    errors.push(agent.lastError);
+    lastErrorsByProvider.set(agent.provider, errors);
+  }
+  return readProviderHealth({
+    provider: input.provider,
+    isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
+    listUsage: async () => {
+      try {
+        return (await input.wsServer.getProviderUsageService().listUsage()).providers;
+      } catch {
+        return null;
+      }
+    },
+    lastErrorsByProvider,
+  });
+}
+
+// Wired once the WebSocket server exists, like the done janitor: it needs the push sender, the
+// provider-usage cache and the create path (docs/remediation.md).
+function createRemediationLadder(input: {
+  config: Pick<PaseoDaemonConfig, "paseoHome">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  createAgent: (
+    input: Parameters<typeof createAgentCommand>[1],
+  ) => ReturnType<typeof createAgentCommand>;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  serverId: string;
+  logger: Logger;
+}): RemediationLadder {
+  const { agentManager, agentStorage, logger } = input;
+  return new RemediationLadder({
+    dependencies: {
+      createAgent: async (request) => {
+        const result = await input.createAgent({
+          kind: "mcp",
+          provider: request.provider,
+          title: request.title,
+          initialPrompt: request.prompt,
+          promptFailure: "throw",
+          cwd: request.cwd,
+          labels: request.labels,
+          background: true,
+          notifyOnFinish: false,
+        });
+        if (!result.initialPromptStarted) {
+          throw new Error(`agent ${result.snapshot.id} was created but its prompt did not start`);
+        }
+        return { agentId: result.snapshot.id };
+      },
+      inspectAgent: async (agentId) => {
+        const live = agentManager.getAgent(agentId);
+        if (!live || live.lifecycle === "closed") {
+          const record = await agentStorage.get(agentId);
+          return record && !record.archivedAt ? { status: "unloaded" } : { status: "gone" };
+        }
+        if (live.lifecycle === "error") return { status: "error", error: live.lastError };
+        if (live.lifecycle === "idle") {
+          return {
+            status: "idle",
+            finalText: await agentManager.getLastAssistantMessage(agentId),
+            totalTokens: live.totalTokens,
+          };
+        }
+        return { status: "running", totalTokens: live.totalTokens };
+      },
+      cancelAgent: async (agentId) => {
+        await agentManager.cancelAgentRun(agentId, "remediation");
+      },
+      archiveAgent: async (agentId) => {
+        await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
+      },
+      findAccountBlocker: (provider) =>
+        findEscalationAccountBlocker({
+          provider,
+          poolEntries: resolveAccountPoolEntries(input.daemonConfigStore.get().providers),
+          getHealth: (id) =>
+            readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider: id }),
+        }),
+    },
+    getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
+    serverId: input.serverId,
+    readDaemonConfig: () => ({ remediation: input.daemonConfigStore.get().remediation }),
+    statePath: path.join(input.config.paseoHome, "remediation", "state.json"),
+    logger: logger.child({ module: "remediation-ladder" }),
+  });
+}
+
+// Wired once the WebSocket server exists, like AccountFailoverMonitor below: it owns the push
+// sender and the provider-usage cache.
+function createDoneJanitor(input: {
+  config: Pick<PaseoDaemonConfig, "doneJanitorOverrides" | "paseoHome" | "worktreesRoot">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  workspaceRegistry: Pick<FileBackedWorkspaceRegistry, "list">;
+  projectRegistry: Pick<FileBackedProjectRegistry, "list" | "remove">;
+  scheduleService: Pick<ScheduleService, "list">;
+  terminalManager: TerminalManager | null;
+  archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  worktreeSnapshotter: WorktreeSnapshotter;
+  serverId: string;
+  logger: Logger;
+}): AgentDoneJanitor {
+  const { agentManager, agentStorage, terminalManager, logger } = input;
+  const overrides = input.config.doneJanitorOverrides;
+  return new AgentDoneJanitor({
+    dependencies: {
+      listLiveAgents: () => agentManager.listAgentsForDoneJanitor(),
+      listStoredAgents: () => agentStorage.list(),
+      listWorkspaces: () => input.workspaceRegistry.list(),
+      listScheduledAgentIds: async () =>
+        new Set(
+          (await input.scheduleService.list()).flatMap((schedule) =>
+            schedule.target.type === "agent" && schedule.status !== "completed"
+              ? [schedule.target.agentId]
+              : [],
+          ),
+        ),
+      getProviderHealth: (provider) =>
+        readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider }),
+      askAgent: (ask) => askAgentWhetherDone({ agentManager, agentStorage, logger }, ask),
+      archiveAgent: async (agentId) => {
+        await archiveAgentCommand({ agentManager, agentStorage, logger }, agentId);
+      },
+      countTerminals: async (workspaceId) => {
+        if (!terminalManager) return 0;
+        const lists = await Promise.all(
+          terminalManager
+            .listDirectories()
+            .map((cwd) => terminalManager.getTerminals(cwd, { workspaceId })),
+        );
+        return lists.flat().filter((terminal) => terminal.workspaceId === workspaceId).length;
+      },
+      isPaseoOwnedWorktreePath: async (worktreePath) =>
+        (
+          await isPaseoOwnedWorktreeCwd(worktreePath, {
+            paseoHome: input.config.paseoHome,
+            worktreesRoot: input.config.worktreesRoot,
+          })
+        ).allowed,
+      checkWorktree: (check) => checkWorktreeDeletionSafety(check),
+      measureBytes: (worktreePath) =>
+        sampleDirectorySizeBytes(worktreePath, { timeoutMs: 120_000 }),
+      reclaimWorkspace: async (workspaceId) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
+        return { removedDirectory: result.removedDirectory };
+      },
+      snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
+      listProjects: () => input.projectRegistry.list(),
+      probeProjectRoot,
+      removeProject: (projectId) =>
+        removeProjectRecord({
+          projectRegistry: input.projectRegistry,
+          paseoHome: input.config.paseoHome,
+          projectId,
+          logger,
+        }),
+    },
+    getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
+    serverId: input.serverId,
+    readDaemonConfig: () => ({ doneJanitor: input.daemonConfigStore.get().doneJanitor }),
+    logger,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    now: overrides?.now,
+  });
+}
+
+// Wired once the WebSocket server exists, like the done janitor: account health reads its
+// provider-usage cache. See docs/stalled-agents.md.
+function createAgentStallSweep(input: {
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  processSampler: ProcessSampler;
+  wsServer: Pick<VoiceAssistantWebSocketServer, "getProviderUsageService">;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  sink: RemediationSink;
+  snapshotter: WorktreeSnapshotter;
+  logger: Logger;
+  paceResume: PaceResume;
+}): AgentStallSweep {
+  const { agentManager, agentStorage, logger } = input;
+  return new AgentStallSweep({
+    dependencies: {
+      listAgents: () => agentManager.listAgentsForStallSweep(),
+      sampleProcesses: () => input.processSampler.sampleProcesses(),
+      getProviderHealth: async (provider) => {
+        const lastErrorsByProvider = new Map<string, (string | undefined)[]>();
+        for (const agent of agentManager.listAgentsForAccountFailover()) {
+          const errors = lastErrorsByProvider.get(agent.provider) ?? [];
+          errors.push(agent.lastError);
+          lastErrorsByProvider.set(agent.provider, errors);
+        }
+        return readProviderHealth({
+          provider,
+          isAvailable: async (id) => (await agentManager.getProviderAvailability(id)).available,
+          listUsage: async () => {
+            try {
+              return (await input.wsServer.getProviderUsageService().listUsage()).providers;
+            } catch {
+              return null;
+            }
+          },
+          lastErrorsByProvider,
+        });
+      },
+      snapshotter: input.snapshotter,
+      nudgeAgent: (nudge) =>
+        nudgeStalledAgent(
+          { agentManager, agentStorage, logger, paceResume: input.paceResume },
+          nudge,
+        ),
+      handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
+    },
+    sink: input.sink,
+    readRemediationConfig: () => input.daemonConfigStore.get().remediation,
+    logger,
+  });
+}
+
+function createFinishObligationService(input: {
+  config: Pick<PaseoDaemonConfig, "finishReportOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  restartRecovery: Pick<RestartRecoveryService, "isAboutToResume">;
+  serverId: string;
+  logger: Logger;
+  paceResume: PaceResume;
+  isTurnHeld: (agentId: string) => boolean;
+}): FinishObligationService {
+  const overrides = input.config.finishReportOverrides;
+  return new FinishObligationService({
+    agentManager: input.agentManager,
+    agentStorage: input.agentStorage,
+    serverId: input.serverId,
+    logger: input.logger,
+    isAccountFailoverEnabled: () =>
+      input.daemonConfigStore.get().accountFailover?.enabled !== false,
+    isClaimedByRestartRecovery:
+      overrides?.isClaimedByRestartRecovery ??
+      ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
+    paceResume: input.paceResume,
+    isTurnHeld: input.isTurnHeld,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    ladder: overrides?.ladder,
+    now: overrides?.now,
+  });
+}
+
+// Wired once the WebSocket server exists: it owns the push sender and the provider-usage cache.
+function createAccountFailoverMonitor(input: {
+  config: Pick<PaseoDaemonConfig, "accountFailoverOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  workspaceProvisioning: Pick<WorkspaceProvisioningService, "runInImportWorkspace">;
+  wsServer: Pick<
+    VoiceAssistantWebSocketServer,
+    "getProviderUsageService" | "getPushNotificationSender"
+  >;
+  daemonConfigStore: Pick<DaemonConfigStore, "get">;
+  remediationSink: RemediationSink;
+  restartRecovery: Pick<RestartRecoveryService, "isAboutToResume">;
+  serverId: string;
+  logger: Logger;
+  paceResume: PaceResume;
+}): AccountFailoverMonitor {
+  const overrides = input.config.accountFailoverOverrides;
+  return new AccountFailoverMonitor({
+    agentManager: input.agentManager,
+    agentStorage: input.agentStorage,
+    workspaceProvisioning: input.workspaceProvisioning,
+    providerUsage: overrides?.providerUsage ?? input.wsServer.getProviderUsageService(),
+    pushNotificationSender: input.wsServer.getPushNotificationSender(),
+    remediationSink: overrides?.remediationSink ?? input.remediationSink,
+    serverId: input.serverId,
+    readDaemonConfig: () => ({
+      accountFailover: input.daemonConfigStore.get().accountFailover,
+      providers: input.daemonConfigStore.get().providers,
+    }),
+    logger: input.logger,
+    isClaimedByRestartRecovery:
+      overrides?.isClaimedByRestartRecovery ??
+      ((agentId) => input.restartRecovery.isAboutToResume(agentId)),
+    paceResume: input.paceResume,
+    sweepIntervalMs: overrides?.sweepIntervalMs,
+    now: overrides?.now,
+  });
+}
+
+function withContextMeterConfig(
+  config: Pick<PaseoDaemonConfig, "contextMeter">,
+): Pick<MutableDaemonConfig, "contextMeter"> {
+  return config.contextMeter !== undefined ? { contextMeter: { ...config.contextMeter } } : {};
+}
+
+function withBudgetPacingConfig(
+  config: Pick<PaseoDaemonConfig, "budgetPacing">,
+): Pick<MutableDaemonConfig, "budgetPacing"> {
+  return config.budgetPacing !== undefined ? { budgetPacing: config.budgetPacing } : {};
+}
+
+function withLeaderCompactionConfig(
+  config: Pick<PaseoDaemonConfig, "leaderCompaction">,
+): Pick<MutableDaemonConfig, "leaderCompaction"> {
+  return config.leaderCompaction !== undefined ? { leaderCompaction: config.leaderCompaction } : {};
+}
+
+function withDiskSweeperConfig(
+  config: Pick<PaseoDaemonConfig, "diskSweeper">,
+): Pick<MutableDaemonConfig, "diskSweeper"> {
+  return config.diskSweeper !== undefined ? { diskSweeper: config.diskSweeper } : {};
+}
+
+function withMcpGatewayConfig(
+  config: Pick<PaseoDaemonConfig, "mcpGateway">,
+): Pick<MutableDaemonConfig, "mcpGateway"> {
+  return config.mcpGateway !== undefined ? { mcpGateway: config.mcpGateway } : {};
+}
+
+/** Exported for the boot pass-through test; not part of the daemon's public surface. */
+export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
   const providers = config.providerOverrides ?? {};
 
   const initialConfig: MutableDaemonConfig = {
@@ -544,8 +1191,24 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     browserTools: { enabled: config.browserToolsEnabled ?? false },
     providers,
     metadataGeneration: {
+      ...config.metadataGeneration,
       providers: config.metadataGeneration?.providers ?? [],
     },
+    ...withTokenBurnMonitorConfig(config),
+    ...withResourceMonitorConfig(config),
+    ...withProcessPriorityConfig(config),
+    ...withDeviceLeasesConfig(config),
+    ...withArtifactJanitorConfig(config),
+    ...withAccountFailoverConfig(config),
+    ...withBudgetPacingConfig(config),
+    ...withLeaderCompactionConfig(config),
+    ...withContextMeterConfig(config),
+    ...withDoneJanitorConfig(config),
+    ...withAdmissionConfig(config),
+    ...withRefocusConfig(config),
+    ...withRemediationConfig(config),
+    ...withDiskSweeperConfig(config),
+    ...withMcpGatewayConfig(config),
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
@@ -600,6 +1263,12 @@ export async function createPaseoDaemon(
       },
     },
   });
+  // Provider and git spawn sites read this at spawn time (utils/process-priority.ts). Set before
+  // anything can spawn, then kept current on every patch and reload.
+  setProcessPriorityPolicy(daemonConfigStore.get().processPriority);
+  daemonConfigStore.onChange(() =>
+    setProcessPriorityPolicy(daemonConfigStore.get().processPriority),
+  );
   const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
   void orchestrationSkills.autoUpdate().catch((error) => {
     logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
@@ -638,6 +1307,12 @@ export async function createPaseoDaemon(
   // pattern.
   const agentMcpAuthToken = randomUUID();
 
+  // Distinct capability token authenticating sessions to the MCP gateway's brokered-server
+  // proxy (/mcp/gateway/*, KTD1). Deliberately never the same value as agentMcpAuthToken above:
+  // the two surfaces protect different things (the daemon's own agent-control MCP vs. brokered
+  // external accounts), so leaking one must never grant the other.
+  const mcpGatewayAuthToken = randomUUID();
+
   const listenTarget = parseListenString(config.listen);
 
   const app = express();
@@ -670,6 +1345,24 @@ export async function createPaseoDaemon(
     appBaseUrl = typeof value === "string" ? value : "https://app.paseo.sh";
   });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
+  let agentTokenBurnMonitor: AgentTokenBurnMonitor | null = null;
+  let agentModelDivergenceMonitor: AgentModelDivergenceMonitor | null = null;
+  let agentResourceMonitor: AgentResourceMonitor | null = null;
+  let pluginConnectionMonitor: PluginConnectionMonitor | null = null;
+  let accountFailoverMonitor: AccountFailoverMonitor | null = null;
+  let budgetPacingMonitor: AgentBudgetPacingMonitor | null = null;
+  let leaderCompactionMonitor: AgentLeaderCompactionMonitor | null = null;
+  let doneJanitor: AgentDoneJanitor | null = null;
+  let remediationLadder: RemediationLadder | null = null;
+  let tokenAuditJob: TokenAuditJob | null = null;
+  let agentStallSweep: AgentStallSweep | null = null;
+  let workSnapshotSweep: AgentWorkSnapshotSweep | null = null;
+  let daemonVitals: DaemonVitals | null = null;
+  // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
+  // because Session's WorkspaceDirectory needs `getDiskUsage`/`requestDiskUsageSample` wired in
+  // from the start; push notifications are resolved lazily via `getPushNotificationSender` since
+  // wsServer doesn't exist yet at that point either.
+  let worktreeDiskMonitor: WorktreeDiskMonitor | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
   const scriptHealthMonitor = new ScriptHealthMonitor({
     serviceProxy,
@@ -865,6 +1558,57 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
+  const remediationSink = createForwardingRemediationSink();
+  worktreeDiskMonitor = new WorktreeDiskMonitor({
+    projectRegistry,
+    workspaceRegistry,
+    paseoHome: config.paseoHome,
+    worktreesBaseRoot: config.worktreesRoot,
+    homeDir: homedir(),
+    serverId,
+    getPushNotificationSender: () => wsServer?.getPushNotificationSender() ?? null,
+    readDaemonConfig: () => ({
+      diskSweeper: daemonConfigStore.get().diskSweeper,
+      remediation: daemonConfigStore.get().remediation,
+    }),
+    logger,
+    remediationSink,
+    // Lazy: the done janitor is built later than this monitor (docs/disk-pressure.md).
+    getDoneJanitorRunner: () => {
+      if (!doneJanitor) return null;
+      const activeDoneJanitor = doneJanitor;
+      return async () => {
+        const raw = daemonConfigStore.get().doneJanitor;
+        if (raw?.enabled !== true) {
+          return summarizeDoneJanitorRun({ enabled: false, dryRun: false, report: null });
+        }
+        const report = await activeDoneJanitor.tick();
+        return summarizeDoneJanitorRun({ enabled: true, dryRun: raw.dryRun ?? false, report });
+      };
+    },
+    // Same laziness for the artifact janitor's on-demand sweep — it, and the process sampler it
+    // needs `ps` rows from, are both built later than this monitor (both `const`s below; the
+    // closure only resolves them once called, well after bootstrap finishes building them).
+    getArtifactJanitorRunner: () => {
+      return async () => {
+        const raw = daemonConfigStore.get().artifactJanitor;
+        if (raw?.enabled !== true) {
+          return summarizeArtifactJanitorRun({ enabled: false, dryRun: false, result: null });
+        }
+        // An unreadable process table must not read as "nothing uses these simulators".
+        const table = await processSampler.sampleProcessTable();
+        if (table.status === "failed") {
+          return {
+            state: "live",
+            outcome: "skipped",
+            detail: "processes could not be sampled, so nothing could be proven unused",
+          };
+        }
+        const result = await testArtifactJanitor.sweep({ rows: table.rows });
+        return summarizeArtifactJanitorRun({ enabled: true, dryRun: raw.dryRun ?? false, result });
+      };
+    },
+  });
   const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
     workspaceRegistry,
@@ -893,6 +1637,45 @@ export async function createPaseoDaemon(
     workspaceGitService,
     logger,
   });
+  // The device cap (docs/device-leases.md). Built before the provider runtime because the
+  // providers take its launch gate, and handed the agent list below once AgentManager exists —
+  // it only ever reads ids, so a late binding costs nothing.
+  const processSampler = createSystemProcessSampler({ logger });
+  let listDeviceLeaseAgents: () => readonly DeviceLeaseAgentSummary[] = () => [];
+  let sendDeviceLeaseMessageToAgent: (agentId: string, body: string) => Promise<void> = async () =>
+    undefined;
+  const deviceLeaseManager = new DeviceLeaseManager({
+    processSampler,
+    readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
+    listAgents: () => listDeviceLeaseAgents(),
+    sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
+    logger: logger.child({ module: "device-leases" }),
+  });
+  deviceLeaseManager.reportMode();
+
+  // The artifact janitor (docs/artifact-janitor.md). Built next to the cap and wrapped around
+  // its launch gate, so one PreToolUse hook serves both: the janitor refuses a launch onto a
+  // full volume and notes a test run's cleanup obligation, then the cap decides about slots.
+  const testArtifactJanitor = new TestArtifactJanitor({
+    homeDir: homedir(),
+    readDaemonConfig: () => ({ artifactJanitor: daemonConfigStore.get().artifactJanitor }),
+    listAgentIds: () => listDeviceLeaseAgents().map((agent) => agent.agentId),
+    listLeasedDeviceIds: () => deviceLeaseManager.listLeasedDeviceIds(),
+    logger: logger.child({ module: "artifact-janitor" }),
+  });
+  // Work snapshots (docs/work-snapshots.md): the done janitor, the work-at-risk sweep and the
+  // stalled-agent sweep all snapshot through this one instance.
+  const worktreeSnapshotter = new GitWorktreeSnapshotter({
+    readConfig: () => resolveWorkSnapshotsConfig(daemonConfigStore.get().remediation),
+    paseoHome: config.paseoHome,
+    logger: logger.child({ module: "work-snapshots" }),
+  });
+  const deviceLaunchGate = createArtifactAwareLaunchGate({
+    janitor: testArtifactJanitor,
+    inner: deviceLeaseManager,
+    logger: logger.child({ module: "artifact-janitor" }),
+  });
+
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
     logger,
@@ -902,6 +1685,7 @@ export async function createPaseoDaemon(
       providerOverrides: config.providerOverrides,
       workspaceGitService,
       managedProcesses,
+      deviceLaunchGate,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -919,6 +1703,11 @@ export async function createPaseoDaemon(
     if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
+  // The title tracker needs the AgentManager instance it's scheduling
+  // refreshes against, but AgentManager needs a callback at construction
+  // time. Break the cycle with a reassignable closure; pointed at the real
+  // tracker once it's constructed below.
+  let handleAgentTurnFinished: (params: { agentId: string; cwd: string }) => void = () => {};
   const agentManager = new AgentManager({
     pluginLifecycle: pluginRuntime,
     clients: initialAgentManagerState.clients,
@@ -928,10 +1717,38 @@ export async function createPaseoDaemon(
     onWorkspaceStateMayHaveChanged: ({ cwd }) => {
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
+    onAgentTurnFinished: (params) => handleAgentTurnFinished(params),
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
+  });
+  // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
+  // before AgentManager because the providers need its gate, and it only reads the agent list.
+  listDeviceLeaseAgents = () =>
+    agentManager.listAgentsForResourceMonitor().map((agent) => ({
+      agentId: agent.id,
+      provider: agent.provider,
+      isRunning: agent.isRunning,
+    }));
+  // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
+  // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).
+  sendDeviceLeaseMessageToAgent = async (agentId, body) => {
+    await sendPromptToAgent({
+      agentManager,
+      agentStorage,
+      agentId,
+      prompt: formatSystemNotificationPrompt(body),
+      activeTurnBehavior: "steer",
+      unarchive: false,
+      logger,
+    });
+  };
+  // The status surface clients subscribe to (`device_status_update`), reachable from Session
+  // through the AgentManager it already holds.
+  agentManager.setDeviceLeaseStatusSource({
+    getSnapshot: () => deviceLeaseManager.getSnapshot(),
+    subscribe: (listener) => deviceLeaseManager.subscribe(listener),
   });
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
@@ -948,6 +1765,57 @@ export async function createPaseoDaemon(
   );
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
+  // Before any agent can start a turn: the cap on concurrent child turns, and the pacer every
+  // bulk resume path shares (docs/resource-monitor.md, "Child admission and resume pacing").
+  const admissionQueuePath = path.join(config.paseoHome, "admission", "queue.json");
+  const heldTurnsAtBoot = await loadHeldTurns(admissionQueuePath, logger);
+  const childAdmission = new ChildAdmissionController({
+    readConfig: () => daemonConfigStore.get().admission,
+    listAgents: () => agentManager.listAgentsForAdmission(),
+    logger,
+    queueFilePath: admissionQueuePath,
+  });
+  childAdmission.adoptRestored(heldTurnsAtBoot);
+  agentManager.setChildAdmission(childAdmission);
+  // A raised cap or a disable applies to the children already waiting, not only to new ones.
+  daemonConfigStore.onChange(() => childAdmission.pump());
+  const resumePacer = new ResumePacer({
+    readSettings: () => {
+      const settings = childAdmission.settings();
+      return { enabled: settings.enabled, perMinute: settings.bulkResumesPerMinute };
+    },
+    logger,
+  });
+
+  // Before anything can load or prompt an agent: the open run markers are the only record of who
+  // was mid-turn when the last daemon stopped, and the first new turn would replace them.
+  const restartRecovery = await RestartRecoveryService.capture({
+    agentStorage,
+    agentManager,
+    config: config.restartRecovery,
+    logger: logger.child({ module: "restart-recovery" }),
+    isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
+    paceResume: (resume, fn) => resumePacer.run(resume, fn),
+  });
+  // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
+  // the records, so a restart still knows who is waiting to hear back. Recovery decides who was
+  // mid-turn and resumes them; the ledger leaves alone any agent recovery has claimed.
+  const finishObligations = createFinishObligationService({
+    config,
+    agentManager,
+    agentStorage,
+    daemonConfigStore,
+    restartRecovery,
+    serverId,
+    logger,
+    paceResume: (resume, fn) => resumePacer.run(resume, fn),
+    isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
+  });
+  await finishObligations.initialize();
+  agentManager.setFinishObligations(finishObligations);
+  // Messages waiting for a busy agent live on its record, so a restart still delivers them.
+  const promptQueue = createPromptQueue({ agentManager, agentStorage, logger });
+  agentManager.setPromptQueue(promptQueue);
   await bootstrapWorkspaceRegistries({
     serverId,
     paseoHome: config.paseoHome,
@@ -1012,6 +1880,8 @@ export async function createPaseoDaemon(
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       resolveFirstAgentPromptTitle(firstAgentContext),
+      undefined,
+      { titleSource: "auto" },
     );
     if (firstAgentContext) {
       workspaceAutoName.scheduleForDirectory({
@@ -1086,6 +1956,43 @@ export async function createPaseoDaemon(
     },
     logger,
   });
+
+  const agentTitleTracker = new AgentTitleTracker({
+    agentManager,
+    agentStorage,
+    providerSnapshotManager,
+    workspaceGitService,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    logger,
+  });
+  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
+  agentTitleTracker.start();
+
+  const workspaceTitleTracker = new WorkspaceTitleTracker({
+    agentManager,
+    workspaceRegistry,
+    providerSnapshotManager,
+    workspaceGitService,
+    readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
+    emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
+      await emitWorkspaceUpdatesExternal([workspaceId]);
+    },
+    logger,
+  });
+  workspaceTitleTracker.start();
+
+  // Refocus (docs/refocus.md). Needs nothing but the manager and live config, so it is watching
+  // before the first prompt can be dispatched.
+  const agentRefocus = new AgentRefocus({
+    agentManager,
+    readDaemonConfig: () => ({ refocus: daemonConfigStore.get().refocus }),
+    logger: logger.child({ module: "refocus" }),
+  });
+  agentManager.setPromptDispatchInterceptor((agentId, prompt) =>
+    agentRefocus.interceptPrompt(agentId, prompt),
+  );
+  agentRefocus.start();
+  daemonConfigStore.onChange(() => agentRefocus.reportMode());
 
   setupAutoArchiveOnMerge({
     paseoHome: config.paseoHome,
@@ -1274,6 +2181,8 @@ export async function createPaseoDaemon(
     const workspace = await workspaceProvisioning.createWorkspaceForDirectory(
       input.cwd,
       resolveFirstAgentPromptTitle(input.firstAgentContext),
+      undefined,
+      { titleSource: "auto" },
     );
     workspaceAutoName.scheduleForDirectory({
       workspaceId: workspace.workspaceId,
@@ -1340,6 +2249,7 @@ export async function createPaseoDaemon(
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
   await scheduleService.start();
+  agentManager.startProviderSubagentSweep();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1382,6 +2292,8 @@ export async function createPaseoDaemon(
         cwd,
         title,
         projectId,
+        // The caller named it deliberately; the tracker leaves it alone.
+        title ? { titleSource: "manual" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;
@@ -1412,6 +2324,7 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
+    deviceLeaseManager,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -1432,6 +2345,36 @@ export async function createPaseoDaemon(
   agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
   setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
+
+  // MCP gateway (U1/U2): daemon-side client + auth authority for brokered external MCP
+  // servers, and the /mcp/gateway/* routes agent sessions relay through. Constructed with
+  // whatever `mcpGateway` config the daemon started with — live reconfiguration is out of
+  // scope here (see McpGateway's class doc) — and started (fire-and-forget, below, after
+  // wsServer is accepting connections) once the daemon's own reachable base URL is known
+  // (needed for the OAuth redirect_uri, KTD3). Non-blocking so an unreachable upstream
+  // never delays the daemon that manages all agents from coming up.
+  const mcpGateway = new McpGateway({
+    paseoHome: config.paseoHome,
+    config: resolveMcpGatewayConfig(daemonConfigStore.get().mcpGateway),
+    logger,
+  });
+  installMcpGatewayRoutes(app, {
+    gateway: mcpGateway,
+    capabilityToken: mcpGatewayAuthToken,
+    password: config.auth?.password,
+    mcpDebug: config.mcpDebug,
+    logger,
+  });
+  // U3: wires the gateway + its distinct capability token into session injection
+  // (`prepareSessionConfig`'s `withRuntimeMcpGatewayServers`). Deferred to a setter rather than
+  // a constructor option because the gateway is built after the agent manager.
+  agentManager.setMcpGateway(mcpGateway, mcpGatewayAuthToken);
+  // Servers adopted at runtime (docs/mcp-gateway.md) survive a restart by landing in
+  // config.json through the same patch path the app's config editor uses; the live gateway
+  // already holds them, so the store's "restart required" note for mcpGateway is moot here.
+  mcpGateway.setServerPersister((name, serverConfig) => {
+    daemonConfigStore.patch({ mcpGateway: { servers: { [name]: serverConfig } } });
+  });
 
   let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;
@@ -1599,10 +2542,22 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
+            // KTD3: prefer the daemon's configured public base URL (the service-proxy
+            // precedent) over the loopback fallback, so a reachable-from-elsewhere daemon
+            // gets a redirect_uri a remote browser can actually complete OAuth against.
+            applyMcpGatewayOAuthRedirectBaseUrl(
+              mcpGateway,
+              serviceProxyPublicBaseUrl,
+              boundListenTarget,
+            );
             const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
             agentMcpBaseUrl =
               !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
+            // U3: the same loopback-normalized base the /mcp/agents entry uses (agent
+            // subprocesses run on this machine, same as the daemon) — distinct from the
+            // OAuth redirect base URL (KTD3), which prefers a publicly reachable address.
+            agentManager.setMcpGatewayBaseUrl(createMcpGatewayLoopbackBaseUrl(boundListenTarget));
             agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
             daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
               mcpEnabled = value !== false;
@@ -1717,10 +2672,336 @@ export async function createPaseoDaemon(
               pluginRuntime,
               orchestrationSkills,
               workspaceLabelService,
+              worktreeDiskMonitor
+                ? {
+                    get: (workspaceId) => worktreeDiskMonitor!.getDiskUsage(workspaceId),
+                    requestSample: (workspaceId, cwd) =>
+                      worktreeDiskMonitor!.requestSample(workspaceId, cwd),
+                  }
+                : undefined,
+              restartRecovery,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
+            worktreeDiskMonitor?.start();
+            // Fire-and-forget, like worktreeDiskMonitor above: an unreachable upstream
+            // must not delay the daemon that manages all agents from accepting
+            // connections. Errors surface per-server via getServerState()/mcp_status_update
+            // rather than here.
+            void mcpGateway.start().catch((error: unknown) => {
+              logger.warn({ err: error }, "MCP gateway failed to start one or more servers");
+            });
+            // Wired here (rather than at construction, above) for the same reason as the
+            // token-burn monitor below: the push sender doesn't exist until wsServer does.
+            mcpGateway.setNotifier({
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+            });
+            // Wired here (rather than beside AgentTitleTracker, above) because it needs the
+            // push sender wsServer resolved (injected override, or its own
+            // createPushNotifications) — not available until wsServer exists.
+            // Captured before the closure: `wsServer` is a mutable binding at this scope, so
+            // reaching through it from inside readProviderUsage loses its non-null narrowing.
+            const providerUsageService = wsServer.getProviderUsageService();
+            agentTokenBurnMonitor = new AgentTokenBurnMonitor({
+              agentManager,
+              agentStorage,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
+              serverId,
+              // Same steer path AgentResourceMonitor uses below, for the same reason: it is
+              // the only way to put a system-authored message into a live turn.
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+              // The sampler shares the monitor's 60s loop and the usage service's cache; the
+              // store is the one the sessions read, so a request sees what was just recorded.
+              usageHistory: new UsageHistorySampler({
+                store: wsServer.getUsageHistoryStore(),
+                readProviderUsage: async () => (await providerUsageService.listUsage()).providers,
+                readSettings: () => daemonConfigStore.get().tokenBurnMonitor?.usageHistory,
+                logger,
+              }),
+              // So the governor's downgrade never sets a model the agent's provider does not
+              // have. `downgradeToModel` is one string for a fleet that is not one provider.
+              listProviderModels: async (provider) =>
+                (await providerSnapshotManager.listModels({ provider })).map((model) => model.id),
+              readDaemonConfig: () => ({
+                tokenBurnMonitor: daemonConfigStore.get().tokenBurnMonitor,
+                providers: daemonConfigStore.get().providers,
+              }),
+              logger,
+            });
+            agentTokenBurnMonitor.start();
+            // Same push sender as the token-burn monitor above. Reads its settings from the same
+            // config block but is switched on by its own flag, off unless set.
+            agentModelDivergenceMonitor = new AgentModelDivergenceMonitor({
+              agentManager,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readSettings: () => daemonConfigStore.get().tokenBurnMonitor?.modelDivergence,
+              logger,
+            });
+            agentModelDivergenceMonitor.start();
+            // Wired here for the same reason as the token-burn monitor above — needs the push
+            // sender wsServer resolved. sendSystemMessageToAgent reuses the same steer path
+            // chat mentions and notify-on-finish use (agent-prompt.ts's sendPromptToAgent).
+            agentResourceMonitor = new AgentResourceMonitor({
+              agentManager,
+              agentStorage,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              remediationSink,
+              serverId,
+              processSampler,
+              saturationLedger: createSaturationLedger({ paseoHome: config.paseoHome, logger }),
+              // The cap counts devices from this same sweep sample rather than taking its own
+              // `ps` — one scan a minute on a machine that is already struggling.
+              reportDeviceSample: (sample) => deviceLeaseManager.reconcileFromSample(sample),
+              // Same deal for the artifact janitor: it needs the sweep's `ps` rows to prove
+              // nothing still references a simulator directory before it deletes one.
+              sweepTestArtifacts: (input) => testArtifactJanitor.sweep(input),
+              // The saturation rung holds new child turns until load falls; running turns and
+              // root agents are untouched (docs/resource-monitor.md).
+              holdChildAdmission: (held, reason) =>
+                childAdmission.setHold("cpu-saturation", held, reason),
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              readDaemonConfig: () => ({
+                resourceMonitor: daemonConfigStore.get().resourceMonitor,
+              }),
+              logger,
+            });
+            agentResourceMonitor.start();
+            // A reload or a config patch logs each monitor's new mode now rather than at its next
+            // sweep, a minute later — the moment someone is most likely to be checking.
+            const tokenBurnMonitorForModeLog = agentTokenBurnMonitor;
+            const resourceMonitorForModeLog = agentResourceMonitor;
+            const modelDivergenceMonitorForModeLog = agentModelDivergenceMonitor;
+            daemonConfigStore.onChange(() => {
+              tokenBurnMonitorForModeLog.reportMode();
+              modelDivergenceMonitorForModeLog.reportMode();
+              resourceMonitorForModeLog.reportMode();
+              deviceLeaseManager.reportMode();
+            });
+            pluginConnectionMonitor = new PluginConnectionMonitor({
+              listConnectivity: () => pluginRuntime.listSessionConnectivity(),
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              logger,
+            });
+            pluginConnectionMonitor.start();
+            accountFailoverMonitor = createAccountFailoverMonitor({
+              config,
+              agentManager,
+              agentStorage,
+              workspaceProvisioning,
+              wsServer,
+              daemonConfigStore,
+              remediationSink,
+              restartRecovery,
+              serverId,
+              logger,
+              paceResume: (resume, fn) => resumePacer.run(resume, fn),
+            });
+            accountFailoverMonitor.start();
+            finishObligations.start({
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+            });
+            // Fire-and-forget: the pacer spreads these over minutes, and each goes through
+            // admission again. Steer, so a child someone already prompted is never cancelled.
+            void restoreHeldTurns({
+              controller: childAdmission,
+              pacer: resumePacer,
+              held: heldTurnsAtBoot,
+              dispatch: async (turn) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId: turn.agentId,
+                  prompt: turn.prompt,
+                  ...(turn.runOptions ? { runOptions: turn.runOptions } : {}),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  // If it queues again, it keeps its place in line rather than joining the back.
+                  queuedAt: turn.queuedAt,
+                  logger,
+                });
+              },
+              logger,
+            });
+            // Messages waiting for a busy agent before the restart, from its record, in order.
+            void promptQueue.resume().catch((error: unknown) => {
+              logger.error({ err: error }, "Failed to resume messages queued before the restart");
+            });
+            // Advice-only sibling of the two monitors above: it reads the same cached usage rows
+            // the failover monitor does and the same steer path, and never acts on either.
+            budgetPacingMonitor = new AgentBudgetPacingMonitor({
+              agentManager,
+              providerUsage: providerUsageService,
+              sendSystemMessageToAgent: async (agentId, body) => {
+                await sendPromptToAgent({
+                  agentManager,
+                  agentStorage,
+                  agentId,
+                  prompt: formatSystemNotificationPrompt(body),
+                  activeTurnBehavior: "steer",
+                  unarchive: false,
+                  logger,
+                });
+              },
+              readDaemonConfig: () => ({
+                budgetPacing: daemonConfigStore.get().budgetPacing,
+                providers: daemonConfigStore.get().providers,
+              }),
+              logger,
+            });
+            budgetPacingMonitor.start();
+            // Starts its own turns rather than steering, through startTurnIfIdle, so it takes no
+            // sendSystemMessageToAgent: every message it sends waits for an idle agent.
+            leaderCompactionMonitor = new AgentLeaderCompactionMonitor({
+              agentManager,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              serverId,
+              readDaemonConfig: () => ({
+                leaderCompaction: daemonConfigStore.get().leaderCompaction,
+              }),
+              logger,
+              sweepIntervalMs: config.leaderCompactionOverrides?.sweepIntervalMs,
+            });
+            leaderCompactionMonitor.start();
+            const leaderCompactionMonitorForModeLog = leaderCompactionMonitor;
+            daemonConfigStore.onChange(() => leaderCompactionMonitorForModeLog.reportMode());
+            doneJanitor = createDoneJanitor({
+              config,
+              agentManager,
+              agentStorage,
+              workspaceRegistry,
+              projectRegistry,
+              scheduleService,
+              terminalManager,
+              archiveWorkspaceById: archiveWorkspaceByIdExternal,
+              wsServer,
+              daemonConfigStore,
+              worktreeSnapshotter,
+              serverId,
+              logger,
+            });
+            doneJanitor.start();
+            remediationLadder = createRemediationLadder({
+              config,
+              agentManager,
+              agentStorage,
+              createAgent,
+              wsServer,
+              daemonConfigStore,
+              serverId,
+              logger,
+            });
+            remediationSink.attach(remediationLadder);
+            // The weekly token audit: seven deterministic checks, no model. Only a new RED or a
+            // regression reaches the ladder above, as one small advisory agent (docs/token-audit.md).
+            const tokenAuditPushSender = wsServer.getPushNotificationSender();
+            tokenAuditJob = new TokenAuditJob({
+              paseoHome: config.paseoHome,
+              buildContext: () =>
+                buildDoctorContext({
+                  paseoHome: config.paseoHome,
+                  facts: {
+                    source: "daemon",
+                    daemon: null,
+                    plugins: null,
+                    agents: null,
+                    workspaces: null,
+                    usage: null,
+                  },
+                }),
+              readConfig: () =>
+                resolveTokenAuditConfig(
+                  tokenAuditSection(readRawConfig(config.paseoHome).rawConfig),
+                ),
+              sink: remediationSink,
+              getPushNotificationSender: () => tokenAuditPushSender,
+              serverId,
+              logger: logger.child({ module: "token-audit" }),
+            });
+            tokenAuditJob.start();
+            // Fire-and-forget: reconciling in-flight agents reads agent state and must not delay
+            // the daemon from accepting connections.
+            void remediationLadder.start().catch((error: unknown) => {
+              logger.error({ err: error }, "Remediation ladder failed to start");
+            });
+            const stallSweep = createAgentStallSweep({
+              agentManager,
+              agentStorage,
+              processSampler,
+              wsServer,
+              daemonConfigStore,
+              sink: remediationSink,
+              snapshotter: worktreeSnapshotter,
+              logger,
+              paceResume: (resume, fn) => resumePacer.run(resume, fn),
+            });
+            agentStallSweep = stallSweep;
+            stallSweep.start();
+            daemonConfigStore.onChange(() => stallSweep.reportMode());
+            workSnapshotSweep = new AgentWorkSnapshotSweep({
+              dependencies: {
+                listAgents: async () =>
+                  buildWorkSnapshotAgentViews({
+                    live: agentManager.listAgentsForDoneJanitor(),
+                    stored: await agentStorage.list(),
+                    lastErrors: new Map(
+                      agentManager
+                        .listAgentsForAccountFailover()
+                        .map((agent) => [agent.id, agent.lastError]),
+                    ),
+                  }),
+                listActiveWorkspaceDirectories: async () =>
+                  (await workspaceRegistry.list())
+                    .filter((workspace) => !workspace.archivedAt)
+                    .map((workspace) => workspace.worktreeRoot ?? workspace.cwd),
+                listOrphanCandidates: async () =>
+                  listPaseoWorktreeDirectories(
+                    resolvePaseoWorktreesBaseRoot({
+                      paseoHome: config.paseoHome,
+                      worktreesRoot: config.worktreesRoot,
+                    }),
+                  ),
+                snapshotter: worktreeSnapshotter,
+              },
+              sink: remediationSink,
+              readConfig: () => daemonConfigStore.get().remediation,
+              statePath: path.join(config.paseoHome, "work-snapshots.json"),
+              logger: logger.child({ module: "work-snapshots" }),
+            });
+            workSnapshotSweep.start();
+            daemonVitals = startDaemonVitals({
+              config: config.daemonVitals,
+              paseoHome: config.paseoHome,
+              serverId,
+              pushNotificationSender: wsServer.getPushNotificationSender(),
+              logger,
+            });
+            restartRecovery.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -1775,22 +3056,65 @@ export async function createPaseoDaemon(
     }
   };
 
+  // The periodic monitors, sweeps and jobs, in the order stop() has always stopped them. Split out
+  // of stop() to keep it under the complexity limit.
+  const stopMonitorsAndSweeps = () => {
+    agentModelDivergenceMonitor?.stop();
+    agentResourceMonitor?.stop();
+    deviceLeaseManager.stop();
+    pluginConnectionMonitor?.stop();
+    accountFailoverMonitor?.stop();
+    budgetPacingMonitor?.stop();
+    leaderCompactionMonitor?.stop();
+    doneJanitor?.stop();
+    remediationLadder?.stop();
+    tokenAuditJob?.stop();
+    agentStallSweep?.stop();
+    workSnapshotSweep?.stop();
+    worktreeDiskMonitor?.stop();
+  };
+
   const stop = async () => {
     await pluginRuntime.stopAllPlugins();
     unsubscribePluginProviders();
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
+    restartRecovery.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
+    resumePacer.stop();
+    // Before the closures below: each one would otherwise read as its child's outcome.
+    finishObligations.prepareForShutdown();
+    // What is still queued stays on the agent records for the next daemon to deliver.
+    promptQueue.stop();
     await closeAllAgents(logger, agentManager);
     await agentManager.flushForShutdown().catch(() => undefined);
+    // Held child prompts must be on disk before exit; bounded, so a stuck disk can't hang it.
+    await withTimeout(
+      childAdmission.flush(),
+      ADMISSION_QUEUE_FLUSH_TIMEOUT_MS,
+      "Timed out saving held child turns",
+    ).catch((error: unknown) => {
+      logger.warn({ err: error }, "Held child turns may be missing from the admission queue");
+    });
+    await finishObligations.stop().catch(() => undefined);
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
     await agentProviderRuntime.shutdown();
     terminalManager.killAll();
     await speechService.stop();
+    agentManager.stopProviderSubagentSweep();
+    agentTitleTracker.stop();
+    workspaceTitleTracker.stop();
+    agentManager.setPromptDispatchInterceptor(null);
+    agentRefocus.stop();
+    agentTokenBurnMonitor?.stop();
+    // After the monitor stops: its last sweep's readings are still in memory, not on disk.
+    await wsServer?.getUsageHistoryStore().close();
+    stopMonitorsAndSweeps();
+    await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
@@ -1808,6 +3132,9 @@ export async function createPaseoDaemon(
     await new Promise<void>((resolve) => {
       httpServer.close(() => resolve());
     });
+    // Last, so a wedge during any earlier step is still observed and the heartbeat file only says
+    // "stopped" once everything else has.
+    await daemonVitals?.stop();
     // Clean up socket files
     if (listenTarget.type === "socket" && existsSync(listenTarget.path)) {
       unlinkSync(listenTarget.path);
@@ -1822,9 +3149,19 @@ export async function createPaseoDaemon(
     serviceProxy,
     scriptRuntimeStore,
     browserToolsBroker,
+    // The gateway instance and its distinct capability token (KTD1) — the accessor session
+    // injection (U3) will need to build brokered `mcpServers` entries.
+    mcpGateway,
+    getMcpGatewayAuthToken: () => mcpGatewayAuthToken,
     start,
     stop,
     getListenTarget: () => boundListenTarget,
+    getAccountFailoverMonitor: () => accountFailoverMonitor,
+    getDoneJanitor: () => doneJanitor,
+    getRemediationLadder: () => remediationLadder,
+    getFinishObligations: () => finishObligations,
+    getLeaderCompactionMonitor: () => leaderCompactionMonitor,
+    getRestartRecovery: () => restartRecovery,
   };
 }
 

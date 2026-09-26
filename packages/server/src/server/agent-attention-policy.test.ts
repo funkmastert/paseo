@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  attentionPushLevel,
   computeNotificationPlan,
   isPushEligibleAttentionReason,
   type ClientPresenceState,
@@ -230,5 +231,21 @@ describe("isPushEligibleAttentionReason", () => {
     expect(isPushEligibleAttentionReason("finished")).toBe(true);
     expect(isPushEligibleAttentionReason("permission")).toBe(true);
     expect(isPushEligibleAttentionReason("error")).toBe(false);
+  });
+});
+
+describe("attentionPushLevel", () => {
+  const child = { "paseo.parent-agent-id": "leader-1" };
+
+  it("makes a finished root agent an alert", () => {
+    expect(attentionPushLevel("finished", {})).toBe("alert");
+  });
+
+  it("lets a delegated child's finish wait for a digest", () => {
+    expect(attentionPushLevel("finished", child)).toBe("notice");
+  });
+
+  it("never demotes a permission request, even a child's", () => {
+    expect(attentionPushLevel("permission", child)).toBe("alert");
   });
 });

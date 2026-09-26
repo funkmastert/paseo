@@ -38,6 +38,7 @@ import {
   type ProviderRefreshContext,
   type ResolveAgentDefaultModeInput,
 } from "../agent-sdk-types.js";
+import { weighTokenUsage } from "../token-rate-tracker.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
 import { runProviderRefreshActivity } from "../provider-refresh-deadline.js";
 import type { Logger } from "pino";
@@ -49,6 +50,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
+import {
+  evaluateDeviceLaunchApproval,
+  explainDeviceLaunchRefusal,
+} from "../device-launch-approval.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import { renderPromptAttachmentAsText } from "../prompt-attachments.js";
 import { composeSystemPromptParts } from "../system-prompt.js";
 import { curateAgentActivity } from "../activity-curator.js";
@@ -254,6 +260,11 @@ interface CodexAppServerClientLike {
 
 interface CodexAppServerAgentDeps {
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
+  /**
+   * The device cap's launch gate (docs/device-leases.md). Codex has no hook, so the strongest
+   * thing available is its own command-approval request — which Full Access never sends.
+   */
+  deviceLaunchGate?: DeviceLaunchGate;
   customProvider?: {
     id: string;
     label: string;
@@ -929,6 +940,30 @@ function filterCodexThreadsByCwd(
   return threads.filter(
     (thread) => typeof thread.cwd === "string" && belongsToWorkspace(thread.cwd),
   );
+}
+
+/**
+ * Per-turn token delta for the burn-rate tracker (input + output + cached-read). Codex's
+ * `thread/tokenUsage/updated` notification carries `last` — the last exchange's own usage, not
+ * a session-cumulative total (unlike OpenCode/ACP) — so this just sums the fields already
+ * extracted by `toAgentUsage`, mirroring the Claude adapter's `buildTurnTokenDelta`.
+ */
+export function buildCodexTurnTokenDelta(usage: AgentUsage | undefined): number | undefined {
+  if (!usage) {
+    return undefined;
+  }
+  // Codex reports `cachedInputTokens` as a SUBSET of `inputTokens` (codex-rs's
+  // TokenUsage::non_cached_input is input − cached; total_tokens = input + output), unlike
+  // Anthropic, where cache reads sit outside input_tokens. Split before weighting, or every
+  // cached token counts once at full price and again at the cache rate.
+  const inputTokens = usage.inputTokens ?? 0;
+  const cachedInputTokens = Math.min(usage.cachedInputTokens ?? 0, inputTokens);
+  const total = weighTokenUsage({
+    inputTokens: inputTokens - cachedInputTokens,
+    cacheReadInputTokens: cachedInputTokens,
+    outputTokens: usage.outputTokens,
+  });
+  return total > 0 ? total : undefined;
 }
 
 export function toAgentUsage(tokenUsage: unknown): AgentUsage | undefined {
@@ -3359,6 +3394,14 @@ export class CodexAppServerAgentSession implements AgentSession {
   private warnedInvalidNotificationPayloads = new Set<string>();
   private warnedIncompleteEditToolCallIds = new Set<string>();
   private latestUsage: AgentUsage | undefined;
+  /**
+   * The most recent `thread/tokenUsage/updated` usage, consumed exactly once by the next
+   * `turn_completed` to feed the token-rate tracker. `usage.last` is already scoped to the last
+   * exchange (not a session-cumulative total), so no diffing is needed here, unlike OpenCode/ACP
+   * — but unlike `latestUsage` it must be cleared after each turn so a turn with no new usage
+   * notification doesn't re-report the previous turn's tokens as its own.
+   */
+  private pendingTurnTokenUsage: AgentUsage | undefined;
   private latestPlanResult: { callId: string; text: string; turnId: string | null } | null = null;
   private readonly userMessageTurnIndexes = new Map<string, number>();
   private readonly userMessageTurnIds: string[] = [];
@@ -5952,10 +5995,13 @@ export class CodexAppServerAgentSession implements AgentSession {
       if (this.planModeEnabled && this.latestPlanResult?.text) {
         this.emitSyntheticPlanApprovalRequest(this.latestPlanResult.text);
       }
+      const turnTokenDelta = buildCodexTurnTokenDelta(this.pendingTurnTokenUsage);
+      this.pendingTurnTokenUsage = undefined;
       this.emitEvent({
         type: "turn_completed",
         provider: CODEX_PROVIDER,
         usage: this.latestUsage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
       });
     }
     this.activeForegroundTurnId = null;
@@ -5968,6 +6014,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   }
 
   private resetTurnTrackingState(): void {
+    this.pendingTurnTokenUsage = undefined;
     this.latestPlanResult = null;
     this.emittedItemStartedIds.clear();
     this.emittedItemCompletedIds.clear();
@@ -6019,6 +6066,7 @@ export class CodexAppServerAgentSession implements AgentSession {
   ): void {
     this.latestUsage = toAgentUsage(parsed.tokenUsage);
     if (this.latestUsage) {
+      this.pendingTurnTokenUsage = this.latestUsage;
       this.notifySubscribers({
         type: "usage_updated",
         provider: CODEX_PROVIDER,
@@ -6751,7 +6799,7 @@ export class CodexAppServerAgentSession implements AgentSession {
     );
   }
 
-  private handleCommandApprovalRequest(params: unknown): Promise<unknown> {
+  private async handleCommandApprovalRequest(params: unknown): Promise<unknown> {
     const parsed = z
       .object({
         itemId: z.string(),
@@ -6762,6 +6810,32 @@ export class CodexAppServerAgentSession implements AgentSession {
         reason: z.string().nullable().optional(),
       })
       .parse(params);
+
+    // The device cap's only say over Codex. It answers before the request reaches a person or
+    // an auto-approver, so a device launch with no slot is declined rather than queued behind
+    // Tyler's attention (docs/device-leases.md).
+    const refusal = await evaluateDeviceLaunchApproval({
+      gate: this.deps.deviceLaunchGate,
+      agentId: this.agentId,
+      command: parsed.command,
+      logger: this.logger,
+    });
+    if (refusal) {
+      this.emitEvent({
+        type: "timeline",
+        provider: CODEX_PROVIDER,
+        item: { type: "assistant_message", text: formatOutOfBandStatusMessage(refusal) },
+      });
+      // Codex's approval response is a bare decision, so the reason travels separately.
+      explainDeviceLaunchRefusal({
+        gate: this.deps.deviceLaunchGate,
+        agentId: this.agentId,
+        message: refusal,
+        logger: this.logger,
+      });
+      return { decision: "decline" };
+    }
+
     const commandPreview = mapCodexExecNotificationToToolCall({
       callId: parsed.itemId,
       command: parsed.command,
@@ -7032,6 +7106,7 @@ export class CodexAppServerAgentClient implements AgentClient {
       "provider.codex.spawn",
     );
     const child = spawnProcess(launchPrefix.command, args, {
+      priority: "agent",
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
       ...createProviderEnvSpec({

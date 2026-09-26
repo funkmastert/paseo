@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,10 +18,17 @@ import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import { getOpenAgentTabLabel, PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
-import { formatSystemNotificationPrompt, startAgentRun } from "./agent-prompt.js";
+import {
+  createPromptQueue,
+  formatSystemNotificationPrompt,
+  sendPromptToAgent,
+  startAgentRun,
+} from "./agent-prompt.js";
 import { StaleProviderSessionError } from "./stale-provider-session-error.js";
+import { McpGatewayActionError } from "../mcp-gateway/action-failure.js";
 import { ensureAgentLoaded, ensureUnarchivedAgentLoaded } from "./agent-loading.js";
 import type { StoredAgentRecord } from "./agent-storage.js";
+import type { ProviderSubagentStore } from "./provider-subagents/store.js";
 import type {
   AgentTimelineFetchOptions,
   AgentTimelineFetchResult,
@@ -29,6 +36,7 @@ import type {
   AgentTimelineStore,
 } from "./agent-timeline-store-types.js";
 import type {
+  AgentAccountAuth,
   AgentClient,
   AgentCreateSessionOptions,
   AgentFeature,
@@ -526,6 +534,44 @@ class TestAgentSession implements AgentSession {
   async close(): Promise<void> {}
 }
 
+/**
+ * A session whose turn stays open until it is interrupted, then reports `turn_canceled` — what
+ * a provider does when a run is stopped. `TestAgentSession` completes its turn synchronously,
+ * so it cannot be cancelled mid-flight.
+ */
+class CancelableTestAgentSession extends TestAgentSession {
+  private openTurnId: string | null = null;
+  private cancelNextTurn = true;
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    const turnId = `cancelable-turn-${randomUUID()}`;
+    this.openTurnId = turnId;
+    const shouldHang = this.cancelNextTurn;
+    this.cancelNextTurn = false;
+    setTimeout(() => {
+      this.pushEvent({ type: "turn_started", provider: "codex", turnId });
+      if (!shouldHang) {
+        this.pushEvent({ type: "turn_completed", provider: "codex", turnId });
+        this.openTurnId = null;
+      }
+    }, 0);
+    return { turnId };
+  }
+
+  override async interrupt(): Promise<void> {
+    const turnId = this.openTurnId;
+    if (!turnId) return;
+    this.openTurnId = null;
+    this.pushEvent({ type: "turn_canceled", provider: "codex", reason: "interrupted", turnId });
+  }
+}
+
+class CancelableTestAgentClient extends TestAgentClient {
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    return new CancelableTestAgentSession(config);
+  }
+}
+
 class ResumeTrackingTestAgentClient extends TestAgentClient {
   private readonly retryStarted = deferred<void>();
 
@@ -637,7 +683,13 @@ class UnsupportedSteeringSession extends TestAgentSession {
 async function startAndSteerThroughManager(
   session: AgentSession,
   behavior: "steer" | "interrupt" = "steer",
-): Promise<{ manager: AgentManager; agentId: string; workdir: string }> {
+  prompt = "replacement",
+): Promise<{
+  manager: AgentManager;
+  agentId: string;
+  workdir: string;
+  dispatch: { disposition: string };
+}> {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-steer-dispatch-"));
   const client = new (class extends TestAgentClient {
     override async createSession(): Promise<AgentSession> {
@@ -654,12 +706,12 @@ async function startAndSteerThroughManager(
     }
   })();
   await manager.waitForAgentRunStart(agent.id);
-  await startAgentRun(manager, agent.id, "replacement", logger, {
+  const dispatch = await startAgentRun(manager, agent.id, prompt, logger, {
     replaceRunning: true,
     activeTurnBehavior: behavior,
     runOptions: { clientMessageId: "replacement-client" },
   });
-  return { manager, agentId: agent.id, workdir };
+  return { manager, agentId: agent.id, workdir, dispatch };
 }
 
 test("uses an injected timeline store without making it a production requirement", async () => {
@@ -687,6 +739,859 @@ test("uses an injected timeline store without making it a production requirement
     );
   } finally {
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("emits agent state for lastActivitySummary only when the summary text actually changes", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-dedup-"));
+  class ManualTurnSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "manual-turn-1";
+      // Only fire turn_started — never turn_completed — so the test controls
+      // every timeline push and no unrelated emitState call races with it.
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      }, 0);
+      return { turnId };
+    }
+  }
+  const session = new ManualTurnSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+        // Drain so foreground state transitions apply.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const observedSummaries: string[] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          const summary = event.agent.lastActivitySummary;
+          if (typeof summary === "string") {
+            observedSummaries.push(summary);
+          }
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const toolCallA: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    const toolCallB: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-2",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/other.ts", content: "y" },
+    };
+
+    // Session events process through an internal per-agent promise queue
+    // (enqueueSessionEvent/sessionEventTails), not synchronously with
+    // pushEvent — drain it after each push so processing order is observed.
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Same summary text twice in a row must not double-emit; a real change must.
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallA });
+    await drain();
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallA });
+    await drain();
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCallB });
+    await drain();
+
+    unsubscribe();
+
+    expect(observedSummaries).toEqual(["[Read] src/index.ts", "[Read] src/other.ts"]);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/other.ts");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("streamed assistant/reasoning deltas never update lastActivitySummary, but a tool_call still does", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-streaming-"));
+  class ManualTurnSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      const turnId = "manual-turn-1";
+      setTimeout(() => {
+        this.pushEvent({ type: "turn_started", provider: this.provider, turnId });
+      }, 0);
+      return { turnId };
+    }
+  }
+  const session = new ManualTurnSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+        // Drain so foreground state transitions apply.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    let agentStateEmits = 0;
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          agentStateEmits += 1;
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Each of these simulates one coalesced flush window: a different
+    // mid-message fragment every time, which must never drive the summary.
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "Working on" },
+    });
+    await drain();
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "assistant_message", text: "Working on it now" },
+    });
+    await drain();
+    session.pushEvent({
+      type: "timeline",
+      provider: "codex",
+      item: { type: "reasoning", text: "Thinking about the next step" },
+    });
+    await drain();
+
+    expect(agentStateEmits).toBe(0);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBeUndefined();
+
+    const toolCall: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCall });
+    await drain();
+
+    unsubscribe();
+
+    expect(agentStateEmits).toBe(1);
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/index.ts");
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the stale activity summary from the emitted state", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-summary-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const toolCall: AgentTimelineItem = {
+      type: "tool_call",
+      callId: "call-1",
+      name: "read_file",
+      status: "completed",
+      error: null,
+      detail: { type: "read", filePath: "src/index.ts", content: "x" },
+    };
+    session.pushEvent({ type: "timeline", provider: "codex", item: toolCall });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBe("[Read] src/index.ts");
+
+    const emittedSummaries: Array<string | undefined> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedSummaries.push(event.agent.lastActivitySummary);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+    unsubscribe();
+
+    expect(manager.getAgent(agent.id)?.lastActivitySummary).toBeUndefined();
+    expect(emittedSummaries[emittedSummaries.length - 1]).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("emits agent state for mcp_server_statuses only when the statuses actually change (KTD8)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-mcp-server-statuses-dedup-"));
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const emittedStatuses: unknown[] = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedStatuses.push(event.agent.mcpServerStatuses);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const first = [{ name: "zeeq", status: "connected" }];
+
+    // Same statuses reported twice in a row (every turn's init message re-reports
+    // them, KTD8) must not double-emit; a real change must.
+    session.pushEvent({ type: "mcp_server_statuses", provider: "codex", statuses: first });
+    await drain();
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "codex",
+      statuses: [{ name: "zeeq", status: "connected" }],
+    });
+    await drain();
+    const second = [{ name: "zeeq", status: "needs-auth" }];
+    session.pushEvent({ type: "mcp_server_statuses", provider: "codex", statuses: second });
+    await drain();
+
+    unsubscribe();
+
+    expect(emittedStatuses).toEqual([first, second]);
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual(second);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the stale mcp_server_statuses from the emitted state (KTD8)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-mcp-server-statuses-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "codex",
+      statuses: [{ name: "zeeq", status: "needs-auth" }],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual([
+      { name: "zeeq", status: "needs-auth" },
+    ]);
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+async function createLiveEventAgent(
+  workdir: string,
+  agentConfig: { model?: string } = {},
+): Promise<{
+  manager: AgentManager;
+  agentId: string;
+  session: TestAgentSession;
+}> {
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let capturedSession: TestAgentSession | null = null;
+  class LiveEventClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      capturedSession = new TestAgentSession(config);
+      return capturedSession;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new LiveEventClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, ...agentConfig },
+    undefined,
+    { workspaceId: undefined },
+  );
+  return { manager, agentId: snapshot.id, session: capturedSession! };
+}
+
+describe("model divergence tracking", () => {
+  async function withAgent(
+    run: (agent: Awaited<ReturnType<typeof createLiveEventAgent>>) => Promise<void>,
+  ): Promise<void> {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-model-divergence-"));
+    const agent = await createLiveEventAgent(workdir, { model: "claude-sonnet-5" });
+    try {
+      await run(agent);
+    } finally {
+      // setAgentModel persists; let the write land before the directory goes.
+      await agent.manager.flush();
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  }
+
+  function observe(session: TestAgentSession, model: string): void {
+    session.pushEvent({ type: "model_observed", provider: "codex", model });
+  }
+
+  /** What a subscriber to one agent sees: the stream event types, and how many state emits. */
+  function watchAgent(manager: AgentManager, agentId: string) {
+    const watch = { seen: [] as string[], emits: 0, stop: () => {} };
+    watch.stop = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) watch.emits += 1;
+        if (event.type === "agent_stream") watch.seen.push(event.event.type);
+      },
+      { agentId, replayState: false },
+    );
+    return watch;
+  }
+
+  function divergenceOf(manager: AgentManager, agentId: string) {
+    return manager.listAgentsForModelDivergenceMonitor().find((entry) => entry.id === agentId)
+      ?.divergence;
+  }
+
+  test("a response on the configured model leaves no finding", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+    });
+  });
+
+  test("responses on another model are a finding, counted, and never forwarded or emitted", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      const watch = watchAgent(manager, agentId);
+
+      observe(session, "claude-opus-5");
+      observe(session, "claude-opus-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      watch.stop();
+      const { seen, emits } = watch;
+
+      expect(divergenceOf(manager, agentId)).toMatchObject({
+        configuredModel: "claude-sonnet-5",
+        observedModel: "claude-opus-5",
+        responses: 2,
+      });
+      expect(seen).not.toContain("model_observed");
+      expect(emits).toBe(0);
+    });
+  });
+
+  test("setAgentModel explains the response already in flight, then holds the old model to account", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-sonnet-5");
+      await manager.setAgentModel(agentId, "claude-haiku-4-5");
+
+      // The request that was streaming when the model changed still reports the old one.
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+
+      // The next request runs on the new model, which ends the transition.
+      observe(session, "claude-haiku-4-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+
+      // From here the old model is unexplained.
+      observe(session, "claude-sonnet-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toMatchObject({
+        configuredModel: "claude-haiku-4-5",
+        observedModel: "claude-sonnet-5",
+      });
+    });
+  });
+
+  test("setAgentModel drops a finding raised against the model it replaced", async () => {
+    await withAgent(async ({ manager, agentId, session }) => {
+      observe(session, "claude-opus-5");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(divergenceOf(manager, agentId)).toBeDefined();
+
+      await manager.setAgentModel(agentId, "claude-opus-5");
+
+      expect(divergenceOf(manager, agentId)).toBeUndefined();
+    });
+  });
+
+  test("a finding put on the wire appears in the snapshot and list projections, and clears", async () => {
+    await withAgent(async ({ manager, agentId }) => {
+      const alert = {
+        configuredModel: "claude-sonnet-5",
+        observedModel: "claude-opus-5",
+        firstObservedAt: "2026-09-23T12:00:00.000Z",
+        responses: 3,
+        persisted: true,
+      };
+      manager.setModelDivergenceAlert(agentId, alert);
+      const shown = manager.getAgent(agentId);
+      expect(shown && toAgentPayload(shown).modelDivergence).toEqual(alert);
+
+      manager.clearModelDivergenceAlert(agentId);
+      const cleared = manager.getAgent(agentId);
+      expect(cleared && toAgentPayload(cleared).modelDivergence).toBeUndefined();
+    });
+  });
+});
+
+test("usage_updated emits once per distinct usage and skips the snapshot write", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-usage-updated-"));
+  try {
+    const { manager, agentId, session } = await createLiveEventAgent(workdir);
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    const recordBefore = await storage.get(agentId);
+    let emits = 0;
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) emits += 1;
+      },
+      { agentId, replayState: false },
+    );
+
+    const usage = {
+      inputTokens: 10,
+      contextWindowMaxTokens: 200_000,
+      contextWindowUsedTokens: 175,
+    };
+    session.pushEvent({ type: "usage_updated", provider: "codex", usage });
+    session.pushEvent({ type: "usage_updated", provider: "codex", usage: { ...usage } });
+    session.pushEvent({
+      type: "usage_updated",
+      provider: "codex",
+      usage: { ...usage, contextWindowUsedTokens: 260 },
+    });
+    await vi.waitFor(() => {
+      expect(manager.getAgent(agentId)?.lastUsage?.contextWindowUsedTokens).toBe(260);
+    });
+    unsubscribe();
+
+    // Two distinct usages → two emits; the byte-identical repeat is dropped.
+    expect(emits).toBe(2);
+    // Live-only: the stored record is byte-identical to before the ticks.
+    expect(await storage.get(agentId)).toEqual(recordBefore);
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("turn_completed with a positive turnTokenDelta updates the token-rate buckets and total, adding no new emitState", async () => {
+  async function runScenario(turnTokenDelta: number | undefined) {
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-"));
+    try {
+      const { manager, agentId, session } = await createLiveEventAgent(workdir);
+      let emits = 0;
+      const unsubscribe = manager.subscribe(
+        (event) => {
+          if (event.type === "agent_state" && event.agent.id === agentId) emits += 1;
+        },
+        { agentId, replayState: false },
+      );
+
+      session.pushEvent({
+        type: "turn_completed",
+        provider: "codex",
+        turnId: "turn-1",
+        usage: { inputTokens: 5 },
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      unsubscribe();
+
+      const agent = manager.getAgent(agentId);
+      return { emits, tokenRateBuckets: agent?.tokenRateBuckets, totalTokens: agent?.totalTokens };
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  }
+
+  const withoutDelta = await runScenario(undefined);
+  const withDelta = await runScenario(40);
+
+  expect(withoutDelta.tokenRateBuckets).toBeUndefined();
+  expect(withoutDelta.totalTokens).toBeUndefined();
+  expect(withDelta.tokenRateBuckets).toEqual([expect.objectContaining({ tokens: 40 })]);
+  expect(withDelta.totalTokens).toBe(40);
+  // The bucket/total update rides whatever emitState the turn_completed handler already fires
+  // for lifecycle bookkeeping — it must not add a broadcast of its own.
+  expect(withDelta.emits).toBe(withoutDelta.emits);
+});
+
+test("turn_completed ignores a zero or negative turnTokenDelta", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-rate-zero-"));
+  try {
+    const { agentId, session, manager } = await createLiveEventAgent(workdir);
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 0,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-2",
+      turnTokenDelta: -5,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const agent = manager.getAgent(agentId);
+    expect(agent?.tokenRateBuckets).toBeUndefined();
+    expect(agent?.totalTokens).toBeUndefined();
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("reloading an agent keeps its spend and the governor's fired stages", async () => {
+  // A reload closes one session and opens another for the same agent. The budget is for the
+  // task, so zeroing the ledger here hid a 51M-token agent from a 40M governor on the live daemon.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-spend-"));
+  const session = new TestAgentSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+        override async resumeSession(): Promise<AgentSession> {
+          return new TestAgentSession({ provider: "codex", cwd: workdir });
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 40,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const governorState = {
+      budgetTokens: 1_000,
+      firedStages: ["notify"],
+    } as unknown as NonNullable<ReturnType<typeof manager.getSpendGovernorState>>;
+    manager.setSpendGovernorState(agent.id, governorState);
+
+    await manager.reloadAgentSession(agent.id);
+
+    const reloaded = manager.getAgent(agent.id);
+    expect(reloaded?.totalTokens).toBe(40);
+    expect(reloaded?.tokenRateBuckets).toBeDefined();
+    expect(manager.getSpendGovernorState(agent.id)).toBe(governorState);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears the token-rate buckets and total from the emitted state", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-token-rate-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    session.pushEvent({
+      type: "turn_completed",
+      provider: "codex",
+      turnId: "turn-1",
+      turnTokenDelta: 40,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(manager.getAgent(agent.id)?.tokenRateBuckets).toBeDefined();
+    expect(manager.getAgent(agent.id)?.totalTokens).toBe(40);
+
+    const emittedTotals: Array<number | undefined> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agent.id) {
+          emittedTotals.push(event.agent.totalTokens);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+    unsubscribe();
+
+    expect(manager.getAgent(agent.id)?.tokenRateBuckets).toBeUndefined();
+    expect(manager.getAgent(agent.id)?.totalTokens).toBeUndefined();
+    expect(emittedTotals[emittedTotals.length - 1]).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("rewind clears tokenBurnAlert and tokenBurnMonitorState from the live agent", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-rewind-token-burn-"));
+  class RewindableSession extends TestAgentSession {
+    override readonly capabilities = {
+      ...TEST_CAPABILITIES,
+      supportsRewindConversation: true,
+    };
+    override async revertConversation(): Promise<void> {}
+    override async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+      yield {
+        type: "timeline",
+        provider: this.provider,
+        item: { type: "user_message", text: "before", messageId: "message-1" },
+      };
+    }
+  }
+  const session = new RewindableSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    manager.setTokenBurnAlert(agent.id, {
+      trigger: "rate",
+      ratePerMinute: 50_000,
+      firstBreachedAt: new Date().toISOString(),
+    });
+    manager.setTokenBurnMonitorState(agent.id, {
+      consecutiveAboveRate: 3,
+      consecutiveBelowRate: 0,
+      rateFired: true,
+      nextTotalThreshold: 5_000_000,
+    });
+    expect(manager.getAgent(agent.id)?.tokenBurnAlert).toBeDefined();
+    expect(manager.getTokenBurnMonitorState(agent.id)).toBeDefined();
+
+    await manager.rewind(agent.id, "message-1", "conversation");
+
+    expect(manager.getAgent(agent.id)?.tokenBurnAlert).toBeUndefined();
+    expect(manager.getTokenBurnMonitorState(agent.id)).toBeUndefined();
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("listAgentsForTokenBurnMonitor exposes a lean, scope-neutral view including internal agents", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-burn-list-"));
+  try {
+    const { manager, agentId } = await createLiveEventAgent(workdir);
+    const summaries = manager.listAgentsForTokenBurnMonitor(Date.now());
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]).toMatchObject({
+      id: agentId,
+      internal: false,
+      isDelegated: false,
+      tokenRate: undefined,
+      totalTokens: undefined,
+    });
+  } finally {
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("setTokenBurnAlert emits state and projects tokenBurnAlert on the wire payload; clearTokenBurnAlert removes it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-token-burn-alert-"));
+  try {
+    const { manager, agentId } = await createLiveEventAgent(workdir);
+    const emitted: Array<boolean> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (event.type === "agent_state" && event.agent.id === agentId) {
+          emitted.push(event.agent.tokenBurnAlert !== undefined);
+        }
+      },
+      { agentId, replayState: false },
+    );
+
+    manager.setTokenBurnAlert(agentId, {
+      trigger: "total",
+      totalTokens: 5_000_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    });
+
+    const agent = manager.getAgent(agentId);
+    expect(agent?.tokenBurnAlert).toEqual({
+      trigger: "total",
+      totalTokens: 5_000_000,
+      firstBreachedAt: "2026-09-12T00:00:00.000Z",
+    });
+    expect(toAgentPayload(agent!).tokenBurnAlert).toEqual(agent?.tokenBurnAlert);
+    expect(emitted.at(-1)).toBe(true);
+
+    manager.clearTokenBurnAlert(agentId);
+    expect(manager.getAgent(agentId)?.tokenBurnAlert).toBeUndefined();
+    expect(emitted.at(-1)).toBe(false);
+
+    unsubscribe();
+  } finally {
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -742,16 +1647,225 @@ test("retries provider history hydration after a stream failure", async () => {
   }
 });
 
-test("unavailable steer interrupts once and starts one replacement turn", async () => {
+// A message never cancels in-flight work. Replacing the turn here is what killed Tyler's running
+// workflow agents: in Claude Code, interrupting a turn also aborts its background tasks.
+test("a steer the turn cannot take waits for it instead of interrupting it", async () => {
   const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
   session.steerResult = "unavailable";
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(session);
   try {
-    expect(session.interruptCount).toBe(1);
-    expect(session.startCount).toBe(2);
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startCount).toBe(1);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+
+    await vi.waitFor(() => expect(session.startCount).toBe(2));
+    expect(session.startPrompts).toEqual(["initial", "replacement"]);
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
+  } finally {
+    await manager.closeAgent(agentId);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// MCP send_agent_prompt, the CLI and clients older than steering send no behavior at all. That
+// used to mean "interrupt"; nothing but an explicit stop may cancel in-flight work.
+test("a message sent with no behavior steers into the running turn", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-default-steer-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { codex: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const result = await sendPromptToAgent({
+      agentManager: manager,
+      agentStorage: new AgentStorage(join(workdir, "agents"), logger),
+      agentId: agent.id,
+      prompt: "follow-up",
+      logger,
+    });
+
+    expect(result).toEqual({ disposition: "steered" });
+    expect(session.steerCount).toBe(1);
+    expect(session.interruptCount).toBe(0);
+    expect(session.startPrompts).toEqual(["initial"]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// A message waiting for a busy agent lived only in memory, so a daemon restart before the turn
+// ended lost it. It lives on the agent's record now, and the next daemon delivers it.
+test("a message waiting for a busy agent is on its record until the turn it waited for ends", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-queued-record-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const session = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  session.steerResult = "unavailable";
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    registry: storage,
+    logger,
+  });
+  manager.setPromptQueue(
+    createPromptQueue({ agentManager: manager, agentStorage: storage, logger }),
+  );
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    const run = manager.streamAgent(agent.id, "initial");
+    void (async () => {
+      for await (const _event of run) {
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+
+    const result = await startAgentRun(manager, agent.id, "after your turn", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "queued-client" },
+    });
+
+    expect(result).toEqual({ disposition: "queued" });
+    expect((await storage.get(agent.id))?.queuedPrompts).toEqual([
+      expect.objectContaining({ prompt: "after your turn", clientMessageId: "queued-client" }),
+    ]);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "after your turn"]));
+    await vi.waitFor(async () =>
+      expect((await storage.get(agent.id))?.queuedPrompts).toBeUndefined(),
+    );
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("messages a busy agent was waiting for are delivered, in order, by the next daemon", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-queued-restart-"));
+  const agentsDir = join(workdir, "agents");
+  const firstStorage = new AgentStorage(agentsDir, logger);
+  const busy = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  busy.steerResult = "unavailable";
+  const firstDaemon = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return busy;
+        }
+      })(),
+    },
+    registry: firstStorage,
+    logger,
+  });
+  const firstQueue = createPromptQueue({
+    agentManager: firstDaemon,
+    agentStorage: firstStorage,
+    logger,
+  });
+  firstDaemon.setPromptQueue(firstQueue);
+  const agent = await firstDaemon.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const run = firstDaemon.streamAgent(agent.id, "long task");
+  void (async () => {
+    for await (const _event of run) {
+    }
+  })();
+  await firstDaemon.waitForAgentRunStart(agent.id);
+  for (const text of ["first", "second"]) {
+    await expect(
+      startAgentRun(firstDaemon, agent.id, text, logger, {
+        replaceRunning: true,
+        activeTurnBehavior: "steer",
+      }),
+    ).resolves.toEqual({ disposition: "queued" });
+  }
+  // The daemon goes down with the turn still running.
+  firstQueue.stop();
+  await firstStorage.flush();
+
+  const resumed = new SteeringTestSession({ provider: "codex", cwd: workdir });
+  resumed.steerResult = "unavailable";
+  const secondStorage = new AgentStorage(agentsDir, logger);
+  await secondStorage.initialize();
+  const secondDaemon = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async resumeSession(): Promise<AgentSession> {
+          return resumed;
+        }
+        override async createSession(): Promise<AgentSession> {
+          return resumed;
+        }
+      })(),
+    },
+    registry: secondStorage,
+    logger,
+  });
+  const secondQueue = createPromptQueue({
+    agentManager: secondDaemon,
+    agentStorage: secondStorage,
+    logger,
+  });
+  secondDaemon.setPromptQueue(secondQueue);
+  try {
+    await secondQueue.resume();
+
+    await vi.waitFor(() => expect(resumed.startPrompts).toEqual(["first"]));
+    // "second" waits for the turn "first" started, and never interrupts it.
+    expect(resumed.interruptCount).toBe(0);
+    resumed.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+    await vi.waitFor(() => expect(resumed.startPrompts).toEqual(["first", "second"]));
+    await vi.waitFor(async () =>
+      expect((await secondStorage.get(agent.id))?.queuedPrompts).toBeUndefined(),
+    );
+  } finally {
+    await secondDaemon.closeAgent(agent.id).catch(() => undefined);
+    await firstDaemon.closeAgent(agent.id).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("an explicit interrupt still replaces the running turn", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  const { manager, agentId, workdir } = await startAndSteerThroughManager(session, "interrupt");
+  try {
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "replacement"]));
+    expect(session.steerCount).toBe(0);
+    expect(session.interruptCount).toBe(1);
   } finally {
     await manager.closeAgent(agentId);
     rmSync(workdir, { recursive: true, force: true });
@@ -972,7 +2086,7 @@ test("orders a concurrent replacement after a pending accepted steer", async () 
   }
 });
 
-test("does not replace a newer foreground turn after unavailable steer fallback is admitted", async () => {
+test("a waiting message never replaces a newer turn that started while it waited", async () => {
   const entered = deferred<void>();
   const release = deferred<void>();
   const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
@@ -1009,9 +2123,6 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
       activeTurnBehavior: "steer",
       runOptions: { clientMessageId: "hello-client" },
     });
-    const rejected = expect(send).rejects.toThrow(
-      "Active turn changed before steering could be delivered",
-    );
     await entered.promise;
     session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
     await consumeA;
@@ -1022,15 +2133,15 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
     })();
     await manager.waitForAgentRunStart(agent.id);
     release.resolve();
-    await rejected;
+    await expect(send).resolves.toEqual({ disposition: "queued" });
     expect(manager.getAgent(agent.id)?.activeForegroundTurnId).toBe("active-turn-2");
     expect(session.interruptCount).toBe(0);
-    expect(session.startPrompts).not.toContain("hello");
-    expect(
-      manager
-        .getTimeline(agent.id)
-        .some((item) => item.type === "user_message" && item.clientMessageId === "hello-client"),
-    ).toBe(false);
+    expect(session.startPrompts).toEqual(["A", "B"]);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-2" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["A", "B", "hello"]));
+    expect(session.interruptCount).toBe(0);
   } finally {
     release.resolve();
     if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
@@ -1038,6 +2149,129 @@ test("does not replace a newer foreground turn after unavailable steer fallback 
       consumeB ?? Promise.resolve(),
       new Promise((resolve) => setTimeout(resolve, 100)),
     ]);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// Case A in the incident: the leader was idle but a background workflow kept an autonomous turn
+// open. A message that turn could not take replaced it, and the interrupt killed the workflow.
+test("an autonomous turn that cannot take a steer is never interrupted by it", async () => {
+  const session = new SteeringTestSession({ provider: "claude", cwd: process.cwd() });
+  session.steerResult = "unavailable";
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-autonomous-wait-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { claude: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+    session.pushEvent({ type: "turn_started", provider: "claude", turnId: "active-turn-0" });
+    await vi.waitFor(() => expect(manager.getAgent(agent.id)?.activeTurnId).toBe("active-turn-0"));
+
+    const result = await startAgentRun(manager, agent.id, "while the workflow runs", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "workflow-client" },
+    });
+
+    expect(result).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startPrompts).toEqual([]);
+
+    session.pushEvent({ type: "turn_completed", provider: "claude", turnId: "active-turn-0" });
+
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["while the workflow runs"]));
+    expect(session.interruptCount).toBe(0);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+// The 20:42 kill: two reports landed together. The first had started a run that had no turn yet,
+// so the second could not steer, fell through to a replacement, and cancelled it.
+test("a message sent while another message's turn is still starting joins it", async () => {
+  const startGate = deferred<void>();
+  class GatedStartSession extends SteeringTestSession {
+    override async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+      await startGate.promise;
+      return await super.startTurn(prompt);
+    }
+  }
+  const session = new GatedStartSession({ provider: "claude", cwd: process.cwd() });
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-pending-start-"));
+  const client = new (class extends TestAgentClient {
+    override async createSession() {
+      return session;
+    }
+  })();
+  const manager = new AgentManager({ clients: { claude: client }, logger });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const first = await startAgentRun(manager, agent.id, "first report", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+    });
+    const second = await startAgentRun(manager, agent.id, "second report", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+      runOptions: { clientMessageId: "second-client" },
+    });
+
+    expect(first).toEqual({ disposition: "turn_started" });
+    expect(second).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+
+    startGate.resolve();
+
+    await vi.waitFor(() => expect(session.steerCount).toBe(1));
+    expect(session.startPrompts).toEqual(["first report"]);
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agent.id)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "second-client" }),
+      ),
+    );
+  } finally {
+    startGate.resolve();
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("messages waiting on a busy agent are delivered in the order they were sent", async () => {
+  const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+  session.steerResult = "unavailable";
+  const { manager, agentId, workdir } = await startAndSteerThroughManager(
+    session,
+    "steer",
+    "first",
+  );
+  try {
+    await startAgentRun(manager, agentId, "second", logger, {
+      replaceRunning: true,
+      activeTurnBehavior: "steer",
+    });
+    expect(session.interruptCount).toBe(0);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "first"]));
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-2" });
+    await vi.waitFor(() => expect(session.startPrompts).toEqual(["initial", "first", "second"]));
+    expect(session.interruptCount).toBe(0);
+  } finally {
+    await manager.closeAgent(agentId);
     rmSync(workdir, { recursive: true, force: true });
   }
 });
@@ -1084,21 +2318,28 @@ test("steers a tracked autonomous turn without creating a replacement run", asyn
   }
 });
 
-test("isolated rewind falls back from steering to the normal replacement path", async () => {
+test("a slash command sent into a running turn waits for it instead of interrupting it", async () => {
   const session = new SteeringTestSession({ provider: "claude", cwd: process.cwd() });
   session.steerResult = "unavailable";
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(
+    session,
+    "steer",
+    "/rewind submitted-message-id",
+  );
   try {
-    await startAgentRun(manager, agentId, "/rewind submitted-message-id", logger, {
-      replaceRunning: true,
-      activeTurnBehavior: "steer",
-      runOptions: { clientMessageId: "rewind-client" },
-    });
-    await manager.waitForAgentRunStart(agentId);
-    expect(session.interruptCount).toBe(2);
-    expect(session.startPrompts).toContain("/rewind submitted-message-id");
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "rewind-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+
+    session.pushEvent({ type: "turn_completed", provider: "claude", turnId: "active-turn-1" });
+
+    await vi.waitFor(() =>
+      expect(session.startPrompts).toEqual(["initial", "/rewind submitted-message-id"]),
+    );
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
   } finally {
     await manager.closeAgent(agentId);
@@ -1106,14 +2347,22 @@ test("isolated rewind falls back from steering to the normal replacement path", 
   }
 });
 
-test("missing steer operation interrupts once and starts one replacement turn", async () => {
+test("a provider that cannot steer gets the message after its turn, not an interrupt", async () => {
   const session = new UnsupportedSteeringSession({ provider: "codex", cwd: process.cwd() });
-  const { manager, agentId, workdir } = await startAndSteerThroughManager(session);
+  const { manager, agentId, workdir, dispatch } = await startAndSteerThroughManager(session);
   try {
-    expect(session.interruptCount).toBe(1);
-    expect(session.startCount).toBe(2);
-    expect(manager.getTimeline(agentId)).toContainEqual(
-      expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+    expect(dispatch).toEqual({ disposition: "queued" });
+    expect(session.interruptCount).toBe(0);
+    expect(session.startCount).toBe(1);
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "unsupported-turn-1" });
+
+    await vi.waitFor(() => expect(session.startCount).toBe(2));
+    expect(session.interruptCount).toBe(0);
+    await vi.waitFor(() =>
+      expect(manager.getTimeline(agentId)).toContainEqual(
+        expect.objectContaining({ type: "user_message", clientMessageId: "replacement-client" }),
+      ),
     );
   } finally {
     await manager.closeAgent(agentId);
@@ -2872,6 +4121,446 @@ test("createAgent injects paseo MCP server only into provider launch config", as
   });
 });
 
+type FakeMcpGateway = NonNullable<ConstructorParameters<typeof AgentManager>[0]["mcpGateway"]>;
+
+/**
+ * Structurally complete stand-in for the `Pick<McpGateway, …>` the manager accepts. Test files
+ * are outside `npm run typecheck`, so a partial literal here compiles and runs while silently
+ * drifting from the real handle; building every fake through this helper keeps the shape in one
+ * place. `on`/`off` return the fake itself, standing in for the class's chainable `this`.
+ */
+function createFakeMcpGateway(overrides: Partial<FakeMcpGateway> = {}): FakeMcpGateway {
+  const fake = {
+    enabled: true,
+    sessionMode: "overlay" as const,
+    getServerNames: (): string[] => [],
+    getSnapshot: () => [],
+    startAuthorization: async (): Promise<never> => {
+      throw new Error("startAuthorization is not exercised by this test");
+    },
+    adoptServer: async (): Promise<never> => {
+      throw new Error("adoptServer is not exercised by this test");
+    },
+    on: () => fake,
+    off: () => fake,
+    ...overrides,
+  };
+  return fake as unknown as FakeMcpGateway;
+}
+
+test("createAgent injects brokered MCP gateway servers only into provider launch config (U3)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["github", "zeeq"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000110",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(snapshot.config.mcpServers).toBeUndefined();
+  expect(client.lastConfig?.mcpGatewayEnabled).toBe(true);
+  // The gateway's mode rides the launch config only (docs/mcp-gateway.md "Session injection").
+  expect(client.lastConfig?.mcpGatewaySessionMode).toBe("overlay");
+  expect(client.lastConfig?.mcpServers).toEqual({
+    github: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/github",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+    zeeq: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/zeeq",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+  });
+
+  const stored = await storage.get(snapshot.id);
+  expect(stored?.config?.mcpServers).toBeUndefined();
+  expect(stored?.config?.mcpGatewayEnabled).toBeUndefined();
+  expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
+});
+
+test("createAgent injects brokered MCP gateway servers for a derived provider on a Claude client", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  // An account-pool provider: its id is not "claude", its client is.
+  const client = new CaptureClient("claude-personal");
+  const manager = new AgentManager({
+    clients: { "claude-personal": client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["zeeq"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000115",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await manager.createAgent({ provider: "claude-personal", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewayEnabled).toBe(true);
+  expect(client.lastConfig?.mcpServers).toEqual({
+    zeeq: {
+      type: "http",
+      url: "http://127.0.0.1:6767/mcp/gateway/zeeq",
+      headers: { Authorization: "Bearer gw-token" },
+    },
+  });
+});
+
+test("a session's needs-auth for a server its launch brokered is dropped; other reports are kept", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const session = new TestAgentSession({ provider: "claude", cwd: workdir });
+
+  class GatewayClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+
+    override async createSession(): Promise<AgentSession> {
+      return session;
+    }
+  }
+
+  const manager = new AgentManager({
+    clients: { claude: new GatewayClient("claude") },
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["zeeq", "linear"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000116",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    // zeeq: the account's name-keyed needs-auth cache, not the gateway. linear: a real failure
+    // reaching the daemon route. sentry: a per-dir server the gateway does not broker.
+    session.pushEvent({
+      type: "mcp_server_statuses",
+      provider: "claude",
+      statuses: [
+        { name: "zeeq", status: "needs-auth" },
+        { name: "linear", status: "failed" },
+        { name: "sentry", status: "needs-auth" },
+      ],
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(manager.getAgent(agent.id)?.mcpServerStatuses).toEqual([
+      { name: "linear", status: "failed" },
+      { name: "sentry", status: "needs-auth" },
+    ]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
+test("createAgent forwards the gateway's strict session mode to the launch config only", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({
+      sessionMode: "strict",
+      getServerNames: () => ["github"],
+    }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000114",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewaySessionMode).toBe("strict");
+  const stored = await storage.get(snapshot.id);
+  expect(stored?.config?.mcpGatewaySessionMode).toBeUndefined();
+});
+
+test("adoptMcpGatewayServer reads the reporting agent's per-dir config, brokers it, and starts auth", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const configDir = mkdtempSync(join(tmpdir(), "agent-manager-claude-config-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  writeFileSync(
+    join(workdir, ".mcp.json"),
+    JSON.stringify({ mcpServers: { linear: { type: "http", url: "https://mcp.linear.app/mcp" } } }),
+  );
+
+  class ScopedClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+    resolveMcpConfigScope(cwd: string) {
+      return { configDir, projectDir: cwd };
+    }
+  }
+
+  const adopted: unknown[] = [];
+  const gateway = createFakeMcpGateway({
+    adoptServer: async (input) => {
+      adopted.push(input);
+      return { status: "needs-auth", auth: "oauth" };
+    },
+    startAuthorization: async () => ({ authorizationUrl: "https://linear.example/authorize" }),
+  });
+  const manager = new AgentManager({
+    clients: { claude: new ScopedClient() },
+    registry: storage,
+    logger,
+    mcpGateway: gateway,
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000115",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  const snapshot = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await expect(
+    manager.adoptMcpGatewayServer({ name: "linear", agentId: snapshot.id }),
+  ).resolves.toEqual({ authorizationUrl: "https://linear.example/authorize" });
+  expect(adopted).toEqual([
+    { name: "linear", url: "https://mcp.linear.app/mcp", transport: "http" },
+  ]);
+
+  // A name the agent's config doesn't define is an error the strip surfaces inline.
+  await expect(
+    manager.adoptMcpGatewayServer({ name: "biblio", agentId: snapshot.id }),
+  ).rejects.toThrow(/No remote MCP server named "biblio"/);
+});
+
+test("adoptMcpGatewayServer names the cause instead of flattening every failure into one string", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const configDir = mkdtempSync(join(tmpdir(), "agent-manager-claude-config-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  writeFileSync(
+    join(configDir, ".claude.json"),
+    JSON.stringify({
+      // Signed in, so a missing name is about the name, not the account.
+      oauthAccount: { emailAddress: "worker@example.com" },
+      mcpServers: {
+        remote: { type: "http", url: "https://remote.example/mcp" },
+        "local-fs": { type: "stdio", command: "fs-tool" },
+      },
+    }),
+  );
+
+  let accountAuth: AgentAccountAuth = { state: "signed-in", accountLabel: "worker@example.com" };
+  class ScopedClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+    resolveMcpConfigScope(cwd: string) {
+      return { configDir, projectDir: cwd };
+    }
+    async describeAccountAuth(): Promise<AgentAccountAuth> {
+      return accountAuth;
+    }
+  }
+  // A provider that cannot expose an MCP config at all — the inherited client has no scope.
+  class ScopelessClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  let adoptResult: () => Promise<{ status: string; auth: string }> = async () => ({
+    status: "needs-auth",
+    auth: "oauth",
+  });
+  let authorize: () => Promise<{ authorizationUrl: string }> = async () => ({
+    authorizationUrl: "https://remote.example/authorize",
+  });
+  const manager = new AgentManager({
+    clients: { claude: new ScopedClient(), codex: new ScopelessClient() },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({
+      adoptServer: async () => adoptResult(),
+      startAuthorization: async () => authorize(),
+    }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => randomUUID(),
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+  const agent = await manager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const scopeless = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const reasonOf = async (name: string, agentId: string): Promise<unknown> =>
+    manager.adoptMcpGatewayServer({ name, agentId }).then(
+      () => null,
+      (error: unknown) => (error instanceof McpGatewayActionError ? error.reason : error),
+    );
+
+  expect(await reasonOf("remote", "no-such-agent")).toBe("unknown_agent");
+  expect(await reasonOf("remote", scopeless.id)).toBe("provider_has_no_config");
+  expect(await reasonOf("local-fs", agent.id)).toBe("server_is_local");
+  expect(await reasonOf("absent", agent.id)).toBe("server_not_in_config");
+
+  // Only the leg after a successful adopt is authentication.
+  adoptResult = async () => {
+    throw new Error("gateway refused the definition");
+  };
+  expect(await reasonOf("remote", agent.id)).toBe("adopt_failed");
+  adoptResult = async () => ({ status: "needs-auth", auth: "oauth" });
+  authorize = async () => {
+    throw new Error("discovery failed");
+  };
+  expect(await reasonOf("remote", agent.id)).toBe("authorization_failed");
+
+  // A signed-out account outranks "not in the config": it is the fact with a fix.
+  accountAuth = {
+    state: "signed-out",
+    signInCommand: `CLAUDE_CONFIG_DIR=${configDir} claude /login`,
+  };
+  const signedOut = await manager.adoptMcpGatewayServer({ name: "absent", agentId: agent.id }).then(
+    () => null,
+    (error: unknown) => (error instanceof McpGatewayActionError ? error : null),
+  );
+  expect(signedOut?.reason).toBe("account_signed_out");
+  expect(signedOut?.remedy).toEqual({ command: `CLAUDE_CONFIG_DIR=${configDir} claude /login` });
+  // A local entry is decided about this server, so it still wins over the account's state.
+  expect(await reasonOf("local-fs", agent.id)).toBe("server_is_local");
+
+  // A provider that cannot say anything about its account never invents a signed-out answer.
+  accountAuth = { state: "unknown" };
+  expect(await reasonOf("absent", agent.id)).toBe("server_not_in_config");
+});
+
+test("createAgent never injects brokered MCP gateway servers for a non-Claude provider (U3 scope)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["github"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000111",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.mcpGatewayEnabled).toBeUndefined();
+  expect(client.lastConfig?.mcpServers).toBeUndefined();
+});
+
+test("createAgent launch config is byte-identical to the pre-gateway shape when the gateway is disabled (R10)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const disabledGatewayManager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ enabled: false, getServerNames: () => ["github"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000112",
+  });
+  disabledGatewayManager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  await disabledGatewayManager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const withDisabledGateway = client.lastConfig;
+
+  const noGatewayAtAllManager = new AgentManager({
+    clients: { claude: client },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000113",
+  });
+
+  await noGatewayAtAllManager.createAgent({ provider: "claude", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const withNoGatewayConfigured = client.lastConfig;
+
+  expect(withDisabledGateway).toEqual(withNoGatewayConfigured);
+  expect(withDisabledGateway?.mcpGatewayEnabled).toBeUndefined();
+  expect(withDisabledGateway?.mcpServers).toBeUndefined();
+});
+
 test("createAgent closes and rejects a provider session that cannot honor MCP servers", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);
@@ -4567,6 +6256,172 @@ test("force provider hydration removes children absent from current history", as
   });
 });
 
+test("sweepStaleProviderSubagents cancels a running provider subagent stale past the liveness threshold, even while its parent stays open", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-stale-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+    staleProviderSubagentLivenessMs: 15 * 60 * 1000,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: {
+      type: "upsert",
+      id: "stuck-child",
+      title: "Stuck child",
+      status: "running",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Its terminal SDK event never arrives, and the parent agent stays open — the case
+  // `cancelRunningProviderSubagents` (only invoked from `closeAgentRuntime`) structurally can't
+  // reach. Just under the 15-minute liveness threshold: left alone.
+  await manager.sweepStaleProviderSubagents(new Date("2026-01-01T00:14:59.000Z"));
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "stuck-child", status: "running" }),
+  ]);
+
+  // Past the threshold: the sweep terminalizes it.
+  await manager.sweepStaleProviderSubagents(new Date("2026-01-01T00:15:00.000Z"));
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "stuck-child", status: "canceled" }),
+  ]);
+});
+
+test("sweepStaleProviderSubagents leaves a fresh running provider subagent alone", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-fresh-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "fresh-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(manager.listProviderSubagents(snapshot.id)).toEqual([
+    expect.objectContaining({ id: "fresh-child", status: "running" }),
+  ]);
+});
+
+test("sweepStaleProviderSubagents cancels a running provider subagent whose parent is confirmed closed and archived", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-archived-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "orphaned-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Simulates the state `cancelRunningProviderSubagents` normally prevents: the parent's runtime
+  // is gone and its record is archived, but the descriptor never got canceled (e.g. a crash
+  // between the two). No public path reaches this — `closeAgentRuntime` always cancels running
+  // children before removing the live agent — so it's reproduced directly for this
+  // defense-in-depth branch.
+  const managerInternals = manager as unknown as { agents: Map<string, unknown> };
+  managerInternals.agents.delete(snapshot.id);
+  const record = await storage.get(snapshot.id);
+  if (!record) {
+    throw new Error("expected a persisted record for the created agent");
+  }
+  await storage.upsert({ ...record, archivedAt: "2026-01-01T00:00:00.000Z" });
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(
+    (manager as unknown as { providerSubagents: ProviderSubagentStore }).providerSubagents.list(
+      snapshot.id,
+    ),
+  ).toEqual([expect.objectContaining({ id: "orphaned-child", status: "canceled" })]);
+});
+
+test("sweepStaleProviderSubagents leaves a running provider subagent alone when its parent is merely off-memory (not positively closed)", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-provider-sweep-ambiguous-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  let session: TestAgentSession | null = null;
+  class ProviderChildClient extends TestAgentClient {
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      session = new TestAgentSession(config);
+      return session;
+    }
+  }
+  const manager = new AgentManager({
+    clients: { codex: new ProviderChildClient() },
+    registry: storage,
+    logger,
+  });
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  session?.pushEvent({
+    type: "provider_subagent",
+    provider: "codex",
+    event: { type: "upsert", id: "unloaded-parent-child", status: "running" },
+  });
+  await vi.waitFor(() => expect(manager.listProviderSubagents(snapshot.id)).toHaveLength(1));
+
+  // Not live and not archived is ambiguous — it could simply be lazily unloaded, matching the
+  // "never touch what it can't positively evaluate" rule. Its own descriptor is fresh, so the
+  // liveness check must not fire either.
+  const managerInternals = manager as unknown as { agents: Map<string, unknown> };
+  managerInternals.agents.delete(snapshot.id);
+
+  await manager.sweepStaleProviderSubagents();
+
+  expect(
+    (manager as unknown as { providerSubagents: ProviderSubagentStore }).providerSubagents.list(
+      snapshot.id,
+    ),
+  ).toEqual([expect.objectContaining({ id: "unloaded-parent-child", status: "running" })]);
+});
+
 test("reloadAgentSession preserves current title when config title is unset", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-reload-title-"));
   const storagePath = join(workdir, "agents");
@@ -4678,6 +6533,223 @@ test("updateAgentMetadata bumps updatedAt for stored agents", async () => {
   expect(after?.title).toBe("Stored title");
   expect(after?.labels).toEqual({ surface: "mobile", role: "worker" });
   expect(Date.parse(after!.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
+});
+
+test("setTitle marks titleManuallySet", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-set-title-manual-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000210",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  const before = await storage.get(snapshot.id);
+  expect(before?.titleManuallySet).toBeFalsy();
+
+  await manager.setTitle(snapshot.id, "Renamed by user");
+
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Renamed by user");
+  expect(after?.titleManuallySet).toBe(true);
+});
+
+test("applyGeneratedTitle updates a live agent's title without marking it manually set", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000211",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  const before = await storage.get(snapshot.id);
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "  Generated task title  ");
+
+  expect(applied).toBe(true);
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Generated task title");
+  expect(after?.titleManuallySet).toBeFalsy();
+  expect(Date.parse(after!.updatedAt)).toBeGreaterThan(Date.parse(before!.updatedAt));
+});
+
+test("applyGeneratedTitle no-ops once the title was manually set", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-manual-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000212",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+  await manager.setTitle(snapshot.id, "Manually renamed");
+  const before = await storage.get(snapshot.id);
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "Generated task title");
+
+  expect(applied).toBe(false);
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Manually renamed");
+  expect(after?.updatedAt).toBe(before!.updatedAt);
+});
+
+test("applyGeneratedTitle does not clobber a manual rename that races between its guard read and its write", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-race-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000214",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  // Simulate a manual rename landing between applyGeneratedTitle's
+  // titleManuallySet guard read (registry.get) and the queued write it
+  // triggers: intercept that read, race a setTitle() ahead of it, then let
+  // the (now stale) read resolve as it originally would have.
+  const originalGet = storage.get.bind(storage);
+  vi.spyOn(storage, "get").mockImplementationOnce(async (agentId: string) => {
+    const record = await originalGet(agentId);
+    await manager.setTitle(snapshot.id, "Renamed while generating");
+    return record;
+  });
+
+  await manager.applyGeneratedTitle(snapshot.id, "Generated task title");
+
+  const after = await storage.get(snapshot.id);
+  expect(after?.title).toBe("Renamed while generating");
+  expect(after?.titleManuallySet).toBe(true);
+});
+
+test("applyGeneratedTitle no-ops when the title is already the generated value", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-apply-generated-title-unchanged-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000213",
+  });
+
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Same title" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const before = await storage.get(snapshot.id);
+  expect(before?.title).toBe("Same title");
+  expect(before?.titleManuallySet).toBeFalsy();
+
+  const applied = await manager.applyGeneratedTitle(snapshot.id, "Same title");
+
+  expect(applied).toBe(false);
+  const after = await storage.get(snapshot.id);
+  expect(after?.updatedAt).toBe(before!.updatedAt);
+});
+
+test("onAgentTurnFinished fires once per running->idle transition, even while turn 1's attention is unread", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000214",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  await manager.runAgent(snapshot.id, "say hello");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).toHaveBeenCalledTimes(1);
+  expect(onAgentTurnFinished).toHaveBeenNthCalledWith(1, { agentId: snapshot.id, cwd: workdir });
+
+  const afterTurn1 = await storage.get(snapshot.id);
+  expect(afterTurn1?.requiresAttention).toBe(true);
+
+  // Turn 1's attention is still unread (never cleared) when turn 2 finishes.
+  await manager.runAgent(snapshot.id, "say hello again");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).toHaveBeenCalledTimes(2);
+  expect(onAgentTurnFinished).toHaveBeenNthCalledWith(2, { agentId: snapshot.id, cwd: workdir });
+});
+
+test("onAgentTurnFinished does not fire for an idle->idle transition", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-idle-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000215",
+  });
+
+  const snapshot = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  // The agent is already idle after creation; renaming emits state without a turn.
+  await manager.setTitle(snapshot.id, "Renamed while idle");
+
+  expect(onAgentTurnFinished).not.toHaveBeenCalled();
+});
+
+test("onAgentTurnFinished does not fire for internal agents", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-turn-finished-internal-"));
+  const storagePath = join(workdir, "agents");
+  const storage = new AgentStorage(storagePath, logger);
+  const onAgentTurnFinished = vi.fn();
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished,
+    idFactory: () => "00000000-0000-4000-8000-000000000216",
+  });
+
+  const snapshot = await manager.createAgent(
+    { provider: "codex", cwd: workdir, internal: true },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await manager.runAgent(snapshot.id, "say hello");
+  await manager.flush();
+
+  expect(onAgentTurnFinished).not.toHaveBeenCalled();
 });
 
 test("persists live mode, model, and thinking changes without an external snapshot subscriber", async () => {
@@ -5057,6 +7129,129 @@ test("runAgent persists finished attention and idle status without an external s
   expect(persisted?.requiresAttention).toBe(true);
   expect(persisted?.attentionReason).toBe("finished");
   expect(persisted?.attentionTimestamp).toEqual(expect.any(String));
+});
+
+test("a cancelled turn is not a finish, and does not survive into the next one", async () => {
+  // Reproduces the shape four of Tyler's agents were left in: cancelled mid-turn, recorded
+  // idle with `finished` attention and no lastError, indistinguishable from real completion.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-cancel-attention-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new CancelableTestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    idFactory: () => randomUUID(),
+  });
+
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Cancelled" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  void manager.streamAgent(agent.id, "sleep 30").next();
+  await vi.waitFor(() => expect(manager.getAgent(agent.id)?.lifecycle).toBe("running"));
+  await manager.cancelAgentRun(agent.id, "user");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
+  expect(manager.getAgent(agent.id)?.attention.requiresAttention).toBe(false);
+  expect((await storage.get(agent.id))?.requiresAttention).toBe(false);
+  expect(attentionReasons).toEqual([]);
+
+  // The next turn, which really does finish, still raises attention — the suppression is
+  // scoped to the cancelled turn and nothing else.
+  await manager.runAgent(agent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
+});
+
+test("the done janitor's question raises no finish, and does not silence the next one", async () => {
+  // The janitor asks an idle agent whether it is done. Its answer is not the agent finishing
+  // work: flagging it would push "finished" to a person for every question asked.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-quiet-turn-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const finishedTurns: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+    idFactory: () => randomUUID(),
+  });
+
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Asked" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  // What the agent said before the question must never be read as its answer.
+  await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "DONE" });
+  const cursor = manager.getTimelineCursor(agent.id);
+  expect(manager.markQuietTurn(agent.id)).toBe(true);
+  await manager.runAgent(agent.id, "are you done?");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention.requiresAttention).toBe(false);
+  expect((await storage.get(agent.id))?.requiresAttention).toBe(false);
+  expect(attentionReasons).toEqual([]);
+  expect(finishedTurns).toEqual([]);
+  expect(manager.readTimelineSince(agent.id, cursor!)?.assistantText).toBe("");
+  await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "NOT_DONE" });
+  expect(manager.readTimelineSince(agent.id, cursor!)?.assistantText).toBe("NOT_DONE");
+
+  await manager.runAgent(agent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
+  expect(finishedTurns).toEqual([agent.id]);
+});
+
+test("a delegated agent finishing raises no attention: its parent already has the result", async () => {
+  // 27 of 34 outstanding attention flags on one live daemon were finished subagents. Nothing
+  // surfaces them (broadcastAgentAttention skips delegated agents) and nothing clears them,
+  // because a human never opens a subagent to read it.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-delegated-attention-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new TestAgentClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    idFactory: () => randomUUID(),
+  });
+
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Leader" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const child = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Worker" },
+    undefined,
+    { labels: { [PARENT_AGENT_ID_LABEL]: parent.id }, workspaceId: undefined },
+  );
+
+  await manager.runAgent(child.id, "say hello");
+  await manager.runAgent(parent.id, "say hello");
+  await manager.flush();
+
+  expect((await storage.get(child.id))?.lastStatus).toBe("idle");
+  expect((await storage.get(child.id))?.requiresAttention).toBe(false);
+  expect((await storage.get(child.id))?.attentionReason).toBeNull();
+  // The human-started agent still does, or the signal would carry nothing at all.
+  expect((await storage.get(parent.id))?.requiresAttention).toBe(true);
+  expect((await storage.get(parent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["finished"]);
 });
 
 test("archiveSnapshot clears persisted attention and normalizes running status", async () => {

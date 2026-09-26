@@ -31,7 +31,8 @@
     "packages/relay",
     "packages/website",
     "packages/desktop",
-    "packages/cli"
+    "packages/cli",
+    "plugins/claude-account-pool"
   ],
   "scripts": {
     "dev": "npm run dev:server",

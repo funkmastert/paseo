@@ -33,6 +33,10 @@ export interface AgentListItem {
   status: string;
   cwd: string;
   created: string;
+  /** Not rendered as a table column, but preserved so `--json` output carries it. */
+  archivedAt: string | null;
+  /** Not rendered as a table column, but preserved so `--json` output carries it. */
+  labels: Record<string, string>;
 }
 
 /** Helper to get relative time string */
@@ -88,7 +92,7 @@ export const agentLsSchema: OutputSchema<AgentListItem> = {
 };
 
 /** Transform agent snapshot to AgentListItem */
-function toListItem(agent: AgentSnapshotPayload): AgentListItem {
+export function toListItem(agent: AgentSnapshotPayload): AgentListItem {
   const model = normalizeModelId(agent.runtimeInfo?.model) ?? normalizeModelId(agent.model);
   return {
     id: agent.id,
@@ -99,6 +103,8 @@ function toListItem(agent: AgentSnapshotPayload): AgentListItem {
     status: agent.status,
     cwd: shortenPath(agent.cwd),
     created: relativeTime(agent.createdAt),
+    archivedAt: agent.archivedAt ?? null,
+    labels: agent.labels,
   };
 }
 

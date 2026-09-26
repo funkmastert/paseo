@@ -30,10 +30,16 @@ import type {
   AgentProvider,
   AgentMode,
   AgentCapabilityFlags,
+  AgentTokenRate,
   AgentUsage,
   AgentPersistenceHandle,
+  ModelDivergenceAlert,
+  TokenBurnAlert,
+  OwedFinishReport,
 } from "@getpaseo/protocol/agent-types";
 import type {
+  AgentMcpServerStatus,
+  AgentTurnQueued,
   ServerInfoStatusPayload,
   ProjectPlacementPayload,
   ServerCapabilities,
@@ -87,6 +93,51 @@ export interface Agent {
   runtimeInfo?: AgentRuntimeInfo;
   lastUsage?: AgentUsage;
   lastError?: string | null;
+  /**
+   * One-line "what is this agent doing right now" summary, computed
+   * server-side from the latest timeline item. Absent on old daemons and
+   * while idle before any timeline item has arrived; keeps its last value
+   * while the agent is idle so rows show recent activity.
+   */
+  lastActivitySummary?: string;
+  /**
+   * Provider-reported MCP server statuses from the SDK's init message (KTD8), captured
+   * verbatim each turn. Live-only like `lastActivitySummary`: absent until the first init
+   * message arrives, keeps its last value while idle. Covers stdio/pass-through servers, which
+   * have no daemon-side gateway state (mcp-status/use-mcp-status.ts) — the app's only visibility
+   * into their health (AE3).
+   */
+  mcpServerStatuses?: AgentMcpServerStatus[];
+  /**
+   * Trailing-window token-burn rate (tokens/min), computed server-side. Claude only in phase 1
+   * — absent on other providers and on old daemons, not a fabricated zero. Feeds
+   * token-burn-tone-model.ts at the list owner; never rendered directly.
+   */
+  recentTokenRate?: AgentTokenRate;
+  /** Live-only lifetime token total alongside recentTokenRate — tooltip/long-press only. */
+  totalTokens?: number;
+  /**
+   * Live breach state set by the daemon-side token-burn monitor. Attention-worthy independent
+   * of attentionReason — see agent-state-bucket.ts and
+   * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
+   */
+  tokenBurnAlert?: TokenBurnAlert;
+  /**
+   * A finish report this subagent owes its parent that has not arrived: it stopped without
+   * reporting, or the report could not be delivered. Absent while it is simply working, and on
+   * daemons that predate it. See docs/finish-reports.md.
+   */
+  owedFinishReport?: OwedFinishReport;
+  /**
+   * Set while this child's new turn waits for a machine-wide admission slot; `status` reads
+   * running meanwhile. Absent on daemons that predate it. See docs/resource-monitor.md.
+   */
+  turnQueued?: AgentTurnQueued;
+  /**
+   * Live finding from the daemon-side model-divergence monitor: the responses report a model the
+   * agent was not configured with. Absent when the monitor is off and on old daemons.
+   */
+  modelDivergence?: ModelDivergenceAlert;
   title: string | null;
   cwd: string;
   workspaceId?: string;
@@ -126,6 +177,7 @@ export interface WorkspaceDescriptor {
   githubRuntime?: WorkspaceDescriptorPayload["githubRuntime"];
   forge?: WorkspaceDescriptorPayload["forge"];
   project?: ProjectPlacementPayload;
+  diskUsage?: WorkspaceDescriptorPayload["diskUsage"];
 }
 
 export function normalizeWorkspaceDescriptor(
@@ -164,6 +216,7 @@ export function normalizeWorkspaceDescriptor(
     githubRuntime: payload.githubRuntime,
     forge: payload.forge,
     project: payload.project,
+    diskUsage: payload.diskUsage ?? null,
   };
 }
 

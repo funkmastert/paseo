@@ -62,6 +62,9 @@ export function WorkspaceRenameModal({
       initialValue={workspace.title ?? workspace.name}
       placeholder={workspace.name}
       submitLabel={t("sidebar.workspace.rename.submit")}
+      // Clearing the name restores the branch/directory name shown in the placeholder,
+      // and hands naming back to Paseo — see docs/agent-lifecycle.md "Workspace names".
+      allowEmpty
       onClose={onClose}
       onSubmit={handleSubmit}
       testID={testID}

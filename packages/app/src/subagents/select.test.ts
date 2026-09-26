@@ -338,6 +338,74 @@ describe("selectSubagentsForParent", () => {
     expect(rows[0]).not.toHaveProperty("cwd");
   });
 
+  it("passes recentTokenRate through when the agent has one", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "child",
+        parentAgentId: "parent",
+        recentTokenRate: { tokensPerMinute: 6_200, asOfMs: 1_700_000_000_000 },
+      }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]).toMatchObject({
+      recentTokenRate: { tokensPerMinute: 6_200, asOfMs: 1_700_000_000_000 },
+    });
+  });
+
+  it("omits recentTokenRate when the agent doesn't have one", () => {
+    setAgents([makeAgent({ id: "parent" }), makeAgent({ id: "child", parentAgentId: "parent" })]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]).not.toHaveProperty("recentTokenRate");
+  });
+
+  it("defaults requiresAttention to false when the agent field is undefined", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({ id: "child", parentAgentId: "parent", requiresAttention: undefined }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows[0]?.requiresAttention).toBe(false);
+  });
+
+  it("carries the agent's live activity summary as the row subtitle", () => {
+    setAgents([
+      makeAgent({ id: "parent" }),
+      makeAgent({
+        id: "child",
+        parentAgentId: "parent",
+        lastActivitySummary: "Running the test suite",
+      }),
+      makeAgent({ id: "quiet-child", parentAgentId: "parent" }),
+    ]);
+
+    const rows = selectSubagentsForParent(
+      useSessionStore.getState(),
+      { serverId: SERVER_ID, parentAgentId: "parent" },
+      EMPTY_PENDING_ARCHIVE_IDS,
+    );
+
+    expect(rows.map((row) => row.subtitle)).toEqual(["Running the test suite", null]);
+  });
+
   it("moves a child when parentAgentId changes", () => {
     const child = makeAgent({ id: "child", parentAgentId: "parent-a" });
     setAgents([makeAgent({ id: "parent-a" }), makeAgent({ id: "parent-b" }), child]);

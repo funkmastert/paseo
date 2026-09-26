@@ -244,6 +244,16 @@ export const ko: TranslationResources = {
       unarchive: "보관 해제",
     },
   },
+  agentIdChip: {
+    copiedLabel: "에이전트 ID",
+  },
+  pinnedGrid: {
+    title: "고정됨 ({{count}})",
+    close: "그리드 닫기",
+    openWorkspace: "작업 공간 열기",
+    noChat: "이 작업 공간에는 아직 채팅이 없습니다",
+    empty: "고정된 채팅 없음",
+  },
   sessions: {
     title: "기록",
     empty: "아직 세션이 없습니다",
@@ -272,12 +282,21 @@ export const ko: TranslationResources = {
       running: "실행 중",
       error: "오류",
       closed: "종료됨",
+      queued: "대기열",
     },
     badges: {
       archived: "보관됨",
       pending: "대기 {{count}}개",
       attention: "주의",
+      needsInput: "입력 필요",
+      failed: "실패",
+      owesReport: "보고 필요",
+      reportUndelivered: "보고 미전달",
+      tokenBurnWarning: "높은 소비량",
+      tokenBurnDanger: "매우 높은 소비량",
+      modelDiverged: "예상 외 모델",
     },
+    tokenBurnTooltip: "{{rate}} tok/min · 총 {{total}}",
     archiveSheet: {
       hostOffline: "호스트 오프라인",
       runningAgent: "이 에이전트는 아직 실행 중입니다. 보관하면 에이전트가 중지됩니다.",
@@ -703,6 +722,10 @@ export const ko: TranslationResources = {
         workspacePathCopiedLabel: "워크스페이스 경로",
         branchNameCopiedLabel: "브랜치 이름",
       },
+      history: {
+        recentMenu: "최근",
+        empty: "최근 기록 없음",
+      },
     },
     scripts: {
       title: "스크립트",
@@ -842,7 +865,7 @@ export const ko: TranslationResources = {
             "이 브랜치가 이미 {{baseRef}}와 최신 상태이므로 업데이트를 사용할 수 없습니다",
           mergePrNoGithub: "GitHub가 연결되어 있지 않아 지금은 PR 병합을 사용할 수 없습니다",
           archiveNotWorktree:
-            "이 워크스페이스가 Paseo 워크트리로 생성되지 않아 여기서 보관을 사용할 수 없습니다",
+            "이 워크스페이스가 Bozeo 워크트리로 생성되지 않아 여기서 보관을 사용할 수 없습니다",
           mergePrNoForge:
             "{{brand}}가 연결되어 있지 않기 때문에 지금은 {{noun}} 병합을 사용할 수 없습니다.",
           mergePrMissing: "아직 풀 리퀘스트가 없어 PR 병합을 사용할 수 없습니다",
@@ -1006,6 +1029,9 @@ export const ko: TranslationResources = {
         generic: "해당 기능을 사용하려면 이 호스트에 {{brand}}를 설정하세요.",
       },
     },
+    diskUsage: {
+      accessible: "{{size}} · {{timeAgo}} 전 측정",
+    },
   },
   workspaceLabels: {
     title: "레이블",
@@ -1082,6 +1108,7 @@ export const ko: TranslationResources = {
         changeRequest: "풀 리퀘스트",
         checks: "검사",
         services: "서비스",
+        diskUsage: "디스크 사용량",
         labels: "레이블",
         diff: "Diff 통계",
         timestamp: "마지막 활동",
@@ -1107,6 +1134,7 @@ export const ko: TranslationResources = {
     },
     pinned: {
       title: "고정됨",
+      openGrid: "고정된 채팅을 그리드로 열기",
     },
     host: {
       noHost: "호스트 없음",
@@ -1129,7 +1157,7 @@ export const ko: TranslationResources = {
       discord: "Discord",
       github: "GitHub 이슈 만들기",
       whatsNew: "새로운 소식",
-      appName: "Paseo",
+      appName: "Bozeo",
     },
     sections: {
       sessions: "기록",
@@ -1276,7 +1304,7 @@ export const ko: TranslationResources = {
       close: "창 닫기",
     },
     quitting: {
-      title: "Paseo 종료 중...",
+      title: "Bozeo 종료 중...",
       detail: "로컬 데몬을 중지하는 중입니다.",
     },
     daemon: {
@@ -1290,19 +1318,30 @@ export const ko: TranslationResources = {
       },
       management: {
         title: "내장 데몬 관리",
-        hint: "Paseo가 내장 데몬을 시작하고 중지하도록 허용합니다",
+        hint: "Bozeo가 내장 데몬을 시작하고 중지하도록 허용합니다",
         pauseTitle: "내장 데몬 일시 중지",
         pauseMessage:
           "내장 데몬이 즉시 중지됩니다. 내장 데몬에 연결된 실행 중인 에이전트와 터미널이 중지됩니다.",
         pauseAndStop: "일시 중지 후 중지",
         registrationFailed:
-          "내장 데몬이 시작되었지만 Paseo가 localhost 연결을 저장하지 못했습니다. 데몬 관리를 껐다가 다시 켜거나 localhost를 수동으로 추가하세요.",
-        pausedStopFailed: "내장 데몬 관리가 일시 중지되었지만 Paseo가 데몬을 중지하지 못했습니다.",
+          "내장 데몬이 시작되었지만 Bozeo가 localhost 연결을 저장하지 못했습니다. 데몬 관리를 껐다가 다시 켜거나 localhost를 수동으로 추가하세요.",
+        pausedStopFailed: "내장 데몬 관리가 일시 중지되었지만 Bozeo가 데몬을 중지하지 못했습니다.",
         updateFailed: "내장 데몬 관리를 업데이트할 수 없습니다.",
       },
       keepRunning: {
         title: "종료 후에도 데몬 계속 실행",
-        hint: "Paseo를 종료해도 데몬이 계속 실행됩니다",
+        hint: "Bozeo를 종료해도 데몬이 계속 실행됩니다",
+      },
+      keepAwake: {
+        title: "Mac 깨어 있게 유지",
+        hint: "Bozeo가 열려 있는 동안 Mac이 잠자기 상태가 되지 않도록 하여 에이전트가 계속 실행됩니다",
+      },
+      keepDisplayAwake: {
+        title: "디스플레이 켜 두기",
+        hint: "디스플레이를 켜 두면 배터리가 더 빨리 소모됩니다",
+        always: "항상",
+        onPowerAdapter: "전원 연결 시",
+        never: "안 함",
       },
       logs: {
         title: "로그 파일",
@@ -1371,7 +1410,7 @@ export const ko: TranslationResources = {
     },
     rosetta: {
       title: "Apple Silicon 빌드 다운로드",
-      runningIntel: "Apple Silicon에서 Rosetta로 Paseo의 Intel 빌드를 실행하고 있습니다.",
+      runningIntel: "Apple Silicon에서 Rosetta로 Bozeo의 Intel 빌드를 실행하고 있습니다.",
       highCpu:
         "이로 인해 CPU 사용량이 높아집니다. 이를 해결하려면 Apple Silicon 빌드를 다운로드하세요.",
       download: "다운로드",
@@ -1414,7 +1453,7 @@ export const ko: TranslationResources = {
         microphone: "마이크 상태를 아직 확인하지 않았습니다.",
       },
       testNotification: {
-        title: "Paseo 알림 테스트",
+        title: "Bozeo 알림 테스트",
         body: "이 메시지가 보이면 데스크톱 알림이 작동하는 것입니다.",
         notDelivered: "알림이 전달되지 않았습니다. 시스템 설정 > 알림을 확인하세요.",
         failed: "알림을 보내지 못했습니다.",
@@ -1428,7 +1467,7 @@ export const ko: TranslationResources = {
     },
   },
   rootError: {
-    title: "Paseo에 문제가 발생했습니다.",
+    title: "Bozeo에 문제가 발생했습니다.",
     body: "앱을 다시 로드해 보세요. 이런 일이 계속 발생하면 신고할 때 아래 세부정보를 포함하세요.",
     details: "세부",
   },
@@ -1523,7 +1562,7 @@ export const ko: TranslationResources = {
     },
   },
   onboarding: {
-    title: "Paseo에 오신 것을 환영합니다",
+    title: "Bozeo에 오신 것을 환영합니다",
     subtitle: "시작하려면 컴퓨터를 연결하세요",
     actions: {
       settings: "설정",
@@ -1611,7 +1650,7 @@ export const ko: TranslationResources = {
     },
     direct: {
       title: "직접 연결",
-      helper: "Paseo 서버의 주소를 입력하세요.",
+      helper: "Bozeo 서버의 주소를 입력하세요.",
       fields: {
         host: "호스트",
         port: "포트",
@@ -1652,7 +1691,7 @@ export const ko: TranslationResources = {
     },
     remoteSsh: {
       title: "원격 SSH",
-      helper: "원격 호스트에서 실행 중인 Paseo 데몬에 연결합니다.",
+      helper: "원격 호스트에서 실행 중인 Bozeo 데몬에 연결합니다.",
       fields: {
         target: "SSH 호스트",
       },
@@ -1709,15 +1748,15 @@ export const ko: TranslationResources = {
       enableDescription:
         "릴레이를 사용하면 이 장치를 어디에서나 연결할 수 있습니다. 페어링 트래픽은 종단 간 암호화됩니다.",
       relayDocs: "릴레이 작동 방식",
-      relayDocsAccessibility: "Paseo 릴레이 작동 방식 읽기",
+      relayDocsAccessibility: "Bozeo 릴레이 작동 방식 읽기",
       enableRelay: "릴레이 활성화",
       enablingRelay: "활성화 중...",
       notNow: "지금은 아님",
       directConnectionHint:
         "릴레이 없이 TCP, Tailscale 또는 다른 VPN을 통해 직접 연결하세요. QR 코드가 생성되지 않습니다.",
-      updateRequired: "Paseo 데스크톱에서 릴레이를 활성화하려면 호스트를 업데이트하세요.",
+      updateRequired: "Bozeo 데스크톱에서 릴레이를 활성화하려면 호스트를 업데이트하세요.",
       unavailable: "페어링 정보를 사용할 수 없습니다.",
-      hint: "휴대폰의 Paseo로 이 QR 코드를 스캔하거나 아래 링크를 복사하세요.",
+      hint: "휴대폰의 Bozeo로 이 QR 코드를 스캔하거나 아래 링크를 복사하세요.",
       securityWarning:
         "이 페어링 링크는 비밀번호처럼 취급하세요. 링크를 가진 사람은 누구나 이 데몬에 접근할 수 있습니다.",
       qrUnavailable: "QR 코드를 사용할 수 없습니다.",
@@ -1752,7 +1791,7 @@ export const ko: TranslationResources = {
   serviceUrl: {
     title: "서비스 URL 열기",
     message: "{{url}}을(를) 열까요?",
-    inPaseo: "Paseo에서",
+    inBozeo: "Bozeo에서",
     externalBrowser: "외부 브라우저",
     dontAskAgain: "다시 묻지 않기",
   },
@@ -1830,6 +1869,33 @@ export const ko: TranslationResources = {
       emptyTitle: "아직 풀 리퀘스트가 없습니다",
       emptyDescription: "이 체크아웃에 풀 리퀘스트를 만들면 세부 정보가 여기에 표시됩니다.",
     },
+    orchestration: {
+      label: "오케스트레이션",
+      subtitle: "에이전트 트리",
+      tooltip: "리더와 하위 에이전트 트리 보기",
+      emptyState: "이 호스트에는 아직 에이전트가 없습니다",
+      labelAll: "오케스트레이션: 모든 에이전트",
+      subtitleAll: "모든 에이전트",
+      subtitleLeader: "이 트리",
+      scopeLeader: "이 트리",
+      scopeAll: "전체",
+      scopeMissing: "이 트리는 더 이상 없습니다. 전체로 전환하면 나머지를 볼 수 있습니다.",
+      emptyStateFiltered: "활동 중인 항목이 없습니다. 오래된 에이전트 {{count}}개를 숨겼습니다.",
+      showOlder: "오래된 {{count}}개 보기",
+      hideOlder: "오래된 항목 숨기기",
+      usageUnavailable: "사용량을 사용할 수 없음",
+      usageAsOf: "{{time}} 기준 사용량",
+      accountRoleLeader: "리더",
+      accountRolePrimary: "기본 워커",
+      accountRoleBackup: "예비",
+      accountLeaderHere: "리더 있음",
+      accountLeadersHere: "리더 {{count}}",
+      accountWorkersHere: "워커 {{count}}",
+      accountBalanceLeft: "{{amount}} 남음",
+      staleTitle: "업데이트되지 않음",
+      staleLastSynced: "마지막 동기화 {{time}}",
+      staleNeverSynced: "아직 동기화되지 않음",
+    },
     diff: {
       changesLabel: "변경 사항",
       diffLabel: "Diff",
@@ -1884,12 +1950,129 @@ export const ko: TranslationResources = {
   sidebarCallout: {
     dismiss: "닫기",
   },
+  restartRecovery: {
+    summary_one: "에이전트 {{count}}개가 턴 도중 중단되었습니다",
+    summary_other: "에이전트 {{count}}개가 턴 도중 중단되었습니다",
+    resumeAll: "모두 재개",
+    dismissAll: "무시",
+    state: {
+      pending: "대기 중",
+      resuming: "재개 중",
+      failed: "재개 실패",
+    },
+    notRestorable: "재개할 수 없음",
+    error: "복구 실패: {{error}}",
+    expand: "재시작 복구 펼치기",
+    collapse: "재시작 복구 접기",
+  },
+  deviceStatus: {
+    summary: "{{total}}대 중 {{used}}대 사용 중",
+    summaryCapOff: "{{used}}대 실행 중",
+    dryRun: "드라이런",
+    platform: {
+      ios: "시뮬레이터",
+      android: "에뮬레이터",
+    },
+    heldBy: "{{agent}} 사용 중",
+    unleased: "예약 없음",
+    starting: "시작 중",
+    waiting_one: "에이전트 {{count}}개가 자리를 기다리는 중",
+    waiting_other: "에이전트 {{count}}개가 자리를 기다리는 중",
+    unleasedCount_one: "예약 없는 기기 {{count}}대",
+    unleasedCount_other: "예약 없는 기기 {{count}}대",
+    unenforced: "상한 미적용: {{providers}}",
+    enforcement: {
+      asks: "거부되지 않을 수 있음",
+      observes: "거부할 수 없음",
+    },
+    expand: "기기 상태 펼치기",
+    collapse: "기기 상태 접기",
+  },
+  mcpStatus: {
+    collapsedSummary: {
+      healthy: "MCP 서버 연결됨",
+      issues: "MCP 문제: {{names}}",
+    },
+    status: {
+      connected: "연결됨",
+      connecting: "연결 중",
+      needsAuth: "인증 필요",
+      error: "오류",
+      disabled: "사용 안 함",
+      sessionReported: "세션 문제",
+      claudeAiConnector: "Claude 계정마다 로그인 필요",
+    },
+    authAction: "인증",
+    reauthAction: "재인증",
+    adoptAction: "중계 후 로그인",
+    openClaudeAiAction: "claude.ai 열기",
+    authError: "인증 실패: {{error}}",
+    failure: {
+      gatewayDisabled: "이 호스트에서 MCP 게이트웨이가 꺼져 있습니다.",
+      unknownAgent:
+        "이를 보고한 에이전트가 더 이상 열려 있지 않습니다. 사용 중인 에이전트를 여세요.",
+      providerHasNoConfig: "Paseo가 {{provider}}의 MCP 설정을 읽을 수 없어 중계할 수 없습니다.",
+      accountSignedOut:
+        "{{provider}}에 로그인되어 있지 않습니다. 호스트에서 다음을 실행한 뒤 다시 시도하세요:",
+      serverNotInConfig:
+        "{{name}}은(는) Paseo가 {{provider}}용으로 읽는 MCP 설정에 없습니다. 에이전트가 다른 곳에서 불러오며, Paseo는 그곳을 알 수 없습니다.",
+      serverIsLocal:
+        "{{name}}은(는) 로컬 명령으로 실행됩니다. http와 sse 서버만 중계할 수 있습니다.",
+      adoptFailed: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
+      unknownServer: "게이트웨이가 중계하는 {{name}} 서버가 없습니다.",
+      staticAuth: "{{name}}은(는) 저장된 헤더로 로그인하므로 승인할 것이 없습니다.",
+      noRedirectUrl:
+        "이 호스트에는 {{name}}이(가) 되돌려 보낼 수 있는 주소가 없습니다. 데몬의 공개 URL을 설정한 뒤 다시 시도하세요.",
+      clientNotRegistered:
+        "{{name}}용 OAuth 앱을 직접 등록한 뒤, 클라이언트 ID와 시크릿을 호스트의 토큰 파일에 추가하세요. {{name}}은(는) 자동 등록을 지원하지 않아 Paseo가 대신할 수 없습니다.",
+      clientRegistrationRefused:
+        "{{name}}이(가) Paseo를 클라이언트로 등록하지 않아 로그인을 시작할 수 없습니다. 일부 제공자는 자체 허용 목록의 MCP 클라이언트만 받아들이며, 여기서 설정하는 것으로는 바뀌지 않습니다. {{name}}이(가) 로컬 서버를 제공하는지 확인해 이 항목을 그쪽으로 연결하세요.",
+      serverRejected: "{{error}}",
+      serverUnreachable: "{{error}}",
+      authorizationFailed: "로그인 실패: {{error}}",
+      unknown: "{{name}}을(를) 중계하지 못했습니다: {{error}}",
+    },
+    remedy: {
+      redirectUrl: "등록할 리디렉션 URI",
+      path: "호스트의 파일",
+      snippet: "추가할 내용",
+      command: "호스트에서 실행",
+    },
+    showFullError: "메시지 전체 보기",
+    showLessError: "메시지 줄이기",
+    copyError: "메시지 복사",
+    copiedError: "복사됨",
+    reportedBy: "{{agent}}가 보고함",
+    reportedByOn: "{{provider}}의 {{agent}}",
+    reportedByCount: "에이전트 {{count}}개가 보고함",
+    reportedOn: "{{provider}}에서",
+    expand: "MCP 상태 펼치기",
+    collapse: "MCP 상태 접기",
+  },
   contextWindow: {
     title: "컨텍스트 윈도우",
     used: "{{percentage}}% 사용됨",
     tokens: "{{used}} / {{max}} 토큰",
     sessionCost: "세션 비용 {{cost}}",
     accessibility: "컨텍스트 윈도우 {{percentage}}% 사용됨",
+    spendTitle: "사용량",
+    spendSummary: "{{span}} 동안 가중 토큰 {{total}}",
+    breakdownLoading: "컨텍스트를 읽는 중…",
+    breakdownPending: "이 턴이 끝나면 세부 내역이 표시됩니다.",
+    breakdownUnsupported: "이 제공자는 컨텍스트 세부 내역을 제공할 수 없습니다.",
+    breakdownError: "컨텍스트 세부 내역을 읽지 못했습니다.",
+    breakdownAsOf: "{{time}} 기준",
+    breakdownBarAccessibility: "컨텍스트 윈도우 세부 내역",
+    deferredTitle: "윈도우 밖",
+    messageToolResults: "도구 결과",
+    messageAttachments: "첨부 파일",
+    messageAssistant: "어시스턴트",
+    messageToolCalls: "도구 호출",
+    messageUser: "사용자 메시지",
+    memoryTotalWarning: "메모리 파일이 {{tokens}} 토큰으로 권장 {{limit}}을(를) 넘습니다.",
+    memoryFileWarning: "{{path}}은(는) {{tokens}} 토큰으로 {{limit}}을(를) 넘습니다.",
+    reReadAdvice:
+      "이 세션은 매 턴 약 {{tokens}} 토큰을 다시 읽습니다. 짧은 인수인계와 함께 새 세션을 시작하는 편이 더 저렴합니다.",
   },
   review: {
     comment: {
@@ -1954,7 +2137,7 @@ export const ko: TranslationResources = {
       send: "보내기",
       sending: "보내는 중...",
       sentTitle: "테스트 알림을 보냈습니다",
-      sentDescription: "Paseo가 알림을 운영 체제에 전달했습니다.",
+      sentDescription: "Bozeo가 알림을 운영 체제에 전달했습니다.",
       sendFailedTitle: "테스트 알림을 보낼 수 없음",
     },
     hostSections: {
@@ -1977,10 +2160,10 @@ export const ko: TranslationResources = {
       selection: "모델 선택",
       automatic: "자동",
       preferred: "수동",
-      automaticHint: "Paseo가 사용 가능한 빠른 모델을 선택합니다",
-      preferredHint: "Paseo에서 사용할 모델을 선택하세요",
+      automaticHint: "Bozeo가 사용 가능한 빠른 모델을 선택합니다",
+      preferredHint: "Bozeo에서 사용할 모델을 선택하세요",
       model: "모델",
-      fallbackHint: "사용할 수 없으면 Paseo가 다른 사용 가능한 모델을 사용합니다",
+      fallbackHint: "사용할 수 없으면 Bozeo가 다른 사용 가능한 모델을 사용합니다",
       docs: "문서",
       saveError: "메타데이터 생성을 업데이트할 수 없습니다",
     },
@@ -1989,7 +2172,7 @@ export const ko: TranslationResources = {
       browserData: {
         title: "브라우저 데이터",
         siteData: "쿠키 및 사이트 데이터",
-        description: "브라우저 탭은 Paseo 전체에서 로그인 및 사이트 데이터를 공유합니다.",
+        description: "브라우저 탭은 Bozeo 전체에서 로그인 및 사이트 데이터를 공유합니다.",
         clear: "브라우저 데이터 지우기",
         clearing: "삭제 중...",
         confirmTitle: "브라우저 데이터를 삭제하시겠습니까?",
@@ -2018,7 +2201,7 @@ export const ko: TranslationResources = {
         description: "실행 중인 스크립트의 URL을 열 위치",
         options: {
           ask: "물어보기",
-          inApp: "Paseo에서",
+          inApp: "Bozeo에서",
           external: "외부 브라우저",
         },
       },
@@ -2103,7 +2286,7 @@ export const ko: TranslationResources = {
         label: "앱 업데이트",
         readyToInstall: "설치 준비됨: {{version}}",
         installTitle: "데스크톱 업데이트 설치",
-        installMessage: "이 컴퓨터의 Paseo를 업데이트합니다",
+        installMessage: "이 컴퓨터의 Bozeo를 업데이트합니다",
         installConfirm: "업데이트 설치",
         update: "업데이트",
         updateTo: "{{version}}(으)로 업데이트",
@@ -2220,6 +2403,8 @@ export const ko: TranslationResources = {
         closePane: "창 닫기",
         newTerminal: "새 터미널",
         searchFiles: "파일 검색",
+        historyBack: "뒤로 가기",
+        historyForward: "앞으로 가기",
         toggleCommandCenter: "명령 센터 토글",
         showKeyboardShortcuts: "키보드 단축키 표시",
         toggleLeftSidebar: "왼쪽 사이드바 토글",
@@ -2271,6 +2456,67 @@ export const ko: TranslationResources = {
       },
     },
     host: {
+      notifications: {
+        title: "알림",
+        info: "즉시 도착할 알림과 요약으로 모아 보낼 알림을 선택하세요. 경고는 확인이 필요하고, 안내는 알아 두면 좋지만 기다릴 수 있습니다.",
+        loadError: "알림 설정을 불러올 수 없습니다",
+        unsupported: "알림 설정을 변경하려면 이 호스트를 업데이트하세요",
+        availability: {
+          label: "상태",
+          options: {
+            available: "가능",
+            focus: "집중",
+            away: "자리 비움",
+            off: "끔",
+          },
+          hints: {
+            available: "경고는 즉시 알리고 안내는 요약으로 도착합니다",
+            focus: "긴급 경고만 소리가 나고 안내는 대기합니다",
+            away: "경고는 계속 알리고 안내는 돌아올 때까지 대기합니다",
+            off: "소리가 나지 않으며 모두 조용히 전달됩니다",
+          },
+        },
+        duration: {
+          label: "기간",
+          options: {
+            oneHour: "1시간",
+            fourHours: "4시간",
+            untilChanged: "변경할 때까지",
+          },
+          endsAt: "{{time}}까지",
+        },
+        interrupt: {
+          label: "방해 허용 대상",
+          hint: "그 외는 요약으로 대기합니다",
+          options: {
+            urgent: "긴급만",
+            alert: "경고 및 긴급",
+            notice: "모두",
+          },
+        },
+        notices: {
+          label: "안내",
+          hint: "알아 두면 좋지만 지금 조치할 필요는 없습니다",
+          options: {
+            digest: "요약",
+            off: "끔",
+          },
+        },
+        digestInterval: {
+          label: "요약 전송 간격",
+          options: {
+            m15: "15분",
+            m30: "30분",
+            m60: "1시간",
+            m180: "3시간",
+          },
+        },
+        status: {
+          held: "다음 요약 대기 중",
+          unreached: "미전달 ({{count}})",
+          unreachedHint: "공급자가 거부했거나 등록된 기기가 없을 때 보낸 알림",
+        },
+      },
       appearance: {
         title: "모양",
         name: {
@@ -2332,11 +2578,11 @@ export const ko: TranslationResources = {
         title: "오케스트레이션 스킬",
         description: "CLI를 통해 에이전트가 오케스트레이션하도록 가르칩니다",
         updateAvailable: "업데이트 사용 가능",
-        updateTitle: "Paseo 스킬을 업데이트할까요?",
+        updateTitle: "Bozeo 스킬을 업데이트할까요?",
         updateFallback: "번들된 스킬을 내 컴퓨터에 동기화합니다.",
-        uninstallTitle: "Paseo 스킬을 제거할까요?",
+        uninstallTitle: "Bozeo 스킬을 제거할까요?",
         uninstallMessage:
-          "~/.agents, ~/.claude, ~/.codex에서 모든 Paseo 오케스트레이션 스킬을 제거합니다.",
+          "~/.agents, ~/.claude, ~/.codex에서 모든 Bozeo 오케스트레이션 스킬을 제거합니다.",
         choose: "스킬 선택",
         chooseAll: "모든 스킬",
         chooseAllHint: "나중에 추가되는 항목을 포함하여 모든 번들 스킬을 설치된 상태로 유지합니다.",
@@ -2478,15 +2724,15 @@ export const ko: TranslationResources = {
             "이 호스트는 연결되어 있지 않습니다. 재시작하기 전에 온라인 상태가 될 때까지 기다리세요.",
           offlineTitle: "호스트 오프라인",
           offlineMessage:
-            "이 호스트는 오프라인입니다. Paseo가 자동으로 다시 연결하므로 다시 온라인이 될 때까지 기다린 후 재시작하세요.",
+            "이 호스트는 오프라인입니다. Bozeo가 자동으로 다시 연결하므로 다시 온라인이 될 때까지 기다린 후 재시작하세요.",
           requestFailedTitle: "오류",
           requestFailedMessage:
-            "재시작 요청을 보내지 못했습니다. Paseo가 자동으로 다시 연결하므로 호스트가 온라인으로 표시되면 다시 시도하세요.",
+            "재시작 요청을 보내지 못했습니다. Bozeo가 자동으로 다시 연결하므로 호스트가 온라인으로 표시되면 다시 시도하세요.",
           dialogFailedMessage: "재시작 확인 대화 상자를 열 수 없습니다.",
         },
         update: {
           desktopManagedHint:
-            "이 데몬은 Paseo Desktop에서 관리됩니다. 호스트에서 Paseo 데스크톱을 업데이트합니다.",
+            "이 데몬은 Bozeo Desktop에서 관리됩니다. 호스트에서 Bozeo 데스크톱을 업데이트합니다.",
           title: "데몬 업데이트",
           hint: "데몬을 최신 버전으로 업데이트하고 다시 시작하세요.",
           confirm: "업데이트",
@@ -2647,7 +2893,7 @@ export const ko: TranslationResources = {
         newScript: "새 스크립트",
         editScript: "{{name}} 편집",
         runAsService: "서비스로 실행",
-        serviceHint: "Paseo가 프로세스를 감독하고 $PASEO_PORT를 통해 포트를 할당합니다",
+        serviceHint: "Bozeo가 프로세스를 감독하고 $PASEO_PORT를 통해 포트를 할당합니다",
         actions: {
           add: "스크립트 추가",
           edit: "편집",
@@ -2656,7 +2902,7 @@ export const ko: TranslationResources = {
       },
       metadata: {
         title: "메타데이터 생성",
-        info: "Paseo가 메타데이터를 생성하는 데 사용하는 AI 프롬프트에 주입되는 프로젝트별 지침 - 브랜치 이름, 커밋 스타일, PR 형식 같은 팀 규칙을 적용하는 데 사용하세요",
+        info: "Bozeo가 메타데이터를 생성하는 데 사용하는 AI 프롬프트에 주입되는 프로젝트별 지침 - 브랜치 이름, 커밋 스타일, PR 형식 같은 팀 규칙을 적용하는 데 사용하세요",
         branchName: "브랜치 이름",
         branchNamePlaceholder:
           "브랜치에 feat/ 또는 fix/를 접두사로, 개인 브랜치에는 mb/를 붙이세요",

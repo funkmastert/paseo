@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createGitHubService } from "../services/github-service.js";
 import type { CurrentPullRequestStatus, ForgeService } from "../services/forge-service.js";
 import { defaultForgeRegistry } from "../services/forge-registry.js";
+import { currentSpawnPriority, type SpawnPriority } from "../utils/spawn.js";
 import {
   getCheckoutDiff as getCheckoutDiffUncached,
   getCheckoutSnapshotFacts as getCheckoutSnapshotFactsUncached,
@@ -1304,6 +1305,83 @@ describe("WorkspaceGitServiceImpl primitive refresh entrypoint", () => {
     } finally {
       service.dispose();
       unregister();
+    }
+  });
+
+  async function registerGenericForgeWorkspace(
+    getCurrentPullRequestStatus: ForgeService["getCurrentPullRequestStatus"],
+  ) {
+    const forge = {
+      ...createGitHubServiceStub(),
+      retainCurrentPullRequestStatusPoll: undefined,
+      getCurrentPullRequestStatus,
+    };
+    const unregister = defaultForgeRegistry.register("gitlab-test", {
+      createService: () => forge,
+      matchesHost: (host) => host === "forge-self-heal.test",
+    });
+    const service = createService({
+      getCheckoutSnapshotFacts: vi.fn(async (cwd: string) =>
+        createCheckoutFacts(cwd, {
+          currentBranch: "feature",
+          remoteUrl: "https://forge-self-heal.test/acme/repo.git",
+          pullRequestLookupTarget: { headRef: "feature", headSha: "1".repeat(40) },
+        }),
+      ),
+      getCheckoutStatus: vi.fn(async (cwd: string) =>
+        createCheckoutStatus(cwd, {
+          currentBranch: "feature",
+          remoteUrl: "https://forge-self-heal.test/acme/repo.git",
+        }),
+      ),
+    });
+    const subscription = service.registerWorkspace({ cwd: REPO_CWD }, vi.fn());
+    await flushPromises();
+    return {
+      dispose: () => {
+        subscription.unsubscribe();
+        service.dispose();
+        unregister();
+      },
+    };
+  }
+
+  test("generic forge self-heal spawns its CLI at background priority", async () => {
+    const seen: Array<SpawnPriority | undefined> = [];
+    const harness = await registerGenericForgeWorkspace(async () => {
+      seen.push(currentSpawnPriority());
+      return createCurrentPullRequestStatus();
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(120_000);
+      await flushPromises();
+      expect(seen).toEqual(["background"]);
+    } finally {
+      harness.dispose();
+    }
+  });
+
+  test("generic forge self-heal backs off after consecutive failures instead of retrying at the base interval", async () => {
+    const getCurrentPullRequestStatus = vi.fn(async () => {
+      throw new Error("tea was terminated before completing");
+    });
+    const harness = await registerGenericForgeWorkspace(getCurrentPullRequestStatus);
+    try {
+      // Base interval 120s: failure 1 retries after 120s, failure 2 after 240s, then the 300s cap.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(239_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(299_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(getCurrentPullRequestStatus).toHaveBeenCalledTimes(4);
+    } finally {
+      harness.dispose();
     }
   });
 

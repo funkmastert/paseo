@@ -1,4 +1,5 @@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { AgentIdChip } from "@/components/agent-id-chip";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
 import { getOpenAgentTabLabel } from "@getpaseo/protocol/agent-labels";
 import {
@@ -25,6 +26,9 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { Theme } from "@/styles/theme";
 import invariant from "tiny-invariant";
 import { SidebarMenuToggle } from "@/components/headers/menu-header";
+import { HistoryBackButton } from "@/components/navigation/history-back-button";
+import { buildNavigationHistoryReplayDeps } from "@/navigation/navigation-history-replay";
+import { canGoBack, goBack, useNavigationHistoryStore } from "@/stores/navigation-history-store";
 import { ScreenHeader } from "@/components/headers/screen-header";
 import { ScreenTitle } from "@/components/headers/screen-title";
 import { HostBadge } from "@/hosts/host-badge";
@@ -188,6 +192,7 @@ import {
 } from "@/panels/panel-instance-attributes";
 import { findAdjacentPane } from "@/utils/split-navigation";
 import { supportsDesktopPaneSplits, useIsCompactFormFactor } from "@/constants/layout";
+import { openOrchestrationTab } from "@/orchestration/open-orchestration-tab";
 import { getIsElectron, isNative, isWeb } from "@/constants/platform";
 import type { SurfaceBackdrop } from "@/styles/surface-backdrop";
 import { buildHostRootRoute, buildSettingsHostRoute } from "@/utils/host-routes";
@@ -206,6 +211,7 @@ import {
 } from "@/workspace/file-open";
 import { RenderProfile } from "@/utils/render-profiler";
 import { useWorkspaceCheckoutStatus } from "@/screens/workspace/use-workspace-checkout-status";
+import { resolveWorkspaceHardwareBackAction } from "@/screens/workspace/workspace-hardware-back-model";
 import { useHasPullRequest } from "@/panels/pull-request";
 
 const WORKSPACE_FLOATING_PANEL_PORTAL_HOST_PREFIX = "workspace-floating-panels";
@@ -315,6 +321,7 @@ function getFallbackTabOptionLabel(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -347,6 +354,9 @@ function getFallbackTabOptionLabel(
   if (tab.target.kind === "commit_diff") {
     return tab.target.sha.slice(0, 7);
   }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
+  }
   return labels.agent;
 }
 
@@ -362,6 +372,7 @@ function getFallbackTabOptionDescription(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -399,6 +410,9 @@ function getFallbackTabOptionDescription(
   }
   if (tab.target.kind === "plugin") {
     return tab.target.panelId;
+  }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
   }
   return tab.target.path;
 }
@@ -478,6 +492,12 @@ function ResolvedMobileActiveTabTrigger({
               ? t("workspace.tabs.loading")
               : presentation.label}
           </Text>
+          {activeTab.target.kind === "agent" ? (
+            <AgentIdChip
+              agentId={activeTab.target.agentId}
+              testID="workspace-active-tab-agent-id"
+            />
+          ) : null}
         </>
       )}
     </WorkspaceTabPresentationResolver>
@@ -599,6 +619,7 @@ function MobileWorkspaceTabOption({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );
@@ -967,6 +988,7 @@ interface WorkspaceHeaderTitleBarProps {
   onCreateTerminal: () => void;
   onCreateTerminalWithProfile: (profile: TerminalProfile) => void;
   onCreateBrowser: () => void;
+  onOpenOrchestration: () => void;
   onOpenImportSheet: () => void;
   onCopyWorkspacePath: () => void;
   onCopyBranchName: () => void;
@@ -996,6 +1018,7 @@ function WorkspaceHeaderTitleBar({
   onCreateTerminal,
   onCreateTerminalWithProfile,
   onCreateBrowser,
+  onOpenOrchestration,
   onOpenImportSheet,
   onCopyWorkspacePath,
   onCopyBranchName,
@@ -1034,6 +1057,7 @@ function WorkspaceHeaderTitleBar({
             onCreateTerminal={onCreateTerminal}
             onCreateTerminalWithProfile={onCreateTerminalWithProfile}
             onCreateBrowser={onCreateBrowser}
+            onOpenOrchestration={onOpenOrchestration}
             onOpenImportSheet={onOpenImportSheet}
             onCopyWorkspacePath={onCopyWorkspacePath}
             onCopyBranchName={onCopyBranchName}
@@ -1795,16 +1819,33 @@ function WorkspaceScreenContent({
   );
 
   useEffect(() => {
-    // Back dismisses the compact overlay only. On a wide native layout the
-    // explorer is a tab, `showMobileAgent` has no rendered consumer, and
-    // returning true would swallow Back with nothing to show for it.
-    if (!isRouteFocused || isWeb || !isMobile || !isExplorerSidebarShowing) {
+    // Consolidated hardware Back handling (see docs/plans/2026-09-12-001-feat-global-back-history-plan.md
+    // for the history half). Dismissing the compact overlay and cross-workspace/tab history
+    // navigation both want the same `hardwareBackPress` event; registering them as two separate
+    // effects made "who wins" depend on registration order, since BackHandler dispatches
+    // listeners LIFO and stops at the first one that returns true. One handler reading both
+    // pieces of state through resolveWorkspaceHardwareBackAction makes the priority explicit:
+    // dismissing the overlay always wins, and only falls through to history when it's closed.
+    // On a wide native layout the explorer is a tab, not an overlay, so `isOverlayOpen` is
+    // always false there and this falls straight through to history navigation.
+    if (!isRouteFocused || !isNative) {
       return;
     }
 
     const handler = BackHandler.addEventListener("hardwareBackPress", () => {
-      showMobileAgent();
-      return true;
+      const action = resolveWorkspaceHardwareBackAction({
+        isOverlayOpen: isMobile && isExplorerSidebarShowing,
+        canGoBack: canGoBack(useNavigationHistoryStore.getState()),
+      });
+      switch (action) {
+        case "dismissOverlay":
+          showMobileAgent();
+          return true;
+        case "historyBack":
+          return goBack(buildNavigationHistoryReplayDeps());
+        case "unhandled":
+          return false;
+      }
     });
 
     return () => handler.remove();
@@ -2365,6 +2406,7 @@ function WorkspaceScreenContent({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );
@@ -2819,6 +2861,21 @@ function WorkspaceScreenContent({
     }
     openWorkspaceTabFocused(persistenceKey, target, FOCUSED_PANE_PLACEMENT);
   }, [normalizedWorkspaceId, openWorkspaceTabFocused, persistenceKey]);
+
+  // The same open the Command Center's Orchestration action does (command-center/
+  // workspace-registration.tsx): host-wide, no scope agent.
+  const handleOpenOrchestration = useCallback(() => {
+    openOrchestrationTab({
+      isCompact: isMobile,
+      canSplit: supportsDesktopPaneSplits() && !isMobile,
+      workspaceKey: persistenceKey,
+      preferences: openInSidePane,
+      openTab: (target) => {
+        if (!persistenceKey) return;
+        openTab({ workspaceKey: persistenceKey, target, intent: "reveal" });
+      },
+    });
+  }, [isMobile, openInSidePane, openTab, persistenceKey]);
 
   const handleBulkCloseTabs = useCallback(
     async (input: {
@@ -3885,6 +3942,7 @@ function WorkspaceScreenContent({
           left={
             <>
               <SidebarMenuToggle />
+              <HistoryBackButton />
               <WorkspaceHeaderTitleBar
                 isLoading={isWorkspaceHeaderLoading}
                 title={workspaceHeaderTitle}
@@ -3905,6 +3963,7 @@ function WorkspaceScreenContent({
                 onCreateTerminal={handleCreateTerminal}
                 onCreateTerminalWithProfile={handleCreateTerminalWithProfile}
                 onCreateBrowser={handleCreateBrowserTab}
+                onOpenOrchestration={handleOpenOrchestration}
                 onOpenImportSheet={openImportSheet}
                 onCopyWorkspacePath={handleCopyWorkspacePath}
                 onCopyBranchName={handleCopyBranchName}
@@ -3928,6 +3987,7 @@ function WorkspaceScreenContent({
       handleCreateDraftTab,
       handleCreateTerminal,
       handleCreateTerminalWithProfile,
+      handleOpenOrchestration,
       handleOpenSetupTab,
       handleOpenUrlInBrowserTab,
       handleScriptTerminalStarted,

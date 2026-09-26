@@ -2,7 +2,8 @@ import { Fragment, useCallback, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Pressable, Text, View, type GestureResponderEvent } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { ExternalLink, Folder, GitBranch, Globe } from "lucide-react-native";
+import { ExternalLink, Folder, GitBranch, Globe, HardDrive } from "lucide-react-native";
+import type { WorkspaceDiskUsage } from "@getpaseo/protocol/messages";
 import {
   workspaceLabelKey,
   type WorkspaceLabelDefinition,
@@ -14,7 +15,9 @@ import type { PrHint } from "@/git/pr-hint";
 import { getForgePresentation, normalizeForge } from "@/git/forge";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { useSidebarMetaPreferences } from "@/components/sidebar/display-preferences/model";
+import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import type { Theme } from "@/styles/theme";
+import { formatDiskUsageSize, type DiskUsageTone } from "@/utils/disk-usage-tone-model";
 import { PullRequestStateIcon } from "@/git/pull-request-state-icon";
 import { CheckIndicator } from "./check-indicator";
 import type { CheckSummary, CheckSummaryState } from "./check-summary";
@@ -38,6 +41,7 @@ const ThemedExternalLink = withUnistyles(ExternalLink);
 const ThemedFolder = withUnistyles(Folder);
 const ThemedGitBranch = withUnistyles(GitBranch);
 const ThemedGlobe = withUnistyles(Globe);
+const ThemedHardDrive = withUnistyles(HardDrive);
 
 /** Stable identity so a row without labels doesn't re-select its items on every render. */
 const EMPTY_LABELS: readonly WorkspaceLabelDefinition[] = [];
@@ -45,11 +49,12 @@ const EMPTY_LABELS: readonly WorkspaceLabelDefinition[] = [];
 const foregroundMapping = (theme: Theme) => ({ color: theme.colors.foreground });
 const mutedMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
 const dangerMapping = (theme: Theme) => ({ color: theme.colors.statusDanger });
+const warningMapping = (theme: Theme) => ({ color: theme.colors.statusWarning });
 
 /**
  * The subtitle under a workspace title: which host it lives on, its change request, that
- * change request's CI, any running service, and the labels someone put on it. Everything the
- * row knows about a workspace that isn't its name.
+ * change request's CI, any running service, how much disk it holds, and the labels someone put
+ * on it. Everything the row knows about a workspace that isn't its name.
  *
  * Items are peers separated by a dot rather than ranked by chrome. The host used to be a
  * tinted pill on the title line, which made it the loudest thing in a row whose subject is
@@ -66,6 +71,7 @@ export function WorkspaceMetaRow({
   hostBadge,
   prHint,
   serviceSummary,
+  diskUsage,
   labels = EMPTY_LABELS,
 }: {
   currentBranch: string | null;
@@ -73,6 +79,7 @@ export function WorkspaceMetaRow({
   hostBadge: HostBadgeModel | null;
   prHint: PrHint | null;
   serviceSummary: WorkspaceServiceSummary | null;
+  diskUsage: WorkspaceDiskUsage | null;
   labels?: readonly WorkspaceLabelDefinition[];
 }) {
   const { rowItems, checksDisplay } = useSidebarMetaPreferences();
@@ -82,6 +89,7 @@ export function WorkspaceMetaRow({
     hasHostBadge: hostBadge !== null,
     prHint,
     serviceSummary,
+    diskUsage,
     labels,
     visible: rowItems,
     checksDisplay,
@@ -125,6 +133,9 @@ function MetaItemNode({
   }
   if (item.kind === "checks") {
     return <ChecksItem summary={item.summary} label={item.label} />;
+  }
+  if (item.kind === "diskUsage") {
+    return <DiskUsageItem diskUsage={item.diskUsage} tone={item.tone} />;
   }
   if (item.kind === "labels") {
     return <LabelsItem labels={item.labels} leading={leading} />;
@@ -274,6 +285,45 @@ const CHECK_STATE_ACCESSIBLE_KEYS = {
 } as const;
 
 /**
+ * How much disk the workspace's worktree holds, once it crosses the tone model's floor — see
+ * `disk-usage-tone-model.ts`. Unlike `ChecksItem`, there is no icon-only mode: the formatted
+ * size is the point of the item, so it always shows beside the icon.
+ *
+ * The accessible label carries the size and how stale the sample is, the same "tooltip on the
+ * wrapper" precedent `ChecksItem` and `PullRequestItem` use rather than a hover popover — see
+ * docs/floating-panels.md for why this row avoids that primitive.
+ */
+function DiskUsageItem({
+  diskUsage,
+  tone,
+}: {
+  diskUsage: WorkspaceDiskUsage;
+  tone: DiskUsageTone;
+}) {
+  const { t } = useTranslation();
+  const timeAgo = useCompactTimeAgo(new Date(diskUsage.sampledAt));
+  const size = formatDiskUsageSize(diskUsage.bytes);
+  return (
+    <View
+      style={styles.item}
+      accessibilityLabel={t("workspace.diskUsage.accessible", { size, timeAgo })}
+      testID={`sidebar-workspace-disk-usage-${tone}`}
+    >
+      <ThemedHardDrive size={META_ICON_SIZE} uniProps={DISK_USAGE_COLOR_MAPPINGS[tone]} />
+      <Text style={diskUsageTextStyle(tone)} numberOfLines={1}>
+        {size}
+      </Text>
+    </View>
+  );
+}
+
+const DISK_USAGE_COLOR_MAPPINGS: Record<DiskUsageTone, (theme: Theme) => { color: string }> = {
+  muted: mutedMapping,
+  warning: warningMapping,
+  danger: dangerMapping,
+};
+
+/**
  * A running service, named. It is the one item on the line whose text is arbitrary — everything
  * else is a number, a short word, or a host label the user already picked — so it is also the
  * only one allowed to shrink, and it truncates rather than pushing the line past the row.
@@ -413,6 +463,24 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: 16,
     flexShrink: 0,
   },
+  diskUsageTextMuted: {
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 16,
+    flexShrink: 0,
+  },
+  diskUsageTextWarning: {
+    color: theme.colors.statusWarning,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 16,
+    flexShrink: 0,
+  },
+  diskUsageTextDanger: {
+    color: theme.colors.statusDanger,
+    fontSize: theme.fontSize.sm,
+    lineHeight: 16,
+    flexShrink: 0,
+  },
 }));
 
 // Read inside render, never into a module-scope table: touching `styles.x` at module load
@@ -422,4 +490,10 @@ function checksTextStyle(state: CheckSummaryState) {
   if (state === "failed") return styles.checksTextFailed;
   if (state === "running") return styles.checksTextRunning;
   return styles.checksTextPassed;
+}
+
+function diskUsageTextStyle(tone: DiskUsageTone) {
+  if (tone === "danger") return styles.diskUsageTextDanger;
+  if (tone === "warning") return styles.diskUsageTextWarning;
+  return styles.diskUsageTextMuted;
 }

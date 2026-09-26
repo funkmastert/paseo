@@ -1,0 +1,137 @@
+import type { Query } from "@anthropic-ai/claude-agent-sdk";
+import { describe, expect, test, vi } from "vitest";
+
+import { createTestLogger } from "../../../../test-utils/test-logger.js";
+import type { AgentSessionConfig } from "../../agent-sdk-types.js";
+import { ClaudeAgentClient } from "./agent.js";
+import type { ClaudeQueryInput } from "./query.js";
+
+function createQueryMock(): Query {
+  const events = [
+    {
+      type: "system",
+      subtype: "init",
+      session_id: "system-prompt-session",
+      permissionMode: "default",
+      model: "opus",
+    },
+    { type: "assistant", message: { content: "done" } },
+    {
+      type: "result",
+      subtype: "success",
+      usage: { input_tokens: 1, cache_read_input_tokens: 0, output_tokens: 1 },
+      total_cost_usd: 0,
+    },
+  ];
+  let index = 0;
+  return {
+    next: vi.fn(async () =>
+      index < events.length
+        ? { done: false, value: events[index++] }
+        : { done: true, value: undefined },
+    ),
+    return: vi.fn(async () => ({ done: true, value: undefined })),
+    interrupt: vi.fn(async () => undefined),
+    close: vi.fn(() => undefined),
+    setPermissionMode: vi.fn(async () => undefined),
+    setModel: vi.fn(async () => undefined),
+    supportedModels: vi.fn(async () => [{ value: "opus", displayName: "Opus" }]),
+    supportedCommands: vi.fn(async () => []),
+    rewindFiles: vi.fn(async () => ({ canRewind: true })),
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  } as Query;
+}
+
+/** Runs one turn and returns the options handed to the SDK. */
+async function launchOptions(
+  config: Omit<AgentSessionConfig, "provider">,
+): Promise<ClaudeQueryInput["options"]> {
+  let captured: ClaudeQueryInput["options"] | undefined;
+  const client = new ClaudeAgentClient({
+    logger: createTestLogger(),
+    queryFactory: ({ options }: ClaudeQueryInput) => {
+      captured = options;
+      return createQueryMock();
+    },
+    resolveBinary: async () => "/test/claude/bin",
+  });
+  const session = await client.createSession({ provider: "claude", ...config }, { env: {} });
+  try {
+    await session.run("system prompt check");
+  } finally {
+    await session.close();
+  }
+  if (!captured) throw new Error("queryFactory was never called");
+  return captured;
+}
+
+function appendedText(options: ClaudeQueryInput["options"]): string {
+  const systemPrompt = options.systemPrompt;
+  if (typeof systemPrompt !== "object" || systemPrompt === null || Array.isArray(systemPrompt)) {
+    throw new Error("Claude launches must keep the claude_code preset system prompt");
+  }
+  return systemPrompt.append ?? "";
+}
+
+describe("Claude system prompt composition", () => {
+  test("providerOptions.appendSystemPrompt reaches the SDK as preset append text", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      providerOptions: { appendSystemPrompt: "Write and Bash are withheld from you." },
+    });
+
+    expect(appendedText(options)).toBe("Write and Bash are withheld from you.");
+  });
+
+  test("the agent, daemon, and providerOptions notes compose in that order", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      systemPrompt: "Agent instructions.",
+      daemonAppendSystemPrompt: "Daemon-wide instructions.",
+      providerOptions: { appendSystemPrompt: "Restriction notice." },
+    });
+
+    expect(appendedText(options)).toBe(
+      "Agent instructions.\n\nDaemon-wide instructions.\n\nRestriction notice.",
+    );
+  });
+
+  test("the providerOptions note never clobbers the daemon-wide append", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      daemonAppendSystemPrompt: "Daemon-wide instructions.",
+      providerOptions: { appendSystemPrompt: "Restriction notice." },
+    });
+
+    expect(appendedText(options)).toContain("Daemon-wide instructions.");
+    expect(appendedText(options)).toContain("Restriction notice.");
+  });
+
+  test("leaving it unset composes exactly as before", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      systemPrompt: "Agent instructions.",
+      daemonAppendSystemPrompt: "Daemon-wide instructions.",
+      providerOptions: {},
+    });
+
+    expect(appendedText(options)).toBe("Agent instructions.\n\nDaemon-wide instructions.");
+  });
+
+  test("the note is stripped before the SDK option spread", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      providerOptions: {
+        appendSystemPrompt: "Restriction notice.",
+        disallowedTools: ["Write"],
+      },
+    });
+
+    // appendSystemPrompt is Paseo's own key. Leaking it into the SDK Options object
+    // would hand the Claude CLI an option it does not know.
+    expect(options).not.toHaveProperty("appendSystemPrompt");
+    expect(options.disallowedTools).toEqual(["Write"]);
+  });
+});

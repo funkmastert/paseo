@@ -1,11 +1,12 @@
 import { useCallback, useMemo, type ReactElement } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { Archive, Unlink } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { getProviderIcon } from "@/components/provider-icons";
+import { RowActionButton } from "@/components/row-action-button";
+import { TokenBurnBadge } from "@/components/token-burn-badge";
 import { ComposerTrackActions, ComposerTrackPill, ComposerTrackRow } from "@/composer/tracks";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { isNative } from "@/constants/platform";
 import {
@@ -13,12 +14,15 @@ import {
   type WorkspaceTabPresentation,
 } from "@/screens/workspace/workspace-tab-presentation";
 import type { Theme } from "@/styles/theme";
+import { useTokenBurnTones } from "@/hooks/use-token-burn-tones";
+import type { TokenBurnSibling, TokenBurnTone } from "@/utils/token-burn-tone-model";
 import type { SubagentRow } from "./select";
 import type { ArchiveFinishedStatus } from "./use-archive-finished";
 import {
   buildSubagentPillPresentation,
   buildSubagentRowPresentationData,
   countFinishedSubagents,
+  selectVisibleSubagentRows,
 } from "./track-presentation";
 
 const ThemedArchive = withUnistyles(Archive);
@@ -67,6 +71,20 @@ export function SubagentsTrack({
 }: SubagentsTrackProps): ReactElement | null {
   const { t } = useTranslation();
 
+  // Collection rows never independently subscribe to token-rate data — the list owner derives
+  // the keyed tone model once (docs/coding-standards.md). useTokenBurnTones owns the hysteresis
+  // ref and re-derives on the minute tick, so a badge expires when its rate goes stale even
+  // though a quiet track sends no row update to trigger a re-render. Must run before the early
+  // return below so hook order stays stable regardless of `rows`.
+  const tokenBurnSiblings = useMemo<TokenBurnSibling[]>(
+    () =>
+      rows
+        .filter((row): row is Extract<SubagentRow, { kind: "paseo" }> => row.kind === "paseo")
+        .map((row) => ({ id: row.id, recentTokenRate: row.recentTokenRate })),
+    [rows],
+  );
+  const tokenBurnTones = useTokenBurnTones(tokenBurnSiblings);
+
   const isArchivingFinished = archiveFinishedStatus.kind === "archiving";
   const isArchiveFinishedFailed = archiveFinishedStatus.kind === "failed";
   if (rows.length === 0 && !isArchivingFinished && !isArchiveFinishedFailed) {
@@ -76,6 +94,9 @@ export function SubagentsTrack({
   const pill = buildSubagentPillPresentation(t, rows);
   const finishedCount = countFinishedSubagents(rows);
   const showArchiveFinished = finishedCount > 0 || isArchivingFinished || isArchiveFinishedFailed;
+  // Same population the pill counted (see selectVisibleSubagentRows) — a pill reading "2 failed"
+  // opens on those 2 rows, not every finished sibling the pill never mentioned.
+  const visibleRows = selectVisibleSubagentRows(rows);
 
   return (
     <ComposerTrackPill
@@ -85,7 +106,7 @@ export function SubagentsTrack({
       panelTitle={t("subagents.title")}
     >
       {showArchiveFinished && onArchiveFinished ? (
-        <ComposerTrackActions divided={rows.length > 0}>
+        <ComposerTrackActions divided={visibleRows.length > 0}>
           <ArchiveFinishedRow
             status={archiveFinishedStatus}
             disabled={isArchivingFinished}
@@ -93,11 +114,12 @@ export function SubagentsTrack({
           />
         </ComposerTrackActions>
       ) : null}
-      {rows.map((row) => (
+      {visibleRows.map((row) => (
         <SubagentsTrackRow
           key={row.id}
           row={row}
           serverId={serverId}
+          tokenBurnTone={tokenBurnTones.get(row.id)}
           onOpenSubagent={onOpenSubagent}
           onOpenProviderSubagent={onOpenProviderSubagent}
           onArchiveSubagent={onArchiveSubagent}
@@ -169,6 +191,7 @@ function ArchiveFinishedRow({
 interface SubagentsTrackRowProps {
   serverId: string;
   row: SubagentRow;
+  tokenBurnTone?: TokenBurnTone;
   onOpenSubagent: (id: string) => void;
   onOpenProviderSubagent: (parentAgentId: string, subagentId: string) => void;
   onArchiveSubagent: (id: string) => void;
@@ -178,6 +201,7 @@ interface SubagentsTrackRowProps {
 function SubagentsTrackRow({
   serverId,
   row,
+  tokenBurnTone,
   onOpenSubagent,
   onOpenProviderSubagent,
   onArchiveSubagent,
@@ -188,6 +212,7 @@ function SubagentsTrackRow({
   const presentation = useMemo(() => buildRowPresentation(row, serverId), [row, serverId]);
   const displayLabel =
     presentation.titleState === "loading" ? t("common.states.loading") : presentation.label;
+  const tokensPerMinute = row.kind === "paseo" ? (row.recentTokenRate?.tokensPerMinute ?? 0) : 0;
   const handlePress = useCallback(() => {
     if (row.kind === "provider") {
       onOpenProviderSubagent(row.parentAgentId, row.id);
@@ -215,6 +240,13 @@ function SubagentsTrackRow({
             {presentation.subtitle}
           </Text>
         ) : null}
+        {tokenBurnTone && row.kind === "paseo" ? (
+          <TokenBurnBadge
+            tone={tokenBurnTone}
+            tokensPerMinute={tokensPerMinute}
+            testID={`subagents-track-token-burn-${row.id}`}
+          />
+        ) : null}
         {row.kind === "paseo" ? (
           <SubagentRowActions
             rowId={row.id}
@@ -235,6 +267,8 @@ function SubagentsTrackRow({
       presentation,
       row.kind,
       row.id,
+      tokenBurnTone,
+      tokensPerMinute,
     ],
   );
 
@@ -316,23 +350,15 @@ function SubagentActionButton({
   onPress: () => void;
 }): ReactElement {
   return (
-    <Tooltip delayDuration={0} enabledOnDesktop enabledOnMobile={false}>
-      <TooltipTrigger asChild disabled={!visible}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={accessibilityLabel}
-          testID={testID}
-          onPress={onPress}
-          style={styles.actionButton}
-          hitSlop={8}
-        >
-          {({ hovered, pressed }) => renderSubagentActionIcon(icon, hovered || pressed)}
-        </Pressable>
-      </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
-        <Text style={styles.tooltipText}>{tooltipLabel}</Text>
-      </TooltipContent>
-    </Tooltip>
+    <RowActionButton
+      accessibilityLabel={accessibilityLabel}
+      testID={testID}
+      tooltipLabel={tooltipLabel}
+      visible={visible}
+      onPress={onPress}
+    >
+      {(active) => renderSubagentActionIcon(icon, active)}
+    </RowActionButton>
   );
 }
 
@@ -367,14 +393,5 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     gap: theme.spacing[1],
     opacity: 0,
-  },
-  actionButton: {
-    padding: theme.spacing[1],
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  tooltipText: {
-    fontSize: theme.fontSize.sm,
-    color: theme.colors.foreground,
   },
 }));

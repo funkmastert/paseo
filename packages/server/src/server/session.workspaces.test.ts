@@ -589,6 +589,7 @@ function createSessionForWorkspaceTests(
     clearAgentAttention: async () => {},
     markAgentUnread: async () => {},
     notifyAgentState: () => {},
+    onMcpGatewayStatusChange: () => () => {},
     ...options.agentManager,
   });
   const workspaceRegistry: SessionOptions["workspaceRegistry"] = options.workspaceRegistry ?? {
@@ -1571,6 +1572,7 @@ test("archive emits an authoritative agent_update upsert for subscribed clients"
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: () => null,
         archiveAgent: async () => {
@@ -2054,6 +2056,7 @@ test("close_items_request archives agents and kills terminals in one batch", asy
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-1" ? { id: agentId } : null),
         hasInFlightRun: (agentId: string) => agentId === "agent-1",
@@ -2223,6 +2226,7 @@ test("close_items_request archives stored agents that are not currently loaded",
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) => (agentId === "agent-live" ? { id: agentId } : null),
         hasInFlightRun: () => false,
@@ -2383,6 +2387,7 @@ test("close_items_request continues after an archive failure", async () => {
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: (agentId: string) =>
           agentId === "agent-bad" || agentId === "agent-good" ? { id: agentId } : null,
@@ -3655,6 +3660,7 @@ test("workspace update stream keeps persisted workspace visible after agents sto
       paseoHome: "/tmp/paseo-test",
       agentManager: asAgentManager({
         subscribe: () => () => {},
+        onMcpGatewayStatusChange: () => () => {},
         listAgents: () => [],
         getAgent: () => null,
       }),
@@ -6404,6 +6410,7 @@ test("listWorkspaceDescriptorsSnapshot keeps git workspaces on the baseline desc
     statusEnteredAt: workspace.createdAt,
     activityAt: null,
     diffStat: null,
+    diskUsage: null,
   } as const;
   const gitDescriptor = {
     ...baselineDescriptor,

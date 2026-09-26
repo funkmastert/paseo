@@ -8,6 +8,12 @@ import {
 import type { z } from "zod";
 import { CLIENT_CAPS, type ClientCapability } from "@getpaseo/protocol/client-capabilities";
 import type { AgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
+import type { NotificationsPolicyPayload } from "@getpaseo/protocol/notify-policy/rpc-schemas";
+import type {
+  NotifyLedgerEntry,
+  NotifyPolicySettings,
+} from "@getpaseo/protocol/notify-policy/types";
+import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import { parsePluginSourceReference } from "@getpaseo/protocol/plugin-source-reference";
 import {
   AgentCreateFailedStatusPayloadSchema,
@@ -94,6 +100,7 @@ import type {
   DaemonGetStatusResponse,
   DaemonGetPairingOfferResponse,
   DaemonConfigReloadResponse,
+  DaemonDoctorResponse,
   DiagnosticsResponse,
   AgentRewindResponseMessage,
   ListTerminalsResponse,
@@ -161,6 +168,7 @@ import {
   normalizeProvidersSnapshotPayload,
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
+import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -473,6 +481,14 @@ type GetProvidersSnapshotPayload = GetProvidersSnapshotResponseMessage["payload"
 type RefreshProvidersSnapshotPayload = RefreshProvidersSnapshotResponseMessage["payload"];
 type ProviderDiagnosticPayload = ProviderDiagnosticResponseMessage["payload"];
 type ProviderUsageListPayload = ProviderUsageListResponseMessage["payload"];
+type UsageHistoryGetPayload = Extract<
+  SessionOutboundMessage,
+  { type: "usage.history.get.response" }
+>["payload"];
+export type AgentContextUsageReadPayload = Extract<
+  SessionOutboundMessage,
+  { type: "agent.context_usage.read.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -715,6 +731,14 @@ export type WorkspaceLabelDeleteInspectPayload = Extract<
   SessionOutboundMessage,
   { type: "workspace.label.delete.inspect.response" }
 >["payload"];
+export type McpGatewayAuthStartPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.auth.start.response" }
+>["payload"];
+export type McpGatewayServerAdoptPayload = Extract<
+  SessionOutboundMessage,
+  { type: "mcp_gateway.server.adopt.response" }
+>["payload"];
 export type ProjectListPayload = Extract<
   SessionOutboundMessage,
   { type: "project.list.response" }
@@ -759,6 +783,7 @@ export interface CreateScheduleOptions {
   maxRuns?: number;
   expiresAt?: string;
   runOnCreate?: boolean;
+  condition?: ScheduleCondition;
   requestId?: string;
 }
 export interface InspectScheduleOptions {
@@ -786,6 +811,8 @@ export interface UpdateScheduleOptions {
   newAgentConfig?: UpdateScheduleNewAgentConfig;
   maxRuns?: number | null;
   expiresAt?: string | null;
+  /** Null clears the condition. */
+  condition?: ScheduleCondition | null;
   requestId?: string;
 }
 export interface RenameBranchInput {
@@ -907,6 +934,17 @@ class DaemonProtocolError extends Error {
     this.name = "DaemonProtocolError";
     this.requestId = identity.requestId;
     this.responseType = identity.responseType;
+  }
+}
+
+/** A daemon refusal of a provider move. `code` is the daemon's vocabulary; see messages.ts. */
+export class AgentProviderMoveRejection extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AgentProviderMoveRejection";
   }
 }
 
@@ -2667,6 +2705,27 @@ export class DaemonClient {
     }
   }
 
+  /**
+   * Re-open a live agent under another provider, keeping its id and conversation. Rejects with
+   * `AgentProviderMoveRejection` so a caller can branch on `code` instead of matching prose.
+   */
+  async moveAgentToProvider(agentId: string, providerId: string): Promise<void> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.provider.move.response">({
+        message: {
+          type: "agent.provider.move.request",
+          agentId,
+          providerId,
+        },
+      });
+    if (!payload.accepted) {
+      throw new AgentProviderMoveRejection(
+        payload.code ?? "move_failed",
+        payload.error ?? `Could not move agent ${agentId} to provider '${providerId}'`,
+      );
+    }
+  }
+
   async updateAgent(
     agentId: string,
     updates: { name?: string; labels?: Record<string, string> },
@@ -2787,6 +2846,52 @@ export class DaemonClient {
       throw new Error(payload.error ?? "setWorkspacePinned rejected");
     }
     return { pinnedAt: payload.pinnedAt };
+  }
+
+  /** Agents the last daemon stop cut off mid-turn. Gate on `features.restartRecovery`. */
+  async getRestartRecoveryPlan(requestId?: string): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.get_plan.response">(
+        {
+          requestId,
+          message: { type: "agent.restart_recovery.get_plan.request" },
+        },
+      );
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Resume the selected entries, or every resumable one, leaders first. */
+  async applyRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.apply.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.apply.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+        // Each depth waits for its agents' runs to start, up to a minute per provider start.
+        timeout: 600_000,
+      });
+    return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Settle the selected pending entries so no later daemon offers them again. */
+  async dismissRestartRecovery(
+    options: { agentIds?: string[] } = {},
+    requestId?: string,
+  ): Promise<RestartRecoveryPlan> {
+    const payload =
+      await this.sendNamespacedCorrelatedSessionRequest<"agent.restart_recovery.dismiss.response">({
+        requestId,
+        message: {
+          type: "agent.restart_recovery.dismiss.request",
+          ...(options.agentIds ? { agentIds: options.agentIds } : {}),
+        },
+      });
+    return requireRestartRecoveryPlan(payload);
   }
 
   async inspectWorkspaceRecovery(
@@ -3092,6 +3197,17 @@ export class DaemonClient {
       "agent_permission_request",
       "agent_permission_resolved",
     ];
+    // COMPAT(mcpStatus): added in v0.8.1. An older daemon's SessionEventSubscription enum
+    // doesn't know "mcp_status_update" and parses the array strictly, so sending it
+    // unconditionally would reject the whole subscription request. Remove gating once the
+    // daemon floor is >= v0.8.1.
+    if (this.lastServerInfoMessage?.features?.mcpStatus === true) {
+      events.push("mcp_status_update");
+    }
+    // COMPAT(deviceLeases): added in v0.8.1, gated for the same reason as mcpStatus above.
+    if (this.lastServerInfoMessage?.features?.deviceLeases === true) {
+      events.push("device_status_update");
+    }
     if (this.eventListeners.size === 0 && !this.messageHandlers.has("providers_snapshot_update")) {
       this.providerSnapshotUpdates.clear();
     }
@@ -4837,6 +4953,56 @@ export class DaemonClient {
     });
   }
 
+  async getNotificationPolicy(requestId?: string): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.get.request" },
+    });
+  }
+
+  /** Every field is optional, so one call can change the dials, the availability, or both. */
+  async setNotificationPolicy(
+    changes: Partial<NotifyPolicySettings>,
+    requestId?: string,
+  ): Promise<NotificationsPolicyPayload> {
+    this.requireNotificationPolicySupport();
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.policy.set.request", ...changes },
+    });
+  }
+
+  async listNotificationLedger(
+    options: { unreachedOnly?: boolean; limit?: number; requestId?: string } = {},
+  ): Promise<{ entries: NotifyLedgerEntry[]; unreachedCount: number }> {
+    this.requireNotificationPolicySupport();
+    const { requestId, ...filters } = options;
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId,
+      message: { type: "notifications.ledger.list.request", ...filters },
+    });
+  }
+
+  /** True when the connected daemon can run `paseo doctor` itself (`daemon.doctor.request`). */
+  supportsDaemonDoctor(): boolean {
+    // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+    return this.lastServerInfoMessage?.features?.daemonDoctor === true;
+  }
+
+  /** Read-only diagnosis run inside the daemon. Callers gate on `supportsDaemonDoctor()`. */
+  async runDaemonDoctor(options?: {
+    deep?: boolean;
+    requestId?: string;
+    timeout?: number;
+  }): Promise<DaemonDoctorResponse["payload"]> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: { type: "daemon.doctor.request", ...(options?.deep ? { deep: true } : {}) },
+      timeout: options?.timeout,
+    });
+  }
+
   async connectHub(
     hubUrl: string,
     token: string,
@@ -4978,6 +5144,76 @@ export class DaemonClient {
       },
       responseType: "provider_diagnostic_response",
       timeout: 180000,
+    });
+  }
+
+  /**
+   * Starts interactive OAuth for one brokered MCP gateway server (U6, R6's one-click auth
+   * action). Returns `{authorizationUrl, error}` rather than throwing on a known failure
+   * (unknown server, static-auth server) — the caller opens `authorizationUrl` via the
+   * existing external-URL opener; completion arrives later via `mcp_status_update`.
+   */
+  async startMcpGatewayAuth(
+    name: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayAuthStartPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.auth.start.request",
+        name,
+      },
+    });
+  }
+
+  /**
+   * Brokers a server the given agent reported from its own per-dir MCP config and starts
+   * sign-in when it needs OAuth. Gate on `server_info.features.mcpGatewayAdopt`.
+   */
+  async adoptMcpGatewayServer(
+    name: string,
+    agentId: string,
+    options?: { requestId?: string },
+  ): Promise<McpGatewayServerAdoptPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "mcp_gateway.server.adopt.request",
+        name,
+        agentId,
+      },
+    });
+  }
+
+  async getUsageHistory(options?: {
+    agentId?: string;
+    requestId?: string;
+  }): Promise<UsageHistoryGetPayload> {
+    // COMPAT(usageHistory): callers gate on `server_info.features.usageHistory`; an older daemon
+    // answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      message: {
+        type: "usage.history.get.request",
+        ...(options?.agentId ? { agentId: options.agentId } : {}),
+      },
+    });
+  }
+
+  /**
+   * What an agent's context window is made of, from its provider's own `/context`. The daemon
+   * reads it out of band of the agent's turns and caches it; see docs/context-usage.md.
+   */
+  async readAgentContextUsage(
+    agentId: string,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<AgentContextUsageReadPayload> {
+    // COMPAT(agentContextUsage): callers gate on `server_info.features.agentContextUsage`; an older
+    // daemon answers an unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "agent.context_usage.read.request", agentId },
     });
   }
 
@@ -5612,6 +5848,7 @@ export class DaemonClient {
         ...(typeof options.maxRuns === "number" ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
         ...(typeof options.runOnCreate === "boolean" ? { runOnCreate: options.runOnCreate } : {}),
+        ...(options.condition ? { condition: options.condition } : {}),
       },
       responseType: "schedule/create/response",
     });
@@ -5705,6 +5942,7 @@ export class DaemonClient {
         ...(options.newAgentConfig !== undefined ? { newAgentConfig: options.newAgentConfig } : {}),
         ...(options.maxRuns !== undefined ? { maxRuns: options.maxRuns } : {}),
         ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
+        ...(options.condition !== undefined ? { condition: options.condition } : {}),
       },
       responseType: "schedule/update/response",
     });
@@ -5751,6 +5989,13 @@ export class DaemonClient {
     // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
     if (this.lastServerInfoMessage?.features?.hubRelationship !== true) {
       throw new Error("Update the host to use Hub relationship management.");
+    }
+  }
+
+  private requireNotificationPolicySupport(): void {
+    // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+    if (this.lastServerInfoMessage?.features?.notificationPolicy !== true) {
+      throw new Error("Update the host to change notification settings.");
     }
   }
 
@@ -6493,4 +6738,14 @@ function resolveAgentConfig(options: CreateAgentRequestOptions): AgentSessionCon
     provider: merged.provider,
     cwd: merged.cwd,
   };
+}
+
+function requireRestartRecoveryPlan(payload: {
+  plan: RestartRecoveryPlan | null;
+  error: string | null;
+}): RestartRecoveryPlan {
+  if (!payload.plan) {
+    throw new Error(payload.error ?? "Restart recovery request failed");
+  }
+  return payload.plan;
 }

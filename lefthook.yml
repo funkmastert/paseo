@@ -6,9 +6,18 @@ pre-commit:
       exclude:
         - "package-lock.json"
         - "**/package-lock.json"
+        # Mirrors .oxlintrc.json's ignorePatterns: the vendored plugin keeps
+        # its own style and neither tool will accept a file from it. Without
+        # this, a commit touching ONLY plugin files hands oxfmt/oxlint a list
+        # they filter down to nothing and both exit non-zero on "no files
+        # found" — failing the hook, and taking the typecheck job's verdict
+        # with it, for a commit that has nothing wrong with it.
+        - "plugins/claude-account-pool/**"
       run: npm run format:check:files -- {staged_files}
     - name: lint
       glob: "*.{js,jsx,ts,tsx}"
+      exclude:
+        - "plugins/claude-account-pool/**"
       run: npm run lint -- {staged_files}
     - name: typecheck
       run: npm run typecheck

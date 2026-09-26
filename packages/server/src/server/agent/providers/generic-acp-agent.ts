@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { AgentCapabilityFlags } from "../agent-sdk-types.js";
 import { checkProviderLaunchAvailable, resolveProviderLaunch } from "../provider-launch-config.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
 import {
   ACPAgentClient,
   type ACPCatalogModelResolver,
@@ -39,6 +40,8 @@ type GenericACPProviderParams = z.infer<typeof GenericACPProviderParamsSchema>;
 
 interface GenericACPAgentClientOptions {
   logger: Logger;
+  /** The device cap's launch gate; ACP is gated at the terminal and the permission request. */
+  deviceLaunchGate?: DeviceLaunchGate;
   command: [string, ...string[]];
   env?: Record<string, string>;
   providerId?: string;
@@ -69,6 +72,7 @@ export class GenericACPAgentClient extends ACPAgentClient {
         env: options.env,
       },
       defaultCommand: options.command,
+      deviceLaunchGate: options.deviceLaunchGate,
       capabilities: buildGenericACPCapabilities(providerParams),
       waitForInitialCommands: options.waitForInitialCommands,
       initialCommandsWaitTimeoutMs: options.initialCommandsWaitTimeoutMs,

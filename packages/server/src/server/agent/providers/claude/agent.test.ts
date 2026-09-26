@@ -430,6 +430,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       });
 
       expect(models.map((m) => m.id)).toEqual([
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-fable-5-1",
         "claude-fable-5",
@@ -454,7 +455,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       }
 
       const defaultModel = models.find((m) => m.isDefault);
-      expect(defaultModel?.id).toBe("claude-opus-5");
+      expect(defaultModel?.id).toBe("claude-opus-5-5");
     } finally {
       await fs.rm(emptyConfigDir, { recursive: true, force: true });
     }
@@ -476,7 +477,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
         force: false,
       });
 
-      expect(models.find((model) => model.isDefault)?.id).toBe("claude-opus-5");
+      expect(models.find((model) => model.isDefault)?.id).toBe("claude-opus-5-5");
       expect(models.map((model) => model.id)).toContain("claude-fable-5");
     } finally {
       await fs.rm(emptyConfigDir, { recursive: true, force: true });
@@ -778,6 +779,204 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  describe("MCP gateway session injection (U3)", () => {
+    async function createFixtureDirs(): Promise<{ configDir: string; projectDir: string }> {
+      const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-config-"));
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-project-"));
+      return { configDir, projectDir };
+    }
+
+    test("sets strictMcpConfig and merges brokered + re-injected stdio entries", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(configDir, ".claude.json"),
+          JSON.stringify({
+            mcpServers: {
+              "global-tool": { type: "stdio", command: "global-tool-bin" },
+              // A remote per-dir entry: must NOT survive strictMcpConfig suppression.
+              notion: { type: "http", url: "https://mcp.notion.com/mcp" },
+            },
+          }),
+        );
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({
+            mcpServers: { "project-tool": { type: "stdio", command: "./scripts/tool.sh" } },
+          }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpGatewaySessionMode: "strict",
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBe(true);
+        expect(options.mcpServers).toMatchObject({
+          github: {
+            type: "http",
+            url: "http://127.0.0.1:6767/mcp/gateway/github",
+            headers: { Authorization: "Bearer gw-token" },
+          },
+          "global-tool": { type: "stdio", command: "global-tool-bin" },
+          "project-tool": { type: "stdio", command: "./scripts/tool.sh" },
+        });
+        expect(options.mcpServers.notion).toBeUndefined();
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("a brokered/stored entry wins over a same-named re-injected stdio entry", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { github: { type: "stdio", command: "local-shim" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpGatewaySessionMode: "strict",
+          mcpServers: {
+            github: {
+              type: "http",
+              url: "http://127.0.0.1:6767/mcp/gateway/github",
+              headers: { Authorization: "Bearer gw-token" },
+            },
+          },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.mcpServers.github).toMatchObject({
+          type: "http",
+          url: "http://127.0.0.1:6767/mcp/gateway/github",
+        });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("overlay mode (the default) injects brokered entries without strictMcpConfig", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        // Both entries would be re-injected under strict; under overlay the CLI loads them
+        // itself, so the launch options must not touch them. Strict is opt-in because it also
+        // drops claude.ai connectors, which no re-injection can restore (docs/mcp-gateway.md).
+        await fs.writeFile(
+          path.join(configDir, ".claude.json"),
+          JSON.stringify({
+            mcpServers: { "global-tool": { type: "stdio", command: "global-tool-bin" } },
+          }),
+        );
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-tool": { type: "stdio", command: "tool" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const brokered = {
+          github: {
+            type: "http" as const,
+            url: "http://127.0.0.1:6767/mcp/gateway/github",
+            headers: { Authorization: "Bearer gw-token" },
+          },
+        };
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpGatewayEnabled: true,
+          mcpServers: brokered,
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBeUndefined();
+        expect(options.mcpServers).toEqual(brokered);
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+
+    test("no-ops byte-identically when the gateway is disabled (R10)", async () => {
+      const { configDir, projectDir } = await createFixtureDirs();
+      try {
+        // Even with stdio entries on disk, nothing should be read when the per-launch
+        // `mcpGatewayEnabled` signal is absent — proving R10/AE4's "no cost when unused".
+        await fs.writeFile(
+          path.join(projectDir, ".mcp.json"),
+          JSON.stringify({ mcpServers: { "project-tool": { type: "stdio", command: "tool" } } }),
+        );
+
+        const { queryFactory } = createQueryMock();
+        const client = new ClaudeAgentClient({
+          logger,
+          queryFactory,
+          runtimeSettings: { env: { CLAUDE_CONFIG_DIR: configDir } },
+          resolveBinary: async () => "/test/claude/bin",
+        });
+        const session = await client.createSession({
+          provider: "claude",
+          cwd: projectDir,
+          mcpServers: { hub: { type: "http", url: "http://127.0.0.1/hub" } },
+        });
+
+        await (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery();
+
+        const options = queryFactory.mock.calls[0]?.[0].options;
+        expect(options.strictMcpConfig).toBeUndefined();
+        expect(options.mcpServers).toEqual({ hub: { type: "http", url: "http://127.0.0.1/hub" } });
+        await session.close();
+      } finally {
+        await fs.rm(configDir, { recursive: true, force: true });
+        await fs.rm(projectDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   test("lists fast mode only for supported Opus models", async () => {
     const client = new ClaudeAgentClient({ logger, resolveBinary: async () => "/test/claude/bin" });
 
@@ -1072,6 +1271,9 @@ describe("ClaudeAgentSession features", () => {
   test.each([
     ["supported model", "claude-opus-4-8", { type: "disabled" }, undefined],
     ["unsupported model", "claude-fable-5", { type: "adaptive" }, "high"],
+    // Opus 5.5 preselects Extra High for a new session, but this fallback runs mid-session for
+    // any agent, subagents included: it stays the plain default level.
+    ["Opus 5.5", "claude-opus-5-5", { type: "adaptive" }, "high"],
     ["custom model", "openrouter/anthropic/claude-opus-4-8", undefined, undefined],
     ["provider default", null, undefined, undefined],
   ])("reconciles Off when switching to a %s", async (_label, modelId, thinking, effort) => {
@@ -1708,6 +1910,58 @@ describe("ClaudeAgentClient.listImportableSessions", () => {
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
     }
   });
+
+  test("uses the client's own configDir instead of the daemon's CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const cwd = "/tmp/paseo-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, "alt-session.jsonl");
+      await fs.writeFile(
+        sessionFile,
+        `${JSON.stringify({
+          isSidechain: false,
+          type: "user",
+          message: { role: "user", content: "Prompt from the alt account" },
+          cwd,
+          sessionId: "alt-session",
+        })}\n`,
+        "utf-8",
+      );
+      const timestamp = new Date("2026-06-01T12:00:00.000Z");
+      await fs.utimes(sessionFile, timestamp, timestamp);
+
+      const client = new ClaudeAgentClient({
+        logger: createTestLogger(),
+        resolveBinary: async () => "/test/claude/bin",
+        configDir: altConfigDir,
+      });
+
+      await expect(client.listImportableSessions({ limit: 1, cwd })).resolves.toEqual([
+        {
+          providerHandleId: "alt-session",
+          cwd,
+          title: "Prompt from the alt account",
+          firstPromptPreview: "Prompt from the alt account",
+          lastPromptPreview: "Prompt from the alt account",
+          lastActivityAt: timestamp,
+        },
+      ]);
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ClaudeAgentSession context window usage", () => {
@@ -2283,6 +2537,72 @@ describe("ClaudeAgentSession context window usage", () => {
         process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
       }
       await fs.rm(tmpConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves the persisted session jsonl under the client's own runtimeSettings.env.CLAUDE_CONFIG_DIR", async () => {
+    const altConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-alt-"));
+    const decoyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-persist-decoy-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = decoyConfigDir;
+
+    try {
+      const sessionId = "session-alt-account";
+      const cwd = "/tmp/paseo-test-claude-alt-account";
+      const projectDir = claudeProjectDirSync(cwd, { configDir: altConfigDir });
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, `${sessionId}.jsonl`);
+
+      const queryFactory = createQueryFactoryForTurns([
+        [
+          {
+            type: "system",
+            subtype: "init",
+            session_id: sessionId,
+            permissionMode: "default",
+          },
+          {
+            type: "result",
+            subtype: "success",
+            duration_ms: 10,
+            duration_api_ms: 8,
+            is_error: false,
+            num_turns: 1,
+            result: "done",
+            stop_reason: null,
+            total_cost_usd: 0,
+            usage: {},
+            permission_denials: [],
+            uuid: `${sessionId}-result`,
+            session_id: sessionId,
+          },
+        ],
+      ]);
+      const client = new ClaudeAgentClient({
+        logger,
+        queryFactory,
+        resolveBinary: async () => "/test/claude/bin",
+        runtimeSettings: { env: { CLAUDE_CONFIG_DIR: altConfigDir } },
+      });
+      const session = await client.createSession({ provider: "claude", cwd }, undefined, {
+        persistSession: false,
+      });
+      await session.run("turn");
+
+      // Simulate the claude binary writing a session transcript for this account.
+      await fs.writeFile(sessionFile, '{"type":"summary"}\n', "utf-8");
+
+      await session.close();
+
+      await expect(fs.access(sessionFile)).rejects.toThrow();
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(altConfigDir, { recursive: true, force: true });
+      await fs.rm(decoyConfigDir, { recursive: true, force: true });
     }
   });
 
@@ -2871,6 +3191,310 @@ describe("ClaudeAgentSession context window usage", () => {
       await session.close();
     }
   });
+
+  test("turn_completed carries a cost-weighted turnTokenDelta when no partial messages streamed", async () => {
+    const session = await createSessionForTurns([[createInitMessage(), createSuccessResult()]]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      // createSuccessResult's default usage: input_tokens: 10, cache_read_input_tokens: 5,
+      // output_tokens: 7 — weighted 10 + 5 × 0.1 + 7 × 5 = 45.5 (token-rate-tracker.ts).
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "turn_completed",
+          provider: "claude",
+          turnTokenDelta: 45.5,
+        }),
+      );
+      expect(events.some((event) => event.type === "token_burn_delta")).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("streamed requests emit cost-weighted token_burn_delta events and suppress the per-turn fallback", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // Request 1: input 100, cache write 20, cache read 30, output 25
+        //   → 100 + 25 + 3 + 125 = 253
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        // Request 2: input 40, cache read 1000 (the context re-read), output 4
+        //   → 40 + 100 + 20 = 160 — the 1000-token cache read counts as 100, not 1000.
+        createMessageStartEvent({ input_tokens: 40, cache_read_input_tokens: 1000 }),
+        createMessageDeltaEvent(4),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([253, 160]);
+
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+      expect(turnCompleted).toBeDefined();
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
+  function createModelMessageStart(model: string, id: string, parentToolUseId?: string) {
+    return {
+      type: "stream_event",
+      event: {
+        type: "message_start",
+        message: { id, model, usage: { input_tokens: 1 } },
+      },
+      ...(parentToolUseId ? { parent_tool_use_id: parentToolUseId } : {}),
+      session_id: "session-1",
+    };
+  }
+
+  function createModelAssistant(model: string, id: string, parentToolUseId?: string) {
+    return {
+      type: "assistant",
+      message: { id, model, role: "assistant", content: [{ type: "text", text: "hi" }] },
+      ...(parentToolUseId ? { parent_tool_use_id: parentToolUseId } : {}),
+      uuid: `assistant-${id}`,
+      session_id: "session-1",
+    };
+  }
+
+  function observedModels(events: Array<{ type: string }>): string[] {
+    return events
+      .filter((event) => event.type === "model_observed")
+      .map((event) => (event as unknown as { model: string }).model);
+  }
+
+  test("reports the model each response says it came from, once per response", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // The streamed request, then the assistant frames of the same response (one per block).
+        createModelMessageStart("claude-opus-5-5", "msg_1"),
+        createModelAssistant("claude-opus-5-5", "msg_1"),
+        createModelAssistant("claude-opus-5-5", "msg_1"),
+        // The next request in the same turn is its own response.
+        createModelMessageStart("claude-opus-5", "msg_2"),
+        createModelAssistant("claude-opus-5", "msg_2"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      // The init message's own model (claude-sonnet-4-6) is the request echoed back, never
+      // reported; only responses are.
+      expect(observedModels(events)).toEqual(["claude-opus-5-5", "claude-opus-5"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("reports the model from assistant frames when no partial messages stream", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createModelAssistant("claude-sonnet-5", "msg_1"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      expect(observedModels(await collectStreamEvents(session))).toEqual(["claude-sonnet-5"]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("never reports a placeholder frame or a subagent's model", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createModelAssistant("<synthetic>", "msg_synthetic"),
+        // A subagent is allowed a model of its own; its frames carry parent_tool_use_id.
+        createModelMessageStart("claude-haiku-4-5", "msg_child", "toolu-agent-1"),
+        createModelAssistant("claude-haiku-4-5", "msg_child", "toolu-agent-1"),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      expect(observedModels(await collectStreamEvents(session))).toEqual([]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a request that never streams message_delta still records its input side", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        // Request 1 aborted after message_start: input 100 + cache write 20 × 1.25 + cache
+        // read 30 × 0.1 = 128, settled when request 2 starts.
+        createMessageStartEvent(),
+        createMessageStartEvent({ input_tokens: 40, cache_read_input_tokens: 1000 }),
+        createMessageDeltaEvent(4),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([128, 160]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a trailing request without message_delta is settled at turn end instead of dropped", async () => {
+    const session = await createSessionForTurns([
+      [createInitMessage(), createMessageStartEvent(), createSuccessResult()],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      expect(burnDeltas).toEqual([128]);
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("per-request burn bookkeeping resets between turns so the fallback returns", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        createSuccessResult(),
+      ],
+      [createSuccessResult()],
+    ]);
+
+    try {
+      const firstTurn = await collectStreamEvents(session, "turn-1");
+      expect(firstTurn.find((event) => event.type === "turn_completed")).not.toHaveProperty(
+        "turnTokenDelta",
+      );
+
+      // No partial messages in turn 2: with the per-request state reset, the per-turn figure
+      // (10 + 5 × 0.1 + 7 × 5 = 45.5) is recorded again instead of being suppressed.
+      const secondTurn = await collectStreamEvents(session, "turn-2");
+      expect(secondTurn.some((event) => event.type === "token_burn_delta")).toBe(false);
+      expect(secondTurn.find((event) => event.type === "turn_completed")).toMatchObject({
+        turnTokenDelta: 45.5,
+      });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a repeated message_delta for the same request only emits the output increment", async () => {
+    const session = await createSessionForTurns([
+      [
+        createInitMessage(),
+        createMessageStartEvent(),
+        createMessageDeltaEvent(25),
+        createMessageDeltaEvent(40),
+        createSuccessResult(),
+      ],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+
+      const burnDeltas = events
+        .filter((event) => event.type === "token_burn_delta")
+        .map((event) => (event as { tokens: number }).tokens);
+      // 253 for the first delta, then (40 − 25) × 5 = 75 for the extra output only.
+      expect(burnDeltas).toEqual([253, 75]);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("turn_completed omits turnTokenDelta when the result carries no usage", async () => {
+    const session = await createSessionForTurns([
+      [createInitMessage(), createSuccessResult({ usage: undefined })],
+    ]);
+
+    try {
+      const events = await collectStreamEvents(session);
+      const turnCompleted = events.find((event) => event.type === "turn_completed");
+
+      expect(turnCompleted).toBeDefined();
+      expect(turnCompleted).not.toHaveProperty("turnTokenDelta");
+    } finally {
+      await session.close();
+    }
+  });
+
+  // What the CLI writes when an account is capped: a synthetic assistant message flagged
+  // `isApiErrorMessage`, then a result that is `subtype: "success"` with `is_error: true` (the SDK
+  // documents that pairing for a turn that ended on an API error). Copied from a real 2026-09-18
+  // transcript. Reporting it as a completed turn left the agent idle with no error, so nothing
+  // downstream, account failover included, could tell it had failed.
+  function createApiErrorTurn(text: string, error: string): Array<Record<string, unknown>> {
+    return [
+      createInitMessage(),
+      {
+        type: "assistant",
+        uuid: "api-error-1",
+        session_id: "session-1",
+        parent_tool_use_id: null,
+        isApiErrorMessage: true,
+        error,
+        message: {
+          role: "assistant",
+          model: "<synthetic>",
+          content: [{ type: "text", text }],
+        },
+      },
+      createSuccessResult({ is_error: true, result: text, usage: undefined }),
+    ];
+  }
+
+  test.each([
+    ["weekly cap", "You've hit your weekly limit · resets 7am (America/Los_Angeles)", "rate_limit"],
+    [
+      "monthly spend cap",
+      "You've hit your monthly spend limit · raise it at claude.ai/settings/usage?from=cc_cli_limit_message · your session limit resets 5:20pm (America/Los_Angeles)",
+      "rate_limit",
+    ],
+    ["overloaded", "API Error: 529 Overloaded. This is a server-side issue.", "server_error"],
+  ])(
+    "a turn that ends on an API error (%s) fails instead of completing",
+    async (_name, text, error) => {
+      const session = await createSessionForTurns([createApiErrorTurn(text, error)]);
+
+      try {
+        const events = await collectStreamEvents(session);
+
+        expect(events).toContainEqual(
+          expect.objectContaining({ type: "turn_failed", provider: "claude", error: text }),
+        );
+        expect(events.some((event) => event.type === "turn_completed")).toBe(false);
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   test("repeated compacting statuses open a single compaction marker", async () => {
     const session = await createSessionForTurns([

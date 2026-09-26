@@ -5,7 +5,8 @@ import type {
   ProviderOptions,
   ToolPolicy,
 } from "@getpaseo/protocol/agent-types";
-import type { AgentAttachment } from "@getpaseo/protocol/messages";
+import type { AgentAttachment, McpGatewaySessionMode } from "@getpaseo/protocol/messages";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import type { PaseoToolCatalog } from "./tools/types.js";
 
 export type { AgentProviderNotice, AgentTaskItem };
@@ -127,6 +128,7 @@ export interface ProviderSnapshotEntry {
   description?: string;
   iconSvg?: string;
   defaultModeId?: string | null;
+  derivedFromProviderId?: string | null;
 }
 
 export interface AgentCreateConfigParent {
@@ -234,6 +236,18 @@ export interface AgentUsage {
   totalCostUsd?: number;
   contextWindowMaxTokens?: number;
   contextWindowUsedTokens?: number;
+}
+
+/** One 30s slice of a token-rate ring buffer — see token-rate-tracker.ts. */
+export interface AgentTokenRateBucket {
+  bucketStartMs: number;
+  tokens: number;
+}
+
+/** Trailing-window burn rate, computed from the ring buffer at read time. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
 }
 
 export const TOOL_CALL_ICON_NAMES = [
@@ -419,7 +433,41 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      /**
+       * Provider-local per-turn cost-weighted token delta (token-rate-tracker.ts's
+       * `weighTokenUsage`), feeding the burn ring. Providers that streamed `token_burn_delta`
+       * events during the turn omit it here so the turn isn't counted twice; providers with no
+       * burn signal omit it rather than report a fake zero. See docs/token-burn.md.
+       */
+      turnTokenDelta?: number;
+    }
+  | {
+      /**
+       * Cost-weighted burn for one completed API request inside a running turn, so the burn
+       * ring moves while a long turn is in flight instead of receiving one lump at turn end.
+       * Daemon-internal: agent-manager records it and never forwards it. See docs/token-burn.md.
+       */
+      type: "token_burn_delta";
+      provider: AgentProvider;
+      tokens: number;
+    }
+  | {
+      /**
+       * The model one API response reported for itself, once per response. Compared with the
+       * configured model to catch an agent quietly served by a different one. Daemon-internal:
+       * agent-manager folds it into its divergence state and never forwards it. Only the agent's
+       * own frames raise it, never a subagent's, which is allowed a model of its own. See
+       * docs/model-divergence.md.
+       */
+      type: "model_observed";
+      provider: AgentProvider;
+      model: string;
+    }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";
@@ -472,7 +520,23 @@ export type AgentStreamEvent =
       type: "provider_subagent";
       provider: AgentProvider;
       event: import("./provider-subagents/store.js").ProviderSubagentInputEvent;
+    }
+  | {
+      type: "mcp_server_statuses";
+      provider: AgentProvider;
+      statuses: AgentMcpServerStatus[];
     };
+
+/**
+ * A single provider-reported MCP server status from the SDK's init message (KTD8).
+ * `status` is whatever string the provider reports (not a closed enum) — captured
+ * verbatim, live-only, no COMPAT tag needed (a permanently-optional additive field,
+ * like `lastActivitySummary`).
+ */
+export interface AgentMcpServerStatus {
+  name: string;
+  status: string;
+}
 
 export function getAgentStreamEventTurnId(event: AgentStreamEvent): string | undefined {
   return "turnId" in event ? event.turnId : undefined;
@@ -619,6 +683,20 @@ export interface AgentSessionConfig {
   toolPolicy?: ToolPolicy;
   mcpServers?: Record<string, McpServerConfig>;
   /**
+   * Runtime-only per-launch signal (KTD5/KTD6): the MCP gateway is enabled for this launch and
+   * brokered entries are present in `mcpServers`. Never persisted — stripped from storage the
+   * same way the brokered `mcpServers` entries are (`stripMcpGatewayServers` in
+   * `runtime-mcp-config.ts`).
+   */
+  mcpGatewayEnabled?: boolean;
+  /**
+   * Runtime-only companion to `mcpGatewayEnabled`: `strict` makes the Claude adapter set
+   * `strictMcpConfig` and re-inject per-dir stdio entries itself; `overlay` (the default when
+   * absent) leaves the CLI's own MCP loading alone. Why overlay is the default lives in
+   * docs/mcp-gateway.md "Session injection". Stripped from storage alongside `mcpGatewayEnabled`.
+   */
+  mcpGatewaySessionMode?: McpGatewaySessionMode;
+  /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.
    */
@@ -686,6 +764,13 @@ export interface AgentSession {
   /** Release live runtime resources without archiving or deleting the durable native session. */
   close(): Promise<void>;
   listCommands?(): Promise<AgentSlashCommand[]>;
+  /**
+   * What the context window is made of, from the provider's own `/context`, asked out of band of
+   * the conversation: it must never start a turn or enter the model's context. Resolves null when
+   * no runtime is live and `allowStart` is false, or when a turn is running and a runtime would
+   * have to be started. See docs/context-usage.md.
+   */
+  getContextUsage?(options: { allowStart: boolean }): Promise<AgentContextUsage | null>;
   setModel?(modelId: string | null): Promise<void>;
   setThinkingOption?(thinkingOptionId: string | null): Promise<void | AgentProviderNotice>;
   setFeature?(featureId: string, value: unknown): Promise<void>;
@@ -734,9 +819,34 @@ export interface ResolveAgentDefaultModeInput {
   signal?: AbortSignal;
 }
 
+/**
+ * Whether the account a provider's sessions run as is signed in on this host. `unknown` means the
+ * provider cannot tell; nothing may infer a failure from it. `signed-in` is evidence, not proof —
+ * a provider that reads a config file cannot see a revoked keychain token.
+ */
+export type AgentAccountAuth =
+  | { state: "signed-in"; accountLabel: string | null }
+  | { state: "signed-out"; signInCommand: string | null }
+  | { state: "unknown" };
+
 export interface AgentClient {
   readonly provider: AgentProvider;
   readonly capabilities: AgentCapabilityFlags;
+  /**
+   * Where this client's sessions load per-dir MCP definitions from, for the gateway's
+   * "adopt a session-reported server" action (docs/mcp-gateway.md). Only providers that read
+   * per-dir MCP config files implement it.
+   */
+  resolveMcpConfigScope?(
+    cwd: string,
+  ): { configDir: string; projectDir: string; env?: NodeJS.ProcessEnv } | undefined;
+  /**
+   * Whether this client's sessions consume the MCP gateway's brokered `mcpServers` entries
+   * (docs/mcp-gateway.md "Session injection"). Asked of the client rather than read off the
+   * provider id, because every account-pool provider is a derived id (`extends: "claude"`) on a
+   * Claude client.
+   */
+  readonly acceptsMcpGatewayServers?: boolean;
   createSession(
     config: AgentSessionConfig,
     launchContext?: AgentLaunchContext,
@@ -778,6 +888,18 @@ export interface AgentClient {
     input: ImportProviderSessionInput,
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
+  /**
+   * Whether this provider's account is signed in on this host, for explaining a failure that
+   * looks like the provider's fault but is the account's. Only providers that can answer
+   * cheaply and structurally implement it. See docs/mcp-gateway.md.
+   */
+  describeAccountAuth?(): Promise<AgentAccountAuth>;
+  /**
+   * Whether this client can re-open `handle`'s conversation — the transcript has to be readable
+   * from this client's own account directory. Only providers that can answer implement it; an
+   * absent method means "cannot tell", not "no". Used before a provider move (docs/account-failover.md).
+   */
+  canResumeHandle?(handle: AgentPersistenceHandle): Promise<boolean>;
   /**
    * Check availability in the catalogue target when supplied (CLI binary is installed).
    * Returns true if available, false otherwise.

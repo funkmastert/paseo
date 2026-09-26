@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -68,4 +68,42 @@ function hashSuffix(input: string): string {
 
 function resolveConfigDir(options?: ClaudeProjectDirOptions): string {
   return options?.configDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+}
+
+/**
+ * The transcript file for one session under `configDir`, or null when that account cannot see it.
+ * Each account slot has its own `projects/`; cross-account resume works only because the slots
+ * symlink it to a shared directory, so "can this account read this session" is a file lookup.
+ */
+export function findClaudeSessionTranscript(input: {
+  cwd: string;
+  sessionId: string;
+  configDir: string;
+}): string | null {
+  for (const candidate of cwdCandidates(input.cwd)) {
+    const transcript = claudeSessionTranscriptPath(candidate, input.sessionId, input.configDir);
+    if (existsSync(transcript)) {
+      return transcript;
+    }
+  }
+  return null;
+}
+
+/** Where the transcript would live, whether or not it exists. */
+export function claudeSessionTranscriptPath(
+  cwd: string,
+  sessionId: string,
+  configDir: string,
+): string {
+  return join(claudeProjectDirSync(cwd, { configDir }), `${sessionId}.jsonl`);
+}
+
+function cwdCandidates(cwd: string): string[] {
+  try {
+    const real = realpathSync(cwd);
+    return real === cwd ? [cwd] : [cwd, real];
+  } catch {
+    // The directory is gone; the configured path is still worth a lookup.
+    return [cwd];
+  }
 }

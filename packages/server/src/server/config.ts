@@ -548,6 +548,51 @@ interface ResolveConfigFromPersistedOptions {
   relayEnabledFallback?: boolean;
 }
 
+// Every monitor defaults to off or to report-only, so a section missing here is indistinguishable
+// from one configured off. resourceMonitor and deviceLeases were missing, and on every real boot
+// and reload the reaper and the device cap ran on their defaults — the same gap mcpGateway had.
+// Every agents.* monitor section goes through here, and bootstrap.smoke.test.ts boots a real
+// config.json through it; a new section added here belongs in that test too.
+function resolveAgentMonitorConfig(
+  persisted: PersistedConfig,
+): Pick<
+  PaseoDaemonConfig,
+  | "tokenBurnMonitor"
+  | "resourceMonitor"
+  | "processPriority"
+  | "deviceLeases"
+  | "artifactJanitor"
+  | "accountFailover"
+  | "budgetPacing"
+  | "leaderCompaction"
+  | "contextMeter"
+  | "doneJanitor"
+  | "admission"
+  | "refocus"
+  | "remediation"
+  | "daemonVitals"
+  | "restartRecovery"
+> {
+  const agents = persisted.agents;
+  return {
+    tokenBurnMonitor: agents?.tokenBurnMonitor,
+    resourceMonitor: agents?.resourceMonitor,
+    processPriority: agents?.processPriority,
+    deviceLeases: agents?.deviceLeases,
+    artifactJanitor: agents?.artifactJanitor,
+    accountFailover: agents?.accountFailover,
+    budgetPacing: agents?.budgetPacing,
+    leaderCompaction: agents?.leaderCompaction,
+    contextMeter: agents?.contextMeter,
+    doneJanitor: agents?.doneJanitor,
+    admission: agents?.admission,
+    refocus: agents?.refocus,
+    remediation: agents?.remediation,
+    daemonVitals: agents?.daemonVitals,
+    restartRecovery: agents?.restartRecovery,
+  };
+}
+
 export function resolveConfigFromPersisted(
   paseoHome: string,
   persisted: PersistedConfig,
@@ -639,6 +684,11 @@ export function resolveConfigFromPersisted(
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
     metadataGeneration: persisted.agents?.metadataGeneration,
+    ...resolveAgentMonitorConfig(persisted),
+    diskSweeper: persisted.worktrees?.diskSweeper,
+    // bootstrap.ts constructs McpGateway from this field; the e2e tests hand it in directly,
+    // which is why its absence here went unnoticed until a real daemon booted with the section.
+    mcpGateway: persisted.mcpGateway,
     providerOverrides,
     log: resolveLogConfigFromEnv(env, persisted),
     configReload: {

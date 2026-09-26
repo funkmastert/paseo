@@ -37,6 +37,22 @@ Each provider definition owns its option schema and exact MCP preapproval mappin
 must fail closed for Hub unattended execution until it can approve one exact injected MCP server
 and tool identity without approving native tools.
 
+## Gating a tool call
+
+To deny a tool call deterministically on Claude, use a PreToolUse hook, not `canUseTool`. The permission callback is not consulted at all in `bypassPermissions` mode, which is the mode most agents here run in — from the SDK itself:
+
+> `canUseTool` will not be invoked: permissionMode 'bypassPermissions' auto-approves every tool call (except explicit deny rules) before the callback is consulted. To gate every tool call, use a PreToolUse hook instead.
+
+A gate built on `canUseTool` therefore does nothing for those agents, and fails silently: it never runs, so it never logs, and the first sign is the thing it was meant to prevent. A PreToolUse hook runs in every permission mode, resolves before `canUseTool`, and denies with `hookSpecificOutput.permissionDecision: "deny"` and a `permissionDecisionReason` the model reads. Register one matcher per gate with its own tool matcher and timeout (`providers/claude/agent.ts`), re-check the tool name inside the callback, and fail open on any error — a gate that breaks tool calls is worse than the problem it solves.
+
+The hook is a Claude mechanism, but "other providers cannot be gated" is wrong, and assuming it leaves the gate open. Before you conclude a provider has no interception point, check three things that are not hooks:
+
+- **The daemon runs the command itself.** Paseo is the ACP _client_, so `createTerminal` in `providers/acp-agent.ts` is a process this daemon is about to spawn. Declining to spawn it is the strongest gate there is, and the error text reaches the agent in band.
+- **The daemon answers an approval.** Codex's `item/commandExecution/requestApproval` and OMP's bash tool approval arrive before the command runs. Answer them before anything auto-approves, and before the request reaches a person — an auto-accept in front of your gate makes it decorative.
+- **The daemon is inside the agent's process.** The OpenCode bridge plugin runs in the OpenCode server, so its `tool.execute.before` hook throws below every OpenCode mode and permission setting.
+
+What is left over is real. Pi reports tool execution and never asks, so nothing can refuse it. Gate what you can, then add a layer that observes and attributes what you cannot, and make the difference visible rather than letting a partial gate read as a total one. [docs/device-leases.md](device-leases.md) is the worked example of all of it.
+
 ## Two Integration Patterns
 
 ### ACP (Agent Client Protocol) -- recommended
@@ -87,7 +103,7 @@ OpenCode owns user message IDs. Do not pass Paseo-generated IDs to OpenCode prom
 
 `AgentManager` owns the one canonical timeline row for a foreground prompt carrying a Paseo `clientMessageId`. It records that row when `startTurn` accepts, with the wire `messageId` set to the same value. Provider adapters still emit their native user-message echo with the same `clientMessageId` when available; the manager records its provider identity on the internal row without changing or redispatching the wire item. If an adapter emits the echo before `startTurn` resolves, the manager records the provider identity with the row at acceptance. Provider adapters continue to own externally initiated user rows that have no Paseo client identity. Do not perform global transcript text dedupe.
 
-Active-turn steering is an optional `AgentSession.steerActiveTurn` operation. The manager owns admission against its exact foreground turn, canonical user-message creation, echo reconciliation, and falls back to the normal interrupt-and-replace path only when the adapter reports `unavailable`. An adapter error leaves the steer's fate ambiguous and must surface without an interrupt or retry. Codex calls `turn/steer` with the native expected turn and Paseo client user-message ID. Claude pushes an admitted steer into the exact active SDK query input; isolated control commands remain unavailable. OpenCode calls `session/prompt_async` with an OpenCode-generated message ID; the server queues the prompt while busy and the next LLM call in the same Paseo turn includes it. Pi sends its native `steer` RPC, which queues the message for delivery after the in-flight assistant turn's tool calls. Slash-command inputs report `unavailable` because pi rejects extension commands on the steer path, and echo identity is correlated by message text because pi's steer RPC takes no message ID. A missing session reports `unavailable` and uses the normal interrupt fallback.
+Active-turn steering is an optional `AgentSession.steerActiveTurn` operation. The manager owns admission against its exact foreground turn, canonical user-message creation, and echo reconciliation. A message never interrupts a turn: when the adapter reports `unavailable`, or has no steering, or the run has no turn yet, the prompt waits behind the run and is delivered in order when the run takes a steer or ends (`steerIntoActiveTurn`, `PromptDispatchDisposition` `"queued"`). The queue (`PromptQueue`) lives on the agent's record before `"queued"` is returned, so a daemon restart delivers what the last daemon could not, loading the agent first. Only an explicit `activeTurnBehavior: "interrupt"` replaces a running turn, and a send with no behavior steers. The reason is Claude: `query.interrupt()` aborts the whole request, including every background Workflow and Agent task the session is running, so a replacement kills work nobody asked to stop. An adapter error leaves the steer's fate ambiguous and must surface without an interrupt or retry. Codex calls `turn/steer` with the native expected turn and Paseo client user-message ID. Claude pushes an admitted steer into the exact active SDK query input; isolated control commands remain unavailable. OpenCode calls `session/prompt_async` with an OpenCode-generated message ID; the server queues the prompt while busy and the next LLM call in the same Paseo turn includes it. Pi sends its native `steer` RPC, which queues the message for delivery after the in-flight assistant turn's tool calls. Slash-command inputs report `unavailable` because pi rejects extension commands on the steer path, and echo identity is correlated by message text because pi's steer RPC takes no message ID. A missing session reports `unavailable` and waits like any other unavailable steer.
 
 A steering adapter also owes its interrupt: stopping a turn must discard the steers the provider has not read yet, or one of them resumes the turn the user just stopped. Codex clears pending input when it aborts a turn; Claude does not, so its adapter cancels the SDK messages it queued before calling `query.interrupt()`. Pi requires `clear_queue` before `abort`; older binaries without that RPC retain their native queue behavior until the pi compatibility floor reaches 0.84.4.
 
@@ -193,6 +209,39 @@ Cursor usage reads the desktop `state.vscdb` token first, then `cursor-agent`'s 
 ### Usage fetchers are read-only on credentials
 
 A fetcher reads the provider's credential file and never writes it. On a 401 or 403 it returns `unavailable` and leaves refresh to the provider's own CLI: redeeming a refresh token in the fetcher invalidates the CLI's copy (refresh tokens are single-use), and rewriting the file through the fetcher's Zod schema drops any field the schema does not model, corrupting the file for the CLI.
+
+### OpenAI API spend (`openai-api`)
+
+The one fetcher that is not a coding agent: month-to-date spend of an OpenAI platform org, such as the one behind image generation, shown as an account on the [orchestrator's budget strip](orchestration-panel.md#budget-strip). It reads `GET /v1/organization/costs` (daily buckets from the first of the month, UTC, following `next_page`). Off unless configured, and a disabled fetcher returns `null`, which the service drops, so the row does not exist at all.
+
+```json
+{
+  "agents": {
+    "providerUsage": {
+      "openaiApi": {
+        "enabled": true,
+        "label": "OpenAI API (image gen)",
+        "keyEnv": "OPENAI_API_KEY",
+        "adminKeyEnv": "OPENAI_ADMIN_KEY",
+        "envFile": "~/.config/openai/env",
+        "monthlyBudgetUsd": 50,
+        "refreshMinutes": 30
+      }
+    }
+  }
+}
+```
+
+Only `enabled` is needed; every other key shows its default. Config is read from `config.json` on each fetch, so an edit applies without a restart.
+
+**The key needs Usage: Read, not an admin role.** Costs are gated on the `api.usage.read` scope. A project or restricted key granted **Usage: Read** works, given the owner's org role allows it; a key without it gets a 403 that names the scope, and the strip says "Give this OpenAI key Usage: Read (platform.openai.com → API keys → Permissions)". A 401 reads as an invalid or revoked key. To set it up:
+
+1. On platform.openai.com, open the key's permissions (API keys → the key → Permissions) and set **Usage** to **Read**. Or create a separate restricted key with only that scope.
+2. Put the key where the daemon can read it, as `export OPENAI_API_KEY="…"` in `~/.config/openai/env` (the same line other tools read), or in the daemon's environment. `adminKeyEnv` is looked up first when it is set, for a dedicated usage-only key kept apart from the one your code uses; `keyEnv` is the fallback.
+
+**The key never goes in `config.json`.** Config holds only the names (`keyEnv`, `adminKeyEnv`, `envFile`) and the schema is strict, so a stray `apiKey` field fails to load. The fetcher reads the key at fetch time and sends it only to `api.openai.com`; it is never logged, put in an error string, or sent to the app. The one thing kept from an error body is whether it names `api.usage.read`.
+
+What the row reports: a "Spent this month" balance (`used`, plus `limit` when `monthlyBudgetUsd` is set) and, with a budget, a `month` window whose `usedPct` is spend over budget and whose `resetsAt` is the start of next month, UTC. Without a budget there is a spend figure and no meter. With no key found the row is present with the error "Add OPENAI_API_KEY to ~/.config/openai/env" (naming the configured variable and file), so the strip shows "Usage unavailable" with that hint. Spend is cached for `refreshMinutes`, independent of the usage service's five-minute cache.
 
 ---
 
@@ -465,9 +514,12 @@ interface AgentClient {
     input: ImportProviderSessionInput,
     context: ImportProviderSessionContext,
   ): Promise<ImportedProviderSession>;
+  canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean>;
   getDiagnostic?(): Promise<{ diagnostic: string }>;
 }
 ```
+
+Implement `canResumeHandle` when a provider has more than one account and can tell whether a given account can read a given session — it is what lets Paseo move an agent between two accounts of your provider and refuse when the move would silently open an empty conversation. Leaving it out means "cannot tell", and the move proceeds. See [account-failover.md](account-failover.md#moving-an-agent-to-another-account).
 
 **`AgentSession`** -- a running agent conversation:
 

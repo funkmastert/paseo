@@ -36,6 +36,7 @@ jobs:
       browser: ${{ steps.filter.outputs.browser }}
       relay: ${{ steps.filter.outputs.relay }}
       cli: ${{ steps.filter.outputs.cli }}
+      plugin: ${{ steps.filter.outputs.plugin }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -129,7 +130,7 @@ jobs:
   server-tests-ubuntu:
     name: server-tests (ubuntu-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false' || needs.changes.outputs.plugin != 'false') }}
     runs-on: ubuntu-latest
     steps: &server_test_steps
       - uses: actions/checkout@v4
@@ -142,21 +143,21 @@ jobs:
           cache: "npm"
 
       - name: Fetch origin/main (worktree tests)
-        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
+        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.plugin != 'false' }}
         run: git fetch --no-tags origin main:refs/remotes/origin/main
 
       - name: Install dependencies
         run: node scripts/npm-retry.mjs ci
 
       - name: Install agent CLIs for provider tests
-        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
+        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.plugin != 'false' }}
         run: node scripts/npm-retry.mjs install -g @anthropic-ai/claude-code opencode-ai
 
       - name: Build server dependencies
         run: npm run build:server-deps
 
       - name: Run server tests
-        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' }}
+        if: ${{ needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.plugin != 'false' }}
         run: npm run test --workspace=@getpaseo/server
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -164,13 +165,13 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
 
       - name: Run Hub CLI/daemon contract
-        if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.hub != 'false' }}
+        if: ${{ needs.changes.outputs.full == 'false' && needs.changes.outputs.server == 'false' && needs.changes.outputs.plugin == 'false' && needs.changes.outputs.hub != 'false' }}
         run: npm run test:hub-cli-contract --workspace=@getpaseo/server
 
   server-tests-windows:
     name: server-tests (windows-latest)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false') }}
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.server != 'false' || needs.changes.outputs.hub != 'false' || needs.changes.outputs.plugin != 'false') }}
     runs-on: windows-latest
     steps: *server_test_steps
 
@@ -395,6 +396,34 @@ jobs:
       PLAYWRIGHT_SHARD: "4/4"
       PLAYWRIGHT_ARTIFACT: "4"
     steps: *playwright_test_steps
+
+  plugin-tests:
+    name: plugin-tests
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.outputs.full != 'false' || needs.changes.outputs.plugin != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build client dependencies
+        run: npm run build:client
+
+      - name: Build plugin SDK
+        run: npm run build:plugin
+
+      - name: Typecheck claude-account-pool plugin
+        run: npm run typecheck --workspace=claude-account-pool
+
+      - name: Run claude-account-pool plugin tests
+        run: npm run test --workspace=claude-account-pool
 
   relay-tests:
     name: relay-tests

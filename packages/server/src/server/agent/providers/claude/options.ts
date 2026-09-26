@@ -47,6 +47,17 @@ export const ClaudeProviderOptionsSchema = z
   .object({
     allowedTools: z.array(z.string()).optional(),
     disallowedTools: z.array(z.string()).optional(),
+    // Paseo-owned, not an SDK option. The SDK's own channel is
+    // `systemPrompt: { type: "preset", preset: "claude_code", append }`, a single
+    // string that the daemon already spends on the user's `systemPrompt` and the
+    // daemon-wide `daemon.appendSystemPrompt`. A caller that restricts an agent
+    // through the other options here — `disallowedTools` above, `sandbox`,
+    // `settings.permissions` — has no way to tell the agent it did, and an agent
+    // that has to discover its own restrictions by hitting them burns tokens
+    // doing it. This field is the supported way to say so. `buildOptions()`
+    // strips it and folds it into that one `append` string, so it never reaches
+    // the SDK as an unknown key and never clobbers the other two parts.
+    appendSystemPrompt: z.string().optional(),
     additionalDirectories: z.array(z.string()).optional(),
     sandbox: z
       .object({

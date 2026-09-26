@@ -83,6 +83,7 @@ import {
   useHorizontalScrollBoundary,
 } from "@/components/ui/horizontal-scroll-boundary";
 import { useSessionStore } from "@/stores/session-store";
+import { getAgentShortId } from "@/utils/agent-short-id";
 
 const DROPDOWN_WIDTH = 220;
 const DEFAULT_INLINE_ADD_BUTTON_RESERVED_WIDTH = 36;
@@ -177,7 +178,7 @@ function AgentTabTooltipBody({
         {title}
       </Text>
       <View style={styles.tooltipAgentMetadata}>
-        <Text style={styles.tooltipAgentId}>{agentId.slice(0, 7)}</Text>
+        <Text style={styles.tooltipAgentId}>{getAgentShortId(agentId)}</Text>
         {activity ? (
           <>
             <Text style={styles.tooltipAgentSeparator}>·</Text>
@@ -588,6 +589,7 @@ function getFallbackTabLabel(
     changes: string;
     files: string;
     pullRequest: string;
+    orchestration: string;
   },
 ): string {
   if (tab.target.kind === "new_tab") {
@@ -613,6 +615,9 @@ function getFallbackTabLabel(
   }
   if (tab.target.kind === "pull_request") {
     return labels.pullRequest;
+  }
+  if (tab.target.kind === "orchestration") {
+    return labels.orchestration;
   }
   return labels.agent;
 }
@@ -1072,6 +1077,7 @@ function ResolvedWorkspaceDesktopTabsRow({
       changes: t("panels.diff.changesLabel"),
       files: t("panels.files.label"),
       pullRequest: t("panels.pullRequest.label"),
+      orchestration: t("panels.orchestration.label"),
     }),
     [t],
   );

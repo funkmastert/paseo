@@ -437,6 +437,7 @@ export function TooltipContent({
   style,
   testID,
   maxWidth = 280,
+  interactive = false,
 }: PropsWithChildren<{
   side?: Side;
   align?: Align;
@@ -444,6 +445,12 @@ export function TooltipContent({
   style?: StyleProp<ViewStyle>;
   testID?: string;
   maxWidth?: number;
+  /**
+   * Native only: let touches reach the content so it can scroll. Tooltips are otherwise
+   * non-interactive. On web the content stays out of hit-testing, since it closes on hover-out
+   * and pointer events on it would feed back into the trigger's hover.
+   */
+  interactive?: boolean;
 }>): ReactElement | null {
   const ctx = useTooltipContext("TooltipContent");
   const [triggerRect, setTriggerRect] = useState<Rect | null>(null);
@@ -544,7 +551,7 @@ export function TooltipContent({
     >
       <Pressable style={styles.overlay} onPress={handleDismiss}>
         <FloatingSurface
-          pointerEvents="none"
+          pointerEvents={interactive ? "auto" : "none"}
           entering={FadeIn.duration(80)}
           exiting={FadeOut.duration(80)}
           collapsable={false}

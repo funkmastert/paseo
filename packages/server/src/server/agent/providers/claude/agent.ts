@@ -2,7 +2,6 @@ import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { promises } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
   type AgentDefinition,
@@ -19,6 +18,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { Logger } from "pino";
+import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import {
   mapClaudeCanceledToolCall,
   mapClaudeCompletedToolCall,
@@ -34,6 +34,7 @@ import {
   findClaudeModel,
   getClaudeModelsWithSettings,
   normalizeClaudeRuntimeModelId,
+  resolveClaudeConfigDir,
   resolveConfiguredClaudeModel,
 } from "./models.js";
 import {
@@ -42,6 +43,7 @@ import {
   parseClaudeCodeVersion,
   resolveClaudeDisabledThinkingForModel,
 } from "./model-manifest.js";
+import { expandEnvVars, readPerDirStdioMcpServers } from "../../../mcp-gateway/per-dir-stdio.js";
 import { parsePartialJsonObject } from "./partial-json.js";
 import { ClaudeSidechainTracker } from "./sidechain-tracker.js";
 import { ClaudeTaskState } from "./task-state.js";
@@ -77,8 +79,15 @@ import {
 import { renderPromptAttachmentAsText } from "../../prompt-attachments.js";
 import { claudeQuery, type ClaudeOptions, type ClaudeQueryFactory } from "./query.js";
 import { realClaudeRewindSdk, revertClaudeConversation, revertClaudeFiles } from "./rewind.js";
+import { normalizeClaudeContextUsage } from "./context-usage.js";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 import { normalizeProviderReplayTimestamp } from "../../provider-history-timestamps.js";
-import { claudeProjectDirSync } from "./project-dir.js";
+import { readClaudeAccountAuth } from "./account-auth.js";
+import {
+  claudeProjectDirSync,
+  claudeSessionTranscriptPath,
+  findClaudeSessionTranscript,
+} from "./project-dir.js";
 import { THINKING_APPLIES_NEXT_TURN_NOTICE } from "../../provider-notices.js";
 import {
   isProviderImageMarkdown,
@@ -95,6 +104,7 @@ import {
   type AgentCreateSessionOptions,
   type AgentFeature,
   type AgentLaunchContext,
+  type AgentMcpServerStatus,
   type AgentMetadata,
   type AgentMode,
   type AgentModelDefinition,
@@ -108,6 +118,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
   type AgentSession,
+  type AgentAccountAuth,
   type AgentSessionConfig,
   type AgentSlashCommand,
   type SteerActiveTurnOptions,
@@ -126,6 +137,7 @@ import {
   type ProviderRefreshContext,
   type ResolveAgentDefaultModeInput,
 } from "../../agent-sdk-types.js";
+import { weighTokenUsage } from "../../token-rate-tracker.js";
 import { importSessionFromPersistence } from "../../provider-session-import.js";
 import { runProviderRefreshActivity } from "../../provider-refresh-deadline.js";
 import {
@@ -349,6 +361,14 @@ const DEFAULT_MODES: AgentMode[] = [
 
 const VALID_CLAUDE_MODES = new Set(DEFAULT_MODES.map((mode) => mode.id));
 
+/**
+ * The device gate's own hook timeout. It answers from a cached `ps` sample, and takes a fresh
+ * one only when that is older than a few seconds, so this is a ceiling for a wedged `ps` rather
+ * than a normal wait. On timeout the SDK proceeds, which is the same fail-open the gate itself
+ * takes — the process scan still counts whatever booted.
+ */
+const DEVICE_GATE_TIMEOUT_SECONDS = 20;
+
 const REWIND_COMMAND_NAME = "rewind";
 const REWIND_COMMAND: AgentSlashCommand = {
   name: REWIND_COMMAND_NAME,
@@ -405,6 +425,7 @@ interface ClaudeAgentClientOptions {
   resolveBinary?: () => Promise<string>;
   resolveVersion?: (signal?: AbortSignal) => Promise<string>;
   configDir?: string;
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 interface ClaudeAgentSessionOptions {
@@ -417,6 +438,7 @@ interface ClaudeAgentSessionOptions {
   logger: Logger;
   queryFactory?: ClaudeQueryFactory;
   resolveBinary: () => Promise<string>;
+  deviceLaunchGate?: DeviceLaunchGate;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -1489,9 +1511,25 @@ export function readEventIdentifiers(message: SDKMessage): EventIdentifiers {
   };
 }
 
+/**
+ * The `CLAUDE_CONFIG_DIR` a provider's sessions actually run with, `${VAR}`-expanded. A derived
+ * provider (`extends: "claude"` with its own `env`) points at a different account's config dir
+ * than the provider it extends; reading the base provider's — or the `~/.claude` default — would
+ * adopt an MCP definition from the wrong account. Returns undefined when nothing sets it, so
+ * `resolveClaudeConfigDir` keeps its own fallback chain.
+ */
+export function resolveProviderClaudeConfigDir(
+  runtimeSettings: ProviderRuntimeSettings | undefined,
+  env: NodeJS.ProcessEnv,
+): string | undefined {
+  const configured = runtimeSettings?.env?.CLAUDE_CONFIG_DIR;
+  return configured === undefined ? undefined : expandEnvVars(configured, env);
+}
+
 export class ClaudeAgentClient implements AgentClient {
   readonly provider = "claude" as const;
   readonly capabilities = CLAUDE_CAPABILITIES;
+  readonly acceptsMcpGatewayServers = true;
 
   private readonly defaults?: { agents?: Record<string, AgentDefinition> };
   private readonly logger: Logger;
@@ -1500,6 +1538,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly resolveBinary: () => Promise<string>;
   private readonly resolveVersion: (signal?: AbortSignal) => Promise<string>;
   private readonly configDir?: string;
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1511,10 +1550,38 @@ export class ClaudeAgentClient implements AgentClient {
       options.resolveVersion ??
       ((signal) => resolveClaudeCodeVersion(this.runtimeSettings, signal));
     this.configDir = options.configDir;
+    this.deviceLaunchGate = options.deviceLaunchGate;
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
     return resolveConfiguredClaudeModel(model);
+  }
+
+  /** docs/mcp-gateway.md "Adopting a session-reported server": the same dirs strict-mode stdio
+   * re-injection reads (`applyMcpGatewayOptions`), resolved for one session's cwd. */
+  resolveMcpConfigScope(cwd: string): {
+    configDir: string;
+    projectDir: string;
+    env: NodeJS.ProcessEnv;
+  } {
+    // The same env the CLI subprocess gets, so `${VAR}` in a definition expands as the
+    // session itself would expand it — a provider-profile token is not in the daemon's env.
+    const env = createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings });
+    return {
+      configDir: resolveClaudeConfigDir(resolveProviderClaudeConfigDir(this.runtimeSettings, env)),
+      projectDir: cwd,
+      env,
+    };
+  }
+
+  private resolveAccountConfigDir(): string {
+    const env = createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings });
+    return resolveClaudeConfigDir(resolveProviderClaudeConfigDir(this.runtimeSettings, env));
+  }
+
+  /** Reads the account behind this provider's own config dir, the one its sessions run as. */
+  async describeAccountAuth(): Promise<AgentAccountAuth> {
+    return readClaudeAccountAuth(this.resolveAccountConfigDir());
   }
 
   async createSession(
@@ -1532,6 +1599,7 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      deviceLaunchGate: this.deviceLaunchGate,
     });
   }
 
@@ -1560,6 +1628,7 @@ export class ClaudeAgentClient implements AgentClient {
       logger: this.logger,
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
+      deviceLaunchGate: this.deviceLaunchGate,
     });
   }
 
@@ -1613,7 +1682,7 @@ export class ClaudeAgentClient implements AgentClient {
   async listImportableSessions(
     options?: ListImportableSessionsOptions,
   ): Promise<ImportableProviderSession[]> {
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
+    const configDir = resolveClaudeConfigDir(this.configDir);
     const sessionsRoot = options?.cwd
       ? claudeProjectDirSync(options.cwd, { configDir })
       : path.join(configDir, "projects");
@@ -1640,6 +1709,25 @@ export class ClaudeAgentClient implements AgentClient {
       context,
       resumeSession: this.resumeSession.bind(this),
     });
+  }
+
+  /**
+   * A session is reachable from this account only if its transcript is visible under this
+   * client's `CLAUDE_CONFIG_DIR`. Accounts see each other's threads only while their `projects/`
+   * directories point at the same place, which is what makes a provider move possible at all.
+   */
+  async canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean> {
+    const cwd = coerceSessionMetadata(handle.metadata).cwd;
+    if (!cwd) {
+      return false;
+    }
+    const configDir = resolveClaudeConfigDir(
+      resolveProviderClaudeConfigDir(
+        this.runtimeSettings,
+        createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
+      ) ?? this.configDir,
+    );
+    return findClaudeSessionTranscript({ cwd, sessionId: handle.sessionId, configDir }) !== null;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -1795,7 +1883,15 @@ function extractContextWindowSize(modelUsage: unknown): number | undefined {
   return maxContextWindow;
 }
 
-function readStreamRequestInputTokens(event: Record<string, unknown>): number | undefined {
+interface StreamRequestInputBreakdown {
+  inputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+}
+
+function readStreamRequestInputBreakdown(
+  event: Record<string, unknown>,
+): StreamRequestInputBreakdown | undefined {
   const messageUsage = toObjectRecord(toObjectRecord(event.message)?.usage);
   if (!messageUsage) {
     return undefined;
@@ -1818,7 +1914,7 @@ function readStreamRequestInputTokens(event: Record<string, unknown>): number | 
   if (typeof inputTokens !== "number" || inputTokens < 0) {
     return undefined;
   }
-  return inputTokens + cacheCreationInputTokens + cacheReadInputTokens;
+  return { inputTokens, cacheCreationInputTokens, cacheReadInputTokens };
 }
 
 function readStreamRequestOutputTokens(event: Record<string, unknown>): number | undefined {
@@ -1897,6 +1993,16 @@ class ClaudeContextUsageState {
   private streamRequestOutputTokens: number | undefined;
   private compactedContextWindowUsedTokens: number | undefined;
   private completedResultTurns = 0;
+  // Cost-weighted burn (token-rate-tracker.ts) recorded per API request as message_start /
+  // message_delta arrive, so the burn monitor sees a long turn while it runs instead of one
+  // lump at turn end. `streamRequestBurnBreakdown` is the current request's input side;
+  // `streamRequestBurnRecorded` is what has already been handed out for it (message_delta may
+  // repeat with a growing output count, so only the increment goes out); `turnBurnRecorded`
+  // tells the result handler to skip its per-turn fallback.
+  private streamRequestBurnBreakdown: StreamRequestInputBreakdown | undefined;
+  private streamRequestBurnRecorded = 0;
+  private pendingBurnDelta: number | undefined;
+  private turnBurnRecorded = 0;
 
   constructor(initialContextWindowMaxTokens?: number) {
     this.contextWindowMaxTokens = initialContextWindowMaxTokens;
@@ -1906,6 +2012,10 @@ class ClaudeContextUsageState {
     this.streamRequestInputTokens = undefined;
     this.streamRequestOutputTokens = undefined;
     this.compactedContextWindowUsedTokens = undefined;
+    this.streamRequestBurnBreakdown = undefined;
+    this.streamRequestBurnRecorded = 0;
+    this.pendingBurnDelta = undefined;
+    this.turnBurnRecorded = 0;
   }
 
   setInitialContextWindowMaxTokens(contextWindowMaxTokens: number | undefined): void {
@@ -1927,18 +2037,23 @@ class ClaudeContextUsageState {
     }
     const eventType = readTrimmedString(streamEvent.type);
     if (eventType === "message_start") {
-      const inputTokens = readStreamRequestInputTokens(streamEvent);
-      if (typeof inputTokens !== "number") {
+      const breakdown = readStreamRequestInputBreakdown(streamEvent);
+      if (!breakdown) {
         return null;
       }
-      this.streamRequestInputTokens = inputTokens;
+      this.streamRequestInputTokens =
+        breakdown.inputTokens + breakdown.cacheCreationInputTokens + breakdown.cacheReadInputTokens;
       this.streamRequestOutputTokens = 0;
+      this.flushUnrecordedRequestBurn();
+      this.streamRequestBurnBreakdown = breakdown;
+      this.streamRequestBurnRecorded = 0;
     } else if (eventType === "message_delta") {
       const outputTokens = readStreamRequestOutputTokens(streamEvent);
       if (typeof outputTokens !== "number") {
         return null;
       }
       this.streamRequestOutputTokens = outputTokens;
+      this.recordRequestBurn(outputTokens);
     } else {
       return null;
     }
@@ -1984,6 +2099,28 @@ class ClaudeContextUsageState {
     }
   }
 
+  /**
+   * Per-turn cost-weighted token delta (token-rate-tracker.ts's `weighTokenUsage`) for the
+   * burn tracker. Claude's result `usage` is already scoped to this turn (main agent loop
+   * only), unlike `modelUsage` which accumulates across the whole query() call — so no diffing
+   * against a prior snapshot is needed. Fallback only: a turn that streamed partial messages has
+   * already been recorded request by request (`hasRecordedRequestBurnThisTurn`).
+   */
+  buildTurnTokenDelta(message: SDKResultMessage): number | undefined {
+    if (!message.usage) {
+      return undefined;
+    }
+    const usage = toObjectRecord(message.usage) ?? {};
+    const count = (value: unknown): number | undefined =>
+      typeof value === "number" ? value : undefined;
+    return weighTokenUsage({
+      inputTokens: count(usage.input_tokens),
+      cacheCreationInputTokens: count(usage.cache_creation_input_tokens),
+      cacheReadInputTokens: count(usage.cache_read_input_tokens),
+      outputTokens: count(usage.output_tokens),
+    });
+  }
+
   private streamUsedTokens(): number | undefined {
     if (
       typeof this.streamRequestInputTokens !== "number" ||
@@ -1993,6 +2130,49 @@ class ClaudeContextUsageState {
     }
     const usedTokens = this.streamRequestInputTokens + this.streamRequestOutputTokens;
     return usedTokens > 0 ? usedTokens : undefined;
+  }
+
+  private recordRequestBurn(outputTokens: number): void {
+    if (!this.streamRequestBurnBreakdown) {
+      return;
+    }
+    const weighted = weighTokenUsage({ ...this.streamRequestBurnBreakdown, outputTokens });
+    const increment = weighted - this.streamRequestBurnRecorded;
+    if (increment <= 0) {
+      return;
+    }
+    this.streamRequestBurnRecorded = weighted;
+    this.turnBurnRecorded += increment;
+    this.pendingBurnDelta = (this.pendingBurnDelta ?? 0) + increment;
+  }
+
+  /**
+   * A request that streamed message_start but never a message_delta (aborted mid-response, or
+   * a CLI that stops streaming early) still cost its input side. Record that when the next
+   * request starts or the turn ends, so it is never dropped.
+   */
+  private flushUnrecordedRequestBurn(): void {
+    if (!this.streamRequestBurnBreakdown || this.streamRequestBurnRecorded > 0) {
+      return;
+    }
+    this.recordRequestBurn(0);
+  }
+
+  /** Cost-weighted burn accrued since the last call — one `token_burn_delta` event's worth. */
+  takeStreamBurnDelta(): number | undefined {
+    const delta = this.pendingBurnDelta;
+    this.pendingBurnDelta = undefined;
+    return delta;
+  }
+
+  /** Turn-end variant of `takeStreamBurnDelta` that first settles an unfinished request. */
+  takeTrailingRequestBurn(): number | undefined {
+    this.flushUnrecordedRequestBurn();
+    return this.takeStreamBurnDelta();
+  }
+
+  hasRecordedRequestBurnThisTurn(): boolean {
+    return this.turnBurnRecorded > 0;
   }
 
   private createUsageUpdatedEvent(contextWindowUsedTokens: number): AgentStreamEvent {
@@ -2092,12 +2272,19 @@ class ClaudeAgentSession implements AgentSession {
   private nextTurnOrdinal = 1;
   private cancelCurrentTurn: (() => void) | null = null;
   private cachedRuntimeInfo: AgentRuntimeInfo | null = null;
+  private lastObservedModelMessageId: string | null = null;
   private lastOptionsModel: string | null = null;
   private lastRuntimeModel: string | null = null;
   private compacting = false;
   private compactionMarkerOpen = false;
   private queryPumpPromise: Promise<void> | null = null;
   private queryRestartNeeded = false;
+  /**
+   * A thinking change needs a new Claude process, and the old one owns every background Workflow
+   * and Agent task in the session. It waits until none is running; the old setting applies until
+   * then. Restarts that correctness requires (rewind, a rebound session) use `queryRestartNeeded`.
+   */
+  private thinkingRestartPending = false;
   private pendingInterruptAbort = false;
   private foregroundHasVisibleActivity = false;
   private activeTurnHasAssistantText = false;
@@ -2108,6 +2295,8 @@ class ClaudeAgentSession implements AgentSession {
   private pendingFreshSessionId: string | null = null;
   private recentStderr = "";
   private closed = false;
+
+  private readonly deviceLaunchGate?: DeviceLaunchGate;
 
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
@@ -2120,6 +2309,7 @@ class ClaudeAgentSession implements AgentSession {
     this.logger = options.logger.child({ agentId: this.agentId });
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary;
+    this.deviceLaunchGate = options.deviceLaunchGate;
     this.contextUsage = new ClaudeContextUsageState(
       findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
@@ -2455,7 +2645,7 @@ class ClaudeAgentSession implements AgentSession {
     }
 
     this.config.thinkingOptionId = resolution.fallbackThinkingOptionId;
-    this.queryRestartNeeded = true;
+    this.thinkingRestartPending = true;
     this.pushEvent({
       type: "thinking_option_changed",
       provider: "claude",
@@ -2477,7 +2667,7 @@ class ClaudeAgentSession implements AgentSession {
     } else {
       throw new Error(`Unknown thinking option: ${normalizedThinkingOptionId}`);
     }
-    this.queryRestartNeeded = true;
+    this.thinkingRestartPending = true;
     if (this.activeForegroundTurnId || this.autonomousTurn) {
       return THINKING_APPLIES_NEXT_TURN_NOTICE;
     }
@@ -2758,6 +2948,19 @@ class ClaudeAgentSession implements AgentSession {
     return Array.from(commandMap.values()).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  async getContextUsage(options: { allowStart: boolean }): Promise<AgentContextUsage | null> {
+    // A control request, not a prompt: the CLI answers it beside the conversation, so it never
+    // becomes a turn. Ask whatever process is live, even one flagged for restart, and spawn one
+    // only when none is and the session is idle. ensureQuery() retires a live query flagged for
+    // restart, which mid-turn would kill the turn, so it is reached only with no live query.
+    const turnRunning = this.activeForegroundTurnId !== null || this.autonomousTurn !== null;
+    const query =
+      this.query ?? (options.allowStart && !turnRunning ? await this.ensureQuery() : null);
+    if (!query) return null;
+    const raw = await query.getContextUsage();
+    return normalizeClaudeContextUsage(raw, new Date().toISOString());
+  }
+
   async revertConversation(input: { messageId: string }): Promise<void> {
     const target = this.resolveConversationRewindTarget(input.messageId);
     if (target.kind === "fresh-session") {
@@ -2920,6 +3123,16 @@ class ClaudeAgentSession implements AgentSession {
       this.queryRestartNeeded = true;
       throw error;
     }
+  }
+
+  private thinkingRestartDue(): boolean {
+    if (!this.thinkingRestartPending) return false;
+    if (!this.taskProtocolSource.hasRunningTasks) return true;
+    this.logger.debug(
+      { agentId: this.agentId, sessionId: this.claudeSessionId },
+      "Deferring the thinking change while background tasks run in this Claude process",
+    );
+    return false;
   }
 
   private async ensureFreshQuery(): Promise<Query> {
@@ -3095,11 +3308,11 @@ class ClaudeAgentSession implements AgentSession {
   }
 
   private async ensureQuery(): Promise<Query> {
-    if (this.query && !this.queryRestartNeeded) {
+    if (this.query && !this.queryRestartNeeded && !this.thinkingRestartDue()) {
       return this.query;
     }
 
-    if (this.queryRestartNeeded && this.query) {
+    if (this.query) {
       const oldQuery = this.query;
       const oldInput = this.input;
       // Null out query/input BEFORE awaiting the old iterator's return so the
@@ -3108,6 +3321,7 @@ class ClaudeAgentSession implements AgentSession {
       this.input = null;
       this.queryPumpPromise = null;
       this.queryRestartNeeded = false;
+      this.thinkingRestartPending = false;
       // Ending the input retires the process on purpose. Detach first so its
       // exit is not reported as a crash.
       const retiredChild = this.childProcess;
@@ -3136,6 +3350,8 @@ class ClaudeAgentSession implements AgentSession {
     // Preserve claudeSessionId across query recreation so buildOptions() passes
     // resume: sessionId and the new query continues the existing conversation.
     this.persistence = null;
+    // The new process launches with the current thinking option.
+    this.thinkingRestartPending = false;
 
     const input = createAsyncMessageInput<SDKUserMessage>();
     const options = await this.buildOptions();
@@ -3232,9 +3448,22 @@ class ClaudeAgentSession implements AgentSession {
     return { thinking: undefined, effort: undefined, ultracode: false };
   }
 
-  private buildAppendedSystemPrompt(): string {
+  /**
+   * The SDK takes one `append` string, so every source of system-level text shares it.
+   * Order is agent, then daemon, then provider options, and it is load-bearing: the
+   * provider-options note comes from whoever configured this specific agent's
+   * restrictions (an `agent.create` plugin hook, typically) and is the most specific
+   * of the three, so it goes last and is never dropped in favour of the daemon-wide
+   * text. Appending rather than reordering also keeps an unset note byte-identical to
+   * the previous two-part composition.
+   */
+  private buildAppendedSystemPrompt(providerOptionsAppend: string | undefined): string {
     return (
-      composeSystemPromptParts(this.config.systemPrompt, this.config.daemonAppendSystemPrompt) ?? ""
+      composeSystemPromptParts(
+        this.config.systemPrompt,
+        this.config.daemonAppendSystemPrompt,
+        providerOptionsAppend,
+      ) ?? ""
     );
   }
 
@@ -3248,11 +3477,14 @@ class ClaudeAgentSession implements AgentSession {
 
   private async buildOptions(): Promise<ClaudeOptions> {
     const { thinking, effort, ultracode } = this.resolveThinkingConfig();
-    const appendedSystemPrompt = this.buildAppendedSystemPrompt();
-    const providerOptions = applyClaudeToolPolicy(
+    // `appendSystemPrompt` is Paseo's, not the SDK's (see providers/claude/options.ts).
+    // Destructure it away before the `...providerOptions` spread below so it can never
+    // reach the SDK as an unrecognized option.
+    const { appendSystemPrompt, ...providerOptions } = applyClaudeToolPolicy(
       this.config.providerOptions,
       this.config.toolPolicy,
     );
+    const appendedSystemPrompt = this.buildAppendedSystemPrompt(appendSystemPrompt);
     const settingsOptions = this.buildSettingsOptions(providerOptions, { ultracode });
     const sdkEnv = this.buildSdkEnv();
     assertClaudeModeCanRun(this.currentMode, sdkEnv);
@@ -3309,7 +3541,7 @@ class ClaudeAgentSession implements AgentSession {
       ...settingsOptions,
       // Provider subagent panes render the child's nested transcript.
       forwardSubagentText: true,
-      hooks: this.buildSubagentEffortHooks(),
+      hooks: this.buildHooks(),
       ...(this.persistSession === undefined ? {} : { persistSession: this.persistSession }),
       env: sdkEnv,
     };
@@ -3317,6 +3549,8 @@ class ClaudeAgentSession implements AgentSession {
     if (this.config.mcpServers) {
       base.mcpServers = this.normalizeMcpServers(this.config.mcpServers);
     }
+
+    this.applyMcpGatewayOptions(base);
 
     if (this.config.model) {
       base.model = this.config.model;
@@ -3332,6 +3566,40 @@ class ClaudeAgentSession implements AgentSession {
       ];
     }
     return base;
+  }
+
+  /**
+   * U3/KTD5: how brokered gateway entries meet the CLI's own MCP loading. In `overlay` mode
+   * (default) the entries already sit in `base.mcpServers` and nothing else is needed: a
+   * launch-time entry wins a name collision with a per-dir one, and everything the CLI loads on
+   * its own — user/project/local scopes, claude.ai connectors — keeps loading. In `strict` mode
+   * `strictMcpConfig` stops per-dir servers from loading via `settingSources`, but it drops
+   * locally-defined stdio entries (and claude.ai connectors, which can't be re-injected) too —
+   * so re-inject the stdio ones verbatim, sourced from the same config dir + project
+   * `.mcp.json` the CLI would otherwise have read them from. Both signals are per-launch, set by
+   * `withRuntimeMcpGatewayServers` (agent-manager); they're absent when the gateway is disabled,
+   * so this no-ops byte-identically then (R10). See docs/mcp-gateway.md "Session injection".
+   */
+  private applyMcpGatewayOptions(base: ClaudeOptions): void {
+    if (!this.config.mcpGatewayEnabled || this.config.mcpGatewaySessionMode !== "strict") {
+      return;
+    }
+    base.strictMcpConfig = true;
+    const stdioServers = readPerDirStdioMcpServers({
+      configDir: resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR),
+      projectDir: this.config.cwd,
+      env: createProviderEnv({ baseEnv: process.env, runtimeSettings: this.runtimeSettings }),
+      logger: this.logger,
+    });
+    if (Object.keys(stdioServers).length === 0) {
+      return;
+    }
+    base.mcpServers = {
+      ...this.normalizeMcpServers(stdioServers),
+      // Anything already present (brokered gateway entries, or the session's own stored
+      // config) wins over an auto-discovered stdio entry of the same name.
+      ...base.mcpServers,
+    };
   }
 
   private buildSettingsOptions(
@@ -4100,6 +4368,7 @@ class ClaudeAgentSession implements AgentSession {
         this.appendSidechainResultEvents(message, events);
         break;
       case "assistant": {
+        this.appendObservedModelEvent(message.message.model, message.message.id, events);
         const timelineItems = this.mapBlocksToTimeline(message.message.content, {
           suppressAssistantText: options?.suppressAssistantText ?? false,
           suppressReasoning: options?.suppressReasoning ?? false,
@@ -4258,6 +4527,14 @@ class ClaudeAgentSession implements AgentSession {
           sessionId: sessionUpdate.threadStartedSessionId,
         });
       }
+      // Every init message re-reports MCP server statuses (KTD8): there is no SDK push
+      // event for later changes, so re-capturing each turn is how stdio/pass-through
+      // servers' statuses stay current. AgentManager dedupes before broadcasting.
+      events.push({
+        type: "mcp_server_statuses",
+        provider: "claude",
+        statuses: sessionUpdate.mcpServerStatuses,
+      });
       return;
     }
     if (message.subtype === "status") {
@@ -4426,14 +4703,46 @@ class ClaudeAgentSession implements AgentSession {
     }
   }
 
+  /**
+   * Reports the model a response says it came from, once per response. `message_start` and the
+   * assistant frames of the same response both carry it; the message id keeps one response from
+   * counting twice. Only frames that reach here, which are the agent's own: a subagent's frames
+   * are routed away before, and it is allowed a model of its own.
+   */
+  private appendObservedModelEvent(
+    model: unknown,
+    messageId: unknown,
+    events: AgentStreamEvent[],
+  ): void {
+    const observed = typeof model === "string" ? model.trim() : "";
+    if (!observed || observed === "<synthetic>") {
+      return;
+    }
+    const id = typeof messageId === "string" && messageId.length > 0 ? messageId : null;
+    if (id !== null) {
+      if (id === this.lastObservedModelMessageId) {
+        return;
+      }
+      this.lastObservedModelMessageId = id;
+    }
+    events.push({ type: "model_observed", provider: "claude", model: observed });
+  }
+
   private appendStreamEventEvents(
     message: Extract<SDKMessage, { type: "stream_event" }>,
     events: AgentStreamEvent[],
     options: { suppressAssistantText?: boolean; suppressReasoning?: boolean } | undefined,
   ): void {
+    if (message.event.type === "message_start") {
+      this.appendObservedModelEvent(message.event.message.model, message.event.message.id, events);
+    }
     const usageUpdatedEvent = this.contextUsage.buildStreamUsageEvent(message.event);
     if (usageUpdatedEvent) {
       events.push(usageUpdatedEvent);
+    }
+    const burnDelta = this.contextUsage.takeStreamBurnDelta();
+    if (burnDelta !== undefined) {
+      events.push({ type: "token_burn_delta", provider: "claude", tokens: burnDelta });
     }
     const timelineItems = this.mapPartialEvent(message.event, {
       suppressAssistantText: options?.suppressAssistantText ?? false,
@@ -4449,6 +4758,16 @@ class ClaudeAgentSession implements AgentSession {
     events: AgentStreamEvent[],
   ): void {
     const usage = this.convertUsage(message, message.modelUsage);
+    if (message.subtype === "success" && message.is_error === true) {
+      // A turn that ended on an API error (a capped account, an overloaded API) still arrives as
+      // `subtype: "success"`; `is_error` is the only thing that says it failed, and `result` is the
+      // error text. Completing it left the agent idle with no `lastError`, so an account outage
+      // looked like a turn that finished, and account failover had nothing to detect.
+      const resultText = typeof message.result === "string" ? message.result : "";
+      events.push(...this.sidechainTracker.finishAll("failed"));
+      events.push(this.buildTurnFailedEvent(resultText));
+      return;
+    }
     if (message.subtype === "success") {
       events.push(...this.sidechainTracker.finishAll("completed"));
       // Built-in slash commands (e.g. /voice, /usage, "Unknown command: …")
@@ -4469,7 +4788,21 @@ class ClaudeAgentSession implements AgentSession {
           },
         });
       }
-      events.push({ type: "turn_completed", provider: "claude", usage });
+      const trailingBurn = this.contextUsage.takeTrailingRequestBurn();
+      if (trailingBurn !== undefined) {
+        events.push({ type: "token_burn_delta", provider: "claude", tokens: trailingBurn });
+      }
+      // Per-request `token_burn_delta` events already carried this turn's burn; the per-turn
+      // figure is only the fallback for a CLI run that streamed no partial messages.
+      const turnTokenDelta = this.contextUsage.hasRecordedRequestBurnThisTurn()
+        ? undefined
+        : this.contextUsage.buildTurnTokenDelta(message);
+      events.push({
+        type: "turn_completed",
+        provider: "claude",
+        usage,
+        ...(turnTokenDelta !== undefined ? { turnTokenDelta } : {}),
+      });
       return;
     }
     const errorMessage =
@@ -4533,9 +4866,10 @@ class ClaudeAgentSession implements AgentSession {
   private handleSystemMessage(message: SDKSystemMessage): {
     threadStartedSessionId: string | null;
     notice: AgentTimelineItem | null;
+    mcpServerStatuses: AgentMcpServerStatus[];
   } {
     if (message.subtype !== "init") {
-      return { threadStartedSessionId: null, notice: null };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses: [] };
     }
 
     const msgRecord = toObjectRecord(message) ?? {};
@@ -4544,8 +4878,11 @@ class ClaudeAgentSession implements AgentSession {
       sessionId: msgRecord.sessionId,
       session: isObjectRecord(msgRecord.session) ? { id: msgRecord.session.id } : null,
     }).trim();
+    // Defensive: some fixtures/older CLIs omit mcp_servers even though the current
+    // SDK type declares it required. Never crash the init handshake over it.
+    const mcpServerStatuses = Array.isArray(message.mcp_servers) ? message.mcp_servers : [];
     if (!newSessionId) {
-      return { threadStartedSessionId: null, notice: null };
+      return { threadStartedSessionId: null, notice: null, mcpServerStatuses };
     }
     const existingSessionId = this.claudeSessionId;
     let threadStartedSessionId: string | null = null;
@@ -4591,7 +4928,7 @@ class ClaudeAgentSession implements AgentSession {
       this.lastRuntimeModel = message.model;
       this.cachedRuntimeInfo = null;
     }
-    return { threadStartedSessionId, notice };
+    return { threadStartedSessionId, notice, mcpServerStatuses };
   }
 
   private readMissingResumedConversationError(message: SDKMessage): string | null {
@@ -4776,6 +5113,60 @@ class ClaudeAgentSession implements AgentSession {
    * These are observation-only: they record what they see and always return an empty result, so
    * they can never alter tool execution or turn control.
    */
+  /**
+   * Every hook this session registers. PreToolUse carries two independent matchers: the
+   * observation one below, and the device gate, which is the only place a tool call can be
+   * refused deterministically — `canUseTool` is not consulted at all under
+   * `bypassPermissions` ("To gate every tool call, use a PreToolUse hook instead", per the SDK),
+   * and most of Tyler's agents run in exactly that mode.
+   */
+  private buildHooks(): NonNullable<ClaudeOptions["hooks"]> {
+    const hooks = this.buildSubagentEffortHooks();
+    if (!this.deviceLaunchGate || !this.agentId) {
+      return hooks;
+    }
+    return {
+      ...hooks,
+      PreToolUse: [
+        ...(hooks.PreToolUse ?? []),
+        // `matcher` is the SDK's tool-name filter; the callback re-checks the name because a
+        // gate that fires on the wrong tool would refuse work that boots nothing.
+        { matcher: "Bash", hooks: [this.gateDeviceLaunch], timeout: DEVICE_GATE_TIMEOUT_SECONDS },
+      ],
+    };
+  }
+
+  /**
+   * Refuses a shell command that would boot a simulator or emulator when the machine has no
+   * device slot left (docs/device-leases.md). Fails open on every uncertainty — an unreadable
+   * input, a gate that throws, a cap the daemon could not evaluate — because a device cap that
+   * breaks tool calls is worse than one that misses a device the process scan catches anyway.
+   */
+  private gateDeviceLaunch = async (input: unknown): Promise<Record<string, unknown>> => {
+    const allow: Record<string, unknown> = {};
+    const gate = this.deviceLaunchGate;
+    const agentId = this.agentId;
+    if (!gate || !agentId) return allow;
+    const hookInput = input as { tool_name?: unknown; tool_input?: { command?: unknown } };
+    if (hookInput.tool_name !== "Bash" || typeof hookInput.tool_input?.command !== "string") {
+      return allow;
+    }
+    try {
+      const decision = await gate.gateLaunch({ agentId, command: hookInput.tool_input.command });
+      if (decision.decision === "allow") return allow;
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: decision.message,
+        },
+      };
+    } catch (error) {
+      this.logger.warn({ err: error }, "Device launch gate failed; allowing the command");
+      return allow;
+    }
+  };
+
   private buildSubagentEffortHooks(): NonNullable<ClaudeOptions["hooks"]> {
     const observe = async (input: unknown): Promise<Record<string, never>> => {
       try {
@@ -5021,26 +5412,11 @@ class ClaudeAgentSession implements AgentSession {
   private resolveHistoryPath(sessionId: string): string | null {
     const cwd = this.config.cwd;
     if (!cwd) return null;
-    const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
-    const candidates = [cwd];
-    try {
-      const realCwd = fs.realpathSync(cwd);
-      if (realCwd !== cwd) {
-        candidates.push(realCwd);
-      }
-    } catch {
-      // Fall back to the configured cwd when the path has already disappeared.
-    }
-    for (const candidate of candidates) {
-      const historyPath = path.join(
-        claudeProjectDirSync(candidate, { configDir }),
-        `${sessionId}.jsonl`,
-      );
-      if (fs.existsSync(historyPath)) {
-        return historyPath;
-      }
-    }
-    return path.join(claudeProjectDirSync(cwd, { configDir }), `${sessionId}.jsonl`);
+    const configDir = resolveClaudeConfigDir(this.runtimeSettings?.env?.CLAUDE_CONFIG_DIR);
+    return (
+      findClaudeSessionTranscript({ cwd, sessionId, configDir }) ??
+      claudeSessionTranscriptPath(cwd, sessionId, configDir)
+    );
   }
 
   private convertHistoryEntry(entry: ClaudeHistoryEntry): AgentTimelineItem[] {

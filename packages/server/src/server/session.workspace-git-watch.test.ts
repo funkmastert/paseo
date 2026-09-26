@@ -202,6 +202,7 @@ function createSessionForWorkspaceGitWatchTests(options?: {
     paseoHome: "/tmp/paseo-test",
     agentManager: createStub<SessionOptions["agentManager"]>({
       subscribe: () => () => {},
+      onMcpGatewayStatusChange: () => () => {},
       listAgents: () => [],
       getAgent: () => null,
     }),

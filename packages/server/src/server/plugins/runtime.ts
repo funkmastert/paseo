@@ -275,6 +275,7 @@ export class PluginRuntime {
   private readonly spawnChild: () => PluginChild;
   private sessionHost: PluginPaseoSessionHost | null;
   private readonly listeners = new Set<(pluginId: string, error?: string) => void>();
+  private readonly sessionDropListeners = new Set<(pluginId: string) => void>();
 
   constructor(
     logger: pino.Logger,
@@ -297,6 +298,17 @@ export class PluginRuntime {
     return () => this.listeners.delete(listener);
   }
 
+  // Fires when a plugin's own daemon session (its PaseoApi/DaemonClient) is torn
+  // down while the plugin process is still alive and connected — e.g. the daemon
+  // force-closed the session's virtual socket for an expired application lease.
+  // Plugin sessions never resume (see docs/plugins.md), so the only recovery is a
+  // full restart. This is distinct from `subscribe`, which reports the process
+  // itself exiting or failing to load.
+  subscribeSessionDrop(listener: (pluginId: string) => void): () => void {
+    this.sessionDropListeners.add(listener);
+    return () => this.sessionDropListeners.delete(listener);
+  }
+
   async startPlugin(
     pluginId: string,
     configuredPath: string,
@@ -314,6 +326,26 @@ export class PluginRuntime {
     }
     this.plugins.set(pluginId, loaded);
     this.appendLog(pluginId, "stdout", "[paseo] Plugin ready");
+    this.watchSessionHealth(pluginId, loaded);
+  }
+
+  private watchSessionHealth(pluginId: string, loaded: LoadedPlugin): void {
+    const sessionClosed = loaded.sessionClosed;
+    if (!sessionClosed) return;
+    void sessionClosed.then(() => {
+      // Superseded by a stop/reload/remove that already published a different
+      // (or no) instance for this ID; not our concern.
+      if (this.plugins.get(pluginId) !== loaded) return;
+      // The process exited too, so `handleChildClose` already owns reporting
+      // this; avoid double-reporting the same event two different ways.
+      if (!loaded.child?.connected) return;
+      this.logger.error(
+        { pluginId },
+        "Plugin daemon session closed unexpectedly while the process is still running",
+      );
+      for (const listener of this.sessionDropListeners) listener(pluginId);
+      return undefined;
+    });
   }
 
   async validatePlugin(configuredPath: string): Promise<void> {
@@ -337,6 +369,13 @@ export class PluginRuntime {
     return [...this.plugins.values()]
       .map(({ id, clientBundle, requirements }) => ({ id, clientBundle, requirements }))
       .sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  // A client-only plugin has no session to lose, so it counts as connected while loaded.
+  isSessionConnected(pluginId: string): boolean {
+    const loaded = this.plugins.get(pluginId);
+    if (!loaded) return false;
+    return loaded.sessionSocket === null || loaded.sessionSocket.readyState === 1;
   }
 
   getProviderRegistrations(pluginId: string): readonly PluginProviderMetadata[] {

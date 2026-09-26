@@ -32,6 +32,7 @@ function createSnapshot(
     persistence: input.persistence ?? null,
     title: input.title ?? null,
     labels: (input.labels ?? {}) as AgentSnapshotPayload["labels"],
+    lastActivitySummary: input.lastActivitySummary,
   };
 }
 
@@ -113,5 +114,37 @@ describe("normalizeAgentSnapshot", () => {
     expect(missing.parentAgentId).toBeNull();
     expect(empty.parentAgentId).toBeNull();
     expect(nonString.parentAgentId).toBeNull();
+  });
+
+  it("maps lastActivitySummary from the snapshot", () => {
+    const agent = normalizeAgentSnapshot(
+      createSnapshot({ lastActivitySummary: "[Read] src/index.ts" }),
+      "server-1",
+    );
+
+    expect(agent.lastActivitySummary).toBe("[Read] src/index.ts");
+  });
+
+  it("normalizes an old payload without lastActivitySummary to undefined", () => {
+    const agent = normalizeAgentSnapshot(createSnapshot(), "server-1");
+
+    expect(agent.lastActivitySummary).toBeUndefined();
+  });
+});
+
+describe("projectAgentSnapshot", () => {
+  it("includes lastActivitySummary when set", () => {
+    const agent = normalizeAgentSnapshot(
+      createSnapshot({ lastActivitySummary: "[Shell] npm test" }),
+      "server-1",
+    );
+
+    expect(projectAgentSnapshot(agent).lastActivitySummary).toBe("[Shell] npm test");
+  });
+
+  it("omits lastActivitySummary when not set", () => {
+    const agent = normalizeAgentSnapshot(createSnapshot(), "server-1");
+
+    expect(projectAgentSnapshot(agent)).not.toHaveProperty("lastActivitySummary");
   });
 });

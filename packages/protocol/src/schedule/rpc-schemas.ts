@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ScheduleConditionSchema } from "./condition.js";
 import {
   ScheduleCadenceSchema,
   ScheduleRunSchema,
@@ -34,6 +35,7 @@ export const ScheduleCreateRequestSchema = z.object({
   maxRuns: z.number().int().positive().optional(),
   expiresAt: z.string().optional(),
   runOnCreate: z.boolean().optional(),
+  condition: ScheduleConditionSchema.optional(),
 });
 
 export const ScheduleListRequestSchema = z.object({
@@ -97,6 +99,7 @@ export const ScheduleUpdateRequestSchema = z.object({
   newAgentConfig: ScheduleUpdateNewAgentConfigSchema.optional(),
   maxRuns: z.number().int().positive().nullable().optional(),
   expiresAt: z.string().nullable().optional(),
+  condition: ScheduleConditionSchema.nullable().optional(),
 });
 
 export const ScheduleCreateResponseSchema = z.object({

@@ -81,10 +81,63 @@ const ProvidersSchema = z
   })
   .strict();
 
+// Live-toggleable like agents.tokenBurnMonitor (66f76986a) — same mutable/patch split for the
+// same reason: `.partial()` on the config schema would make an absent field indistinguishable
+// from an explicit reset. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const DiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .strict();
+
 const WorktreesConfigSchema = z
   .object({
     root: z.string().min(1).optional(),
     servicePorts: PaseoServicePortAllocationSchema.optional(),
+    diskSweeper: DiskSweeperConfigSchema.optional(),
+  })
+  .strict();
+
+const McpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .strict();
+
+// docs/mcp-gateway.md "Local servers": a stdio server the daemon runs and brokers itself.
+const McpGatewayLocalServerConfigSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    critical: z.boolean().optional(),
+    auth: z.literal("static").optional(),
+  })
+  .strict();
+
+// New top-level section (KTD9), same mutable/patch split as diskSweeper/tokenBurnMonitor —
+// see the `MutableMcpGatewayConfigSchema` comment in @getpaseo/protocol/messages for why this
+// isn't shared with the wire schema. Adding a server is config-only (R9): drop an entry into
+// `servers` and it's picked up on reload/restart, no code change. Criticality (R11) is seeded
+// here by the operator, not hardcoded — e.g. `zeeq`/`agent-gateway` marked `critical: true`.
+// Static-auth header VALUES never live here — only that a server uses static auth
+// (`auth: "static"`) — because `MutableDaemonConfig` is broadcast in full to every connected
+// client; the value lives in the daemon's private 0600 token store, keyed by server name
+// (mcp-gateway/token-store.ts).
+const McpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    // docs/mcp-gateway.md "Session injection": overlay (default) or strict.
+    sessionMode: z.enum(["overlay", "strict"]).optional(),
+    servers: z.record(z.string(), McpGatewayServerConfigSchema).optional(),
+    localServers: z.record(z.string(), McpGatewayLocalServerConfigSchema).optional(),
   })
   .strict();
 
@@ -174,6 +227,449 @@ const StructuredGenerationProviderConfigSchema = z
 const AgentMetadataGenerationSchema = z
   .object({
     providers: z.array(StructuredGenerationProviderConfigSchema).optional(),
+    titleTracking: z
+      .object({
+        enabled: z.boolean().optional(),
+        refreshIntervalMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    // Defaults on; see workspace-title-tracker.ts for what each key paces.
+    workspaceTitleTracking: z
+      .object({
+        enabled: z.boolean().optional(),
+        refreshIntervalMinutes: z.number().positive().optional(),
+        activityWindowMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Each ladder stage of the spend governor switches independently, with its own multiple of the
+// task's budget. See agent/spend-governor.ts and docs/token-burn.md.
+const SpendGovernorStageSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    atFraction: z.number().positive().optional(),
+  })
+  .strict();
+
+const AgentTokenBurnMonitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
+    // Opt-in enforcement ladder. Off unless this says otherwise, and `dryRun` reports the whole
+    // ladder without performing any of it.
+    governor: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        // Nullable on purpose: null (the default) means an agent whose task declared no
+        // `paseo.budget` label is not governed at all.
+        defaultBudgetTokens: z.number().positive().nullable().optional(),
+        downgradeToModel: z.string().min(1).nullable().optional(),
+        notify: SpendGovernorStageSchema.optional(),
+        downgrade: SpendGovernorStageSchema.optional(),
+        stopFanOut: SpendGovernorStageSchema.optional(),
+        pause: SpendGovernorStageSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    // Opt-in, report-only provider usage-window leg.
+    accountPressure: z
+      .object({
+        enabled: z.boolean().optional(),
+        usedPct: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    // Passive usage history (usage-history/). On unless `enabled` is false; retention is fixed.
+    // See docs/usage-history.md.
+    usageHistory: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    // Opt-in: surfaces agents whose responses report a model other than the configured one.
+    // Read by AgentModelDivergenceMonitor, independent of `enabled` above. See
+    // docs/model-divergence.md.
+    modelDivergence: z
+      .object({
+        enabled: z.boolean().optional(),
+        persistResponses: z.number().int().positive().optional(),
+        persistSeconds: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.tokenBurnMonitor above — same mutable/patch split, same reason.
+// See docs/resource-monitor.md.
+const AgentResourceMonitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    memoryBytesPerAgent: z.number().positive().optional(),
+    cpuPercentPerAgent: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    systemSwapUsedRatio: z.number().positive().optional(),
+    orphanBuildDaemonBytes: z.number().positive().optional(),
+    notifyAgent: z.boolean().optional(),
+    // Opt-in reaper leg (agent/build-daemon-reaper.ts). Off unless this says otherwise.
+    reaper: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        idleMinutes: z.number().positive().optional(),
+        minIdleSweeps: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+        graceMs: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    // Machine CPU saturation: detection, the incident ledger, and its remediation rung. On
+    // unless this says otherwise.
+    saturation: z
+      .object({
+        enabled: z.boolean().optional(),
+        loadPerCore: z.number().positive().optional(),
+        busyFraction: z.number().positive().max(1).optional(),
+        sustainedMinutes: z.number().int().positive().optional(),
+        releaseLoadPerCore: z.number().positive().optional(),
+        releaseBusyFraction: z.number().positive().max(1).optional(),
+        reniceTopTrees: z.number().int().nonnegative().optional(),
+        reniceNice: z.number().int().min(1).max(19).optional(),
+        attributedGraceMinutes: z.number().positive().optional(),
+        unattributedGraceMinutes: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.resourceMonitor above. On by default: the structural CPU fix.
+// Nice 0..19 only — the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const AgentProcessPrioritySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.resourceMonitor above — same mutable/patch split, same reason.
+// Off by default like the reaper it is modelled on. See docs/device-leases.md.
+const AgentDeviceLeasesSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    // Both caps default to what the machine can carry (agent/device-slot-defaults.ts) rather
+    // than a constant, so a bigger desk gets a bigger number without editing anything.
+    totalSlots: z.number().int().positive().optional(),
+    slotsPerPlatform: z.number().int().positive().optional(),
+    requireHeadroom: z.boolean().optional(),
+    minAvailableBytes: z.number().positive().optional(),
+    maxSwapUsedRatio: z.number().positive().optional(),
+    pendingTtlMinutes: z.number().positive().optional(),
+    // 0 disables the backstop.
+    maxLeaseHours: z.number().nonnegative().optional(),
+    queueTimeoutMinutes: z.number().positive().optional(),
+  })
+  .strict();
+
+// Off by default like the reaper and the device cap it is modelled on, and every key optional:
+// a daemon that has never heard of this block behaves exactly as it does today. Deletion is
+// gated on `enabled`; the disk guard is its own opt-in because refusing a launch removes
+// nothing. See docs/artifact-janitor.md.
+const AgentArtifactJanitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    minAgeHours: z.number().positive().optional(),
+    minSweeps: z.number().int().positive().optional(),
+    obligationGraceMinutes: z.number().positive().optional(),
+    obligationTtlHours: z.number().positive().optional(),
+    maxPerSweep: z.number().int().positive().optional(),
+    maxBytesPerSweep: z.number().positive().optional(),
+    diskGuard: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        minFreeBytes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.tokenBurnMonitor/resourceMonitor above — same mutable/patch
+// split, same reason. See docs/account-failover.md.
+const AgentAccountFailoverSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    migrateSubagents: z.boolean().optional(),
+    migrationConcurrency: z.number().int().positive().optional(),
+    notifyParent: z.boolean().optional(),
+    collapseToSharedAccount: z.boolean().optional(),
+    // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    // The return leg is gone; a config that still sets these must keep loading.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
+  })
+  .strict();
+
+// Where the app's context meter turns amber and red, and when its breakdown flags memory files.
+// The daemon only stores it; the app reads it through daemon config. See docs/context-usage.md.
+const AgentContextMeterSchema = z
+  .object({
+    amberTokens: z.number().positive().optional(),
+    amberPercent: z.number().positive().max(100).optional(),
+    redTokens: z.number().positive().optional(),
+    redPercent: z.number().positive().max(100).optional(),
+    memoryFilesTokens: z.number().positive().optional(),
+    memoryFileTokens: z.number().positive().optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.accountFailover above — same mutable/patch split, same reason.
+// Every field optional and absent means today's behaviour: the leg is off unless `enabled` says
+// otherwise. See docs/budget-pacing.md.
+const AgentBudgetPacingSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    paceLookbackMinutes: z.number().positive().optional(),
+    minObservationMinutes: z.number().positive().optional(),
+    staleUsageMinutes: z.number().positive().optional(),
+    minActionableMinutes: z.number().nonnegative().optional(),
+    repeatAfterMinutes: z.number().nonnegative().optional(),
+    repeatWorseningPct: z.number().nonnegative().optional(),
+    // 0 silences a direction for the rest of every cycle without turning the leg off.
+    maxAdvisoriesPerCycle: z.number().int().nonnegative().optional(),
+    speedUp: z
+      .object({
+        enabled: z.boolean().optional(),
+        horizonMinutes: z.number().positive().optional(),
+        paceRatio: z.number().positive().optional(),
+        minStrandedPct: z.number().nonnegative().optional(),
+        minRemainingPct: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+    slowDown: z
+      .object({
+        enabled: z.boolean().optional(),
+        paceRatio: z.number().positive().optional(),
+        maxRemainingPct: z.number().nonnegative().optional(),
+        minOvershootPct: z.number().nonnegative().optional(),
+        minEarlyMinutes: z.number().nonnegative().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Live-toggleable like agents.budgetPacing above. Off unless `enabled` says otherwise; every
+// field optional. See docs/leader-compaction.md.
+const AgentLeaderCompactionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    scope: z.enum(["leaders", "all"]).optional(),
+    prepareAtTokens: z.number().int().positive().optional(),
+    retryAfterMinutes: z.number().nonnegative().optional(),
+    maxAttempts: z.number().int().positive().optional(),
+  })
+  .strict();
+
+// Off unless `enabled` says otherwise. See docs/done-janitor.md.
+const AgentDoneJanitorSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    quietHours: z.number().positive().optional(),
+    maxQuestionsPerSweep: z.number().int().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    answerTimeoutMinutes: z.number().positive().optional(),
+    reclaimWorkspaces: z.boolean().optional(),
+    archiveDead: z.boolean().optional(),
+    deadQuietHours: z.number().positive().optional(),
+    maxDeadArchivesPerSweep: z.number().int().positive().optional(),
+    askFinished: z.boolean().optional(),
+  })
+  .strict();
+
+// On unless `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume
+// pacing".
+const AgentAdmissionSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
+  })
+  .strict();
+
+// Off unless `enabled` says otherwise. See docs/refocus.md.
+const AgentRefocusSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    growthTokens: z.number().int().positive().optional(),
+    onCompaction: z.boolean().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    excerptChars: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const RemediationTaskClassSchema = z.enum(["mechanical", "standard", "hard"]);
+
+// Live-toggleable. Unlike its siblings, on unless a rung says otherwise: the remediation ladder
+// exists so the daemon fixes what it can before anyone is told. See docs/remediation.md.
+const AgentRemediationSchema = z
+  .object({
+    remedies: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        provider: z.string().min(1).optional(),
+        taskClass: RemediationTaskClassSchema.optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        cooldownMinutes: z.number().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxPerDay: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    notify: z.object({ enabled: z.boolean().optional() }).strict().optional(),
+    conditions: z
+      .record(
+        z.string(),
+        z
+          .object({
+            escalate: z.boolean().optional(),
+            notify: z.boolean().optional(),
+            graceMinutes: z.number().nonnegative().optional(),
+            cooldownMinutes: z.number().positive().optional(),
+            budgetTokens: z.number().int().positive().optional(),
+            taskClass: RemediationTaskClassSchema.optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+    stalledAgents: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        stallMinutes: z.number().positive().optional(),
+        deadAccountStallMinutes: z.number().positive().optional(),
+        recheckMinutes: z.number().positive().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        maxNudgesPerSweep: z.number().int().positive().optional(),
+        snapshot: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        lowFreeGB: z.number().positive().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        growthRoots: z.array(z.string().min(1)).optional(),
+        sampleTimeoutMs: z.number().int().positive().optional(),
+        sampleIntervalMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    workSnapshots: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        sweepMinutes: z.number().positive().optional(),
+        personalOwners: z.array(z.string().min(1)).optional(),
+        bundleDir: z.string().min(1).optional(),
+        maxUntrackedFileBytes: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Read once at boot; relaunch to change it. Off unless `enabled` says otherwise, and a dry run
+// unless `dryRun` is false. `shutdownReceipt` is the exception: on unless it is false. See
+// docs/daemon-vitals.md.
+const AgentDaemonVitalsSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    tickMs: z.number().int().positive().optional(),
+    slowStallMs: z.number().int().positive().optional(),
+    wedgeMs: z.number().int().positive().optional(),
+    suspendMs: z.number().int().positive().optional(),
+    slowOpThresholdMs: z.number().int().positive().optional(),
+    shutdownReceipt: z.boolean().optional(),
+  })
+  .strict();
+
+// Startup-only. Default `plan`: surface who was cut off mid-turn, resume nothing on its own.
+// See docs/restart-recovery.md.
+const AgentRestartRecoverySchema = z
+  .object({
+    mode: z.enum(["off", "plan", "resume"]).optional(),
+  })
+  .strict();
+
+// The OpenAI platform org's month-to-date spend on the orchestrator's account strip. Names where
+// the key lives (an env var, an env file) and never holds it. Read from config.json on
+// every fetch, so every key is live. See docs/provider-usage.md.
+const AgentProviderUsageSchema = z
+  .object({
+    openaiApi: z
+      .object({
+        enabled: z.boolean().optional(),
+        label: z.string().min(1).optional(),
+        keyEnv: z.string().min(1).optional(),
+        adminKeyEnv: z.string().min(1).optional(),
+        envFile: z.string().min(1).optional(),
+        monthlyBudgetUsd: z.number().positive().optional(),
+        refreshMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+// Read from config.json on every check, so every key is live. `windowDays`, `cwds` and
+// `maxContextRuns` steer the checks themselves. See docs/token-audit.md.
+const AgentTokenAuditSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    intervalDays: z.number().positive().optional(),
+    keep: z.number().int().positive().optional(),
+    windowDays: z.number().positive().optional(),
+    cwds: z.array(z.string().min(1)).optional(),
+    maxContextRuns: z.number().int().positive().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -312,12 +808,35 @@ export const PersistedConfigSchema = z
     providers: ProvidersSchema.optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    // Opaque plugin-owned config (e.g. claude-account-pool's role-model
+    // policy: docs/plans/2026-09-12-004-feat-agent-model-policy-plan.md
+    // §2.4). The daemon persists and round-trips this verbatim; the owning
+    // plugin validates its own shape and fails closed on malformed data.
+    agentModelPolicy: z.record(z.string(), z.unknown()).optional(),
     worktrees: WorktreesConfigSchema.optional(),
+    mcpGateway: McpGatewayConfigSchema.optional(),
     agents: z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
+        tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
+        resourceMonitor: AgentResourceMonitorSchema.optional(),
+        processPriority: AgentProcessPrioritySchema.optional(),
+        deviceLeases: AgentDeviceLeasesSchema.optional(),
+        artifactJanitor: AgentArtifactJanitorSchema.optional(),
+        accountFailover: AgentAccountFailoverSchema.optional(),
+        budgetPacing: AgentBudgetPacingSchema.optional(),
+        leaderCompaction: AgentLeaderCompactionSchema.optional(),
+        contextMeter: AgentContextMeterSchema.optional(),
+        doneJanitor: AgentDoneJanitorSchema.optional(),
+        admission: AgentAdmissionSchema.optional(),
+        refocus: AgentRefocusSchema.optional(),
+        remediation: AgentRemediationSchema.optional(),
+        daemonVitals: AgentDaemonVitalsSchema.optional(),
+        restartRecovery: AgentRestartRecoverySchema.optional(),
+        tokenAudit: AgentTokenAuditSchema.optional(),
+        providerUsage: AgentProviderUsageSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
@@ -377,7 +896,7 @@ function getLogger(logger: LoggerLike | undefined): LoggerLike | undefined {
 // reject a config written by an older release. The stripped values are discarded,
 // not migrated — there is no back-compat for the removed `providers.openai.voice`
 // block (use `providers.openai.stt` / `providers.openai.tts`).
-function stripRemovedConfigFields(parsed: unknown): unknown {
+export function stripRemovedConfigFields(parsed: unknown): unknown {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return parsed;
   }

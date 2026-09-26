@@ -1,10 +1,20 @@
-import { useCallback, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { useCallback, useMemo, useState } from "react";
+import { Pressable, Text, useWindowDimensions, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
-import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import { FloatingScrollView } from "@/components/ui/floating";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useDaemonConfig } from "@/hooks/use-daemon-config";
+import { ContextUsageBreakdownSection } from "@/context-usage/context-usage-breakdown-section";
+import {
+  resolveContextMeterThresholds,
+  resolveContextMeterTone,
+  type ContextMeterTone,
+} from "@/context-usage/context-meter-model";
+import type { Theme } from "@/styles/theme";
 import { ProviderUsageTooltipSection } from "@/provider-usage/tooltip-section";
+import { AgentSpendSparkline } from "@/usage-history/agent-spend-sparkline";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
 import { formatTokenCount } from "./context-window-meter.utils";
 
@@ -14,6 +24,8 @@ interface ContextWindowMeterProps {
   totalCostUsd?: number | null;
   showPercentage?: boolean;
   serverId?: string;
+  /** The agent this meter describes; its weighted-token spend history draws in the tooltip. */
+  agentId?: string | null;
   /** The Paseo provider key, e.g. "claude", "gemini", "codex" */
   provider?: string | null;
   /** Reserve the meter footprint and show a loading ring while usage is pending. */
@@ -59,19 +71,20 @@ function formatSessionCost(value: number): string | null {
   return `$${value.toFixed(2)}`;
 }
 
-function getMeterColors(
-  percentage: number,
-  theme: ReturnType<typeof useUnistyles>["theme"],
-): { progress: string; track: string } {
-  const track = theme.colors.surface3;
-  if (percentage > 90) {
-    return { progress: theme.colors.destructive, track };
-  }
-  if (percentage >= 70) {
-    return { progress: theme.colors.palette.amber[500], track };
-  }
-  return { progress: theme.colors.foregroundMuted, track };
-}
+const ThemedCircle = withUnistyles(Circle);
+
+const trackStrokeMapping = (theme: Theme) => ({ stroke: theme.colors.surface3 });
+const PROGRESS_STROKE_MAPPINGS: Record<ContextMeterTone, (theme: Theme) => { stroke: string }> = {
+  neutral: (theme) => ({ stroke: theme.colors.foregroundMuted }),
+  amber: (theme) => ({ stroke: theme.colors.palette.amber[500] }),
+  red: (theme) => ({ stroke: theme.colors.destructive }),
+};
+
+// The tooltip's own width. A breakdown row needs room for a label and two figures, and a scroll
+// view has no intrinsic width to shrink-wrap to, so the content states one that fits a phone.
+const TOOLTIP_MAX_WIDTH = 320;
+const TOOLTIP_SCREEN_MARGIN = 32;
+const TOOLTIP_MAX_HEIGHT_RATIO = 0.7;
 
 function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
   if (showPercentage) {
@@ -102,12 +115,18 @@ export function ContextWindowMeter({
   totalCostUsd,
   showPercentage = false,
   serverId,
+  agentId,
   provider,
   pending = false,
   glyphSize,
 }: ContextWindowMeterProps) {
-  const { theme } = useUnistyles();
   const { t } = useTranslation();
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const daemonConfig = useDaemonConfig(serverId ?? null).config;
+  const thresholds = useMemo(
+    () => resolveContextMeterThresholds(daemonConfig?.contextMeter),
+    [daemonConfig?.contextMeter],
+  );
   const [isTooltipOpen, setIsTooltipOpen] = useState(false);
   const { view: providerUsageView, refresh: refreshProviderUsage } = useProviderUsage(
     serverId ?? null,
@@ -126,6 +145,11 @@ export function ContextWindowMeter({
   );
 
   const geometry = getMeterGeometry(showPercentage, glyphSize);
+  const tooltipWidth = Math.min(TOOLTIP_MAX_WIDTH, windowWidth - TOOLTIP_SCREEN_MARGIN);
+  const tooltipScrollStyle = useMemo(
+    () => ({ maxHeight: windowHeight * TOOLTIP_MAX_HEIGHT_RATIO }),
+    [windowHeight],
+  );
 
   // No usage yet: reserve the footprint with a track-only ring while a session is
   // active so the real ring fades in without shifting siblings. Render nothing when
@@ -144,12 +168,12 @@ export function ContextWindowMeter({
           accessibilityElementsHidden
           importantForAccessibility="no-hide-descendants"
         >
-          <Circle
+          <ThemedCircle
             cx={geometry.center}
             cy={geometry.center}
             r={geometry.radius}
             fill="none"
-            stroke={theme.colors.surface3}
+            uniProps={trackStrokeMapping}
             strokeWidth={geometry.strokeWidth}
           />
         </Svg>
@@ -162,7 +186,7 @@ export function ContextWindowMeter({
   const roundedPercentage = Math.round(percentage);
   const { svgSize, center, radius, strokeWidth, circumference, containerStyle } = geometry;
   const dashOffset = circumference - (clampedPercentage / 100) * circumference;
-  const colors = getMeterColors(clampedPercentage, theme);
+  const tone = resolveContextMeterTone({ usedTokens, maxTokens }, thresholds);
   const formattedSessionCost =
     typeof totalCostUsd === "number" ? formatSessionCost(totalCostUsd) : null;
 
@@ -191,20 +215,20 @@ export function ContextWindowMeter({
             accessibilityElementsHidden
             importantForAccessibility="no-hide-descendants"
           >
-            <Circle
+            <ThemedCircle
               cx={center}
               cy={center}
               r={radius}
               fill="none"
-              stroke={colors.track}
+              uniProps={trackStrokeMapping}
               strokeWidth={strokeWidth}
             />
-            <Circle
+            <ThemedCircle
               cx={center}
               cy={center}
               r={radius}
               fill="none"
-              stroke={colors.progress}
+              uniProps={PROGRESS_STROKE_MAPPINGS[tone]}
               strokeWidth={strokeWidth}
               strokeLinecap="round"
               strokeDasharray={circumference}
@@ -216,25 +240,36 @@ export function ContextWindowMeter({
           ) : null}
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8}>
-        <View style={styles.tooltipContent}>
-          <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
-          <Text style={styles.tooltipText}>
-            {t("contextWindow.used", { percentage: roundedPercentage })}
-          </Text>
-          <Text style={styles.tooltipDetail}>
-            {t("contextWindow.tokens", {
-              used: formatTokenCount(usedTokens),
-              max: formatTokenCount(maxTokens),
-            })}
-          </Text>
-          {formattedSessionCost ? (
-            <Text style={styles.tooltipDetail}>
-              {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
+      <TooltipContent side="top" align="center" offset={8} maxWidth={TOOLTIP_MAX_WIDTH} interactive>
+        <FloatingScrollView style={tooltipScrollStyle} showsVerticalScrollIndicator={false}>
+          <View style={[styles.tooltipContent, { width: tooltipWidth }]}>
+            <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
+            <Text style={styles.tooltipText}>
+              {t("contextWindow.used", { percentage: roundedPercentage })}
             </Text>
-          ) : null}
-          <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
-        </View>
+            <Text style={styles.tooltipDetail}>
+              {t("contextWindow.tokens", {
+                used: formatTokenCount(usedTokens),
+                max: formatTokenCount(maxTokens),
+              })}
+            </Text>
+            {formattedSessionCost ? (
+              <Text style={styles.tooltipDetail}>
+                {t("contextWindow.sessionCost", { cost: formattedSessionCost })}
+              </Text>
+            ) : null}
+            <ProviderUsageTooltipSection view={providerUsageView} activeProviderId={provider} />
+            <ContextUsageBreakdownSection
+              serverId={serverId}
+              agentId={agentId}
+              enabled={isTooltipOpen}
+              usedTokens={usedTokens}
+              tone={tone}
+              thresholds={thresholds}
+            />
+            <AgentSpendSparkline serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
+          </View>
+        </FloatingScrollView>
       </TooltipContent>
     </Tooltip>
   );
@@ -272,7 +307,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   tooltipContent: {
     gap: theme.spacing[1.5],
-    minWidth: 200,
   },
   tooltipTitle: {
     color: theme.colors.foreground,

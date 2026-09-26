@@ -228,6 +228,31 @@ describe("ProviderUsageService", () => {
     });
   });
 
+  it("leaves out a provider whose fetcher reports nothing", async () => {
+    const silent: ProviderUsageFetcher = {
+      providerId: "silent",
+      displayName: "Silent",
+      fetchUsage: async () => null,
+    };
+    const service = new ProviderUsageService({
+      logger: createLogger(),
+      fetchers: [
+        silent,
+        usageFetcher({
+          providerId: "glm",
+          displayName: "GLM",
+          status: "available",
+          planLabel: null,
+          windows: [],
+        }),
+      ],
+    });
+
+    const result = await service.listUsage();
+
+    expect(result.providers.map((provider) => provider.providerId)).toEqual(["glm"]);
+  });
+
   it("caches usage until forced to refresh", async () => {
     let now = Date.parse("2026-06-19T00:00:00.000Z");
     let calls = 0;

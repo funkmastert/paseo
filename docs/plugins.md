@@ -143,6 +143,42 @@ failure retain the tail; removing the plugin clears it. Daemon restarts do not r
 structured copies remain in `$PASEO_HOME/daemon.log`. Plugin output can contain secrets, so do not
 log credentials or tokens.
 
+## Vendor a first-party plugin
+
+A plugin can live inside this repo instead of its own repo, so it is not a single-copy project
+with no remote. It belongs at `plugins/<id>`, not `packages/` (npm-workspace source for Paseo
+itself) or `plugin-examples/` (throwaway reference plugins for this doc).
+
+Bring an existing plugin's history in with `git subtree`, not a file copy — a copy throws the
+history away:
+
+```bash
+git subtree add --prefix=plugins/<id> /path/to/original/repo master
+```
+
+Add `plugins/<id>` to the root `package.json` `workspaces` array. This replaces a hand-maintained
+`node_modules/@getpaseo/plugin` symlink with npm's own workspace linking: any workspace package the
+plugin depends on (`@getpaseo/plugin` first) resolves through a plain `npm install` at the repo
+root, the same way every other workspace resolves its siblings. A hand-made symlink does not
+survive a fresh clone; npm's does. The plugin keeps its own `tsconfig.json` and its own
+`typecheck`/`test` scripts — `npm run typecheck` and `npm run test` at the root run every
+workspace's script, so the vendored plugin's checks ride along automatically.
+
+`npm run lint` and `npm run format:check` are not workspace-scoped; both walk the whole tree by
+default. A plugin developed to its own standalone conventions will not match this repo's oxlint
+ruleset without a real refactor, so exclude its directory in `.oxlintrc.json` and `.oxfmtrc.json`
+(`ignorePatterns`) instead of reformatting or relaxing rules underneath it. The plugin's own bar —
+TypeScript strict plus its test suite — is what actually gates it; the monorepo sweep should not
+pretend to.
+
+Develop it in place: edit files under `plugins/<id>`, then run `paseo plugin reload <id>` against a
+running daemon (see "Source changes are explicit" above). Run its tests with
+`npm run test --workspace=plugins/<id>`, or `cd plugins/<id> && npm test`.
+
+Point the daemon at the vendored copy like any other directory source (see "Install a directory
+source" above) — `path` in its `plugins.<id>` config entry is the absolute path to `plugins/<id>`
+inside your checkout.
+
 ## Contribute behavior and UI
 
 Default export one contribution function from each runtime entry. Keep the entries to registration
@@ -259,6 +295,29 @@ grace. During daemon startup, plugin sessions may connect while application WebS
 paused; the daemon accepts clients only after configured plugins have settled and the initial
 catalog is complete.
 
+### Session resilience
+
+A plugin session never reconnects, so anything that closes it while the subprocess lives leaves
+the plugin running with a dead `PaseoApi`. Its hooks then fail open with nothing in the UI to show
+it.
+
+- Plugin sessions are exempt from the application-socket lease
+  (`packages/server/src/server/websocket-server.ts:2249`). The lease detects half-open remote
+  sockets. The subprocess's IPC channel already reports exit.
+- The lease does not expire sockets after a late sweep
+  (`packages/server/src/server/websocket/physical-socket.ts:13`). macOS suspends the daemon, and
+  when it resumes, the sweep timer runs before the peers' queued pings are read. Before this
+  rule, every suspension longer than the lease closed every socket.
+- If a session still closes under a live subprocess, the runtime reports it
+  (`packages/server/src/server/plugins/runtime.ts:332`). `PluginService` then restarts the plugin
+  through its lifecycle queue, exactly like `paseo plugin reload`
+  (`packages/server/src/server/plugins/index.ts:339`).
+- `PluginConnectionMonitor` (`packages/server/src/server/plugin-connection-monitor.ts`) logs an
+  error and sends a push when an enabled plugin stays offline for more than a minute. Offline
+  means its session is closed, or it is not running at all. The threshold is fixed. The monitor
+  follows the [resource monitor](resource-monitor.md) pattern: one alert per episode, re-armed
+  after the same run of healthy sweeps.
+
 When the same plugin contribution exists on multiple hosts, Paseo shows it once in the sidebar and
 adds a host picker to the screen header. The selected host supplies the bundle, RPC transport, and
 query cache. Plugin code cannot address another host.
@@ -293,6 +352,27 @@ eleven hooks; `plugin-examples/lifecycle-actions` demonstrates common automation
 Emit from the operation owner, not a client subscription. Provider history replay must not trigger
 live hooks. Observers must not be awaited inside agent mutations: a callback can send a prompt or
 answer a permission through its own daemon session. Awaiting it there deadlocks that command.
+
+An `agent.create` hook that narrows what an agent may do must be able to say so, because the
+agent cannot see `providerOptions` and otherwise discovers a withheld tool by calling it and
+reading the failure — which costs far more tokens than the restriction saves. The Claude
+channel is `providerOptions.appendSystemPrompt`
+(`packages/server/src/server/agent/providers/claude/options.ts`), folded into the SDK's single
+`systemPrompt.append` string by `buildOptions()` after the agent's `systemPrompt` and the
+daemon-wide `daemon.appendSystemPrompt`. Order matters and is asserted in
+`providers/claude/agent.system-prompt.test.ts`: the per-agent note is the most specific of the
+three, so it goes last and never displaces the other two. Other providers have no equivalent
+field yet; add one the same way rather than reaching for the initial prompt.
+
+`initialPrompt` is read-only context on that hook. The caller resolved it before create and
+sends it separately afterwards, so the daemon drops a hook's mutation of it
+(`agent-manager.ts`, in `createAgentInternal`). That is deliberate: a hook cannot reach the
+first message, and a system-level note is the better channel anyway because it survives every
+turn. Both halves — the hook still sees the prompt, the hook still cannot rewrite it — are
+pinned in `plugins/agent-create-restrictions.e2e.test.ts`, alongside the end-to-end proof that
+a hook's `disallowedTools` actually reaches the launched Claude session. Tighten
+`beforeSchemas["agent.create"]`, narrow `ProviderOptions`, or reroute `providerOptions` and
+that suite is what tells you an installed plugin's guard rails just stopped applying.
 
 ## Contribute a provider
 

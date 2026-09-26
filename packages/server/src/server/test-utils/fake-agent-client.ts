@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
+  AgentAccountAuth,
   AgentCapabilityFlags,
   AgentClient,
   AgentFeature,
@@ -20,9 +21,14 @@ import type {
   AgentSlashCommand,
   AgentUsage,
   FetchCatalogOptions,
+  ImportedProviderSession,
+  ImportProviderSessionContext,
+  ImportProviderSessionInput,
 } from "../agent/agent-sdk-types.js";
 import type { AgentPermissionRequest, AgentPermissionResponse } from "../agent/agent-sdk-types.js";
+import { importSessionFromPersistence } from "../agent/provider-session-import.js";
 import { isLikelyExternalToolName } from "@getpaseo/protocol/tool-name-normalization";
+import type { AgentContextUsage } from "@getpaseo/protocol/context-usage/rpc-schemas";
 
 const TEST_CAPABILITIES: AgentCapabilityFlags = {
   supportsStreaming: true,
@@ -58,13 +64,64 @@ interface FakeAgentSessionOptions {
   sessionId?: string;
   memoryMarker?: string | null;
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  onStartTurn?: (prompt: AgentPromptInput, sessionId: string) => void;
 }
 
 export interface TestAgentClientOptions {
   closeSession?: () => Promise<void>;
-  onStartTurn?: (prompt: AgentPromptInput) => void;
+  /** `sessionId` names the provider session, so a test can tell which agent was prompted. */
+  onStartTurn?: (prompt: AgentPromptInput, sessionId: string) => void;
+  /**
+   * Runs before a persisted session is resumed; throw to make the resume fail, or return a
+   * promise to hold the resume until it settles.
+   */
+  onResumeSession?: (handle: AgentPersistenceHandle) => void | Promise<void>;
   supportsMcpServers?: boolean;
+  /** What `describeAccountAuth` answers. Absent reads as "cannot tell", the real default for a
+   * provider whose config dir has never been written. Set it to give two providers one account. */
+  accountAuth?: () => AgentAccountAuth;
+}
+
+const FAKE_HISTORY_ROOT = path.join(tmpdir(), "paseo-fake-provider-history");
+
+function fakeHistoryPath(provider: string, sessionId: string): string {
+  return path.join(FAKE_HISTORY_ROOT, provider, `${sessionId}.jsonl`);
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Every real Claude account slot symlinks projects/ to ~/.claude/projects, so any account can
+// resume any other's transcript. Model that by copying the session's history from whichever fake
+// provider wrote it into the adopting provider's folder, on both import and resume.
+async function copyFakeSessionHistory(provider: string, sessionId: string): Promise<void> {
+  const target = fakeHistoryPath(provider, sessionId);
+  if (await pathExists(target)) {
+    return;
+  }
+  const source = await findFakeSessionHistory(sessionId);
+  if (!source) {
+    return;
+  }
+  await mkdir(path.dirname(target), { recursive: true });
+  await copyFile(source, target);
+}
+
+async function findFakeSessionHistory(sessionId: string): Promise<string | null> {
+  const providers = await readdir(FAKE_HISTORY_ROOT).catch(() => [] as string[]);
+  for (const provider of providers) {
+    const candidate = fakeHistoryPath(provider, sessionId);
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function createDeferred<T>(): Deferred<T> {
@@ -336,7 +393,7 @@ class FakeAgentSession implements AgentSession {
   private activeForegroundTurnId: string | null = null;
 
   private readonly closeSession: (() => Promise<void>) | undefined;
-  private readonly onStartTurn: ((prompt: AgentPromptInput) => void) | undefined;
+  private readonly onStartTurn: ((prompt: AgentPromptInput, sessionId: string) => void) | undefined;
 
   constructor(options: FakeAgentSessionOptions) {
     this.capabilities = {
@@ -349,12 +406,7 @@ class FakeAgentSession implements AgentSession {
     this.memoryMarker = options.memoryMarker ?? null;
     this.closeSession = options.closeSession;
     this.onStartTurn = options.onStartTurn;
-    this.historyPath = path.join(
-      tmpdir(),
-      "paseo-fake-provider-history",
-      this.providerName,
-      `${this.id}.jsonl`,
-    );
+    this.historyPath = fakeHistoryPath(this.providerName, this.id);
   }
 
   get provider() {
@@ -438,8 +490,10 @@ class FakeAgentSession implements AgentSession {
     }
 
     const turnId = `fake-turn-${this.nextTurnOrdinal++}`;
+    // Ahead of recording the turn as active: a hook that throws is a turn that never started,
+    // and leaving `activeForegroundTurnId` set would wedge every later turn on this client.
+    this.onStartTurn?.(prompt, this.id);
     this.activeForegroundTurnId = turnId;
-    this.onStartTurn?.(prompt);
 
     void this.emitTurnEvents(prompt);
 
@@ -502,6 +556,24 @@ class FakeAgentSession implements AgentSession {
     };
     await this.appendHistoryEvent(completed);
     this.notifySubscribers(completed);
+  }
+
+  private async emitHeldTurn(): Promise<void> {
+    const holding: AgentStreamEvent = {
+      type: "timeline",
+      provider: this.providerName,
+      item: { type: "assistant_message", text: "Holding the turn open." },
+    };
+    await this.appendHistoryEvent(holding);
+    this.notifySubscribers(holding);
+    await this.interruptSignal.promise;
+    const canceled: AgentStreamEvent = {
+      type: "turn_canceled",
+      provider: this.providerName,
+      reason: "interrupted",
+    };
+    await this.appendHistoryEvent(canceled);
+    this.notifySubscribers(canceled);
   }
 
   private async emitStressTurn(stress: { count: number; coalesced: boolean }): Promise<void> {
@@ -737,14 +809,28 @@ class FakeAgentSession implements AgentSession {
       await this.appendHistoryEvent(turnStarted);
       this.notifySubscribers(turnStarted);
 
-      if (textPrompt.toLowerCase().includes("emit a turn failure")) {
+      const turnFailureMatch = /emit a turn failure(?::\s*(.+))?/is.exec(textPrompt);
+      if (turnFailureMatch) {
         const failed: AgentStreamEvent = {
           type: "turn_failed",
           provider: this.providerName,
-          error: "Requested fake provider failure",
+          error: turnFailureMatch[1]?.trim() || "Requested fake provider failure",
         };
         await this.appendHistoryEvent(failed);
         this.notifySubscribers(failed);
+        return;
+      }
+
+      if (/keep working until interrupted/i.test(textPrompt)) {
+        // A long task: no outcome until someone interrupts it or its runtime closes.
+        await this.interruptSignal.promise;
+        return;
+      }
+
+      // A turn still in flight when the daemon dies, for restart-recovery chaos tests. It ends
+      // only when interrupted.
+      if (/hold the turn open/i.test(textPrompt)) {
+        await this.emitHeldTurn();
         return;
       }
 
@@ -876,7 +962,26 @@ class FakeAgentSession implements AgentSession {
   }
 
   async close(): Promise<void> {
+    // A turn that keeps working until interrupted ends with its process, as a real one would.
+    this.interruptSignal.resolve();
     await this.closeSession?.();
+  }
+
+  /** A fixed `/context` breakdown: 1.2K of messages in a 200K window. */
+  async getContextUsage(): Promise<AgentContextUsage | null> {
+    return {
+      provider: this.providerName,
+      model: this.config.model ?? null,
+      capturedAt: new Date().toISOString(),
+      source: "session",
+      totalTokens: 1_200,
+      maxTokens: 200_000,
+      categories: [
+        { id: "messages", label: "Messages", tokens: 1_200, kind: "used" },
+        { id: "free_space", label: "Free space", tokens: 198_800, kind: "free" },
+      ],
+      memoryFiles: [],
+    };
   }
 
   async listCommands(): Promise<AgentSlashCommand[]> {
@@ -1216,6 +1321,8 @@ class FakeAgentClient implements AgentClient {
     overrides?: Partial<AgentSessionConfig>,
     _launchContext?: AgentLaunchContext,
   ): Promise<AgentSession> {
+    await this.options.onResumeSession?.(handle);
+    await copyFakeSessionHistory(this.provider, handle.sessionId);
     const cfg: AgentSessionConfig = {
       provider: this.provider,
       cwd: overrides?.cwd ?? process.cwd(),
@@ -1233,6 +1340,27 @@ class FakeAgentClient implements AgentClient {
       memoryMarker: typeof marker === "string" ? marker : null,
       closeSession: this.options.closeSession,
       onStartTurn: this.options.onStartTurn,
+    });
+  }
+
+  async canResumeHandle(handle: AgentPersistenceHandle): Promise<boolean> {
+    return (await findFakeSessionHistory(handle.sessionId)) !== null;
+  }
+
+  async describeAccountAuth(): Promise<AgentAccountAuth> {
+    return this.options.accountAuth?.() ?? { state: "unknown" };
+  }
+
+  async importSession(
+    input: ImportProviderSessionInput,
+    context: ImportProviderSessionContext,
+  ): Promise<ImportedProviderSession> {
+    await copyFakeSessionHistory(this.provider, input.providerHandleId);
+    return importSessionFromPersistence({
+      provider: this.provider,
+      request: input,
+      context,
+      resumeSession: this.resumeSession.bind(this),
     });
   }
 

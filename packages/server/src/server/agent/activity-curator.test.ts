@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildAgentForkContextAttachment, curateAgentActivity } from "./activity-curator.js";
+import {
+  buildAgentForkContextAttachment,
+  curateAgentActivity,
+  recoverLatestActivitySummary,
+  summarizeLatestActivityItem,
+} from "./activity-curator.js";
 import type { AgentTimelineItem } from "./agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 
@@ -438,5 +443,153 @@ second line'`,
         rows: [row(1, { type: "assistant_message", text: "Done.", messageId: "assistant-1" })],
       }),
     ).toThrow("Selected assistant message is no longer available.");
+  });
+});
+
+describe("summarizeLatestActivityItem", () => {
+  it("summarizes a tool-call item using its display name and summary", () => {
+    const item = toolCallItem({
+      callId: "read-1",
+      name: "read_file",
+      detail: {
+        type: "read",
+        filePath: "src/index.ts",
+        content: "console.log('hi')",
+      },
+    });
+
+    expect(summarizeLatestActivityItem(item)).toBe("[Read] src/index.ts");
+  });
+
+  it("summarizes a running tool call with no detail by name only", () => {
+    const item = toolCallItem({
+      callId: "shell-no-detail",
+      name: "exec_command",
+      status: "running",
+      input: { command: "npm run lint" },
+    });
+
+    expect(summarizeLatestActivityItem(item)).toBe("[Exec command]");
+  });
+
+  it("truncates long assistant text without a bracket prefix", () => {
+    const longText = "a".repeat(250);
+
+    const result = summarizeLatestActivityItem({ type: "assistant_message", text: longText });
+
+    expect(result).toBe(`${"a".repeat(197)}...`);
+    expect(result?.startsWith("[")).toBe(false);
+  });
+
+  it("returns short assistant text unchanged", () => {
+    expect(summarizeLatestActivityItem({ type: "assistant_message", text: "Hi there" })).toBe(
+      "Hi there",
+    );
+  });
+
+  it("renders reasoning as a bracketed thought", () => {
+    expect(summarizeLatestActivityItem({ type: "reasoning", text: "Thinking it through" })).toBe(
+      "[Thought] Thinking it through",
+    );
+  });
+
+  it("renders a user message with a bracket prefix", () => {
+    expect(summarizeLatestActivityItem({ type: "user_message", text: "Do the thing" })).toBe(
+      "[User] Do the thing",
+    );
+  });
+
+  it("renders todo/error/compaction items as short labels", () => {
+    expect(
+      summarizeLatestActivityItem({
+        type: "todo",
+        items: [{ text: "One", completed: false }],
+      }),
+    ).toBe("[Tasks]");
+    expect(summarizeLatestActivityItem({ type: "error", message: "boom" })).toBe("[Error] boom");
+    expect(
+      summarizeLatestActivityItem({ type: "compaction", status: "completed", trigger: "auto" }),
+    ).toBe("[Compacted]");
+  });
+
+  it("returns undefined for blank text so callers keep the previous summary", () => {
+    expect(summarizeLatestActivityItem({ type: "assistant_message", text: "   " })).toBeUndefined();
+    expect(summarizeLatestActivityItem({ type: "reasoning", text: "" })).toBeUndefined();
+  });
+
+  it("clamps a long external/MCP tool-call summary to the same cap as other branches", () => {
+    const item = toolCallItem({
+      callId: "mcp-1",
+      name: "mcp__github__search_code",
+      input: { query: "a".repeat(500) },
+    });
+
+    const result = summarizeLatestActivityItem(item);
+
+    expect(result?.length).toBeLessThanOrEqual(203);
+  });
+});
+
+describe("recoverLatestActivitySummary", () => {
+  it("takes the newest summarizable item, not the newest item", () => {
+    // The tail of a real timeline is almost always assistant prose: the agent did some work and
+    // then talked about it. Reading only the last item would recover nothing for most agents.
+    const summary = recoverLatestActivitySummary([
+      toolCallItem({ callId: "1", name: "read_file", detail: { type: "read", filePath: "a.ts" } }),
+      toolCallItem({
+        callId: "2",
+        name: "read_file",
+        detail: { type: "read", filePath: "src/index.ts" },
+      }),
+      { type: "assistant_message", text: "I read both files and here is what I found." },
+      { type: "reasoning", text: "thinking about it" },
+    ]);
+
+    expect(summary).toBe("[Read] src/index.ts");
+  });
+
+  it("skips the same item types the live path skips, so a restart shows the same subtitle", () => {
+    // AgentManager never derives a summary from assistant_message/reasoning, because the stream
+    // coalescer emits those as mid-message fragments. Recovery has to agree or the subtitle
+    // changes shape across a restart.
+    expect(
+      recoverLatestActivitySummary([
+        { type: "assistant_message", text: "only ever talked" },
+        { type: "reasoning", text: "and thought" },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined for an empty timeline rather than inventing a subtitle", () => {
+    expect(recoverLatestActivitySummary([])).toBeUndefined();
+  });
+
+  it("walks past items that summarize to nothing", () => {
+    const summary = recoverLatestActivitySummary([
+      toolCallItem({ callId: "1", name: "read_file", detail: { type: "read", filePath: "a.ts" } }),
+      { type: "user_message", text: "   " },
+    ]);
+
+    expect(summary).toBe("[Read] a.ts");
+  });
+
+  it("costs one pass over a long timeline and stops at the first hit", () => {
+    // The recovery runs once per agent load, over rows already in memory. Bounding it matters
+    // only because the alternative — persisting the field — would have been a write per tool
+    // call across the fleet.
+    const items: AgentTimelineItem[] = [
+      toolCallItem({ callId: "0", name: "read_file", detail: { type: "read", filePath: "a.ts" } }),
+      ...Array.from({ length: 5_000 }, (_, index) => ({
+        type: "assistant_message" as const,
+        text: `chunk ${index}`,
+      })),
+    ];
+
+    const startedAt = performance.now();
+    const summary = recoverLatestActivitySummary(items);
+    const elapsedMs = performance.now() - startedAt;
+
+    expect(summary).toBe("[Read] a.ts");
+    expect(elapsedMs).toBeLessThan(50);
   });
 });

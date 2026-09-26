@@ -57,7 +57,7 @@ describe.skipIf(process.platform === "win32")("PushTokenStore file permissions",
         filePath: tokenPath,
         deliver: async (tokens) => deliveries.push(tokens),
       });
-      await pushNotifications.send({ title: "Agent finished", body: "Done" });
+      await pushNotifications.send({ title: "Agent finished", body: "Done" }, { level: "alert" });
 
       expect(deliveries).toEqual([["ExponentPushToken[test]"]]);
       expect(modeOf(tokenPath)).toBe(PRIVATE_FILE_MODE);

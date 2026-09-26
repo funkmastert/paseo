@@ -24,6 +24,14 @@ import {
   ChatWaitResponseSchema,
 } from "./chat/rpc-schemas.js";
 import {
+  NotificationsPolicyGetRequestSchema,
+  NotificationsPolicySetRequestSchema,
+  NotificationsLedgerListRequestSchema,
+  NotificationsPolicyGetResponseSchema,
+  NotificationsPolicySetResponseSchema,
+  NotificationsLedgerListResponseSchema,
+} from "./notify-policy/rpc-schemas.js";
+import {
   ScheduleCreateRequestSchema,
   ScheduleListRequestSchema,
   ScheduleInspectRequestSchema,
@@ -55,11 +63,28 @@ import {
   LoopLogsResponseSchema,
   LoopStopResponseSchema,
 } from "./loop/rpc-schemas.js";
+import { DaemonDoctorRequestSchema, DaemonDoctorResponseSchema } from "./doctor/rpc-schemas.js";
 import {
   BrowserAutomationExecuteRequestSchema,
   BrowserAutomationExecuteResponseSchema,
 } from "./browser-automation/rpc-schemas.js";
 import { BrowserAutomationHostCapabilitySchema } from "./browser-automation/capabilities.js";
+import {
+  UsageHistoryGetRequestSchema,
+  UsageHistoryGetResponseSchema,
+} from "./usage-history/rpc-schemas.js";
+import {
+  RestartRecoveryGetPlanRequestSchema,
+  RestartRecoveryApplyRequestSchema,
+  RestartRecoveryDismissRequestSchema,
+  RestartRecoveryGetPlanResponseSchema,
+  RestartRecoveryApplyResponseSchema,
+  RestartRecoveryDismissResponseSchema,
+} from "./restart-recovery/rpc-schemas.js";
+import {
+  AgentContextUsageReadRequestSchema,
+  AgentContextUsageReadResponseSchema,
+} from "./context-usage/rpc-schemas.js";
 import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
@@ -133,9 +158,466 @@ const MutableStructuredGenerationProviderSchema = z
   })
   .passthrough();
 
+const MutableTitleTrackingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    // Additive, optional: older daemons/clients ignore it and keep the
+    // hardcoded 10-minute default (see agent-title-tracker.ts).
+    refreshIntervalMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
+// COMPAT(workspaceTitleTracking): added in v0.2.7, additive and optional — an older
+// daemon ignores it and keeps naming a workspace once, from its first agent's prompt.
+const MutableWorkspaceTitleTrackingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    refreshIntervalMinutes: z.number().positive().optional(),
+    activityWindowMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
 const MutableMetadataGenerationConfigSchema = z
   .object({
     providers: z.array(MutableStructuredGenerationProviderSchema).default([]),
+    titleTracking: MutableTitleTrackingConfigSchema.optional(),
+    workspaceTitleTracking: MutableWorkspaceTitleTrackingConfigSchema.optional(),
+  })
+  .passthrough();
+
+// Patch-only variant: `providers` has no default here. `.partial()` on the
+// config schema above would apply the `.default([])` to a patch that never
+// mentioned `providers` at all (only `titleTracking`), making the two
+// indistinguishable and silently clearing the caller's stored providers.
+const MutableMetadataGenerationPatchSchema = z
+  .object({
+    providers: z.array(MutableStructuredGenerationProviderSchema).optional(),
+    titleTracking: MutableTitleTrackingConfigSchema.optional(),
+    workspaceTitleTracking: MutableWorkspaceTitleTrackingConfigSchema.optional(),
+  })
+  .passthrough();
+
+// Live-toggleable like metadataGeneration.titleTracking (553af7e5e) — mirrors its
+// mutable/patch split for the same reason: `.partial()` on the config schema would make an
+// absent field indistinguishable from an explicit reset.
+const MutableTokenBurnMonitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    ratePerMinute: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    totalTokens: z.number().positive().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    breachBatchThreshold: z.number().int().positive().optional(),
+    // Additive, optional: read by the daemon's usage-history recorder. See docs/usage-history.md.
+    usageHistory: z
+      .object({
+        enabled: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+    // Additive, optional: read by the daemon's model-divergence monitor, off unless `enabled`.
+    modelDivergence: z
+      .object({
+        enabled: z.boolean().optional(),
+        persistResponses: z.number().int().positive().optional(),
+        persistSeconds: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableTokenBurnMonitorPatchSchema = MutableTokenBurnMonitorConfigSchema;
+
+// Live-toggleable like tokenBurnMonitor above — same mutable/patch split, same reason.
+// See docs/resource-monitor.md.
+const MutableResourceMonitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    memoryBytesPerAgent: z.number().positive().optional(),
+    cpuPercentPerAgent: z.number().positive().optional(),
+    sustainedMinutes: z.number().positive().optional(),
+    systemSwapUsedRatio: z.number().positive().optional(),
+    orphanBuildDaemonBytes: z.number().positive().optional(),
+    notifyAgent: z.boolean().optional(),
+    reaper: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        idleMinutes: z.number().positive().optional(),
+        minIdleSweeps: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+        graceMs: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+    // Machine CPU saturation: detection, the incident ledger, and its remediation rung. On
+    // unless this says otherwise.
+    saturation: z
+      .object({
+        enabled: z.boolean().optional(),
+        loadPerCore: z.number().positive().optional(),
+        busyFraction: z.number().positive().max(1).optional(),
+        sustainedMinutes: z.number().int().positive().optional(),
+        releaseLoadPerCore: z.number().positive().optional(),
+        releaseBusyFraction: z.number().positive().max(1).optional(),
+        reniceTopTrees: z.number().int().nonnegative().optional(),
+        reniceNice: z.number().int().min(1).max(19).optional(),
+        attributedGraceMinutes: z.number().positive().optional(),
+        unattributedGraceMinutes: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableResourceMonitorPatchSchema = MutableResourceMonitorConfigSchema;
+
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason. Nice values
+// stop at 0: the daemon lowers priority and never raises it. See docs/resource-monitor.md.
+const MutableProcessPriorityConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    agentNice: z.number().int().min(0).max(19).optional(),
+    backgroundNice: z.number().int().min(0).max(19).optional(),
+  })
+  .passthrough();
+
+const MutableProcessPriorityPatchSchema = MutableProcessPriorityConfigSchema;
+
+// Live-toggleable like resourceMonitor above — same mutable/patch split, same reason.
+// See docs/device-leases.md.
+const MutableDeviceLeasesConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    totalSlots: z.number().int().positive().optional(),
+    slotsPerPlatform: z.number().int().positive().optional(),
+    requireHeadroom: z.boolean().optional(),
+    minAvailableBytes: z.number().positive().optional(),
+    maxSwapUsedRatio: z.number().positive().optional(),
+    pendingTtlMinutes: z.number().positive().optional(),
+    maxLeaseHours: z.number().nonnegative().optional(),
+    queueTimeoutMinutes: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDeviceLeasesPatchSchema = MutableDeviceLeasesConfigSchema;
+
+// Live-toggleable like deviceLeases above — same mutable/patch split, same reason, and the same
+// need: this one deletes files, so turning the dry run on and reading what it would have taken
+// must not require restarting a daemon that is running everybody's agents.
+// See docs/artifact-janitor.md.
+const MutableArtifactJanitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    minAgeHours: z.number().positive().optional(),
+    minSweeps: z.number().int().positive().optional(),
+    obligationGraceMinutes: z.number().positive().optional(),
+    obligationTtlHours: z.number().positive().optional(),
+    maxPerSweep: z.number().int().positive().optional(),
+    maxBytesPerSweep: z.number().positive().optional(),
+    diskGuard: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        minFreeBytes: z.number().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableArtifactJanitorPatchSchema = MutableArtifactJanitorConfigSchema;
+
+// Live-toggleable like tokenBurnMonitor/resourceMonitor above — same mutable/patch split, same
+// reason. See docs/account-failover.md.
+const MutableAccountFailoverConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    migrateSubagents: z.boolean().optional(),
+    migrationConcurrency: z.number().int().positive().optional(),
+    notifyParent: z.boolean().optional(),
+    collapseToSharedAccount: z.boolean().optional(),
+    // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    returnHome: z.boolean().optional(),
+    returnMaxHomeUsedPct: z.number().nonnegative().optional(),
+    returnMinIdleMinutes: z.number().nonnegative().optional(),
+    returnCooldownMinutes: z.number().nonnegative().optional(),
+    returnRetryBackoffMinutes: z.number().nonnegative().optional(),
+    returnMaxUsageAgeMinutes: z.number().nonnegative().optional(),
+  })
+  .passthrough();
+
+const MutableAccountFailoverPatchSchema = MutableAccountFailoverConfigSchema;
+
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off by
+// default like the reaper and the device cap it is modelled on. See docs/budget-pacing.md.
+const MutableBudgetPacingConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    paceLookbackMinutes: z.number().positive().optional(),
+    minObservationMinutes: z.number().positive().optional(),
+    staleUsageMinutes: z.number().positive().optional(),
+    minActionableMinutes: z.number().nonnegative().optional(),
+    repeatAfterMinutes: z.number().nonnegative().optional(),
+    repeatWorseningPct: z.number().nonnegative().optional(),
+    maxAdvisoriesPerCycle: z.number().int().nonnegative().optional(),
+    speedUp: z
+      .object({
+        enabled: z.boolean().optional(),
+        horizonMinutes: z.number().positive().optional(),
+        paceRatio: z.number().positive().optional(),
+        minStrandedPct: z.number().nonnegative().optional(),
+        minRemainingPct: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+    slowDown: z
+      .object({
+        enabled: z.boolean().optional(),
+        paceRatio: z.number().positive().optional(),
+        maxRemainingPct: z.number().nonnegative().optional(),
+        minOvershootPct: z.number().nonnegative().optional(),
+        minEarlyMinutes: z.number().nonnegative().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableBudgetPacingPatchSchema = MutableBudgetPacingConfigSchema;
+// Live-toggleable like budgetPacing above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/leader-compaction.md.
+const MutableLeaderCompactionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    scope: z.enum(["leaders", "all"]).optional(),
+    prepareAtTokens: z.number().int().positive().optional(),
+    retryAfterMinutes: z.number().nonnegative().optional(),
+    maxAttempts: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableLeaderCompactionPatchSchema = MutableLeaderCompactionConfigSchema;
+
+// Where the composer's context meter turns amber and red, and when the context breakdown flags
+// memory files. Read by the app only; the daemon stores it. See docs/context-usage.md.
+const MutableContextMeterConfigSchema = z
+  .object({
+    amberTokens: z.number().positive().optional(),
+    amberPercent: z.number().positive().max(100).optional(),
+    redTokens: z.number().positive().optional(),
+    redPercent: z.number().positive().max(100).optional(),
+    memoryFilesTokens: z.number().positive().optional(),
+    memoryFileTokens: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableContextMeterPatchSchema = MutableContextMeterConfigSchema;
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/done-janitor.md.
+const MutableDoneJanitorConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    quietHours: z.number().positive().optional(),
+    maxQuestionsPerSweep: z.number().int().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    answerTimeoutMinutes: z.number().positive().optional(),
+    reclaimWorkspaces: z.boolean().optional(),
+    archiveDead: z.boolean().optional(),
+    deadQuietHours: z.number().positive().optional(),
+    maxDeadArchivesPerSweep: z.number().int().positive().optional(),
+    askFinished: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableDoneJanitorPatchSchema = MutableDoneJanitorConfigSchema;
+// Live-toggleable like doneJanitor above — same mutable/patch split, same reason. On unless
+// `enabled` says otherwise. See docs/resource-monitor.md, "Child admission and resume pacing".
+const MutableAdmissionConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    maxConcurrentChildTurns: z.number().int().positive().optional(),
+    bulkResumesPerMinute: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableAdmissionPatchSchema = MutableAdmissionConfigSchema;
+// Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
+// `enabled` says otherwise. See docs/refocus.md.
+const MutableRefocusConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    growthTokens: z.number().int().positive().optional(),
+    onCompaction: z.boolean().optional(),
+    scope: z.enum(["all", "topLevelOnly"]).optional(),
+    excerptChars: z.number().int().positive().optional(),
+  })
+  .passthrough();
+
+const MutableRefocusPatchSchema = MutableRefocusConfigSchema;
+
+// Live-toggleable like refocus above — same mutable/patch split, same reason. The remediation
+// ladder: deterministic remedy, then one bounded agent, then a person. Escalation is on unless
+// `escalation.enabled` says otherwise. See docs/remediation.md.
+const RemediationTaskClassSchema = z.enum(["mechanical", "standard", "hard"]);
+
+const MutableRemediationConfigSchema = z
+  .object({
+    remedies: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    escalation: z
+      .object({
+        enabled: z.boolean().optional(),
+        provider: z.string().min(1).optional(),
+        taskClass: RemediationTaskClassSchema.optional(),
+        budgetTokens: z.number().int().positive().optional(),
+        cooldownMinutes: z.number().positive().optional(),
+        timeoutMinutes: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxPerDay: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+    notify: z.object({ enabled: z.boolean().optional() }).passthrough().optional(),
+    conditions: z
+      .record(
+        z.string(),
+        z
+          .object({
+            escalate: z.boolean().optional(),
+            notify: z.boolean().optional(),
+            graceMinutes: z.number().nonnegative().optional(),
+            cooldownMinutes: z.number().positive().optional(),
+            budgetTokens: z.number().int().positive().optional(),
+            taskClass: RemediationTaskClassSchema.optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    stalledAgents: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        stallMinutes: z.number().positive().optional(),
+        deadAccountStallMinutes: z.number().positive().optional(),
+        recheckMinutes: z.number().positive().optional(),
+        idleCpuPercent: z.number().nonnegative().optional(),
+        maxNudgesPerSweep: z.number().int().positive().optional(),
+        snapshot: z.boolean().optional(),
+      })
+      .passthrough()
+      .optional(),
+    disk: z
+      .object({
+        enabled: z.boolean().optional(),
+        lowFreeGB: z.number().positive().optional(),
+        fallGB: z.number().positive().optional(),
+        fallWindowMinutes: z.number().positive().optional(),
+        growthRoots: z.array(z.string().min(1)).optional(),
+        sampleTimeoutMs: z.number().int().positive().optional(),
+        sampleIntervalMinutes: z.number().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+    workSnapshots: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        sweepMinutes: z.number().positive().optional(),
+        personalOwners: z.array(z.string().min(1)).optional(),
+        bundleDir: z.string().min(1).optional(),
+        maxUntrackedFileBytes: z.number().int().positive().optional(),
+        maxPerSweep: z.number().int().positive().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+const MutableRemediationPatchSchema = MutableRemediationConfigSchema;
+
+// Live-toggleable via the same titleTracking-style pipeline (553af7e5e), threaded through
+// `worktrees.diskSweeper` rather than an `agents.*` key since it governs worktree disk
+// reclamation, not agent behavior. See docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+const MutableDiskSweeperConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sweepIntervalMs: z.number().positive().optional(),
+    retentionDays: z.number().positive().optional(),
+    maxDeletionsPerTick: z.number().int().positive().optional(),
+    minFreeGB: z.number().positive().optional(),
+    sampleTimeoutMs: z.number().positive().optional(),
+  })
+  .passthrough();
+
+const MutableDiskSweeperPatchSchema = MutableDiskSweeperConfigSchema;
+
+// New top-level config section (KTD9), same mutable/patch split for the same reason as
+// diskSweeper/tokenBurnMonitor above. Exported (unlike its siblings) because the server's
+// McpGateway service (packages/server/src/server/mcp-gateway/gateway.ts) needs the config
+// shape too; persisted-config.ts keeps its own `.strict()` copy for on-disk validation
+// rather than importing this `.passthrough()` wire schema, matching that file's existing
+// disk-sweeper/token-burn-monitor precedent of not sharing schemas across the wire/disk
+// boundary. Static-auth header VALUES never live here — only that a server uses static
+// auth (`auth: "static"`) — because this config is broadcast in full to every client; the
+// header value lives in the daemon's private 0600 token store, keyed by server name.
+export const MutableMcpGatewayServerConfigSchema = z
+  .object({
+    url: z.string().min(1),
+    transport: z.enum(["http", "sse"]),
+    critical: z.boolean().optional(),
+    auth: z.enum(["oauth", "static"]).optional(),
+  })
+  .passthrough();
+
+// A server the daemon runs itself as a stdio subprocess and brokers like a remote one, so a
+// credential held once in the daemon's token store serves every account (docs/mcp-gateway.md
+// "Local servers"). Its env — where credentials go — lives in the token store, never here.
+// `auth: "static"` means it needs that stored env and waits in needs-auth until it exists.
+export const MutableMcpGatewayLocalServerConfigSchema = z
+  .object({
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    critical: z.boolean().optional(),
+    auth: z.literal("static").optional(),
+  })
+  .passthrough();
+
+// How brokered servers reach Claude sessions (docs/mcp-gateway.md "Session injection").
+// `overlay` adds the brokered entries next to whatever the CLI loads itself; `strict` also sets
+// strictMcpConfig, suppressing every per-dir definition — including claude.ai connectors, which
+// is why overlay is the default. Additive optional field on an existing section.
+export const McpGatewaySessionModeSchema = z.enum(["overlay", "strict"]);
+
+export const MutableMcpGatewayConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sessionMode: McpGatewaySessionModeSchema.optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerConfigSchema).optional(),
+    localServers: z.record(z.string(), MutableMcpGatewayLocalServerConfigSchema).optional(),
+  })
+  .passthrough();
+
+// Patch-only variant: like `providers` below, a per-server patch may touch a single field
+// (e.g. flip `critical` alone) without repeating `url`/`transport`, so `url`/`transport`
+// can't be required here the way they are on the full config schema above.
+const MutableMcpGatewayServerPatchSchema = MutableMcpGatewayServerConfigSchema.partial();
+
+const MutableMcpGatewayPatchSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    sessionMode: McpGatewaySessionModeSchema.optional(),
+    servers: z.record(z.string(), MutableMcpGatewayServerPatchSchema).optional(),
+    localServers: z
+      .record(z.string(), MutableMcpGatewayLocalServerConfigSchema.partial())
+      .optional(),
   })
   .passthrough();
 
@@ -243,6 +725,30 @@ export const MutableDaemonConfigSchema = z
     browserTools: MutableBrowserToolsConfigSchema.default({ enabled: false }),
     providers: z.record(z.string(), MutableDaemonProviderConfigSchema).default({}),
     metadataGeneration: MutableMetadataGenerationConfigSchema.default({ providers: [] }),
+    tokenBurnMonitor: MutableTokenBurnMonitorConfigSchema.optional(),
+    resourceMonitor: MutableResourceMonitorConfigSchema.optional(),
+    // COMPAT(processPriority): additive optional config, nothing to remove.
+    processPriority: MutableProcessPriorityConfigSchema.optional(),
+    // COMPAT(deviceLeases): added in v0.8.1, remove nothing — additive optional config.
+    deviceLeases: MutableDeviceLeasesConfigSchema.optional(),
+    // COMPAT(artifactJanitor): added in v0.8.2, remove nothing — additive optional config.
+    artifactJanitor: MutableArtifactJanitorConfigSchema.optional(),
+    accountFailover: MutableAccountFailoverConfigSchema.optional(),
+    // COMPAT(budgetPacing): added in v0.8.2, remove nothing — additive optional config.
+    budgetPacing: MutableBudgetPacingConfigSchema.optional(),
+    // COMPAT(leaderCompaction): added in v0.8.2, remove nothing — additive optional config.
+    leaderCompaction: MutableLeaderCompactionConfigSchema.optional(),
+    // COMPAT(contextMeter): added in v0.8.2, remove nothing — additive optional config.
+    contextMeter: MutableContextMeterConfigSchema.optional(),
+    doneJanitor: MutableDoneJanitorConfigSchema.optional(),
+    // COMPAT(admission): additive optional config, nothing to remove.
+    admission: MutableAdmissionConfigSchema.optional(),
+    // COMPAT(refocus): additive optional config, nothing to remove.
+    refocus: MutableRefocusConfigSchema.optional(),
+    // COMPAT(remediation): additive optional config, nothing to remove.
+    remediation: MutableRemediationConfigSchema.optional(),
+    diskSweeper: MutableDiskSweeperConfigSchema.optional(),
+    mcpGateway: MutableMcpGatewayConfigSchema.optional(),
     autoArchiveAfterMerge: z.boolean().default(false),
     enableTerminalAgentHooks: z.boolean().default(false),
     appendSystemPrompt: z.string().default(""),
@@ -263,7 +769,22 @@ export const MutableDaemonConfigPatchSchema = z
       .record(z.string(), MutableDaemonProviderConfigSchema.partial().passthrough())
       .optional(),
     removeProviders: z.array(z.string().min(1)).optional(),
-    metadataGeneration: MutableMetadataGenerationConfigSchema.partial().optional(),
+    metadataGeneration: MutableMetadataGenerationPatchSchema.optional(),
+    tokenBurnMonitor: MutableTokenBurnMonitorPatchSchema.optional(),
+    resourceMonitor: MutableResourceMonitorPatchSchema.optional(),
+    processPriority: MutableProcessPriorityPatchSchema.optional(),
+    deviceLeases: MutableDeviceLeasesPatchSchema.optional(),
+    artifactJanitor: MutableArtifactJanitorPatchSchema.optional(),
+    accountFailover: MutableAccountFailoverPatchSchema.optional(),
+    budgetPacing: MutableBudgetPacingPatchSchema.optional(),
+    leaderCompaction: MutableLeaderCompactionPatchSchema.optional(),
+    contextMeter: MutableContextMeterPatchSchema.optional(),
+    doneJanitor: MutableDoneJanitorPatchSchema.optional(),
+    admission: MutableAdmissionPatchSchema.optional(),
+    refocus: MutableRefocusPatchSchema.optional(),
+    remediation: MutableRemediationPatchSchema.optional(),
+    diskSweeper: MutableDiskSweeperPatchSchema.optional(),
+    mcpGateway: MutableMcpGatewayPatchSchema.optional(),
     autoArchiveAfterMerge: z.boolean().optional(),
     enableTerminalAgentHooks: z.boolean().optional(),
     appendSystemPrompt: z.string().optional(),
@@ -277,6 +798,12 @@ export const MutableDaemonConfigPatchSchema = z
 
 export type MutableDaemonConfig = z.infer<typeof MutableDaemonConfigSchema>;
 export type MutableDaemonConfigPatch = z.infer<typeof MutableDaemonConfigPatchSchema>;
+export type MutableMcpGatewayConfig = z.infer<typeof MutableMcpGatewayConfigSchema>;
+export type MutableMcpGatewayServerConfig = z.infer<typeof MutableMcpGatewayServerConfigSchema>;
+export type MutableMcpGatewayLocalServerConfig = z.infer<
+  typeof MutableMcpGatewayLocalServerConfigSchema
+>;
+export type McpGatewaySessionMode = z.infer<typeof McpGatewaySessionModeSchema>;
 import type {
   AgentCapabilityFlags,
   AgentModelDefinition,
@@ -290,8 +817,13 @@ import type {
   AgentProviderNotice,
   ToolCallDetail,
   ToolCallTimelineItem,
+  AgentTokenRate,
   AgentUsage,
   JsonValue,
+  ModelDivergenceAlert,
+  TokenBurnAlert,
+  ResourceAlert,
+  OwedFinishReport,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -432,6 +964,46 @@ const AgentUsageSchema: z.ZodType<AgentUsage> = z.object({
   totalCostUsd: z.number().optional(),
   contextWindowMaxTokens: z.number().optional(),
   contextWindowUsedTokens: z.number().optional(),
+});
+
+const AgentTokenRateSchema: z.ZodType<AgentTokenRate> = z.object({
+  tokensPerMinute: z.number(),
+  asOfMs: z.number(),
+});
+
+const TokenBurnAlertSchema: z.ZodType<TokenBurnAlert> = z.object({
+  trigger: z.enum(["rate", "total"]),
+  ratePerMinute: z.number().optional(),
+  totalTokens: z.number().optional(),
+  firstBreachedAt: z.string(),
+  // Additive-optional spend-governor fields; `trigger` deliberately keeps its two values.
+  // See TokenBurnAlert's doc comment in agent-types.ts.
+  budgetTokens: z.number().optional(),
+  spentTokens: z.number().optional(),
+  governorStage: z.string().optional(),
+});
+
+const ModelDivergenceAlertSchema: z.ZodType<ModelDivergenceAlert> = z.object({
+  configuredModel: z.string(),
+  observedModel: z.string(),
+  firstObservedAt: z.string(),
+  responses: z.number(),
+  persisted: z.boolean(),
+});
+
+const ResourceAlertSchema: z.ZodType<ResourceAlert> = z.object({
+  trigger: z.enum(["memory", "cpu"]),
+  memoryBytes: z.number(),
+  cpuPercent: z.number(),
+  firstBreachedAt: z.string(),
+});
+
+// `state` is a string rather than an enum so a state added later still parses on old apps.
+const OwedFinishReportSchema: z.ZodType<OwedFinishReport> = z.object({
+  ownerAgentId: z.string(),
+  state: z.string(),
+  since: z.string(),
+  attempts: z.number().optional(),
 });
 
 const McpStdioServerConfigSchema = z.object({
@@ -851,6 +1423,22 @@ const AgentActiveTurnPayloadSchema = z.object({
   startedAt: z.string().nullable(),
 });
 
+// Per-agent init-reported MCP server statuses (KTD8): the SDK's own init
+// message reports `{name, status}[]` verbatim (status is a provider-defined
+// string, not a closed enum), captured live-only, no COMPAT tag needed —
+// a permanently-optional additive field like lastActivitySummary.
+const AgentMcpServerStatusSchema = z.object({
+  name: z.string(),
+  status: z.string(),
+});
+
+/** A child turn held by the daemon's child-admission cap (docs/resource-monitor.md). */
+export const AgentTurnQueuedSchema = z.object({
+  queuedAt: z.string(),
+});
+
+export type AgentTurnQueued = z.infer<typeof AgentTurnQueuedSchema>;
+
 export const AgentSnapshotPayloadSchema = z.object({
   id: z.string(),
   provider: AgentProviderSchema,
@@ -873,6 +1461,10 @@ export const AgentSnapshotPayloadSchema = z.object({
   runtimeInfo: AgentRuntimeInfoSchema.optional(),
   lastUsage: AgentUsageSchema.optional(),
   lastError: z.string().optional(),
+  lastActivitySummary: z.string().optional(),
+  mcpServerStatuses: z.array(AgentMcpServerStatusSchema).optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
   title: z.string().nullable(),
   labels: z.record(z.string(), z.string()).default({}),
   requiresAttention: z.boolean().optional(),
@@ -880,9 +1472,19 @@ export const AgentSnapshotPayloadSchema = z.object({
   attentionTimestamp: z.string().nullable().optional(),
   archivedAt: z.string().nullable().optional(),
   providerUnavailable: z.boolean().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
+  resourceAlert: ResourceAlertSchema.optional(),
+  // COMPAT(owedFinishReport): added in v0.8.1. Optional because older daemons never send it, and
+  // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
+  owedFinishReport: OwedFinishReportSchema.optional(),
+  modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove. Set while a child's new turn
+  // waits for a machine-wide admission slot; the agent's status reads running meanwhile.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
+export type AgentMcpServerStatus = z.infer<typeof AgentMcpServerStatusSchema>;
 
 export const AgentListItemPayloadSchema = z.object({
   id: z.string(),
@@ -903,6 +1505,17 @@ export const AgentListItemPayloadSchema = z.object({
   attentionTimestamp: z.string().nullable().optional(),
   labels: z.record(z.string(), z.string()).default({}),
   providerUnavailable: z.boolean().optional(),
+  lastActivitySummary: z.string().optional(),
+  recentTokenRate: AgentTokenRateSchema.optional(),
+  totalTokens: z.number().optional(),
+  tokenBurnAlert: TokenBurnAlertSchema.optional(),
+  resourceAlert: ResourceAlertSchema.optional(),
+  // COMPAT(owedFinishReport): added in v0.8.1. Optional because older daemons never send it, and
+  // it stays optional; remove this tag after 2027-03-23 once the daemon floor >= v0.8.1.
+  owedFinishReport: OwedFinishReportSchema.optional(),
+  modelDivergence: ModelDivergenceAlertSchema.optional(),
+  // COMPAT(turnQueued): additive optional field, nothing to remove.
+  turnQueued: AgentTurnQueuedSchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;
@@ -1935,6 +2548,33 @@ export const AgentConfigApplyRequestMessageSchema = z.object({
 export const AgentConfigApplyResponseMessageSchema = z.object({
   type: z.literal("agent.config.apply.response"),
   payload: AgentActionResponsePayloadSchema,
+});
+
+/**
+ * Re-open a live agent's session under another provider, keeping its id, conversation, labels and
+ * parent/child links. `code` names the refusal so a caller can act on it rather than parse prose;
+ * it is a plain string because the daemon's vocabulary grows independently of the client's.
+ * Known values: unknown_provider, provider_disabled, provider_unavailable, same_provider,
+ * no_session, incompatible_provider, session_unreachable, session_conflict, agent_busy.
+ */
+export const AgentProviderMoveRequestMessageSchema = z.object({
+  type: z.literal("agent.provider.move.request"),
+  agentId: z.string(),
+  providerId: z.string(),
+  requestId: z.string(),
+});
+
+export const AgentProviderMoveResponseMessageSchema = z.object({
+  type: z.literal("agent.provider.move.response"),
+  payload: z.object({
+    requestId: z.string(),
+    agentId: z.string(),
+    accepted: z.boolean(),
+    /** Where the agent is now: the target when accepted, the provider it stayed on when not. */
+    providerId: z.string(),
+    code: z.string().nullable(),
+    error: z.string().nullable(),
+  }),
 });
 
 export const AgentDetachRequestMessageSchema = z.object({
@@ -3046,6 +3686,29 @@ export const HubExecutionControlRequestSchema = z.object({
 
 export type HubExecutionControlRequest = z.infer<typeof HubExecutionControlRequestSchema>;
 
+// Starts interactive OAuth for one brokered MCP gateway server (U6/KTD3). Returns the
+// authorization URL for the client to open via the existing external-URL opener; completion
+// arrives later via the callback route + `mcp_status_update`, so there is no long-poll RPC.
+export const McpGatewayAuthStartRequestSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.request"),
+  requestId: z.string(),
+  name: z.string(),
+});
+export type McpGatewayAuthStartRequest = z.infer<typeof McpGatewayAuthStartRequestSchema>;
+
+// Brokers a server an agent session reported from its own Claude config (per-dir `.claude.json`
+// or project `.mcp.json`) through the gateway and, for an OAuth-class server, starts sign-in in
+// the same call — the strip's "Broker & sign in" action on a session-reported row. `agentId`
+// names the reporting session so the daemon knows which config dir and project to read.
+// COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gating after 2027-03-14.
+export const McpGatewayServerAdoptRequestSchema = z.object({
+  type: z.literal("mcp_gateway.server.adopt.request"),
+  requestId: z.string(),
+  name: z.string().min(1),
+  agentId: z.string().min(1),
+});
+export type McpGatewayServerAdoptRequest = z.infer<typeof McpGatewayServerAdoptRequestSchema>;
+
 // These connection event streams have no directory bootstrap or timeline membership.
 export const SessionEventSubscriptionSchema = z.enum([
   "project.update",
@@ -3053,6 +3716,10 @@ export const SessionEventSubscriptionSchema = z.enum([
   "agent_attention_required",
   "agent_permission_request",
   "agent_permission_resolved",
+  // COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+  "mcp_status_update",
+  // COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
+  "device_status_update",
 ]);
 export type SessionEventSubscription = z.infer<typeof SessionEventSubscriptionSchema>;
 export const SessionEventsSetSubscriptionRequestSchema = z.object({
@@ -3067,9 +3734,14 @@ export const SessionEventsSetSubscriptionResponseSchema = z.object({
 
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionRequestSchema,
+  RestartRecoveryGetPlanRequestSchema,
+  RestartRecoveryApplyRequestSchema,
+  RestartRecoveryDismissRequestSchema,
   HubExecutionAgentCreateRequestSchema,
   HubExecutionAgentValidateRequestSchema,
   HubExecutionControlRequestSchema,
+  McpGatewayAuthStartRequestSchema,
+  McpGatewayServerAdoptRequestSchema,
   BrowserAutomationExecuteResponseSchema,
   VoiceAudioChunkMessageSchema,
   AbortRequestMessageSchema,
@@ -3102,6 +3774,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusRequestSchema,
   DaemonGetPairingOfferRequestSchema,
   DaemonConfigReloadRequestSchema,
+  NotificationsPolicyGetRequestSchema,
+  NotificationsPolicySetRequestSchema,
+  NotificationsLedgerListRequestSchema,
+  DaemonDoctorRequestSchema,
   HubManagementDaemonConnectRequestSchema,
   HubManagementDaemonGetStatusRequestSchema,
   HubManagementDaemonDisconnectRequestSchema,
@@ -3143,6 +3819,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   RefreshProvidersSnapshotRequestMessageSchema,
   ProviderDiagnosticRequestMessageSchema,
   ProviderUsageListRequestMessageSchema,
+  UsageHistoryGetRequestSchema,
+  AgentContextUsageReadRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -3162,6 +3840,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureRequestMessageSchema,
   AgentConfigApplyRequestMessageSchema,
   AgentDetachRequestMessageSchema,
+  AgentProviderMoveRequestMessageSchema,
   AgentRewindRequestMessageSchema,
   AgentPermissionResponseMessageSchema,
   CheckoutStatusRequestSchema,
@@ -3470,6 +4149,8 @@ export const ServerInfoStatusPayloadSchema = z
         daemonStatusRpc: z.boolean().optional(),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: z.boolean().optional(),
+        // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+        daemonDoctor: z.boolean().optional(),
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
         relayConfig: z.boolean().optional(),
         // COMPAT(pushTokenRevocation): added in v0.3.2, remove gate after 2027-02-10.
@@ -3514,6 +4195,8 @@ export const ServerInfoStatusPayloadSchema = z
         worktreeRestore: z.boolean().optional(),
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: z.boolean().optional(),
+        // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
+        restartRecovery: z.boolean().optional(),
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: z.boolean().optional(),
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
@@ -3522,6 +4205,10 @@ export const ServerInfoStatusPayloadSchema = z
         agentDetach: z.boolean().optional(),
         // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
         agentThinkingUpdate: z.boolean().optional(),
+        // COMPAT(agentProviderMove): added in v0.8.0, remove gate after 2027-09-18.
+        agentProviderMove: z.boolean().optional(),
+        // COMPAT(scheduleConditions): added in v0.8.0, remove gate after 2027-09-23.
+        scheduleConditions: z.boolean().optional(),
         // COMPAT(daemonDiagnostics): added in v0.1.100, remove gate after 2026-12-25 once daemon floor >= v0.1.100.
         daemonDiagnostics: z.boolean().optional(),
         // COMPAT(daemonSelfUpdate): added in v0.1.93, remove gate after 2026-12-13.
@@ -3538,6 +4225,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspacePinning: z.boolean().optional(),
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
         workspaceMarkUnread: z.boolean().optional(),
+        // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+        notificationPolicy: z.boolean().optional(),
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
         hubRelationship: z.boolean().optional(),
         // COMPAT(projectGithubClone): added in v0.1.108, remove gate after 2027-01-15.
@@ -3589,6 +4278,16 @@ export const ServerInfoStatusPayloadSchema = z
         agentProfiles: z.boolean().optional(),
         // COMPAT(agentConfigApply): added in v0.3.2, remove gate after 2027-02-11.
         agentConfigApply: z.boolean().optional(),
+        // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
+        mcpStatus: z.boolean().optional(),
+        // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
+        mcpGatewayAdopt: z.boolean().optional(),
+        // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
+        deviceLeases: z.boolean().optional(),
+        // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
+        usageHistory: z.boolean().optional(),
+        // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
+        agentContextUsage: z.boolean().optional(),
       })
       .optional(),
   })
@@ -3860,6 +4559,17 @@ export const WorkspaceGitHubRuntimePayloadSchema = z
   .optional()
   .nullable();
 
+// Sampled by the daemon-side WorktreeDiskMonitor via `du -sk`, never computed client-side.
+// `bytes` is the last successful sample; `sampledAt` lets the client show its age and decide
+// whether it's worth trusting. Absent entirely until the workspace has been sampled at least
+// once — see docs/plans/2026-09-12-007-feat-disk-sweeper-indicator-plan.md.
+export const WorkspaceDiskUsageSchema = z.object({
+  bytes: z.number(),
+  sampledAt: z.string(),
+});
+
+export type WorkspaceDiskUsage = z.infer<typeof WorkspaceDiskUsageSchema>;
+
 export const WorkspaceDescriptorPayloadSchema = z
   .object({
     id: z.string(),
@@ -3924,6 +4634,7 @@ export const WorkspaceDescriptorPayloadSchema = z
     project: ProjectPlacementPayloadSchema.optional(),
     // COMPAT(directorySync): sequence of this latest directory projection.
     syncSeq: z.number().int().positive().optional(),
+    diskUsage: WorkspaceDiskUsageSchema.nullable().optional(),
   })
   .transform((workspace) => ({
     ...workspace,
@@ -5947,6 +6658,154 @@ export const RefreshProvidersSnapshotResponseMessageSchema = z.object({
   }),
 });
 
+// Per-server connection status for the MCP auth gateway (KTD9's state machine in
+// packages/server/src/server/mcp-gateway/state.ts). `status` mirrors
+// `McpGatewayServerStatus` there — duplicated rather than imported because the
+// protocol package can't depend on the server package.
+export const McpGatewayStatusEntrySchema = z.object({
+  name: z.string(),
+  status: z.enum(["disabled", "connecting", "connected", "needs-auth", "error"]),
+  critical: z.boolean(),
+  lastChangedAt: z.number(),
+  error: z.string().optional(),
+});
+
+// COMPAT(mcpStatus): added in v0.8.1, remove gating when all clients use mcp status.
+// Copies the providers_snapshot_update pattern exactly (KTD7): new session message,
+// SessionEventSubscriptionSchema entry, feature flag, permission mapping to
+// daemon.read, feature-gated emission so old clients never receive it.
+export const McpStatusUpdateMessageSchema = z.object({
+  type: z.literal("mcp_status_update"),
+  payload: z.object({
+    servers: z.array(McpGatewayStatusEntrySchema),
+    generatedAt: z.string(),
+  }),
+});
+
+// One device the daemon's device cap knows about (docs/device-leases.md). Every "running"
+// entry came from the process scan, not the lease table: a simulator Tyler booted by hand is
+// in here, and the UI must never report bookkeeping as if it were reality. A "starting" entry
+// is a lease whose device has not appeared yet.
+export const DeviceStatusEntrySchema = z.object({
+  platform: z.enum(["ios", "android"]),
+  // Null while a checked-out slot has no device yet — there is nothing truthful to name.
+  deviceId: z.string().nullable(),
+  state: z.enum(["running", "starting"]),
+  // How the holder was established: "lease" (it checked out or the gate leased for it),
+  // "process" (unleased, but the device sits in this agent's process tree), "none" (nobody's).
+  attribution: z.enum(["lease", "process", "none"]),
+  agentId: z.string().optional(),
+  // Since the lease was taken, or — with no lease — how long the device itself has been up.
+  heldForSeconds: z.number().optional(),
+  source: z.enum(["checkout", "launch"]).optional(),
+  reason: z.string().optional(),
+  processCount: z.number().optional(),
+  // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+  // The holder's provider and how strongly the cap binds it. A cap that refuses some agents and
+  // only asks others has to say which is which, or the whole readout is a half-truth.
+  provider: z.string().optional(),
+  enforcement: z.enum(["observes", "asks", "refuses"]).optional(),
+});
+
+// COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+// One provider with a live agent, and what the daemon can do about its device launches.
+export const DeviceStatusProviderEnforcementSchema = z.object({
+  provider: z.string(),
+  tier: z.enum(["observes", "asks", "refuses"]),
+  // Why it is not stronger — a Codex in Full Access asks nothing, a Pi never asks at all.
+  gap: z.string().optional(),
+});
+
+export const DeviceStatusWaiterSchema = z.object({
+  agentId: z.string(),
+  platform: z.enum(["ios", "android"]),
+  reason: z.string().optional(),
+  waitingForSeconds: z.number(),
+});
+
+export const DeviceStatusBlockedSchema = z.object({
+  agentId: z.string(),
+  platform: z.enum(["ios", "android"]),
+  command: z.string(),
+  message: z.string(),
+  dryRun: z.boolean(),
+  at: z.string(),
+});
+
+// COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
+// Copies mcp_status_update's pattern exactly: new session message, SessionEventSubscriptionSchema
+// entry, feature flag, permission mapping to daemon.read, subscription-gated emission.
+export const DeviceStatusUpdateMessageSchema = z.object({
+  type: z.literal("device_status_update"),
+  payload: z.object({
+    enabled: z.boolean(),
+    dryRun: z.boolean(),
+    totalSlots: z.number(),
+    slotsPerPlatform: z.number(),
+    used: z.number(),
+    devices: z.array(DeviceStatusEntrySchema),
+    waiting: z.array(DeviceStatusWaiterSchema),
+    blocked: z.array(DeviceStatusBlockedSchema),
+    // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
+    enforcement: z.array(DeviceStatusProviderEnforcementSchema).optional(),
+    generatedAt: z.string(),
+  }),
+});
+
+/**
+ * How a person clears a gateway failure, in host specifics a client composes its own sentence
+ * from — a command to run, a file to edit, a redirect URI to register an OAuth app with. Never
+ * product copy, which the client owns and translates, and never a secret.
+ */
+const McpGatewayRemedyFields = {
+  // COMPAT(mcpGatewayRemedy): added in v0.8.0, remove optional parsing after 2027-09-18.
+  remedyCommand: z.string().nullable().optional(),
+  remedyPath: z.string().nullable().optional(),
+  remedyRedirectUrl: z.string().nullable().optional(),
+};
+
+// Response to McpGatewayServerAdoptRequestSchema. `authorizationUrl` is set when the adopted
+// server still needs interactive OAuth; null with `error` null means it connected outright (a
+// static header adopted from the agent's config). Same no-secrets rule as auth.start below.
+//
+// `reason` is the machine-readable cause a client keys its copy off, and whether it offers the
+// action again; `error` stays the daemon's own sentence, which is all an older client has.
+// Known reasons: gateway_disabled, unknown_agent, provider_has_no_config, account_signed_out,
+// server_not_in_config, server_is_local, adopt_failed, authorization_failed. It is a plain
+// string, not an enum, so the daemon can name a new cause without breaking an older client.
+export const McpGatewayServerAdoptResponseMessageSchema = z.object({
+  type: z.literal("mcp_gateway.server.adopt.response"),
+  payload: z.object({
+    requestId: z.string(),
+    authorizationUrl: z.string().nullable(),
+    error: z.string().nullable(),
+    // COMPAT(mcpAdoptReason): added in v0.8.0, remove optional parsing after 2027-09-18.
+    reason: z.string().nullable().optional(),
+    ...McpGatewayRemedyFields,
+  }),
+});
+
+// Response to McpGatewayAuthStartRequestSchema (U6/KTD3). `authorizationUrl` is null only
+// when `error` is set — unknown server, a static-auth server with nothing to authorize
+// interactively, an upstream that needs a hand-registered OAuth app, or a discovery/PKCE
+// failure. Never carries tokens or the PKCE verifier — the authorization URL itself is public
+// (challenge only), and the remedy fields are host paths and URIs, never a secret.
+//
+// `reason` names the cause the way the adopt response does, from the same vocabulary. Known
+// values here: gateway_disabled, unknown_server, static_auth, no_redirect_url,
+// client_not_registered, server_rejected, server_unreachable, authorization_failed.
+export const McpGatewayAuthStartResponseMessageSchema = z.object({
+  type: z.literal("mcp_gateway.auth.start.response"),
+  payload: z.object({
+    requestId: z.string(),
+    authorizationUrl: z.string().nullable(),
+    error: z.string().nullable(),
+    // COMPAT(mcpAuthStartReason): added in v0.8.0, remove optional parsing after 2027-09-18.
+    reason: z.string().nullable().optional(),
+    ...McpGatewayRemedyFields,
+  }),
+});
+
 // COMPAT(providersSnapshot): added in v0.1.48, remove gating when all clients use snapshot
 export const ProviderDiagnosticResponseMessageSchema = z.object({
   type: z.literal("provider_diagnostic_response"),
@@ -6460,6 +7319,9 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionResponseSchema,
+  RestartRecoveryGetPlanResponseSchema,
+  RestartRecoveryApplyResponseSchema,
+  RestartRecoveryDismissResponseSchema,
   HubExecutionAgentCreateResponseSchema,
   HubExecutionAgentValidateResponseSchema,
   HubExecutionControlResponseSchema,
@@ -6552,6 +7414,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   DaemonGetStatusResponseSchema,
   DaemonGetPairingOfferResponseSchema,
   DaemonConfigReloadResponseSchema,
+  NotificationsPolicyGetResponseSchema,
+  NotificationsPolicySetResponseSchema,
+  NotificationsLedgerListResponseSchema,
+  DaemonDoctorResponseSchema,
   HubManagementDaemonConnectResponseSchema,
   HubManagementDaemonGetStatusResponseSchema,
   HubManagementDaemonDisconnectResponseSchema,
@@ -6567,6 +7433,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SetAgentFeatureResponseMessageSchema,
   AgentConfigApplyResponseMessageSchema,
   AgentDetachResponseMessageSchema,
+  AgentProviderMoveResponseMessageSchema,
   AgentRewindResponseMessageSchema,
   UpdateAgentResponseMessageSchema,
   ProjectRenameResponseSchema,
@@ -6636,8 +7503,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   GetProvidersSnapshotResponseMessageSchema,
   ProvidersSnapshotUpdateMessageSchema,
   RefreshProvidersSnapshotResponseMessageSchema,
+  McpStatusUpdateMessageSchema,
+  DeviceStatusUpdateMessageSchema,
+  McpGatewayAuthStartResponseMessageSchema,
+  McpGatewayServerAdoptResponseMessageSchema,
   ProviderDiagnosticResponseMessageSchema,
   ProviderUsageListResponseMessageSchema,
+  UsageHistoryGetResponseSchema,
+  AgentContextUsageReadResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,
@@ -6765,6 +7638,9 @@ export type SetAgentThinkingResponseMessage = z.infer<typeof SetAgentThinkingRes
 export type SetAgentFeatureResponseMessage = z.infer<typeof SetAgentFeatureResponseMessageSchema>;
 export type AgentConfigApplyResponseMessage = z.infer<typeof AgentConfigApplyResponseMessageSchema>;
 export type AgentDetachResponseMessage = z.infer<typeof AgentDetachResponseMessageSchema>;
+export type AgentProviderMoveResponseMessage = z.infer<
+  typeof AgentProviderMoveResponseMessageSchema
+>;
 export type AgentRewindResponseMessage = z.infer<typeof AgentRewindResponseMessageSchema>;
 export type UpdateAgentResponseMessage = z.infer<typeof UpdateAgentResponseMessageSchema>;
 export type ProjectRenameResponse = z.infer<typeof ProjectRenameResponseSchema>;
@@ -6804,6 +7680,7 @@ export type ListAvailableProvidersResponse = z.infer<typeof ListAvailableProvide
 export type DaemonGetStatusResponse = z.infer<typeof DaemonGetStatusResponseSchema>;
 export type DaemonGetPairingOfferResponse = z.infer<typeof DaemonGetPairingOfferResponseSchema>;
 export type DaemonConfigReloadResponse = z.infer<typeof DaemonConfigReloadResponseSchema>;
+export type DaemonDoctorResponse = z.infer<typeof DaemonDoctorResponseSchema>;
 export type DiagnosticsResponse = z.infer<typeof DiagnosticsResponseSchema>;
 export type GetProvidersSnapshotResponseMessage = z.infer<
   typeof GetProvidersSnapshotResponseMessageSchema
@@ -6811,6 +7688,17 @@ export type GetProvidersSnapshotResponseMessage = z.infer<
 export type ProvidersSnapshotUpdateMessage = z.infer<typeof ProvidersSnapshotUpdateMessageSchema>;
 export type RefreshProvidersSnapshotResponseMessage = z.infer<
   typeof RefreshProvidersSnapshotResponseMessageSchema
+>;
+export type McpGatewayServerAdoptResponseMessage = z.infer<
+  typeof McpGatewayServerAdoptResponseMessageSchema
+>;
+export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
+export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
+export type DeviceStatusUpdateMessage = z.infer<typeof DeviceStatusUpdateMessageSchema>;
+export type DeviceStatusEntry = z.infer<typeof DeviceStatusEntrySchema>;
+export type DeviceStatusProviderEnforcement = z.infer<typeof DeviceStatusProviderEnforcementSchema>;
+export type McpGatewayAuthStartResponseMessage = z.infer<
+  typeof McpGatewayAuthStartResponseMessageSchema
 >;
 export type ProviderDiagnosticResponseMessage = z.infer<
   typeof ProviderDiagnosticResponseMessageSchema
@@ -6930,6 +7818,7 @@ export type SetAgentThinkingRequestMessage = z.infer<typeof SetAgentThinkingRequ
 export type SetAgentFeatureRequestMessage = z.infer<typeof SetAgentFeatureRequestMessageSchema>;
 export type AgentConfigApplyRequestMessage = z.infer<typeof AgentConfigApplyRequestMessageSchema>;
 export type AgentDetachRequestMessage = z.infer<typeof AgentDetachRequestMessageSchema>;
+export type AgentProviderMoveRequestMessage = z.infer<typeof AgentProviderMoveRequestMessageSchema>;
 export type AgentPermissionResponseMessage = z.infer<typeof AgentPermissionResponseMessageSchema>;
 export type CheckoutStatusRequest = z.infer<typeof CheckoutStatusRequestSchema>;
 export type CheckoutStatusResponse = z.infer<typeof CheckoutStatusResponseSchema>;

@@ -1,5 +1,6 @@
 import { expect, test } from "vitest";
 import {
+  APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS,
   APPLICATION_SOCKET_LEASE_MS,
   ApplicationSocketLease,
   MAX_PHYSICAL_SOCKET_BUFFERED_BYTES,
@@ -119,4 +120,46 @@ test("the awaitable physical send rejects callback errors", async () => {
       onHighWater: () => undefined,
     }),
   ).rejects.toThrow("send failed");
+});
+
+test("a late sweep grants fresh leases instead of expiring sockets the daemon could not hear", () => {
+  let now = 0;
+  const lease = new ApplicationSocketLease<object>(() => now);
+  const socket = {};
+  lease.claim(socket);
+  expect(lease.listExpired()).toEqual([]);
+
+  // The daemon was suspended well past the lease; the socket's pings are still queued.
+  now += APPLICATION_SOCKET_LEASE_MS * 3;
+  expect(lease.listExpired()).toEqual([]);
+  const resumedAt = now;
+
+  // A peer that stays silent after the resume still expires one lease later.
+  const sweepsBeforeDeadline = [];
+  while (
+    now + APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS <
+    resumedAt + APPLICATION_SOCKET_LEASE_MS
+  ) {
+    now += APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS;
+    sweepsBeforeDeadline.push(lease.listExpired());
+  }
+  expect(sweepsBeforeDeadline.flat()).toEqual([]);
+  now += APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS;
+  expect(lease.listExpired()).toEqual([socket]);
+});
+
+test("sweeps on schedule still expire a silent socket", () => {
+  let now = 0;
+  const lease = new ApplicationSocketLease<object>(() => now);
+  const socket = {};
+  lease.claim(socket);
+  const expiredAt: number[] = [];
+  while (expiredAt.length === 0 && now <= APPLICATION_SOCKET_LEASE_MS * 2) {
+    if (lease.listExpired().length > 0) expiredAt.push(now);
+    now += APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS;
+  }
+  expect(expiredAt[0]).toBe(
+    Math.ceil(APPLICATION_SOCKET_LEASE_MS / APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS) *
+      APPLICATION_SOCKET_LEASE_CHECK_INTERVAL_MS,
+  );
 });

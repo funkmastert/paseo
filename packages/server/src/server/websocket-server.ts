@@ -13,6 +13,7 @@ import type pino from "pino";
 import type { ProjectRegistry, WorkspaceRegistry } from "./workspace-registry.js";
 import type { ProjectUpdate } from "./workspace-reconciliation-service.js";
 import type { ScheduleService } from "./schedule/service.js";
+import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
 import type { CheckoutDiffManager, CheckoutDiffMetrics } from "./checkout-diff-manager.js";
 import type { DaemonConfigStore, MutableDaemonConfig } from "./daemon-config-store.js";
 import {
@@ -26,6 +27,7 @@ import {
   type ServerCapabilities,
   type WSOutboundMessage,
   wrapSessionMessage,
+  type WorkspaceDiskUsage,
 } from "./messages.js";
 import { asUint8Array, decodeBinaryFrame } from "@getpaseo/protocol/binary-frames/index";
 import type { TerminalActivity } from "@getpaseo/protocol/terminal-activity";
@@ -67,6 +69,7 @@ import {
   computeNotificationPlan,
   isPushEligibleAttentionReason,
   type ClientPresenceState,
+  attentionPushLevel,
 } from "./agent-attention-policy.js";
 import {
   buildAgentAttentionNotificationPayload,
@@ -85,7 +88,11 @@ import {
   type WebSocketRuntimeCounters,
   type WebSocketRuntimeDiagnosticSnapshot,
 } from "./websocket/runtime-metrics.js";
+import { loadPersistedConfig } from "./persisted-config.js";
+import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.js";
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
+import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
+import { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -552,6 +559,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly workspaceRegistry: WorkspaceRegistry;
   private readonly workspaceLabelService: WorkspaceLabelService | null;
   private readonly scheduleService: ScheduleService;
+  private readonly restartRecovery: RestartRecoveryService | undefined;
   private readonly checkoutDiffManager: CheckoutDiffManager;
   private readonly github: ForgeService;
   private readonly workspaceGitService: WorkspaceGitService;
@@ -560,6 +568,8 @@ export class VoiceAssistantWebSocketServer {
   private readonly paseoHome: string;
   private readonly worktreesRoot: string | undefined;
   private readonly daemonConfigStore: DaemonConfigStore;
+  private readonly getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+  private readonly requestWorktreeDiskUsageSample?: (workspaceId: string, cwd: string) => void;
   private readonly pushNotifications: PushNotifications;
   private readonly pushNotificationSender: PushNotificationSender;
   private readonly mcpBaseUrl: string | null;
@@ -593,6 +603,8 @@ export class VoiceAssistantWebSocketServer {
   private unsubscribeSpeechReadiness: (() => void) | null = null;
   private unsubscribeDaemonConfigChange: (() => void) | null = null;
   private readonly providerUsageService: ProviderUsageService;
+  private readonly usageHistoryStore: UsageHistoryStore;
+  private readonly contextUsageService: AgentContextUsageService;
   private unsubscribeTerminalActivity: (() => void) | null = null;
   private readonly browserToolsBroker: BrowserToolsBroker | null;
   private readonly hubRelationships: HubRelationshipManagement | null;
@@ -650,6 +662,11 @@ export class VoiceAssistantWebSocketServer {
     pluginRuntime?: SessionOptions["pluginRuntime"],
     orchestrationSkills?: SessionOptions["orchestrationSkills"],
     workspaceLabelService?: WorkspaceLabelService,
+    worktreeDiskUsage: {
+      get?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
+      requestSample?: (workspaceId: string, cwd: string) => void;
+    } = {},
+    restartRecovery?: RestartRecoveryService,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -669,14 +686,32 @@ export class VoiceAssistantWebSocketServer {
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
+    this.usageHistoryStore = new UsageHistoryStore({
+      rootDir: join(paseoHome, "usage-history"),
+      logger: this.logger,
+    });
+    this.contextUsageService = new AgentContextUsageService({
+      agents: {
+        getAgent: (agentId) => agentManager.getAgent(agentId),
+        subscribe: (listener) =>
+          agentManager.subscribe((event) => {
+            if (event.type === "agent_state") listener(event.agent.id, event.agent.lifecycle);
+          }),
+      },
+      logger: this.logger,
+    });
+    this.contextUsageService.start();
     this.projectRegistry = projectRegistry ?? createNoopProjectRegistry();
     this.workspaceRegistry = workspaceRegistry ?? createNoopWorkspaceRegistry();
     this.workspaceLabelService = workspaceLabelService ?? null;
+    this.getWorktreeDiskUsage = worktreeDiskUsage.get;
+    this.requestWorktreeDiskUsageSample = worktreeDiskUsage.requestSample;
     const requiredServices = requireWebSocketServices({
       scheduleService,
       checkoutDiffManager,
     });
     this.scheduleService = requiredServices.scheduleService;
+    this.restartRecovery = restartRecovery;
     this.checkoutDiffManager = requiredServices.checkoutDiffManager;
     this.github = github ?? createGitHubService();
     this.workspaceGitService = workspaceGitService ?? createFallbackWorkspaceGitService();
@@ -729,6 +764,9 @@ export class VoiceAssistantWebSocketServer {
       filePath: join(paseoHome, "push-tokens.json"),
     });
     this.pushNotificationSender = pushNotificationSender ?? this.pushNotifications;
+    void this.pushNotifications.start().catch((err) => {
+      pushLogger.warn({ err }, "Failed to start push notifications");
+    });
 
     this.agentManager.setAgentAttentionCallback((params) => {
       void this.broadcastAgentAttention(params).catch((err) => {
@@ -736,8 +774,20 @@ export class VoiceAssistantWebSocketServer {
       });
     });
 
+    // Claude-derived entries are captured once at construction; a config change that adds
+    // or edits one only takes effect after a daemon restart.
     this.providerUsageService = new ProviderUsageService({
       logger: this.logger,
+      claudeDerivedProviders: deriveClaudeProviderEntries(this.daemonConfigStore.get().providers),
+      // Re-read from config.json each fetch: the key is named there, never stored.
+      readOpenAiApiConfig: () => {
+        try {
+          return loadPersistedConfig(paseoHome).agents?.providerUsage?.openaiApi;
+        } catch {
+          // A config the daemon cannot parse is reported where it loads; this row just stays off.
+          return undefined;
+        }
+      },
     });
 
     this.wss = this.createWebSocketServer(server, wsConfig, auth);
@@ -932,6 +982,24 @@ export class VoiceAssistantWebSocketServer {
     this.sendMessageToSockets(this.sessions.keys(), message);
   }
 
+  /** The push sender this instance resolved (injected override, or its own createPushNotifications). */
+  public getPushNotificationSender(): PushNotificationSender {
+    return this.pushNotificationSender;
+  }
+
+  /** The provider-usage service this instance owns, so AccountFailoverMonitor reads the same
+   * cached per-account usage (and shares its cache/API load) rather than standing up a second
+   * instance that would double-hit the Claude usage API. */
+  public getProviderUsageService(): ProviderUsageService {
+    return this.providerUsageService;
+  }
+
+  /** The usage-history store this instance owns: the sampler in AgentTokenBurnMonitor writes it and
+   * each session's `usage.history.get` reads it, so both must share one in-memory view. */
+  public getUsageHistoryStore(): UsageHistoryStore {
+    return this.usageHistoryStore;
+  }
+
   public listSessions(): Session[] {
     return Array.from(
       new Set(
@@ -1033,6 +1101,8 @@ export class VoiceAssistantWebSocketServer {
     this.unsubscribeDaemonConfigChange = null;
     this.unsubscribeTerminalActivity?.();
     this.unsubscribeTerminalActivity = null;
+    this.contextUsageService.stop();
+    this.pushNotifications.stop();
     if (this.runtimeMetricsInterval) {
       clearInterval(this.runtimeMetricsInterval);
       this.runtimeMetricsInterval = null;
@@ -1418,11 +1488,14 @@ export class VoiceAssistantWebSocketServer {
       workspaceLabelService: this.workspaceLabelService ?? undefined,
       directorySync: this.directorySync,
       scheduleService: this.scheduleService,
+      restartRecovery: this.restartRecovery,
       checkoutDiffManager: this.checkoutDiffManager,
       github: this.github,
       workspaceGitService: this.workspaceGitService,
       workspaceAutoName: this.workspaceAutoName,
       daemonConfigStore: this.daemonConfigStore,
+      getWorktreeDiskUsage: this.getWorktreeDiskUsage,
+      requestWorktreeDiskUsageSample: this.requestWorktreeDiskUsageSample,
       pluginRuntime: this.pluginRuntime,
       orchestrationSkills: this.orchestrationSkills,
       mcpBaseUrl: this.mcpBaseUrl,
@@ -1432,6 +1505,8 @@ export class VoiceAssistantWebSocketServer {
       terminalManager: this.terminalManager,
       providerSnapshotManager: this.providerSnapshotManager,
       providerUsageService: this.providerUsageService,
+      usageHistory: this.usageHistoryStore,
+      contextUsage: this.contextUsageService,
       hubExecutionAgents: options.hubExecutionAgents,
       hubRelationships: options.hubRelationships,
       serviceProxy: this.serviceProxy ?? undefined,
@@ -1644,6 +1719,16 @@ export class VoiceAssistantWebSocketServer {
         providersSnapshot: true,
         // COMPAT(providersSnapshotCwd): added in v0.3.2, remove gate after 2027-02-10.
         providersSnapshotCwd: true,
+        // COMPAT(mcpStatus): added in v0.8.1, remove gate after 2027-03-12.
+        mcpStatus: true,
+        // COMPAT(mcpGatewayAdopt): added in v0.8.1, remove gate after 2027-03-14.
+        mcpGatewayAdopt: true,
+        // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
+        deviceLeases: true,
+        // COMPAT(usageHistory): added in v0.8.2, remove gate after 2027-09-23.
+        usageHistory: true,
+        // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
+        agentContextUsage: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.
@@ -1668,6 +1753,8 @@ export class VoiceAssistantWebSocketServer {
         ...(this.advertiseDaemonStatusRpc ? { daemonStatusRpc: true } : {}),
         // COMPAT(daemonConfigReload): added in v0.4.0, remove gate after 2027-02-14.
         daemonConfigReload: true,
+        // COMPAT(daemonDoctor): added in v0.8.1, remove gate after 2027-03-23.
+        daemonDoctor: true,
         // COMPAT(relayConfig): added in v0.2.6, remove gate after 2027-01-31.
         ...(this.advertiseRelayConfig ? { relayConfig: true } : {}),
         // COMPAT(pushTokenRevocation): added in v0.3.2, remove gate after 2027-02-10.
@@ -1710,6 +1797,8 @@ export class VoiceAssistantWebSocketServer {
         worktreeRestore: true,
         // COMPAT(workspaceRecovery): added in v0.1.105, remove after 2027-01-11 once daemon floor >= v0.1.105.
         workspaceRecovery: true,
+        // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
+        restartRecovery: this.restartRecovery !== undefined,
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: true,
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
@@ -1718,6 +1807,10 @@ export class VoiceAssistantWebSocketServer {
         agentDetach: true,
         // COMPAT(agentThinkingUpdate): added in v0.2.4, remove gate after 2027-01-28.
         agentThinkingUpdate: true,
+        // COMPAT(agentProviderMove): added in v0.8.0, remove gate after 2027-09-18.
+        agentProviderMove: true,
+        // COMPAT(scheduleConditions): added in v0.8.0, remove gate after 2027-09-23.
+        scheduleConditions: true,
         // COMPAT(daemonDiagnostics): added in v0.1.100, remove gate after 2026-12-25 once daemon floor >= v0.1.100.
         daemonDiagnostics: true,
         // COMPAT(daemonSelfUpdate): added in v0.1.93, remove gate after 2026-12-13.
@@ -1734,6 +1827,8 @@ export class VoiceAssistantWebSocketServer {
         workspacePinning: true,
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
         workspaceMarkUnread: true,
+        // COMPAT(notificationPolicy): added in v0.8.1, remove gate after 2027-09-23.
+        notificationPolicy: true,
         // COMPAT(hubRelationship): added in v0.1.X, drop the gate when floor >= v0.1.X.
         hubRelationship: true,
         // COMPAT(projectGithubClone): added in v0.1.108, remove gate after 2027-01-15.
@@ -2219,7 +2314,12 @@ export class VoiceAssistantWebSocketServer {
       this.recordInboundMessageType(message.type);
 
       if (message.type === "ping") {
-        this.applicationSocketLease.claim(ws);
+        // The lease finds half-open remote sockets. A plugin session rides its
+        // subprocess's IPC channel, whose exit already tears the session down, and
+        // it can never reconnect — a lease closure only strands a live plugin.
+        if (!this.pluginSocketIds.has(ws)) {
+          this.applicationSocketLease.claim(ws);
+        }
         this.sendToClient(ws, { type: "pong" });
         return;
       }
@@ -2559,7 +2659,8 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      void this.pushNotificationSender.send(notification).catch((err) => {
+      const level = attentionPushLevel(params.reason, agent.labels);
+      void this.pushNotificationSender.send(notification, { level }).catch((err) => {
         this.logger.warn({ err, agentId: params.agentId }, "Failed to send push notification");
       });
     }
@@ -2645,16 +2746,19 @@ export class VoiceAssistantWebSocketServer {
 
     if (plan.shouldPush) {
       void this.pushNotificationSender
-        .send({
-          title,
-          body,
-          data: {
-            serverId: this.serverId,
-            terminalId: params.terminalId,
-            cwd: params.cwd,
-            ...(workspaceId ? { workspaceId } : {}),
+        .send(
+          {
+            title,
+            body,
+            data: {
+              serverId: this.serverId,
+              terminalId: params.terminalId,
+              cwd: params.cwd,
+              ...(workspaceId ? { workspaceId } : {}),
+            },
           },
-        })
+          { level: "alert" },
+        )
         .catch((err) => {
           this.logger.warn(
             { err, terminalId: params.terminalId },

@@ -1,6 +1,7 @@
 import type { AgentModelDefinition, AgentSelectOption } from "../../agent-sdk-types.js";
 
 type ClaudeEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+type ClaudeThinkingOptionId = ClaudeEffortLevel | "ultracode";
 
 interface ClaudeModelManifestEntry {
   id: string;
@@ -11,6 +12,11 @@ interface ClaudeModelManifestEntry {
   minimumClaudeCodeVersion?: string;
   contextWindowMaxTokens?: number;
   effortLevels?: readonly ClaudeEffortLevel[];
+  // Preselected thinking option for a new session on this model. Defaults to
+  // CLAUDE_DEFAULT_THINKING_OPTION_ID when omitted; must name an option the entry actually
+  // advertises (an effort level, "off" when supportsThinkingDisabled, or "ultracode" when xhigh
+  // is in effortLevels) — see the models.test.ts invariant test.
+  defaultThinkingOptionId?: ClaudeThinkingOptionId;
   supportsThinkingDisabled?: boolean;
   supportsFastMode?: boolean;
 }
@@ -35,9 +41,25 @@ export const CLAUDE_ULTRACODE_THINKING_OPTION_ID = "ultracode";
 
 export const CLAUDE_MODEL_MANIFEST = [
   {
+    // Claude Code does not advertise this id yet, but accepts it and reports it back as
+    // `claude-opus-5-5`. Thinking cannot be disabled: the API rejects thinking-off with a 400.
+    id: "claude-opus-5-5",
+    label: "Opus 5.5",
+    description: "Opus 5.5 · Latest release",
+    defaultPriority: 3,
+    minimumClaudeCodeVersion: "2.1.219",
+    contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    // A new session from the app is a root agent, a leader, and leaders run Extra High. Ultra
+    // Code stays selectable but is never preselected: it fans work out to in-process workflows
+    // that a message to the agent can kill. This is only the selector's preselection; the
+    // account-pool classifier decides every agent's level.
+    defaultThinkingOptionId: "xhigh",
+  },
+  {
     id: "claude-opus-5",
     label: "Opus 5",
-    description: "Opus 5 · Latest release",
+    description: "Opus 5 · Previous release",
     defaultPriority: 2,
     minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 1_000_000,
@@ -160,6 +182,7 @@ export const CLAUDE_MODEL_MANIFEST = [
 function buildThinkingOptions(
   effortLevels: readonly ClaudeEffortLevel[] | undefined,
   supportsThinkingDisabled: boolean,
+  defaultThinkingOptionId: string,
 ): AgentSelectOption[] | undefined {
   if (!effortLevels) {
     return undefined;
@@ -170,12 +193,18 @@ function buildThinkingOptions(
     ...effortLevels.map((id) => ({
       id,
       label: CLAUDE_EFFORT_LABELS[id],
-      ...(id === CLAUDE_DEFAULT_THINKING_OPTION_ID ? { isDefault: true } : {}),
+      ...(id === defaultThinkingOptionId ? { isDefault: true } : {}),
     })),
   ];
 
   if (effortLevels.includes("xhigh")) {
-    options.push({ id: CLAUDE_ULTRACODE_THINKING_OPTION_ID, label: "Ultra Code" });
+    options.push({
+      id: CLAUDE_ULTRACODE_THINKING_OPTION_ID,
+      label: "Ultra Code",
+      ...(CLAUDE_ULTRACODE_THINKING_OPTION_ID === defaultThinkingOptionId
+        ? { isDefault: true }
+        : {}),
+    });
   }
 
   return options;
@@ -193,9 +222,12 @@ export function getClaudeManifestModels(claudeCodeVersion?: string): AgentModelD
 
   const definitions: AgentModelDefinition[] = [];
   for (const model of availableModels) {
+    const defaultThinkingOptionId =
+      model.defaultThinkingOptionId ?? CLAUDE_DEFAULT_THINKING_OPTION_ID;
     const thinkingOptions = buildThinkingOptions(
       model.effortLevels,
       model.supportsThinkingDisabled === true,
+      defaultThinkingOptionId,
     );
     const definition: AgentModelDefinition = {
       provider: "claude",
@@ -214,7 +246,7 @@ export function getClaudeManifestModels(claudeCodeVersion?: string): AgentModelD
     }
     if (thinkingOptions) {
       definition.thinkingOptions = thinkingOptions;
-      definition.defaultThinkingOptionId = CLAUDE_DEFAULT_THINKING_OPTION_ID;
+      definition.defaultThinkingOptionId = defaultThinkingOptionId;
     }
     definitions.push(definition);
     if (!("aliases" in model) || !model.aliases) {
@@ -285,6 +317,8 @@ export function resolveClaudeDisabledThinkingForModel(
   return {
     supported:
       !!model && "supportsThinkingDisabled" in model && model.supportsThinkingDisabled === true,
+    // Not the entry's own default: this runs mid-session for any agent, subagents included, and
+    // an entry's default can be a leader's level.
     fallbackThinkingOptionId:
       model && "effortLevels" in model ? CLAUDE_DEFAULT_THINKING_OPTION_ID : undefined,
   };
@@ -363,34 +397,27 @@ export function normalizeClaudeRuntimeModelId(value: string | null | undefined):
     return null;
   }
 
-  const singleSegmentMatch = trimmed.match(
-    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)(\[1m\])?/i,
-  );
-  if (singleSegmentMatch) {
-    const normalizedModelId = normalizeSingleSegmentClaudeModelId(
-      singleSegmentMatch[1],
-      singleSegmentMatch[2],
-      trimmed.toLowerCase().includes("[1m]"),
-    );
-    if (normalizedModelId) {
-      return normalizedModelId;
-    }
-  }
-
-  const runtimeMatch = trimmed.match(
-    /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)[-.](\d+)(\[1m\])?/i,
-  );
-  if (!runtimeMatch) {
+  const embeddedMatch = trimmed.match(EMBEDDED_CLAUDE_MODEL_PATTERN);
+  if (!embeddedMatch) {
     return null;
   }
 
-  return normalizeMajorMinorClaudeModelId(
-    runtimeMatch[1],
-    runtimeMatch[2],
-    runtimeMatch[3],
-    trimmed.toLowerCase().includes("[1m]"),
-  );
+  const [, family, major, minor] = embeddedMatch;
+  const hasOneMillionContext = trimmed.toLowerCase().includes("[1m]");
+  return minor === undefined
+    ? normalizeSingleSegmentClaudeModelId(family, major, hasOneMillionContext)
+    : normalizeMajorMinorClaudeModelId(family, major, minor, hasOneMillionContext);
 }
+
+/**
+ * A first-party id inside a provider-form one (`us.anthropic.…`, `openrouter/anthropic/…`,
+ * Bedrock's trailing `-v1:0`), read whole: family, major, optional minor, `[1m]`, date. The
+ * lookahead refuses a match that stops short of the next version segment. Without it
+ * `claude-opus-5-5` matched as its own prefix `claude-opus-5`, a different manifest model, and
+ * Opus 5.5 agents were shown as Opus 5.
+ */
+const EMBEDDED_CLAUDE_MODEL_PATTERN =
+  /claude[-_ ](fable|opus|sonnet|haiku)[-_ ]+(\d+)(?:[-.](\d{1,2}))?(?:\[1m\])?(?:[-_ ]+\d{8})?(?:\[1m\])?(?![\w.]|[-_ ]\d)/i;
 
 export function getClaudeCustomModelThinkingOptions(): AgentSelectOption[] {
   return CLAUDE_EFFORT_LEVELS.standard.map((id) => {

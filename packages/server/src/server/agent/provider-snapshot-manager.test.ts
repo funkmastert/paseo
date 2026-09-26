@@ -1424,6 +1424,32 @@ describe("ProviderSnapshotManager applyMutableProviderConfig", () => {
     }
   });
 
+  test("a derived provider's snapshot entry names the provider it extends", async () => {
+    const manager = new ProviderSnapshotManager({
+      logger: createTestLogger(),
+      providerOverrides: {
+        claude: { enabled: false },
+        codex: { enabled: false },
+        copilot: { enabled: false },
+        opencode: { enabled: false },
+        pi: { enabled: false },
+      },
+    });
+    try {
+      manager.applyMutableProviderConfig({
+        "zai-claude": { extends: "claude", label: "ZAI", enabled: true },
+      });
+
+      const zaiClaudeEntry = manager
+        .getSnapshot()
+        .records.map(({ entry }) => entry)
+        .find((entry) => entry.provider === "zai-claude");
+      expect(zaiClaudeEntry?.derivedFromProviderId).toBe("claude");
+    } finally {
+      manager.destroy();
+    }
+  });
+
   test("removes startup provider overrides from the live registry", () => {
     const manager = new ProviderSnapshotManager({
       logger: createTestLogger(),

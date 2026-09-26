@@ -20,12 +20,16 @@ import type {
 import type { ManagedAgent } from "./agent-manager.js";
 import type { JsonValue } from "../json-utils.js";
 import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../persistence-hooks.js";
+import { computeTokenRate } from "./token-rate-tracker.js";
+import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
+import { summarizeOwedFinishReport } from "./finish-obligation.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
   title?: string | null;
   createdAt?: string;
   internal?: boolean;
+  titleManuallySet?: boolean;
 }
 
 interface RecentProviderSessionProjectionOptions {
@@ -94,6 +98,7 @@ export function toStoredAgentRecord(
       : null,
     internal: options?.internal,
     owner: agent.owner,
+    titleManuallySet: options?.titleManuallySet,
   } satisfies StoredAgentRecord;
 }
 
@@ -146,6 +151,25 @@ export function toAgentPayload(
     payload.lastError = agent.lastError;
   }
 
+  if (agent.lastActivitySummary !== undefined) {
+    payload.lastActivitySummary = agent.lastActivitySummary;
+  }
+
+  if (agent.mcpServerStatuses !== undefined) {
+    payload.mcpServerStatuses = agent.mcpServerStatuses;
+  }
+
+  const recentTokenRate = computeTokenRate(agent.tokenRateBuckets, Date.now());
+  if (recentTokenRate !== undefined) {
+    payload.recentTokenRate = recentTokenRate;
+  }
+
+  if (agent.totalTokens !== undefined) {
+    payload.totalTokens = agent.totalTokens;
+  }
+
+  applyAgentAlerts(payload, agent);
+
   // Handle attention state
   payload.requiresAttention = agent.attention.requiresAttention;
   if (agent.attention.requiresAttention) {
@@ -157,6 +181,28 @@ export function toAgentPayload(
   }
 
   return payload;
+}
+
+/**
+ * The badges a live agent carries beside its status: over budget, over resources, owing a report,
+ * answering from a model it was not configured with.
+ */
+function applyAgentAlerts(payload: AgentSnapshotPayload, agent: ManagedAgent): void {
+  if (agent.tokenBurnAlert !== undefined) {
+    payload.tokenBurnAlert = agent.tokenBurnAlert;
+  }
+  if (agent.resourceAlert !== undefined) {
+    payload.resourceAlert = agent.resourceAlert;
+  }
+  if (agent.owedFinishReport !== undefined) {
+    payload.owedFinishReport = agent.owedFinishReport;
+  }
+  if (agent.turnQueued !== undefined) {
+    payload.turnQueued = agent.turnQueued;
+  }
+  if (agent.modelDivergenceAlert !== undefined) {
+    payload.modelDivergence = agent.modelDivergenceAlert;
+  }
 }
 
 function buildStoredRuntimeInfo(record: StoredAgentRecord): AgentRuntimeInfo | undefined {
@@ -216,6 +262,7 @@ export function buildStoredAgentPayload(
   const persistence = projectPersistenceHandleForWire(
     buildStoredPersistenceHandle(record, validProviders),
   );
+  const owedFinishReport = summarizeOwedFinishReport(record.finishObligations);
 
   return {
     id: record.id,
@@ -239,12 +286,37 @@ export function buildStoredAgentPayload(
     pendingPermissions: [],
     persistence,
     title: record.title ?? null,
-    requiresAttention: record.requiresAttention ?? false,
-    attentionReason: record.attentionReason ?? null,
-    attentionTimestamp: record.attentionTimestamp ?? null,
+    ...projectStoredAttention(record),
     archivedAt: record.archivedAt ?? null,
     labels: normalizeLabels(record.labels),
     ...(providerAvailable ? {} : { providerUnavailable: true }),
+    ...(owedFinishReport ? { owedFinishReport } : {}),
+  };
+}
+
+interface ProjectedAttention {
+  requiresAttention: boolean;
+  attentionReason: AgentSnapshotPayload["attentionReason"];
+  attentionTimestamp: string | null;
+}
+
+/**
+ * A delegated agent's finish is not shown as needing attention, matching what the manager now
+ * records (`checkAndSetAttention`). Applied at read time as well so records written before that
+ * rule stop badging: there were 27 of them on one daemon, some three weeks old, and nothing
+ * would ever have cleared them — a human does not open a subagent to read it. An error on a
+ * delegated agent still shows.
+ */
+function projectStoredAttention(record: StoredAgentRecord): ProjectedAttention {
+  const requiresAttention = record.requiresAttention ?? false;
+  const reason = record.attentionReason ?? null;
+  if (requiresAttention && reason === "finished" && isDelegatedAgent(record)) {
+    return { requiresAttention: false, attentionReason: null, attentionTimestamp: null };
+  }
+  return {
+    requiresAttention,
+    attentionReason: reason,
+    attentionTimestamp: record.attentionTimestamp ?? null,
   };
 }
 
@@ -268,6 +340,16 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     attentionTimestamp: agent.attentionTimestamp ?? null,
     labels: agent.labels,
     ...(agent.providerUnavailable ? { providerUnavailable: true } : {}),
+    ...(agent.lastActivitySummary !== undefined
+      ? { lastActivitySummary: agent.lastActivitySummary }
+      : {}),
+    ...(agent.recentTokenRate !== undefined ? { recentTokenRate: agent.recentTokenRate } : {}),
+    ...(agent.totalTokens !== undefined ? { totalTokens: agent.totalTokens } : {}),
+    ...(agent.tokenBurnAlert !== undefined ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
+    ...(agent.resourceAlert !== undefined ? { resourceAlert: agent.resourceAlert } : {}),
+    ...(agent.owedFinishReport !== undefined ? { owedFinishReport: agent.owedFinishReport } : {}),
+    ...(agent.modelDivergence !== undefined ? { modelDivergence: agent.modelDivergence } : {}),
+    ...(agent.turnQueued !== undefined ? { turnQueued: agent.turnQueued } : {}),
   };
 }
 

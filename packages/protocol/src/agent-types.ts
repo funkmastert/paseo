@@ -115,6 +115,10 @@ export interface ProviderSnapshotEntry {
   description?: string;
   iconSvg?: string;
   defaultModeId?: string | null;
+  /** The registered provider id this one extends, e.g. a claude-account-pool
+   * entry extending "claude". Lets clients render the base provider's icon
+   * for a custom entry instead of a generic fallback. */
+  derivedFromProviderId?: string | null;
 }
 
 export interface AgentFeatureToggle {
@@ -182,6 +186,89 @@ export interface AgentUsage {
   totalCostUsd?: number;
   contextWindowMaxTokens?: number;
   contextWindowUsedTokens?: number;
+}
+
+/** Trailing-window burn rate (tokens/min), computed server-side from a ring buffer. */
+export interface AgentTokenRate {
+  tokensPerMinute: number;
+  asOfMs: number;
+}
+
+/**
+ * Live breach state set by the daemon-side AgentTokenBurnMonitor when an agent trips the
+ * configured rate or cumulative-total threshold. Additive-optional on the wire and
+ * deliberately NOT a member of the closed `attentionReason` enum — every wire surface for
+ * that enum is a non-catching `z.enum(["finished","error","permission"])`, so adding a value
+ * there breaks parsing on every shipped client. See
+ * docs/plans/2026-09-12-006-feat-token-burn-monitor-plan.md.
+ */
+export interface TokenBurnAlert {
+  trigger: "rate" | "total";
+  ratePerMinute?: number;
+  totalTokens?: number;
+  firstBreachedAt: string;
+  /**
+   * Spend-governor fields, set when the breach is a per-task budget breach rather than a bare
+   * cumulative-total one (agent/spend-governor.ts). A budget breach still reports
+   * `trigger: "total"` — it *is* a cumulative-total breach — because `trigger` is a closed
+   * `z.enum(["rate","total"])` on the wire and a third value would fail to parse on every
+   * shipped client. These three are additive-optional instead: an old app renders the usual
+   * total copy, a new one can render the budget. `governorStage` is a free string, not an
+   * enum, so a later stage is safe to add for the same reason.
+   */
+  budgetTokens?: number;
+  spentTokens?: number;
+  governorStage?: string;
+}
+
+/**
+ * Live finding set by the daemon-side AgentModelDivergenceMonitor when an agent's responses keep
+ * reporting a model other than the one it was configured with, with no intentional change to
+ * explain it (docs/model-divergence.md). Additive-optional on the wire and, like TokenBurnAlert,
+ * not a member of the closed `attentionReason` enum. `configuredModel` is the model the agent was
+ * asked for as compared (an alias arrives resolved); `observedModel` is what the provider said.
+ * `persisted` is false for the first stray responses and true once the mismatch has held.
+ */
+export interface ModelDivergenceAlert {
+  configuredModel: string;
+  observedModel: string;
+  firstObservedAt: string;
+  /** Consecutive responses on this pair so far. */
+  responses: number;
+  persisted: boolean;
+}
+
+/**
+ * Live breach state set by the daemon-side AgentResourceMonitor when an agent's attributed
+ * process tree trips the configured memory or CPU threshold. Additive-optional on the wire and
+ * deliberately NOT a member of the closed `attentionReason` enum, mirroring TokenBurnAlert
+ * above. `trigger` names which leg fired first (memory takes priority when both cross in the
+ * same sweep); `memoryBytes`/`cpuPercent` are always the current reading for the tree, not just
+ * the one that triggered, so the alert carries the full picture either way.
+ */
+export interface ResourceAlert {
+  trigger: "memory" | "cpu";
+  memoryBytes: number;
+  cpuPercent: number;
+  firstBreachedAt: string;
+}
+
+/**
+ * A delegated agent that still owes its parent a finish report the parent has not received —
+ * see docs/finish-reports.md. Present only while that is true and worth an orchestrator's eye:
+ * the child stopped without reporting (`"parked"`), or its report could not be delivered and is
+ * being retried or escalated (`"undelivered"`). A child that is simply still working carries
+ * nothing. `state` is an open string, not an enum, so a later state parses on every shipped app;
+ * an app treats a value it does not know as `"undelivered"`.
+ */
+export interface OwedFinishReport {
+  /** The agent the report is owed to — the parent, or whoever prompted with notifyOnFinish. */
+  ownerAgentId: string;
+  state: string;
+  /** When the current state began (ISO 8601). */
+  since: string;
+  /** Delivery attempts made so far, the failed ones included. */
+  attempts?: number;
 }
 
 export const TOOL_CALL_ICON_NAMES = [
@@ -375,7 +462,15 @@ export type AgentTimelineItem =
 export type AgentStreamEvent =
   | { type: "thread_started"; sessionId: string; provider: AgentProvider }
   | { type: "turn_started"; provider: AgentProvider; turnId?: string }
-  | { type: "turn_completed"; provider: AgentProvider; usage?: AgentUsage; turnId?: string }
+  | {
+      type: "turn_completed";
+      provider: AgentProvider;
+      usage?: AgentUsage;
+      turnId?: string;
+      turnTokenDelta?: number;
+    }
+  | { type: "token_burn_delta"; provider: AgentProvider; tokens: number }
+  | { type: "model_observed"; provider: AgentProvider; model: string }
   | { type: "usage_updated"; provider: AgentProvider; usage: AgentUsage; turnId?: string }
   | {
       type: "mode_changed";
