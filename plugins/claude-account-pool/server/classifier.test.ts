@@ -149,6 +149,7 @@ const LIVE_POLICY: RoleModelPolicy = {
   // No thinking rules configured: DEFAULT_THINKING_POLICY applies — leaders
   // run Ultra Code, subagents take their task class's level.
   thinking: DEFAULT_THINKING_POLICY,
+  childOutputStyle: "Concise",
   revision: "live-fixture",
 };
 
@@ -1099,5 +1100,53 @@ describe("classifyAgent — a pool entry spelled differently from the catalog", 
     expect(decision.model.unadvertisedPoolEntries).toEqual([]);
     expect(strict.model.unadvertisedPoolEntries).toEqual(["claude-opus-5-5"]);
     expect(strict.model.model).toBe("claude-opus-5");
+  });
+});
+
+describe("classifyAgent — output style", () => {
+  const live = (overrides: Partial<ClassifierWorld> = {}) =>
+    world({ policy: LIVE_POLICY, ...overrides } as Partial<ClassifierWorld>);
+
+  it("gives a child the policy's style, and says why", () => {
+    const decision = classifyAgent(child({ labels: { "paseo.agent-type": "worker" } }), live());
+    expect(decision.outputStyle).toMatchObject({ style: "Concise", source: "policy" });
+    expect(decision.outputStyle.reason).toContain("Concise");
+  });
+
+  it("leaves a root agent alone: the operator reads a leader's narration", () => {
+    const decision = classifyAgent({ title: "orchestrate the fleet" }, live());
+    expect(decision.outputStyle).toMatchObject({ style: null, source: "none" });
+    expect(decision.outputStyle.reason).toContain("root");
+  });
+
+  it("applies to every child role, not only workers", () => {
+    for (const agentType of ["worker", "reviewer", "advisor"]) {
+      expect(classifyAgent(child({ labels: { "paseo.agent-type": agentType } }), live()).outputStyle.style).toBe(
+        "Concise",
+      );
+    }
+  });
+
+  it("is off when the policy says null", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      live({ policy: { ...LIVE_POLICY, childOutputStyle: null } } as Partial<ClassifierWorld>),
+    );
+    expect(decision.outputStyle).toMatchObject({ style: null, source: "none" });
+    expect(decision.outputStyle.reason).toContain("switched off");
+  });
+
+  it("keeps a style the caller set: explicit beats inferred", () => {
+    const decision = classifyAgent(child({ requestedOutputStyle: "Explanatory" }), live());
+    expect(decision.outputStyle).toMatchObject({ style: "Explanatory", source: "requested" });
+  });
+
+  it("does not apply to a non-Claude child, which has no such setting", () => {
+    const decision = classifyAgent(
+      child({ requestedProvider: "codex", requestedModel: "gpt-5" }),
+      world({ policy: DEFAULT_POLICY, catalog: new Map([["codex", new Set(["gpt-5"])]]) } as Partial<ClassifierWorld>),
+    );
+    expect(decision.outputStyle).toMatchObject({ style: null, source: "none" });
+    expect(decision.outputStyle.reason).toContain("codex");
   });
 });

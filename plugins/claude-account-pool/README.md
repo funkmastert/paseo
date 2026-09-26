@@ -262,6 +262,7 @@ Every create writes one line, from `server/decision-log.ts`, prefixed
 `classifier-decision ` and followed by a single JSON object: role and its
 source, task class and its source, the model (pool slot, outcome, what it
 resolved from, whether an explicit request was overridden), the thinking level,
+the output style,
 the account, any pool entries that can never run, and the classifier's reasons.
 The role router notes the decision and the account router's hook writes the
 line, because the account is decided there. It names the account that runs, and
@@ -380,6 +381,35 @@ in the app is overridden the same way.
 
 The classifier only governs creation. A thinking level changed mid-session from
 the app is not re-checked.
+
+### Concise output style for children
+
+`agentModelPolicy.childOutputStyle` (default `"Concise"`, `null` switches it
+off) names the Claude Code output style every classifier-routed **child** runs
+with. A subagent's narration is read by its leader, not by a person, and each
+word of it is context that agent re-reads on every later turn. A root agent
+never gets one: the operator reads a leader's narration. Neither does a
+non-Claude agent, and a style the caller already set on the request is kept.
+
+The classifier decides it (`OutputStyleDecision`, with a reason like every
+other part), so `explain`, the settings preview, the `agent_model_policy` tool
+and the `classifier-decision` log line all print it. The create hook writes it
+to `providerOptions.settings.outputStyle`, merged with the tool deny tier that
+lives in the same `settings` object (`shared/output-style.ts`). The value is
+Claude Code's own built-in "Concise" (added in 2.1.237; `keepCodingInstructions`
+is on, so tool and coding guidance stay). Nothing here invents a style.
+
+What it costs: the style adds about 300 tokens to the system prompt (a
+one-off cache write) plus a short reminder each turn, and saves output tokens.
+One paired Haiku run cut output by about a tenth and came out about 2% more
+expensive overall, so it pays only for children that narrate a lot over many
+turns. Measure before widening it.
+
+The daemon must be new enough to accept it. `settings.outputStyle` is a key the
+daemon's provider-options schema (`agent/providers/claude/options.ts`) learned
+in the same change, and an older daemon rejects the whole create as an unknown
+key. Ship the plugin and the daemon together. If the plugin ever runs ahead of
+its daemon, set `childOutputStyle` to `null` first.
 
 ### Model refs are account-agnostic by default
 

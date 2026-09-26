@@ -83,7 +83,7 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
 }
 
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
-  const { role, taskClass, model, thinking } = decision;
+  const { role, taskClass, model, thinking, outputStyle } = decision;
   return {
     caller: role.source === "leader-tier" ? "root" : "child",
     role: { id: role.role.id, source: role.source },
@@ -100,8 +100,14 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(result?.config.model !== undefined ? { final: result.config.model } : {}),
     },
     thinking: { optionId: thinking.optionId, outcome: thinking.outcome },
+    outputStyle: outputStyle.style,
     account: result ? { providerId: result.config.provider ?? null } : { refused: true },
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
-    reasons: { role: role.reason, taskClass: taskClass.reason, model: model.reason },
+    reasons: {
+      role: role.reason,
+      taskClass: taskClass.reason,
+      model: model.reason,
+      outputStyle: outputStyle.reason,
+    },
   };
 }

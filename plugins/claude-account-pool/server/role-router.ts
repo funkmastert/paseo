@@ -10,6 +10,7 @@ import {
 } from "../shared/role-policy-schema";
 import { restrictionNotice } from "../shared/restriction-notice";
 import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
+import { applyOutputStyle } from "../shared/output-style";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import { classifyAgent, type AgentDecision, type ClassifierWorld } from "./classifier";
 import type { DecisionLog, LoggedRequest } from "./decision-log";
@@ -256,11 +257,17 @@ interface ToolEnforcement {
 function enforceToolDecision(
   request: PluginBeforeRequests["agent.create"],
   tools: AgentDecision["tools"],
+  outputStyle: AgentDecision["outputStyle"],
 ): ToolEnforcement {
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const notice = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
+  const withTools = applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice);
+  // The output style rides the same `providerOptions.settings` channel as the
+  // deny tier and is merged onto it, so it lands on every path that writes
+  // tool enforcement. Undefined only when neither has anything to write.
+  const merged = applyOutputStyle(withTools ?? request.config.providerOptions, outputStyle.style);
   return {
-    providerOptions: applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice) as
+    providerOptions: (merged === request.config.providerOptions ? undefined : merged) as
       | ProviderOptionsValue
       | undefined,
     labels: toolDenialLabels(extended.labels, tools.deniedTools),
@@ -514,6 +521,13 @@ function callerDenialsFor(
   return lookup.status === "known" ? { status: "known", denied: lookup.denied } : { status: lookup.status };
 }
 
+/** The output style the request itself already sets, if any. Read structurally: `providerOptions` is free-form JSON on the wire. */
+function requestedOutputStyleOf(request: PluginBeforeRequests["agent.create"]): string | undefined {
+  const options = request.config.providerOptions as { settings?: { outputStyle?: unknown } } | undefined;
+  const style = options?.settings?.outputStyle;
+  return typeof style === "string" && style.length > 0 ? style : undefined;
+}
+
 function routeRoleForCreateUnguarded(
   input: { request: PluginBeforeRequests["agent.create"] },
   options: RoleRouterOptions,
@@ -558,6 +572,7 @@ function routeRoleForCreateUnguarded(
       requestedProvider: request.config.provider,
       requestedModel: request.config.model,
       requestedThinkingOptionId: request.config.thinkingOptionId,
+      requestedOutputStyle: requestedOutputStyleOf(request),
     },
     {
       policy,
@@ -648,7 +663,7 @@ function routeRoleForCreateUnguarded(
     });
   };
 
-  const enforcement = enforceToolDecision(request, decision.tools);
+  const enforcement = enforceToolDecision(request, decision.tools, decision.outputStyle);
 
   // Tool enforcement is independent of model selection: a role can have no
   // configured models (so no rewrite) and still be restricted to reading, or

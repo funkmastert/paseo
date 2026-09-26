@@ -26,6 +26,7 @@ const VALID_STORED_POLICY: RoleModelPolicy = {
   exposeClassifierTool: false,
   allowUnlistedModels: [],
   thinking: DEFAULT_THINKING_POLICY,
+  childOutputStyle: "Concise",
   agentTypeMappings: { worker: "worker" },
   revision: "abc123",
 };

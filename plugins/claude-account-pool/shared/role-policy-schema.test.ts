@@ -49,6 +49,7 @@ function policy(overrides: Partial<RoleModelPolicy>): RoleModelPolicy {
     exposeClassifierTool: false,
     allowUnlistedModels: [],
     thinking: DEFAULT_THINKING_POLICY,
+    childOutputStyle: "Concise",
     revision: "r1",
     ...overrides,
   };
@@ -541,5 +542,24 @@ describe("classModels", () => {
     expect(classModels(r, undefined)).toEqual([]);
     expect(classModels(r, "mechanical")).toEqual([]);
     expect(classModels(r, "hard")).toEqual([]);
+  });
+});
+
+describe("RoleModelPolicySchema — childOutputStyle", () => {
+  const stored = () => {
+    const { childOutputStyle: _omitted, ...rest } = policy({});
+    return rest;
+  };
+
+  it("defaults to Claude Code's built-in Concise when a stored document predates it", () => {
+    expect(RoleModelPolicySchema.parse(stored()).childOutputStyle).toBe("Concise");
+  });
+
+  it("null switches it off, and stays null through a parse", () => {
+    expect(RoleModelPolicySchema.parse({ ...stored(), childOutputStyle: null }).childOutputStyle).toBeNull();
+  });
+
+  it("rejects an empty style name, which the CLI would read as no style at all", () => {
+    expect(RoleModelPolicySchema.safeParse({ ...stored(), childOutputStyle: "" }).success).toBe(false);
   });
 });

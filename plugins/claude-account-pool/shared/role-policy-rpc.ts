@@ -153,7 +153,17 @@ export const RoleModelPolicyExplainResultSchema = z.object({
     account: z.string(),
     /** Optional: a plugin that predates the thinking decision sends none. */
     thinking: z.string().optional(),
+    /** Optional, for the same reason: a plugin that predates the output style decision sends none. */
+    outputStyle: z.string().optional(),
   }),
+  /**
+   * The Claude Code output style the create hook would write to
+   * `providerOptions.settings.outputStyle` — server/classifier.ts's
+   * `OutputStyleDecision`, projected. `style` is absent when none applies
+   * (a root agent, a non-Claude agent, or the policy switched it off).
+   * Optional, and `source` a plain string, so an older app still parses it.
+   */
+  outputStyle: z.object({ style: z.string().optional(), source: z.string() }).optional(),
   /**
    * The thinking level the create hook would write to `config.thinkingOptionId`
    * — server/classifier.ts's `ThinkingDecision`, projected. Optional, like

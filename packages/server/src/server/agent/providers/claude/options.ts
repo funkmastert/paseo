@@ -79,6 +79,11 @@ export const ClaudeProviderOptionsSchema = z
       .optional(),
     settings: z
       .object({
+        // A Claude Code output style by name. The account-pool plugin sets the
+        // built-in "Concise" on classifier-routed child agents; the CLI reads it
+        // from `--settings`. An unknown name is the CLI's to ignore, not ours to
+        // validate: the built-in set differs by CLI version.
+        outputStyle: z.string().min(1).optional(),
         permissions: PermissionRulesSchema.optional(),
         sandbox: z
           .object({

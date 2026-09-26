@@ -6,6 +6,7 @@ import {
   describeRequestedThinking,
   describeThinking,
   describeTools,
+  describeOutputStyle,
   describeUnadvertisedEntries,
   explainSummaryLines,
 } from "./explain-summary";
@@ -160,6 +161,19 @@ describe("describeOutcome — unverified pool default", () => {
 
   it("stays quiet for a listed model", () => {
     expect(describeOutcome(result())).not.toContain("UNVERIFIED");
+  });
+});
+
+describe("describeOutputStyle", () => {
+  it("prints the classifier's own sentence", () => {
+    const line = describeOutputStyle(
+      result({ reasons: { ...result().reasons, outputStyle: "Concise, because a subagent's narration is read by its leader." } }),
+    );
+    expect(line).toBe("Output style: Concise, because a subagent's narration is read by its leader.");
+  });
+
+  it("prints nothing for a plugin that predates the output style", () => {
+    expect(describeOutputStyle(result())).toBeUndefined();
   });
 });
 

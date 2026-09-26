@@ -111,6 +111,8 @@ export interface ClassifierInput {
   requestedModel?: string;
   /** `config.thinkingOptionId` as requested, when the caller named one. */
   requestedThinkingOptionId?: string;
+  /** `config.providerOptions.settings.outputStyle` as requested, when the caller set one. */
+  requestedOutputStyle?: string;
 }
 
 /**
@@ -367,6 +369,23 @@ export interface ThinkingDecision {
   reason: string;
 }
 
+/**
+ * The Claude Code output style the agent runs with. Decided from the policy
+ * and structure only — never from the prompt — so it is as deterministic as
+ * the role of a root agent.
+ */
+export interface OutputStyleDecision {
+  /** What `settings.outputStyle` becomes. `null` means the request is left as it is. */
+  style: string | null;
+  /**
+   * - `policy` — the policy's child style.
+   * - `requested` — the caller set one, and explicit beats inferred.
+   * - `none` — nothing applies; `reason` says which of root, non-Claude or switched-off.
+   */
+  source: "policy" | "requested" | "none";
+  reason: string;
+}
+
 export interface AgentDecision {
   role: RoleDecision;
   taskClass: TaskClassDecision;
@@ -374,6 +393,7 @@ export interface AgentDecision {
   tools: ToolDecision;
   account: AccountDecision;
   thinking: ThinkingDecision;
+  outputStyle: OutputStyleDecision;
 }
 
 /** The read-only floor a child falls to when its parent's restrictions are unknowable. */
@@ -1080,6 +1100,53 @@ function describeThinking(decision: {
 }
 
 /**
+ * The output-style half. A child's narration is read by its leader, not a
+ * person, and every word of it is cache the leader re-reads on every later
+ * turn, so a child runs with the policy's concise style. A root agent does
+ * not: the operator reads a leader. The style is a Claude Code CLI setting, so
+ * it only applies to a Claude-family agent, and one the caller set itself is
+ * kept.
+ */
+function decideOutputStyle(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  model: ModelDecision,
+  hasCaller: boolean,
+): OutputStyleDecision {
+  const family = familyOfProvider(world.pool, model.provider ?? input.requestedProvider ?? POOL_FAMILY);
+  if (family !== POOL_FAMILY) {
+    return {
+      style: null,
+      source: "none",
+      reason: `None: this is a ${family} agent, and an output style is a Claude Code setting.`,
+    };
+  }
+  if (input.requestedOutputStyle !== undefined) {
+    return {
+      style: input.requestedOutputStyle,
+      source: "requested",
+      reason: `${input.requestedOutputStyle}, as the caller's request set it — an explicit style is never replaced.`,
+    };
+  }
+  if (!hasCaller) {
+    return {
+      style: null,
+      source: "none",
+      reason: "None: this is a root agent, and the operator reads a leader's narration.",
+    };
+  }
+  const style = world.policy.childOutputStyle;
+  if (style === null) {
+    return { style: null, source: "none", reason: "None: the policy's child output style is switched off." };
+  }
+  return {
+    style,
+    source: "policy",
+    reason: `${style}, because a subagent's narration is read by its leader rather than a person, and the policy runs children with that style.`,
+  };
+}
+
+/**
  * Classify one `agent.create`. The only entry point; see the file header for
  * the properties it guarantees.
  */
@@ -1135,6 +1202,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const tools = decideTools(world, roleDecision, hasCaller);
   const account = decideAccount(input, world, model, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, hasCaller);
+  const outputStyle = decideOutputStyle(input, world, model, hasCaller);
 
-  return { role: roleDecision, taskClass, model, tools, account, thinking };
+  return { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle };
 }

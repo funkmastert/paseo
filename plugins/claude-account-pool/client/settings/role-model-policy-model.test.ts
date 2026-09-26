@@ -39,6 +39,7 @@ function fakeSavingWrite(): { write: RoleModelPolicyModelDeps["write"]; calls: u
         exposeClassifierTool: false,
         allowUnlistedModels: [],
         thinking: input.patch.thinking,
+        childOutputStyle: "Concise",
         revision: `rev-${counter}`,
       },
     };

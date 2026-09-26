@@ -57,6 +57,11 @@ export function describeThinking(result: RoleModelPolicyExplainResult): string |
   return result.reasons.thinking === undefined ? undefined : `Thinking: ${result.reasons.thinking}`;
 }
 
+/** The output style line, the classifier's own sentence. Absent when the plugin predates the decision. */
+export function describeOutputStyle(result: RoleModelPolicyExplainResult): string | undefined {
+  return result.reasons.outputStyle === undefined ? undefined : `Output style: ${result.reasons.outputStyle}`;
+}
+
 /**
  * The explicit-thinking line, printed only when a requested level was
  * simulated. Names `paseo.thinking-overridden-by-policy` for the same reason
@@ -137,6 +142,7 @@ export function describeUnadvertisedEntries(result: RoleModelPolicyExplainResult
 /** Every line the panel prints, in order. */
 export function explainSummaryLines(result: RoleModelPolicyExplainResult): string[] {
   const thinking = describeThinking(result);
+  const outputStyle = describeOutputStyle(result);
   const requested = describeRequestedModel(result);
   const requestedThinking = describeRequestedThinking(result);
   const unadvertised = describeUnadvertisedEntries(result);
@@ -146,6 +152,7 @@ export function explainSummaryLines(result: RoleModelPolicyExplainResult): strin
     describeOutcome(result),
     ...(thinking ? [thinking] : []),
     describeTools(result),
+    ...(outputStyle ? [outputStyle] : []),
     describeAccount(result),
     ...(requested ? [requested] : []),
     ...(requestedThinking ? [requestedThinking] : []),

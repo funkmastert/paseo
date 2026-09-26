@@ -35,3 +35,14 @@ describe("describeDecision — pool entries", () => {
     expect(decide(["claude-haiku-4-5-20251001"])).not.toContain("never run");
   });
 });
+
+describe("describeDecision — output style", () => {
+  it("names the style and why, for a child", () => {
+    expect(decide(["claude-haiku-4-5"])).toContain("Output style: Concise, because");
+  });
+
+  it("says none for a root", () => {
+    const text = describeDecision(classifyAgent({ title: "lead" }, world(["claude-haiku-4-5"])));
+    expect(text).toContain("Output style: None: this is a root agent");
+  });
+});

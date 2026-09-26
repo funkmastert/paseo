@@ -21,6 +21,7 @@ const VALID_POLICY: RoleModelPolicy = {
   exposeClassifierTool: false,
   allowUnlistedModels: [],
   thinking: DEFAULT_THINKING_POLICY,
+  childOutputStyle: "Concise",
   agentTypeMappings: { worker: "worker" },
   revision: "rev-1",
 };
@@ -186,6 +187,24 @@ describe("role-model-policy RPC handlers", () => {
       expect(patch).toHaveBeenCalledWith({
         agentModelPolicy: expect.objectContaining({ thinking: customThinking }),
       });
+    });
+
+    it("carries the child output style through an unrelated save, so saving never switches it back on", async () => {
+      const stored: RoleModelPolicy = { ...VALID_POLICY, childOutputStyle: null };
+      const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ policyCache: fakePolicyCache(stored) }));
+      const patch = vi.fn().mockResolvedValue({ requestId: "p1", config: {} });
+      const paseo = fakePaseo({ config: { agentModelPolicy: stored }, patch });
+
+      const result = await handlers.write(
+        {
+          revision: stored.revision,
+          patch: { roles: stored.roles, agentTypeMappings: { worker: "worker", scout: "worker" }, modelBudgetThresholdPct: DEFAULT_MODEL_BUDGET_THRESHOLD_PCT },
+        },
+        context(paseo),
+      );
+
+      expect(result.status).toBe("saved");
+      expect(patch).toHaveBeenCalledWith({ agentModelPolicy: expect.objectContaining({ childOutputStyle: null }) });
     });
 
     it("saves the patch's own thinking field when the caller supplies one", async () => {
@@ -914,6 +933,14 @@ describe("explain — the thinking decision", () => {
     expect(result.thinking).toMatchObject({ outcome: "no-thinking-options", override: { requested: "max", reason: "no-thinking-options" } });
     expect(result.thinking).not.toHaveProperty("optionId");
     expect(result.thinking?.override).not.toHaveProperty("applied");
+  });
+
+  it("reports the output style a child would run with, and none for a root", async () => {
+    const child = await explain({ agentType: "worker" });
+    expect(child.outputStyle).toEqual({ style: "Concise", source: "policy" });
+    expect(child.reasons.outputStyle).toContain("Concise");
+    const root = await explain({ root: true });
+    expect(root.outputStyle).toEqual({ source: "none" });
   });
 
   it("still parses a response from a plugin that predates the thinking decision", async () => {

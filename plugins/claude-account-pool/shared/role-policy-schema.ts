@@ -248,6 +248,9 @@ export const DEFAULT_THINKING_POLICY: ThinkingPolicy = {
   byTaskClass: { ...DEFAULT_THINKING_BY_TASK_CLASS },
 };
 
+/** Claude Code's own built-in concise style (added in 2.1.237). See `childOutputStyle`. */
+export const DEFAULT_CHILD_OUTPUT_STYLE = "Concise";
+
 export const RoleRecordSchema = z.object({
   /** Fixed lowercase id for standard roles; stable lowercase UUID for custom roles. */
   id: z.string().min(1),
@@ -355,6 +358,19 @@ export const RoleModelPolicySchema = z
      * semantics at each level of this block.
      */
     thinking: ThinkingPolicySchema,
+    /**
+     * The Claude Code output style every classifier-routed CHILD agent runs
+     * with (`settings.outputStyle`). Default ON, with Claude Code's own
+     * built-in "Concise": a subagent's narration is read by its leader, not
+     * by a person, and every word of it is cache the leader re-reads on every
+     * later turn. `null` switches it off. Leaders never get one — the
+     * operator reads their narration — and neither does a non-Claude agent.
+     * A style the caller set on the request itself is left alone.
+     *
+     * A field `RoleModelPolicy` gained with NO `schemaVersion` bump, like
+     * `thinking` above: absent from a stored document, it takes the default.
+     */
+    childOutputStyle: z.union([z.string().min(1).max(64), z.null()]).default(DEFAULT_CHILD_OUTPUT_STYLE),
     /** Opaque compare-and-swap token, bumped on every accepted write. */
     revision: z.string(),
   })
@@ -465,6 +481,7 @@ export const DEFAULT_POLICY: RoleModelPolicy = {
   exposeClassifierTool: false,
   allowUnlistedModels: [],
   thinking: DEFAULT_THINKING_POLICY,
+  childOutputStyle: DEFAULT_CHILD_OUTPUT_STYLE,
   agentTypeMappings: {
     worker: "worker",
     scout: "worker",

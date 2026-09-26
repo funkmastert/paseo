@@ -4,7 +4,7 @@ import type { ResolvedPool } from "../shared/pool-config";
 import {
   AGENT_ROLE_LABEL,
   AGENT_TYPE_LABEL,
-  DEFAULT_POLICY,
+  DEFAULT_POLICY as SHIPPED_POLICY,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_LABEL,
   THINKING_OVERRIDDEN_LABEL,
@@ -19,6 +19,15 @@ import { createRecentAgentTypes } from "./recent-agent-types";
 import { createRoleRouter, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
 
 type CreateAgentRequest = PluginBeforeRequests["agent.create"];
+
+/**
+ * The shipped policy with the child output style switched off. Almost every
+ * test here asserts a byte-identical pass-through or an exact
+ * `providerOptions`, and the shipped default writes a style into every Claude
+ * child's — so those tests run without it, and the "output style" block at
+ * the bottom is the one place it is on.
+ */
+const DEFAULT_POLICY: RoleModelPolicy = { ...SHIPPED_POLICY, childOutputStyle: null };
 
 function request(overrides: Record<string, unknown>): { request: CreateAgentRequest } {
   return {
@@ -2249,5 +2258,70 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
     expect(result?.config.model).toBe("claude-opus-5-5");
     expect(result?.config.thinkingOptionId).toBe("xhigh");
     expect(result?.labels).toMatchObject({ [THINKING_OVERRIDDEN_LABEL]: "high" });
+  });
+});
+
+describe("createRoleRouter — output style (settings.outputStyle)", () => {
+  const shipped = (overrides: Partial<RoleModelPolicy> = {}) =>
+    baseOptions({ policyCache: fakePolicyCache({ ...SHIPPED_POLICY, ...overrides }) });
+  const settingsOf = (result: CreateAgentRequest | void) =>
+    (result?.config.providerOptions as { settings?: { outputStyle?: string; permissions?: { deny?: string[] } } } | undefined)
+      ?.settings;
+
+  it("sets Concise on a Claude child by default", () => {
+    const result = createRoleRouter(shipped())(request({ callerAgentId: "c1" }), fakeContext);
+    expect(settingsOf(result)?.outputStyle).toBe("Concise");
+  });
+
+  it("leaves a root agent's request untouched", () => {
+    expect(createRoleRouter(shipped())(request({}), fakeContext)).toBeUndefined();
+  });
+
+  it("is off when the policy says null", () => {
+    expect(createRoleRouter(shipped({ childOutputStyle: null }))(request({ callerAgentId: "c1" }), fakeContext)).toBeUndefined();
+  });
+
+  it("merges with the deny tier instead of replacing it", () => {
+    const policy = {
+      ...SHIPPED_POLICY,
+      roles: SHIPPED_POLICY.roles.map((role) => (role.id === "worker" ? { ...role, toolProfile: { kind: "read-only" as const } } : role)),
+    };
+    const result = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }))(
+      request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" } }),
+      fakeContext,
+    );
+    expect(settingsOf(result)?.outputStyle).toBe("Concise");
+    expect(settingsOf(result)?.permissions?.deny).toEqual(expect.arrayContaining(["Write(*)"]));
+    expect((result?.config.providerOptions as { disallowedTools: string[] }).disallowedTools).toContain("Write");
+  });
+
+  it("lands on the model-rewrite path too, next to the new model", () => {
+    const options = baseOptions({
+      policyCache: fakePolicyCache({ ...policyWithWorkerModels(["claude-sonnet-5"]), childOutputStyle: "Concise" }),
+      catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5"] })),
+      poolCache: fakePoolCache({ workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } }),
+    });
+    const result = createRoleRouter(options)(request({ callerAgentId: "c1" }), fakeContext);
+    expect(result?.config.model).toBe("claude-sonnet-5");
+    expect(settingsOf(result)?.outputStyle).toBe("Concise");
+  });
+
+  it("keeps a style the caller already set", () => {
+    const result = createRoleRouter(shipped())(
+      request({
+        callerAgentId: "c1",
+        config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp/work", providerOptions: { settings: { outputStyle: "Explanatory" } } },
+      }),
+      fakeContext,
+    );
+    expect(result).toBeUndefined();
+  });
+
+  it("does not touch a non-Claude child", () => {
+    const result = createRoleRouter(shipped())(
+      request({ callerAgentId: "c1", config: { provider: "codex", model: "gpt-5", cwd: "/tmp/work" } }),
+      fakeContext,
+    );
+    expect(settingsOf(result)?.outputStyle).toBeUndefined();
   });
 });

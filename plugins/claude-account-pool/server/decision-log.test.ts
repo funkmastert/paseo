@@ -86,6 +86,7 @@ describe("decision log", () => {
       model: { ref: "claude-haiku-4-5", outcome: "selected", poolSlot: "mechanical", resolvedFrom: "claude-haiku-4-5-20251001" },
       thinking: { optionId: null, outcome: "no-thinking-options" },
       account: { providerId: "claude-work" },
+      outputStyle: "Concise",
     });
     expect(line.reasons.model).toContain("claude-haiku-4-5-20251001");
   });

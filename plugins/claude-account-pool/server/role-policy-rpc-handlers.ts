@@ -141,6 +141,8 @@ async function performWrite(
     // on an unrelated save would silently re-arm the catalog check for a model
     // the operator had opted in.
     allowUnlistedModels: current.policy.allowUnlistedModels,
+    // Same again: an unrelated save must not switch the child output style back on (or off).
+    childOutputStyle: current.policy.childOutputStyle,
     revision: randomUUID(),
   };
   const parsed = RoleModelPolicySchema.safeParse(candidate);
@@ -285,7 +287,7 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
         },
       );
 
-      const { role, taskClass, model, tools, account, thinking } = decision;
+      const { role, taskClass, model, tools, account, thinking, outputStyle } = decision;
       const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
             requestedRef: model.override.requestedRef,
@@ -349,7 +351,9 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           tools: tools.reason,
           account: account.reason,
           thinking: thinking.reason,
+          outputStyle: outputStyle.reason,
         },
+        outputStyle: { ...(outputStyle.style !== null ? { style: outputStyle.style } : {}), source: outputStyle.source },
         thinking: {
           outcome: thinking.outcome,
           ...(thinking.optionId !== null ? { optionId: thinking.optionId } : {}),

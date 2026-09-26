@@ -12,7 +12,7 @@ import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL, THINKING_OVERRIDD
  * helped if it also learns which label to set instead.
  */
 export function describeDecision(decision: AgentDecision): string {
-  const { role, taskClass, model, tools, account, thinking } = decision;
+  const { role, taskClass, model, tools, account, thinking, outputStyle } = decision;
   const lines: string[] = [];
 
   lines.push(`Role: ${role.role.name} (${role.source}) — ${role.reason}`);
@@ -34,6 +34,8 @@ export function describeDecision(decision: AgentDecision): string {
   lines.push(
     `Thinking: ${thinking.reason}${thinking.override ? ` The create would be labelled ${THINKING_OVERRIDDEN_LABEL}=${thinking.override.requested}.` : ""}`,
   );
+
+  lines.push(`Output style: ${outputStyle.reason}`);
 
   lines.push(
     tools.deniedTools.length === 0
