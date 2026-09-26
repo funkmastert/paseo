@@ -14,6 +14,7 @@ import {
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
+import { MCP_SCOPE_LABEL } from "./runtime-mcp-config.js";
 import { InMemoryAgentTimelineStore } from "./agent-timeline-store.js";
 import { toAgentPayload } from "./agent-projections.js";
 import { projectTimelineRows } from "./timeline-projection.js";
@@ -4239,6 +4240,124 @@ test("createAgent injects brokered MCP gateway servers for a derived provider on
       headers: { Authorization: "Bearer gw-token" },
     },
   });
+});
+
+test("an agent's recorded MCP scope limits its brokered servers on create and again on reload", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    launches: AgentSessionConfig[] = [];
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.launches.push(config);
+      return new McpCapableTestAgentSession(config);
+    }
+
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      overrides?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      const config = { provider: "codex", cwd: workdir, ...overrides } as AgentSessionConfig;
+      this.launches.push(config);
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    // TestAgentSession persists as "codex"; the gateway gates on the client, not the id.
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    mcpGateway: createFakeMcpGateway({ getServerNames: () => ["github", "zeeq", "linear"] }),
+    mcpGatewayAuthToken: "gw-token",
+    idFactory: () => "00000000-0000-4000-8000-000000000116",
+  });
+  manager.setMcpGatewayBaseUrl("http://127.0.0.1:6767");
+
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+    labels: { [MCP_SCOPE_LABEL]: "zeeq,linear,claude.ai" },
+  });
+  await manager.reloadAgentSession(agent.id);
+
+  expect(client.launches.map((launch) => Object.keys(launch.mcpServers ?? {}))).toEqual([
+    ["zeeq", "linear"],
+    ["zeeq", "linear"],
+  ]);
+});
+
+test("a recorded MCP scope without claude.ai turns the connectors off on every launch, and is never stored", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    launches: AgentSessionConfig[] = [];
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.launches.push(config);
+      return new McpCapableTestAgentSession(config);
+    }
+
+    override async resumeSession(
+      _handle: AgentPersistenceHandle,
+      overrides?: Partial<AgentSessionConfig>,
+    ): Promise<AgentSession> {
+      const config = { provider: "codex", cwd: workdir, ...overrides } as AgentSessionConfig;
+      this.launches.push(config);
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000117",
+  });
+
+  const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+    labels: { [MCP_SCOPE_LABEL]: "zeeq" },
+  });
+  await manager.reloadAgentSession(agent.id);
+
+  expect(client.launches.map((launch) => launch.claudeAiConnectorsDisabled)).toEqual([true, true]);
+  const stored = await storage.get(agent.id);
+  expect(stored?.config).not.toHaveProperty("claudeAiConnectorsDisabled");
+});
+
+test("an agent without a recorded MCP scope keeps the claude.ai connectors", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+
+  class CaptureClient extends TestAgentClient {
+    readonly acceptsMcpGatewayServers = true;
+    lastConfig: AgentSessionConfig | null = null;
+
+    override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+      this.lastConfig = config;
+      return new McpCapableTestAgentSession(config);
+    }
+  }
+
+  const client = new CaptureClient();
+  const manager = new AgentManager({
+    clients: { codex: client },
+    registry: storage,
+    logger,
+    idFactory: () => "00000000-0000-4000-8000-000000000118",
+  });
+
+  await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+    workspaceId: undefined,
+  });
+
+  expect(client.lastConfig?.claudeAiConnectorsDisabled).toBeUndefined();
 });
 
 test("a session's needs-auth for a server its launch brokered is dropped; other reports are kept", async () => {

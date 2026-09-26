@@ -1,4 +1,5 @@
 import type { AgentDecision } from "./classifier";
+import { mcpScopeLabelValue } from "./mcp-scope";
 
 /**
  * One line per classifier decision, at create. The prefix is fixed so
@@ -83,7 +84,7 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
 }
 
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
-  const { role, taskClass, model, thinking, outputStyle } = decision;
+  const { role, taskClass, model, thinking, outputStyle, mcp } = decision;
   return {
     caller: role.source === "leader-tier" ? "root" : "child",
     role: { id: role.role.id, source: role.source },
@@ -101,6 +102,8 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
     },
     thinking: { optionId: thinking.optionId, outcome: thinking.outcome },
     outputStyle: outputStyle.style,
+    // The paseo.mcp-scope value, or "all" for an agent that keeps every server.
+    mcp: mcpScopeLabelValue(mcp) ?? "all",
     account: result ? { providerId: result.config.provider ?? null } : { refused: true },
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
     reasons: {

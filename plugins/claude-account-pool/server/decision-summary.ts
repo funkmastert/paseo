@@ -1,5 +1,6 @@
 import type { AgentDecision } from "./classifier";
 import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL, THINKING_OVERRIDDEN_LABEL } from "../shared/role-policy-schema";
+import { mcpScopeLabelValue } from "./mcp-scope";
 
 /**
  * One `AgentDecision` rendered as plain text, for a caller asking what a task
@@ -12,7 +13,7 @@ import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL, THINKING_OVERRIDD
  * helped if it also learns which label to set instead.
  */
 export function describeDecision(decision: AgentDecision): string {
-  const { role, taskClass, model, tools, account, thinking, outputStyle } = decision;
+  const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;
   const lines: string[] = [];
 
   lines.push(`Role: ${role.role.name} (${role.source}) — ${role.reason}`);
@@ -45,6 +46,12 @@ export function describeDecision(decision: AgentDecision): string {
   if (tools.withheld) {
     lines.push(`Tools withheld: ${tools.withheld.reason}`);
   }
+
+  lines.push(
+    mcp.scoped
+      ? `MCP servers: ${mcp.gatewayServers.length > 0 ? mcp.gatewayServers.join(", ") : "none from the gateway"}${mcp.claudeAiConnectors ? " + claude.ai connectors" : ""} (scope ${mcpScopeLabelValue(mcp)}) — ${mcp.reason}`
+      : `MCP servers: all — ${mcp.reason}`,
+  );
 
   if (account.kind !== "not-evaluated") {
     lines.push(`Account: ${account.providerId ?? account.kind} — ${account.reason}`);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
 import {
+  describeMcp,
   describeOutcome,
   describeRequestedModel,
   describeRequestedThinking,
@@ -253,5 +254,33 @@ describe("describeRequestedThinking", () => {
     );
     expect(line).toContain("removed");
     expect(line).toContain("paseo.thinking-overridden-by-policy=max");
+  });
+});
+
+describe("describeMcp", () => {
+  it("names the servers, the connectors and the label a real agent would carry", () => {
+    const line = describeMcp(
+      result({
+        reasons: { ...result().reasons, mcp: "Why." },
+        mcp: {
+          scoped: true,
+          gatewayServers: ["zeeq", "linear"],
+          withheldServers: ["slack"],
+          claudeAiConnectors: false,
+          grants: [],
+          scopeLabel: "zeeq,linear",
+        },
+      }),
+    );
+    expect(line).toBe("MCP servers: zeeq, linear — Why. A real agent would carry paseo.mcp-scope=zeeq,linear.");
+  });
+
+  it("says all for an unscoped agent, and nothing for a plugin that sent no MCP decision", () => {
+    const unscoped = result({
+      reasons: { ...result().reasons, mcp: "Root." },
+      mcp: { scoped: false, gatewayServers: ["zeeq"], withheldServers: [], claudeAiConnectors: true, grants: [] },
+    });
+    expect(describeMcp(unscoped)).toBe("MCP servers: all — Root.");
+    expect(describeMcp(result())).toBeUndefined();
   });
 });

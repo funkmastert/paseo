@@ -155,6 +155,8 @@ export const RoleModelPolicyExplainResultSchema = z.object({
     thinking: z.string().optional(),
     /** Optional, for the same reason: a plugin that predates the output style decision sends none. */
     outputStyle: z.string().optional(),
+    /** Optional: a plugin that predates MCP scoping sends none. */
+    mcp: z.string().optional(),
   }),
   /**
    * The Claude Code output style the create hook would write to
@@ -164,6 +166,27 @@ export const RoleModelPolicyExplainResultSchema = z.object({
    * Optional, and `source` a plain string, so an older app still parses it.
    */
   outputStyle: z.object({ style: z.string().optional(), source: z.string() }).optional(),
+  /**
+   * The MCP gateway servers and claude.ai connectors the create hook would
+   * spawn the agent with — server/mcp-scope.ts's `McpDecision`, projected.
+   * Optional and string-typed for the same app/plugin drift reason as
+   * `thinking` below.
+   */
+  mcp: z
+    .object({
+      /** False keeps every server and the connectors. */
+      scoped: z.boolean(),
+      gatewayServers: z.array(z.string()),
+      withheldServers: z.array(z.string()),
+      claudeAiConnectors: z.boolean(),
+      /** `source`: declared, role, critical, or inferred. */
+      grants: z.array(z.object({ server: z.string(), source: z.string() })),
+      /** Names in `paseo.mcp` no gateway server is called. The create still goes ahead. */
+      unknownDeclaredValues: z.array(z.string()).optional(),
+      /** The `paseo.mcp-scope` value a real agent would carry. Absent when it would carry none. */
+      scopeLabel: z.string().optional(),
+    })
+    .optional(),
   /**
    * The thinking level the create hook would write to `config.thinkingOptionId`
    * — server/classifier.ts's `ThinkingDecision`, projected. Optional, like
@@ -304,6 +327,8 @@ export const roleModelPolicyRpc = {
        * `thinking.override` reports whether the create hook would keep it.
        */
       requestedThinkingOptionId: z.string().optional(),
+      /** Simulates labels[paseo.mcp]: MCP gateway servers asked for on top of the default. */
+      mcp: z.string().optional(),
     }),
     output: RoleModelPolicyExplainResultSchema,
   }),

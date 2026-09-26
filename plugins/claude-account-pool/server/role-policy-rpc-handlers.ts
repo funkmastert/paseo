@@ -4,12 +4,14 @@ import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
+import type { McpGatewayCache } from "./mcp-gateway-cache";
+import { mcpScopeLabelValue } from "./mcp-scope";
 import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
 import type { RecentAgentTypes } from "./recent-agent-types";
 import { loadRolePolicy, type PolicyCache } from "./role-policy";
 import { classifyAgent } from "./classifier";
-import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, TASK_CLASS_LABEL } from "../shared/role-policy-schema";
+import { AGENT_ROLE_LABEL, AGENT_TYPE_LABEL, MCP_LABEL, TASK_CLASS_LABEL } from "../shared/role-policy-schema";
 import { profileDeniedTools } from "../shared/tool-profiles";
 
 export interface RoleModelPolicyRpcDeps {
@@ -31,6 +33,8 @@ export interface RoleModelPolicyRpcDeps {
     | "windowIds"
   >;
   recentAgentTypes: RecentAgentTypes;
+  /** Optional: without it the preview reports every agent keeping every MCP server, as the hook would. */
+  mcpGatewayCache?: Pick<McpGatewayCache, "get" | "forceRefresh">;
 }
 
 export interface RoleModelPolicyRpcHandlers {
@@ -263,6 +267,8 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       if (input.agentType !== undefined) labels[AGENT_TYPE_LABEL] = input.agentType;
       if (input.role !== undefined) labels[AGENT_ROLE_LABEL] = input.role;
       if (input.taskClass !== undefined) labels[TASK_CLASS_LABEL] = input.taskClass;
+      if (input.mcp !== undefined) labels[MCP_LABEL] = input.mcp;
+      await deps.mcpGatewayCache?.forceRefresh();
 
       const decision = classifyAgent(
         {
@@ -284,10 +290,12 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           pool,
           health: deps.health,
           nowMs: Date.now(),
+          mcpGateway: deps.mcpGatewayCache?.get(),
         },
       );
 
-      const { role, taskClass, model, tools, account, thinking, outputStyle } = decision;
+      const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;
+      const mcpScopeLabel = mcpScopeLabelValue(mcp);
       const requestedModelOverride: RoleModelPolicyExplainResult["requestedModelOverride"] = model.override
         ? {
             requestedRef: model.override.requestedRef,
@@ -352,6 +360,16 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
           account: account.reason,
           thinking: thinking.reason,
           outputStyle: outputStyle.reason,
+          mcp: mcp.reason,
+        },
+        mcp: {
+          scoped: mcp.scoped,
+          gatewayServers: mcp.gatewayServers,
+          withheldServers: mcp.withheldServers,
+          claudeAiConnectors: mcp.claudeAiConnectors,
+          grants: mcp.grants,
+          ...(mcp.unknownDeclaredValues ? { unknownDeclaredValues: mcp.unknownDeclaredValues } : {}),
+          ...(mcpScopeLabel !== undefined ? { scopeLabel: mcpScopeLabel } : {}),
         },
         outputStyle: { ...(outputStyle.style !== null ? { style: outputStyle.style } : {}), source: outputStyle.source },
         thinking: {

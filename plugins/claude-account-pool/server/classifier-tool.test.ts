@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_POLICY, type RoleModelPolicy } from "../shared/role-policy-schema";
-import { queryToInput, startClassifierToolServer, type ClassifierToolServer } from "./classifier-tool";
+import { handleMcpMessage, queryToInput, startClassifierToolServer, type ClassifierToolServer } from "./classifier-tool";
 import type { ClassifierWorld } from "./classifier";
 
 /**
@@ -192,5 +192,23 @@ describe("the agent_model_policy MCP tool", () => {
       params: { name: "something_else", arguments: {} },
     })) as { error?: { code: number } };
     expect(called.error?.code).toBe(-32602);
+  });
+});
+
+describe("the agent_model_policy tool — MCP servers", () => {
+  it("carries paseo.mcp into the labels and names the servers in the answer", () => {
+    const input = queryToInput({ mcp: "linear" });
+    expect(input.labels).toEqual({ "paseo.mcp": "linear" });
+
+    const reply = handleMcpMessage(
+      { id: 1, method: "tools/call", params: { name: "agent_model_policy", arguments: { mcp: "linear" } } },
+      () => ({
+        ...world(),
+        mcpGateway: { servers: [{ name: "zeeq", critical: true }, { name: "linear", critical: false }, { name: "slack", critical: false }] },
+      }),
+    ) as { result: { content: { text: string }[] } };
+    const text = reply.result.content[0].text;
+    expect(text).toContain("MCP servers: zeeq, linear (scope zeeq,linear)");
+    expect(text).toContain("Left out: slack.");
   });
 });

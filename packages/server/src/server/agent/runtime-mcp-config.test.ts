@@ -2,6 +2,9 @@ import { describe, expect, test } from "vitest";
 
 import type { AgentSessionConfig } from "./agent-sdk-types.js";
 import {
+  MCP_SCOPE_LABEL,
+  claudeAiConnectorsInScope,
+  scopeMcpGatewayServerNames,
   stripMcpGatewayServers,
   withRuntimeMcpGatewayServers,
   withRuntimePaseoMcpServer,
@@ -223,5 +226,42 @@ describe("stripMcpGatewayServers", () => {
     };
 
     expect(stripMcpGatewayServers(config)).toEqual(config);
+  });
+});
+
+describe("scopeMcpGatewayServerNames", () => {
+  const names = ["zeeq", "github", "linear", "agent-gateway"];
+
+  test("keeps every server when the agent carries no scope, as agents spawned before scoping do", () => {
+    expect(scopeMcpGatewayServerNames(names, undefined)).toEqual(names);
+    expect(scopeMcpGatewayServerNames(names, { other: "x" })).toEqual(names);
+  });
+
+  test("keeps only the recorded servers, in gateway order", () => {
+    expect(
+      scopeMcpGatewayServerNames(names, { [MCP_SCOPE_LABEL]: "linear, zeeq,claude.ai" }),
+    ).toEqual(["zeeq", "linear"]);
+  });
+
+  test("keeps none for an empty scope", () => {
+    expect(scopeMcpGatewayServerNames(names, { [MCP_SCOPE_LABEL]: "none" })).toEqual([]);
+  });
+});
+
+describe("claudeAiConnectorsInScope", () => {
+  test("keeps the connectors without a scope, and when the scope names claude.ai", () => {
+    expect(claudeAiConnectorsInScope(undefined)).toBe(true);
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "zeeq, claude.ai" })).toBe(true);
+  });
+
+  test("drops them for a scope that leaves them out", () => {
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "zeeq" })).toBe(false);
+    expect(claudeAiConnectorsInScope({ [MCP_SCOPE_LABEL]: "none" })).toBe(false);
+  });
+
+  test("the runtime-only connector switch is stripped before storage", () => {
+    expect(
+      stripMcpGatewayServers({ ...BASE_CONFIG, claudeAiConnectorsDisabled: true }),
+    ).not.toHaveProperty("claudeAiConnectorsDisabled");
   });
 });

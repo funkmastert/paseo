@@ -58,7 +58,7 @@ const PROTOCOL_VERSION = "2025-06-18";
 const TOOL = {
   name: "agent_model_policy",
   description:
-    "Ask what an agent WOULD be configured as before you create it: which role it resolves to, which task class, which model and thinking level and pooled account it would run on, and which tools it would keep. Deterministic — this is the same classifier the daemon applies at agent.create, not advice. Use it when you are about to spawn an agent and want to know whether your labels get you the model you think they do.",
+    "Ask what an agent WOULD be configured as before you create it: which role it resolves to, which task class, which model and thinking level and pooled account it would run on, and which tools and MCP servers it would keep. Deterministic — this is the same classifier the daemon applies at agent.create, not advice. Use it when you are about to spawn an agent and want to know whether your labels get you the model you think they do.",
   inputSchema: {
     type: "object",
     properties: {
@@ -89,6 +89,11 @@ const TOOL = {
         description:
           "A thinking level you would ask for explicitly (e.g. high, xhigh, ultracode). The answer says whether policy keeps it — a subagent never runs ultracode.",
       },
+      mcp: {
+        type: "string",
+        description:
+          "The paseo.mcp label you would set: comma-separated MCP gateway server names (or claude.ai, or all) the agent needs beyond the default. The answer lists the servers it would get.",
+      },
       root: {
         type: "boolean",
         description: "Ask about a root agent (one started by a human, the CLI or the app) rather than a subagent.",
@@ -108,6 +113,8 @@ export interface ClassifierToolQuery {
   requestedModel?: string;
   requestedProvider?: string;
   requestedThinkingOptionId?: string;
+  /** The `paseo.mcp` label you would set. */
+  mcp?: string;
   /** True to ask about a ROOT agent (no calling agent), which resolves to `leader` structurally. */
   root?: boolean;
 }
@@ -186,6 +193,7 @@ export function queryToInput(query: ClassifierToolQuery): ClassifierInput {
   if (query.agentType) labels["paseo.agent-type"] = query.agentType;
   if (query.agentRole) labels["paseo.agent-role"] = query.agentRole;
   if (query.taskClass) labels["paseo.task-class"] = query.taskClass;
+  if (query.mcp) labels["paseo.mcp"] = query.mcp;
   return {
     ...(Object.keys(labels).length > 0 ? { labels } : {}),
     title: query.title,

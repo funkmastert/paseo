@@ -94,6 +94,8 @@ import { recoverLatestActivitySummary, summarizeLatestActivityItem } from "./act
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
 import {
   stripInternalPaseoMcpServer,
+  claudeAiConnectorsInScope,
+  scopeMcpGatewayServerNames,
   withRuntimeMcpGatewayServers,
   withRuntimePaseoMcpServer,
 } from "./runtime-mcp-config.js";
@@ -2421,6 +2423,7 @@ export class AgentManager {
       config,
       resolvedAgentId,
       options?.env,
+      options.labels,
     );
     this.requireEnabledProvider(storedConfig.provider);
     const client = await this.requireAvailableClient({
@@ -2511,6 +2514,8 @@ export class AgentManager {
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       mergedConfig,
       resolvedAgentId,
+      undefined,
+      options?.labels,
     );
 
     const client = this.requireClient(handle.provider);
@@ -2689,6 +2694,8 @@ export class AgentManager {
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
       refreshConfig,
       agentId,
+      undefined,
+      existing.labels,
     );
     const hadPreviousPaseoToolPolicy = this.paseoToolPolicies.has(agentId);
     const previousPaseoToolPolicy = this.paseoToolPolicies.get(agentId);
@@ -7037,13 +7044,17 @@ export class AgentManager {
     config: AgentSessionConfig,
     agentId: string,
     env?: Record<string, string>,
+    /** The agent's labels, for its recorded MCP scope (`scopeMcpGatewayServerNames`). */
+    labels?: Readonly<Record<string, string>>,
   ): Promise<PreparedSessionConfig> {
     const storedConfig = await this.normalizeConfig(stripInternalPaseoMcpServer(config), { env });
     const paseoToolPolicy = this.paseoToolsEnabled
       ? this.resolvePaseoToolPolicy(storedConfig.provider)
       : { enabled: false };
     const brokersMcpServers = this.clientAcceptsMcpGatewayServers(storedConfig.provider);
-    const brokeredServerNames = brokersMcpServers ? (this.mcpGateway?.getServerNames() ?? []) : [];
+    const brokeredServerNames = brokersMcpServers
+      ? scopeMcpGatewayServerNames(this.mcpGateway?.getServerNames() ?? [], labels)
+      : [];
     const launchConfig = this.applyDaemonAppendSystemPrompt(
       withRuntimeMcpGatewayServers({
         config: withRuntimePaseoMcpServer({
@@ -7062,6 +7073,14 @@ export class AgentManager {
         sessionMode: this.mcpGateway?.sessionMode,
       }),
     );
+    // Claude clients only (the same test that admits brokered servers, minus the gateway being
+    // on): the CLI's own switch for connectors it loads from the account.
+    if (
+      !claudeAiConnectorsInScope(labels) &&
+      this.clients.get(storedConfig.provider)?.acceptsMcpGatewayServers === true
+    ) {
+      launchConfig.claudeAiConnectorsDisabled = true;
+    }
     if (launchConfig.mcpGatewayEnabled) {
       this.brokeredMcpServerNames.set(agentId, new Set(brokeredServerNames));
     } else {
