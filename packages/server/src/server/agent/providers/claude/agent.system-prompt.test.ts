@@ -175,3 +175,36 @@ describe("Claude system prompt cache sharing", () => {
     expect(preset(options)).toMatchObject({ excludeDynamicSections: true });
   });
 });
+
+describe("Claude output style (config.outputStyle)", () => {
+  test("reaches the SDK as settings.outputStyle", async () => {
+    const options = await launchOptions({ cwd: process.cwd(), outputStyle: "Concise" });
+
+    expect(options.settings).toMatchObject({ outputStyle: "Concise" });
+  });
+
+  test("merges with providerOptions.settings instead of replacing the deny tier", async () => {
+    const options = await launchOptions({
+      cwd: process.cwd(),
+      outputStyle: "Concise",
+      providerOptions: { settings: { permissions: { deny: ["Write(*)"] } } },
+    });
+
+    expect(options.settings).toMatchObject({
+      outputStyle: "Concise",
+      permissions: { deny: ["Write(*)"] },
+    });
+  });
+
+  test("leaving it unset adds no settings at all", async () => {
+    const options = await launchOptions({ cwd: process.cwd() });
+
+    expect(options.settings).toBeUndefined();
+  });
+
+  test("is not handed to the SDK as an option of its own", async () => {
+    const options = await launchOptions({ cwd: process.cwd(), outputStyle: "Concise" });
+
+    expect(options).not.toHaveProperty("outputStyle");
+  });
+});

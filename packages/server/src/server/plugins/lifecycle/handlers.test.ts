@@ -96,6 +96,43 @@ test("agent.create hooks receive callerAgentId and can pass it through unchanged
   expect(output).toMatchObject({ callerAgentId: "agent-parent" });
 });
 
+test("agent.create hooks drop a config key this daemon does not know, without failing the create", async () => {
+  // What an older daemon does with a field a newer plugin writes onto `config`
+  // (the account-pool plugin's `outputStyle` before this daemon learned it):
+  // the config schema is a plain object, so the key is stripped and the create
+  // goes ahead without it.
+  const hooks = new PluginHookHandlers(() => {});
+  hooks.before("agent.create", ({ request }) => ({
+    ...request,
+    config: { ...request.config, aFieldFromTheFuture: "x" } as typeof request.config,
+  }));
+  const output = await hooks.invoke(
+    "operation",
+    "before",
+    "agent.create",
+    { config: { provider: "claude", cwd: "/project" } },
+    paseo,
+  );
+  expect(output).toMatchObject({ config: { provider: "claude", cwd: "/project" } });
+  expect(output).not.toHaveProperty("config.aFieldFromTheFuture");
+});
+
+test("agent.create hooks keep config.outputStyle", async () => {
+  const hooks = new PluginHookHandlers(() => {});
+  hooks.before("agent.create", ({ request }) => ({
+    ...request,
+    config: { ...request.config, outputStyle: "Concise" },
+  }));
+  const output = await hooks.invoke(
+    "operation",
+    "before",
+    "agent.create",
+    { config: { provider: "claude", cwd: "/project" } },
+    paseo,
+  );
+  expect(output).toMatchObject({ config: { outputStyle: "Concise" } });
+});
+
 test("agent.create hooks omit callerAgentId for a create with no caller", async () => {
   const hooks = new PluginHookHandlers(() => {});
   let observedCallerAgentId: string | undefined = "unset";

@@ -603,6 +603,15 @@ export interface AgentSessionConfig {
   modeId?: string;
   model?: string;
   thinkingOptionId?: string;
+  /**
+   * Claude Code output style by name (`Concise`, `Explanatory`, ...). Optional
+   * and provider-scoped: the Claude adapter passes it to the CLI as
+   * `settings.outputStyle`; every other provider ignores it. It is a config
+   * field, not a `providerOptions` key, so that a daemon that predates it
+   * drops it from a plugin's create instead of rejecting the whole create
+   * (`providerOptions` is validated strictly).
+   */
+  outputStyle?: string;
   featureValues?: Record<string, unknown>;
   title?: string | null;
   providerOptions?: ProviderOptions;

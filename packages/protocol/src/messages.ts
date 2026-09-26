@@ -1056,6 +1056,9 @@ const AgentSessionConfigSchema = z.object({
   modeId: z.string().optional(),
   model: z.string().optional(),
   thinkingOptionId: z.string().optional(),
+  // Claude Code output style by name. Optional so an older daemon, whose plain-object config
+  // schema strips it, still accepts the create. See AgentSessionConfig.outputStyle.
+  outputStyle: z.string().optional(),
   featureValues: z.record(z.string(), z.unknown()).optional(),
   title: z.string().trim().min(1).max(MAX_EXPLICIT_AGENT_TITLE_CHARS).optional().nullable(),
   providerOptions: ProviderOptionsSchema.optional(),

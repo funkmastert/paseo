@@ -245,6 +245,9 @@ function buildStoredAgentConfig(record: StoredAgentRecord): AgentSessionConfig {
   if (record.config.thinkingOptionId != null) {
     config.thinkingOptionId = record.config.thinkingOptionId;
   }
+  if (record.config.outputStyle != null) {
+    config.outputStyle = record.config.outputStyle;
+  }
   if (record.config.featureValues != null) {
     config.featureValues = record.config.featureValues;
   }

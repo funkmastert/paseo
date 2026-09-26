@@ -39,6 +39,7 @@ function buildManagedAgentConfig(
     modeId: configOverrides.modeId ?? "plan",
     model: configOverrides.model ?? "gpt-5.1",
     thinkingOptionId: configOverrides.thinkingOptionId,
+    outputStyle: configOverrides.outputStyle,
     providerOptions: configOverrides.providerOptions,
     toolPolicy: configOverrides.toolPolicy,
     systemPrompt: configOverrides.systemPrompt,
@@ -214,6 +215,25 @@ describe("AgentStorage", () => {
     const persisted = await reloaded.get("agent-feature-values");
     expect(persisted?.config?.featureValues).toEqual({ fast_mode: true });
     expect(buildSessionConfig(persisted!).featureValues).toEqual({ fast_mode: true });
+  });
+
+  test("applySnapshot stores config.outputStyle, so a resumed agent gets the style it was created with", async () => {
+    await storage.applySnapshot(
+      createManagedAgent({ id: "agent-output-style", config: { outputStyle: "Concise" } }),
+    );
+
+    const reloaded = new AgentStorage(storagePath, logger);
+    const persisted = await reloaded.get("agent-output-style");
+    expect(persisted?.config?.outputStyle).toBe("Concise");
+    expect(buildSessionConfig(persisted!)?.outputStyle).toBe("Concise");
+    expect(buildConfigOverrides(persisted!).outputStyle).toBe("Concise");
+  });
+
+  test("applySnapshot keeps outputStyle absent when it was never set", async () => {
+    await storage.applySnapshot(createManagedAgent({ id: "agent-no-output-style" }));
+
+    const persisted = await new AgentStorage(storagePath, logger).get("agent-no-output-style");
+    expect(persisted?.config?.outputStyle).toBeUndefined();
   });
 
   test("applySnapshot keeps featureValues absent when they were never set", async () => {

@@ -2261,16 +2261,14 @@ describe("createRoleRouter — thinking (config.thinkingOptionId)", () => {
   });
 });
 
-describe("createRoleRouter — output style (settings.outputStyle)", () => {
+describe("createRoleRouter — output style (config.outputStyle)", () => {
   const shipped = (overrides: Partial<RoleModelPolicy> = {}) =>
     baseOptions({ policyCache: fakePolicyCache({ ...SHIPPED_POLICY, ...overrides }) });
-  const settingsOf = (result: CreateAgentRequest | void) =>
-    (result?.config.providerOptions as { settings?: { outputStyle?: string; permissions?: { deny?: string[] } } } | undefined)
-      ?.settings;
 
-  it("sets Concise on a Claude child by default", () => {
+  it("sets Concise on a Claude child by default, and leaves providerOptions alone", () => {
     const result = createRoleRouter(shipped())(request({ callerAgentId: "c1" }), fakeContext);
-    expect(settingsOf(result)?.outputStyle).toBe("Concise");
+    expect(result?.config.outputStyle).toBe("Concise");
+    expect(result?.config).not.toHaveProperty("providerOptions");
   });
 
   it("leaves a root agent's request untouched", () => {
@@ -2281,18 +2279,18 @@ describe("createRoleRouter — output style (settings.outputStyle)", () => {
     expect(createRoleRouter(shipped({ childOutputStyle: null }))(request({ callerAgentId: "c1" }), fakeContext)).toBeUndefined();
   });
 
-  it("merges with the deny tier instead of replacing it", () => {
-    const policy = {
+  it("does not touch the deny tier: providerOptions come out exactly as they would without a style", () => {
+    const policy = (childOutputStyle: string | null): RoleModelPolicy => ({
       ...SHIPPED_POLICY,
+      childOutputStyle,
       roles: SHIPPED_POLICY.roles.map((role) => (role.id === "worker" ? { ...role, toolProfile: { kind: "read-only" as const } } : role)),
-    };
-    const result = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy) }))(
-      request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" } }),
-      fakeContext,
-    );
-    expect(settingsOf(result)?.outputStyle).toBe("Concise");
-    expect(settingsOf(result)?.permissions?.deny).toEqual(expect.arrayContaining(["Write(*)"]));
-    expect((result?.config.providerOptions as { disallowedTools: string[] }).disallowedTools).toContain("Write");
+    });
+    const create = () => request({ callerAgentId: "c1", labels: { [AGENT_ROLE_LABEL]: "worker" } });
+    const withStyle = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy("Concise")) }))(create(), fakeContext);
+    const without = createRoleRouter(baseOptions({ policyCache: fakePolicyCache(policy(null)) }))(create(), fakeContext);
+    expect(withStyle?.config.outputStyle).toBe("Concise");
+    expect(withStyle?.config.providerOptions).toEqual(without?.config.providerOptions);
+    expect(JSON.stringify(withStyle?.config.providerOptions)).not.toContain("outputStyle");
   });
 
   it("lands on the model-rewrite path too, next to the new model", () => {
@@ -2303,15 +2301,12 @@ describe("createRoleRouter — output style (settings.outputStyle)", () => {
     });
     const result = createRoleRouter(options)(request({ callerAgentId: "c1" }), fakeContext);
     expect(result?.config.model).toBe("claude-sonnet-5");
-    expect(settingsOf(result)?.outputStyle).toBe("Concise");
+    expect(result?.config.outputStyle).toBe("Concise");
   });
 
-  it("keeps a style the caller already set", () => {
+  it("keeps a style the caller already set on config.outputStyle", () => {
     const result = createRoleRouter(shipped())(
-      request({
-        callerAgentId: "c1",
-        config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp/work", providerOptions: { settings: { outputStyle: "Explanatory" } } },
-      }),
+      request({ callerAgentId: "c1", config: { provider: "claude", model: "claude-sonnet", cwd: "/tmp/work", outputStyle: "Explanatory" } }),
       fakeContext,
     );
     expect(result).toBeUndefined();
@@ -2322,6 +2317,6 @@ describe("createRoleRouter — output style (settings.outputStyle)", () => {
       request({ callerAgentId: "c1", config: { provider: "codex", model: "gpt-5", cwd: "/tmp/work" } }),
       fakeContext,
     );
-    expect(settingsOf(result)?.outputStyle).toBeUndefined();
+    expect(result?.config.outputStyle).toBeUndefined();
   });
 });

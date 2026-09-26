@@ -10,7 +10,6 @@ import {
 } from "../shared/role-policy-schema";
 import { restrictionNotice } from "../shared/restriction-notice";
 import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
-import { applyOutputStyle } from "../shared/output-style";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import { classifyAgent, type AgentDecision, type ClassifierWorld } from "./classifier";
 import type { DecisionLog, LoggedRequest } from "./decision-log";
@@ -243,6 +242,14 @@ interface ToolEnforcement {
    * nothing denied, no label present).
    */
   labels: Record<string, string> | undefined;
+  /**
+   * The output style to write to `config.outputStyle`, or undefined when there
+   * is none to add. A protocol-level field rather than a `providerOptions` key
+   * on purpose: an older daemon's hook re-parse drops an unknown `config` key,
+   * so the child simply runs without the style, whereas its strictly validated
+   * `providerOptions` would reject the create.
+   */
+  outputStyle: string | undefined;
 }
 
 /**
@@ -261,16 +268,14 @@ function enforceToolDecision(
 ): ToolEnforcement {
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const notice = restrictionNotice(tools.deniedTools, { inherited: tools.inheritedTools.length > 0 });
-  const withTools = applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice);
-  // The output style rides the same `providerOptions.settings` channel as the
-  // deny tier and is merged onto it, so it lands on every path that writes
-  // tool enforcement. Undefined only when neither has anything to write.
-  const merged = applyOutputStyle(withTools ?? request.config.providerOptions, outputStyle.style);
   return {
-    providerOptions: (merged === request.config.providerOptions ? undefined : merged) as
+    providerOptions: applyToolProfile(request.config.providerOptions, tools.profile, tools.inheritedTools, notice) as
       | ProviderOptionsValue
       | undefined,
     labels: toolDenialLabels(extended.labels, tools.deniedTools),
+    // Written on every path that writes tool enforcement, and only when it changes something.
+    outputStyle:
+      outputStyle.style !== null && outputStyle.style !== request.config.outputStyle ? outputStyle.style : undefined,
   };
 }
 
@@ -314,7 +319,11 @@ function policyRestrictsAnything(policy: RoleModelPolicy): boolean {
 
 /** True when enforcement has nothing to write and the request can pass through byte-identical. */
 function isNoOp(enforcement: ToolEnforcement): boolean {
-  return enforcement.providerOptions === undefined && enforcement.labels === undefined;
+  return (
+    enforcement.providerOptions === undefined &&
+    enforcement.labels === undefined &&
+    enforcement.outputStyle === undefined
+  );
 }
 
 /** Applies tool enforcement alone, on the paths that skip the model rewrite. */
@@ -328,6 +337,9 @@ function withToolProfile(
   const next: PluginBeforeRequests["agent.create"] = { ...request };
   if (enforcement.providerOptions) {
     next.config = { ...request.config, providerOptions: enforcement.providerOptions };
+  }
+  if (enforcement.outputStyle !== undefined) {
+    next.config = { ...next.config, outputStyle: enforcement.outputStyle };
   }
   const extended = next as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   if (enforcement.labels !== undefined) {
@@ -521,10 +533,9 @@ function callerDenialsFor(
   return lookup.status === "known" ? { status: "known", denied: lookup.denied } : { status: lookup.status };
 }
 
-/** The output style the request itself already sets, if any. Read structurally: `providerOptions` is free-form JSON on the wire. */
+/** The output style the request itself already sets, if any. */
 function requestedOutputStyleOf(request: PluginBeforeRequests["agent.create"]): string | undefined {
-  const options = request.config.providerOptions as { settings?: { outputStyle?: unknown } } | undefined;
-  const style = options?.settings?.outputStyle;
+  const style = request.config.outputStyle;
   return typeof style === "string" && style.length > 0 ? style : undefined;
 }
 
@@ -767,6 +778,9 @@ function routeRoleForCreateUnguarded(
   }
   if (enforcement.providerOptions) {
     nextConfig.providerOptions = enforcement.providerOptions;
+  }
+  if (enforcement.outputStyle !== undefined) {
+    nextConfig.outputStyle = enforcement.outputStyle;
   }
   const thinkingEnforcement = enforceThinkingDecision(request.config.thinkingOptionId, decision.thinking);
   if (thinkingEnforcement.configPatch?.action === "set") {

@@ -3633,13 +3633,18 @@ class ClaudeAgentSession implements AgentSession {
     input: { ultracode: boolean },
   ): Pick<ClaudeOptions, "settings"> | Record<string, never> {
     const fastMode = this.resolveFastModeSetting();
-    if (fastMode === null && !input.ultracode) {
+    // `config.outputStyle` is the provider-agnostic field; here it becomes the CLI's own
+    // `settings.outputStyle`, merged with whatever `providerOptions.settings` carries (the tool
+    // deny tier lives there).
+    const outputStyle = this.config.outputStyle;
+    if (fastMode === null && !input.ultracode && !outputStyle) {
       return {};
     }
     return {
       settings: mergeClaudeSettings(providerOptions.settings, {
         ...(fastMode === null ? {} : { fastMode }),
         ...(input.ultracode ? { ultracode: true } : {}),
+        ...(outputStyle ? { outputStyle } : {}),
       }),
     };
   }

@@ -75,21 +75,6 @@ describe("provider-owned option schemas", () => {
     ).toMatchObject({ appendSystemPrompt: "Write is withheld from you." });
   });
 
-  test("accepts the Claude output style next to the deny tier, so a plugin can set both", () => {
-    expect(
-      validateProviderOptions("claude", ClaudeProviderOptionsSchema, {
-        disallowedTools: ["Write"],
-        settings: { outputStyle: "Concise", permissions: { deny: ["Write(*)"] } },
-      }),
-    ).toMatchObject({ settings: { outputStyle: "Concise", permissions: { deny: ["Write(*)"] } } });
-  });
-
-  test("still rejects a settings key it does not know", () => {
-    expect(() =>
-      validateProviderOptions("claude", ClaudeProviderOptionsSchema, { settings: { hooks: {} } }),
-    ).toThrow("providerOptions.settings");
-  });
-
   test("reports the exact invalid Claude option path", () => {
     expect(() =>
       validateProviderOptions("claude", ClaudeProviderOptionsSchema, {

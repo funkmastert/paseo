@@ -111,7 +111,7 @@ export interface ClassifierInput {
   requestedModel?: string;
   /** `config.thinkingOptionId` as requested, when the caller named one. */
   requestedThinkingOptionId?: string;
-  /** `config.providerOptions.settings.outputStyle` as requested, when the caller set one. */
+  /** `config.outputStyle` as requested, when the caller set one. */
   requestedOutputStyle?: string;
 }
 

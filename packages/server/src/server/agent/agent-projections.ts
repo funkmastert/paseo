@@ -397,6 +397,9 @@ function buildSerializableConfig(config: AgentSessionConfig): SerializableAgentC
   if (config.thinkingOptionId) {
     serializable.thinkingOptionId = config.thinkingOptionId;
   }
+  if (config.outputStyle) {
+    serializable.outputStyle = config.outputStyle;
+  }
   if (Object.prototype.hasOwnProperty.call(config, "featureValues")) {
     const featureValues = sanitizeMetadata(config.featureValues);
     if (featureValues !== undefined) {

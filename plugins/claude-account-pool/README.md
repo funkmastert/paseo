@@ -394,8 +394,9 @@ non-Claude agent, and a style the caller already set on the request is kept.
 The classifier decides it (`OutputStyleDecision`, with a reason like every
 other part), so `explain`, the settings preview, the `agent_model_policy` tool
 and the `classifier-decision` log line all print it. The create hook writes it
-to `providerOptions.settings.outputStyle`, merged with the tool deny tier that
-lives in the same `settings` object (`shared/output-style.ts`). The value is
+to `config.outputStyle`, a protocol field the Claude adapter turns into the
+CLI's `settings.outputStyle`, merged with the tool deny tier in
+`providerOptions.settings`. The value is
 Claude Code's own built-in "Concise" (added in 2.1.237; `keepCodingInstructions`
 is on, so tool and coding guidance stay). Nothing here invents a style.
 
@@ -405,11 +406,14 @@ One paired Haiku run cut output by about a tenth and came out about 2% more
 expensive overall, so it pays only for children that narrate a lot over many
 turns. Measure before widening it.
 
-The daemon must be new enough to accept it. `settings.outputStyle` is a key the
-daemon's provider-options schema (`agent/providers/claude/options.ts`) learned
-in the same change, and an older daemon rejects the whole create as an unknown
-key. Ship the plugin and the daemon together. If the plugin ever runs ahead of
-its daemon, set `childOutputStyle` to `null` first.
+It is a config field rather than a `providerOptions` key so that version skew
+is harmless. The plugin loads from the checkout and the daemon from the app
+build, so either can be older. A daemon that predates `config.outputStyle`
+drops the unknown key when it re-parses the hook's result, and the child runs
+without the style. `providerOptions` is validated strictly, so a key there
+would have failed every create. A daemon that knows the field stores it with
+the agent's config, so a resumed agent gets the style it was created with and
+the prompt cache is not rebuilt mid-session.
 
 ### Model refs are account-agnostic by default
 
