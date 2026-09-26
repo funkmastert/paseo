@@ -1034,3 +1034,70 @@ describe("classifyAgent — thinking", () => {
     });
   });
 });
+
+/**
+ * The live catalog lists Haiku as `claude-haiku-4-5`; the policy the operator
+ * wrote spelled it as the dated snapshot. The classifier must resolve the
+ * spelling against the catalog rather than skip the entry as unadvertised.
+ */
+describe("classifyAgent — a pool entry spelled differently from the catalog", () => {
+  const LIVE_CATALOG = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
+  const spelled = () =>
+    world({
+      policy: LIVE_POLICY,
+      catalog: catalog(LIVE_CATALOG),
+      thinkingCatalog: thinkingCatalog({
+        claude: {
+          "claude-opus-5": { optionIds: ["off", "low", "medium", "high", "xhigh", "max"], defaultOptionId: "high" },
+          "claude-sonnet-5": { optionIds: ["off", "low", "medium", "high", "xhigh", "max"], defaultOptionId: "high" },
+          "claude-haiku-4-5": { optionIds: [] },
+        },
+      }),
+    } as Partial<ClassifierWorld>);
+
+  it("runs the catalog's Haiku for a mechanical worker, without falling back or flagging it unadvertised", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" } }),
+      spelled(),
+    );
+    expect(decision.model).toMatchObject({
+      outcome: "selected",
+      model: "claude-haiku-4-5",
+      resolvedFrom: "claude-haiku-4-5-20251001",
+      poolSlot: "mechanical",
+      unadvertisedPoolEntries: [],
+    });
+    expect(decision.model.unadvertised).toBeUndefined();
+    expect(decision.model.reason).toContain("claude-haiku-4-5-20251001");
+    expect(decision.thinking.outcome).toBe("no-thinking-options");
+  });
+
+  it("honors an explicit request for the catalog's spelling instead of overriding it to Sonnet", () => {
+    const decision = classifyAgent(
+      child({
+        labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" },
+        requestedProvider: "claude",
+        requestedModel: "claude-haiku-4-5",
+      }),
+      spelled(),
+    );
+    expect(decision.model.outcome).toBe("honored-request");
+    expect(decision.model.override).toBeUndefined();
+  });
+
+  it("still lists a pool entry that no spelling of matches, so it is never silently dead", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" } }),
+      spelled(),
+    );
+    // opus-5-5 is not in this catalog and the policy allowlists it, so it is not skipped;
+    // with the allowlist removed it must be reported.
+    const strict = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "hard" } }),
+      world({ ...spelled(), policy: { ...LIVE_POLICY, allowUnlistedModels: [] } } as Partial<ClassifierWorld>),
+    );
+    expect(decision.model.unadvertisedPoolEntries).toEqual([]);
+    expect(strict.model.unadvertisedPoolEntries).toEqual(["claude-opus-5-5"]);
+    expect(strict.model.model).toBe("claude-opus-5");
+  });
+});

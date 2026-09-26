@@ -214,6 +214,13 @@ export interface ModelDecision {
   provider: string | null;
   /** Absent only when `outcome` is `unconfigured`. */
   model?: string;
+  /**
+   * Set when the model that runs is the catalog's spelling of a differently
+   * spelled pool entry, so `model` is not what the policy wrote: a dated
+   * snapshot (`claude-haiku-4-5-20251001`) whose alias the provider lists.
+   * The value is the pool's own spelling.
+   */
+  resolvedFrom?: string;
   /** The ordered pool the decision came from. */
   pool: readonly string[];
   /** Which pool that was. Names the `classModels` fallback an operator otherwise misreads as "my Hard pool is ignored". */
@@ -578,17 +585,26 @@ function decideModel(
   const unverifiedNote = outcome.unadvertised
     ? " The provider's catalog does not list it, so it is UNVERIFIED — it is selectable only because allowUnlistedModels names it."
     : "";
+  // The pool's spelling and the id that runs differ: say both, so nobody
+  // reads a decision for `claude-haiku-4-5` and concludes the policy's
+  // dated entry was ignored.
+  const resolvedField = outcome.resolvedFrom !== undefined ? { resolvedFrom: outcome.resolvedFrom } : {};
+  const resolvedNote =
+    outcome.resolvedFrom !== undefined
+      ? ` The pool spells it ${outcome.resolvedFrom}; the provider's catalog lists it as ${outcome.model}, and that is the id that runs.`
+      : "";
 
   if (outcome.outcome === "unavailable") {
     return {
       ...base,
       crossesRequestedFamily,
       ...unadvertised,
+      ...resolvedField,
       outcome: "unavailable",
       provider: outcome.provider,
       model: outcome.model,
       ...(override ? { override } : {}),
-      reason: `No entry in ${poolPhrase(slot, fellBack)} is selectable right now, so its first entry ${effectiveRef} is used anyway rather than dropping the spawn.${unverifiedNote}${overrideNote}`,
+      reason: `No entry in ${poolPhrase(slot, fellBack)} is selectable right now, so its first entry ${effectiveRef} is used anyway rather than dropping the spawn.${resolvedNote}${unverifiedNote}${overrideNote}`,
     };
   }
 
@@ -596,11 +612,12 @@ function decideModel(
     ...base,
     crossesRequestedFamily,
     ...unadvertised,
+    ...resolvedField,
     outcome: "selected",
     provider: outcome.provider,
     model: outcome.model,
     ...(override ? { override } : {}),
-    reason: `${effectiveRef} is the first selectable entry in ${poolPhrase(slot, fellBack)}.${unverifiedNote}${overrideNote}`,
+    reason: `${effectiveRef} is the first selectable entry in ${poolPhrase(slot, fellBack)}.${resolvedNote}${unverifiedNote}${overrideNote}`,
   };
 }
 

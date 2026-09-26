@@ -12,6 +12,7 @@ import { restrictionNotice } from "../shared/restriction-notice";
 import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
 import { classifyAgent, type AgentDecision, type ClassifierWorld } from "./classifier";
+import type { DecisionLog, LoggedRequest } from "./decision-log";
 import type { HealthTracker } from "./health";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -191,6 +192,12 @@ export interface RoleRouterOptions {
   parentProfiles?: ParentToolProfiles;
   /** Called (deduplicated per caller) when a caller's own restrictions could not be determined. */
   onParentProfileUnresolved?: (episode: ParentProfileUnresolvedEpisode) => void;
+  /**
+   * Where the classifier's decision is noted for the one-line-per-create log.
+   * The line itself is written by the account router's hook, once the account
+   * that actually runs is known (see server/decision-log.ts).
+   */
+  decisionLog?: DecisionLog;
   /**
    * Injectable clock for tests; defaults to Date.now. Drives the throttle on
    * the "unexpected error resolving role" fail-open log, so a role that
@@ -561,6 +568,8 @@ function routeRoleForCreateUnguarded(
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
     },
   );
+
+  options.decisionLog?.note(request as unknown as LoggedRequest, decision);
 
   const role = decision.role.role;
   const taskClass = decision.taskClass.taskClass;

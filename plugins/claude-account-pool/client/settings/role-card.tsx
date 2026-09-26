@@ -6,6 +6,7 @@ import { AddModelDropdown } from "./add-model-dropdown";
 import { ModelRow } from "./model-row";
 import { RoleCardMetadataEditor } from "./role-card-metadata-editor";
 import type { ModelPoolSlot, RoleModelPolicyModel, RoleModelPolicyModelState } from "./role-model-policy-model";
+import { poolEntryStatus, poolEntryWarning } from "./pool-entry-status";
 import { ToolProfileRow } from "./tool-profile-row";
 import type { ModelCatalogState } from "./use-model-catalog";
 
@@ -105,6 +106,7 @@ export function RoleCard({ roleId, model, state, catalog, theme }: RoleCardProps
                 isLast={index === modelRefs.length - 1}
                 disabled={state.saving || state.malformed}
                 theme={theme}
+                warning={poolEntryWarning(poolEntryStatus(modelRef, catalog.catalog, state.policy.allowUnlistedModels))}
                 onMoveUp={() => void model.moveModel(roleId, modelRef, "up", slot)}
                 onMoveDown={() => void model.moveModel(roleId, modelRef, "down", slot)}
                 onRemove={() => void model.removeModel(roleId, modelRef, slot)}

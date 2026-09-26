@@ -475,3 +475,68 @@ describe("unadvertisedPoolEntries", () => {
     expect(unadvertisedPoolEntries(r, catalog({ claude: [], codex: [] }), "hard", ["claude-opus-5-5"])).toEqual(["codex/gpt-9"]);
   });
 });
+
+describe("dated snapshot vs alias spelling", () => {
+  // The live policy once spelled Haiku as the dated snapshot while both
+  // accounts' catalogs listed only the alias. Every mechanical spawn skipped
+  // the pool entry, and nothing said so.
+  const DATED = "claude-haiku-4-5-20251001";
+  const ALIAS = "claude-haiku-4-5";
+  const advertised = catalog({ claude: ["claude-sonnet-5", ALIAS] });
+
+  it("selects the catalog's spelling when the pool names the dated snapshot, and says what it resolved from", () => {
+    const result = selectModel(role({ mechanicalModels: [DATED] }), advertised, ONE_WORKER_POOL, createHealthTracker(), {
+      taskClass: "mechanical",
+    });
+    expect(result).toEqual({ outcome: "selected", provider: null, model: ALIAS, resolvedFrom: DATED });
+  });
+
+  it("resolves the other way: an alias in the pool finds a catalog that lists the dated id", () => {
+    const result = selectModel(
+      role({ models: [ALIAS] }),
+      catalog({ claude: [DATED] }),
+      ONE_WORKER_POOL,
+      createHealthTracker(),
+    );
+    expect(result).toEqual({ outcome: "selected", provider: null, model: DATED, resolvedFrom: ALIAS });
+  });
+
+  it("does not report a resolution when the spelling already matches", () => {
+    const result = selectModel(role({ models: [ALIAS] }), advertised, ONE_WORKER_POOL, createHealthTracker());
+    expect(result).toEqual({ outcome: "selected", provider: null, model: ALIAS });
+  });
+
+  it("never merges different versions: opus-5 and opus-5-5 stay distinct", () => {
+    const result = selectModel(
+      role({ models: ["claude-opus-5-5", "claude-opus-5"] }),
+      catalog({ claude: ["claude-opus-5"] }),
+      ONE_WORKER_POOL,
+      createHealthTracker(),
+    );
+    expect(result).toMatchObject({ outcome: "selected", model: "claude-opus-5" });
+    expect(unadvertisedPoolEntries(role({ models: ["claude-opus-5-5"] }), catalog({ claude: ["claude-opus-5"] }))).toEqual([
+      "claude-opus-5-5",
+    ]);
+  });
+
+  it("no longer lists a spelling mismatch as an unadvertised pool entry", () => {
+    expect(unadvertisedPoolEntries(role({ mechanicalModels: [DATED] }), advertised, "mechanical")).toEqual([]);
+  });
+
+  it("approves an explicit request in either spelling, so a requested alias is not overridden by a dated pool", () => {
+    const r = role({ mechanicalModels: [DATED] });
+    expect(isRequestedModelApproved(r, "claude", ALIAS, "mechanical")).toBe(true);
+    expect(
+      evaluateRequestedModel(r, "claude", ALIAS, advertised, ONE_WORKER_POOL, createHealthTracker(), {
+        taskClass: "mechanical",
+      }),
+    ).toEqual({ configured: true, eligible: true });
+  });
+
+  it("an allowlist entry in the other spelling still unlocks an unlisted model", () => {
+    const r = role({ models: ["claude-opus-5-5-20260101"] });
+    expect(
+      unadvertisedPoolEntries(r, catalog({ claude: ["claude-opus-5"] }), undefined, ["claude-opus-5-5"]),
+    ).toEqual([]);
+  });
+});

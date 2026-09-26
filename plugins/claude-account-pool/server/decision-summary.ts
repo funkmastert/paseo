@@ -26,6 +26,11 @@ export function describeDecision(decision: AgentDecision): string {
         : `${model.provider}/${model.model}`;
   lines.push(`Model: ${target} — ${model.reason}`);
   lines.push(`Pool (${model.poolSlot}): ${model.pool.length > 0 ? model.pool.join(", ") : "empty"}`);
+  if (model.unadvertisedPoolEntries.length > 0) {
+    lines.push(
+      `Pool entries that never run: ${model.unadvertisedPoolEntries.join(", ")} — the provider's catalog does not list them and allowUnlistedModels does not name them, so selection skips them.`,
+    );
+  }
   lines.push(
     `Thinking: ${thinking.reason}${thinking.override ? ` The create would be labelled ${THINKING_OVERRIDDEN_LABEL}=${thinking.override.requested}.` : ""}`,
   );

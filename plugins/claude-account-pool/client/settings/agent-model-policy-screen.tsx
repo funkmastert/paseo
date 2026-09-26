@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Text } from "react-native";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsSection } from "@getpaseo/plugin/client/ui";
@@ -20,6 +21,21 @@ export function AgentModelPolicyScreen({ theme }: PluginSurfaceProps) {
   const recentAgentTypes = useRecentAgentTypes();
   const referencedFamilies = load.status === "ready" ? rolePolicyFamilies(load.state.policy) : [];
   const catalog = useModelCatalog(referencedFamilies);
+
+  // Every pool row is checked against its family's catalog, so load the
+  // families the policy references up front rather than when the Add-model
+  // picker is first opened. Each is asked for once: a failed load must not
+  // retry on every render.
+  const requestedFamilies = useRef(new Set<string>());
+  const referencedKey = referencedFamilies.join(",");
+  useEffect(() => {
+    for (const family of referencedKey.split(",").filter((entry) => entry.length > 0)) {
+      if (!requestedFamilies.current.has(family)) {
+        requestedFamilies.current.add(family);
+        catalog.ensureFamily(family);
+      }
+    }
+  }, [referencedKey, catalog]);
 
   if (load.status === "loading") {
     return <Text style={{ color: theme.colors.foreground }}>Loading policy…</Text>;

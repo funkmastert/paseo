@@ -7,6 +7,7 @@ import {
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
+import { findCatalogId, modelIdentity } from "../shared/model-identity";
 import { detectModelFamily, weeklyModelWindow, type ModelFamily } from "./windows";
 
 export type ModelCatalog = ReadonlyMap<string, ReadonlySet<string>>;
@@ -51,6 +52,12 @@ export type SelectModelResult =
       provider: string | null;
       model: string;
       /**
+       * Set when `model` is the catalog's spelling of a differently spelled
+       * pool entry (a dated snapshot vs its alias): the entry as the policy
+       * wrote it. Absent when the two already match.
+       */
+      resolvedFrom?: string;
+      /**
        * Set only when the catalog doesn't list the model and it was selected
        * because the operator named it in `allowUnlistedModels`. Unverified by
        * the provider, verified by the operator; callers surface it.
@@ -61,6 +68,8 @@ export type SelectModelResult =
       outcome: "unavailable";
       provider: string | null;
       model: string;
+      /** Same meaning as on "selected". */
+      resolvedFrom?: string;
       /** Same meaning as on "selected", for the fallback entry: unlisted by the catalog, vouched for by the operator. */
       unadvertised?: true;
     };
@@ -124,9 +133,15 @@ export interface SelectModelOptions {
   taskClass?: TaskClassId;
 }
 
-/** Whether the provider's advertised catalog lists this model. */
+/** The id the catalog lists for this model, whichever spelling asked. See `findCatalogId`. */
+function catalogIdFor(family: string, model: string, catalog: ModelCatalog): string | undefined {
+  const listed = catalog.get(family);
+  return listed ? findCatalogId(listed, model) : undefined;
+}
+
+/** Whether the provider's advertised catalog lists this model, in any spelling. */
 function isListedInCatalog(family: string, model: string, catalog: ModelCatalog): boolean {
-  return catalog.get(family)?.has(model) === true;
+  return catalogIdFor(family, model, catalog) !== undefined;
 }
 
 /**
@@ -166,7 +181,7 @@ function isRefCurrentlySelectable(
   allowUnlisted: readonly string[],
 ): boolean {
   const present = isListedInCatalog(family, model, catalog) || isAllowlisted(allowUnlisted, family, model);
-  return present && isRefUsable(family, model, pool, health, thresholdPct);
+  return present && isRefUsable(family, catalogIdFor(family, model, catalog) ?? model, pool, health, thresholdPct);
 }
 
 /** Renders a selection back into the ref spelling the operator configured, for logs/notifications. */
@@ -205,7 +220,11 @@ export function isRequestedModelApproved(
 ): boolean {
   return classModels(role, taskClass).some((ref) => {
     const parsed = splitModelRef(ref);
-    return parsed !== null && parsed.model === requestedModel && modelRefFamily(parsed) === requestedFamily;
+    return (
+      parsed !== null &&
+      modelIdentity(parsed.model) === modelIdentity(requestedModel) &&
+      modelRefFamily(parsed) === requestedFamily
+    );
   });
 }
 
@@ -234,7 +253,7 @@ export interface RequestedModelEvaluation {
 function isAllowlisted(allowlist: readonly string[], family: string, model: string): boolean {
   return allowlist.some((ref) => {
     const parsed = splitModelRef(ref);
-    return parsed !== null && parsed.model === model && modelRefFamily(parsed) === family;
+    return parsed !== null && modelIdentity(parsed.model) === modelIdentity(model) && modelRefFamily(parsed) === family;
   });
 }
 
@@ -339,15 +358,17 @@ export function selectModel(
       continue; // Defensive: schema validation already prevents malformed refs from being stored.
     }
     const family = modelRefFamily(parsed);
-    const { model } = parsed;
-    if (!isRefCurrentlySelectable(family, model, catalog, pool, health, thresholdPct, allowUnlisted)) {
+    if (!isRefCurrentlySelectable(family, parsed.model, catalog, pool, health, thresholdPct, allowUnlisted)) {
       continue;
     }
+    const listedId = catalogIdFor(family, parsed.model, catalog);
+    const model = listedId ?? parsed.model;
     return {
       outcome: "selected",
       provider: parsed.provider,
       model,
-      ...(isListedInCatalog(family, model, catalog) ? {} : { unadvertised: true as const }),
+      ...(model !== parsed.model ? { resolvedFrom: parsed.model } : {}),
+      ...(listedId !== undefined ? {} : { unadvertised: true as const }),
     };
   }
 
@@ -356,13 +377,15 @@ export function selectModel(
     return { outcome: "unconfigured" }; // Defensive: same guarantee as above.
   }
   const fallbackFamily = modelRefFamily(fallback);
+  const fallbackListedId = catalogIdFor(fallbackFamily, fallback.model, catalog);
   const fallbackUnadvertised =
-    !isListedInCatalog(fallbackFamily, fallback.model, catalog) &&
-    isAllowlisted(allowUnlisted, fallbackFamily, fallback.model);
+    fallbackListedId === undefined && isAllowlisted(allowUnlisted, fallbackFamily, fallback.model);
+  const fallbackModel = fallbackListedId ?? fallback.model;
   return {
     outcome: "unavailable",
     provider: fallback.provider,
-    model: fallback.model,
+    model: fallbackModel,
+    ...(fallbackModel !== fallback.model ? { resolvedFrom: fallback.model } : {}),
     ...(fallbackUnadvertised ? { unadvertised: true as const } : {}),
   };
 }

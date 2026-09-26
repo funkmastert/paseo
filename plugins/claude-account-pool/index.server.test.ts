@@ -396,6 +396,28 @@ describe("contribute (index.server)", () => {
       h.done();
     });
 
+    it("REGRESSION: a mechanical worker runs the catalog's Haiku though the policy spells the dated snapshot, and the create logs ONE decision line naming the account that runs", async () => {
+      const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+
+      const created = await h.create("claude-sonnet-5", {
+        callerAgentId: "caller-1",
+        labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" },
+      });
+
+      expect(created.config.model).toBe("claude-haiku-4-5");
+      const decisions = lines.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("classifier-decision "));
+      expect(decisions).toHaveLength(1);
+      expect(JSON.parse(decisions[0].slice("classifier-decision ".length))).toMatchObject({
+        caller: "child",
+        taskClass: { value: "mechanical", source: "declared" },
+        model: { ref: "claude-haiku-4-5", resolvedFrom: "claude-haiku-4-5-20251001", poolSlot: "mechanical", final: "claude-haiku-4-5" },
+        account: { providerId: created.config.provider },
+      });
+      lines.mockRestore();
+      h.done();
+    });
+
     it("without the allowlist the leader default falls to the advertised opus-5, unchanged from before", async () => {
       const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
 

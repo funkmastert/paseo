@@ -27,6 +27,10 @@ Each is one check in `packages/server/src/server/session/doctor/tokens/`, catego
 - **Transcripts are streamed**, never read whole: the shared projects directory is gigabytes. The check stops at its deadline and says how many files it read.
 - **Windows and Linux.** `ps eww`, `launchctl` and `plutil` are macOS only, so those rows say UNKNOWN and name the platform. Windows Task Scheduler is not probed.
 
+## What `CLAUDE_CODE_SUBAGENT_MODEL` does
+
+Read from the pinned Claude Code binary (`@anthropic-ai/claude-agent-sdk-darwin-arm64`), not from docs. The variable outranks the Agent tool call's own `model` argument and an agent's frontmatter `model:`, so a leader that asks for `haiku` on a call still gets whatever the variable names. Built-in Explore is `inherit`, capped at Opus only when the parent runs an unlisted family (`CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP` lifts the cap). It does not default to Haiku. With the variable unset an unpinned subagent runs on its parent's model, which for a leader is Opus 5.5. In the 4 days to 2026-09-25 in-process subagents were 14 calls and under 1% of tokens, so this stays one env value per account rather than a routing policy. Changing it means editing `agents.providers.<id>.env` in the daemon config: the classifier does not decide it.
+
 ## The weekly job
 
 `agents.tokenAudit` in `config.json`. The job re-reads the file on every check, so every key is live and none needs `paseo daemon reload`.

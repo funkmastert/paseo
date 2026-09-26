@@ -9,6 +9,7 @@ import { createPoolCache, type PoolCache } from "./server/pool";
 import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-agent-types";
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
+import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
 import { createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
@@ -54,6 +55,8 @@ export default function contribute(server: PluginServerContext) {
   let catalogCache: ModelCatalogCache | null = null;
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
+  // stdout, not console.error: this is a record of every create, not a problem report.
+  const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
   let classifierTool: ClassifierToolServer | null = null;
   // Resolves once the post-reload warm-up (below) has settled or timed out.
@@ -101,6 +104,7 @@ export default function contribute(server: PluginServerContext) {
     const startedCatalogCache = catalogCache;
     const startedParentProfiles = parentProfiles;
     roleRouter = createRoleRouter({
+      decisionLog,
       policyCache,
       catalogCache,
       poolCache,
@@ -316,7 +320,19 @@ export default function contribute(server: PluginServerContext) {
   });
   const unregisterCreate = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
-    return router?.(input, context) ?? undefined;
+    // The decision log line is written here, after the account is decided,
+    // so it names the account that runs. A refusal is a throw; it is logged
+    // and re-thrown untouched.
+    const asked = input.request as unknown as LoggedRequest;
+    let routed: ReturnType<AgentCreateRouter>;
+    try {
+      routed = router?.(input, context) ?? undefined;
+    } catch (error) {
+      decisionLog.finish(asked, undefined);
+      throw error;
+    }
+    decisionLog.finish(asked, (routed ?? input.request) as unknown as LoggedRequest);
+    return routed;
   });
 
   /**

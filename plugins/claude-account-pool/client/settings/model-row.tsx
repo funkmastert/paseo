@@ -9,6 +9,8 @@ export interface ModelRowProps {
   isLast: boolean;
   disabled: boolean;
   theme: PluginSurfaceProps["theme"];
+  /** Set when the catalog check says something about this entry (see ./pool-entry-status.ts). */
+  warning?: string;
   onMoveUp(): void;
   onMoveDown(): void;
   onRemove(): void;
@@ -50,9 +52,9 @@ function bindingHint(modelRef: string): string {
 }
 
 /** One entry in a role's ordered model list — most-preferred first. */
-export function ModelRow({ modelRef, isFirst, isLast, disabled, theme, onMoveUp, onMoveDown, onRemove }: ModelRowProps) {
+export function ModelRow({ modelRef, isFirst, isLast, disabled, theme, warning, onMoveUp, onMoveDown, onRemove }: ModelRowProps) {
   return (
-    <SettingsRow label={modelRef} hint={bindingHint(modelRef)} testID={`model-row-${modelRef}`}>
+    <SettingsRow label={modelRef} hint={warning ? `${bindingHint(modelRef)} ${warning}` : bindingHint(modelRef)} testID={`model-row-${modelRef}`}>
       <View style={{ flexDirection: "row", alignItems: "center" }}>
         <IconButton name="ChevronUp" disabled={disabled || isFirst} color={theme.colors.foreground} onPress={onMoveUp} />
         <IconButton name="ChevronDown" disabled={disabled || isLast} color={theme.colors.foreground} onPress={onMoveDown} />

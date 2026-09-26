@@ -258,6 +258,16 @@ The properties it holds to, each one bought with an incident:
   what the explain RPC and the settings preview print — the rendering side
   states no rule of its own.
 
+Every create writes one line, from `server/decision-log.ts`, prefixed
+`classifier-decision ` and followed by a single JSON object: role and its
+source, task class and its source, the model (pool slot, outcome, what it
+resolved from, whether an explicit request was overridden), the thinking level,
+the account, any pool entries that can never run, and the classifier's reasons.
+The role router notes the decision and the account router's hook writes the
+line, because the account is decided there. It names the account that runs, and
+a refused create is logged with `account: {"refused": true}`. Find them with
+`grep 'classifier-decision ' daemon.log`.
+
 #### Keeping the prose from becoming a fifth authority
 
 The rules used to be restated in English in two more places — the
@@ -645,6 +655,20 @@ The override reason distinguishes two different situations:
   approved model that's temporarily unavailable gets policy's live
   selection instead, with a message that says so — not the same message as
   a caller who asked for a model the role forbids.
+
+#### A dated snapshot and its alias are one model
+
+`claude-haiku-4-5-20251001` in a pool and `claude-haiku-4-5` in the catalog
+name the same model. The catalog check, the explicit-request approval check
+and `allowUnlistedModels` all compare `modelIdentity` (`shared/model-identity.ts`):
+case-folded, with a trailing `-YYYYMMDD` removed. Nothing else is folded, so
+`claude-opus-5-5` and `claude-opus-5` stay different models and `[1m]` stays
+part of the identity. When the two spellings differ, the id that runs is the
+catalog's (`ModelDecision.resolvedFrom` keeps the pool's spelling, and the
+decision's reason says both). The settings screen's pool rows run the same
+check against the loaded catalog: an entry that no spelling resolves and
+`allowUnlistedModels` doesn't name is marked `NEVER RUNS`. The
+`agent_model_policy` tool and the explain preview list the same entries.
 
 #### Models the CLI accepts but doesn't advertise: `allowUnlistedModels`
 
