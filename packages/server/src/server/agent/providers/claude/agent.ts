@@ -3637,7 +3637,8 @@ class ClaudeAgentSession implements AgentSession {
     // `settings.outputStyle`, merged with whatever `providerOptions.settings` carries (the tool
     // deny tier lives there).
     const outputStyle = this.config.outputStyle;
-    if (fastMode === null && !input.ultracode && !outputStyle) {
+    const connectorsDisabled = this.config.claudeAiConnectorsDisabled === true;
+    if (fastMode === null && !input.ultracode && !outputStyle && !connectorsDisabled) {
       return {};
     }
     return {
@@ -3645,6 +3646,7 @@ class ClaudeAgentSession implements AgentSession {
         ...(fastMode === null ? {} : { fastMode }),
         ...(input.ultracode ? { ultracode: true } : {}),
         ...(outputStyle ? { outputStyle } : {}),
+        ...(connectorsDisabled ? { disableClaudeAiConnectors: true } : {}),
       }),
     };
   }

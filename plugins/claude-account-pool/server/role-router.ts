@@ -23,6 +23,8 @@ import type { ProviderIdCache } from "./router";
 import { formatModelRef } from "./role-availability";
 import type { ParentToolProfiles } from "./parent-profiles";
 import type { ResolveRoleTier } from "./role-resolve";
+import type { McpGatewayCache } from "./mcp-gateway-cache";
+import { withMcpScope } from "./mcp-scope-enforcement";
 
 /** Stands in for `callerAgentId` in notifications about a root agent, which has none. */
 const ROOT_AGENT_CALLER = "(root agent)";
@@ -36,6 +38,12 @@ export interface DeclaredRoleUnknownEpisode {
 export interface DeclaredTaskClassUnknownEpisode {
   callerAgentId: string;
   value: string;
+}
+
+/** Fired when labels[paseo.mcp] named servers no gateway server is called. Mirrors DeclaredTaskClassUnknownEpisode. */
+export interface DeclaredMcpUnknownEpisode {
+  callerAgentId: string;
+  values: string[];
 }
 
 export interface RoleUnavailableEpisode {
@@ -159,6 +167,13 @@ export interface RoleRouterOptions {
   onDeclaredRoleUnknown?: (episode: DeclaredRoleUnknownEpisode) => void;
   /** Called (deduplicated per caller+value) when a caller declared an unrecognized labels[paseo.task-class] value. */
   onDeclaredTaskClassUnknown?: (episode: DeclaredTaskClassUnknownEpisode) => void;
+  /**
+   * The daemon's MCP gateway servers, for the MCP half of the decision.
+   * Optional: without it every agent keeps every server, as before scoping.
+   */
+  mcpGatewayCache?: Pick<McpGatewayCache, "get">;
+  /** Called (deduplicated per caller+values) when labels[paseo.mcp] named something no gateway server is called. */
+  onDeclaredMcpUnknown?: (episode: DeclaredMcpUnknownEpisode) => void;
   /**
    * Called (deduplicated per caller+role) when a role's tool profile was
    * withheld because the role came from tier-3/4 classification rather than
@@ -474,13 +489,16 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
   const thinkingOverriddenSeen = new Set<string>();
   const toolProfileWithheldSeen = new Set<string>();
   const parentUnresolvedSeen = new Set<string>();
+  const declaredMcpUnknownSeen = new Set<string>();
   const logThrottle = createLogThrottle({ now: options.now });
 
   return function routeRoleForCreate(input) {
     try {
-      return routeRoleForCreateUnguarded(
+      const decided: DecisionHolder = {};
+      const routed = routeRoleForCreateUnguarded(
         input,
         options,
+        decided,
         declaredUnknownSeen,
         declaredTaskClassUnknownSeen,
         unavailableRoleIds,
@@ -490,6 +508,7 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         toolProfileWithheldSeen,
         parentUnresolvedSeen,
       );
+      return applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in classification
@@ -539,9 +558,43 @@ function requestedOutputStyleOf(request: PluginBeforeRequests["agent.create"]): 
   return typeof style === "string" && style.length > 0 ? style : undefined;
 }
 
+/** Where the unguarded router leaves its decision for the MCP step that runs after it. */
+interface DecisionHolder {
+  decision?: AgentDecision;
+}
+
+/**
+ * Applies the MCP half of the decision to whatever the rest of the router
+ * returned. Kept outside the router's many return paths so every one of
+ * them gets it, including the recovered and honored ones.
+ */
+function applyMcpDecision(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  decision: AgentDecision | undefined,
+  options: RoleRouterOptions,
+  declaredMcpUnknownSeen: Set<string>,
+): PluginBeforeRequests["agent.create"] | void {
+  if (!decision) {
+    return routed;
+  }
+  const unknown = decision.mcp.unknownDeclaredValues;
+  if (unknown) {
+    const caller = (request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields).callerAgentId ?? ROOT_AGENT_CALLER;
+    const dedupeKey = `${caller} ${unknown.join(",")}`;
+    if (!declaredMcpUnknownSeen.has(dedupeKey)) {
+      declaredMcpUnknownSeen.add(dedupeKey);
+      options.onDeclaredMcpUnknown?.({ callerAgentId: caller, values: unknown });
+    }
+  }
+  const base = routed ?? request;
+  return withMcpScope(base, decision.mcp) ?? routed;
+}
+
 function routeRoleForCreateUnguarded(
   input: { request: PluginBeforeRequests["agent.create"] },
   options: RoleRouterOptions,
+  decided: DecisionHolder,
   declaredUnknownSeen: Set<string>,
   declaredTaskClassUnknownSeen: Set<string>,
   unavailableRoleIds: Set<string>,
@@ -592,8 +645,10 @@ function routeRoleForCreateUnguarded(
       pool,
       health: options.health,
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
+      mcpGateway: options.mcpGatewayCache?.get(),
     },
   );
+  decided.decision = decision;
 
   options.decisionLog?.note(request as unknown as LoggedRequest, decision);
 

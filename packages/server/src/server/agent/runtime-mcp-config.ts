@@ -73,8 +73,45 @@ function isInternalPaseoMcpServer(config: McpServerConfig): boolean {
 const MCP_GATEWAY_PATH_PREFIX = "/mcp/gateway/";
 
 /**
+ * The gateway servers an agent was spawned with, as a comma-separated list of
+ * `mcpGateway.servers` names (`none` for an empty list). Written once at
+ * create by a `before("agent.create")` hook (the account-pool plugin's
+ * classifier) and read on every launch, so a resumed or reloaded agent gets
+ * the same set it started with: connecting or dropping a server mid-session
+ * rebuilds the prompt cache. Absent means every server. `claude.ai` in the
+ * list keeps the account's claude.ai connectors (`claudeAiConnectorsInScope`).
+ */
+export const MCP_SCOPE_LABEL = "paseo.mcp-scope";
+
+export function scopeMcpGatewayServerNames(
+  serverNames: readonly string[],
+  labels: Readonly<Record<string, string>> | undefined,
+): string[] {
+  const scope = labels?.[MCP_SCOPE_LABEL];
+  if (scope === undefined) {
+    return [...serverNames];
+  }
+  const granted = new Set(scope.split(",").map((name) => name.trim()));
+  return serverNames.filter((name) => granted.has(name));
+}
+
+/** The scope entry naming the account's claude.ai connectors, which the CLI loads itself. */
+const CLAUDE_AI_CONNECTORS_SCOPE = "claude.ai";
+
+/** Whether the agent's recorded scope keeps the claude.ai connectors. No scope keeps them. */
+export function claudeAiConnectorsInScope(
+  labels: Readonly<Record<string, string>> | undefined,
+): boolean {
+  const scope = labels?.[MCP_SCOPE_LABEL];
+  if (scope === undefined) {
+    return true;
+  }
+  return scope.split(",").some((name) => name.trim() === CLAUDE_AI_CONNECTORS_SCOPE);
+}
+
+/**
  * Strips brokered MCP gateway entries (KTD1) and the runtime-only `mcpGatewayEnabled` /
- * `mcpGatewaySessionMode` signals (KTD6) from a config before it's persisted — mirrors
+ * `mcpGatewaySessionMode` signals (KTD6), plus `claudeAiConnectorsDisabled`, from a config before it's persisted — mirrors
  * `stripInternalPaseoMcpServer`. Entries are identified by URL pathname prefix rather than by
  * name, since brokered server names come from the operator's `mcpGateway.servers` config
  * (KTD9), not a fixed identifier.
@@ -83,6 +120,7 @@ export function stripMcpGatewayServers(config: AgentSessionConfig): AgentSession
   const next = { ...config };
   delete next.mcpGatewayEnabled;
   delete next.mcpGatewaySessionMode;
+  delete next.claudeAiConnectorsDisabled;
 
   const mcpServers = next.mcpServers;
   if (!mcpServers) {

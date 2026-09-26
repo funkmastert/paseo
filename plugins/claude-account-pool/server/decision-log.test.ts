@@ -87,6 +87,8 @@ describe("decision log", () => {
       thinking: { optionId: null, outcome: "no-thinking-options" },
       account: { providerId: "claude-work" },
       outputStyle: "Concise",
+      // No gateway snapshot in this world, so nothing is scoped.
+      mcp: "all",
     });
     expect(line.reasons.model).toContain("claude-haiku-4-5-20251001");
   });

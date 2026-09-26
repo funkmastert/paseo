@@ -109,9 +109,10 @@ describe("contribute (index.server)", () => {
       await Promise.resolve();
     }
 
-    // Twice: the pool cache and the role-policy cache each read daemon
-    // config independently (mirrors pool.ts's own config.get() call).
-    expect(configGet).toHaveBeenCalledTimes(2);
+    // Three times: the pool cache, the role-policy cache and the MCP gateway
+    // cache each read daemon config independently (mirrors pool.ts's own
+    // config.get() call).
+    expect(configGet).toHaveBeenCalledTimes(3);
     expect(providersSnapshot).toHaveBeenCalledTimes(1);
 
     // The usage poller must not wait for its own 5-minute interval either —

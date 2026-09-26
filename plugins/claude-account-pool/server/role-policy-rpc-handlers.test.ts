@@ -951,3 +951,34 @@ describe("explain — the thinking decision", () => {
     expect(RoleModelPolicyExplainResultSchema.safeParse({ ...older, reasons: olderReasons }).success).toBe(true);
   });
 });
+
+describe("explain — MCP scope", () => {
+  const gateway = {
+    get: () => ({ servers: [{ name: "zeeq", critical: true }, { name: "linear", critical: false }] }),
+    forceRefresh: vi.fn().mockResolvedValue(undefined),
+  };
+
+  it("reports the servers a child would be spawned with and the label it would carry", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ mcpGatewayCache: gateway }));
+
+    const result = await handlers.explain({ mcp: "linear" }, context(fakePaseo({})));
+
+    expect(result.mcp).toMatchObject({
+      scoped: true,
+      gatewayServers: ["zeeq", "linear"],
+      withheldServers: [],
+      claudeAiConnectors: false,
+      scopeLabel: "zeeq,linear",
+    });
+    expect(result.reasons.mcp).toMatch(/linear/);
+  });
+
+  it("reports a root keeping everything, with no label", async () => {
+    const handlers = createRoleModelPolicyRpcHandlers(baseDeps({ mcpGatewayCache: gateway }));
+
+    const result = await handlers.explain({ root: true }, context(fakePaseo({})));
+
+    expect(result.mcp).toMatchObject({ scoped: false, gatewayServers: ["zeeq", "linear"], claudeAiConnectors: true });
+    expect(result.mcp?.scopeLabel).toBeUndefined();
+  });
+});

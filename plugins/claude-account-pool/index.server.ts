@@ -2,6 +2,7 @@ import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } fro
 import { createAccountIdentity } from "./server/account-identity";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { createHealthTracker } from "./server/health";
+import { createMcpGatewayCache, type McpGatewayCache } from "./server/mcp-gateway-cache";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
 import { createNotifier, type Notifier } from "./server/notify";
 import { createParentToolProfiles, type ParentToolProfiles } from "./server/parent-profiles";
@@ -52,6 +53,7 @@ export default function contribute(server: PluginServerContext) {
   let parentProfiles: ParentToolProfiles | null = null;
   let router: AgentCreateRouter | null = null;
   let policyCache: PolicyCache | null = null;
+  let mcpGatewayCache: McpGatewayCache | null = null;
   let catalogCache: ModelCatalogCache | null = null;
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
@@ -92,6 +94,8 @@ export default function contribute(server: PluginServerContext) {
     notifier = createNotifier({ paseo, health });
     policyCache = createPolicyCache(paseo);
     const startedPolicyCache = policyCache;
+    mcpGatewayCache = createMcpGatewayCache(paseo);
+    const startedMcpGatewayCache = mcpGatewayCache;
     catalogCache = createModelCatalogCache(paseo, () => catalogFamilies(startedPolicyCache.get()));
     recentAgentTypes = createRecentAgentTypes();
     parentProfiles = createParentToolProfiles(paseo);
@@ -112,6 +116,11 @@ export default function contribute(server: PluginServerContext) {
       recentAgentTypes,
       providerIds,
       parentProfiles,
+      mcpGatewayCache,
+      onDeclaredMcpUnknown: (episode) =>
+        console.error(
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" asked for MCP servers ${episode.values.map((value) => `"${value}"`).join(", ")} in paseo.mcp, which no mcpGateway server is called; created without them`,
+        ),
       onDeclaredRoleUnknown: (episode) =>
         console.error(
           `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
@@ -181,6 +190,7 @@ export default function contribute(server: PluginServerContext) {
       poolCache,
       health,
       recentAgentTypes,
+      mcpGatewayCache,
     });
     router = createRouter({
       poolCache,
@@ -254,6 +264,8 @@ export default function contribute(server: PluginServerContext) {
             .then(() => startedCatalogCache.forceRefresh())
             .catch(() => undefined),
           startedUsagePoller.pollOnce().catch(() => undefined),
+          // Before its first read every child keeps every MCP server.
+          startedMcpGatewayCache.forceRefresh().catch(() => undefined),
         ]).then(() => undefined);
         const timedOut = new Promise<void>((resolveTimeout) => {
           const timer = setTimeout(resolveTimeout, STARTUP_WARM_TIMEOUT_MS);
@@ -360,6 +372,7 @@ export default function contribute(server: PluginServerContext) {
     const startedPolicyCache = policyCache;
     const startedCatalogCache = catalogCache;
     const startedPoolCache = poolCache;
+    const startedMcpGatewayCache = mcpGatewayCache;
     classifierTool = startClassifierToolServer({
       world: () => ({
         policy: startedPolicyCache.get(),
@@ -368,6 +381,7 @@ export default function contribute(server: PluginServerContext) {
         pool: startedPoolCache.get().pool,
         health,
         nowMs: Date.now(),
+        mcpGateway: startedMcpGatewayCache?.get(),
       }),
     });
     return classifierTool;
@@ -480,6 +494,7 @@ export default function contribute(server: PluginServerContext) {
     usagePoller?.stop();
     notifier?.stop();
     policyCache?.stop();
+    mcpGatewayCache?.stop();
     catalogCache?.stop();
     parentProfiles?.stop();
     classifierTool?.close();

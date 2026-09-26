@@ -706,6 +706,13 @@ export interface AgentSessionConfig {
    */
   mcpGatewaySessionMode?: McpGatewaySessionMode;
   /**
+   * Runtime-only: this launch turns the account's claude.ai connectors off, because the agent's
+   * `paseo.mcp-scope` label leaves them out (`claudeAiConnectorsInScope` in
+   * `runtime-mcp-config.ts`). Derived from the label on every launch and never persisted, so a
+   * daemon that predates it simply keeps them on. Stripped from storage with the gateway signals.
+   */
+  claudeAiConnectorsDisabled?: boolean;
+  /**
    * Internal agents are hidden from listings and don't trigger notifications.
    * They are used for ephemeral system tasks like commit/PR generation.
    */

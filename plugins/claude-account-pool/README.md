@@ -230,8 +230,9 @@ mappings, and their precedence) is ported from
 everything known at `agent.create` — labels, title, initial prompt, whether
 there is a calling agent and what that caller was itself denied, any requested
 provider/model or thinking level, the policy document, the live catalog, the
-pool and its health — and returns one `AgentDecision`: role, task class, model,
-account, tool profile, thinking level, **and a sentence per part saying why**.
+pool, its health and the MCP gateway's servers — and returns one
+`AgentDecision`: role, task class, model, account, tool profile, thinking
+level, MCP servers, **and a sentence per part saying why**.
 The thinking level is decided after the model, because what a model offers
 bounds it.
 
@@ -239,7 +240,7 @@ Everything that needs the answer calls that one function:
 
 | Consumer | What it does with the decision |
 | --- | --- |
-| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, `config.thinkingOptionId`, the tool profile into `config.providerOptions`, the labels recording what happened — including `paseo.thinking-overridden-by-policy` when the level that runs isn't the one asked for. |
+| `before("agent.create")` (`server/role-router.ts`) | Writes it onto the request: `config.model`, `config.provider` on a cross-family selection, `config.thinkingOptionId`, the tool profile into `config.providerOptions`, the labels recording what happened — including `paseo.thinking-overridden-by-policy` when the level that runs isn't the one asked for, and `paseo.mcp-scope` for a scoped child (see [MCP servers](#mcp-servers)). |
 | `role-model-policy.explain` (`server/role-policy-rpc-handlers.ts`) | Projects it onto the wire for the settings preview. |
 | `agent_model_policy` (MCP tool, below) | Renders it as text for an agent asking before it spawns. |
 
@@ -299,6 +300,9 @@ The paragraph a fleet prompt should carry, in full:
 > it heads the leader pool and every `hard` pool. **Fable is in no pool at
 > all** — Opus 5.5 supersedes it, so nothing routes there and asking for it
 > gets you overridden.
+> A child gets Paseo's own tools and the critical MCP servers; if it needs
+> another (linear, notion, github, …) or the claude.ai connectors, set
+> `paseo.mcp` to a comma-separated list of server names, `claude.ai`, or `all`.
 > To see what a create would actually produce before you make it, call the
 > `agent_model_policy` tool, which runs the same classifier the daemon does and
 > reports the role, class, model, thinking level, account and tools you would
@@ -1156,6 +1160,50 @@ When on, tiers 3 and 4 enforce their resolved role's tool profile too, with
 no distinction from an explicit label. It isn't exposed on the settings
 screen yet — set it directly on the stored `agentModelPolicy` document if you
 need it.
+
+### MCP servers
+
+A root agent gets every MCP server. A child gets Paseo's own server, the
+servers marked `critical` in `mcpGateway.servers`, and whatever else it asks
+for or its work names. The CLI defers MCP tool schemas, but every tool's name
+still rides in the prompt of every request, so an agent that never touches
+Linear should not carry Linear's 68 tools. Measured on 2026-09-25 with Sonnet 5
+on Claude Code 2.1.280, a child's request prefix went from 32.8k to 28.9k
+tokens. `server/mcp-scope.ts` decides it as part of the
+classifier:
+
+- `paseo.mcp` on the create (`linear,notion`, `claude.ai` for the account's
+  claude.ai connectors, `all` for everything) adds servers. An unknown name is
+  logged and ignored; the create goes ahead.
+- A role's optional `mcpServers` list in `agentModelPolicy` adds servers for
+  every child resolved to that role. There is no editor for it on the
+  settings screen yet.
+- A server whose name appears as a word in the title or prompt is added
+  (`mcp__linear__…` counts; `github-actions` does not name `github`). Claude
+  Docs and Google Drive in the text add the connectors.
+
+Requests only ever add. Nothing removes a critical server, and inference
+cannot strip what the caller asked for.
+
+The router writes the decision as one label, `paseo.mcp-scope`: the granted
+gateway servers, plus `claude.ai` when the connectors stay on (`none` when
+nothing is granted). The label persists with the agent, and the daemon reads
+it on every launch, so a resume, reload or account move replays the spawn-time
+set rather than deciding again; see
+[Session injection](../../docs/mcp-gateway.md#session-injection). An agent
+without it gets every server, which is also what every agent created before
+scoping gets. The router strips the label from a root, so a caller cannot
+scope an agent the classifier did not.
+
+The label is the only thing the router writes for this, because the daemon
+loading the plugin can be older than the plugin. An older daemon ignores the
+label and the agent keeps everything. A new `providerOptions` key would
+instead fail every child create there: the Claude options schema is strict and
+re-validated on create and resume.
+
+The explain RPC and the `agent_model_policy` tool take a `mcp` argument
+simulating `paseo.mcp` and report the servers the agent would get and the
+label it would carry.
 
 ### Asking before you spawn
 

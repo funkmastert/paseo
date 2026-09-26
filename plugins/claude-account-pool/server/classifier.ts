@@ -44,11 +44,12 @@ import {
   type ResolveRoleTier,
   type TaskClassSource,
 } from "./role-resolve";
+import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scope";
 
 /**
  * THE classifier. One deterministic function answering the whole of "what
  * should this agent be" — role, task class, model, thinking level, account,
- * tools — from everything known at `agent.create`.
+ * tools and MCP servers — from everything known at `agent.create`.
  *
  * Every consumer calls this and only this: the `before("agent.create")` hook
  * (server/role-router.ts), the `role-model-policy.explain` RPC
@@ -139,6 +140,12 @@ interface ClassifierWorldBase {
    * caller isn't tracking inheritance, which behaves like `cold`.
    */
   callerDenials?: { status: "known"; denied: readonly string[] } | { status: "cold" } | { status: "unknown" };
+  /**
+   * The daemon's MCP gateway servers and which are critical, for the MCP
+   * scope (server/mcp-scope.ts). Omitted means the config could not be read,
+   * which fails open: every server, as before scoping existed.
+   */
+  mcpGateway?: McpGatewaySnapshot;
 }
 
 /**
@@ -394,6 +401,8 @@ export interface AgentDecision {
   account: AccountDecision;
   thinking: ThinkingDecision;
   outputStyle: OutputStyleDecision;
+  /** Which MCP gateway servers and connectors it is spawned with. See server/mcp-scope.ts. */
+  mcp: McpDecision;
 }
 
 /** The read-only floor a child falls to when its parent's restrictions are unknowable. */
@@ -1203,6 +1212,11 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const account = decideAccount(input, world, model, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, hasCaller);
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
+  const mcp = decideMcp(
+    { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },
+    world.mcpGateway,
+    roleDecision.role,
+  );
 
-  return { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle };
+  return { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle, mcp };
 }

@@ -1065,6 +1065,33 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  test("turns the account's claude.ai connectors off through Claude flag settings when the launch says so", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      model: "claude-opus-4-8",
+      providerOptions: { settings: { permissions: { deny: ["Bash"] } } },
+      claudeAiConnectorsDisabled: true,
+    });
+
+    await expect(
+      (session as unknown as { ensureQuery(): Promise<unknown> }).ensureQuery(),
+    ).resolves.toBeDefined();
+
+    expect(queryFactory.mock.calls[0]?.[0].options.settings).toMatchObject({
+      permissions: { deny: ["Bash"] },
+      disableClaudeAiConnectors: true,
+    });
+
+    await session.close();
+  });
+
   test("maps Ultracode to xhigh effort and Claude ultracode settings", async () => {
     const { queryFactory } = createQueryMock();
     const client = new ClaudeAgentClient({

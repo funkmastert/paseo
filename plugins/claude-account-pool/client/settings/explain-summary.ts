@@ -1,5 +1,5 @@
 import type { RoleModelPolicyExplainResult } from "../../shared/role-policy-rpc";
-import { THINKING_OVERRIDDEN_LABEL } from "../../shared/role-policy-schema";
+import { MCP_SCOPE_LABEL, THINKING_OVERRIDDEN_LABEL } from "../../shared/role-policy-schema";
 import { THINKING_LEVEL_LABELS, type ThinkingLevelId } from "../../shared/thinking-levels";
 
 /**
@@ -95,6 +95,24 @@ export function describeTools(result: RoleModelPolicyExplainResult): string {
   return `${applied} — ${result.reasons.tools}${withheld}`;
 }
 
+/**
+ * The MCP line: the servers the agent would be spawned with, the label a real
+ * one would carry, and the classifier's sentence. Absent when the plugin
+ * predates MCP scoping.
+ */
+export function describeMcp(result: RoleModelPolicyExplainResult): string | undefined {
+  const mcp = result.mcp;
+  if (mcp === undefined || result.reasons.mcp === undefined) {
+    return undefined;
+  }
+  if (!mcp.scoped) {
+    return `MCP servers: all — ${result.reasons.mcp}`;
+  }
+  const servers = mcp.gatewayServers.length > 0 ? mcp.gatewayServers.join(", ") : "none from the gateway";
+  const connectors = mcp.claudeAiConnectors ? " + claude.ai connectors" : "";
+  return `MCP servers: ${servers}${connectors} — ${result.reasons.mcp} A real agent would carry ${MCP_SCOPE_LABEL}=${mcp.scopeLabel ?? ""}.`;
+}
+
 /** The account line — which pooled account serves it, from the same ladder the account router walks. */
 export function describeAccount(result: RoleModelPolicyExplainResult): string {
   const target = result.account.providerId ? `${result.account.providerId} — ` : "";
@@ -146,6 +164,7 @@ export function explainSummaryLines(result: RoleModelPolicyExplainResult): strin
   const requested = describeRequestedModel(result);
   const requestedThinking = describeRequestedThinking(result);
   const unadvertised = describeUnadvertisedEntries(result);
+  const mcp = describeMcp(result);
   return [
     describeRole(result),
     describeTaskClass(result),
@@ -153,6 +172,7 @@ export function explainSummaryLines(result: RoleModelPolicyExplainResult): strin
     ...(thinking ? [thinking] : []),
     describeTools(result),
     ...(outputStyle ? [outputStyle] : []),
+    ...(mcp ? [mcp] : []),
     describeAccount(result),
     ...(requested ? [requested] : []),
     ...(requestedThinking ? [requestedThinking] : []),

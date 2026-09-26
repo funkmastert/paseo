@@ -16,6 +16,24 @@ export const AGENT_ROLE_LABEL = "paseo.agent-role";
 export const TASK_CLASS_LABEL = "paseo.task-class";
 
 /**
+ * Asks for MCP gateway servers a child would not get by default: a
+ * comma-separated list of `mcpGateway.servers` names, `claude.ai` for the
+ * account's claude.ai connectors, or `all`. Only ever adds. An unknown name
+ * never blocks the create. See server/mcp-scope.ts.
+ */
+export const MCP_LABEL = "paseo.mcp";
+
+/**
+ * Set by the role router: the MCP servers the agent was spawned with, which
+ * the daemon reads on every launch (create, resume, reload) so a resumed
+ * agent gets exactly that set. Absent means every server, which is also
+ * what an agent created before scoping existed gets. The daemon's copy of
+ * this name and its parser live in
+ * `packages/server/src/server/agent/runtime-mcp-config.ts`.
+ */
+export const MCP_SCOPE_LABEL = "paseo.mcp-scope";
+
+/**
  * Set by the role router (never read by it) when an explicitly requested
  * model wasn't a member of the resolved role's pool and policy overrode it.
  * Value is the ref the caller asked for, so the UI can show "model chosen by
@@ -157,6 +175,8 @@ export const MAX_ALIASES_PER_ROLE = 8;
 export const MAX_MODELS_PER_ROLE = 32;
 export const MAX_MAPPINGS = 256;
 export const MAX_MODEL_REF_LENGTH = 256;
+export const MAX_MCP_SERVERS_PER_ROLE = 32;
+export const MAX_MCP_SERVER_NAME_LENGTH = 128;
 
 /**
  * A thinking-effort option id, as a model's `thinkingOptions` (or the
@@ -278,6 +298,13 @@ export const RoleRecordSchema = z.object({
    * behaving exactly as it did.
    */
   toolProfile: ToolProfileSchema.default(DEFAULT_TOOL_PROFILE),
+  /**
+   * MCP gateway servers every child resolved to this role gets on top of the
+   * critical ones, by `mcpGateway.servers` name (`claude.ai` names the
+   * account's claude.ai connectors). Absent adds nothing. See
+   * server/mcp-scope.ts.
+   */
+  mcpServers: z.array(z.string().min(1).max(MAX_MCP_SERVER_NAME_LENGTH)).max(MAX_MCP_SERVERS_PER_ROLE).optional(),
 });
 export type RoleRecord = z.infer<typeof RoleRecordSchema>;
 
