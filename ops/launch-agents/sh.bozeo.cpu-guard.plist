@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>sh.bozeo.cpu-guard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/tylerthackray/.nvm/versions/node/v24.18.0/bin/node</string>
+    <string>/Users/tylerthackray/bozeo-ops/cpu-guard.mjs</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/usr/sbin:/usr/bin:/bin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/cpu-guard.log</string>
+  <key>StandardErrorPath</key><string>/Users/tylerthackray/Library/Logs/Bozeo/cpu-guard.log</string>
+</dict>
+</plist>
