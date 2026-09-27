@@ -73,6 +73,11 @@ function splitNames(value: string | undefined): string[] {
     .filter((name) => name.length > 0);
 }
 
+/** How a declared name is compared with a gateway server name: trimmed and case-folded, as text inference already is. */
+function foldName(name: string): string {
+  return name.trim().toLowerCase();
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -138,12 +143,13 @@ export function decideMcp(
   gateway: McpGatewaySnapshot | undefined,
   role: RoleRecord,
 ): McpDecision {
-  const declared = splitNames(input.labels?.[MCP_LABEL]);
-  const gatewayNames = new Set(gateway?.servers.map((server) => server.name) ?? []);
-  const unknown = declared.filter(
-    (name) =>
-      name !== ALL_SERVERS && name !== PASEO_SERVER && name !== CLAUDE_AI_CONNECTORS && !gatewayNames.has(name),
-  );
+  const declaredValues = splitNames(input.labels?.[MCP_LABEL]);
+  const declared = new Set(declaredValues.map(foldName));
+  const gatewayNames = new Set(gateway?.servers.map((server) => foldName(server.name)) ?? []);
+  const unknown = declaredValues.filter((name) => {
+    const folded = foldName(name);
+    return folded !== ALL_SERVERS && folded !== PASEO_SERVER && folded !== CLAUDE_AI_CONNECTORS && !gatewayNames.has(folded);
+  });
   const unknownDeclaredValues = unknown.length > 0 ? unknown : undefined;
 
   if (!input.hasCaller) {
@@ -160,7 +166,7 @@ export function decideMcp(
       unknownDeclaredValues,
     );
   }
-  if (declared.includes(ALL_SERVERS)) {
+  if (declared.has(ALL_SERVERS)) {
     return everything(
       gateway,
       `Every MCP server: ${MCP_LABEL}=${ALL_SERVERS} asked for all of them.${unknownNote(unknown)}`,
@@ -168,11 +174,11 @@ export function decideMcp(
     );
   }
 
-  const roleNames = role.mcpServers ?? [];
+  const roleNames = new Set((role.mcpServers ?? []).map(foldName));
   const text = [input.title ?? "", input.initialPrompt ?? ""].join("\n");
   const sourceOf = (server: McpGatewayServerInfo): McpGrantSource | undefined => {
-    if (declared.includes(server.name)) return "declared";
-    if (roleNames.includes(server.name)) return "role";
+    if (declared.has(foldName(server.name))) return "declared";
+    if (roleNames.has(foldName(server.name))) return "role";
     if (server.critical) return "critical";
     if (textNames(text, server.name)) return "inferred";
     return undefined;
@@ -189,9 +195,9 @@ export function decideMcp(
     }
   }
 
-  const connectorSource: McpGrantSource | undefined = declared.includes(CLAUDE_AI_CONNECTORS)
+  const connectorSource: McpGrantSource | undefined = declared.has(CLAUDE_AI_CONNECTORS)
     ? "declared"
-    : roleNames.includes(CLAUDE_AI_CONNECTORS)
+    : roleNames.has(CLAUDE_AI_CONNECTORS)
       ? "role"
       : CLAUDE_AI_TEXT_RE.test(text)
         ? "inferred"

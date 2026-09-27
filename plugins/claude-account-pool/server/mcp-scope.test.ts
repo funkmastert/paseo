@@ -64,6 +64,20 @@ describe("decideMcp", () => {
     expect(decision.reason).toMatch(/jira/);
   });
 
+  it("matches paseo.mcp and role values case-insensitively, labels with the gateway's spelling, reports unknowns as written", () => {
+    const decision = decideMcp(child({ labels: { [MCP_LABEL]: " Github , CLAUDE.AI, Paseo, NoSuch" } }), GATEWAY, {
+      ...worker,
+      mcpServers: ["Notion"],
+    });
+    expect(decision.grants).toContainEqual({ server: "github", source: "declared" });
+    expect(decision.grants).toContainEqual({ server: "notion", source: "role" });
+    expect(decision.claudeAiConnectors).toBe(true);
+    expect(decision.withheldServers).not.toContain("github");
+    expect(decision.unknownDeclaredValues).toEqual(["NoSuch"]);
+    expect(mcpScopeLabelValue(decision)).toBe("zeeq,github,notion,agent-gateway,claude.ai");
+    expect(decideMcp(child({ labels: { [MCP_LABEL]: "ALL" } }), GATEWAY, worker).scoped).toBe(false);
+  });
+
   it("paseo is always there, so naming it is not unknown", () => {
     const decision = decideMcp(child({ labels: { [MCP_LABEL]: "paseo" } }), GATEWAY, worker);
     expect(decision.unknownDeclaredValues).toBeUndefined();
