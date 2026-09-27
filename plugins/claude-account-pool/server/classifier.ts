@@ -441,11 +441,19 @@ function roleSourceFor(tier: ResolveRoleTier, match: ClassificationMatch | undef
   return "default";
 }
 
+/** Longest caller-supplied label value a reason quotes; past it the value is cut and ends in an ellipsis. */
+const MAX_ECHOED_VALUE_CHARS = 120;
+
+/** A caller-supplied value as a reason quotes it: capped, so a huge label cannot make a huge log line. */
+function echoed(value: string): string {
+  return value.length > MAX_ECHOED_VALUE_CHARS ? `${value.slice(0, MAX_ECHOED_VALUE_CHARS)}…` : value;
+}
+
 function describeRole(decision: Omit<RoleDecision, "reason">, input: ClassifierInput): string {
   const name = decision.role.name;
   const ignored =
     decision.unknownDeclaredValue !== undefined
-      ? ` The declared role "${decision.unknownDeclaredValue}" matched no configured role name or alias, so it was ignored rather than blocking the create.`
+      ? ` The declared role "${echoed(decision.unknownDeclaredValue)}" matched no configured role name or alias, so it was ignored rather than blocking the create.`
       : "";
   switch (decision.source) {
     case "leader-tier":
@@ -468,7 +476,7 @@ function describeRole(decision: Omit<RoleDecision, "reason">, input: ClassifierI
 function describeTaskClass(decision: Omit<TaskClassDecision, "reason">): string {
   const ignored =
     decision.unknownDeclaredValue !== undefined
-      ? ` The declared class "${decision.unknownDeclaredValue}" is not one of mechanical/standard/hard, so it was ignored.`
+      ? ` The declared class "${echoed(decision.unknownDeclaredValue)}" is not one of mechanical/standard/hard, so it was ignored.`
       : "";
   switch (decision.source) {
     case "declared":

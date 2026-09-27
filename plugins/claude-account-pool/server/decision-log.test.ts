@@ -188,6 +188,18 @@ describe("decision log", () => {
     expect(stripped.labels).toEqual(asked.labels);
   });
 
+  it("caps an unknown role or task-class label value echoed into the reasons, so a huge label cannot make a huge line", () => {
+    const { lines, log } = harness();
+    const huge = "x".repeat(2_000_000);
+    const asked = request({ labels: { "paseo.agent-role": huge, "paseo.task-class": huge } });
+    log.note(asked, decisionFor(asked));
+    log.finish(tokenOf(log, asked), asked, asked);
+    const line = parse(lines[0]);
+    expect(lines[0].length).toBeLessThan(10_000);
+    expect(line.reasons.role).toContain(`"${"x".repeat(120)}…"`);
+    expect(line.reasons.taskClass).toContain(`"${"x".repeat(120)}…"`);
+  });
+
   it("marks a root create", () => {
     const { lines, log } = harness();
     const root = request({ callerAgentId: undefined, labels: undefined });
