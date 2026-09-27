@@ -1,4 +1,5 @@
 import type { AgentDecision } from "./classifier";
+import { echoed } from "./echo";
 import { mcpScopeLabelValue } from "./mcp-scope";
 
 /**
@@ -133,13 +134,27 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
   };
 }
 
+/** The model the request that runs carries. It is the caller's own whenever no hook rewrote it, so it is capped. */
+function finalModel(result: LoggedRequest | undefined): { final: string } | undefined {
+  return result?.config.model !== undefined ? { final: echoed(result.config.model) } : undefined;
+}
+
+/** The account the request that runs carries, or that it was refused. It is the caller's own whenever the pool passed it through, so it is capped. */
+function account(result: LoggedRequest | undefined): Record<string, unknown> {
+  if (!result) {
+    return { refused: true };
+  }
+  return { providerId: result.config.provider !== undefined ? echoed(result.config.provider) : null };
+}
+
 /** The line for a create whose decision was never noted or has expired: what ran, and that the decision is not known. */
 function describeUnknown(request: LoggedRequest, result: LoggedRequest | undefined): Record<string, unknown> {
+  const final = finalModel(result);
   return {
     caller: request.callerAgentId ? "child" : "root",
     decision: "unknown",
-    ...(result?.config.model !== undefined ? { model: { final: result.config.model } } : {}),
-    account: result ? { providerId: result.config.provider ?? null } : { refused: true },
+    ...(final ? { model: final } : {}),
+    account: account(result),
   };
 }
 
@@ -158,13 +173,14 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(model.override ? { overridden: true } : {}),
       ...(model.unadvertised ? { unadvertised: model.unadvertised.ref } : {}),
       // What the request actually carries after every hook ran, for the case a hook skipped the rewrite.
-      ...(result?.config.model !== undefined ? { final: result.config.model } : {}),
+      ...finalModel(result),
     },
-    thinking: { optionId: thinking.optionId, outcome: thinking.outcome },
-    outputStyle: outputStyle.style,
+    // Both can be the caller's own value, left standing, so both are capped.
+    thinking: { optionId: thinking.optionId === null ? null : echoed(thinking.optionId), outcome: thinking.outcome },
+    outputStyle: outputStyle.style === null ? null : echoed(outputStyle.style),
     // The paseo.mcp-scope value, or "all" for an agent that keeps every server.
     mcp: mcpScopeLabelValue(mcp) ?? "all",
-    account: result ? { providerId: result.config.provider ?? null } : { refused: true },
+    account: account(result),
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
     reasons: {
       role: role.reason,

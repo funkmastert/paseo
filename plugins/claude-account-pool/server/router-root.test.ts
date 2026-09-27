@@ -184,6 +184,22 @@ describe("createRouter — a root routing decision never fails a create", () => 
     expect(episodes[0]?.reason).not.toContain("until");
   });
 
+  it("caps the model a reroute's logged reason names, so a huge model id cannot make a huge line", () => {
+    const health = tracker();
+    health.reportUsage("claude-backup", [{ window: WINDOW_SEVEN_DAY, usedPct: 100, resetsAt: WEEKLY_RESET }]);
+    health.reportUsage("claude", [{ window: WINDOW_SEVEN_DAY, usedPct: 42 }]);
+    const episodes: RootRerouteEpisode[] = [];
+
+    router(health, { onRootRerouted: (episode) => episodes.push(episode) })(
+      rootCreate("claude-backup", "z".repeat(2_000_000)),
+      fakeContext,
+    );
+
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0]?.reason.length).toBeLessThan(1_000);
+    expect(episodes[0]?.reason).toContain(`out of budget for ${"z".repeat(120)}…`);
+  });
+
   it("keeps the requested provider and logs when root routing throws", () => {
     const health = tracker();
     health.reportUsage("claude-backup", [{ window: WINDOW_SEVEN_DAY, usedPct: 100 }]);

@@ -1,4 +1,5 @@
 import type { PluginHookContext } from "@getpaseo/plugin/server";
+import { echoed } from "./echo";
 import type { CapEvent, HealthTracker } from "./health";
 import type { FailOpenEpisode, PoolCollapsedEpisode, PoolDryEpisode, PoolExhaustedEpisode } from "./router";
 
@@ -196,7 +197,7 @@ function formatCapMessage(event: CapEvent, children: AgentDirectoryRow[]): strin
 
 function formatPoolDryMessage(episode: PoolDryEpisode): string {
   return (
-    `Account pool: every worker is capped for model "${episode.requestedModel}". ` +
+    `Account pool: every worker is capped for model "${echoed(episode.requestedModel)}". ` +
     `New spawns are falling back to the leader account "${episode.leaderProviderId}".`
   );
 }

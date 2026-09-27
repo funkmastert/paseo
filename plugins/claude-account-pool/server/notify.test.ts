@@ -137,6 +137,25 @@ describe("createNotifier", () => {
     notifier.stop();
   });
 
+  it("caps the model a pool-dry notification names, so a huge model id cannot make a huge message", async () => {
+    const rows: FakeAgentRow[] = [
+      { id: "leader-1", parentLabel: null, title: "Leader", provider: "human-claude" },
+      { id: "caller-1", parentLabel: "leader-1", title: "Worker Agent", provider: "worker-a" },
+    ];
+    const { paseo, sendCalls } = fakePaseo(rows);
+    const { schedule, flush } = fakeScheduler();
+    const notifier = createNotifier({ paseo, health: createHealthTracker(), schedule });
+
+    notifier.onTurnEnded("leader-1");
+    notifier.notePoolDry({ callerAgentId: "caller-1", requestedModel: "z".repeat(2_000_000), leaderProviderId: "leader-provider" });
+    await flush();
+
+    expect(sendCalls).toHaveLength(1);
+    expect(sendCalls[0].text.length).toBeLessThan(1_000);
+    expect(sendCalls[0].text).toContain(`model "${"z".repeat(120)}…"`);
+    notifier.stop();
+  });
+
   it("says the pool collapsed onto one account exactly once, and re-arms when capacity returns", async () => {
     const rows: FakeAgentRow[] = [
       { id: "leader-1", parentLabel: null, title: "Leader", provider: "claude-leader" },

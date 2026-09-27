@@ -596,6 +596,38 @@ describe("classifyAgent — nothing silent", () => {
       }
     }
   });
+
+  it("never quotes a caller-supplied string whole, so a huge label, model, level, style or provider cannot make a huge reason", () => {
+    const huge = (char: string) => char.repeat(2_000_000);
+    const labels = {
+      "paseo.agent-role": huge("r"),
+      "paseo.task-class": huge("c"),
+      "paseo.mcp": [huge("s"), ...Array.from({ length: 10_000 }, (_, index) => `server-${index}`)].join(","),
+    };
+    const asked = { labels, requestedModel: huge("m"), requestedThinkingOptionId: huge("t"), requestedOutputStyle: huge("o") };
+    const gateway = { mcpGateway: { servers: [{ name: "github", critical: false }] } };
+    const cases: Array<[ClassifierInput, Partial<ClassifierWorld>]> = [
+      // The live policy overrides the request, and names what was asked for.
+      [child(asked), { policy: LIVE_POLICY, ...gateway }],
+      // The default policy configures nothing, so the request's own model stands, with no thinking options known for it.
+      [child(asked), { thinkingCatalog: new Map(), ...gateway }],
+      // A provider outside the pool, for a child and for a root.
+      [child({ ...asked, requestedProvider: huge("p") }), gateway],
+      [{ ...asked, requestedProvider: huge("p") }, gateway],
+      // A root on a pooled account keeps it, and says which model it can run.
+      [{ ...asked, requestedProvider: "claude-work" }, gateway],
+    ];
+    for (const [input, overrides] of cases) {
+      const decision = classifyAgent(input, world({ nowMs: 1, ...overrides } as Partial<ClassifierWorld>));
+      const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;
+      for (const part of [role, taskClass, model, tools, account, thinking, outputStyle, mcp]) {
+        expect(part.reason.length).toBeLessThan(5_000);
+      }
+      for (const ref of [model.requestedRef, model.override?.requestedRef, model.unadvertised?.ref, thinking.modelRef]) {
+        expect(ref?.length ?? 0).toBeLessThanOrEqual(121);
+      }
+    }
+  });
 });
 
 
