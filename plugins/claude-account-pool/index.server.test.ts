@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import contribute from "./index.server";
+import { DECISION_TOKEN_LABEL } from "./server/decision-log";
 
 type BeforeHandler = (
   input: { request: PluginBeforeRequests["agent.create"] },
@@ -79,6 +80,33 @@ function fakePaseo(config: Record<string, unknown> = { providers: {} }) {
     agents: { list: agentsList, ref: vi.fn() },
   } as unknown as PluginHookContext["paseo"];
   return { paseo, configGet, providersSnapshot, listUsage, agentsList };
+}
+
+/** One create of a templated fan-out: the same caller, cwd, title and prompt; only the task class differs. */
+function fanOutCreate(taskClass: string): PluginBeforeRequests["agent.create"] {
+  return {
+    config: { provider: "claude-personal", cwd: "/tmp", title: "fan-out" },
+    callerAgentId: "caller-1",
+    initialPrompt: "do the thing",
+    labels: { "paseo.agent-type": "worker", "paseo.task-class": taskClass },
+  } as unknown as PluginBeforeRequests["agent.create"];
+}
+
+/** Runs one before hook the way the daemon does: on a structured clone, so no object survives from one hook to the next. */
+async function runHook(
+  hook: BeforeHandler,
+  request: PluginBeforeRequests["agent.create"],
+  context: PluginHookContext,
+): Promise<PluginBeforeRequests["agent.create"]> {
+  return (await hook({ request: structuredClone(request) }, context)) ?? request;
+}
+
+/** The parsed `classifier-decision` lines among console.log calls. */
+function decisionLines(calls: unknown[][]): Record<string, unknown>[] {
+  return calls
+    .map((call) => String(call[0]))
+    .filter((line) => line.startsWith("classifier-decision "))
+    .map((line) => JSON.parse(line.slice("classifier-decision ".length)));
 }
 
 const fakeContext = (paseo: PluginHookContext["paseo"]) => ({ paseo, signal: new AbortController().signal }) as PluginHookContext;
@@ -292,7 +320,7 @@ describe("contribute (index.server)", () => {
 
     function harness(config: Record<string, unknown>) {
       const errors = vi.spyOn(console, "error").mockImplementation(() => {});
-      const { server, dispatchBefore } = fakeServer();
+      const { server, dispatchBefore, beforeHandlers } = fakeServer();
       const cleanup = contribute(server);
       const live = fakePaseo(config);
       (live.paseo.providers as unknown as { listModels: unknown }).listModels = vi
@@ -302,6 +330,7 @@ describe("contribute (index.server)", () => {
       return {
         live,
         logged,
+        hooks: beforeHandlers.get("agent.create") ?? [],
         create: (model: string | undefined, extra: Record<string, unknown> = {}) =>
           dispatchBefore(
             "agent.create",
@@ -415,6 +444,35 @@ describe("contribute (index.server)", () => {
         model: { ref: "claude-haiku-4-5", resolvedFrom: "claude-haiku-4-5-20251001", poolSlot: "mechanical", final: "claude-haiku-4-5" },
         account: { providerId: created.config.provider },
       });
+      lines.mockRestore();
+      h.done();
+    });
+
+    it("REGRESSION: two concurrent creates that differ only in task class each log their own decision when they finish in reverse order", async () => {
+      const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+      const [roleHook, accountHook] = h.hooks;
+      const context = fakeContext(h.live.paseo);
+
+      const mechanical = await runHook(roleHook, fanOutCreate("mechanical"), context);
+      const hard = await runHook(roleHook, fanOutCreate("hard"), context);
+      const hardOut = await runHook(accountHook, hard, context);
+      const mechanicalOut = await runHook(accountHook, mechanical, context);
+
+      const decisions = decisionLines(lines.mock.calls);
+      expect(decisions).toHaveLength(2);
+      expect(decisions[0]).toMatchObject({
+        taskClass: { value: "hard" },
+        model: { ref: "claude-opus-5", poolSlot: "hard", final: hardOut.config.model },
+      });
+      expect(decisions[1]).toMatchObject({
+        taskClass: { value: "mechanical" },
+        model: { ref: "claude-haiku-4-5", poolSlot: "mechanical", final: mechanicalOut.config.model },
+      });
+      // The pairing token is the plugin's own bookkeeping and never reaches the daemon.
+      for (const out of [hardOut, mechanicalOut]) {
+        expect(Object.keys((out as { labels?: Record<string, string> }).labels ?? {})).not.toContain(DECISION_TOKEN_LABEL);
+      }
       lines.mockRestore();
       h.done();
     });

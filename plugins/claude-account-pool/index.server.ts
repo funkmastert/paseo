@@ -328,23 +328,32 @@ export default function contribute(server: PluginServerContext) {
     // RPC. It cannot throw (loadRolePolicy keeps the last good policy on any
     // failure) and is bounded so a stuck daemon can't stall spawning.
     await refreshPolicyForCreate();
-    return roleRouter?.(input, context) ?? undefined;
+    const routed = roleRouter?.(input, context) ?? undefined;
+    // The decision the role router noted for this create rides to the
+    // account hook as a label, the one thing that survives the daemon's
+    // clone and strict parse between handlers. `tag` returns its argument
+    // untouched when nothing was noted, so a passthrough stays a passthrough.
+    const tagged = decisionLog.tag(input.request, routed ?? input.request);
+    return tagged === input.request ? routed : tagged;
   });
   const unregisterCreate = server.before("agent.create", async (input, context) => {
     await ensureStarted(context.paseo);
     // The decision log line is written here, after the account is decided,
     // so it names the account that runs. A refusal is a throw; it is logged
     // and re-thrown untouched.
-    const asked = input.request as unknown as LoggedRequest;
+    // The pairing token is stripped before routing, and the stripped request
+    // is what goes back to the daemon, so no agent ever carries it.
+    const { token, request } = decisionLog.untag(input.request);
+    const asked = request as unknown as LoggedRequest;
     let routed: ReturnType<AgentCreateRouter>;
     try {
-      routed = router?.(input, context) ?? undefined;
+      routed = router?.({ ...input, request }, context) ?? undefined;
     } catch (error) {
-      decisionLog.finish(asked, undefined);
+      decisionLog.finish(token, asked, undefined);
       throw error;
     }
-    decisionLog.finish(asked, (routed ?? input.request) as unknown as LoggedRequest);
-    return routed;
+    decisionLog.finish(token, asked, (routed ?? request) as unknown as LoggedRequest);
+    return routed ?? (token === undefined ? undefined : request);
   });
 
   /**

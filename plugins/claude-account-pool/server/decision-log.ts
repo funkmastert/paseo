@@ -8,7 +8,7 @@ import { mcpScopeLabelValue } from "./mcp-scope";
  */
 export const DECISION_LOG_PREFIX = "classifier-decision";
 
-/** Enough of an `agent.create` request to fingerprint it and read what it became. Structural, like the other request reads in this plugin. */
+/** Enough of an `agent.create` request to read what it became. Structural, like the other request reads in this plugin. */
 export interface LoggedRequest {
   callerAgentId?: string;
   initialPrompt?: string;
@@ -16,17 +16,41 @@ export interface LoggedRequest {
   config: { provider?: string; model?: string; title?: string | null; cwd?: string; thinkingOptionId?: string };
 }
 
+/**
+ * Carries a create's pairing token from the role router's hook to the account
+ * router's hook. The daemon hands every `before` handler a structured clone
+ * and strict-parses each output, so no object survives between the two hooks
+ * and no field outside the request schema does either; a label does. The
+ * account router's hook strips it, so it never reaches an agent.
+ */
+export const DECISION_TOKEN_LABEL = "paseo.decision-log-token";
+
 export interface DecisionLog {
   /** Called by the role router (server/role-router.ts) with what it decided for `request`. Writes nothing. */
   note(request: LoggedRequest, decision: AgentDecision): void;
   /**
-   * Called by the account router's hook with the request it received and what
-   * came out of it: `undefined` when the create was refused. This is the only
-   * place a line is written, because the account is decided here — after the
-   * role router, which deliberately classifies without `nowMs` — so a line
-   * written any earlier would name an account that isn't the one that runs.
+   * Called by the role router's hook with the request the role router received
+   * and what the hook is about to return. Returns `output` carrying the pairing
+   * token of the decision noted for `request`, or `output` unchanged when none
+   * was noted.
    */
-  finish(request: LoggedRequest, result: LoggedRequest | undefined): void;
+  tag<T extends { labels?: Record<string, string> }>(request: object, output: T): T;
+  /**
+   * Strips the pairing token from a request, returning the token and the
+   * request without it. The account router's hook routes and returns the
+   * stripped request.
+   */
+  untag<T extends { labels?: Record<string, string> }>(request: T): { token: string | undefined; request: T };
+  /**
+   * Called by the account router's hook with the pairing token, the request it
+   * received and what came out of it: `undefined` when the create was refused.
+   * This is the only place a line is written, because the account is decided
+   * here — after the role router, which deliberately classifies without
+   * `nowMs` — so a line written any earlier would name an account that isn't
+   * the one that runs. A create whose decision cannot be found still gets a
+   * line, with the decision marked unknown. Never throws.
+   */
+  finish(token: string | undefined, request: LoggedRequest, result: LoggedRequest | undefined): void;
 }
 
 export interface DecisionLogOptions {
@@ -39,47 +63,83 @@ const PENDING_TTL_MS = 60_000;
 const MAX_PENDING = 64;
 
 interface Pending {
-  fingerprint: string;
   decision: AgentDecision;
   atMs: number;
-}
-
-/**
- * The role router and the account router are separate hooks, and the request
- * object is copied between them, so the decision is matched to its create by
- * fingerprint rather than by identity. None of the fields below is rewritten
- * by either router: the model, provider and thinking level are.
- */
-function fingerprintOf(request: LoggedRequest): string {
-  return [
-    request.callerAgentId ?? "",
-    request.config.cwd ?? "",
-    request.config.title ?? "",
-    (request.initialPrompt ?? "").slice(0, 120),
-  ].join("\u0000");
+  /** Set once its line is written, so a repeated finish writes nothing. Kept until the TTL so the repeat is recognised. */
+  finished: boolean;
 }
 
 export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
   const now = options.now ?? Date.now;
-  let pending: Pending[] = [];
+  const instance = Math.random().toString(36).slice(2, 10);
+  let sequence = 0;
+  const pending = new Map<string, Pending>();
+  const noted = new WeakMap<object, string>();
+
+  const prune = (nowMs: number) => {
+    for (const [token, entry] of pending) {
+      if (nowMs - entry.atMs >= PENDING_TTL_MS) {
+        pending.delete(token);
+      }
+    }
+    // Insertion order is age order, so the first keys are the oldest.
+    for (const token of pending.keys()) {
+      if (pending.size < MAX_PENDING) break;
+      pending.delete(token);
+    }
+  };
 
   return {
     note(request, decision) {
       const nowMs = now();
-      pending = pending.filter((entry) => nowMs - entry.atMs < PENDING_TTL_MS).slice(-(MAX_PENDING - 1));
-      pending.push({ fingerprint: fingerprintOf(request), decision, atMs: nowMs });
+      prune(nowMs);
+      sequence += 1;
+      const token = `${instance}-${sequence}`;
+      pending.set(token, { decision, atMs: nowMs, finished: false });
+      noted.set(request, token);
     },
-    finish(request, result) {
-      const nowMs = now();
-      pending = pending.filter((entry) => nowMs - entry.atMs < PENDING_TTL_MS);
-      const fingerprint = fingerprintOf(request);
-      const index = pending.findIndex((entry) => entry.fingerprint === fingerprint);
-      if (index === -1) {
-        return;
+    tag(request, output) {
+      const token = noted.get(request);
+      if (token === undefined) {
+        return output;
       }
-      const [entry] = pending.splice(index, 1);
-      options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(describe(entry.decision, result))}`);
+      return { ...output, labels: { ...output.labels, [DECISION_TOKEN_LABEL]: token } };
     },
+    untag(request) {
+      const token = request.labels?.[DECISION_TOKEN_LABEL];
+      if (token === undefined) {
+        return { token: undefined, request };
+      }
+      const { [DECISION_TOKEN_LABEL]: _token, ...labels } = request.labels ?? {};
+      return { token, request: { ...request, labels } };
+    },
+    finish(token, request, result) {
+      try {
+        const nowMs = now();
+        prune(nowMs);
+        const entry = token === undefined ? undefined : pending.get(token);
+        if (entry?.finished) {
+          return;
+        }
+        if (entry) {
+          entry.finished = true;
+        }
+        const line = entry ? describe(entry.decision, result) : describeUnknown(request, result);
+        options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(line)}`);
+      } catch {
+        // A log line is never worth failing a create over.
+      }
+    },
+  };
+}
+
+/** The line for a create whose decision was never noted or has expired: what ran, and that the decision is not known. */
+function describeUnknown(request: LoggedRequest, result: LoggedRequest | undefined): Record<string, unknown> {
+  return {
+    caller: request.callerAgentId ? "child" : "root",
+    decision: "unknown",
+    ...(result?.config.model !== undefined ? { model: { final: result.config.model } } : {}),
+    account: result ? { providerId: result.config.provider ?? null } : { refused: true },
   };
 }
 
