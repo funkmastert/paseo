@@ -135,6 +135,39 @@ describe("decision log", () => {
     expect(lines.map((line) => parse(line).account.providerId)).toEqual(["claude-work", "claude-personal"]);
   });
 
+  it("keeps every decision of a burst of creates noted before any of them finishes", () => {
+    // Concurrent creates all await the same policy read, so every role hook
+    // notes before any account hook finishes.
+    const { lines, log } = harness();
+    const burst = Array.from({ length: 65 }, (_, index) => request({ callerAgentId: `caller-${index}` }));
+    const tokens = burst.map((asked) => {
+      log.note(asked, decisionFor(asked));
+      return tokenOf(log, asked);
+    });
+    burst.forEach((asked, index) => log.finish(tokens[index], asked, asked));
+
+    expect(lines).toHaveLength(65);
+    for (const line of lines.map(parse)) {
+      expect(line.decision).toBeUndefined();
+      expect(line.role).toEqual({ id: "worker", source: "agent-type-mapping" });
+    }
+  });
+
+  it("still forgets the oldest orphan once more creates are pending than any burst reaches", () => {
+    const { lines, log } = harness();
+    const noted = Array.from({ length: 1025 }, (_, index) => {
+      const asked = request({ callerAgentId: `caller-${index}` });
+      log.note(asked, decisionFor(asked));
+      return { asked, token: tokenOf(log, asked) };
+    });
+    const first = noted[0];
+    const last = noted[noted.length - 1];
+    log.finish(first.token, first.asked, first.asked);
+    log.finish(last.token, last.asked, last.asked);
+    expect(parse(lines[0]).decision).toBe("unknown");
+    expect(parse(lines[1]).role).toEqual({ id: "worker", source: "agent-type-mapping" });
+  });
+
   it("still logs a create whose decision expired, with the decision unknown rather than a stale one", () => {
     const { lines, log, advance } = harness();
     const asked = request();

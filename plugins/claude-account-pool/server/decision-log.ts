@@ -59,16 +59,25 @@ export interface DecisionLogOptions {
   now?: () => number;
 }
 
-/** A create whose account router never reported back (a throw, a passthrough hook) is forgotten after this. */
+/**
+ * A create whose account router never reported back (a throw, a passthrough
+ * hook) is forgotten after the TTL, which is what bounds the pending entries.
+ *
+ * The count is a backstop against a flood of such orphans, set far above any
+ * burst of creates. Every create that arrives while the role hook's policy
+ * read is in flight notes before any of them finishes, because they share the
+ * one read (server/interval-poller.ts), so a backstop near burst size evicts
+ * a live create's decision and logs that create as unknown.
+ */
 const PENDING_TTL_MS = 60_000;
-const MAX_PENDING = 64;
+const MAX_PENDING = 1024;
 
-interface Pending {
-  decision: AgentDecision;
-  atMs: number;
-  /** Set once its line is written, so a repeated finish writes nothing. Kept until the TTL so the repeat is recognised. */
-  finished: boolean;
-}
+/**
+ * A noted create, then a finished one. A finished entry drops its decision —
+ * which can carry whole request values — and is kept until the TTL only so a
+ * repeated finish is recognised and writes nothing.
+ */
+type Pending = { finished: false; decision: AgentDecision; atMs: number } | { finished: true; atMs: number };
 
 export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
   const now = options.now ?? Date.now;
@@ -96,7 +105,7 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
       prune(nowMs);
       sequence += 1;
       const token = `${instance}-${sequence}`;
-      pending.set(token, { decision, atMs: nowMs, finished: false });
+      pending.set(token, { finished: false, decision, atMs: nowMs });
       noted.set(request, token);
     },
     tag(request, output) {
@@ -122,8 +131,8 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
         if (entry?.finished) {
           return;
         }
-        if (entry) {
-          entry.finished = true;
+        if (token !== undefined && entry) {
+          pending.set(token, { finished: true, atMs: entry.atMs });
         }
         const line = entry ? describe(entry.decision, result) : describeUnknown(request, result);
         options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(line)}`);
