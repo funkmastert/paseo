@@ -7,7 +7,7 @@ import {
   type RoleRecord,
   type TaskClassId,
 } from "../shared/role-policy-schema";
-import { findCatalogId, modelIdentity } from "../shared/model-identity";
+import { findCatalogId, sameModel } from "../shared/model-identity";
 import { detectModelFamily, weeklyModelWindow, type ModelFamily } from "./windows";
 
 export type ModelCatalog = ReadonlyMap<string, ReadonlySet<string>>;
@@ -222,7 +222,7 @@ export function isRequestedModelApproved(
     const parsed = splitModelRef(ref);
     return (
       parsed !== null &&
-      modelIdentity(parsed.model) === modelIdentity(requestedModel) &&
+      sameModel(parsed.model, requestedModel) &&
       modelRefFamily(parsed) === requestedFamily
     );
   });
@@ -253,7 +253,7 @@ export interface RequestedModelEvaluation {
 function isAllowlisted(allowlist: readonly string[], family: string, model: string): boolean {
   return allowlist.some((ref) => {
     const parsed = splitModelRef(ref);
-    return parsed !== null && modelIdentity(parsed.model) === modelIdentity(model) && modelRefFamily(parsed) === family;
+    return parsed !== null && sameModel(parsed.model, model) && modelRefFamily(parsed) === family;
   });
 }
 

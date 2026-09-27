@@ -16,6 +16,13 @@ describe("poolEntryStatus", () => {
     });
   });
 
+  it("does not resolve a dated snapshot to a different dated snapshot", () => {
+    expect(poolEntryStatus("claude-3-5-sonnet-20240620", { claude: ["claude-3-5-sonnet-20241022"] }, [])).toEqual({
+      kind: "unadvertised",
+      allowlisted: false,
+    });
+  });
+
   it("is unadvertised when no spelling is listed, and says whether the allowlist vouches for it", () => {
     expect(poolEntryStatus("claude-opus-5-5", CATALOG, [])).toEqual({ kind: "unadvertised", allowlisted: false });
     expect(poolEntryStatus("claude-opus-5-5", CATALOG, ["claude-opus-5-5"])).toEqual({

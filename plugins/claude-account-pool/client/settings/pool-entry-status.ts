@@ -1,4 +1,4 @@
-import { findCatalogId, modelIdentity } from "../../shared/model-identity";
+import { findCatalogId, sameModel } from "../../shared/model-identity";
 import { modelRefFamily, splitModelRef } from "../../shared/role-policy-schema";
 
 /**
@@ -37,7 +37,7 @@ export function poolEntryStatus(
   }
   const allowlisted = allowUnlistedModels.some((entry) => {
     const other = splitModelRef(entry);
-    return other !== null && modelRefFamily(other) === family && modelIdentity(other.model) === modelIdentity(parsed.model);
+    return other !== null && modelRefFamily(other) === family && sameModel(other.model, parsed.model);
   });
   return { kind: "unadvertised", allowlisted };
 }

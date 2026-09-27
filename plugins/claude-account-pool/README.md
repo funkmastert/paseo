@@ -698,8 +698,10 @@ The override reason distinguishes two different situations:
 
 `claude-haiku-4-5-20251001` in a pool and `claude-haiku-4-5` in the catalog
 name the same model. The catalog check, the explicit-request approval check
-and `allowUnlistedModels` all compare `modelIdentity` (`shared/model-identity.ts`):
-case-folded, with a trailing `-YYYYMMDD` removed. Nothing else is folded, so
+and `allowUnlistedModels` all compare with `sameModel` (`shared/model-identity.ts`):
+case-folded, and a dated id matches the undated id with the same base. Two
+different dates never match, so `claude-3-5-sonnet-20240620` does not approve
+`claude-3-5-sonnet-20241022`. Nothing else is folded, so
 `claude-opus-5-5` and `claude-opus-5` stay different models and `[1m]` stays
 part of the identity. When the two spellings differ, the id that runs is the
 catalog's (`ModelDecision.resolvedFrom` keeps the pool's spelling, and the

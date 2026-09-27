@@ -533,6 +533,18 @@ describe("dated snapshot vs alias spelling", () => {
     ).toEqual({ configured: true, eligible: true });
   });
 
+  it("never merges two different dated snapshots of one base", () => {
+    const JUNE = "claude-3-5-sonnet-20240620";
+    const OCTOBER = "claude-3-5-sonnet-20241022";
+    const r = role({ models: [JUNE] });
+    expect(isRequestedModelApproved(r, "claude", OCTOBER)).toBe(false);
+    expect(
+      evaluateRequestedModel(r, "claude", OCTOBER, catalog({ claude: [JUNE, OCTOBER] }), ONE_WORKER_POOL, createHealthTracker()),
+    ).toMatchObject({ configured: false });
+    expect(unadvertisedPoolEntries(r, catalog({ claude: [OCTOBER] }))).toEqual([JUNE]);
+    expect(unadvertisedPoolEntries(r, catalog({ claude: [OCTOBER] }), undefined, [OCTOBER])).toEqual([JUNE]);
+  });
+
   it("an allowlist entry in the other spelling still unlocks an unlisted model", () => {
     const r = role({ models: ["claude-opus-5-5-20260101"] });
     expect(
