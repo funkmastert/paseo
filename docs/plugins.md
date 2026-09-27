@@ -179,6 +179,11 @@ Point the daemon at the vendored copy like any other directory source (see "Inst
 source" above) — `path` in its `plugins.<id>` config entry is the absolute path to `plugins/<id>`
 inside your checkout.
 
+`plugins/claude-account-pool` is the one vendored plugin. It routes agents across several Claude
+accounts and runs only on this fork's daemon; its
+[README](../plugins/claude-account-pool/README.md#requirements) covers requirements, install and
+verification.
+
 ## Contribute behavior and UI
 
 Default export one contribution function from each runtime entry. Keep the entries to registration

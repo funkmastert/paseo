@@ -18,80 +18,256 @@ ranks accounts, and [Role policy](#role-policy) for the second half — model
 pools, thinking levels, tool enforcement, the leader role, and the Fable budget
 gate.
 
+## Requirements
+
+- **The Paseo fork's daemon.** Clone <https://github.com/funkmastert/paseo>,
+  branch `multi-account-orchestrator`. On stock Paseo
+  ([getpaseo/paseo](https://github.com/getpaseo/paseo)) every agent create
+  fails once this plugin runs: stock Paseo's `agent.create` hook accepts only
+  `config` and `env`, and this plugin's hook returns `labels` on every create,
+  so the daemon rejects the result (`Plugin claude-account-pool before
+  agent.create failed: … Unrecognized key: "labels"`). The plugin also
+  depends on things only the fork has: `labels`, `callerAgentId` and
+  `initialPrompt` on that hook, the `agentModelPolicy` and `mcpGateway` config
+  keys (stock Paseo's strict config schema rejects both),
+  `config.outputStyle`, and the daemon reading the `paseo.mcp-scope` label.
+- **The fork's CLI**, `packages/cli/bin/paseo` in your checkout. The `paseo`
+  that a Paseo.app install puts in `~/.local/bin` is stock, and fails to load
+  the fork's `config.json`.
+- **Node 22** (`.tool-versions` pins 22.20.0), npm and git.
+- **Claude Code** (`claude`) on the daemon's `PATH`. The daemon lists Opus 5.5
+  (`claude-opus-5-5`) from Claude Code 2.1.219.
+- **One Claude subscription login per pooled account.** Signing in opens a
+  browser, so a person has to finish that step.
+- **Platform.** Built and run on macOS. The routing code is platform-neutral.
+  `exposeClassifierTool` listens on a Unix socket path, which Node on Windows
+  does not accept, so that feature is untested there. The commands below are
+  POSIX shell.
+
 ## Operator setup
 
-### 1. Configure one provider entry per Claude account
+### 1. Build the fork and start its daemon
+
+`paseo daemon start` runs the daemon in the background on `127.0.0.1:6767`,
+with its state and `config.json` in `~/.paseo`. The Paseo desktop app's daemon
+uses the same port and directory: if the app is running, quit it and run
+`paseo daemon stop` before `paseo daemon start`.
+
+```bash
+git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
+cd paseo
+npm ci
+npm run build:server
+export PATH="$PWD/packages/cli/bin:$PATH"   # this checkout's paseo, ahead of any other
+which paseo                                 # …/paseo/packages/cli/bin/paseo
+paseo daemon start
+paseo daemon status
+```
+
+`npm run build:server` builds the daemon and the CLI. `packages/cli/bin/paseo`
+fails with `ERR_MODULE_NOT_FOUND` until it has run. The plugin needs no build
+of its own: the daemon compiles its TypeScript when it loads it and supplies
+`@getpaseo/plugin` and `zod` at runtime.
+
+To run the fork beside another daemon instead, pass `--home <dir> --port <port>`
+to `daemon start`, set `PASEO_HOME=<dir> PASEO_HOST=127.0.0.1:<port>` for
+every later command, and read `~/.paseo` below as `<dir>`. Without
+`PASEO_HOST`, the CLI falls back to `6767`.
+
+### 2. Configure the pool and the policy
 
 Each pooled account is its own `agents.providers.<id>` entry that extends the
 built-in `claude` provider and points at that account's credentials via
-`env.CLAUDE_CONFIG_DIR`, following the "Multiple profiles for the same
-provider" pattern documented in Paseo's `docs/custom-providers.md`. Add
-`params.accountPool` to mark each entry's role in the pool.
+`env.CLAUDE_CONFIG_DIR`, following
+["Multiple profiles for the same provider"](../../docs/custom-providers.md#multiple-profiles-for-the-same-provider).
+`params.accountPool` marks each entry's place in the pool.
 
-In `$PASEO_HOME/config.json`:
+Merge this into `~/.paseo/config.json`, with your own absolute paths. It
+validates against the daemon's config schema and this plugin's policy schema:
 
 ```json
 {
+  "pluginsEnabled": true,
   "agents": {
     "providers": {
       "claude-leader": {
         "extends": "claude",
         "label": "Claude (Leader)",
-        "env": { "CLAUDE_CONFIG_DIR": "/home/paseo/.claude-accounts/leader" },
-        "params": {
-          "accountPool": { "role": "leader", "priority": 1 }
-        }
+        "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/leader" },
+        "params": { "accountPool": { "role": "leader", "priority": 1 } }
       },
       "claude-worker-1": {
         "extends": "claude",
         "label": "Claude (Worker 1)",
-        "env": { "CLAUDE_CONFIG_DIR": "/home/paseo/.claude-accounts/worker-1" },
-        "params": {
-          "accountPool": { "role": "worker", "priority": 1 }
-        }
+        "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/worker-1" },
+        "params": { "accountPool": { "role": "worker", "priority": 1 } }
       },
       "claude-worker-2": {
         "extends": "claude",
         "label": "Claude (Worker 2)",
-        "env": { "CLAUDE_CONFIG_DIR": "/home/paseo/.claude-accounts/worker-2" },
-        "params": {
-          "accountPool": { "role": "worker", "priority": 2 }
-        }
+        "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-accounts/worker-2" },
+        "params": { "accountPool": { "role": "worker", "priority": 2 } }
       }
     }
+  },
+  "agentModelPolicy": {
+    "schemaVersion": 4,
+    "revision": "1",
+    "roles": [
+      { "id": "leader", "name": "leader", "standard": true, "aliases": [], "models": [] },
+      {
+        "id": "worker", "name": "worker", "standard": true, "aliases": [],
+        "models": ["claude-sonnet-5"],
+        "mechanicalModels": ["claude-haiku-4-5"],
+        "hardModels": ["claude-opus-5-5"]
+      },
+      { "id": "reviewer", "name": "reviewer", "standard": true, "aliases": [], "models": ["claude-sonnet-5"], "hardModels": ["claude-opus-5-5"] },
+      { "id": "advisor", "name": "advisor", "standard": true, "aliases": [], "models": ["claude-opus-5-5"] }
+    ],
+    "agentTypeMappings": { "worker": "worker", "reviewer": "reviewer", "advisor": "advisor" }
   }
 }
 ```
 
 `role` is `"leader"` or `"worker"`. `priority` is a positive integer; it
 breaks ties between workers with the same headroom (see [Where a spawn
-lands](#where-a-spawn-lands) — it is no longer the primary order). There must
-be exactly one `leader` entry — it is the last-resort target once no worker
-can run the request, and the anchor for pool notifications. Worker priorities
-must be unique. Malformed or missing `accountPool` config anywhere in
-`agents.providers` makes this plugin fail open: it treats the pool as empty
-and steps out of the way rather than blocking agent creation.
+lands](#where-a-spawn-lands) — it is no longer the primary order). At most one
+entry may be the `leader`: it is the last-resort target once no worker can run
+the request, and the anchor for pool notifications. Worker priorities must be
+unique. Malformed `accountPool` config anywhere in `agents.providers` makes
+this plugin fail open: it treats the pool as empty and steps out of the way
+rather than blocking agent creation. `params` on a pool entry replaces the base
+`claude` provider's `params`, so a Claude knob such as
+[`excludeDynamicSections`](../../docs/custom-providers.md#claude-params-shared-system-prompt-cache)
+goes there too.
 
-### 2. Apply the config change
+`pluginsEnabled` switches the plugin system on. Without it, step 5 records the
+plugin but never starts it.
 
-`agents.providers` is one of the daemon's reloadable config paths, but it is
-not picked up automatically when you edit `config.json` on disk — run
-`paseo reload` after saving to apply the new entries without restarting the
-daemon. A full daemon restart is not required.
+`agentModelPolicy` is the [role policy](#role-policy). The four standard roles
+must all be present. Every other field takes its default: leaders think at
+Extra High, children get the Concise output style, and the tool profile is
+`unrestricted`. `leader` has no models here, so a root agent runs the model it
+asks for. A model in that pool overrides what the app or CLI asks for on every
+root agent. `revision` is the settings screen's compare-and-swap token: any
+string, changed on every hand edit. Leave the key out and nothing picks models,
+but the plugin still places accounts, sets thinking levels, and gives children
+the Concise style and a scoped set of MCP servers.
 
-### 3. Install the plugin
+### 3. Sign each account in
 
-This plugin is vendored inside the Paseo fork at `plugins/claude-account-pool`
-(see [docs/plugins.md](../../docs/plugins.md#vendor-a-first-party-plugin)).
-Point the daemon at your checkout of that directory:
+For every `CLAUDE_CONFIG_DIR` in the config:
 
 ```bash
-paseo plugin install /path/to/your/paseo-fork-checkout/plugins/claude-account-pool
+mkdir -p ~/.claude-accounts/worker-1
+ln -s ~/.claude/projects ~/.claude-accounts/worker-1/projects
+ln -s ~/.claude/CLAUDE.md ~/.claude-accounts/worker-1/CLAUDE.md   # if you have one
+CLAUDE_CONFIG_DIR=~/.claude-accounts/worker-1 claude /login
+```
+
+Sign each directory in to a different Claude account. The usage windows the
+pool ranks accounts by come from that login. An entry authenticated some other
+way, such as an API key, reports no usage, and the pool places work on it
+blind. The shared `projects/` is what lets a session move between accounts,
+and the `CLAUDE.md` link gives every account your global rules. `paseo doctor`
+flags a directory that is signed out or missing either link, and prints the
+fix.
+
+### 4. Apply the config
+
+Run `paseo reload` after editing `config.json`. `agents.providers`,
+`pluginsEnabled` and `agentModelPolicy` all apply without a restart. The
+reload's output lists `agentModelPolicy`, and after step 5 `plugins.*`, under
+"These changes require a daemon restart". Ignore those two: that list compares
+the file with the one the daemon started from, and both are already live.
+`mcpGateway` does need `paseo daemon restart`.
+
+### 5. Install the plugin
+
+From the checkout root:
+
+```bash
+paseo plugin install "$PWD/plugins/claude-account-pool"
 paseo plugin ls
 ```
 
+```text
+PLUGIN                STATUS      ENABLED   SOURCE      …   DIRECTORY
+claude-account-pool   running     yes       directory   …   /…/paseo/plugins/claude-account-pool
+```
+
+`install` writes
+`"plugins": { "claude-account-pool": { "source": "directory", "path": "<absolute path>", "enabled": true } }`
+into `config.json` and starts the plugin at once, with no reload. It refuses an
+id that is already configured. After editing the plugin's source, run
+`paseo plugin reload claude-account-pool`. The plugin is vendored in the fork;
+see [docs/plugins.md](../../docs/plugins.md#vendor-a-first-party-plugin).
+
 Plugins are unsandboxed, trusted code: this plugin's server code runs with
 the daemon user's access on the daemon host.
+
+## Verify it works
+
+```bash
+paseo doctor --full
+```
+
+The header says `ran in the daemon` only when the daemon is the fork's. Look
+for `✓ plugins  claude-account-pool: running`,
+`✓ config  config.json is accepted by the running daemon`, and no
+`not logged in` line for a pooled account.
+
+Then route a child. `PASEO_AGENT_ID` makes the second create a child of the
+first, and children are what the router moves:
+
+```bash
+ROOT=$(paseo -q run -d --provider claude-leader --model claude-haiku-4-5 --title "pool check" "Reply with OK")
+PASEO_AGENT_ID=$ROOT paseo -q run -d --provider claude-leader \
+  --label paseo.agent-type=worker --label paseo.task-class=mechanical \
+  --title "pool check child" "Reply with OK"
+paseo ls -a
+grep 'classifier-decision ' ~/.paseo/daemon.log | tail -1
+```
+
+The child asked for `claude-leader` but runs on a worker, on the mechanical
+pool's model:
+
+```text
+NAME               PROVIDER
+pool check child   claude-worker-1/claude-haiku-4-5
+pool check         claude-leader/claude-haiku-4-5
+```
+
+The log line is the same decision as JSON, with a reason for each part. Each
+agent spends one short turn; `paseo archive <id>` clears them away.
+
+## Troubleshooting
+
+- **`which paseo` is not the checkout's, or `paseo` rejects keys in
+  `config.json`.** That is the stock CLI reading the fork's config. Run the
+  `export PATH` line from step 1 again.
+- **`packages/cli/bin/paseo` fails with `ERR_MODULE_NOT_FOUND`.** The fork is
+  not built. Run `npm run build:server`.
+- **`paseo plugin ls` shows `disabled` with ENABLED `yes`.** `pluginsEnabled`
+  is not `true`. Set it and run `paseo reload`.
+- **`paseo plugin ls` shows `failed`.** The ERROR column and
+  `paseo plugin logs claude-account-pool` carry the compile or load error.
+- **Every agent create fails with `Plugin claude-account-pool before
+  agent.create failed`.** The daemon is stock Paseo. `paseo doctor` reporting
+  that it ran in the CLI rather than in the daemon says the same.
+- **The daemon rejects `config.json`, or new connections hang, after adding
+  `agentModelPolicy` or `mcpGateway`.** Also a stock daemon: its config schema
+  is strict. See [docs/doctor.md](../../docs/doctor.md).
+- **An agent on a pooled account ends in `error` on its first turn.** That
+  account is not signed in. `paseo doctor` names it and prints
+  `CLAUDE_CONFIG_DIR=<dir> claude /login`.
+- **Children stay on the account they asked for, and the plugin log shows
+  `pool: FAIL-OPEN`.** The pool config is malformed: two `leader` entries, two
+  workers with one `priority`, or a `priority` that is not a positive integer.
+  The log line names which.
+- **A policy edit has no effect.** A malformed `agentModelPolicy` is ignored in
+  favour of the last good one, and nothing is logged. The Agent Model Policy
+  settings screen marks it malformed and refuses to save until it parses.
 
 ## Where a spawn lands
 
@@ -213,7 +389,10 @@ it asked for.
 ## Role policy
 
 Stored under the top-level `agentModelPolicy` key in daemon config, edited
-from the **Agent Model Policy** settings screen. A role is resolved for every
+from the **Agent Model Policy** settings screen, or by hand in `config.json`
+followed by `paseo reload`. `allowUnlistedModels`, `exposeClassifierTool`,
+`enforceToolsOnClassifiedRoles`, `childOutputStyle` and a role's `mcpServers`
+have no editor yet; set them by hand. A role is resolved for every
 `agent.create`, and decides three things: which model the agent runs, at what
 thinking level, and which tools it may use. The model and thinking halves are
 further split by **task class** — how much model the work is worth — described
@@ -278,7 +457,8 @@ The rules used to be restated in English in two more places — the
 sync; it is for them to stop stating rules. They should name the **vocabulary**
 and point here.
 
-The paragraph a fleet prompt should carry, in full:
+The paragraph a fleet prompt should carry, in full. Its sentences about Opus
+5.5 and Fable describe the maintainer's pools; change them to match yours.
 
 > **MODEL POLICY.** You do not choose models for Paseo agents — the
 > account-pool classifier does, deterministically, on every `agent.create`. You
@@ -411,10 +591,10 @@ expensive overall, so it pays only for children that narrate a lot over many
 turns. Measure before widening it.
 
 It is a config field rather than a `providerOptions` key so that version skew
-is harmless. The plugin loads from the checkout and the daemon from the app
-build, so either can be older. A daemon that predates `config.outputStyle`
-drops the unknown key when it re-parses the hook's result, and the child runs
-without the style. `providerOptions` is validated strictly, so a key there
+is harmless. The plugin loads from a checkout, and the daemon can come from a
+separate build such as a packaged app, so either can be older. A daemon that
+predates `config.outputStyle` drops the unknown key when it re-parses the
+hook's result, and the child runs without the style. `providerOptions` is validated strictly, so a key there
 would have failed every create. A daemon that knows the field stores it with
 the agent's config, so a resumed agent gets the style it was created with and
 the prompt cache is not rebuilt mid-session.
@@ -713,10 +893,12 @@ check against the loaded catalog: an entry that no spelling resolves and
 #### Models the CLI accepts but doesn't advertise: `allowUnlistedModels`
 
 The catalog check exists so nothing lands on a nonexistent model, but it
-can't tell "absent because it isn't real" from "absent because the provider
-doesn't advertise it". Claude Code 2.1.280 runs `claude-opus-5-5` yet omits
-it from its model list, so without an escape neither a caller nor a pool
-could ever reach it.
+can't tell "absent because it isn't real" from "absent because nobody listed
+it yet". For Claude the catalog is the daemon's own list
+(`providers/claude/model-manifest.ts`, filtered by the installed Claude Code
+version) plus the models named in the account's `settings.json`. A model
+Claude Code accepts before the daemon lists it can't be reached without an
+escape. `claude-opus-5-5` was one until the manifest named it on 2026-09-24.
 
 `agentModelPolicy.allowUnlistedModels` is an operator-set list of model refs
 (same `model` / `provider/model` spelling as a pool). An id named there
@@ -726,8 +908,8 @@ so it may be a pool default (put it first in a pool to make it the default).
 
 ```json
 "agentModelPolicy": {
-  "allowUnlistedModels": ["claude-opus-5-5"],
-  "roles": [ { "id": "leader", "models": ["claude-opus-5-5", "claude-opus-5"], ... } ]
+  "allowUnlistedModels": ["<model id>"],
+  "roles": [ { "id": "leader", "models": ["<model id>", "claude-opus-5-5"], ... } ]
 }
 ```
 
@@ -1109,8 +1291,9 @@ subagents will keep doing the work itself and keep spending its own budget, no
 matter how the roles beneath it are configured. The `orchestrator` profile is
 what makes delegation the only option left.
 
-The leader role ships unconfigured and unrestricted: installing this changes
-nothing until you set it up.
+The leader role ships with no models and the `unrestricted` profile, so its
+model and tools change nothing until you configure them. The leader thinking
+level applies from install (see [Thinking level](#thinking-level)).
 
 ### A guessed role may pick a model. It may not take tools away.
 
@@ -1187,6 +1370,12 @@ classifier:
 Requests only ever add. Nothing removes a critical server, and inference
 cannot strip what the caller asked for.
 
+A child keeps the account's claude.ai connectors only when one of those three
+names them. With no `mcpGateway`, or one without `"enabled": true`, there is no
+gateway server to grant, so a child gets Paseo's own server and loses the
+connectors unless it asks for them. Servers configured in the account's own
+Claude settings are loaded by the CLI and are not scoped.
+
 The router writes the decision as one label, `paseo.mcp-scope`: the granted
 gateway servers, plus `claude.ai` when the connectors stay on (`none` when
 nothing is granted). The label persists with the agent, and the daemon reads
@@ -1240,10 +1429,11 @@ switched on. `packages/server/src/server/plugins/account-pool-plugin-load.test.t
 compiles and evaluates this plugin the way the daemon does, so a module-scope
 mistake of that shape fails a test instead of a fleet.
 
-**Off by default.** Set `exposeClassifierTool: true` on the stored
-`agentModelPolicy` document to turn it on. Enabling it changes the
-`mcpServers` of every agent the daemon creates, which is not something an
-upgrade should do quietly. It exposes the operator's routing policy to agents
+**Off by default.** Set `"exposeClassifierTool": true` inside
+`agentModelPolicy` in `config.json` and run `paseo reload`. Agents then see
+the tool as `mcp__paseo-agent-policy__agent_model_policy`. Enabling it
+changes the `mcpServers` of every agent the daemon creates, which is not
+something an upgrade should do quietly. It exposes the operator's routing policy to agents
 already running on the operator's machine, and nothing else — the socket
 carries no credentials and answers only this one question.
 
@@ -1256,11 +1446,12 @@ that took the plugin down.
 
 ### Fable budget gate
 
-> Fable is currently retired from every pool — Opus 5.5 supersedes it, so
+> The maintainer's policy has Fable in no pool — Opus 5.5 supersedes it, so
 > nothing routes there. The gate below stays in the code because the decision
-> is an operator's to make, not a schema change: put a Fable entry back in a
-> pool and it starts applying again. `server/classifier.test.ts` asserts that
-> no configured pool names it.
+> is an operator's to make, not a schema change: put a Fable entry in a pool
+> and it applies. `server/classifier.test.ts` asserts that no pool names Fable
+> in its copy of the maintainer's policy (`LIVE_POLICY`); your own config is
+> not checked.
 
 Fable is the expensive escalation model. When every pooled account is at or
 above a threshold share of its weekly Fable window, roles skip their Fable
