@@ -44,6 +44,7 @@ import {
   type ResolveRoleTier,
   type TaskClassSource,
 } from "./role-resolve";
+import { echoed } from "./echo";
 import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scope";
 
 /**
@@ -265,7 +266,9 @@ export interface ModelDecision {
    * The ref the caller asked for, spelled the way the create hook spells it
    * (always provider-qualified, defaulting to the pool family). Present
    * whenever a model was requested, honored or not, so no consumer has to
-   * spell it a second way.
+   * spell it a second way. The caller controls both halves, so it is capped
+   * like every other quoted request value (server/echo.ts); a ref past the
+   * cap ends in an ellipsis.
    */
   requestedRef?: string;
   /**
@@ -347,7 +350,7 @@ export interface ThinkingDecision {
    * When `override` is also set, a null here means the requested id is removed.
    */
   optionId: string | null;
-  /** The effective model this was decided for, spelled like `formatModelRef`. Absent only when no model is known at all. */
+  /** The effective model this was decided for, spelled like `formatModelRef` and capped when it is the request's own. Absent only when no model is known at all. */
   modelRef?: string;
   /** What the leader rule, the request or the class named, before any cap or clamp. */
   wanted?: string;
@@ -441,14 +444,6 @@ function roleSourceFor(tier: ResolveRoleTier, match: ClassificationMatch | undef
   return "default";
 }
 
-/** Longest caller-supplied label value a reason quotes; past it the value is cut and ends in an ellipsis. */
-const MAX_ECHOED_VALUE_CHARS = 120;
-
-/** A caller-supplied value as a reason quotes it: capped, so a huge label cannot make a huge log line. */
-function echoed(value: string): string {
-  return value.length > MAX_ECHOED_VALUE_CHARS ? `${value.slice(0, MAX_ECHOED_VALUE_CHARS)}…` : value;
-}
-
 function describeRole(decision: Omit<RoleDecision, "reason">, input: ClassifierInput): string {
   const name = decision.role.name;
   const ignored =
@@ -527,7 +522,7 @@ function decideModel(
   const { slot, fellBack } = resolvePoolSlot(role, taskClass);
   const requestedFamily = familyOfProvider(world.pool, input.requestedProvider ?? POOL_FAMILY);
   const requestedRef = input.requestedModel
-    ? `${input.requestedProvider ?? POOL_FAMILY}/${input.requestedModel}`
+    ? echoed(`${input.requestedProvider ?? POOL_FAMILY}/${input.requestedModel}`)
     : undefined;
   // One options object for both eligibility calls below, so an explicit
   // request and ordered selection are held to the same bar by construction —
@@ -771,7 +766,7 @@ function decideAccount(
   const effectiveProvider = model.provider ?? input.requestedProvider ?? POOL_FAMILY;
   const family = familyOfProvider(world.pool, effectiveProvider);
   if (family !== POOL_FAMILY) {
-    return { kind: "no-pool", reason: `This is a ${family} request, and the pool only routes ${POOL_FAMILY}-family accounts.` };
+    return { kind: "no-pool", reason: `This is a ${echoed(family)} request, and the pool only routes ${POOL_FAMILY}-family accounts.` };
   }
   if (world.nowMs === undefined) {
     return { kind: "not-evaluated", reason: "No instant was supplied, so account headroom was not scored." };
@@ -813,9 +808,9 @@ function decideAccount(
   }
 }
 
-/** Display label for a thinking option id, falling back to the raw id for one this plugin doesn't recognize (a non-Claude provider's own token). */
+/** Display label for a thinking option id, falling back to the id itself for one this plugin doesn't recognize (a non-Claude provider's own token, or anything a caller asked for). */
 function thinkingLabel(optionId: string): string {
-  return THINKING_LEVEL_LABELS[optionId as ThinkingLevelId] ?? optionId;
+  return THINKING_LEVEL_LABELS[optionId as ThinkingLevelId] ?? echoed(optionId);
 }
 
 /** The model the thinking decision is made against. */
@@ -851,7 +846,7 @@ function effectiveThinkingModel(
     return {
       modelId: input.requestedModel,
       family: familyOfProvider(world.pool, input.requestedProvider ?? POOL_FAMILY),
-      modelRef: formatModelRef({ provider: input.requestedProvider ?? null, model: input.requestedModel }),
+      modelRef: echoed(formatModelRef({ provider: input.requestedProvider ?? null, model: input.requestedModel })),
     };
   }
   return undefined;
@@ -1135,14 +1130,14 @@ function decideOutputStyle(
     return {
       style: null,
       source: "none",
-      reason: `None: this is a ${family} agent, and an output style is a Claude Code setting.`,
+      reason: `None: this is a ${echoed(family)} agent, and an output style is a Claude Code setting.`,
     };
   }
   if (input.requestedOutputStyle !== undefined) {
     return {
       style: input.requestedOutputStyle,
       source: "requested",
-      reason: `${input.requestedOutputStyle}, as the caller's request set it — an explicit style is never replaced.`,
+      reason: `${echoed(input.requestedOutputStyle)}, as the caller's request set it — an explicit style is never replaced.`,
     };
   }
   if (!hasCaller) {

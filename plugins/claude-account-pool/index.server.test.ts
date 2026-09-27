@@ -477,6 +477,42 @@ describe("contribute (index.server)", () => {
       h.done();
     });
 
+    it("REGRESSION: no line a create logs grows with a caller-supplied string, whichever label, model, level or provider carries it", async () => {
+      const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+      const [roleHook, accountHook] = h.hooks;
+      const context = fakeContext(h.live.paseo);
+      const huge = (char: string) => char.repeat(2_000_000);
+      const create = (provider: string) =>
+        ({
+          config: { provider, model: huge("m"), thinkingOptionId: huge("t"), cwd: "/tmp" },
+          callerAgentId: "caller-1",
+          labels: {
+            "paseo.agent-role": huge("r"),
+            "paseo.task-class": huge("c"),
+            "paseo.mcp": [huge("s"), ...Array.from({ length: 10_000 }, (_, index) => `server-${index}`)].join(","),
+          },
+        }) as unknown as PluginBeforeRequests["agent.create"];
+
+      // A pooled account, then a provider outside the pool, which the account router passes through as asked.
+      for (const provider of ["claude-personal", huge("p")]) {
+        await runHook(accountHook, await runHook(roleHook, create(provider), context), context);
+      }
+
+      // Every episode the create raises actually ran, so each of their lines is measured below.
+      const logged = h.logged();
+      for (const episode of ["declared unknown role", "declared unknown task class", "in paseo.mcp", "explicitly requested \"claude-personal/", "explicitly requested thinking level"]) {
+        expect(logged).toContain(episode);
+      }
+      const decisions = lines.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("classifier-decision "));
+      expect(decisions).toHaveLength(2);
+      for (const line of [...logged.split("\n"), ...decisions]) {
+        expect(line.length).toBeLessThan(10_000);
+      }
+      lines.mockRestore();
+      h.done();
+    });
+
     it("without the allowlist the leader default falls to the advertised opus-5, unchanged from before", async () => {
       const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
 

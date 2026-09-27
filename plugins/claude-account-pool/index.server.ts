@@ -1,6 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext, PluginServerContext } from "@getpaseo/plugin/server";
 import { createAccountIdentity } from "./server/account-identity";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
+import { echoed, echoedList } from "./server/echo";
 import { createHealthTracker } from "./server/health";
 import { createMcpGatewayCache, type McpGatewayCache } from "./server/mcp-gateway-cache";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
@@ -119,15 +120,15 @@ export default function contribute(server: PluginServerContext) {
       mcpGatewayCache,
       onDeclaredMcpUnknown: (episode) =>
         console.error(
-          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" asked for MCP servers ${episode.values.map((value) => `"${value}"`).join(", ")} in paseo.mcp, which no mcpGateway server is called; created without them`,
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" asked for MCP servers ${echoedList(episode.values)} in paseo.mcp, which no mcpGateway server is called; created without them`,
         ),
       onDeclaredRoleUnknown: (episode) =>
         console.error(
-          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${episode.value}"; falling through to automatic classification`,
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown role "${echoed(episode.value)}"; falling through to automatic classification`,
         ),
       onDeclaredTaskClassUnknown: (episode) =>
         console.error(
-          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown task class "${episode.value}" (expected mechanical/standard/hard); falling through to automatic classification`,
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" declared unknown task class "${echoed(episode.value)}" (expected mechanical/standard/hard); falling through to automatic classification`,
         ),
       onToolProfileWithheld: (episode) =>
         console.error(
@@ -170,7 +171,7 @@ export default function contribute(server: PluginServerContext) {
         );
       },
       onThinkingOverridden: (episode) => {
-        const model = episode.modelRef !== undefined ? `"${episode.modelRef}"` : "the model";
+        const model = episode.modelRef !== undefined ? `"${echoed(episode.modelRef)}"` : "the model";
         const why =
           episode.reason === "leader-rule"
             ? "agentModelPolicy.thinking.leader outranks a requested level for a leader"
@@ -180,7 +181,7 @@ export default function contribute(server: PluginServerContext) {
                 ? `${model} offers no thinking options at all`
                 : `${model} does not offer it`;
         console.error(
-          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested thinking level "${episode.requested}", but ${why}; policy applied ${episode.applied === null ? "none" : `"${episode.applied}"`} instead`,
+          `[claude-account-pool] role-router: caller "${episode.callerAgentId}" explicitly requested thinking level "${echoed(episode.requested)}", but ${why}; policy applied ${episode.applied === null ? "none" : `"${episode.applied}"`} instead`,
         );
       },
     });

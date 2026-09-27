@@ -1,4 +1,5 @@
 import { POOL_FAMILY } from "../shared/role-policy-schema";
+import { echoed } from "./echo";
 import { rankByHeadroom, type HeadroomHealth } from "./headroom";
 import { relevantWindows, type HealthTracker } from "./health";
 
@@ -246,16 +247,19 @@ function describeCap(providerId: string, blockedBy: CappedWindow, modelId: strin
  * and the settings preview can't say different things.
  */
 export function describeRootSelection(selection: RootAccountSelection, requestedProviderId: string, modelId: string): string {
+  // Both are the request's own, so both are capped before a sentence quotes them.
+  const requested = echoed(requestedProviderId);
+  const model = echoed(modelId);
   switch (selection.kind) {
     case "not-pooled":
-      return `A root agent keeps the account it was started on, and ${requestedProviderId} is not a pooled account.`;
+      return `A root agent keeps the account it was started on, and ${requested} is not a pooled account.`;
     case "kept":
-      return `A root agent keeps the account it was started on while that account can serve it, and ${selection.providerId} can run ${modelId || "this request"}.`;
+      return `A root agent keeps the account it was started on while that account can serve it, and ${selection.providerId} can run ${model || "this request"}.`;
     case "rerouted":
       return selection.target === "leader"
-        ? `${describeCap(selection.from, selection.blockedBy, modelId)}, so this root agent starts on the leader account ${selection.providerId} instead. A root keeps the account it was started on only while that account can serve it.`
-        : `${describeCap(selection.from, selection.blockedBy, modelId)} and the leader account can't run it either, so this root agent starts on ${selection.providerId}, the pooled worker with the most headroom. A root keeps the account it was started on only while that account can serve it.`;
+        ? `${describeCap(selection.from, selection.blockedBy, model)}, so this root agent starts on the leader account ${selection.providerId} instead. A root keeps the account it was started on only while that account can serve it.`
+        : `${describeCap(selection.from, selection.blockedBy, model)} and the leader account can't run it either, so this root agent starts on ${selection.providerId}, the pooled worker with the most headroom. A root keeps the account it was started on only while that account can serve it.`;
     case "stranded":
-      return `${describeCap(selection.providerId, selection.blockedBy, modelId)}, and so is every other pooled account (${selection.providerIds.join(", ")}). A root agent is never refused, so it keeps ${selection.providerId} and will fail until a window resets.`;
+      return `${describeCap(selection.providerId, selection.blockedBy, model)}, and so is every other pooled account (${selection.providerIds.join(", ")}). A root agent is never refused, so it keeps ${selection.providerId} and will fail until a window resets.`;
   }
 }

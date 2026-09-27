@@ -1,4 +1,5 @@
 import type { AgentDecision } from "./classifier";
+import { echoed } from "./echo";
 import { mcpScopeLabelValue } from "./mcp-scope";
 
 /**
@@ -58,16 +59,25 @@ export interface DecisionLogOptions {
   now?: () => number;
 }
 
-/** A create whose account router never reported back (a throw, a passthrough hook) is forgotten after this. */
+/**
+ * A create whose account router never reported back (a throw, a passthrough
+ * hook) is forgotten after the TTL, which is what bounds the pending entries.
+ *
+ * The count is a backstop against a flood of such orphans, set far above any
+ * burst of creates. Every create that arrives while the role hook's policy
+ * read is in flight notes before any of them finishes, because they share the
+ * one read (server/interval-poller.ts), so a backstop near burst size evicts
+ * a live create's decision and logs that create as unknown.
+ */
 const PENDING_TTL_MS = 60_000;
-const MAX_PENDING = 64;
+const MAX_PENDING = 1024;
 
-interface Pending {
-  decision: AgentDecision;
-  atMs: number;
-  /** Set once its line is written, so a repeated finish writes nothing. Kept until the TTL so the repeat is recognised. */
-  finished: boolean;
-}
+/**
+ * A noted create, then a finished one. A finished entry drops its decision —
+ * which can carry whole request values — and is kept until the TTL only so a
+ * repeated finish is recognised and writes nothing.
+ */
+type Pending = { finished: false; decision: AgentDecision; atMs: number } | { finished: true; atMs: number };
 
 export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
   const now = options.now ?? Date.now;
@@ -95,7 +105,7 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
       prune(nowMs);
       sequence += 1;
       const token = `${instance}-${sequence}`;
-      pending.set(token, { decision, atMs: nowMs, finished: false });
+      pending.set(token, { finished: false, decision, atMs: nowMs });
       noted.set(request, token);
     },
     tag(request, output) {
@@ -121,8 +131,8 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
         if (entry?.finished) {
           return;
         }
-        if (entry) {
-          entry.finished = true;
+        if (token !== undefined && entry) {
+          pending.set(token, { finished: true, atMs: entry.atMs });
         }
         const line = entry ? describe(entry.decision, result) : describeUnknown(request, result);
         options.write(`${DECISION_LOG_PREFIX} ${JSON.stringify(line)}`);
@@ -133,13 +143,27 @@ export function createDecisionLog(options: DecisionLogOptions): DecisionLog {
   };
 }
 
+/** The model the request that runs carries. It is the caller's own whenever no hook rewrote it, so it is capped. */
+function finalModel(result: LoggedRequest | undefined): { final: string } | undefined {
+  return result?.config.model !== undefined ? { final: echoed(result.config.model) } : undefined;
+}
+
+/** The account the request that runs carries, or that it was refused. It is the caller's own whenever the pool passed it through, so it is capped. */
+function account(result: LoggedRequest | undefined): Record<string, unknown> {
+  if (!result) {
+    return { refused: true };
+  }
+  return { providerId: result.config.provider !== undefined ? echoed(result.config.provider) : null };
+}
+
 /** The line for a create whose decision was never noted or has expired: what ran, and that the decision is not known. */
 function describeUnknown(request: LoggedRequest, result: LoggedRequest | undefined): Record<string, unknown> {
+  const final = finalModel(result);
   return {
     caller: request.callerAgentId ? "child" : "root",
     decision: "unknown",
-    ...(result?.config.model !== undefined ? { model: { final: result.config.model } } : {}),
-    account: result ? { providerId: result.config.provider ?? null } : { refused: true },
+    ...(final ? { model: final } : {}),
+    account: account(result),
   };
 }
 
@@ -158,13 +182,14 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
       ...(model.override ? { overridden: true } : {}),
       ...(model.unadvertised ? { unadvertised: model.unadvertised.ref } : {}),
       // What the request actually carries after every hook ran, for the case a hook skipped the rewrite.
-      ...(result?.config.model !== undefined ? { final: result.config.model } : {}),
+      ...finalModel(result),
     },
-    thinking: { optionId: thinking.optionId, outcome: thinking.outcome },
-    outputStyle: outputStyle.style,
+    // Both can be the caller's own value, left standing, so both are capped.
+    thinking: { optionId: thinking.optionId === null ? null : echoed(thinking.optionId), outcome: thinking.outcome },
+    outputStyle: outputStyle.style === null ? null : echoed(outputStyle.style),
     // The paseo.mcp-scope value, or "all" for an agent that keeps every server.
     mcp: mcpScopeLabelValue(mcp) ?? "all",
-    account: result ? { providerId: result.config.provider ?? null } : { refused: true },
+    account: account(result),
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
     reasons: {
       role: role.reason,

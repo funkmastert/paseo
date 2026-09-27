@@ -135,6 +135,39 @@ describe("decision log", () => {
     expect(lines.map((line) => parse(line).account.providerId)).toEqual(["claude-work", "claude-personal"]);
   });
 
+  it("keeps every decision of a burst of creates noted before any of them finishes", () => {
+    // Concurrent creates all await the same policy read, so every role hook
+    // notes before any account hook finishes.
+    const { lines, log } = harness();
+    const burst = Array.from({ length: 65 }, (_, index) => request({ callerAgentId: `caller-${index}` }));
+    const tokens = burst.map((asked) => {
+      log.note(asked, decisionFor(asked));
+      return tokenOf(log, asked);
+    });
+    burst.forEach((asked, index) => log.finish(tokens[index], asked, asked));
+
+    expect(lines).toHaveLength(65);
+    for (const line of lines.map(parse)) {
+      expect(line.decision).toBeUndefined();
+      expect(line.role).toEqual({ id: "worker", source: "agent-type-mapping" });
+    }
+  });
+
+  it("still forgets the oldest orphan once more creates are pending than any burst reaches", () => {
+    const { lines, log } = harness();
+    const noted = Array.from({ length: 1025 }, (_, index) => {
+      const asked = request({ callerAgentId: `caller-${index}` });
+      log.note(asked, decisionFor(asked));
+      return { asked, token: tokenOf(log, asked) };
+    });
+    const first = noted[0];
+    const last = noted[noted.length - 1];
+    log.finish(first.token, first.asked, first.asked);
+    log.finish(last.token, last.asked, last.asked);
+    expect(parse(lines[0]).decision).toBe("unknown");
+    expect(parse(lines[1]).role).toEqual({ id: "worker", source: "agent-type-mapping" });
+  });
+
   it("still logs a create whose decision expired, with the decision unknown rather than a stale one", () => {
     const { lines, log, advance } = harness();
     const asked = request();
@@ -198,6 +231,84 @@ describe("decision log", () => {
     expect(lines[0].length).toBeLessThan(10_000);
     expect(line.reasons.role).toContain(`"${"x".repeat(120)}…"`);
     expect(line.reasons.taskClass).toContain(`"${"x".repeat(120)}…"`);
+  });
+
+  it("cuts a capped label between characters, never inside one, so the line jq reads has no lone surrogate", () => {
+    const { lines, log } = harness();
+    // 119 units, then a two-unit emoji straddling the 120-unit cap.
+    const label = `${"x".repeat(119)}\u{1F389}${"y".repeat(200)}`;
+    const asked = request({ labels: { "paseo.agent-role": label, "paseo.task-class": label } });
+    log.note(asked, decisionFor(asked));
+    log.finish(tokenOf(log, asked), asked, asked);
+    const line = parse(lines[0]);
+    for (const reason of [line.reasons.role, line.reasons.taskClass]) {
+      expect((reason as unknown as { isWellFormed(): boolean }).isWellFormed()).toBe(true);
+      expect(reason).toContain(`"${"x".repeat(119)}…"`);
+    }
+  });
+
+  it("caps a requested model id, in the decision and in the line, so a huge model id cannot make a huge line", () => {
+    const { lines, log } = harness();
+    const huge = "z".repeat(2_000_000);
+    const asked = request({ config: { ...request().config, model: huge } });
+    const decision = classifyAgent(
+      {
+        labels: asked.labels,
+        title: asked.config.title,
+        initialPrompt: asked.initialPrompt,
+        callerAgentId: asked.callerAgentId,
+        requestedProvider: asked.config.provider,
+        requestedModel: huge,
+      },
+      world,
+    );
+    expect(decision.model.requestedRef).toBe(`claude/${"z".repeat(113)}…`);
+    expect(decision.model.override?.requestedRef).toBe(decision.model.requestedRef);
+    log.note(asked, decision);
+    // The request itself as the result: what the account hook sees when policy left the model alone.
+    log.finish(tokenOf(log, asked), asked, asked);
+    expect(lines[0].length).toBeLessThan(10_000);
+    const line = parse(lines[0]);
+    expect(line.model.requested).toBe(`claude/${"z".repeat(113)}…`);
+    expect(line.model.final).toBe(`${"z".repeat(120)}…`);
+    expect(line.reasons.model).toContain(`claude/${"z".repeat(113)}… was asked for`);
+  });
+
+  it("caps a requested thinking level, output style and provider that reach the line", () => {
+    const { lines, log } = harness();
+    const asked = request({ labels: { "paseo.agent-type": "worker" } });
+    const decision = classifyAgent(
+      {
+        labels: asked.labels,
+        callerAgentId: asked.callerAgentId,
+        requestedProvider: asked.config.provider,
+        requestedThinkingOptionId: "t".repeat(2_000_000),
+        requestedOutputStyle: "s".repeat(2_000_000),
+      },
+      // A catalog with no thinking options known, so the requested level stands as asked.
+      { ...world, thinkingCatalog: new Map() },
+    );
+    log.note(asked, decision);
+    log.finish(tokenOf(log, asked), asked, { ...asked, config: { ...asked.config, provider: "p".repeat(2_000_000) } });
+    expect(lines[0].length).toBeLessThan(10_000);
+    const line = parse(lines[0]);
+    expect(line.thinking).toEqual({ optionId: `${"t".repeat(120)}…`, outcome: "model-unknown" });
+    expect(line.outputStyle).toBe(`${"s".repeat(120)}…`);
+    expect(line.reasons.outputStyle).toContain(`${"s".repeat(120)}…, as the caller's request set it`);
+    expect(line.account).toEqual({ providerId: `${"p".repeat(120)}…` });
+  });
+
+  it("caps the model and account of a line whose decision is unknown, which come straight from the request", () => {
+    const { lines, log } = harness();
+    const asked = request({ config: { provider: "p".repeat(2_000_000), model: "z".repeat(2_000_000) } });
+    log.finish(undefined, asked, asked);
+    expect(lines[0].length).toBeLessThan(1_000);
+    expect(parse(lines[0])).toEqual({
+      caller: "child",
+      decision: "unknown",
+      model: { final: `${"z".repeat(120)}…` },
+      account: { providerId: `${"p".repeat(120)}…` },
+    });
   });
 
   it("marks a root create", () => {

@@ -1,4 +1,5 @@
 import { MCP_LABEL, type RoleRecord } from "../shared/role-policy-schema";
+import { echoedList } from "./echo";
 
 /**
  * The MCP half of the tools decision: which of the daemon's MCP gateway
@@ -111,8 +112,7 @@ function unknownNote(unknown: readonly string[]): string {
   if (unknown.length === 0) {
     return "";
   }
-  const names = unknown.map((name) => `"${name}"`).join(", ");
-  return ` ${MCP_LABEL} named ${names}, which no gateway server is called, so ${unknown.length === 1 ? "it was" : "they were"} ignored rather than blocking the create.`;
+  return ` ${MCP_LABEL} named ${echoedList(unknown)}, which no gateway server is called, so ${unknown.length === 1 ? "it was" : "they were"} ignored rather than blocking the create.`;
 }
 
 const SOURCE_PHRASE: Record<McpGrantSource, string> = {
