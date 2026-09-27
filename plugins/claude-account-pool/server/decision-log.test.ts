@@ -200,6 +200,20 @@ describe("decision log", () => {
     expect(line.reasons.taskClass).toContain(`"${"x".repeat(120)}…"`);
   });
 
+  it("cuts a capped label between characters, never inside one, so the line jq reads has no lone surrogate", () => {
+    const { lines, log } = harness();
+    // 119 units, then a two-unit emoji straddling the 120-unit cap.
+    const label = `${"x".repeat(119)}\u{1F389}${"y".repeat(200)}`;
+    const asked = request({ labels: { "paseo.agent-role": label, "paseo.task-class": label } });
+    log.note(asked, decisionFor(asked));
+    log.finish(tokenOf(log, asked), asked, asked);
+    const line = parse(lines[0]);
+    for (const reason of [line.reasons.role, line.reasons.taskClass]) {
+      expect((reason as unknown as { isWellFormed(): boolean }).isWellFormed()).toBe(true);
+      expect(reason).toContain(`"${"x".repeat(119)}…"`);
+    }
+  });
+
   it("caps a requested model id, in the decision and in the line, so a huge model id cannot make a huge line", () => {
     const { lines, log } = harness();
     const huge = "z".repeat(2_000_000);

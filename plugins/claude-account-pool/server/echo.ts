@@ -12,9 +12,19 @@ const MAX_ECHOED_CHARS = 120;
 /** Most caller-supplied values a list quotes; past it the rest are counted. */
 const MAX_ECHOED_ITEMS = 10;
 
-/** A caller-supplied value as a reason or log line quotes it: capped, so a huge value cannot make a huge line. */
+/**
+ * A caller-supplied value as a reason or log line quotes it: capped, so a huge
+ * value cannot make a huge line. The cut lands between characters, never
+ * inside a surrogate pair: `JSON.stringify` keeps a lone surrogate as an
+ * escape, and `jq` renders it as U+FFFD.
+ */
 export function echoed(value: string): string {
-  return value.length > MAX_ECHOED_CHARS ? `${value.slice(0, MAX_ECHOED_CHARS)}…` : value;
+  if (value.length <= MAX_ECHOED_CHARS) {
+    return value;
+  }
+  const last = value.charCodeAt(MAX_ECHOED_CHARS - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? MAX_ECHOED_CHARS - 1 : MAX_ECHOED_CHARS;
+  return `${value.slice(0, end)}…`;
 }
 
 /** Caller-supplied values as a reason or log line lists them: each quoted and capped, and past the first few, counted. */
