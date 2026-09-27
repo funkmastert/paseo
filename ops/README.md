@@ -53,7 +53,9 @@ Four services in `launch-agents/` (copies of `~/Library/LaunchAgents/sh.bozeo.*.
 | `sh.bozeo.failover-watch` | `failover-watch.mjs` | `~/Library/Logs/Bozeo/failover-watch.log` |
 | `sh.bozeo.public-web` | `public-web/server.mjs` | `~/Library/Logs/Bozeo/public-web.log` |
 
-Install one (loads from `~/bozeo-ops`, not this repo — copy the plist there first if it doesn't already exist):
+Install one. The plist goes in `~/Library/LaunchAgents`, and it points at the
+script under `~/bozeo-ops`, not at this repo — make sure the script is there
+first:
 
 ```sh
 cp ops/launch-agents/sh.bozeo.cpu-guard.plist ~/Library/LaunchAgents/
