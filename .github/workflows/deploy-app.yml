@@ -11,6 +11,8 @@ on:
 
 jobs:
   deploy:
+    # Deploys to upstream's Cloudflare account (app.paseo.sh). Forks skip it.
+    if: github.repository == 'getpaseo/paseo'
     runs-on: ubuntu-latest
 
     steps:
