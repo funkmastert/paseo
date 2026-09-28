@@ -1,5 +1,7 @@
 # Development
 
+To build and install this fork as an app rather than work on it, see [install.md](install.md).
+
 ## Prerequisites
 
 - Node.js (see `.tool-versions` for exact version)

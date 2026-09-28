@@ -2,203 +2,71 @@
   <img src="packages/website/public/logo.svg" width="64" height="64" alt="Paseo logo">
 </p>
 
-<h1 align="center">Paseo</h1>
+<h1 align="center">Bozeo</h1>
+
+<p align="center">A fork of <a href="https://github.com/getpaseo/paseo">Paseo</a> that runs your coding agents across several Claude accounts.</p>
+
+[Paseo](https://github.com/getpaseo/paseo) is Mohamed Boudra's app for running Claude Code, Codex, Copilot, OpenCode and Pi agents on your own machine and driving them from your desk, your phone or a terminal. Everything this fork builds on is his work: the app, the daemon, the CLI and the relay. [paseo.sh](https://paseo.sh) has the docs and signed downloads, and [getpaseo/paseo](https://github.com/getpaseo/paseo) is where the project lives. If you like what you see here, star it there.
+
+This fork adds a layer for people who run many agents on more than one Claude subscription. The app calls itself Bozeo. The CLI is still `paseo`, and the fork keeps Paseo's data directory, `~/.paseo`.
+
+## What this fork adds
+
+You sign in to each of your Claude accounts once and give them roles: one leader, the rest workers. For every new agent, one classifier decides its model, thinking level, account and allowed tools from a role policy you edit in Settings. The classifier is a set of rules, not a model call, and it records why it chose each part. Agents you start yourself stay on the account you pick. Agents they spawn go to worker accounts, ranked by how much room each has left in its session and weekly windows, so the account you work in keeps its budget. When an account hits its cap, failover moves its stuck agents to an account with room, conversation included. Setup and the full policy are in [plugins/claude-account-pool/README.md](plugins/claude-account-pool/README.md) and [docs/account-failover.md](docs/account-failover.md).
 
 <p align="center">
-  <a href="README.md">English</a> ·
-  <a href="README.zh-CN.md">简体中文</a> ·
-  <a href="README.ja.md">日本語</a> ·
-  <a href="README.ko.md">한국어</a>
+  <img src="docs/assets/orchestration-account-strip-desktop.png" width="600" alt="Budget strip: three Claude accounts and a Codex account, each with its role, usage windows and running agents">
 </p>
 
-<p align="center">
-  <a href="https://github.com/getpaseo/paseo/stargazers">
-    <img src="https://img.shields.io/github/stars/getpaseo/paseo?style=flat&logo=github" alt="GitHub stars">
-  </a>
-  <a href="https://github.com/getpaseo/paseo/releases">
-    <img src="https://img.shields.io/github/v/release/getpaseo/paseo?style=flat&logo=github" alt="GitHub release">
-  </a>
-  <a href="https://x.com/moboudra">
-    <img src="https://img.shields.io/badge/%40moboudra-555?logo=x" alt="X">
-  </a>
-  <a href="https://discord.gg/jz8T2uahpH">
-    <img src="https://img.shields.io/badge/Discord-555?logo=discord" alt="Discord">
-  </a>
-  <a href="https://www.reddit.com/r/PaseoAI/">
-    <img src="https://img.shields.io/badge/Reddit-555?logo=reddit" alt="Reddit">
-  </a>
-</p>
+Also in this fork:
 
-<p align="center">One interface for Claude Code, Codex, Copilot, OpenCode, and Pi agents.</p>
+- **Orchestration panel.** Every agent and subagent in one tree, with each account's usage and where its agents run. [docs/orchestration-panel.md](docs/orchestration-panel.md)
+- **Restart recovery.** Agents a daemon stop cut off mid-turn are listed in the sidebar and resumed, leaders first. `paseo recover` does the same from a terminal. [docs/restart-recovery.md](docs/restart-recovery.md)
+- **`paseo doctor`.** Read-only checks for signed-out accounts, plugins that did not load, a stale daemon and more. Each finding prints the command that fixes it. [docs/doctor.md](docs/doctor.md)
+- **MCP gateway.** The daemon signs in to OAuth MCP servers once and hands the login to every account, with a status strip in the sidebar. [docs/mcp-gateway.md](docs/mcp-gateway.md)
+- **Pinned grid and context meter.** Open every pinned chat side by side, and see what fills each agent's context. [docs/pinned-grid.md](docs/pinned-grid.md), [docs/context-usage.md](docs/context-usage.md)
+- **Daemon housekeeping.** Per-agent token burn, CPU and memory, usage history with a projection of when each window caps, nudges for stalled agents, and a [remediation ladder](docs/remediation.md) that tries a fix before it notifies you.
+- **Cleanup.** A disk sweeper, on by default, deletes Paseo worktrees that have been archived or orphaned for 7 days, and only when they are clean and fully pushed. The janitors that delete anything else or stop processes are off until you turn them on.
 
-<p align="center">
-  <img src="https://paseo.sh/hero-mockup.png" alt="Paseo app screenshot" width="100%">
-</p>
+## Should you use this fork?
 
-<p align="center">
-  <img src="https://paseo.sh/mobile-mockup.png" alt="Paseo mobile app" width="100%">
-</p>
+Use [upstream Paseo](https://github.com/getpaseo/paseo) instead if any of these is true:
 
-Run agents in parallel on your own machines. Ship from your phone or your desk.
+- **You have one Claude account.** The pool routes work between accounts, so with one account it has nothing to do.
+- **You want a signed download that updates itself.** This fork has no releases yet, and its builds are not signed.
+- **You want the phone apps.** The App Store and Play Store apps are built from upstream and do not have this fork's screens.
+- **You want upstream's latest release.** This fork is based on Paseo 0.8.0 and does not pick up every upstream release.
 
-- **Self-hosted:** Agents run on your machine with your full dev environment. Use your tools, your configs, and your skills.
-- **Multi-provider:** Claude Code, Codex, Copilot, OpenCode, and Pi through the same interface. Pick the right model for each job.
-- **Voice control:** Dictate tasks or talk through problems in voice mode. Hands-free when you need it.
-- **Cross-device:** iOS, Android, desktop, web, and CLI. Start work at your desk, check in from your phone, script it from the terminal.
-- **Privacy-first:** Paseo doesn't have any telemetry, tracking, or forced log-ins.
+Use this fork if you run agents on two or more Claude accounts, want spawned agents kept off the account you work in, and can build from source.
 
-## Plugins
+Run Paseo or Bozeo, not both at once: they share `~/.paseo` and port 6767 ([details](docs/install.md#before-you-start)).
 
-Add themes, workspace panels, commands, settings screens, and coding-agent providers with trusted
-TypeScript plugins. Install from a local directory or Git repository with `paseo plugin add <source>`.
+## Install
 
-See the [plugin docs](https://paseo.sh/docs/plugins) for your Paseo version, or start with the
-[0.8 beta quickstart](https://paseo.sh/docs/plugins/v0.8). Plugins run with access to your daemon
-machine and inside connected clients; install only code you trust.
+There are no releases yet, so you build the desktop app from source. If the [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download it instead. [docs/install.md](docs/install.md) has every step, the Windows differences and troubleshooting.
 
-## Getting Started
-
-Paseo runs a local server called the daemon that manages your coding agents. Clients like the desktop app, mobile app, web app, and CLI connect to it.
-
-### Prerequisites
-
-You need at least one agent CLI installed and configured with your credentials:
-
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
-- [Codex](https://github.com/openai/codex)
-- [GitHub Copilot](https://github.com/features/copilot/cli/)
-- [OpenCode](https://github.com/anomalyco/opencode)
-- [Pi](https://pi.dev)
-
-### Desktop app (recommended)
-
-Download it from [paseo.sh/download](https://paseo.sh/download) or the [GitHub releases page](https://github.com/getpaseo/paseo/releases). Open the app and the daemon starts automatically. Nothing else to install.
-
-To connect from your phone, open **Settings → your host → Pair Device**.
-
-### CLI / headless
-
-Install the CLI and start Paseo:
+You need Git, Node.js 22, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. On Windows, run these commands in Git Bash.
 
 ```bash
-npm install -g @getpaseo/cli
-paseo
+git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
+cd paseo
+npm ci
+npm run build:desktop -- --publish never
 ```
 
-Paseo starts locally, then asks whether to enable the end-to-end encrypted relay for device pairing. If you decline, connect directly over TCP, Tailscale, or another VPN. This path is useful for servers and remote machines.
+Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream.
 
-For full setup and configuration, see:
+The installer lands in `packages/desktop/release/`: a `.dmg` on macOS, a `Paseo-Setup-<version>-<arch>.exe` on Windows. Then set up the account pool with the plugin's [operator setup](plugins/claude-account-pool/README.md#operator-setup), as [docs/install.md](docs/install.md#set-up-the-account-pool) describes.
 
-- [Docs](https://paseo.sh/docs)
-- [Connectivity guide](https://paseo.sh/docs/connectivity)
-- [Configuration reference](https://paseo.sh/docs/configuration)
+## Docs
 
-### Docker
+- [docs/install.md](docs/install.md): build, install, first run, Windows notes, troubleshooting.
+- [plugins/claude-account-pool/README.md](plugins/claude-account-pool/README.md): pool setup, account routing, role policy, thinking levels, tool profiles.
+- [docs/](docs/): this fork's design notes. [CLAUDE.md](CLAUDE.md) has the index.
+- [paseo.sh/docs](https://paseo.sh/docs): upstream's docs for everything this fork does not change, including the [CLI](https://paseo.sh/docs/cli), [connectivity](https://paseo.sh/docs/connectivity) and [configuration](https://paseo.sh/docs/configuration).
 
-Run the Paseo daemon and self-hosted web UI in Docker:
-
-```bash
-docker run -d --name paseo \
-  -p 6767:6767 \
-  -e PASEO_PASSWORD=change-me \
-  -v "$PWD/paseo-home:/home/paseo" \
-  -v "$PWD:/workspace" \
-  ghcr.io/getpaseo/paseo:latest
-```
-
-Open `http://localhost:6767` after it starts. Extend the base image with the agent CLIs you use, then provide credentials through environment variables or the persistent `/home/paseo` volume. See the [Docker documentation](docs/docker.md) for full setup details.
-
-## CLI
-
-Everything you can do in the app, you can do from the terminal.
-
-```bash
-paseo run --provider claude/opus-4.6 "implement user authentication"
-paseo run --provider codex/gpt-5.5 --worktree feature-x "implement feature X"
-
-paseo ls                           # list running agents
-paseo attach abc123                # stream live output
-paseo send abc123 "also add tests" # follow-up task
-
-# run on a remote daemon; --cwd is a path on that host
-paseo run --host workstation.local:6767 --cwd /workspace "run the full test suite"
-```
-
-See the [full CLI reference](https://paseo.sh/docs/cli) for more.
-
-## TypeScript SDK
-
-Build issue integrations, dashboards, and orchestration services with `@getpaseo/client`:
-
-```ts
-import { createPaseoClient } from "@getpaseo/client";
-
-const client = createPaseoClient({ url: "ws://127.0.0.1:6767/ws" });
-await client.connect();
-
-const agent = await client.agents.create({
-  config: { provider: "codex/gpt-5.5" },
-  cwd: "/Users/me/dev/storefront",
-  prompt: "Review the current diff and name the riskiest change.",
-});
-
-const result = await agent.waitForFinish();
-console.log(result.lastMessage);
-
-await client.close();
-```
-
-See the [SDK quickstart](https://paseo.sh/docs/sdk/quickstart), [recipes](https://paseo.sh/docs/sdk/recipes), and [API reference](https://paseo.sh/docs/sdk/reference).
-
-## Skills
-
-Skills teach your agent to use Paseo to orchestrate other agents.
-
-```bash
-npx skills add getpaseo/paseo
-```
-
-Then use them in any agent conversation:
-
-- `/paseo-handoff` — hand off work between agents. I use this to plan with Claude and then handoff to Codex to implement.
-- `/paseo-advisor` — spin up a single agent as an advisor for a second opinion, without delegating the work itself.
-- `/paseo-committee` — form a committee of two contrasting agents to step back, do root cause analysis, and produce a plan.
-
-## Development
-
-Quick monorepo package map:
-
-- `packages/server`: Paseo daemon (agent process orchestration, WebSocket API, MCP server)
-- `packages/app`: Expo client (iOS, Android, web)
-- `packages/cli`: `paseo` CLI for daemon and agent workflows
-- `packages/desktop`: Electron desktop app
-- `packages/relay`: Relay transport and encryption used by the daemon and clients
-- `packages/website`: Marketing site and documentation (`paseo.sh`)
-
-Common commands:
-
-```bash
-# run all local dev services
-npm run dev
-
-# run individual surfaces
-npm run dev:server
-npm run dev:app
-npm run dev:desktop
-npm run dev:website
-
-# build the server stack
-npm run build:server
-
-# repo-wide checks
-npm run typecheck
-```
-
-## Related projects
-
-- [getpaseo/paseo-relay](https://github.com/getpaseo/paseo-relay) — official distributed relay, written in Elixir
-- [paseo-vscode](https://marketplace.visualstudio.com/items?itemName=hinnes.paseo-vscode) — VS Code extension
+This fork has no issue tracker. Report a problem to [upstream](https://github.com/getpaseo/paseo/issues) only if it also happens on an upstream release.
 
 ## License
 
-Apache-2.0
+Apache-2.0, the same as upstream. Paseo is copyright Mohamed Boudra; see [LICENSE](LICENSE). This fork's changes are recorded in its git history.
