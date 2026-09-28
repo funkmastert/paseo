@@ -118,6 +118,8 @@ The plugin README's [troubleshooting](../plugins/claude-account-pool/README.md#t
 
 **Windows: `paseo` is not recognized.** Add `%USERPROFILE%\.local\bin` to your user `PATH` and open a new terminal.
 
+**After a build, `git status` shows `package.json` modified with a `packageManager` line.** The build added it on a machine where Corepack's `yarn` shim is on `PATH`. Run `git checkout package.json` so your next `git pull` does not conflict.
+
 **The package step fails.** Run the app from source instead: `npm run dev:desktop` on macOS, or `npm run dev:win:desktop` on Windows. It keeps its state inside the checkout and runs its daemon on its own port, so it can run while the installed app is open.
 
 **Linux.** The build config also has AppImage, deb, rpm and tar.gz targets. This page does not cover them.
