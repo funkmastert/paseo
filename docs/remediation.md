@@ -41,7 +41,7 @@ The ladder creates it through the normal create path (`createAgentCommand`, `kin
 | `paseo.remediation-key` | the episode key                                                                                 |
 | `paseo.agent-type`      | `worker`                                                                                        |
 
-It runs in the observation's `escalation.cwd`, else the home directory. The prompt (`remediation/escalation.ts`) carries the condition, the summary, the evidence cut at 8 KB, the attempts, the monitor's task, and these limits: stay inside the task; no pushes to shared company forges; never restart the Paseo daemon or edit `~/.paseo/config.json`; never touch another agent's worktree except as the task says; never delete uncommitted work.
+It runs in a new workspace at the observation's `escalation.cwd`, else the home directory. The done janitor archives that workspace, and the agent with it, ten minutes after the agent stops ([done-janitor.md](done-janitor.md#idle-workspaces)); a push still opens it from the archive. The prompt (`remediation/escalation.ts`) carries the condition, the summary, the evidence cut at 8 KB, the attempts, the monitor's task, and these limits: stay inside the task; no pushes to shared company forges; never restart the Paseo daemon or edit `~/.paseo/config.json`; never touch another agent's worktree except as the task says; never delete uncommitted work.
 
 The agent ends its final message with exactly one line:
 
