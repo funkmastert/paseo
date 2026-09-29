@@ -82,8 +82,12 @@ export function AskJevResultCard({ result }: { result: AskJevResultView }): Reac
         </Text>
         <Text style={styles.detail}>{result.detail}</Text>
       </View>
+      {result.position ? (
+        <View style={styles.barsRow}>
+          <PositionRow position={result.position} />
+        </View>
+      ) : null}
       <View style={styles.barsRow}>
-        {result.position ? <PositionRow position={result.position} /> : null}
         {result.bars.map((bar) => (
           <BarRow key={bar.key} bar={bar} />
         ))}

@@ -60,6 +60,15 @@ describe("mapAskJevPayload", () => {
     });
   });
 
+  it("calls an even split Even and marks neither side", () => {
+    const view = mapAskJevPayload(payload({ answer: { type: "noul", noul: 0.5 } }), YES_NO);
+    expect(view).toMatchObject({
+      kind: "answer",
+      headline: "Even",
+      bars: [{ chosen: false }, { chosen: false }],
+    });
+  });
+
   it("answers No below one half", () => {
     const view = mapAskJevPayload(payload({ answer: { type: "noul", noul: 0.3 } }), YES_NO);
     expect(view).toMatchObject({

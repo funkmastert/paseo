@@ -260,6 +260,25 @@ describe("resolveJevConfig clamps", () => {
     );
   });
 
+  test("askJev: its own lane, no shadow, a deadline clamped to 1–30 s", () => {
+    expect(resolveJevConfig({}, { homeDir: HOME }).askJev).toEqual({
+      enabled: true,
+      shadow: false,
+      timeoutMs: 15_000,
+      maxConcurrent: 2,
+      maxUsdPerDay: 0.25,
+    });
+    expect(
+      resolveJevConfig({ askJev: { timeoutMs: 600_000 } }, { homeDir: HOME }).askJev.timeoutMs,
+    ).toBe(30_000);
+    expect(
+      resolveJevConfig({ askJev: { timeoutMs: 10 } }, { homeDir: HOME }).askJev.timeoutMs,
+    ).toBe(1_000);
+    expect(
+      resolveJevConfig({ askJev: { maxUsdPerDay: -1, enabled: false } }, { homeDir: HOME }).askJev,
+    ).toMatchObject({ enabled: false, maxUsdPerDay: 0.25 });
+  });
+
   test("agentTools.assignShare is clamped into [0, 1]", () => {
     expect(
       resolveJevConfig({ agentTools: { assignShare: 5 } }, { homeDir: HOME }).agentTools
@@ -342,6 +361,7 @@ describe("createJevConfigReader", () => {
             maxConcurrent: 2.5,
             spawnHint: { timeoutMs: 0 },
             agentTools: { shadow: true },
+            askJev: { shadow: true, timeoutMs: 120_000 },
           },
         },
       } as Record<string, unknown>,
@@ -360,6 +380,7 @@ describe("createJevConfigReader", () => {
     expect(result.config.maxConcurrent).toBe(2);
     expect(result.config.spawnHint.timeoutMs).toBe(1500);
     expect(result.config.agentTools.shadow).toBe(false);
+    expect(result.config.askJev).toMatchObject({ shadow: false, timeoutMs: 30_000 });
   });
 
   test.each([

@@ -102,6 +102,14 @@ function metaOf(payload: AskJevPayload): AskJevMeta {
   };
 }
 
+const NOUL_HEADLINES = { yes: "Yes", no: "No", even: "Even" } as const;
+
+/** An even split leans neither way, so neither side is the answer. */
+function noulLean(yes: number): keyof typeof NOUL_HEADLINES {
+  if (Math.round(yes * 100) === 50) return "even";
+  return yes > 0.5 ? "yes" : "no";
+}
+
 function answerView(payload: AskJevPayload, question: JevQuestion): AskJevResultView | null {
   const answer = payload.answer;
   if (!answer || answer.type !== question.type) return null;
@@ -109,15 +117,15 @@ function answerView(payload: AskJevPayload, question: JevQuestion): AskJevResult
   switch (answer.type) {
     case "noul": {
       const yes = clamp01(answer.noul);
-      const isYes = yes >= 0.5;
+      const lean = noulLean(yes);
       return {
         kind: "answer",
         answerType: "noul",
-        headline: isYes ? "Yes" : "No",
+        headline: NOUL_HEADLINES[lean],
         detail: `${formatPercent(yes)} probability of yes`,
         bars: [
-          { key: "yes", label: "Yes", fraction: yes, chosen: isYes },
-          { key: "no", label: "No", fraction: 1 - yes, chosen: !isYes },
+          { key: "yes", label: "Yes", fraction: yes, chosen: lean === "yes" },
+          { key: "no", label: "No", fraction: 1 - yes, chosen: lean === "no" },
         ],
         position: null,
         meta,

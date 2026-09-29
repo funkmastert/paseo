@@ -791,6 +791,8 @@ export const AgentJevSchema = z
     askJev: z
       .object({
         enabled: z.boolean().optional(),
+        // askJev has no shadow mode, like agentTools; the key is accepted and ignored.
+        shadow: z.boolean().optional(),
         timeoutMs: z.number().optional(),
         maxConcurrent: z.number().optional(),
         maxUsdPerDay: z.number().optional(),

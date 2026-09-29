@@ -1984,6 +1984,9 @@
                     "enabled": {
                       "type": "boolean"
                     },
+                    "shadow": {
+                      "type": "boolean"
+                    },
                     "timeoutMs": {
                       "type": "number"
                     },
