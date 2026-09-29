@@ -7,27 +7,33 @@ import {
   type OfferedOptions,
   type QuestionRequestOptions,
 } from "./options.js";
-import { findExcludedAction, isReadOnlyPermission } from "./safety.js";
+import { findExcludedAction, isReadOnlyPermission, type ReadScope } from "./safety.js";
+import type { AwayReplyThread } from "./thread.js";
 
 /**
  * JEV decides; code writes (docs/jev.md, "Feature 14: away auto-reply"). JEV cannot generate text,
  * so it only picks from closed sets, and this file maps its answers to one reply from a fixed set
  * of templates. The floors are code constants: code owns the numbers.
+ *
+ * Asymmetric: every answer JEV is unsure about means no reply. The floors sit well above JEV's
+ * calibration error (0.13-0.25), and a hold or destructive answer only needs to be a little above
+ * zero to stop a reply.
  */
 
-export const NEEDS_REPLY_FLOOR = 0.6;
-export const WAIT_KIND_FLOOR = 0.6;
+export const NEEDS_REPLY_FLOOR = 0.8;
+export const WAIT_KIND_FLOOR = 0.75;
 /** Picking the option the leader itself recommended. */
-export const OPTION_FLOOR_WITH_RECOMMENDATION = 0.6;
+export const OPTION_FLOOR_WITH_RECOMMENDATION = 0.75;
 /** Picking an option when the leader recommended none. */
-export const OPTION_FLOOR = 0.7;
-export const READ_ONLY_FLOOR = 0.9;
+export const OPTION_FLOOR = 0.85;
+export const READ_ONLY_FLOOR = 0.95;
+/** A "Tyler said to hold" answer at or over this sends nothing. */
+export const TYLER_HOLD_CEILING = 0.2;
 
 const LAST_MESSAGE_CHARS = 4000;
 const CONTEXT_MESSAGE_CHARS = 2000;
 const PLAN_CHARS = 4000;
 const REQUEST_CHARS = 1000;
-const REPLY_LABEL_CHARS = 120;
 
 export const AWAY_REPLY_GUARD =
   "Do not merge any PR, and do not take any destructive, irreversible or outward-facing action on the strength of this reply; leave those for Tyler.";
@@ -41,24 +47,39 @@ export function awayReplyMarker(thresholdMinutes: number): string {
 
 export interface AwayReplyContext {
   episode: WaitingEpisode;
+  /** Everything since Tyler last wrote, and his recent messages. */
+  thread: AwayReplyThread;
   /** The options JEV may pick from: the leader's own. */
   offered: OfferedOptions;
   question: QuestionRequestOptions | null;
   planText: string | null;
+  /**
+   * The plan action that puts the leader back in the mode it had before planning
+   * (`implement_resume`). Null when none is offered: `implement` would move it to `acceptEdits`,
+   * so such a plan gets no auto-reply.
+   */
+  resumeActionId: string | null;
+  /** Where a read-only tool may read: the leader's cwd. */
+  readScope: ReadScope;
 }
 
 export type AwayReplyContextResult =
   | { ok: true; context: AwayReplyContext }
   | { ok: false; reason: string };
 
-export function buildAwayReplyContext(episode: WaitingEpisode): AwayReplyContextResult {
+export function buildAwayReplyContext(
+  episode: WaitingEpisode,
+  thread: AwayReplyThread,
+  readScope: ReadScope,
+): AwayReplyContextResult {
   const request = episode.request;
+  const base = { episode, thread, readScope, resumeActionId: null };
   switch (episode.kind) {
     case "turn-ended":
       return {
         ok: true,
         context: {
-          episode,
+          ...base,
           offered: parseOfferedOptions(episode.lastMessage),
           question: null,
           planText: null,
@@ -67,7 +88,7 @@ export function buildAwayReplyContext(episode: WaitingEpisode): AwayReplyContext
     case "question": {
       const question = parseQuestionRequest(request?.input);
       if (!question) return { ok: false, reason: "unsupported-question" };
-      return { ok: true, context: { episode, offered: question, question, planText: null } };
+      return { ok: true, context: { ...base, offered: question, question, planText: null } };
     }
     case "plan": {
       // The marker rides on the plan text Claude echoes back as "Approved Plan (edited by user)".
@@ -76,13 +97,18 @@ export function buildAwayReplyContext(episode: WaitingEpisode): AwayReplyContext
       if (typeof plan !== "string" || plan.trim().length === 0) {
         return { ok: false, reason: "plan-cannot-carry-marker" };
       }
+      const resume = (request?.actions ?? []).find(
+        (action) => action.behavior === "allow" && action.intent === "implement_resume",
+      );
+      if (!resume) return { ok: false, reason: "plan-would-change-mode" };
       return {
         ok: true,
         context: {
-          episode,
+          ...base,
           offered: { options: [], recommendedId: null },
           question: null,
           planText: plan,
+          resumeActionId: resume.id,
         },
       };
     }
@@ -90,7 +116,7 @@ export function buildAwayReplyContext(episode: WaitingEpisode): AwayReplyContext
       return {
         ok: true,
         context: {
-          episode,
+          ...base,
           offered: { options: [], recommendedId: null },
           question: null,
           planText: null,
@@ -107,12 +133,15 @@ function requestSummary(context: AwayReplyContext): string {
 }
 
 /**
- * Everything the deterministic exclusion reads: the agent's whole last message (not the capped
- * copy JEV gets), the question and its options, the plan, and the tool request.
+ * Everything the deterministic exclusion reads: the whole thread since Tyler last wrote (every
+ * message, reasoning block and tool call, not the capped copy JEV gets), Tyler's recent messages,
+ * the question and its options, the plan, and the tool request.
  */
 export function threadText(context: AwayReplyContext): string {
   const request = context.episode.request;
   return [
+    context.thread.scanText,
+    ...context.thread.tylerMessages,
     context.episode.lastMessage,
     context.question?.question ?? "",
     ...context.offered.options.map((option) => option.label),
@@ -151,6 +180,8 @@ export function buildAwayReplyRequest(context: AwayReplyContext): {
   const state: Record<string, unknown> = { waiting_on: WAITING_ON[episode.kind] };
   const messageCap = episode.kind === "turn-ended" ? LAST_MESSAGE_CHARS : CONTEXT_MESSAGE_CHARS;
   if (episode.lastMessage.trim()) state["last_message"] = episode.lastMessage.slice(-messageCap);
+  state["tyler_recent_messages"] = context.thread.tylerMessages;
+  if (context.thread.jevText.trim()) state["thread_since_tyler"] = context.thread.jevText;
   if (context.question) state["question"] = context.question.question;
   if (offered.options.length >= 2) {
     state["options"] = Object.fromEntries(
@@ -175,6 +206,7 @@ export function buildAwayReplyRequest(context: AwayReplyContext): {
           },
         },
         destructive: destructiveQuestion("Would allowing the tool call in `request`"),
+        tyler_hold: TYLER_HOLD_QUESTION,
       },
     };
   }
@@ -213,9 +245,22 @@ export function buildAwayReplyRequest(context: AwayReplyContext): {
       criteria: optionCriteria(context),
     };
   }
-  questions["destructive"] = destructiveQuestion("Would acting on the best answer to the agent");
+  questions["destructive"] = destructiveQuestion(
+    "Would acting on the best answer to the agent, or carrying on with anything in `thread_since_tyler`,",
+  );
+  questions["tyler_hold"] = TYLER_HOLD_QUESTION;
   return { state, questions };
 }
+
+const TYLER_HOLD_QUESTION: JevQuestions[string] = {
+  type: "noul",
+  instructions:
+    "Did the person, in `tyler_recent_messages`, tell the agent to stop, wait, hold, pause, do nothing, or leave the decision to them?",
+  criteria: {
+    true: "Their latest messages ask the agent to stop, wait, hold off, not proceed, or wait for them to decide or come back",
+    false: "Their latest messages ask for the work to go ahead, or say nothing about waiting",
+  },
+};
 
 function destructiveQuestion(lead: string): JevQuestions[string] {
   return {
@@ -300,21 +345,15 @@ export function mapAwayReplyAnswers(
   });
 
   const destructive = noul(answers, "destructive");
-  if (destructive === null) return decide(none("malformed"), null);
+  const hold = noul(answers, "tyler_hold");
+  if (destructive === null || hold === null) return decide(none("malformed"), null);
   if (destructive >= config.destructiveThreshold) {
     return decide(none("destructive-intent"), round(destructive));
   }
+  if (hold >= TYLER_HOLD_CEILING) return decide(none("tyler-said-hold"), round(hold));
 
   const { episode, offered } = context;
-  if (episode.kind === "permission") {
-    const readOnly = noul(answers, "read_only");
-    if (readOnly === null) return decide(none("malformed"), null);
-    if (readOnly < READ_ONLY_FLOOR) return decide(none("jev-not-read-only"), round(readOnly));
-    if (!episode.request || !isReadOnlyPermission(episode.request)) {
-      return decide(none("not-read-only"), round(readOnly));
-    }
-    return decide({ kind: "approve-permission" }, round(readOnly));
-  }
+  if (episode.kind === "permission") return decidePermission(context, answers, decide);
 
   const needs = noul(answers, "needs_reply");
   const kind = choice(answers, "wait_kind");
@@ -332,16 +371,49 @@ export function mapAwayReplyAnswers(
     case "open_question":
       return decide(none("open-question"), confidence);
     case "approve_plan":
-      if (episode.kind === "plan" || episode.kind === "turn-ended") {
-        return decide({ kind: "reply", body: { kind: "keep-going" } }, confidence);
-      }
-      // A question is answered with one of its options, never with "keep going".
-      return chooseOption(offered, answers, confidence, decide);
+      return approvePlan(context, answers, confidence, decide);
     case "choose_option":
       if (episode.kind === "plan") return decide(none("plan-is-not-a-choice"), confidence);
       return chooseOption(offered, answers, confidence, decide);
     default:
       return decide(none("other"), confidence);
+  }
+}
+
+type Decide = (picked: AwayReplyChoice, confidence: number | null) => AwayReplyDecision;
+
+/** A tool permission: code's check and JEV's `read_only` must both pass. */
+function decidePermission(
+  context: AwayReplyContext,
+  answers: Record<string, JevAnswer>,
+  decide: Decide,
+): AwayReplyDecision {
+  const { request } = context.episode;
+  const readOnly = noul(answers, "read_only");
+  if (readOnly === null) return decide(none("malformed"), null);
+  if (readOnly < READ_ONLY_FLOOR) return decide(none("jev-not-read-only"), round(readOnly));
+  if (!request || !isReadOnlyPermission(request, context.readScope)) {
+    return decide(none("not-read-only"), round(readOnly));
+  }
+  return decide({ kind: "approve-permission" }, round(readOnly));
+}
+
+function approvePlan(
+  context: AwayReplyContext,
+  answers: Record<string, JevAnswer>,
+  confidence: number,
+  decide: Decide,
+): AwayReplyDecision {
+  switch (context.episode.kind) {
+    case "plan":
+      return decide({ kind: "reply", body: { kind: "keep-going" } }, confidence);
+    // "Keep going" after a turn only ratifies a plan the agent spelled out, and the scan read.
+    case "turn-ended":
+      if (!context.thread.hasPlan) return decide(none("no-plan-to-approve"), confidence);
+      return decide({ kind: "reply", body: { kind: "keep-going" } }, confidence);
+    // A question is answered with one of its options, never with "keep going".
+    default:
+      return chooseOption(context.offered, answers, confidence, decide);
   }
 }
 
@@ -380,27 +452,28 @@ function guardChoice(picked: AwayReplyChoice): AwayReplyChoice {
   return hit ? none(`excluded-option-${hit.category}`) : picked;
 }
 
-function replyLabel(label: string): string {
-  const flat = label.replace(/\s+/g, " ").replace(/"/g, "'").trim();
-  return flat.length > REPLY_LABEL_CHARS ? `${flat.slice(0, REPLY_LABEL_CHARS - 1)}…` : flat;
-}
+const ORDINALS = ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th", "8th", "9th"];
 
-/** How a reply names an option: the leader's own id, or for a question (no ids) the label. */
+/**
+ * How a reply names an option: by the leader's own id, never its text. The text is the agent's
+ * (and may echo an issue or a web page); quoted back in a reply marked as Tyler's, it would read
+ * as his instruction. A question's options have no ids, so its position.
+ */
 function optionRef(
   body: Extract<AwayReplyBody, { optionId: string }>,
   kind: WaitingEpisode["kind"],
 ): string {
-  const label = replyLabel(body.optionLabel);
-  if (kind === "question") return `"${label}"`;
-  return label ? `${body.optionId} ("${label}")` : body.optionId;
+  if (kind !== "question") return `option ${body.optionId}`;
+  const position = Number(body.optionId);
+  return `the ${ORDINALS[position - 1] ?? `#${position}`} option you listed`;
 }
 
 export function replyBodyText(body: AwayReplyBody, kind: WaitingEpisode["kind"]): string {
   switch (body.kind) {
     case "recommendation":
-      return `Go with your recommendation, option ${optionRef(body, kind)}.`;
+      return `Go with your recommendation, ${optionRef(body, kind)}.`;
     case "option":
-      return `Go with option ${optionRef(body, kind)}.`;
+      return `Go with ${optionRef(body, kind)}.`;
     case "keep-going":
       return "Keep going with the plan you described.";
   }

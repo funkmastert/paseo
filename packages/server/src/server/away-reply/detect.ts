@@ -2,7 +2,6 @@ import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "../agent/account-failover-detector.js";
 import type { AgentLifecycleStatus } from "../agent/agent-manager.js";
-import { isSystemInjectedEnvelope } from "../agent/agent-prompt.js";
 import type { AgentPermissionRequest } from "../agent/agent-sdk-types.js";
 import type { AgentTimelineRow } from "../agent/agent-timeline-store-types.js";
 
@@ -11,14 +10,14 @@ import type { AgentTimelineRow } from "../agent/agent-timeline-store-types.js";
  * auto-reply"). Pure: the job feeds it the live agent list and a timeline tail.
  */
 
-/** Opts one agent out, any value but absent. Set with `update_agent`, like `paseo.keep`. */
+/**
+ * Opts one agent out, any value but absent. Set with `update_agent`, like `paseo.keep`. Sticky:
+ * the job records the opt-out daemon-side the first time it sees it, so an agent that removes the
+ * label from itself is still opted out (`state.ts`).
+ */
 export const AWAY_REPLY_OPT_OUT_LABEL = "paseo.away-reply";
-/** ISO time of the last auto-reply. Also marks the episode it answered as done. */
-export const AUTO_REPLIED_AT_LABEL = "paseo.auto-replied-at";
-/** Auto-replies since Tyler last wrote to this agent. */
-export const AUTO_REPLY_STREAK_LABEL = "paseo.auto-reply-streak";
 
-/** Every auto-reply starts with this, so it is never read as Tyler's own message. */
+/** Every auto-reply starts with this, so the agent reading it knows Tyler did not write it. */
 export const AWAY_REPLY_MARKER_PREFIX = "[Auto-reply on Tyler's behalf";
 
 const REMEDIATION_LABELS = ["paseo.remediation", "paseo.remediation-key"];
@@ -39,6 +38,12 @@ export interface AwayReplyAgentView {
   pendingPermissions: AgentPermissionRequest[];
   /** Set when the stored record is archived. A live runtime is closed on archive, so rare. */
   archivedAt: string | null;
+  title: string | null;
+  /**
+   * The unread flag. A finished turn raises it; Tyler opening the agent clears it. A turn-ended
+   * wait whose flag is down was read and left, so it is not answered.
+   */
+  requiresAttention: boolean;
 }
 
 export type AwayReplyWaitKind = "turn-ended" | "question" | "plan" | "permission";
@@ -90,11 +95,6 @@ export function leaderSkipReason(
   return null;
 }
 
-/** A user message Tyler wrote: not a `<paseo-system>` envelope, not an auto-reply. */
-export function isTylerMessage(text: string): boolean {
-  return !isSystemInjectedEnvelope(text) && !text.startsWith(AWAY_REPLY_MARKER_PREFIX);
-}
-
 function timestampMs(row: AgentTimelineRow): number | null {
   const parsed = Date.parse(row.timestamp);
   return Number.isFinite(parsed) ? parsed : null;
@@ -116,15 +116,6 @@ export function lastAssistantMessage(rows: readonly AgentTimelineRow[]): string 
     chunks.push(item.text);
   }
   return chunks.toReversed().join("");
-}
-
-/** Whether Tyler wrote to the agent at or after `sinceMs`, as far as the tail reaches. */
-export function tylerMessagedSince(rows: readonly AgentTimelineRow[], sinceMs: number): boolean {
-  return rows.some((row) => {
-    if (row.item.type !== "user_message" || !isTylerMessage(row.item.text)) return false;
-    const at = timestampMs(row);
-    return at !== null && at >= sinceMs;
-  });
 }
 
 const REQUEST_KINDS: Partial<Record<AgentPermissionRequest["kind"], AwayReplyWaitKind>> = {

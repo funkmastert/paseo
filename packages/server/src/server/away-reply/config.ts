@@ -2,10 +2,11 @@ import type { ResolvedJevFeatureConfig } from "../jev/config.js";
 
 /**
  * `agents.jev.awayReply` (docs/jev.md, "Feature 14: away auto-reply"). Lenient like the rest of
- * `agents.jev`: a malformed value falls back to its default. Tyler asked this feature to act, so
- * it is live by default (D10), not shadow; `dryRun` is its shadow switch, and the service reads it
- * as `shadow`. Like every JEV feature it needs the dedicated key (D5), so without one it does
- * nothing.
+ * `agents.jev`: a malformed value falls back to its default. It starts in dry run like every JEV
+ * feature (D6): it records what it would have sent and sends nothing, and `dryRun: false` is
+ * Tyler's switch to let it act once he has read a day of those decisions. Agents cannot edit
+ * `config.json`, so this code default is the lever. Like every JEV feature it needs the dedicated
+ * key (D5), so without one it does nothing at all.
  */
 export interface ResolvedAwayReplyConfig extends ResolvedJevFeatureConfig {
   /** Log and record the decision, send nothing, write nothing. The service's `shadow`. */
@@ -15,7 +16,7 @@ export interface ResolvedAwayReplyConfig extends ResolvedJevFeatureConfig {
   maxRepliesPerAgentPerDay: number;
   /** Across every leader. */
   maxRepliesPerDay: number;
-  /** A JEV destructive-intent probability at or over this sends nothing. At most 0.5. */
+  /** A JEV destructive-intent probability at or over this sends nothing. At most 0.05. */
   destructiveThreshold: number;
   /** Approve a tool permission that code and JEV both judge read-only. */
   approveReadOnlyPermissions: boolean;
@@ -23,18 +24,22 @@ export interface ResolvedAwayReplyConfig extends ResolvedJevFeatureConfig {
   skipPinnedWorkspaces: boolean;
 }
 
-/** Config can lower the destructive-intent threshold, never raise it past this. */
-export const AWAY_REPLY_MAX_DESTRUCTIVE_THRESHOLD = 0.5;
+/**
+ * Config can lower the destructive-intent threshold, never raise it past this. JEV's calibration
+ * error is 0.13-0.25, so a reply needs JEV nearly certain nothing destructive is in play; the code
+ * exclusion carries the safety, and this is the second opinion.
+ */
+export const AWAY_REPLY_MAX_DESTRUCTIVE_THRESHOLD = 0.05;
 
 export const AWAY_REPLY_DEFAULTS: ResolvedAwayReplyConfig = {
   enabled: true,
-  shadow: false,
-  dryRun: false,
+  shadow: true,
+  dryRun: true,
   timeoutMs: 5000,
   thresholdMinutes: 60,
   maxRepliesPerAgentPerDay: 3,
   maxRepliesPerDay: 12,
-  destructiveThreshold: 0.2,
+  destructiveThreshold: 0.05,
   approveReadOnlyPermissions: true,
   skipPinnedWorkspaces: false,
 };

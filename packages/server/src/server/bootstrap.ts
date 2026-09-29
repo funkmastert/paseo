@@ -3208,13 +3208,31 @@ export async function createPaseoDaemon(
             stallSweep.start();
             daemonConfigStore.onChange(() => stallSweep.reportMode());
             // Feature 14 (docs/jev.md): answers a leader that has waited on Tyler past the
-            // threshold. Needs the JEV key like every JEV feature; without one it does nothing.
+            // threshold while he is away. Needs the JEV key like every JEV feature; without one
+            // it does nothing. Starts in dry run (D6).
+            const presenceServer = wsServer;
             awayReplyJob = createAwayReplyJob({
               agentManager,
               agentStorage,
               workspaceRegistry,
               jev,
+              readPresence: () => ({
+                clients: presenceServer.listSessions().flatMap((session) => {
+                  const activity = session.getClientActivity();
+                  return activity
+                    ? [
+                        {
+                          focusedAgentId: activity.focusedAgentId,
+                          appVisible: activity.appVisible,
+                          lastActivityAtMs: activity.lastActivityAt.getTime(),
+                        },
+                      ]
+                    : [];
+                }),
+                availability: presenceServer.getAvailabilityMode(),
+              }),
               paseoHome: config.paseoHome,
+              homeDir: homedir(),
               logger,
             });
             awayReplyJob.start();

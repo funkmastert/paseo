@@ -1,6 +1,10 @@
+import path from "node:path";
 import type { Logger } from "pino";
 
-import type { AgentManager, IdleTurnOutcome } from "../agent/agent-manager.js";
+import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+
+import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "../agent/account-failover-detector.js";
+import type { AgentManager, AgentOperatorSignal, IdleTurnOutcome } from "../agent/agent-manager.js";
 import type { AgentPermissionResponse } from "../agent/agent-sdk-types.js";
 import type { AgentStorage } from "../agent/agent-storage.js";
 import type { AgentTimelineRow } from "../agent/agent-timeline-store-types.js";
@@ -27,26 +31,38 @@ import {
   type AwayReplyContext,
   type AwayReplyDecision,
 } from "./decision.js";
+import { AwayReplyDecisionFile } from "./decision-file.js";
 import {
-  AUTO_REPLIED_AT_LABEL,
-  AUTO_REPLY_STREAK_LABEL,
+  AWAY_REPLY_OPT_OUT_LABEL,
   detectWaiting,
   leaderSkipReason,
-  tylerMessagedSince,
   type AwayReplyAgentView,
   type WaitingEpisode,
 } from "./detect.js";
-import { findExcludedAction, isReadOnlyPermission, TYLER_ONLY_CATEGORIES } from "./safety.js";
+import { presenceSkipReason, type AwayReplyPresence } from "./presence.js";
+import {
+  findCompanyMarker,
+  findExcludedAction,
+  isReadOnlyPermission,
+  normalizeForScan,
+  TYLER_ONLY_CATEGORIES,
+  type ReadScope,
+} from "./safety.js";
+import { AwayReplyState, type AwayReplyFollowUp } from "./state.js";
+import { holdReason, isHoldMessage, readThread, replyTextHash } from "./thread.js";
 
 /**
  * Feature 14, the away auto-reply (docs/jev.md, "Feature 14: away auto-reply"). Every sweep finds
- * leaders that have waited on Tyler past the threshold, asks JEV one block of typed questions
- * about each, and sends at most one templated, marked reply per waiting episode. The usual monitor
- * shape: an unref'd timer, config re-read every sweep, no overlapping sweeps.
+ * leaders that have waited on Tyler past the threshold while he is away, asks JEV one block of
+ * typed questions about each, and sends at most one templated, marked reply per waiting episode.
+ * The usual monitor shape: an unref'd timer, config re-read every sweep, no overlapping sweeps.
  *
- * The hard rules live here and in `safety.ts`, not in JEV: the deterministic exclusion, one reply
- * per episode, two in a row at most without Tyler writing, the daily caps, and never a turn into a
- * running agent.
+ * It acts as Tyler, so when in doubt it does nothing. The hard rules live here, in `safety.ts` and
+ * in `thread.ts`, not in JEV: presence, Tyler's own "stop" or "wait", a cancelled turn, the
+ * deterministic exclusion over the whole thread since he last wrote, company code, one reply per
+ * episode, two in a row at most without him, the daily caps, and never a turn into a running
+ * agent. Their state is the daemon's (`state.ts`), not agent labels. It starts in dry run (D6):
+ * every decision, with the exact text it would have sent, goes to `decision-file.ts`.
  */
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -54,10 +70,14 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
 const MAX_EVALUATIONS_PER_SWEEP = 3;
 /** Replies in a row with no message from Tyler in between. A hard rule, not config. */
 export const MAX_CONSECUTIVE_AUTO_REPLIES = 2;
-const TIMELINE_TAIL_ROWS = 200;
+/** Enough to reach back to Tyler's last message in a long turn; past it, nothing is answered. */
+const TIMELINE_TAIL_ROWS = 1000;
+/** A follow-up with no word from Tyler this long after the decision is closed as such. */
+const FOLLOW_UP_WINDOW_MS = 24 * 60 * 60_000;
 const MONITOR_NAME = "away-reply";
 const CALL_SITE = "away-reply.evaluate";
 const DECISION_QUESTION = "Does this wait need Tyler, and what should be said?";
+export const AWAY_REPLY_STATE_FILE = "away-reply-state.json";
 
 /**
  * Nothing was sent and the reason can pass, so the next sweep may ask again. Anything else spends
@@ -88,15 +108,22 @@ export interface AwayReplyDependencies {
     requestId: string,
     response: AgentPermissionResponse,
   ): Promise<void>;
-  setLabels(agentId: string, labels: Record<string, string>): Promise<void>;
   /** The agent's existing attention flag, raised with no push. */
   raiseAttention(agentId: string): Promise<void>;
+  /** The connected app clients and Tyler's availability mode. Null or a throw counts as present. */
+  readPresence(): AwayReplyPresence | null;
 }
 
 export interface AwayReplyJobOptions {
   dependencies: AwayReplyDependencies;
   jev: Pick<JevService, "decide" | "isActive" | "checkScope" | "decisions">;
   readConfig: () => ResolvedAwayReplyConfig;
+  state: AwayReplyState;
+  decisionFile: AwayReplyDecisionFile;
+  /** For `~` in a read-only tool's path. */
+  homeDir: string | null;
+  /** The agent manager's operator signals; unsubscribed on `stop`. */
+  subscribeOperatorSignals?: (listener: (signal: AgentOperatorSignal) => void) => () => void;
   logger: Logger;
   sweepIntervalMs?: number;
   now?: () => number;
@@ -117,37 +144,6 @@ export interface AwayReplyReportEntry {
 export interface AwayReplyReport {
   dryRun: boolean;
   entries: AwayReplyReportEntry[];
-}
-
-interface DailyCounts {
-  day: string;
-  total: number;
-  perAgent: Map<string, number>;
-}
-
-function localDay(ms: number): string {
-  const date = new Date(ms);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
-}
-
-function labelTimeMs(labels: Record<string, string>): number | null {
-  const raw = labels[AUTO_REPLIED_AT_LABEL];
-  const parsed = raw ? Date.parse(raw) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-/** Auto-replies since Tyler last wrote to this agent. Tyler writing resets it to zero. */
-export function currentStreak(
-  labels: Record<string, string>,
-  rows: readonly AgentTimelineRow[],
-): number {
-  const lastAt = labelTimeMs(labels);
-  if (lastAt === null) return 0;
-  if (tylerMessagedSince(rows, lastAt)) return 0;
-  const streak = Number.parseInt(labels[AUTO_REPLY_STREAK_LABEL] ?? "", 10);
-  return Number.isFinite(streak) && streak > 0 ? streak : 1;
 }
 
 /** JEV's answers mapped to a choice; any other outcome is no reply, which is today's behaviour. */
@@ -178,19 +174,61 @@ function verdictSummary(decision: AwayReplyDecision, outcome: JevOutcome): strin
   return "no answer";
 }
 
-function planActionId(context: AwayReplyContext): string | undefined {
-  const actions = context.episode.request?.actions ?? [];
-  const allow = actions.filter((action) => action.behavior === "allow");
-  return (
-    allow.find((action) => action.variant === "primary")?.id ??
-    allow.find((action) => action.intent === "implement")?.id ??
-    allow[0]?.id
-  );
+function timestampMs(row: AgentTimelineRow): number {
+  const parsed = Date.parse(row.timestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/** When the agent's latest turn started: its newest user message, or 0 when the tail has none. */
+function latestTurnStartMs(rows: readonly AgentTimelineRow[]): number {
+  const row = rows.findLast((entry) => entry.item.type === "user_message");
+  return row ? timestampMs(row) : 0;
+}
+
+const APPROVE =
+  /^\s*(?:yes|yep|yeah|ok(?:ay)?|sure|go(?:\s+ahead)?|proceed|continue|keep\s+going|lgtm|sounds\s+good|do\s+it|approved?)\b/i;
+const OPTION_ALONE = /^\s*(?:option\s+)?\(?([a-z]|\d{1,2})\)?\s*[.!)]?\s*$/i;
+const OPTION_NAMED =
+  /\b(?:option|go\s+with|pick|choose|use|let'?s\s+(?:go\s+with|do))\s+(?:option\s+)?\(?([a-z]|\d{1,2})\)?(?=[\s.,!)]|$)/i;
+
+/** The option Tyler's own message picks, `approve`, `hold`, or null. Never his text. */
+export function readTylerChoice(text: string, optionIds: readonly string[]): string | null {
+  const plain = normalizeForScan(text);
+  for (const pattern of [OPTION_ALONE, OPTION_NAMED]) {
+    const raw = pattern.exec(plain)?.[1];
+    if (!raw) continue;
+    const id = /^\d+$/.test(raw) ? String(Number(raw)) : raw.toUpperCase();
+    if (optionIds.includes(id)) return id;
+  }
+  if (isHoldMessage(plain)) return "hold";
+  if (APPROVE.test(plain)) return "approve";
+  return null;
+}
+
+function choiceKind(choice: AwayReplyChoice): string {
+  if (choice.kind === "reply") return choice.body.kind;
+  return choice.kind;
+}
+
+function sameChoice(would: AwayReplyFollowUp["would"], tyler: string | null): boolean | null {
+  if (tyler === null) return null;
+  switch (would.kind) {
+    case "option":
+    case "recommendation":
+      return tyler === would.optionId;
+    case "keep-going":
+    case "approve-permission":
+      return tyler === "approve";
+    default:
+      return null;
+  }
 }
 
 export class AwayReplyJob {
   private readonly options: AwayReplyJobOptions;
   private readonly deps: AwayReplyDependencies;
+  private readonly state: AwayReplyState;
+  private readonly decisionFile: AwayReplyDecisionFile;
   private readonly now: () => number;
   private readonly modeLog: MonitorModeLog;
   /** A restart does not mean Tyler is back or away: every wait restarts its clock at boot. */
@@ -201,16 +239,20 @@ export class AwayReplyJob {
   private readonly evaluated = new Set<string>();
   /** The last skip reason logged per episode, so a skip is logged once, not every sweep. */
   private readonly loggedSkips = new Map<string, string>();
-  private daily: DailyCounts;
   private pinnedWorkspaceIds: ReadonlySet<string> = new Set();
+  private unsubscribe: (() => void) | null;
 
   constructor(options: AwayReplyJobOptions) {
     this.options = options;
     this.deps = options.dependencies;
+    this.state = options.state;
+    this.decisionFile = options.decisionFile;
     this.now = options.now ?? Date.now;
     this.modeLog = new MonitorModeLog(options.logger);
     this.bootMs = this.now();
-    this.daily = { day: localDay(this.bootMs), total: 0, perAgent: new Map() };
+    // From construction, not `start`: a message Tyler sends before the first sweep still counts.
+    this.unsubscribe =
+      options.subscribeOperatorSignals?.((signal) => this.onOperatorSignal(signal)) ?? null;
   }
 
   start(): void {
@@ -230,6 +272,13 @@ export class AwayReplyJob {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+
+  /** Resolves once the state and decision-file writes queued so far have landed. */
+  async flush(): Promise<void> {
+    await Promise.all([this.state.flush(), this.decisionFile.flush()]);
   }
 
   reportMode(): void {
@@ -237,6 +286,23 @@ export class AwayReplyJob {
     this.modeLog.report([
       { monitor: MONITOR_NAME, enabled: config.enabled, dryRun: config.dryRun },
     ]);
+  }
+
+  /**
+   * The agent manager's word on who acted: Tyler at an app client, or a cancelled turn. Recorded
+   * at once, so a restart right after cannot lose it.
+   */
+  onOperatorSignal(signal: AgentOperatorSignal): void {
+    this.state.recordSignal(signal);
+    if (signal.kind !== "human-permission-response") return;
+    for (const followUp of this.state.followUps()) {
+      if (followUp.agentId !== signal.agentId || followUp.requestId !== signal.requestId) continue;
+      this.writeFollowUp(followUp, {
+        outcome: "tyler-answered-request",
+        atMs: signal.at.getTime(),
+        tyler: this.readTylerResponse(followUp, signal.response),
+      });
+    }
   }
 
   /** Runs one sweep; null when another sweep is in flight. */
@@ -258,8 +324,10 @@ export class AwayReplyJob {
     if (!config.enabled || !this.options.jev.isActive("awayReply")) return report;
 
     const nowMs = this.now();
-    this.rollDay(nowMs);
+    this.state.rollDay(nowMs);
     const agents = await this.deps.listAgents();
+    this.syncRecords(agents);
+    this.resolveFollowUps(nowMs);
     const pinnedWorkspaceIds = config.skipPinnedWorkspaces
       ? await this.deps.listPinnedWorkspaceIds()
       : new Set<string>();
@@ -272,7 +340,8 @@ export class AwayReplyJob {
         leaderSkipReason(agent, agents, {
           pinnedWorkspaceIds,
           skipPinnedWorkspaces: config.skipPinnedWorkspaces,
-        })
+        }) ||
+        this.state.agent(agent.id).optedOutAt !== null
       ) {
         continue;
       }
@@ -286,53 +355,90 @@ export class AwayReplyJob {
       if (this.evaluated.has(episode.key)) continue;
       if (evaluations >= MAX_EVALUATIONS_PER_SWEEP) continue;
 
-      const entry = await this.consider(agent, episode, rows, config, nowMs);
+      const entry = await this.consider(agent, agents, episode, rows, config, nowMs);
       if (entry.spentEvaluation) evaluations += 1;
       if (entry.entry) report.entries.push(entry.entry);
     }
 
     for (const key of this.evaluated) if (!liveKeys.has(key)) this.evaluated.delete(key);
     for (const key of this.loggedSkips.keys()) if (!liveKeys.has(key)) this.loggedSkips.delete(key);
+    this.state.prune(new Set(agents.map((agent) => agent.id)));
     return report;
   }
 
+  /** Failover successors take their predecessors' records; opt-out labels become sticky. */
+  private syncRecords(agents: readonly AwayReplyAgentView[]): void {
+    for (const agent of agents) {
+      const successor = agent.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL];
+      if (successor) this.state.inherit(agent.id, successor);
+      if (AWAY_REPLY_OPT_OUT_LABEL in agent.labels) this.state.recordOptOut(agent.id);
+    }
+  }
+
+  /** Why Tyler counts as present, or null. A presence read that fails counts as present. */
+  private presenceReason(agentId: string, config: ResolvedAwayReplyConfig): string | null {
+    let presence: AwayReplyPresence | null;
+    try {
+      presence = this.deps.readPresence();
+    } catch {
+      presence = null;
+    }
+    if (!presence) return "presence-unknown";
+    return presenceSkipReason({
+      presence,
+      agentId,
+      nowMs: this.now(),
+      thresholdMinutes: config.thresholdMinutes,
+    });
+  }
+
   /**
-   * The hard limits: one reply per episode, two in a row without Tyler, the daily caps, and the
-   * code half of the read-only rule. `final` means the episode cannot pass later.
+   * The hard limits: one reply per episode, two in a row without Tyler, the daily caps, whether
+   * Tyler is around, and whether this wait is one he left on purpose. `final` means the episode
+   * cannot pass later.
    */
   private limitReason(
     agent: AwayReplyAgentView,
     episode: WaitingEpisode,
-    streak: number,
+    rows: readonly AgentTimelineRow[],
     config: ResolvedAwayReplyConfig,
   ): { reason: string; final: boolean } | null {
-    const repliedAt = labelTimeMs(agent.labels);
-    if (repliedAt !== null && repliedAt >= episode.waitingSinceMs) {
-      return { reason: "already-replied", final: true };
-    }
-    if (streak >= MAX_CONSECUTIVE_AUTO_REPLIES) {
+    if (!this.state.isUsable()) return { reason: "state-unreadable", final: false };
+    const record = this.state.agent(agent.id);
+    if (record.answered.includes(episode.key)) return { reason: "already-replied", final: true };
+    if (record.streak >= MAX_CONSECUTIVE_AUTO_REPLIES) {
       return { reason: "consecutive-limit", final: false };
     }
-    if ((this.daily.perAgent.get(agent.id) ?? 0) >= config.maxRepliesPerAgentPerDay) {
+    if (this.state.dailyCount(agent.id) >= config.maxRepliesPerAgentPerDay) {
       return { reason: "agent-daily-cap", final: false };
     }
-    if (this.daily.total >= config.maxRepliesPerDay) return { reason: "daily-cap", final: false };
-    if (episode.kind !== "permission") return null;
-    if (!config.approveReadOnlyPermissions) return { reason: "permissions-off", final: false };
-    if (!episode.request || !isReadOnlyPermission(episode.request)) {
-      return { reason: "not-read-only", final: true };
+    if (this.state.dailyTotal() >= config.maxRepliesPerDay) {
+      return { reason: "daily-cap", final: false };
+    }
+    const present = this.presenceReason(agent.id, config);
+    if (present) return { reason: present, final: false };
+    if (episode.kind === "turn-ended") {
+      // Tyler opened it after it finished, and left it.
+      if (!agent.requiresAttention) return { reason: "tyler-read-thread", final: true };
+      // Stopped, by Tyler, the spend governor or anything else: not finished, not waiting.
+      if (record.lastCanceledAt !== null && record.lastCanceledAt >= latestTurnStartMs(rows)) {
+        return { reason: `turn-canceled-${record.lastCancelReason ?? "unknown"}`, final: true };
+      }
+    }
+    if (episode.kind === "permission" && !config.approveReadOnlyPermissions) {
+      return { reason: "permissions-off", final: false };
     }
     return null;
   }
 
-  private rollDay(nowMs: number): void {
-    const day = localDay(nowMs);
-    if (this.daily.day !== day) this.daily = { day, total: 0, perAgent: new Map() };
+  private readScope(agent: AwayReplyAgentView): ReadScope {
+    return { cwd: agent.cwd, home: this.options.homeDir };
   }
 
   /** The gates that need no JEV call, then the call, then the reply. */
   private async consider(
     agent: AwayReplyAgentView,
+    agents: readonly AwayReplyAgentView[],
     episode: WaitingEpisode,
     rows: readonly AgentTimelineRow[],
     config: ResolvedAwayReplyConfig,
@@ -340,18 +446,41 @@ export class AwayReplyJob {
   ): Promise<{ entry: AwayReplyReportEntry | null; spentEvaluation: boolean }> {
     const skip = (reason: string, final: boolean) => {
       if (final) this.evaluated.add(episode.key);
-      return { entry: this.logSkip(episode, reason, config), spentEvaluation: false };
+      return { entry: this.logSkip(agent, episode, reason, config), spentEvaluation: false };
     };
 
-    const streak = currentStreak(agent.labels, rows);
-    const limited = this.limitReason(agent, episode, streak, config);
+    const limited = this.limitReason(agent, episode, rows, config);
     if (limited) return skip(limited.reason, limited.final);
 
-    const built = buildAwayReplyContext(episode);
+    const record = this.state.agent(agent.id);
+    const read = readThread(rows, {
+      humanMessageIds: new Set(record.humanMessageIds),
+      sentHashes: new Set(record.sentHashes),
+    });
+    if (!read.ok) return skip(read.reason, true);
+    const hold = holdReason(read.thread);
+    if (hold) return skip(hold, true);
+
+    const built = buildAwayReplyContext(episode, read.thread, this.readScope(agent));
     if (!built.ok) return skip(built.reason, true);
     const context = built.context;
+    const scanned = threadText(context);
 
-    const hit = findExcludedAction(threadText(context));
+    // Company code: the leader's cwd, its children's, or any mention in the thread.
+    const childCwds = agents
+      .filter((other) => getParentAgentIdFromLabels(other.labels) === agent.id)
+      .map((other) => other.cwd);
+    const company = findCompanyMarker([agent.cwd, ...childCwds, scanned].join("\n"));
+    if (company) return skip("company-code", true);
+
+    if (
+      episode.kind === "permission" &&
+      (!episode.request || !isReadOnlyPermission(episode.request, context.readScope))
+    ) {
+      return skip("not-read-only", true);
+    }
+
+    const hit = findExcludedAction(scanned);
     if (hit) {
       if (TYLER_ONLY_CATEGORIES.has(hit.category) && episode.kind === "turn-ended") {
         await this.raiseAttention(agent.id, config);
@@ -359,7 +488,7 @@ export class AwayReplyJob {
       return skip(`excluded-${hit.category}`, true);
     }
 
-    const scope = { cwds: [agent.cwd], agentIds: [agent.id] };
+    const scope = { cwds: [agent.cwd, ...childCwds], agentIds: [agent.id] };
     if ((await this.options.jev.checkScope(scope)) === "excluded") {
       return skip("d7-excluded", true);
     }
@@ -381,12 +510,7 @@ export class AwayReplyJob {
 
     const decision = decisionFor(context, outcome, config);
     const dryRun = config.dryRun || outcome.kind === "shadow";
-    const entry = await this.act(agent, context, decision, outcome, {
-      dryRun,
-      streak,
-      nowMs,
-      config,
-    });
+    const entry = await this.act(agent, context, decision, outcome, { dryRun, nowMs, config });
     return { entry, spentEvaluation: true };
   }
 
@@ -395,62 +519,53 @@ export class AwayReplyJob {
     context: AwayReplyContext,
     decision: AwayReplyDecision,
     outcome: JevOutcome,
-    run: { dryRun: boolean; streak: number; nowMs: number; config: ResolvedAwayReplyConfig },
+    run: { dryRun: boolean; nowMs: number; config: ResolvedAwayReplyConfig },
   ): Promise<AwayReplyReportEntry> {
-    const { episode } = context;
     const choice = decision.choice;
     if (choice.kind === "none") {
       if (choice.raiseAttention && !run.dryRun) await this.raiseAttention(agent.id, run.config);
-      return this.finish(episode, outcome, decision, {
+      return this.finish(agent, context, outcome, decision, {
         action: "no-reply",
         reason: choice.reason,
         text: null,
         applied: false,
-        config: run.config,
+        dryRun: run.dryRun,
       });
     }
 
     const text = this.replyText(context, choice, run.config);
     if (run.dryRun) {
-      return this.finish(episode, outcome, decision, {
+      return this.finish(agent, context, outcome, decision, {
         action: "would-reply",
         reason: this.replyReason(choice),
         text,
         applied: false,
-        config: run.config,
+        dryRun: true,
       });
     }
 
     const notSent = await this.deliver(context, choice, text, run.config);
     if (notSent) {
-      return this.finish(episode, outcome, decision, {
+      return this.finish(agent, context, outcome, decision, {
         action: "not-sent",
         reason: notSent,
         text: null,
         applied: false,
-        config: run.config,
+        dryRun: false,
       });
     }
 
-    this.daily.total += 1;
-    this.daily.perAgent.set(agent.id, (this.daily.perAgent.get(agent.id) ?? 0) + 1);
-    await this.deps
-      .setLabels(agent.id, {
-        [AUTO_REPLIED_AT_LABEL]: new Date(run.nowMs).toISOString(),
-        [AUTO_REPLY_STREAK_LABEL]: String(run.streak + 1),
-      })
-      .catch((error: unknown) => {
-        this.options.logger.warn(
-          { err: error, agentId: agent.id },
-          "away-reply: label write failed",
-        );
-      });
-    return this.finish(episode, outcome, decision, {
+    this.state.recordReply(agent.id, {
+      at: run.nowMs,
+      episodeKey: context.episode.key,
+      textHash: context.episode.kind === "turn-ended" && text ? replyTextHash(text) : null,
+    });
+    return this.finish(agent, context, outcome, decision, {
       action: "replied",
       reason: this.replyReason(choice),
       text,
       applied: true,
-      config: run.config,
+      dryRun: false,
     });
   }
 
@@ -478,8 +593,8 @@ export class AwayReplyJob {
     config: ResolvedAwayReplyConfig,
   ): Promise<string | null> {
     const { episode } = context;
-    // The JEV call took time: Tyler may have answered, or the thread moved on. Re-read, and send
-    // only if this is still the same wait.
+    // The JEV call took time: Tyler may be back, may have answered, or the thread moved on.
+    // Re-read, and send only if this is still the same wait and he is still away.
     const agents = await this.deps.listAgents();
     const fresh = agents.find((agent) => agent.id === episode.agentId);
     if (!fresh) return "agent-gone";
@@ -488,11 +603,11 @@ export class AwayReplyJob {
       skipPinnedWorkspaces: config.skipPinnedWorkspaces,
     });
     if (skipReason) return skipReason;
-    const again = detectWaiting(
-      fresh,
-      this.deps.readTimelineTail(fresh.id, TIMELINE_TAIL_ROWS) ?? [],
-    );
+    const rows = this.deps.readTimelineTail(fresh.id, TIMELINE_TAIL_ROWS) ?? [];
+    const again = detectWaiting(fresh, rows);
     if (!again.waiting || again.episode.key !== episode.key) return "thread-moved";
+    const limited = this.limitReason(fresh, again.episode, rows, config);
+    if (limited) return limited.reason;
 
     try {
       if (episode.kind === "turn-ended") {
@@ -540,11 +655,18 @@ export class AwayReplyJob {
         updatedInput: { ...request.input, answers: { [context.question.header]: text } },
       };
     }
-    if (context.episode.kind === "plan" && context.planText && choice.body.kind === "keep-going") {
+    if (
+      context.episode.kind === "plan" &&
+      context.planText &&
+      context.resumeActionId &&
+      choice.body.kind === "keep-going"
+    ) {
       const note = `${awayReplyMarker(config.thresholdMinutes)} ${replyBodyText(choice.body, "plan")} ${AWAY_REPLY_GUARD}`;
+      // `implement_resume` puts the leader back in the mode it planned from; `implement` would
+      // move a bypass leader to acceptEdits.
       return {
         behavior: "allow",
-        selectedActionId: planActionId(context),
+        selectedActionId: context.resumeActionId,
         updatedInput: { ...request.input, plan: `${context.planText}\n\n${note}` },
       };
     }
@@ -557,6 +679,7 @@ export class AwayReplyJob {
   }
 
   private logSkip(
+    agent: AwayReplyAgentView,
     episode: WaitingEpisode,
     reason: string,
     config: ResolvedAwayReplyConfig,
@@ -573,6 +696,16 @@ export class AwayReplyJob {
       },
       "away-reply",
     );
+    this.decisionFile.append({
+      type: "skip",
+      at: new Date(this.now()).toISOString(),
+      agentId: episode.agentId,
+      title: agent.title,
+      episode: episode.kind,
+      episodeKey: episode.key,
+      dryRun: config.dryRun,
+      reason,
+    });
     return {
       agentId: episode.agentId,
       episode: episode.kind,
@@ -583,9 +716,10 @@ export class AwayReplyJob {
     };
   }
 
-  /** The one structured line, and the decision record, for an episode JEV was asked about. */
+  /** The structured line, the decision record and the decision file, for an evaluated episode. */
   private finish(
-    episode: WaitingEpisode,
+    agent: AwayReplyAgentView,
+    context: AwayReplyContext,
     outcome: JevOutcome,
     decision: AwayReplyDecision,
     result: {
@@ -593,10 +727,12 @@ export class AwayReplyJob {
       reason: string;
       text: string | null;
       applied: boolean;
-      config: ResolvedAwayReplyConfig;
+      dryRun: boolean;
     },
   ): AwayReplyReportEntry {
-    const waitedMinutes = Math.round((this.now() - episode.waitingSinceMs) / 60_000);
+    const { episode } = context;
+    const nowMs = this.now();
+    const waitedMinutes = Math.round((nowMs - episode.waitingSinceMs) / 60_000);
     const choice = decision.choice;
     const optionId =
       choice.kind === "reply" && choice.body.kind !== "keep-going" ? choice.body.optionId : null;
@@ -611,21 +747,56 @@ export class AwayReplyJob {
         outcome: outcome.kind,
         callId: outcome.callId,
         verdicts: decision.verdicts,
-        dryRun: result.config.dryRun,
+        dryRun: result.dryRun,
       },
       "away-reply",
     );
-    const verdict = verdictSummary(decision, outcome);
     this.options.jev.decisions.record({
       agentId: episode.agentId,
       callId: outcome.callId,
       feature: "awayReply",
       question: DECISION_QUESTION,
-      verdict,
+      verdict: verdictSummary(decision, outcome),
       confidence: decision.confidence,
       action: this.describeAction(result),
       applied: result.applied,
     });
+    const response =
+      episode.kind !== "turn-ended" && choice.kind !== "none"
+        ? {
+            behavior: "allow" as const,
+            selectedActionId: episode.kind === "plan" ? context.resumeActionId : null,
+          }
+        : null;
+    this.decisionFile.append({
+      type: "decision",
+      at: new Date(nowMs).toISOString(),
+      agentId: episode.agentId,
+      title: agent.title,
+      episode: episode.kind,
+      episodeKey: episode.key,
+      waitedMinutes,
+      dryRun: result.dryRun,
+      action: result.action,
+      reason: result.reason,
+      callId: outcome.callId,
+      verdicts: decision.verdicts,
+      optionId,
+      text: result.text,
+      response,
+    });
+    if (!result.applied) {
+      this.state.addFollowUp({
+        callId: outcome.callId,
+        agentId: episode.agentId,
+        episodeKey: episode.key,
+        episode: episode.kind,
+        decidedAt: nowMs,
+        requestId: episode.request?.id ?? null,
+        would: { kind: choiceKind(choice), optionId },
+        options: context.offered.options.map((option) => ({ id: option.id, label: option.label })),
+      });
+    }
     return {
       agentId: episode.agentId,
       episode: episode.kind,
@@ -634,6 +805,79 @@ export class AwayReplyJob {
       callId: outcome.callId,
       text: result.text,
     };
+  }
+
+  /** What Tyler's own answer to a request picked. */
+  private readTylerResponse(
+    followUp: AwayReplyFollowUp,
+    response: AgentPermissionResponse,
+  ): string | null {
+    if (response.behavior !== "allow") return "deny";
+    if (followUp.episode !== "question") return "approve";
+    const answers = response.updatedInput?.["answers"];
+    if (typeof answers !== "object" || answers === null) return null;
+    const given = Object.values(answers as Record<string, unknown>)
+      .filter((value): value is string => typeof value === "string")
+      .map((value) => normalizeForScan(value).trim().toLowerCase());
+    const match = followUp.options.find((option) =>
+      given.some((answer) =>
+        answer.startsWith(normalizeForScan(option.label).trim().toLowerCase()),
+      ),
+    );
+    return match?.id ?? null;
+  }
+
+  /** Closes follow-ups Tyler has since answered by message, or that aged out. */
+  private resolveFollowUps(nowMs: number): void {
+    for (const followUp of this.state.followUps()) {
+      const record = this.state.agent(followUp.agentId);
+      if (record.lastHumanAt !== null && record.lastHumanAt > followUp.decidedAt) {
+        const humanIds = new Set(record.humanMessageIds);
+        const rows = this.deps.readTimelineTail(followUp.agentId, TIMELINE_TAIL_ROWS) ?? [];
+        const row = rows.find(
+          (entry) =>
+            entry.item.type === "user_message" &&
+            entry.item.clientMessageId !== undefined &&
+            humanIds.has(entry.item.clientMessageId) &&
+            timestampMs(entry) > followUp.decidedAt,
+        );
+        const text = row?.item.type === "user_message" ? row.item.text : null;
+        this.writeFollowUp(followUp, {
+          outcome: "tyler-message",
+          atMs: row ? timestampMs(row) : record.lastHumanAt,
+          tyler:
+            text === null
+              ? null
+              : readTylerChoice(
+                  text,
+                  followUp.options.map((option) => option.id),
+                ),
+        });
+        continue;
+      }
+      if (nowMs - followUp.decidedAt > FOLLOW_UP_WINDOW_MS) {
+        this.writeFollowUp(followUp, { outcome: "no-tyler-action-24h", atMs: nowMs, tyler: null });
+      }
+    }
+  }
+
+  private writeFollowUp(
+    followUp: AwayReplyFollowUp,
+    result: { outcome: string; atMs: number; tyler: string | null },
+  ): void {
+    this.state.removeFollowUp(followUp.episodeKey);
+    this.decisionFile.append({
+      type: "followup",
+      at: new Date(this.now()).toISOString(),
+      agentId: followUp.agentId,
+      episodeKey: followUp.episodeKey,
+      callId: followUp.callId,
+      outcome: result.outcome,
+      minutesAfterDecision: Math.round((result.atMs - followUp.decidedAt) / 60_000),
+      would: followUp.would,
+      tyler: result.tyler,
+      sameChoice: sameChoice(followUp.would, result.tyler),
+    });
   }
 
   private describeAction(result: { action: AwayReplyAction; reason: string }): string {
@@ -657,14 +901,17 @@ export interface CreateAwayReplyJobInput {
     | "getAgent"
     | "fetchTimeline"
     | "startTurnIfIdle"
-    | "setLabels"
     | "markAgentUnread"
+    | "subscribeOperatorSignals"
   > &
     PermissionResponseAgentManager;
   agentStorage: Pick<AgentStorage, "list">;
   workspaceRegistry: Pick<FileBackedWorkspaceRegistry, "list">;
   jev: JevService;
+  /** The connected app clients and Tyler's availability mode (the WebSocket server's). */
+  readPresence: () => AwayReplyPresence | null;
   paseoHome: string;
+  homeDir: string | null;
   logger: Logger;
   sweepIntervalMs?: number;
 }
@@ -673,6 +920,7 @@ export interface CreateAwayReplyJobInput {
 export function createAwayReplyJob(input: CreateAwayReplyJobInput): AwayReplyJob {
   const { agentManager } = input;
   const logger = input.logger.child({ module: "away-reply" });
+  const jevDir = path.join(input.paseoHome, "jev");
   return new AwayReplyJob({
     dependencies: {
       listAgents: async () => {
@@ -693,6 +941,8 @@ export function createAwayReplyJob(input: CreateAwayReplyJobInput): AwayReplyJob
               ? [...(agentManager.getAgent(summary.id)?.pendingPermissions.values() ?? [])]
               : [],
           archivedAt: archivedAt.get(summary.id) ?? null,
+          title: summary.title,
+          requiresAttention: summary.requiresAttention,
         }));
       },
       readTimelineTail: (agentId, limit) => {
@@ -711,8 +961,8 @@ export function createAwayReplyJob(input: CreateAwayReplyJobInput): AwayReplyJob
       startTurnIfIdle: (agentId, text) => agentManager.startTurnIfIdle(agentId, text),
       respondToPermission: (agentId, requestId, response) =>
         respondToAgentPermission({ agentManager, agentId, requestId, response, logger }),
-      setLabels: (agentId, labels) => agentManager.setLabels(agentId, labels),
       raiseAttention: (agentId) => agentManager.markAgentUnread(agentId),
+      readPresence: input.readPresence,
     },
     jev: input.jev,
     readConfig: () =>
@@ -723,6 +973,10 @@ export function createAwayReplyJob(input: CreateAwayReplyJobInput): AwayReplyJob
             | undefined
         )?.["awayReply"],
       ),
+    state: new AwayReplyState({ filePath: path.join(jevDir, AWAY_REPLY_STATE_FILE), logger }),
+    decisionFile: new AwayReplyDecisionFile({ dir: jevDir, logger }),
+    homeDir: input.homeDir,
+    subscribeOperatorSignals: (listener) => agentManager.subscribeOperatorSignals(listener),
     logger,
     sweepIntervalMs: input.sweepIntervalMs,
   });

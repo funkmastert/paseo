@@ -1,13 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { formatSystemNotificationPrompt } from "../agent/agent-prompt.js";
-import {
-  AWAY_REPLY_MARKER_PREFIX,
-  detectWaiting,
-  isTylerMessage,
-  leaderSkipReason,
-  tylerMessagedSince,
-} from "./detect.js";
+import { detectWaiting, leaderSkipReason } from "./detect.js";
 import {
   MINUTE,
   T0,
@@ -178,22 +172,5 @@ describe("leaderSkipReason", () => {
     expect(leaderSkipReason(leaderView({ runningProviderSubagentCount: 1 }), [], NO_PINS)).toBe(
       "subagents-running",
     );
-  });
-});
-
-describe("Tyler's messages", () => {
-  it("are neither envelopes nor auto-replies", () => {
-    expect(isTylerMessage("go with B")).toBe(true);
-    expect(isTylerMessage(formatSystemNotificationPrompt("x"))).toBe(false);
-    expect(isTylerMessage(`${AWAY_REPLY_MARKER_PREFIX} — away >1h, JEV] Go.`)).toBe(false);
-  });
-
-  it("count from a time", () => {
-    const rows = rowsOf([
-      user(`${AWAY_REPLY_MARKER_PREFIX} — away >1h, JEV] Go.`, T0),
-      user("thanks, carry on", T0 + 5 * MINUTE),
-    ]);
-    expect(tylerMessagedSince(rows, T0)).toBe(true);
-    expect(tylerMessagedSince(rows, T0 + 6 * MINUTE)).toBe(false);
   });
 });

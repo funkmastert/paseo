@@ -20,6 +20,9 @@ export function leaderView(overrides: Partial<AwayReplyAgentView> = {}): AwayRep
     runningProviderSubagentCount: 0,
     pendingPermissions: [],
     archivedAt: null,
+    title: null,
+    // A finished turn raises the unread flag; Tyler opening the agent clears it.
+    requiresAttention: true,
     ...overrides,
   };
 }

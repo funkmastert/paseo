@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { JevAnswer } from "../jev/contract.js";
@@ -13,8 +16,21 @@ import {
 } from "./decision.js";
 import type { WaitingEpisode } from "./detect.js";
 import { MINUTE, T0, planRequest, questionRequest, toolRequest } from "./test-utils/fixtures.js";
+import type { AwayReplyThread } from "./thread.js";
 
-const CONFIG = { destructiveThreshold: 0.2 };
+const CONFIG = { destructiveThreshold: 0.05 };
+const SCOPE = { cwd: "/nonexistent/away-reply-cwd", home: null };
+
+function thread(overrides: Partial<AwayReplyThread> = {}): AwayReplyThread {
+  return {
+    tylerMessages: ["Fix the flaky test"],
+    scanText: "",
+    jevText: "",
+    otherUserMessages: [],
+    hasPlan: false,
+    ...overrides,
+  };
+}
 
 function episode(overrides: Partial<WaitingEpisode>): WaitingEpisode {
   return {
@@ -28,8 +44,11 @@ function episode(overrides: Partial<WaitingEpisode>): WaitingEpisode {
   };
 }
 
-function context(overrides: Partial<WaitingEpisode>): AwayReplyContext {
-  const built = buildAwayReplyContext(episode(overrides));
+function context(
+  overrides: Partial<WaitingEpisode>,
+  threadOverrides: Partial<AwayReplyThread> = {},
+): AwayReplyContext {
+  const built = buildAwayReplyContext(episode(overrides), thread(threadOverrides), SCOPE);
   if (!built.ok) throw new Error(built.reason);
   return built.context;
 }
@@ -46,7 +65,8 @@ function answers(overrides: Record<string, JevAnswer> = {}): Record<string, JevA
   return {
     needs_reply: noul(0.93),
     wait_kind: choice("choose_option", 0.82),
-    destructive: noul(0.03),
+    destructive: noul(0.01),
+    tyler_hold: noul(0.02),
     ...overrides,
   };
 }
@@ -57,10 +77,14 @@ const UNMARKED =
 
 describe("buildAwayReplyRequest", () => {
   it("keys the option question on the leader's own options, with a none exit", () => {
-    const request = buildAwayReplyRequest(context({ lastMessage: RECOMMENDED }));
+    const request = buildAwayReplyRequest(
+      context({ lastMessage: RECOMMENDED }, { jevText: `agent: ${RECOMMENDED}` }),
+    );
     expect(request.state).toEqual({
       waiting_on: "the end of its turn: its last message is the newest in the thread",
       last_message: RECOMMENDED,
+      tyler_recent_messages: ["Fix the flaky test"],
+      thread_since_tyler: `agent: ${RECOMMENDED}`,
       options: { A: "retry the connect.", B: "wait for ready." },
       recommended_option: "B",
     });
@@ -76,14 +100,15 @@ describe("buildAwayReplyRequest", () => {
       "wait_kind",
       "option",
       "destructive",
+      "tyler_hold",
     ]);
   });
 
-  it("asks read_only and destructive only, for a tool permission", () => {
+  it("asks read_only, destructive and tyler_hold, for a tool permission", () => {
     const request = buildAwayReplyRequest(
       context({ kind: "permission", request: toolRequest("Read", { file_path: "/tmp/x" }) }),
     );
-    expect(Object.keys(request.questions)).toEqual(["read_only", "destructive"]);
+    expect(Object.keys(request.questions)).toEqual(["read_only", "destructive", "tyler_hold"]);
     expect(request.state["request"]).toBe('Read: {"file_path":"/tmp/x"}');
   });
 
@@ -99,7 +124,7 @@ describe("mapAwayReplyAnswers", () => {
   it("goes with the leader's recommendation when JEV picks it", () => {
     const decision = mapAwayReplyAnswers(
       context({ lastMessage: RECOMMENDED }),
-      answers({ option: choice("B", 0.71) }),
+      answers({ option: choice("B", 0.8) }),
       CONFIG,
     );
     expect(decision.choice).toEqual({
@@ -124,7 +149,7 @@ describe("mapAwayReplyAnswers", () => {
     for (const id of ["A", "B", "C"]) {
       const decision = mapAwayReplyAnswers(
         context({ lastMessage: UNMARKED }),
-        answers({ option: choice(id, 0.8) }),
+        answers({ option: choice(id, 0.9) }),
         CONFIG,
       );
       expect(decision.choice).toMatchObject({
@@ -142,17 +167,23 @@ describe("mapAwayReplyAnswers", () => {
 
   it.each([
     ["the none exit", { option: choice("none", 0.9) }, "no-option-picked"],
-    ["a low-confidence pick", { option: choice("B", 0.65) }, "low-confidence-option"],
+    ["a low-confidence pick", { option: choice("B", 0.8) }, "low-confidence-option"],
     ["FYI", { wait_kind: choice("fyi", 0.9) }, "fyi"],
     ["an open question", { wait_kind: choice("open_question", 0.9) }, "open-question"],
-    ["no reply needed", { needs_reply: noul(0.3) }, "no-reply-needed"],
-    ["a low-confidence wait kind", { wait_kind: choice("choose_option", 0.5) }, "low-confidence"],
+    ["no reply needed", { needs_reply: noul(0.75) }, "no-reply-needed"],
+    ["a low-confidence wait kind", { wait_kind: choice("choose_option", 0.7) }, "low-confidence"],
     [
-      "destructive intent",
-      { destructive: noul(0.2), option: choice("B", 0.9) },
+      "destructive intent just over the floor",
+      { destructive: noul(0.05), option: choice("B", 0.9) },
       "destructive-intent",
     ],
+    [
+      "a hold in Tyler's messages",
+      { tyler_hold: noul(0.2), option: choice("B", 0.9) },
+      "tyler-said-hold",
+    ],
     ["a missing answer", { destructive: choice("x", 1) }, "malformed"],
+    ["a missing hold answer", { tyler_hold: choice("x", 1) }, "malformed"],
   ])("sends nothing on %s", (_name, override, reason) => {
     const decision = mapAwayReplyAnswers(
       context({ lastMessage: UNMARKED }),
@@ -175,9 +206,15 @@ describe("mapAwayReplyAnswers", () => {
     });
   });
 
-  it("keeps going on an approve-plan answer to a finished turn or a plan approval", () => {
-    const plan = mapAwayReplyAnswers(
+  it("keeps going on a plan approval, or a finished turn that spelled out its plan", () => {
+    const vague = mapAwayReplyAnswers(
       context({ lastMessage: "Next I will add the tests, then the docs. OK?" }),
+      answers({ wait_kind: choice("approve_plan", 0.8) }),
+      CONFIG,
+    );
+    expect(vague.choice).toMatchObject({ kind: "none", reason: "no-plan-to-approve" });
+    const plan = mapAwayReplyAnswers(
+      context({ lastMessage: "1. add the tests\n2. add the docs\nOK?" }, { hasPlan: true }),
       answers({ wait_kind: choice("approve_plan", 0.8) }),
       CONFIG,
     );
@@ -227,36 +264,70 @@ describe("mapAwayReplyAnswers", () => {
   });
 
   it("approves a tool permission only when code and JEV both call it read-only", () => {
-    const read = context({
-      kind: "permission",
-      request: toolRequest("Bash", { command: "git status" }),
+    const root = mkdtempSync(path.join(os.tmpdir(), "away-reply-decision-"));
+    try {
+      writeFileSync(path.join(root, "notes.md"), "notes");
+      const scope = { cwd: root, home: null };
+      const read = buildAwayReplyContext(
+        episode({ kind: "permission", request: toolRequest("Read", { file_path: "notes.md" }) }),
+        thread(),
+        scope,
+      );
+      if (!read.ok) throw new Error(read.reason);
+      const hold = { tyler_hold: noul(0.01) };
+      expect(
+        mapAwayReplyAnswers(
+          read.context,
+          { read_only: noul(0.97), destructive: noul(0.01), ...hold },
+          CONFIG,
+        ).choice,
+      ).toEqual({ kind: "approve-permission" });
+      expect(
+        mapAwayReplyAnswers(
+          read.context,
+          { read_only: noul(0.9), destructive: noul(0.01), ...hold },
+          CONFIG,
+        ).choice,
+      ).toMatchObject({ kind: "none", reason: "jev-not-read-only" });
+      const bash = buildAwayReplyContext(
+        episode({ kind: "permission", request: toolRequest("Bash", { command: "git status" }) }),
+        thread(),
+        scope,
+      );
+      if (!bash.ok) throw new Error(bash.reason);
+      expect(
+        mapAwayReplyAnswers(
+          bash.context,
+          { read_only: noul(0.99), destructive: noul(0.01), ...hold },
+          CONFIG,
+        ).choice,
+      ).toMatchObject({ kind: "none", reason: "not-read-only" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a plan approval that would move the leader out of its mode", () => {
+    const request = planRequest("1. add tests\n2. add docs");
+    request.actions = request.actions?.filter((action) => action.intent !== "implement_resume");
+    expect(buildAwayReplyContext(episode({ kind: "plan", request }), thread(), SCOPE)).toEqual({
+      ok: false,
+      reason: "plan-would-change-mode",
     });
-    expect(
-      mapAwayReplyAnswers(read, { read_only: noul(0.95), destructive: noul(0.02) }, CONFIG).choice,
-    ).toEqual({ kind: "approve-permission" });
-    expect(
-      mapAwayReplyAnswers(read, { read_only: noul(0.85), destructive: noul(0.02) }, CONFIG).choice,
-    ).toMatchObject({ kind: "none", reason: "jev-not-read-only" });
-    const write = context({
-      kind: "permission",
-      request: toolRequest("Bash", { command: "npm i x" }),
-    });
-    expect(
-      mapAwayReplyAnswers(write, { read_only: noul(0.99), destructive: noul(0.01) }, CONFIG).choice,
-    ).toMatchObject({ kind: "none", reason: "not-read-only" });
   });
 
   it("reports verdicts without any state", () => {
     const decision = mapAwayReplyAnswers(
       context({ lastMessage: RECOMMENDED }),
-      answers({ option: choice("B", 0.71) }),
+      answers({ option: choice("B", 0.8) }),
       CONFIG,
     );
     expect(decision.verdicts).toEqual([
       "needs_reply 0.93",
       "wait_kind choose_option 0.82",
-      "destructive 0.03",
-      "option B 0.71",
+      "destructive 0.01",
+      "tyler_hold 0.02",
+      "option B 0.8",
     ]);
   });
 });
@@ -279,16 +350,23 @@ describe("the reply text", () => {
     }
   });
 
-  it("uses exactly the fixed templates", () => {
+  it("uses exactly the fixed templates, naming an option by its id and never its text", () => {
     expect(formatAwayReply(bodies[0], "turn-ended", 60)).toBe(
-      `${awayReplyMarker(60)} Go with your recommendation, option B ("wait for ready"). ${AWAY_REPLY_GUARD}`,
+      `${awayReplyMarker(60)} Go with your recommendation, option B. ${AWAY_REPLY_GUARD}`,
     );
     expect(formatAwayReply(bodies[1], "question", 90)).toBe(
-      `[Auto-reply on Tyler's behalf — away >90m, JEV] Go with option "Use 'SQLite' now". ${AWAY_REPLY_GUARD}`,
+      `[Auto-reply on Tyler's behalf — away >90m, JEV] Go with the 2nd option you listed. ${AWAY_REPLY_GUARD}`,
     );
     expect(formatAwayReply(bodies[2], "turn-ended", 120)).toBe(
       `[Auto-reply on Tyler's behalf — away >2h, JEV] Keep going with the plan you described. ${AWAY_REPLY_GUARD}`,
     );
+    for (const body of bodies) {
+      for (const kind of ["turn-ended", "question", "plan"] as const) {
+        const text = formatAwayReply(body, kind, 60);
+        expect(text).not.toContain("wait for ready");
+        expect(text).not.toContain("SQLite");
+      }
+    }
   });
 
   it("states the guard in the words Tyler asked for", () => {

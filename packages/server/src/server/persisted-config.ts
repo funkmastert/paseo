@@ -788,8 +788,8 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
-    // Feature 14. Live by default (D10); `dryRun` is its shadow switch. An older daemon rejects
-    // this key (strict schema), so nothing writes it by default.
+    // Feature 14. Dry run by default (D6); `dryRun: false` lets it act. The resolver clamps
+    // `destructiveThreshold` to 0.05; the schema keeps 0.5 so a config written earlier stays valid.
     awayReply: z
       .object({
         enabled: z.boolean().optional(),

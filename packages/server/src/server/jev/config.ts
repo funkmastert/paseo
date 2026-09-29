@@ -54,7 +54,7 @@ export interface ResolvedJevConfig {
     cutPoint: boolean;
   };
   stallJudgment: ResolvedJevFeatureConfig & { loopWatch: boolean };
-  /** Feature 14. Live by default (D10); `dryRun` is its `shadow`. */
+  /** Feature 14. Dry run by default (D6); `dryRun` is its `shadow`. */
   awayReply: ResolvedAwayReplyConfig;
 }
 
