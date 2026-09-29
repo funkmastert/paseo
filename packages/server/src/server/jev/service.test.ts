@@ -741,6 +741,41 @@ describe("JevService: ledger, audit, status", () => {
     expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control"]);
   });
 
+  it("infers the provider from the key's prefix through the real config reader, never leaking the key", async () => {
+    // Unlike makeHarness, this builds the service with no injected configReader, so it exercises
+    // the real createJevConfigReader + keyResolver wiring that provider inference depends on.
+    const root = mkdtempSync(path.join(os.tmpdir(), "jev-service-infer-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const homeDir = path.join(root, "home");
+    const paseoHome = path.join(root, "paseo-home");
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(paseoHome, { recursive: true });
+    let logText = "";
+    const logger = pino(
+      { level: "trace" },
+      new Writable({
+        write(chunk, _encoding, callback) {
+          logText += chunk.toString();
+          callback();
+        },
+      }),
+    );
+    const service = createJevService({
+      paseoHome,
+      logger,
+      homeDir,
+      platform: "darwin",
+      capturedKey: { present: true, value: () => "apikey_typesafe-fake-key-do-not-use" },
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const status = service.status();
+    expect(status.provider).toBe("typesafe");
+    expect(status.providerInferred).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("apikey_typesafe-fake-key-do-not-use");
+    expect(logText).not.toContain("apikey_typesafe-fake-key-do-not-use");
+  });
+
   it("attaches a spawn hint to the agent whose paseo.jev-call names it", async () => {
     const { service, home } = makeHarness({
       extra: {

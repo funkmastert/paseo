@@ -24,6 +24,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
   reason: "config-unreadable",
   keyPresent: false,
   provider: "openrouter",
+  providerInferred: false,
   model: "",
   features: {
     spawnHint: { enabled: false, shadow: true },

@@ -277,14 +277,19 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   const sleep = options.sleep ?? defaultSleep;
   const redact = options.redact ?? redactJevRequest;
   const jevDir = path.join(options.paseoHome, "jev");
-  const configReader =
-    options.configReader ??
-    createJevConfigReader({ paseoHome: options.paseoHome, homeDir, logger });
   const keyResolver = createJevKeyResolver({
     captured: options.capturedKey,
     logger,
     platform: options.platform,
   });
+  const configReader =
+    options.configReader ??
+    createJevConfigReader({
+      paseoHome: options.paseoHome,
+      homeDir,
+      logger,
+      resolveKey: (envFile) => keyResolver.resolve(envFile).key,
+    });
   const scopeChecker =
     options.scopeChecker ??
     new JevEgressScopeChecker({
@@ -996,6 +1001,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       reason,
       keyPresent: keyPresent(snap),
       provider: fixedTransport?.provider ?? config?.provider ?? "openrouter",
+      providerInferred: config?.providerInferred ?? false,
       model: config?.model ?? "",
       features,
       lanes: { control: laneStatus("control"), agentTools: laneStatus("agentTools") },

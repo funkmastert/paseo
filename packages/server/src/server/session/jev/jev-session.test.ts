@@ -34,6 +34,7 @@ const BASE_STATUS: JevStatus = {
   reason: null,
   keyPresent: true,
   provider: "fake",
+  providerInferred: false,
   model: "jev-fake",
   features: {
     spawnHint: FEATURE_STATUS,
