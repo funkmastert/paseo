@@ -44,7 +44,7 @@ The pool is the `params.accountPool` of each Claude account entry in `agents.pro
 
 ## Where a rescued agent goes
 
-A **usable** account: enabled, not the one being left, not dead this sweep, and with every usage window under 90% (`USABLE_BELOW_PCT`, `account-pool-headroom.ts`). An account at 90% is not dead, but it would cap the agent again within a turn or two, so it is never a target for a rescue or an idle move. An account whose usage cannot be read counts as usable; a failed usage poll must not strand every agent. Among equals, the one with the most budget left wins. Which role comes first depends on the agent:
+A **usable** account: enabled, not the one being left, not dead this sweep, and with every usage window that limits the agent's model under 90% (`USABLE_BELOW_PCT`, `account-pool-headroom.ts`). An account at 90% is not dead, but it would cap the agent again within a turn or two, so it is never a target for a rescue or an idle move. An account whose usage cannot be read counts as usable; a failed usage poll must not strand every agent. Among equals, the one with the most budget left wins. Which role comes first depends on the agent:
 
 - **A child** prefers a worker, and collapses onto the leader account when no worker can take it.
 - **A root** prefers the leader account, and goes to the worker with the most budget when the leader account is out. A root is Tyler's own session; isolation only ever protected the leader account from children. On 2026-09-24 a root sat on an exhausted worker for hours while the leader account had nearly all its budget.
@@ -89,6 +89,8 @@ Two independent signals, either one sufficient (`account-failover-detector.ts`):
 
 - **Proactive.** A usage window at or above 100%, read from the daemon's cached `ProviderUsageService` (the same rows the Host Usage screen shows). An account reporting `unavailable` with no windows is never dead on that basis: an account can serve traffic fine while its usage is unreadable.
 
+  A model's weekly window (`weekly_model_*`) stops only that model, so it makes the account dead only for agents on that model family (`windowLimitsModel`): an Opus cap moves the Opus leaders and leaves the Sonnet workers where they are. The session, weekly and surface windows stop everyone. An agent whose model is unset or in no known family is held to every window, since it may be on the capped model. The same rule decides which windows count toward a target's 90% line and its headroom. The family list matches the account-pool plugin's (`plugins/claude-account-pool/server/windows.ts`); change them together.
+
 A healthy usage reading does not clear a reactive signal. A monthly spend cap does not appear in the utilization windows at all.
 
 This monitor is the only thing that acts on a usage window. Two others read the same rows and act on none of them, so nothing races this monitor for an account: the token-burn monitor's account-pressure leg warns at 90% ([docs/token-burn.md](token-burn.md#account-pressure)), and [budget pacing](budget-pacing.md) advises running leaders on how hard to fan out.
@@ -121,16 +123,23 @@ The sweep covers agents loaded in the daemon. After a restart, a stuck agent is 
 
 ## What a migration does
 
-1. **Adopt or retire, if the conversation already lives elsewhere.** If the agent already has a successor, or another live record holds its session, the monitor only retires this record (see [Idempotency](#idempotency) and [Duplicates](#duplicates)). Nothing is moved, imported, or sent.
-2. **Move the agent onto the target account.** Same id, same conversation, same settings, same children.
-3. **Send a resume prompt**, through the daemon's shared resume pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)): after a drain the moved agents restart a few a minute, roots first, instead of all at once. Re-sends to an agent that never restarted go through it too. It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
-4. **Record** the agent id → account in the ledger.
+1. **Re-read the agent.** A sweep plans every rescue at its start, and the resume pace holds each migration slot, so the live daemon moves an agent 15 to 60 seconds after planning it. If in that time a turn started (a parent's message, a finish report, Tyler), something else moved or retired it, or it stopped being stuck, the monitor leaves it this sweep. The next sweep plans from its state then.
+2. **Adopt or retire, if the conversation already lives elsewhere.** If the agent already has a successor, or another live record holds its session, the monitor only retires this record (see [Idempotency](#idempotency) and [Duplicates](#duplicates)). Nothing is moved, imported, or sent.
+3. **Move the agent onto the target account.** Same id, same conversation, same settings, same children.
+4. **Send a resume prompt**, through the daemon's shared resume pace ([resource-monitor.md](resource-monitor.md#child-admission-and-resume-pacing)): after a drain the moved agents restart a few a minute, roots first, instead of all at once. Re-sends to an agent that never restarted go through it too. It tells the agent to answer the message that failed, and to create subagents with an explicit `"<target>/<model>"` provider — without that, the default provider or a role/model policy that pins one can place a new subagent back on the exhausted account.
+5. **Record** the agent id → account in the ledger.
 
 A moved agent keeps the parent label and the id its parent holds, so nobody has to be told where it went. Its parent was already told "errored" when the cap hit, so after the resume prompt the monitor re-arms the finish report and the parent hears again when the work finishes ([finish-reports.md](finish-reports.md#successors)).
 
 ### When it falls back to importing
 
-`session_conflict` from a **retired** holder is the case that happens in practice: the target still holds this conversation's retired handle from an earlier import, and reviving that handle is the right answer anyway. A **live** holder is not an import case; it makes this record a duplicate ([Duplicates](#duplicates)). Any other refusal, or an unexpected failure part-way through a move, also falls back — the import path builds a fresh agent from the session id and works even when the moved agent is left closed.
+Importing is right only when the record being left will not run again: the import retires it, and a record that is still running would make a second live agent writing the same transcript and worktree.
+
+- `session_conflict` from a **retired** holder is the case that happens in practice: the target still holds this conversation's retired handle from an earlier import, and reviving that handle is the right answer anyway. A **live** holder is not an import case; it makes this record a duplicate ([Duplicates](#duplicates)).
+- `agent_busy` and `same_provider` never import. A turn started after the re-read, or another mover put the agent on the target first; either way the agent is live. `agent_busy` is retried on a later sweep, and `same_provider` is done: that other move was the rescue. On 2026-09-28 the retired watcher's moves raced the daemon's plan this way, and five imports failed only because both picked the same target.
+- Any other refusal, or an unexpected failure part-way through a move, falls back. The import path builds a fresh agent from the session id and works even when the moved agent is left closed.
+
+The import itself refuses a session that any account's record is running a turn on, whatever provider it is imported onto (`import-sessions.ts`). It still allows one that another account holds between turns: that is the manual handoff, which retires the original afterwards.
 
 The import path costs more, which is why it is second:
 
@@ -215,6 +224,7 @@ It is live-toggleable like `tokenBurnMonitor` and `resourceMonitor`: the monitor
 - **Headroom is only as fresh as the usage cache.** Ranking reads the same cached rows the dead-account check does, so a sweep can rank on numbers up to one refresh old. It costs a suboptimal target, never a dead one — the dead check and the ranking see the same rows.
 - **Two entries on one Claude login look like two accounts to the headroom ranking.** They report identical windows and score identically. Target selection excludes them via `describeProviderAccount` (see [Two providers, one account](#two-providers-one-account)), through the same unavailable set as dead accounts.
 - **One account label, no organisation.** Two providers are the same account only when their client reports the same email. An account with no readable label is never matched, so a pool of accounts that all report `unknown` gets no shared-account handling at all — every move is taken at face value. Matching by organisation or by the OAuth account uuid would need the quota fetcher to surface identity alongside the usage rows, which it does not today.
+- **A model cap's error condemns the whole account.** Only the usage windows are scoped by model. Once an Opus agent fails on an Opus cap, its limit-shaped error is reactive evidence, which is account-wide, so the account is dead for its Sonnet agents too until the evidence expires.
 - **Loaded agents only**, as described under [Which agents move](#which-agents-move).
 - **The import fallback mints a second id.** Everything under [When it falls back to importing](#when-it-falls-back-to-importing) applies when it runs, including a parent that may relaunch the subagent before the sweep reaches it (leaving two copies). The successor inherits the predecessor's finish report ([finish-reports.md](finish-reports.md#successors)). If duplicates become a pattern there, set `migrateSubagents: false`.
 

@@ -7,6 +7,7 @@ import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
+import { isModelWindow, windowLimitsModel } from "./account-pool-headroom.js";
 
 // Loose substring matching by design: provider error copy drifts, and a false positive costs an
 // unnecessary migration (conversation, model, and predecessor all survive) while a false
@@ -114,12 +115,74 @@ export interface PlanAccountFailoverSweepInput {
 }
 
 export interface AccountFailoverSweepPlan {
+  /** Accounts dead for every agent on them. */
   deadProviderIds: Set<string>;
+  /**
+   * Per account, the model-scoped windows at their cap. Each makes the account dead only for
+   * agents on that model (`isAccountDeadFor`).
+   */
+  cappedModelWindows: Map<string, string[]>;
   candidates: AccountFailoverAgentSummary[];
   /** Carry into the next sweep's `previousSightings`. */
   sightings: Map<string, LimitErrorSighting>;
   /** Carry into the next sweep's `previousProviderSightings`; entries past the TTL are dropped. */
   providerSightings: Map<string, ProviderLimitSighting>;
+}
+
+/**
+ * The pool accounts with a usage window at its cap: dead for everyone when the window is the
+ * account's, and only for that model when it is one model's weekly window.
+ */
+function readUsageCaps(
+  usage: readonly ProviderUsage[] | null,
+  poolProviderIds: ReadonlySet<string>,
+): { accountWide: Set<string>; modelWindows: Map<string, string[]> } {
+  const accountWide = new Set<string>();
+  const modelWindows = new Map<string, string[]>();
+  for (const provider of usage ?? []) {
+    if (!poolProviderIds.has(provider.providerId)) continue;
+    for (const window of provider.windows) {
+      if (typeof window.usedPct !== "number") continue;
+      if (window.usedPct < USAGE_WINDOW_DEAD_THRESHOLD_PCT) continue;
+      if (!isModelWindow(window.id)) {
+        accountWide.add(provider.providerId);
+        continue;
+      }
+      const capped = modelWindows.get(provider.providerId) ?? [];
+      modelWindows.set(provider.providerId, [...capped, window.id]);
+    }
+  }
+  return { accountWide, modelWindows };
+}
+
+/**
+ * Whether the agent's account is dead for it this sweep: dead for everyone, or at its cap on a
+ * window scoped to the agent's model.
+ */
+export function isAccountDeadFor(
+  plan: {
+    deadProviderIds: ReadonlySet<string>;
+    cappedModelWindows: ReadonlyMap<string, readonly string[]>;
+  },
+  agent: Pick<AccountFailoverAgentSummary, "provider" | "model">,
+): boolean {
+  if (plan.deadProviderIds.has(agent.provider)) return true;
+  const capped = plan.cappedModelWindows.get(agent.provider) ?? [];
+  return capped.some((windowId) => windowLimitsModel(windowId, agent.model));
+}
+
+/**
+ * Whether the agent's own state makes it a rescue candidate, whatever its account: its turn ended
+ * in error or on a cap, and nothing is running it now.
+ */
+export function isStuckTurn(
+  agent: Pick<AccountFailoverAgentSummary, "internal" | "lifecycle" | "lastError">,
+): boolean {
+  return (
+    !agent.internal &&
+    (agent.lifecycle === "error" || isLimitShapedError(agent.lastError)) &&
+    !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle)
+  );
 }
 
 /**
@@ -130,7 +193,8 @@ export interface AccountFailoverSweepPlan {
  *   the moment they are migrated would make the account look healthy one sweep later and send
  *   the next stuck agent straight back onto it.
  * - Proactive: a usage window at or over 100%. A provider reporting `unavailable` with no windows
- *   is never dead on that basis alone: it may be serving traffic fine with unreadable usage.
+ *   is never dead on that basis alone: it may be serving traffic fine with unreadable usage. A
+ *   model's weekly window at its cap condemns the account for agents on that model only.
  *   A healthy usage reading never clears a reactive signal either — a monthly spend cap does not
  *   show up in the utilization windows at all.
  *
@@ -178,27 +242,22 @@ export function planAccountFailoverSweep(
     if (input.poolProviderIds.has(providerId)) deadProviderIds.add(providerId);
   }
 
-  for (const provider of input.usage ?? []) {
-    if (!input.poolProviderIds.has(provider.providerId)) continue;
-    const atCap = provider.windows.some(
-      (window) =>
-        typeof window.usedPct === "number" && window.usedPct >= USAGE_WINDOW_DEAD_THRESHOLD_PCT,
-    );
-    if (atCap) deadProviderIds.add(provider.providerId);
-  }
+  const usageCaps = readUsageCaps(input.usage, input.poolProviderIds);
+  for (const providerId of usageCaps.accountWide) deadProviderIds.add(providerId);
+  const cappedModelWindows = usageCaps.modelWindows;
 
   // An agent in error on a dead account is a candidate whatever its error says: its turn ended
   // while its account was out, and it is resumed where it can run. Only a limit-shaped error
   // condemns an account, though, so this never makes an account dead by itself.
+  const plan = { deadProviderIds, cappedModelWindows };
   const candidates = input.agents.filter(
     (agent) =>
-      (sightings.has(agent.id) || (agent.lifecycle === "error" && !agent.internal)) &&
+      isStuckTurn(agent) &&
       !getMigratedToFromLabels(agent.labels) &&
-      deadProviderIds.has(agent.provider) &&
-      !NON_CANDIDATE_LIFECYCLES.has(agent.lifecycle) &&
+      isAccountDeadFor(plan, agent) &&
       Boolean(agent.sessionId) &&
       (input.migrateSubagents || getParentAgentIdFromLabels(agent.labels) === null),
   );
 
-  return { deadProviderIds, candidates, sightings, providerSightings };
+  return { deadProviderIds, cappedModelWindows, candidates, sightings, providerSightings };
 }

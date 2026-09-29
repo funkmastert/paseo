@@ -168,12 +168,19 @@ export class AgentStorage {
     provider: string,
     providerHandleId: string,
   ): Promise<StoredAgentRecord[]> {
+    return (await this.listBySession(providerHandleId)).filter(
+      (record) => record.persistence?.provider === provider,
+    );
+  }
+
+  /** Every record on this session, whichever provider holds it. Accounts share one transcript
+   * store, so records on different accounts can be the same conversation. */
+  async listBySession(providerHandleId: string): Promise<StoredAgentRecord[]> {
     await this.load();
     return Array.from(this.cache.values()).filter(
       (record) =>
-        record.persistence?.provider === provider &&
-        (record.persistence.sessionId === providerHandleId ||
-          record.persistence.nativeHandle === providerHandleId),
+        record.persistence?.sessionId === providerHandleId ||
+        record.persistence?.nativeHandle === providerHandleId,
     );
   }
 
