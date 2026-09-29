@@ -738,7 +738,8 @@ describe("JevService: ledger, audit, status", () => {
     expect(status.features.spawnHint.shadow).toBe(true);
     expect(status.features.stallJudgment.shadow).toBe(true);
     expect(status.features.agentTools.shadow).toBe(false);
-    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control"]);
+    expect(status.features.askJev.shadow).toBe(false);
+    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control", "interactive"]);
   });
 
   it("attaches a spawn hint to the agent whose paseo.jev-call names it", async () => {
