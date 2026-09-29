@@ -31,7 +31,13 @@ import {
   parseGitHubRepository,
   type RepoVisibility,
 } from "./github-repo-visibility.js";
-import { looksLikeSecret } from "./snapshot-secret-filter.js";
+import {
+  displayPath,
+  findTokenKind,
+  hasSecretName,
+  looksLikeSecret,
+  WITHHELD_PATH,
+} from "./snapshot-secret-filter.js";
 
 const BACKUP_REF_PREFIX = "refs/backup/";
 const GIT_TIMEOUT_MS = 60_000;
@@ -40,7 +46,11 @@ const PUSH_TIMEOUT_MS = 120_000;
 const ADD_BATCH = 200;
 const MAX_SLUG_LENGTH = 120;
 /** How long a repository's private or public answer is trusted. */
-const VISIBILITY_TTL_MS = 60 * 60_000;
+const VISIBILITY_TTL_MS = 5 * 60_000;
+/** Git output the pre-push scan reads at most; more than this is bundled unscanned. */
+const PUSH_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+/** Findings a held-back push logs at most. */
+const MAX_PUSH_FINDINGS = 20;
 
 const BASE_ENV = {
   GIT_OPTIONAL_LOCKS: "0",
@@ -63,7 +73,20 @@ export interface GitWorktreeSnapshotterOptions {
   runGit?: RunGitCommand;
   /** Whether a GitHub repository is private. Defaults to asking GitHub; tests answer instead. */
   lookupRepoVisibility?: (owner: string, repo: string) => Promise<RepoVisibility>;
+  /** Overrides `PUSH_SCAN_MAX_BYTES`, so a test can reach the cap. */
+  pushScanMaxBytes?: number;
 }
+
+/** A path, or where in a commit, and what kind of secret was seen there. Never the secret. */
+interface PushFinding {
+  path: string;
+  kind: string;
+}
+
+type PushScan =
+  | { kind: "clean" }
+  | { kind: "possible-secret"; findings: PushFinding[] }
+  | { kind: "unscanned"; reason: string };
 
 /** What a worktree holds that exists nowhere else, read without writing anything. */
 export type WorktreeAssessment =
@@ -345,8 +368,8 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         } catch {
           continue; // Gone since it was listed.
         }
-        if (stats.size > maxUntrackedFileBytes) skippedFiles.push(file);
-        else if (await looksLikeSecret(path, file, stats)) possibleSecrets.push(file);
+        if (stats.size > maxUntrackedFileBytes) skippedFiles.push(displayPath(file));
+        else if (await looksLikeSecret(path, file, stats)) possibleSecrets.push(displayPath(file));
         else keep.push(file);
       }
       for (let index = 0; index < keep.length; index += ADD_BATCH) {
@@ -404,9 +427,9 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
 
   /**
    * A personal GitHub origin that GitHub says is private gets the snapshot as branch
-   * `backup/<date>/<slug>`; anything else, or no origin, gets a bundle file. The push goes to the
-   * URL rather than the remote name, so no remote-tracking ref is written and the done janitor's
-   * reachability check reads as before.
+   * `backup/<date>/<slug>`, unless what the push would send may hold a secret; anything else, or no
+   * origin, gets a bundle file. The push goes to the URL rather than the remote name, so no
+   * remote-tracking ref is written and the done janitor's reachability check reads as before.
    */
   private async sendOffsite(input: {
     worktreePath: string;
@@ -416,36 +439,39 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   }): Promise<WorktreeSnapshotOffsite> {
     const cached = this.offsiteByCommit.get(input.commit);
     if (cached) return cached;
-    const { worktreePath, ref, config } = input;
+    const { worktreePath, ref, commit, config } = input;
     const url = (await this.tryGit(worktreePath, ["config", "--get", "remote.origin.url"]))?.trim();
     let offsite: WorktreeSnapshotOffsite | null = null;
-    if (
-      url &&
-      isPersonalGitHubRemote(url, config.personalOwners) &&
-      (await this.isPrivateRepository(worktreePath, url))
-    ) {
-      const branch = `backup/${ref.slice(BACKUP_REF_PREFIX.length)}`;
-      try {
-        await this.git(
-          worktreePath,
-          ["push", "--no-verify", "--quiet", url, `${ref}:refs/heads/${branch}`],
-          {},
-          PUSH_TIMEOUT_MS,
-        );
-        offsite = { kind: "pushed", remote: "origin", branch };
-      } catch (error) {
-        this.options.logger.warn(
-          { err: error, worktreePath, ref },
-          "Work snapshot: push to the personal remote failed; bundling instead",
-        );
+    // A bundle made because GitHub did not answer is not the last word on this snapshot: the next
+    // sweep asks again, even when the worktree has not changed.
+    let settled = true;
+    if (url && isPersonalGitHubRemote(url, config.personalOwners)) {
+      const visibility = await this.repositoryVisibility(worktreePath, url);
+      settled = visibility !== "unknown";
+      if (visibility === "private" && (await this.pushIsClean(worktreePath, ref, commit))) {
+        const branch = `backup/${ref.slice(BACKUP_REF_PREFIX.length)}`;
+        try {
+          await this.git(
+            worktreePath,
+            ["push", "--no-verify", "--quiet", url, `${ref}:refs/heads/${branch}`],
+            {},
+            PUSH_TIMEOUT_MS,
+          );
+          offsite = { kind: "pushed", remote: "origin", branch };
+        } catch (error) {
+          this.options.logger.warn(
+            { err: error, worktreePath, ref },
+            "Work snapshot: push to the personal remote failed; bundling instead",
+          );
+        }
       }
     }
     offsite ??= await this.writeBundle(worktreePath, ref, config);
-    if (offsite.kind !== "none") this.offsiteByCommit.set(input.commit, offsite);
+    if (settled && offsite.kind !== "none") this.offsiteByCommit.set(commit, offsite);
     return offsite;
   }
 
-  private async isPrivateRepository(worktreePath: string, url: string): Promise<boolean> {
+  private async repositoryVisibility(worktreePath: string, url: string): Promise<RepoVisibility> {
     const parsed = parseGitHubRepository(url);
     const key = parsed ? `${parsed.owner}/${parsed.repo}`.toLowerCase() : null;
     const cached = key ? this.visibilityByRepo.get(key) : undefined;
@@ -464,7 +490,113 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         "Work snapshot: the personal repository is not known to be private; bundling instead of pushing",
       );
     }
-    return visibility === "private";
+    return visibility;
+  }
+
+  /** Scans what the push would send and logs why when it holds the push back. */
+  private async pushIsClean(worktreePath: string, ref: string, commit: string): Promise<boolean> {
+    let scan: PushScan;
+    try {
+      scan = await this.scanPush(worktreePath, commit);
+    } catch (error) {
+      scan = { kind: "unscanned", reason: describeError(error) };
+    }
+    if (scan.kind === "possible-secret") {
+      this.options.logger.warn(
+        { worktreePath, ref, findings: scan.findings },
+        "Work snapshot: possible secret in what the push would send; bundling instead of pushing",
+      );
+    } else if (scan.kind === "unscanned") {
+      this.options.logger.warn(
+        { worktreePath, ref, reason: scan.reason },
+        "Work snapshot: could not scan what the push would send; bundling instead of pushing",
+      );
+    }
+    return scan.kind === "clean";
+  }
+
+  /**
+   * Everything the push sends that no remote has: the snapshot and HEAD's unpushed commits. Their
+   * added lines and messages are scanned for tokens and their changed paths for secret-shaped
+   * names. This reads the objects actually sent, so it also covers tracked edits, committed files,
+   * and untracked files past the untracked filter's 64 KB window or changed after it ran.
+   */
+  private async scanPush(worktreePath: string, commit: string): Promise<PushScan> {
+    const maxBytes = this.options.pushScanMaxBytes ?? PUSH_SCAN_MAX_BYTES;
+    const range = ["--diff-merges=first-parent", commit, "--not", "--remotes"];
+    const names = await this.readForScan(
+      worktreePath,
+      ["log", "--format=", "--name-only", "-z", "--diff-filter=d", ...range],
+      maxBytes,
+    );
+    const patch = await this.readForScan(
+      worktreePath,
+      [
+        "log",
+        "--patch",
+        "--text",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-prefix",
+        "--unified=0",
+        "--format=%x1e%B",
+        ...range,
+      ],
+      maxBytes,
+    );
+    if (names === null || patch === null) {
+      return { kind: "unscanned", reason: `more than ${maxBytes} bytes to scan` };
+    }
+
+    const findings = new Map<string, PushFinding>();
+    const note = (path: string, kind: string) => {
+      if (findings.size < MAX_PUSH_FINDINGS) findings.set(`${path}\0${kind}`, { path, kind });
+    };
+    for (const name of names.split("\0")) {
+      if (!name) continue;
+      if (findTokenKind(name) !== null) note(WITHHELD_PATH, "token in the path");
+      else if (hasSecretName(name)) note(name, "secret-shaped name");
+    }
+    let section: "message" | "header" | "hunk" = "header";
+    let path = "(unknown path)";
+    for (const line of patch.split("\n")) {
+      let text: string | null = null;
+      if (line.startsWith("\x1e")) {
+        section = "message";
+        text = line.slice(1);
+      } else if (line.startsWith("diff --git ")) {
+        section = "header";
+        path = "(unknown path)";
+      } else if (section === "message") {
+        text = line;
+      } else if (section === "header") {
+        if (line.startsWith("+++ ")) path = line.slice(4);
+        else if (line.startsWith("@@")) section = "hunk";
+      } else if (line.startsWith("+")) {
+        text = line.slice(1);
+      }
+      const kind = text === null ? null : findTokenKind(text);
+      if (kind !== null) note(section === "message" ? "(commit message)" : displayPath(path), kind);
+    }
+    return findings.size === 0
+      ? { kind: "clean" }
+      : { kind: "possible-secret", findings: [...findings.values()] };
+  }
+
+  /** Git's stdout, or null when it is over `maxBytes`. */
+  private async readForScan(cwd: string, args: string[], maxBytes: number): Promise<string | null> {
+    try {
+      const result = await this.runGit(["--no-optional-locks", ...args], {
+        cwd,
+        envOverlay: BASE_ENV,
+        timeout: GIT_TIMEOUT_MS,
+        maxOutputBytes: maxBytes,
+      });
+      return result.truncated ? null : result.stdout;
+    } catch (error) {
+      throw new GitFailure(args, error);
+    }
   }
 
   private async writeBundle(
