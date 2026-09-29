@@ -1056,11 +1056,17 @@ function createDoneJanitor(input: {
           paseoHome: input.config.paseoHome,
           paseoWorktreesBaseRoot: input.config.worktreesRoot,
         }),
-      archiveWorkspace: async (workspaceId, directory) => {
+      archiveWorkspace: async (workspaceId, directory, recheck) => {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle", {
           expectedDirectory: directory,
+          recheck,
         });
-        return { removedDirectory: result.removedDirectory };
+        return {
+          removedDirectory: result.removedDirectory,
+          ...(result.keptDirectoryReason
+            ? { keptDirectoryReason: result.keptDirectoryReason }
+            : {}),
+        };
       },
       archiveWorkspaceRecord: async (workspaceId) => {
         await input.archiveWorkspaceById(workspaceId, "done-janitor-idle-record", {

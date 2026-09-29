@@ -159,8 +159,8 @@ function harness(input: {
   countRunningScripts?: (workspaceId: string) => number;
   /** Runs once, at the first `du`: after a reclaim's plan and before its archive. */
   whileMeasuring?: (state: HarnessState) => void;
-  /** Runs inside the reclaim's archive-by-scope, before its re-check at each stage. */
-  duringReclaim?: (stage: ArchiveRecheckStage, state: HarnessState) => void;
+  /** Runs inside a deleting archive-by-scope, before its re-check at each stage. */
+  duringArchive?: (stage: ArchiveRecheckStage, state: HarnessState) => void;
   logger?: Logger;
   /** The directory archive-by-scope would delete; absent: its resolution, by path shape. */
   resolveArchiveDirectory?: (workspace: DoneJanitorWorkspace) => string | null;
@@ -246,7 +246,7 @@ function harness(input: {
     // directory. A refusal before the records touches nothing; one before the directory keeps it.
     reclaimWorkspace: async (workspaceId, directory, recheck) => {
       expectedDirectories.push(directory);
-      input.duringReclaim?.("archive", state);
+      input.duringArchive?.("archive", state);
       const refused = await recheck("archive");
       if (refused) throw new ArchiveRefusedError(refused);
       reclaimed.push(workspaceId);
@@ -259,7 +259,7 @@ function harness(input: {
           stored[agentIndex] = { ...candidate, archivedAt, updatedAt: archivedAt };
         }
       }
-      input.duringReclaim?.("delete", state);
+      input.duringArchive?.("delete", state);
       const kept = await recheck("delete");
       return kept
         ? { removedDirectory: false, keptDirectoryReason: kept }
@@ -277,10 +277,17 @@ function harness(input: {
       );
       return owned?.[0] ?? null;
     },
-    archiveWorkspace: async (workspaceId, directory) => {
+    archiveWorkspace: async (workspaceId, directory, recheck) => {
       expectedDirectories.push(directory);
+      input.duringArchive?.("archive", state);
+      const refused = await recheck("archive");
+      if (refused) throw new ArchiveRefusedError(refused);
       archiveWorkspaceRecords(workspaceId, `archive-workspace:${workspaceId}`);
-      return { removedDirectory: true };
+      input.duringArchive?.("delete", state);
+      const kept = await recheck("delete");
+      return kept
+        ? { removedDirectory: false, keptDirectoryReason: kept }
+        : { removedDirectory: true };
     },
     archiveWorkspaceRecord: async (workspaceId) => {
       archiveWorkspaceRecords(workspaceId, `archive-record:${workspaceId}`);
@@ -1462,7 +1469,7 @@ describe("AgentDoneJanitor reclaims on what is true at the reclaim, not at the p
       config: ON,
       stored: [record({ archivedAt: FOUR_DAYS_AGO })],
       live,
-      duringReclaim: (stage, state) => {
+      duringArchive: (stage, state) => {
         if (stage === "archive") startAgent(state, live);
       },
     });
@@ -1486,7 +1493,7 @@ describe("AgentDoneJanitor reclaims on what is true at the reclaim, not at the p
       config: ON,
       stored: [record({ archivedAt: FOUR_DAYS_AGO })],
       live,
-      duringReclaim: (stage, state) => {
+      duringArchive: (stage, state) => {
         if (stage === "delete") startAgent(state, live, { workspaceId: "ws-new" });
       },
     });
@@ -2406,6 +2413,76 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
   });
 
   describe("Paseo-owned worktrees, whose directory the archive deletes", () => {
+    test("an agent that starts while the worktree is measured keeps it, and is not archived", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        whileMeasuring: (state) => {
+          state.stored[0] = { ...state.stored[0], lastStatus: "running" };
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.stored[0]?.archivedAt).toBeFalsy();
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          workspaceId: "ws-1",
+          reason: "it was idle, but then agent agent-1 is running",
+        }),
+      );
+    });
+
+    test("an agent that starts inside the archive, after the janitor's last look, stops it before anything is touched", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        duringArchive: (stage, state) => {
+          if (stage === "archive") state.stored[0] = { ...state.stored[0], lastStatus: "running" };
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.stored[0]?.archivedAt).toBeFalsy();
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "it was idle, but then agent agent-1 is running",
+        }),
+      );
+    });
+
+    test("an agent that starts in the directory after the archive took the records keeps the directory", async () => {
+      const live: DoneJanitorAgentSummary[] = [];
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        live,
+        duringArchive: (stage, state) => {
+          if (stage !== "delete") return;
+          state.stored.push(record({ id: "late", workspaceId: "ws-new" }));
+          live.push(liveSummary({ id: "late", workspaceId: "ws-new", lifecycle: "running" }));
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      expect(report?.entries).not.toContainEqual(expect.objectContaining({ action: "deleted" }));
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "archived-workspace",
+          workspaceId: "ws-1",
+          reason:
+            "idle past 3d; clean tree and branch feature is merged or pushed; archived the workspace, but kept its directory: agent late runs inside it",
+        }),
+      );
+    });
+
     test("clean and pushed: snapshotted, archived and its directory deleted", async () => {
       const h = sweepHarness({ stored: [record()], workspaces: [workspace()] });
 

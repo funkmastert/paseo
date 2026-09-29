@@ -225,9 +225,13 @@ export interface DoneJanitorDependencies {
    * The idle-workspace sweep's archive when it deletes a directory: archive-by-scope again, so
    * its agents, terminals and record go with the directory `resolveArchiveDirectory` names.
    * `directory` is the one the checks read; the archive throws, touching nothing, when it would
-   * delete another.
+   * delete another. `recheck` as for `reclaimWorkspace`.
    */
-  archiveWorkspace(workspaceId: string, directory: string): Promise<{ removedDirectory: boolean }>;
+  archiveWorkspace(
+    workspaceId: string,
+    directory: string,
+    recheck: ArchiveRecheck,
+  ): Promise<{ removedDirectory: boolean; keptDirectoryReason?: string }>;
   /**
    * The idle-workspace sweep's record-only archive: archive-by-scope with the directory kept, so
    * a plan that deletes nothing cannot delete anything, whatever the record resolves to by then.
@@ -713,16 +717,32 @@ export class AgentDoneJanitor {
       report.entries.push(describe("kept-idle-workspace", check.reason));
       return true;
     }
-    let removedDirectory: boolean;
-    try {
-      ({ removedDirectory } = await this.deps.archiveWorkspace(
-        workspace.workspaceId,
-        plan.directory,
-      ));
-    } catch (error) {
-      this.reportIdleArchiveFailure(report, workspace, describe, error);
+    // `du` and the snapshot took minutes. Look again here, and archive-by-scope looks again
+    // inside, right before the records and right before the directory.
+    const deleted = plan.directory;
+    const recheck: ArchiveRecheck = (stage) =>
+      stage === "archive"
+        ? this.idleWorkspaceBlocker(workspace.workspaceId, sweep)
+        : this.deletionBlocker(changed.workspace, deleted);
+    const since = await recheck("archive");
+    if (since) {
+      report.entries.push(describe("kept-idle-workspace", `it was idle, but then ${since}`));
       return true;
     }
+    let result: { removedDirectory: boolean; keptDirectoryReason?: string };
+    try {
+      result = await this.deps.archiveWorkspace(workspace.workspaceId, deleted, recheck);
+    } catch (error) {
+      if (error instanceof ArchiveRefusedError) {
+        report.entries.push(
+          describe("kept-idle-workspace", `it was idle, but then ${error.reason}`),
+        );
+      } else {
+        this.reportIdleArchiveFailure(report, workspace, describe, error);
+      }
+      return true;
+    }
+    const { removedDirectory } = result;
     const done = { ...facts, invariant: check.invariant };
     report.entries.push(
       removedDirectory
@@ -730,7 +750,9 @@ export class AgentDoneJanitor {
         : {
             ...describe(
               "archived-workspace",
-              `${reason}; the record is archived, but the directory was not removed (see daemon log)`,
+              result.keptDirectoryReason
+                ? `${reason}; archived the workspace, but kept its directory: ${result.keptDirectoryReason}`
+                : `${reason}; the record is archived, but the directory was not removed (see daemon log)`,
             ),
             ...done,
           },
@@ -927,6 +949,16 @@ export class AgentDoneJanitor {
       }
     }
     return null;
+  }
+
+  /** Why an idle workspace must not be archived now, read afresh; null while it is still idle. */
+  private async idleWorkspaceBlocker(
+    workspaceId: string,
+    sweep: ResolvedWorkspaceSweepConfig,
+  ): Promise<string | null> {
+    const changed = await this.idleWorkspaceChange(workspaceId, sweep);
+    if (changed.kind === "archived") return "the workspace was archived by someone else";
+    return changed.kind === "changed" ? changed.reason : null;
   }
 
   /**
@@ -1623,44 +1655,60 @@ export class AgentDoneJanitor {
    * Why a planned deletion must not take its next step, read now; null to go ahead. Before the
    * archive nothing may have moved in since the plan: an agent not archived, or at work, in it or
    * under its directory; another workspace there; an open terminal or a running script; any
-   * activity newer than the plan saw. Before the delete the archive has just archived the
-   * workspace and its agents, so only what arrived since counts: a process inside it, a
-   * schedule, an agent or workspace there.
+   * activity newer than the plan saw. Before the delete, `deletionBlocker`.
    */
   private async reclaimBlocker(
     plan: ReclaimPlan,
     stage: ArchiveRecheckStage,
   ): Promise<string | null> {
     const { workspace, path } = plan;
+    if (stage === "delete") return this.deletionBlocker(workspace, path);
     const workspaceId = workspace.workspaceId;
-    if (stage === "delete") {
-      // The slow scan first, so the reads below are the last thing before the delete.
-      const occupied = await this.occupiedReason(path);
-      if (occupied) return occupied;
-    } else {
-      const terminals = await this.deps.countTerminals(workspaceId);
-      if (terminals > 0) return `it has ${terminals} open terminal(s)`;
-      const scripts = await this.deps.countRunningScripts(workspaceId);
-      if (scripts > 0) return `${scripts} script(s) run in it`;
-    }
+    const terminals = await this.deps.countTerminals(workspaceId);
+    if (terminals > 0) return `it has ${terminals} open terminal(s)`;
+    const scripts = await this.deps.countRunningScripts(workspaceId);
+    if (scripts > 0) return `${scripts} script(s) run in it`;
     const [views, workspaces] = await Promise.all([this.loadViews(), this.deps.listWorkspaces()]);
     const fresh = workspaces.find((candidate) => candidate.workspaceId === workspaceId);
-    if (stage === "archive") {
-      if (!fresh || fresh.archivedAt) return "the workspace was archived by someone else";
-      if (isProtectivePin(fresh)) return "its workspace was pinned";
-    }
-    const conflict = directoryConflict(fresh ?? workspace, path, workspaces, views, new Set());
+    if (!fresh || fresh.archivedAt) return "the workspace was archived by someone else";
+    if (isProtectivePin(fresh)) return "its workspace was pinned";
+    const conflict = directoryConflict(fresh, path, workspaces, views, new Set());
     if (conflict) return conflict;
-    // Straight from the runtimes: a view of an archived record never says it is at work.
+    const atWork = this.agentAtWork(workspaceId, path);
+    if (atWork) return atWork;
+    const newest = newestActivity(fresh, path, views);
+    return newest.atMs > plan.activityMs ? newest.source : null;
+  }
+
+  /**
+   * The last look before archive-by-scope deletes a directory. It has just archived the
+   * workspace and its agents, so only what arrived since counts: a process inside it, a
+   * schedule, or an agent or workspace there.
+   */
+  private async deletionBlocker(
+    workspace: DoneJanitorWorkspace,
+    path: string,
+  ): Promise<string | null> {
+    // The slow scan first, so the reads below are the last thing before the delete.
+    const occupied = await this.occupiedReason(path);
+    if (occupied) return occupied;
+    const [views, workspaces] = await Promise.all([this.loadViews(), this.deps.listWorkspaces()]);
+    const conflict = directoryConflict(workspace, path, workspaces, views, new Set());
+    return conflict ?? this.agentAtWork(workspace.workspaceId, path);
+  }
+
+  /**
+   * A live agent in the workspace or under its directory that is at work, read from the
+   * runtimes: a view of an archived record never says it is.
+   */
+  private agentAtWork(workspaceId: string, path: string): string | null {
     for (const agent of this.deps.listLiveAgents()) {
       const inWorkspace = agent.workspaceId === workspaceId;
       if (!inWorkspace && !isRealpathInsideRoot(path, agent.cwd)) continue;
       const work = describeWork(agent);
       if (work) return `agent ${agent.id} ${inWorkspace ? "in it" : "inside it"} ${work}`;
     }
-    if (stage === "delete" || !fresh) return null;
-    const newest = newestActivity(fresh, path, views);
-    return newest.atMs > plan.activityMs ? newest.source : null;
+    return null;
   }
 
   /**
