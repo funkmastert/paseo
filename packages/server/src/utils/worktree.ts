@@ -42,7 +42,12 @@ import { spawnProcess } from "./spawn.js";
 import { resolvePaseoHome } from "../server/paseo-home.js";
 import { createExternalProcessEnv } from "../server/paseo-env.js";
 import { parseGitRevParsePath, resolveGitRevParsePath } from "./git-rev-parse-path.js";
-import { expandTilde, getRealpathAwareRelativePath, isPathInsideRoot } from "./path.js";
+import {
+  canonicalizePath,
+  expandTilde,
+  getRealpathAwareRelativePath,
+  isPathInsideRoot,
+} from "./path.js";
 import { terminateWithTreeKill } from "./tree-kill.js";
 
 export { slugify, validateBranchSlug } from "@getpaseo/protocol/branch-slug";
@@ -1068,6 +1073,7 @@ export interface DeletePaseoWorktreeOptions {
   worktreesBaseRoot?: string;
 }
 
+/** Deletes a Paseo-owned worktree and returns the directory it removed, in canonical form. */
 export async function deletePaseoWorktree({
   cwd,
   worktreePath,
@@ -1076,7 +1082,7 @@ export async function deletePaseoWorktree({
   worktreesRoot,
   paseoHome,
   worktreesBaseRoot,
-}: DeletePaseoWorktreeOptions): Promise<void> {
+}: DeletePaseoWorktreeOptions): Promise<string> {
   if (!worktreePath && !worktreeSlug) {
     throw new Error("worktreePath or worktreeSlug is required");
   }
@@ -1099,8 +1105,11 @@ export async function deletePaseoWorktree({
     paseoHome,
     worktreesRoot: worktreesBaseRoot,
   });
-  const resolvedWorktree =
-    ownership.allowed && ownership.worktreePath ? ownership.worktreePath : resolvedRequested;
+  // Canonical, so the directory removed is the one its callers resolved and checked
+  // (canonicalizePath in utils/path.ts): the same string, not only the same directory.
+  const resolvedWorktree = canonicalizePath(
+    ownership.allowed && ownership.worktreePath ? ownership.worktreePath : resolvedRequested,
+  );
 
   const relativeWorktreePath = getRealpathAwareRelativePath(
     resolvedWorktreesRoot,
@@ -1142,6 +1151,7 @@ export async function deletePaseoWorktree({
       // not critical; git will prune lazily
     }
   }
+  return resolvedWorktree;
 }
 
 export async function rollbackCreatedPaseoWorktree(

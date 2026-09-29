@@ -981,7 +981,7 @@ function createDoneJanitor(input: {
   archiveWorkspaceById: (
     workspaceId: string,
     requestId: string,
-    options?: { keepDirectory?: boolean },
+    options?: { keepDirectory?: boolean; expectedDirectory?: string },
   ) => Promise<ArchiveResult>;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
@@ -1038,8 +1038,10 @@ function createDoneJanitor(input: {
       checkWorktree: (check) => checkWorktreeDeletionSafety(check),
       measureBytes: (worktreePath) =>
         sampleDirectorySizeBytes(worktreePath, { timeoutMs: 120_000 }),
-      reclaimWorkspace: async (workspaceId) => {
-        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
+      reclaimWorkspace: async (workspaceId, directory) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor", {
+          expectedDirectory: directory,
+        });
         return { removedDirectory: result.removedDirectory };
       },
       resolveArchiveDirectory: (workspace) =>
@@ -1047,8 +1049,10 @@ function createDoneJanitor(input: {
           paseoHome: input.config.paseoHome,
           paseoWorktreesBaseRoot: input.config.worktreesRoot,
         }),
-      archiveWorkspace: async (workspaceId) => {
-        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle");
+      archiveWorkspace: async (workspaceId, directory) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle", {
+          expectedDirectory: directory,
+        });
         return { removedDirectory: result.removedDirectory };
       },
       archiveWorkspaceRecord: async (workspaceId) => {
@@ -2169,7 +2173,7 @@ export async function createPaseoDaemon(
   const archiveWorkspaceByIdExternal = (
     workspaceId: string,
     requestId: string,
-    options: { keepDirectory?: boolean } = {},
+    options: { keepDirectory?: boolean; expectedDirectory?: string } = {},
   ) =>
     archiveByScope(
       {
@@ -2197,6 +2201,7 @@ export async function createPaseoDaemon(
         scope: { kind: "workspace", workspaceId },
         requestId,
         keepDirectory: options.keepDirectory,
+        expectedDirectory: options.expectedDirectory,
       },
     );
   const hubAgentLifecycle = new CreateAgentLifecycleDispatch({

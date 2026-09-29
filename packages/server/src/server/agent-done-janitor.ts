@@ -191,8 +191,12 @@ export interface DoneJanitorDependencies {
     baseBranch: string | null;
   }): Promise<WorktreeDeletionSafety>;
   measureBytes(path: string): Promise<number | undefined>;
-  /** Archives the workspace record and deletes its worktree: archive-by-scope, the same path a person's archive takes. */
-  reclaimWorkspace(workspaceId: string): Promise<{ removedDirectory: boolean }>;
+  /**
+   * Archives the workspace record and deletes its worktree: archive-by-scope, the same path a
+   * person's archive takes. `directory` is the one the checks read; the archive throws, touching
+   * nothing, when it would delete another.
+   */
+  reclaimWorkspace(workspaceId: string, directory: string): Promise<{ removedDirectory: boolean }>;
   /**
    * The directory archive-by-scope deletes with this workspace, resolved the way it resolves it
    * (`resolveArchiveDirectory`, workspace-archive-service.ts); null when it deletes none. For an
@@ -203,8 +207,10 @@ export interface DoneJanitorDependencies {
   /**
    * The idle-workspace sweep's archive when it deletes a directory: archive-by-scope again, so
    * its agents, terminals and record go with the directory `resolveArchiveDirectory` names.
+   * `directory` is the one the checks read; the archive throws, touching nothing, when it would
+   * delete another.
    */
-  archiveWorkspace(workspaceId: string): Promise<{ removedDirectory: boolean }>;
+  archiveWorkspace(workspaceId: string, directory: string): Promise<{ removedDirectory: boolean }>;
   /**
    * The idle-workspace sweep's record-only archive: archive-by-scope with the directory kept, so
    * a plan that deletes nothing cannot delete anything, whatever the record resolves to by then.
@@ -688,7 +694,10 @@ export class AgentDoneJanitor {
     }
     let removedDirectory: boolean;
     try {
-      ({ removedDirectory } = await this.deps.archiveWorkspace(workspace.workspaceId));
+      ({ removedDirectory } = await this.deps.archiveWorkspace(
+        workspace.workspaceId,
+        plan.directory,
+      ));
     } catch (error) {
       this.reportIdleArchiveFailure(report, workspace, describe, error);
       return true;
@@ -1455,7 +1464,9 @@ export class AgentDoneJanitor {
     if (recordProblem || !workspace?.worktreeRoot) {
       return keep(recordProblem ?? "the workspace record is missing");
     }
-    const path = resolve(workspace.worktreeRoot);
+    // The directory archive-by-scope deletes, never the record's own spelling of it.
+    const path = await this.deps.resolveArchiveDirectory(workspace);
+    if (!path) return keep("its archive deletes no directory");
     if (!(await this.deps.isPaseoOwnedWorktreePath(path))) {
       return keep("its directory is outside the Paseo worktrees root");
     }
@@ -1535,7 +1546,7 @@ export class AgentDoneJanitor {
       return false;
     }
     try {
-      const result = await this.deps.reclaimWorkspace(plan.workspace.workspaceId);
+      const result = await this.deps.reclaimWorkspace(plan.workspace.workspaceId, plan.path);
       const entry = {
         ...this.describePlan(plan, false, why),
         invariant: check.invariant,

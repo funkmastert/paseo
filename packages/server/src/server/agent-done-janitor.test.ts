@@ -93,6 +93,8 @@ interface Harness {
   reclaimed: string[];
   /** Workspaces the idle-workspace sweep archived. */
   archivedWorkspaces: string[];
+  /** The directory each deleting archive was told its checks read (`expectedDirectory`). */
+  expectedDirectories: string[];
   removedProjects: string[];
   pushes: PushPayload[];
   levels: (string | undefined)[];
@@ -152,6 +154,7 @@ function harness(input: {
   const archived: string[] = [];
   const reclaimed: string[] = [];
   const archivedWorkspaces: string[] = [];
+  const expectedDirectories: string[] = [];
   const removedProjects: string[] = [];
   const projects = input.projects ?? [];
   const pushes: PushPayload[] = [];
@@ -214,8 +217,9 @@ function harness(input: {
       input.checkWorktree?.(worktreePath) ??
       input.safety ?? { safe: true, branch: "feature", head: "abc" },
     measureBytes: async () => 3 * GB,
-    reclaimWorkspace: async (workspaceId) => {
+    reclaimWorkspace: async (workspaceId, directory) => {
       reclaimed.push(workspaceId);
+      expectedDirectories.push(directory);
       events.push(`reclaim:${workspaceId}`);
       const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
       workspaces[index] = { ...workspaces[index], archivedAt: new Date(now).toISOString() };
@@ -233,7 +237,8 @@ function harness(input: {
       );
       return owned?.[0] ?? null;
     },
-    archiveWorkspace: async (workspaceId) => {
+    archiveWorkspace: async (workspaceId, directory) => {
+      expectedDirectories.push(directory);
       archiveWorkspaceRecords(workspaceId, `archive-workspace:${workspaceId}`);
       return { removedDirectory: true };
     },
@@ -296,6 +301,7 @@ function harness(input: {
     archived,
     reclaimed,
     archivedWorkspaces,
+    expectedDirectories,
     removedProjects,
     pushes,
     levels,
@@ -330,6 +336,8 @@ describe("AgentDoneJanitor", () => {
     expect(h.asked).toEqual(["agent-1"]);
     expect(h.archived).toEqual(["agent-1"]);
     expect(h.reclaimed).toEqual(["ws-1"]);
+    // The archive deletes only the directory the checks read, or throws.
+    expect(h.expectedDirectories).toEqual(["/home/t/.paseo/worktrees/h/feature"]);
     expect(report?.entries).toContainEqual(
       expect.objectContaining({ action: "deleted", workspaceId: "ws-1", bytes: 3 * GB }),
     );
@@ -2325,6 +2333,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       const report = await h.janitor.tick();
 
       expect(h.events).toEqual([`snapshot:${ROOT}`, "archive-workspace:ws-1"]);
+      expect(h.expectedDirectories).toEqual([ROOT]);
       expect(report?.entries).toContainEqual(
         expect.objectContaining({ action: "deleted", path: ROOT }),
       );

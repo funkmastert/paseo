@@ -226,17 +226,18 @@ describe("paseo worktree manager", () => {
       paseoHome,
     });
 
-    await deletePaseoWorktree({
+    const deleted = await deletePaseoWorktree({
       cwd: repoDir,
       worktreePath: created.worktreePath,
       paseoHome,
     });
     expect(existsSync(created.worktreePath)).toBe(false);
 
-    // Second call — nothing left on disk and no admin entry — must not throw.
+    // Second call — nothing left on disk and no admin entry — must not throw, and names the
+    // same directory.
     await expect(
       deletePaseoWorktree({ cwd: repoDir, worktreePath: created.worktreePath, paseoHome }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(deleted);
   });
 
   it("deletes a worktree when the parent repo root is not available", async () => {

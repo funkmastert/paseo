@@ -157,6 +157,8 @@ Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each wo
 
 Deleting a directory is the one thing the janitor cannot undo, so every deletion it makes, by any pass, meets one rule: **every file in the worktree is tracked and pushed, or in a verified backup, or under a regenerable directory.** Anything else present keeps the worktree, and the reason is logged. When in doubt, it keeps: a git command that fails, output cut off at the runner's cap, or a process list that cannot be read all keep it.
 
+The directory checked is the directory deleted, as the same string. Every pass asks archive-by-scope which directory its archive deletes (`resolveArchiveDirectory`, `workspace-archive-service.ts`), checks that one, and hands it back as `expectedDirectory`. An archive that would delete another directory, or none, throws before it touches anything, and the workspace is kept. Both sides are canonical (`canonicalizePath`, `utils/path.ts`): the realpath, or for a path that does not exist, the realpath of its deepest existing ancestor with the rest appended. On macOS `/var/…` and `/private/var/…` are one directory and two strings, so compare only canonical paths.
+
 Git's listing has to be the whole of what the deletion loses, so these keep the worktree too, snapshot or not:
 
 - **A directory the delete cannot get through**: one it cannot read, or cannot write or search. Git skips a directory it cannot open without failing, and a delete that meets one stops part-way, leaving half a worktree. `readWorktreeCoverage` walks the whole tree for these, ignored directories included, without following symlinks.
@@ -203,7 +205,7 @@ A fixer's workspace ignores its directory, since fixers run in the home director
 
 The archive goes through archive-by-scope, the path of a person's **Archive workspace**, which archives the workspace's agents and terminals with it. It deletes a directory only for a Paseo-owned worktree: the record says so, or an older record's path lies under the Paseo worktrees root.
 
-The janitor asks archive-by-scope's own resolution which directory that is (`resolveArchiveDirectory`, `workspace-archive-service.ts`), runs every check against it, and names it on every line. For an older record without the ownership flag it is the worktree root above the record's cwd, even when that cwd is a subdirectory that no longer exists. A live run resolves it again from the fresh record right before the deletion, and keeps the workspace if the answer changed. An archive that deletes nothing goes through archive-by-scope with `keepDirectory`, which tears down and deletes no directory whatever the record says, so a record-only line can never delete one.
+The janitor checks the directory archive-by-scope deletes ([the deletion invariant](#the-deletion-invariant)) and names it on every line. For an older record without the ownership flag it is the worktree root above the record's cwd, even when that cwd is a subdirectory that no longer exists. A live run resolves it again from the fresh record right before the deletion, and keeps the workspace if the answer changed. An archive that deletes nothing goes through archive-by-scope with `keepDirectory`, which tears down and deletes no directory whatever the record says, so a record-only line can never delete one.
 
 - **External worktrees, local checkouts and directories** keep their directory, dirty or not. Only the record is archived.
 - **A Paseo-owned worktree** goes through the conflict and snapshot-failure checks and the [git gate](#reclaiming-the-worktree):
