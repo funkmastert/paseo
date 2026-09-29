@@ -1,6 +1,6 @@
 # Install
 
-This page builds this fork's desktop app from source on macOS or Windows and gets it running. Setting up the Claude account pool is the plugin's own doc, linked below.
+This page builds this fork's desktop app from source on macOS or Windows and gets it running. Setting up the Claude account pool is the plugin's own doc, linked below. Or run `/install` in Claude Code to be walked through it.
 
 The fork has no releases yet. If its [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download that instead: the release page has the install steps. [fork-releases.md](fork-releases.md) covers how releases are made.
 
