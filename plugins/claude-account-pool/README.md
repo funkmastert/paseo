@@ -56,7 +56,7 @@ uses the same port and directory: if the app is running, quit it and run
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci   # keeps your global git hooks: docs/install.md#build
 npm run build:server
 export PATH="$PWD/packages/cli/bin:$PATH"   # this checkout's paseo, ahead of any other
 which paseo                                 # …/paseo/packages/cli/bin/paseo

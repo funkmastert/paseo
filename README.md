@@ -50,11 +50,11 @@ You need Git, Node.js 22, and [Claude Code](https://docs.anthropic.com/en/docs/c
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci
 npm run build:desktop -- --publish never
 ```
 
-Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream.
+Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream. The two variables on `npm ci` stop its hook installer from replacing your global git hooks ([why](docs/install.md#build)).
 
 The installer lands in `packages/desktop/release/`: a `.dmg` on macOS, a `Paseo-Setup-<version>-<arch>.exe` on Windows. Then set up the account pool with the plugin's [operator setup](plugins/claude-account-pool/README.md#operator-setup), as [docs/install.md](docs/install.md#set-up-the-account-pool) describes.
 

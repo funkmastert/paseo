@@ -32,11 +32,12 @@ Run these in Terminal on macOS and in Git Bash on Windows. Git Bash is the shell
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci
 npm run build:desktop -- --publish never
 ```
 
 - `--branch multi-account-orchestrator` gets this fork. The default branch, `main`, is an unmodified copy of upstream.
+- `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1` protects your own git hooks. `npm ci` runs the repo's `prepare` script, `lefthook install --force`. If your global or system git config sets `core.hooksPath`, lefthook installs its hooks in that shared directory and renames yours to `.old`, which turns them off in every repository. With the two variables set, lefthook sees neither config and installs into the checkout's `.git/hooks`. `LEFTHOOK=0` does not stop the install. On Windows, whether Git for Windows honours `/dev/null` here is unknown: if `git config --get core.hooksPath` prints a path, copy that directory somewhere safe before `npm ci`.
 - `--publish never` builds without uploading anything.
 
 The app checks this fork's GitHub releases for updates (`publish` in `packages/desktop/electron-builder.yml`).
@@ -108,7 +109,7 @@ The plugin README's [verify](../plugins/claude-account-pool/README.md#verify-it-
 
 The plugin README's [troubleshooting](../plugins/claude-account-pool/README.md#troubleshooting) covers the pool: plugins disabled or failed, signed-out accounts, a malformed pool config. These are the app and daemon failures.
 
-**The app is called Paseo, not Bozeo.** You built `main`. Run `git checkout multi-account-orchestrator` and `npm ci`, then build again.
+**The app is called Paseo, not Bozeo.** You built `main`. Run `git checkout multi-account-orchestrator` and the `npm ci` line from [Build](#build), then build again.
 
 **Paseo and Bozeo keep stopping each other's daemon.** They share `~/.paseo` and port 6767. Quit one of them.
 
