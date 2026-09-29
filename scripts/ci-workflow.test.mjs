@@ -283,7 +283,11 @@ test("PR routing declares stable behavior ownership", () => {
       "packages/app/package.json",
     ],
     relay: ["packages/relay/**"],
-    plugin: ["plugins/claude-account-pool/**", "packages/plugin/**"],
+    plugin: [
+      "plugins/claude-account-pool/**",
+      "packages/plugin/**",
+      "packages/server/src/server/agent/account-failover-detector.ts",
+    ],
     cli: ["packages/cli/**"],
   });
 });

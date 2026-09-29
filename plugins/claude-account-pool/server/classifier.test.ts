@@ -18,7 +18,7 @@ import type { ModelCatalog } from "./role-availability";
  * is the point of it being pure.
  */
 function healthyHealth(overrides: Partial<ClassifierWorld["health"]> = {}): ClassifierWorld["health"] {
-  return {
+  const health = {
     isHealthyFor: () => true,
     isHealthyForAllWindows: () => true,
     isLastResortEligible: () => true,
@@ -27,6 +27,11 @@ function healthyHealth(overrides: Partial<ClassifierWorld["health"]> = {}): Clas
     windowIds: () => [],
     ...overrides,
   } as ClassifierWorld["health"];
+  // Unless a test says otherwise, every cap is refusal-grade, as it is without CLI refusal text.
+  return {
+    isExhaustedFor: (providerId: string, modelId?: string) => !health.isLastResortEligible(providerId, modelId),
+    ...health,
+  };
 }
 
 const LIVE_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"];
@@ -518,6 +523,21 @@ describe("classifyAgent — the account", () => {
     expect(decision.account.kind).toBe("exhausted");
   });
 
+  it("places on an account only the CLI's refusal text caps rather than refusing, and says so", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      at({
+        health: healthyHealth({
+          isHealthyFor: () => false,
+          isLastResortEligible: () => false,
+          isExhaustedFor: () => false,
+        }),
+      }),
+    );
+    expect(decision.account).toMatchObject({ kind: "worker", providerId: "claude-work" });
+    expect(decision.account.reason).toContain("never refuses a spawn");
+  });
+
   it("leaves a root agent and a non-pool-family child alone", () => {
     expect(classifyAgent({ title: "root" }, at()).account.kind).toBe("no-pool");
     const policy = withRole(LIVE_POLICY, "worker", { models: ["codex/gpt-5.1"] });
@@ -577,6 +597,82 @@ describe("classifyAgent — the account", () => {
       expect(decision.account.providerId).toBe("claude-spare");
       expect(decision.account.reason).toContain("never refused");
     });
+  });
+});
+
+/**
+ * A create with no calling agent is the leader unless it says otherwise. Daemon jobs (the
+ * remediation ladder) start agents with no caller and label them workers; ignoring the label ran
+ * every one of them as a leader — Opus 5.5 at Extra High on the leader account — including the
+ * ones labelled mechanical.
+ */
+describe("classifyAgent — a caller-less create that declares its role", () => {
+  const live = (overrides: Partial<ClassifierWorld> = {}) =>
+    world({ policy: LIVE_POLICY, ...overrides } as Partial<ClassifierWorld>);
+  const root = (overrides: Partial<ClassifierInput> = {}): ClassifierInput => ({ requestedProvider: "claude", ...overrides });
+
+  it("honours paseo.agent-type: a mechanical worker runs the worker's mechanical model", () => {
+    const decision = classifyAgent(
+      root({ labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" } }),
+      live(),
+    );
+    expect(decision.role.role.id).toBe("worker");
+    expect(decision.role.source).toBe("agent-type-mapping");
+    expect(decision.model.model).toBe("claude-haiku-4-5-20251001");
+  });
+
+  it("takes its thinking from the task class, as a subagent does, not the leader rule", () => {
+    const decision = classifyAgent(root({ labels: { "paseo.agent-type": "worker" } }), live());
+    expect(decision.model.model).toBe("claude-sonnet-5");
+    expect(decision.thinking).toMatchObject({ outcome: "task-class-default", optionId: "high" });
+  });
+
+  it("never runs Ultra Code, the subagent invariant", () => {
+    const decision = classifyAgent(
+      root({ labels: { "paseo.agent-type": "worker" }, requestedThinkingOptionId: "ultracode" }),
+      live(),
+    );
+    expect(decision.thinking.optionId).not.toBe("ultracode");
+  });
+
+  it("honours paseo.agent-role", () => {
+    const decision = classifyAgent(root({ labels: { "paseo.agent-role": "reviewer" } }), live());
+    expect(decision.role.role.id).toBe("reviewer");
+    expect(decision.role.source).toBe("declared-label");
+    expect(decision.tools.deniedTools).toContain("Write");
+  });
+
+  it("walks the child ladder for its account, and is never refused", () => {
+    const at = (health: ClassifierWorld["health"]) => live({ nowMs: 1_700_000_000_000, health } as Partial<ClassifierWorld>);
+    const placed = classifyAgent(root({ labels: { "paseo.agent-type": "worker" } }), at(healthyHealth()));
+    expect(placed.account).toMatchObject({ kind: "worker", providerId: "claude-work" });
+
+    const out = classifyAgent(
+      root({ labels: { "paseo.agent-type": "worker" } }),
+      at(healthyHealth({ isHealthyFor: () => false, isLastResortEligible: () => false })),
+    );
+    expect(out.account.kind).toBe("exhausted");
+    expect(out.account.reason).toContain("never refused");
+  });
+
+  it("stays the leader with no label, with a label no mapping or role knows, or when only its title names a role", () => {
+    for (const input of [
+      root(),
+      root({ labels: { "paseo.agent-type": "chat" } }),
+      root({ labels: { "paseo.agent-role": "nonsense" } }),
+      root({ title: "worker" }),
+    ]) {
+      const decision = classifyAgent(input, live());
+      expect(decision.role.role.id).toBe("leader");
+      expect(decision.role.source).toBe("leader-tier");
+      expect(decision.thinking.outcome).toBe("leader-rule");
+    }
+  });
+
+  it("keeps a root's MCP servers and output style: nobody's leader reads it", () => {
+    const decision = classifyAgent(root({ labels: { "paseo.agent-type": "worker" } }), live());
+    expect(decision.outputStyle.style).toBeNull();
+    expect(decision.mcp.reason).toContain("no calling agent");
   });
 });
 

@@ -506,7 +506,25 @@ export function wrapSessionProvider(provider: AgentProvider, inner: AgentSession
   return wrapped;
 }
 
-function wrapClientProvider(
+/** `method` bound to `inner` and called with the base provider's id in place of the derived one. */
+function asBaseProvider<Arg extends { provider: AgentProvider }, Result>(
+  inner: AgentClient,
+  method: ((arg: Arg) => Promise<Result>) | undefined,
+): ((arg: Arg) => Promise<Result>) | undefined {
+  if (!method) return undefined;
+  const bound = method.bind(inner);
+  return async (arg) => await bound({ ...arg, provider: inner.provider });
+}
+
+/**
+ * Every AgentClient member, the optional ones made required, so leaving one out of the client
+ * wrapper is a type error — the same guard as ForwardedAgentSession. Every account-pool account
+ * is a derived provider behind this wrapper; it had silently dropped createSession's options
+ * (`persistSession: false` from the title/branch generators) and four members.
+ */
+type ForwardedAgentClient = { [K in keyof Required<AgentClient>]: AgentClient[K] };
+
+export function wrapClientProvider(
   provider: AgentProvider,
   inner: AgentClient,
   profileModels: ProviderProfileModel[],
@@ -518,13 +536,13 @@ function wrapClientProvider(
   const listFeatures = inner.listFeatures?.bind(inner);
   const canResumeHandle = inner.canResumeHandle?.bind(inner);
 
-  return {
+  const wrapped: ForwardedAgentClient = {
     provider,
     capabilities: inner.capabilities,
     // Dropping this left every account-pool provider launching with no brokered MCP servers,
     // so each account fell back to its own per-dir login for servers the gateway holds.
     acceptsMcpGatewayServers: inner.acceptsMcpGatewayServers,
-    createSession: async (config, launchContext) =>
+    createSession: async (config, launchContext, options) =>
       wrapSessionProvider(
         provider,
         await inner.createSession(
@@ -533,6 +551,7 @@ function wrapClientProvider(
             provider: inner.provider,
           },
           launchContext,
+          options,
         ),
       ),
     resumeSession: async (handle, overrides, launchContext, options) =>
@@ -621,7 +640,13 @@ function wrapClientProvider(
     getCatalogCacheKey: inner.getCatalogCacheKey?.bind(inner),
     isAvailable: (signal, options) => inner.isAvailable(signal, options),
     getDiagnostic: inner.getDiagnostic?.bind(inner),
+    listCommands: asBaseProvider(inner, inner.listCommands),
+    archiveNativeSession: asBaseProvider(inner, inner.archiveNativeSession),
+    unarchiveNativeSession: asBaseProvider(inner, inner.unarchiveNativeSession),
+    // Idempotent by contract, and each derived provider owns its own base client.
+    shutdown: inner.shutdown ? async () => await inner.shutdown?.() : undefined,
   };
+  return wrapped;
 }
 
 function createRegistryEntry(

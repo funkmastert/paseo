@@ -573,18 +573,19 @@ saved; environment overrides are not persisted with it.
 
 ### Context and cleanup
 
-| Contract                           | Behavior                                                                                                  |
-| ---------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `context.paseo`                    | Existing SDK connected to this daemon                                                                     |
-| `context.signal`                   | Aborted on invocation timeout or plugin stop; pass to external requests                                   |
-| Input data                         | Detached snapshot; change state through returned requests or SDK commands                                 |
-| Registration result                | Idempotent remover, e.g. `const remove = server.on(...); remove();`                                       |
-| Reload, disable, removal, shutdown | Remaining registrations removed                                                                           |
-| Unknown hook name                  | Registration fails                                                                                        |
-| Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation; an event handler logs an error. |
-| Event-handler error                | Logged against plugin; original operation continues                                                       |
-| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                             |
-| Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                 |
+| Contract                           | Behavior                                                                                                                                                                                    |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `context.paseo`                    | Existing SDK connected to this daemon                                                                                                                                                       |
+| `context.signal`                   | Aborted on invocation timeout or plugin stop; pass to external requests                                                                                                                     |
+| Input data                         | Detached snapshot; change state through returned requests or SDK commands                                                                                                                   |
+| Registration result                | Idempotent remover, e.g. `const remove = server.on(...); remove();`                                                                                                                         |
+| Reload, disable, removal, shutdown | Remaining registrations removed                                                                                                                                                             |
+| Unknown hook name                  | Registration fails                                                                                                                                                                          |
+| Hook timeout                       | 30 seconds; aborts the signal. A before hook fails the pending operation, except `agent.create` (next row); an event handler logs an error.                                                 |
+| Plugin gone mid-call               | An `agent.create` before hook whose plugin timed out, exited or was stopped is skipped: the create goes ahead as requested, as if no plugin were loaded. A hook that throws still fails it. |
+| Event-handler error                | Logged against plugin; original operation continues                                                                                                                                         |
+| Event delivery                     | Live, best effort; no replay, persistence, or automatic retry                                                                                                                               |
+| Event concurrency                  | Different events may overlap; callback completion order is not guaranteed                                                                                                                   |
 
 ### Complete examples
 

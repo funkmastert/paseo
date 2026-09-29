@@ -27,6 +27,7 @@ export interface RoleModelPolicyRpcDeps {
     HealthTracker,
     | "isHealthyFor"
     | "isLastResortEligible"
+    | "isExhaustedFor"
     | "windowUtilization"
     | "isHealthyForAllWindows"
     | "describeWindow"

@@ -222,12 +222,14 @@ describe("createNotifier", () => {
       requestedModel: "claude-sonnet",
       exhaustedProviderIds: ["worker-a", "backup", "claude-leader"],
       earliestResetAt,
+      refused: true,
     });
     notifier.notePoolExhausted({
       callerAgentId: "caller-1",
       requestedModel: "claude-sonnet",
       exhaustedProviderIds: ["worker-a", "backup", "claude-leader"],
       earliestResetAt,
+      refused: true,
     });
     await flush();
 

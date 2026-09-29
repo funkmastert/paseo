@@ -55,6 +55,19 @@ export function modelWindowFor(modelId: string): string | undefined {
 }
 
 /**
+ * Whether `window` is a weekly window scoped to a model other than `modelId`'s, so it bounds
+ * nothing a spawn of `modelId` needs. False when no model is named: then nothing can be ruled out.
+ * The family is read from the window id, so a daemon id like `weekly_model_fable_5` still matches
+ * a Fable model.
+ */
+export function isOtherModelWindow(window: string, modelId: string): boolean {
+  if (!modelId || !window.startsWith("weekly_model_")) {
+    return false;
+  }
+  return detectModelFamily(window.slice("weekly_model_".length)) !== detectModelFamily(modelId);
+}
+
+/**
  * Whether a window id is a weekly one — the general 7-day window or a
  * per-model weekly one. Weekly windows are the reason cap expiry can't be
  * one constant: a 5-hour window is back within the working day, while a

@@ -18,7 +18,7 @@ import { relevantWindows, type HealthTracker } from "./health";
 
 export type AccountSelectHealth = Pick<
   HealthTracker,
-  "isHealthyFor" | "isLastResortEligible" | "isHealthyForAllWindows"
+  "isHealthyFor" | "isLastResortEligible" | "isExhaustedFor" | "isHealthyForAllWindows"
 > &
   HeadroomHealth;
 
@@ -42,10 +42,13 @@ export interface AccountPool {
  * - `no-leader` — no usable worker AND no configured leader. The pool is
  *   unfinished rather than exhausted, so router.ts fails open.
  * - `exhausted` — a leader exists and nothing in the pool can run this.
+ *
+ * `refusing` marks a worker or leader placed although it is capped for this model: every account
+ * is, and nothing but the CLI's per-window refusal text caps this one.
  */
 export type AccountSelection =
-  | { kind: "worker"; providerId: string }
-  | { kind: "leader"; providerId: string }
+  | { kind: "worker"; providerId: string; refusing?: true }
+  | { kind: "leader"; providerId: string; refusing?: true }
   | { kind: "no-leader" }
   | { kind: "exhausted"; providerIds: string[] };
 
@@ -72,7 +75,7 @@ export function isAccountHealthy(health: AccountSelectHealth, providerId: string
 /** The pool entries that could serve this request at all — healthy, or drained but not capped. */
 export function usablePoolMembers(pool: AccountPool, health: AccountSelectHealth, modelId: string): string[] {
   return poolMemberIds(pool).filter(
-    (providerId) => isAccountHealthy(health, providerId, modelId) || health.isLastResortEligible(providerId),
+    (providerId) => isAccountHealthy(health, providerId, modelId) || health.isLastResortEligible(providerId, modelId),
   );
 }
 
@@ -84,7 +87,8 @@ export function usablePoolMembers(pool: AccountPool, health: AccountSelectHealth
  *   1. a worker healthy for the requested model;
  *   2. a worker that is drained but not capped — still isolation;
  *   3. the leader, if it can run anything;
- *   4. nothing.
+ *   4. a worker, then the leader, capped only by the CLI's per-window refusal text;
+ *   5. nothing.
  *
  * 1 is kept above 2 rather than merged into one headroom ranking: a drained
  * worker has less room than a healthy one by definition, and letting a score
@@ -103,7 +107,9 @@ export function selectPoolAccount(
 
   const healthyWorkers = rank(pool.workers.filter((worker) => isHealthy(worker.providerId)));
   const drainedWorkers = rank(
-    pool.workers.filter((worker) => !isHealthy(worker.providerId) && health.isLastResortEligible(worker.providerId)),
+    pool.workers.filter(
+      (worker) => !isHealthy(worker.providerId) && health.isLastResortEligible(worker.providerId, modelId),
+    ),
   );
   const worker = healthyWorkers[0] ?? drainedWorkers[0];
   if (worker) {
@@ -111,12 +117,23 @@ export function selectPoolAccount(
   }
 
   const leaderUsable =
-    pool.leader !== null && (isHealthy(pool.leader.providerId) || health.isLastResortEligible(pool.leader.providerId));
+    pool.leader !== null &&
+    (isHealthy(pool.leader.providerId) || health.isLastResortEligible(pool.leader.providerId, modelId));
   if (pool.leader && leaderUsable) {
     return { kind: "leader", providerId: pool.leader.providerId };
   }
+  // Tier 4 keeps the refusal as wide as it was before the pool read the CLI's per-window messages
+  // (classify.ts's REFUSAL_LIMIT_PATTERN): that text alone ranks an account last, and never
+  // makes the pool exhausted.
+  const refusingWorker = rank(pool.workers.filter((worker) => !health.isExhaustedFor(worker.providerId, modelId)))[0];
+  if (refusingWorker) {
+    return { kind: "worker", providerId: refusingWorker.providerId, refusing: true };
+  }
   if (!pool.leader) {
     return { kind: "no-leader" };
+  }
+  if (!health.isExhaustedFor(pool.leader.providerId, modelId)) {
+    return { kind: "leader", providerId: pool.leader.providerId, refusing: true };
   }
   return { kind: "exhausted", providerIds: poolMemberIds(pool) };
 }
