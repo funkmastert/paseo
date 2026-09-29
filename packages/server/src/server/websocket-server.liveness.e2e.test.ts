@@ -2,9 +2,13 @@ import { expect, test } from "vitest";
 import { WebSocket, type RawData } from "ws";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/index.js";
 import { WSOutboundMessageSchema, type WSOutboundMessage } from "./messages.js";
+import { MAX_PHYSICAL_SOCKET_BUFFERED_BYTES } from "./websocket/physical-socket.js";
 
 const LARGE_REQUEST_BYTES = 512 * 1024;
-const BURST_MESSAGE_COUNT = 32;
+// Each pong echoes its request id, so the paused socket is owed LARGE_REQUEST_BYTES per ping. The
+// burst must cross the high-water mark plus what the kernel's loopback buffers absorb (8 MB here),
+// so 16 MB of margin; a fixed count went stale when the mark rose from 8 MB to 64 MB (#2488).
+const BURST_MESSAGE_COUNT = MAX_PHYSICAL_SOCKET_BUFFERED_BYTES / LARGE_REQUEST_BYTES + 32;
 const TEST_TIMEOUT_MS = 30_000;
 
 interface SocketClose {
