@@ -1,18 +1,25 @@
+import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { describe, expect, test } from "vitest";
+import { createServer, connect, type Server, type Socket } from "node:net";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   type BuildDaemonReaperConfig,
   type BuildDaemonReaperMemory,
+  createSystemBuildDaemonConnectionChecker,
   createSystemBuildDaemonCwdResolver,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
   markBuildDaemonHandled,
   parseLsofCwdOutput,
+  parseLsofPidOutput,
+  selectBuildDaemonPidsNeedingConnectionCheck,
   selectBuildDaemonPidsNeedingCwd,
 } from "./build-daemon-reaper.js";
 import { parsePsOutput, type ProcessSampleRow } from "./process-sampler.js";
 
 const OWNER_UID = 501;
+/** The home directory every fixture path below lives under. */
+const HOME = "/Users/t";
 /**
  * Appended to a daemon's command line to mark it as attributable to an agent, the same marker
  * `withRuntimePaseoMcpServer` writes into an agent's own launch and process-attribution.ts reads
@@ -28,6 +35,10 @@ const KOTLIN_COMMAND =
   "/usr/bin/java -Xmx2g -cp kotlin-daemon.jar org.jetbrains.kotlin.daemon.KotlinCompileDaemon " +
   "--daemon-runFilesPath=/Users/t/Library/Application Support/kotlin/daemon" +
   AGENT_MARKER_SUFFIX;
+
+/** A Metro an agent started in its worktree; no marker, so cwd is what attributes it. */
+const AGENT_METRO_COMMAND =
+  "/usr/local/bin/node /Users/t/.paseo/worktrees/abc12345/node_modules/.bin/expo start --port 8081";
 
 const CONFIG: BuildDaemonReaperConfig = {
   idleCpuPercent: 2,
@@ -64,10 +75,12 @@ function runSweeps(params: {
   startMs?: number;
   agentOwnedDirs?: readonly string[];
   pidCwd?: ReadonlyMap<number, string>;
+  pidTcpConnected?: ReadonlyMap<number, boolean>;
 }) {
   const config = { ...CONFIG, ...params.config };
   const agentOwnedDirs = params.agentOwnedDirs ?? [];
   const pidCwd = params.pidCwd ?? new Map();
+  const pidTcpConnected = params.pidTcpConnected;
   let memory: BuildDaemonReaperMemory | undefined;
   let nowMs = params.startMs ?? 1_000_000;
   let last = evaluateBuildDaemonReapCandidates({
@@ -79,6 +92,8 @@ function runSweeps(params: {
     nowMs,
     agentOwnedDirs,
     pidCwd,
+    pidTcpConnected,
+    homeDir: HOME,
   });
   for (let index = 0; index < params.sweeps; index += 1) {
     last = evaluateBuildDaemonReapCandidates({
@@ -90,6 +105,8 @@ function runSweeps(params: {
       nowMs,
       agentOwnedDirs,
       pidCwd,
+      pidTcpConnected,
+      homeDir: HOME,
     });
     memory = last.memory;
     nowMs += 60_000;
@@ -268,6 +285,134 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
+  test("an agent whose cwd was $HOME does not make Tyler's own daemons agent-owned", () => {
+    // Nine live agent records have cwd = $HOME. Counting it would make every daemon that runs
+    // anywhere in the home directory, or names a home path in its argv, look like an agent's.
+    const studioGradle = row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND });
+    const checkoutGradle = row({ pid: 28057, command: UNATTRIBUTED_GRADLE_COMMAND });
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [studioGradle, checkoutGradle],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees", HOME, `${HOME}/`],
+      pidCwd: new Map([
+        [28056, "/Users/t/.gradle/daemon/9.7.1"],
+        [28057, "/Users/t/mobile-worktrees/main"],
+      ]),
+      config: { maxPerSweep: 10 },
+    });
+
+    expect(result.candidates).toEqual([]);
+    expect(result.sightings.map((sighting) => sighting.verdict)).toEqual([
+      "not-abandoned",
+      "not-abandoned",
+    ]);
+  });
+
+  test("/ and every ancestor of $HOME are never agent-owned either", () => {
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/", "/Users", "/Users/", "", "relative/dir"],
+      pidCwd: new Map([[28056, "/Users/t/Projects/tylers-own-app"]]),
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("an agent worktree daemon is still reapable with $HOME among the agent cwds", () => {
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees", HOME],
+      pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+    });
+
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+  });
+
+  test("an argv path matches an agent-owned directory only on a path boundary", () => {
+    const withArg = (pid: number, arg: string) =>
+      row({ pid, command: `${UNATTRIBUTED_GRADLE_COMMAND} ${arg}` });
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [
+        withArg(701, "-Dorg.gradle.project.dir=/Users/t/paseo-worktrees/x/app"),
+        withArg(702, "--project-cache-dir /Users/t/paseo-scratch/cache"),
+        withArg(703, "-Dorg.gradle.project.dir=/Users/t/other/Users/t/paseo/app"),
+        withArg(704, "-Dorg.gradle.project.dir=/Users/t/paseo/android"),
+        withArg(705, "-cp /Users/t/paseo:/opt/lib/tools.jar"),
+        withArg(706, "--project-dir /Users/t/paseo"),
+      ],
+      agentOwnedDirs: ["/Users/t/paseo"],
+      config: { maxPerSweep: 10 },
+    });
+
+    expect(result.candidates.map((candidate) => candidate.pid).sort()).toEqual([704, 705, 706]);
+  });
+
+  test("an idle Metro with an established client, such as Tyler's phone, is spared however long", () => {
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+      pidTcpConnected: new Map([[901, true]]),
+    });
+
+    expect(result.candidates).toEqual([]);
+    expect(result.sightings).toEqual([
+      expect.objectContaining({ pid: 901, kind: "metro", verdict: "serving-clients" }),
+    ]);
+  });
+
+  test("a Metro whose connections could not be checked is spared, never assumed idle", () => {
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+      pidTcpConnected: new Map(),
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("a client connecting mid-way restarts a Metro's idle clock", () => {
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+      pidTcpConnected: new Map([[901, false]]),
+    });
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 901, kind: "metro" })]);
+
+    const connected = evaluateBuildDaemonReapCandidates({
+      rows: [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+      attributedPids: new Set(),
+      ownerUid: OWNER_UID,
+      config: CONFIG,
+      previous: result.memory,
+      nowMs: 1_000_000 + 18 * 60_000,
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+      pidTcpConnected: new Map([[901, true]]),
+      homeDir: HOME,
+    });
+    expect(connected.candidates).toEqual([]);
+    expect(connected.memory.get(901)).toMatchObject({ idleSinceMs: undefined, idleSweeps: 0 });
+  });
+
+  test("the connection check only gates dev servers: an idle Gradle daemon needs no answer", () => {
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [row({ pid: 28056 })],
+      pidTcpConnected: new Map(),
+    });
+
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+  });
+
   test("another user's daemon is never signalled", () => {
     const result = runSweeps({
       sweeps: 30,
@@ -329,6 +474,8 @@ describe("evaluateBuildDaemonReapCandidates", () => {
       rowsForSweep: () =>
         kinds.map((kind, index) => row({ pid: 800 + index, command: commands[kind] })),
       config: { maxPerSweep: 10 },
+      // Metro is the one dev server: it is reapable only once lsof says nobody is connected.
+      pidTcpConnected: new Map([[800 + kinds.indexOf("metro"), false]]),
     });
 
     expect(result.candidates.map((candidate) => candidate.kind).sort()).toEqual([...kinds].sort());
@@ -518,6 +665,112 @@ describe("selectBuildDaemonPidsNeedingCwd", () => {
     const rows = [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })];
 
     expect(selectBuildDaemonPidsNeedingCwd(rows, new Set(), undefined, undefined)).toEqual([]);
+  });
+});
+
+describe("selectBuildDaemonPidsNeedingConnectionCheck", () => {
+  test("selects same-uid, ppid-1 Metro daemons only, marker or not, and nothing already handled", () => {
+    const memory: BuildDaemonReaperMemory = new Map();
+    const rows = [
+      row({ pid: 1, command: AGENT_METRO_COMMAND }),
+      row({ pid: 2, command: AGENT_METRO_COMMAND + AGENT_MARKER_SUFFIX }),
+      row({ pid: 3 }), // Gradle: not a dev server
+      row({ pid: 4, command: AGENT_METRO_COMMAND, ppid: 777 }),
+      row({ pid: 5, command: AGENT_METRO_COMMAND, uid: 502 }),
+      row({ pid: 6, command: AGENT_METRO_COMMAND }),
+      row({ pid: 7, command: AGENT_METRO_COMMAND }),
+    ];
+    memory.set(6, {
+      kind: "metro",
+      firstSeenAtMs: 0,
+      idleSinceMs: 0,
+      idleSweeps: 20,
+      handled: "signalled",
+    });
+
+    expect(
+      selectBuildDaemonPidsNeedingConnectionCheck(rows, new Set([7]), OWNER_UID, memory),
+    ).toEqual([1, 2]);
+    expect(selectBuildDaemonPidsNeedingConnectionCheck(rows, new Set(), undefined, memory)).toEqual(
+      [],
+    );
+  });
+});
+
+describe("parseLsofPidOutput", () => {
+  test("collects every p-line and ignores the fd and name lines", () => {
+    expect(parseLsofPidOutput("p901\nf14\nn127.0.0.1:8081->127.0.0.1:50122\np902\nf9\n")).toEqual(
+      new Set([901, 902]),
+    );
+  });
+
+  test("empty output means no pid had a connection", () => {
+    expect(parseLsofPidOutput("")).toEqual(new Set());
+  });
+});
+
+async function listenOnLoopback(): Promise<{ server: Server; port: number }> {
+  const server = createServer((socket) => socket.on("error", () => {}));
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("no port");
+  return { server, port: address.port };
+}
+
+async function connectOnLoopback(port: number): Promise<Socket> {
+  const socket = connect(port, "127.0.0.1");
+  await new Promise<void>((resolve) => socket.once("connect", resolve));
+  return socket;
+}
+
+describe("createSystemBuildDaemonConnectionChecker", () => {
+  let server: Server | undefined;
+  let client: Socket | undefined;
+  let child: ReturnType<typeof spawn> | undefined;
+
+  afterEach(() => {
+    client?.destroy();
+    server?.close();
+    child?.kill("SIGKILL");
+    client = undefined;
+    server = undefined;
+    child = undefined;
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "sees this process's established loopback connection, and none on an idle child",
+    async () => {
+      const listening = await listenOnLoopback();
+      server = listening.server;
+      client = await connectOnLoopback(listening.port);
+      child = spawn("sleep", ["30"], { stdio: "ignore" });
+      const childPid = child.pid;
+      if (childPid === undefined) throw new Error("no child pid");
+
+      const result = await createSystemBuildDaemonConnectionChecker().check([
+        process.pid,
+        childPid,
+      ]);
+
+      expect(result).toEqual(
+        new Map([
+          [process.pid, true],
+          [childPid, false],
+        ]),
+      );
+    },
+  );
+
+  test("an empty pid list never shells out and answers nothing", async () => {
+    expect(await createSystemBuildDaemonConnectionChecker().check([])).toEqual(new Map());
+  });
+
+  test("an lsof that cannot run answers nothing, so every Metro is spared", async () => {
+    const checker = createSystemBuildDaemonConnectionChecker({
+      lsofPath: "/nonexistent/paseo-test-lsof",
+    });
+
+    expect(await checker.check([process.pid])).toEqual(new Map());
   });
 });
 

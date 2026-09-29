@@ -3,7 +3,9 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { stableAuditKey } from "./memory.js";
+import { diffReports } from "../../../token-audit/diff.js";
+import { mergeSameKeyRows, stableAuditKey } from "./memory.js";
+import { row, type TokenAuditReport, type TokenSeverity } from "./types.js";
 
 function git(cwd: string, ...args: string[]): void {
   execFileSync("git", args, { cwd, stdio: "pipe" });
@@ -81,5 +83,70 @@ describe("stableAuditKey", () => {
     const file = path.join(root, "CLAUDE.md");
     writeFileSync(file, "no git here");
     expect(await stableAuditKey(file)).toBe(realpathSync(file));
+  });
+});
+
+describe("mergeSameKeyRows", () => {
+  const KEY = "memory:file:/Users/t/paseo/.git:CLAUDE.md";
+  const BOZEO = "/Users/t/paseo-worktrees/bozeo/CLAUDE.md";
+  const CI_GREEN = "/Users/t/paseo-worktrees/wk-ci-green/CLAUDE.md";
+
+  function fileRow(severity: TokenSeverity, tokens: number) {
+    return row("memory", KEY, severity, "project memory file", `${tokens} tokens`, "cost", {
+      "memory.fileTokens": tokens,
+    });
+  }
+
+  function report(bozeo: TokenSeverity, ciGreen: TokenSeverity): TokenAuditReport {
+    const tokens = (severity: TokenSeverity) => (severity === "RED" ? 9_000 : 1_000);
+    return {
+      version: 1,
+      generatedAt: "2026-09-29T00:00:00.000Z",
+      source: "job",
+      rows: mergeSameKeyRows([
+        { row: fileRow(bozeo, tokens(bozeo)), path: BOZEO },
+        { row: fileRow(ciGreen, tokens(ciGreen)), path: CI_GREEN },
+      ]),
+    };
+  }
+
+  it("folds sibling worktrees' rows into one: worst severity, largest metric, every path", () => {
+    const other = row("memory", "memory:total:/elsewhere", "GREEN", "total", "e", "c");
+    const merged = mergeSameKeyRows([
+      { row: fileRow("GREEN", 1_000), path: BOZEO },
+      { row: other, path: "/elsewhere" },
+      { row: fileRow("RED", 9_000), path: CI_GREEN },
+    ]);
+
+    expect(merged.map((r) => r.key)).toEqual([KEY, "memory:total:/elsewhere"]);
+    expect(merged[0]).toMatchObject({ severity: "RED", metrics: { "memory.fileTokens": 9_000 } });
+    expect(merged[0]?.evidence).toContain(BOZEO);
+    expect(merged[0]?.evidence).toContain(CI_GREEN);
+    expect(merged[1]).toBe(other);
+  });
+
+  it("a measured severity wins over UNKNOWN", () => {
+    const [merged] = mergeSameKeyRows([
+      { row: row("memory", KEY, "UNKNOWN", "f", "e", "c"), path: BOZEO },
+      { row: fileRow("GREEN", 1_000), path: CI_GREEN },
+    ]);
+    expect(merged?.severity).toBe("GREEN");
+  });
+
+  it("an unchanged RED in one sibling worktree does not re-escalate the next week", () => {
+    const diff = diffReports(report("RED", "GREEN"), report("RED", "GREEN"));
+    expect(diff.newRed).toEqual([]);
+    expect(diff.escalate).toBe(false);
+  });
+
+  it("the repo's file going RED in any worktree is a new RED", () => {
+    const diff = diffReports(report("GREEN", "GREEN"), report("RED", "GREEN"));
+    expect(diff.newRed.map((r) => r.key)).toEqual([KEY]);
+    expect(diff.escalate).toBe(true);
+  });
+
+  it("a RED that moves between sibling worktrees is the same repo item, still RED", () => {
+    const diff = diffReports(report("GREEN", "RED"), report("RED", "GREEN"));
+    expect(diff.newRed).toEqual([]);
   });
 });

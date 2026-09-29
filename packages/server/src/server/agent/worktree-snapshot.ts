@@ -294,11 +294,17 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   }
 
   /**
-   * Seeds the temporary index from a copy of the worktree's own, so `add -u` below inherits its
-   * stat cache and only re-hashes a file whose mtime or size actually moved since git last looked
-   * at it, instead of every tracked file in the worktree. Falls back to `read-tree HEAD` — no stat
-   * cache, so `add -u` must hash everything — when the real index can't be found or copied; that
-   * also correctly seeds an unborn branch's empty tree.
+   * Seeds the temporary index with HEAD's tree, carrying the stat cache over from a copy of the
+   * worktree's own index, so `add -u` below only re-hashes a file whose mtime or size actually
+   * moved since git last looked at it, instead of every tracked file in the worktree.
+   *
+   * The copy is reset to HEAD with a one-tree `read-tree -m`, which keeps an entry's stat data only
+   * where it still matches HEAD. Without the reset, a file the agent staged but never committed
+   * would already be in the index, so `ls-files --others` would not list it and it would skip the
+   * untracked-file filter. `read-tree -m` refuses an index with unmerged entries (a worktree
+   * mid-merge); that, and a real index that can't be found or copied, falls back to a plain
+   * `read-tree HEAD` — no stat cache, so `add -u` must hash everything. That plain read also seeds
+   * an unborn branch's empty tree.
    */
   private async seedSnapshotIndex(
     worktreePath: string,
@@ -308,12 +314,21 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     if (head) {
       const realIndexPath = await this.tryGit(worktreePath, ["rev-parse", "--git-path", "index"]);
       const resolved = realIndexPath ? resolveGitRevParsePath(worktreePath, realIndexPath) : null;
+      let copied = false;
       if (resolved && existsSync(resolved)) {
         try {
           copyFileSync(resolved, indexFile);
-          return;
+          copied = true;
         } catch {
           // Fall through to a fresh index seeded from HEAD.
+        }
+      }
+      if (copied) {
+        try {
+          await this.git(worktreePath, ["read-tree", "-m", head], { GIT_INDEX_FILE: indexFile });
+          return;
+        } catch {
+          // Unmerged entries: fall through to a fresh index seeded from HEAD.
         }
       }
     }

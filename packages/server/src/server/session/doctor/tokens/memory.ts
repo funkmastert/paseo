@@ -11,7 +11,13 @@ import {
   type TokenCount,
 } from "./context-report.js";
 import { auditAccounts, auditCwds } from "./settings.js";
-import { row, type TokenAuditCheck, type TokenAuditRow, type TokenSeverity } from "./types.js";
+import {
+  row,
+  severityRank,
+  type TokenAuditCheck,
+  type TokenAuditRow,
+  type TokenSeverity,
+} from "./types.js";
 
 /** Tyler's thresholds: flag any single memory file over 5k tokens and a total over 10k. */
 export const MEMORY_FILE_LIMIT_TOKENS = 5_000;
@@ -52,6 +58,54 @@ export async function stableAuditKey(absolutePath: string): Promise<string> {
   } catch {
     return real;
   }
+}
+
+interface KeyedRow {
+  row: TokenAuditRow;
+  path: string;
+}
+
+/** Measured severities first: a sibling's UNKNOWN must not mask another's GREEN, AMBER or RED. */
+function mergeRank(severity: TokenAuditRow["severity"]): number {
+  return severity === "UNKNOWN" ? Number.POSITIVE_INFINITY : severityRank(severity);
+}
+
+/**
+ * Sibling worktrees of one repo share a `stableAuditKey`, so two audited dirs can yield two rows
+ * with one key, and the diff, which indexes last week's rows by key, would compare every one of
+ * them against whichever came last. One row per key instead, which is what the key promises: the
+ * worst measured severity, the largest of each metric, and every path in the evidence.
+ */
+export function mergeSameKeyRows(entries: readonly KeyedRow[]): TokenAuditRow[] {
+  const groups = new Map<string, [KeyedRow, ...KeyedRow[]]>();
+  for (const entry of entries) {
+    const group = groups.get(entry.row.key);
+    if (group) group.push(entry);
+    else groups.set(entry.row.key, [entry]);
+  }
+  const merged: TokenAuditRow[] = [];
+  for (const group of groups.values()) {
+    merged.push(group.length === 1 ? group[0].row : mergeGroup(group));
+  }
+  return merged;
+}
+
+function mergeGroup(group: readonly [KeyedRow, ...KeyedRow[]]): TokenAuditRow {
+  const worst = group.reduce((a, b) =>
+    mergeRank(b.row.severity) < mergeRank(a.row.severity) ? b : a,
+  );
+  const metrics: Record<string, number> = {};
+  for (const { row: member } of group) {
+    for (const [name, value] of Object.entries(member.metrics ?? {})) {
+      metrics[name] = Math.max(metrics[name] ?? value, value);
+    }
+  }
+  const paths = group.map((entry) => entry.path).join(", ");
+  return {
+    ...worst.row,
+    evidence: `${worst.row.evidence}; worst of ${group.length} worktrees of one repo: ${paths}`,
+    ...(Object.keys(metrics).length > 0 ? { metrics } : {}),
+  };
 }
 
 interface FileEntry {
@@ -256,10 +310,10 @@ function appendRow(
 // ---- the check -------------------------------------------------------------------------------
 
 async function fileRows(runs: ContextRun[]): Promise<TokenAuditRow[]> {
-  return Promise.all(
+  const entries: KeyedRow[] = await Promise.all(
     uniqueFiles(runs).map(async (file) => {
       const key = await stableAuditKey(realpathOrNull(file.path) ?? file.path);
-      return row(
+      const fileRow = row(
         "memory",
         `memory:file:${key}`,
         gradeAgainst(file.tokens, MEMORY_FILE_LIMIT_TOKENS),
@@ -268,8 +322,10 @@ async function fileRows(runs: ContextRun[]): Promise<TokenAuditRow[]> {
         `${file.tokens.value} tokens on the first turn of every agent that loads it, then re-read from cache on every turn`,
         { "memory.fileTokens": file.tokens.value },
       );
+      return { row: fileRow, path: file.path };
     }),
   );
+  return mergeSameKeyRows(entries);
 }
 
 function memoryFilesTokens(run: ContextRun): number {
@@ -286,7 +342,7 @@ async function totalRows(
     const current = byCwd.get(run.cwd);
     if (!current || memoryFilesTokens(run) > memoryFilesTokens(current)) byCwd.set(run.cwd, run);
   }
-  const rows: TokenAuditRow[] = [];
+  const entries: KeyedRow[] = [];
   for (const [cwd, run] of byCwd) {
     const memory = run.report?.categories["Memory files"];
     if (!memory) continue;
@@ -298,8 +354,9 @@ async function totalRows(
       : memory;
     const appendNote = append ? ` + appendSystemPrompt ${append.tokens.value}` : "";
     const key = await stableAuditKey(cwd);
-    rows.push(
-      row(
+    entries.push({
+      path: cwd,
+      row: row(
         "memory",
         `memory:total:${key}`,
         gradeAgainst(total, MEMORY_TOTAL_LIMIT_TOKENS),
@@ -308,9 +365,9 @@ async function totalRows(
         `${total.value} tokens in the prefix of every agent started there, cache-written once then read every turn`,
         { "memory.totalTokens": total.value },
       ),
-    );
+    });
   }
-  return rows;
+  return mergeSameKeyRows(entries);
 }
 
 function failedRunsRow(runs: ContextRun[]): TokenAuditRow[] {

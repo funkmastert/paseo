@@ -15,17 +15,20 @@ import {
   type ResourceMonitorDetectorConfig,
 } from "./agent/resource-monitor-detector.js";
 import {
+  type BuildDaemonConnectionChecker,
   type BuildDaemonCwdResolver,
   type BuildDaemonReapCandidate,
   type BuildDaemonReaperConfig,
   type BuildDaemonReaperMemory,
   type BuildDaemonSighting,
   type BuildDaemonVerdict,
+  createSystemBuildDaemonConnectionChecker,
   createSystemBuildDaemonCwdResolver,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
   markBuildDaemonHandled,
   type ProcessSignaller,
+  selectBuildDaemonPidsNeedingConnectionCheck,
   selectBuildDaemonPidsNeedingCwd,
 } from "./agent/build-daemon-reaper.js";
 import {
@@ -276,6 +279,10 @@ export interface AgentResourceMonitorOptions {
   worktreeRootDirs?: readonly string[];
   /** Injectable so tests never shell out to a real `lsof`. Defaults to a batched system lookup. */
   cwdResolver?: BuildDaemonCwdResolver;
+  /** Which Metro pids have an ESTABLISHED TCP client. Injectable for the same reason. */
+  connectionChecker?: BuildDaemonConnectionChecker;
+  /** Never an agent-owned directory, nor anything above it. Defaults to `os.homedir()`. */
+  homeDir?: string;
   /** The SIGTERM grace wait, injectable so tests don't spend it. */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -484,6 +491,7 @@ const NO_REAPER_PASS: ReaperPass = { attempts: [], spared: undefined, candidateC
 /** The verdicts that mean "left alone", in the order the summary lists them. */
 const SPARED_VERDICTS: readonly BuildDaemonVerdict[] = [
   "busy",
+  "serving-clients",
   "idle-accumulating",
   "first-sighting",
   "not-abandoned",
@@ -582,6 +590,8 @@ export class AgentResourceMonitor {
   private readonly ownerUid: number | undefined;
   private readonly worktreeRootDirs: readonly string[];
   private readonly cwdResolver: BuildDaemonCwdResolver;
+  private readonly connectionChecker: BuildDaemonConnectionChecker;
+  private readonly homeDir: string | undefined;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly reportDeviceSample: AgentResourceMonitorOptions["reportDeviceSample"];
   private readonly sweepTestArtifacts: AgentResourceMonitorOptions["sweepTestArtifacts"];
@@ -633,6 +643,9 @@ export class AgentResourceMonitor {
     this.ownerUid = "ownerUid" in options ? options.ownerUid : process.getuid?.();
     this.worktreeRootDirs = options.worktreeRootDirs ?? [];
     this.cwdResolver = options.cwdResolver ?? createSystemBuildDaemonCwdResolver();
+    this.connectionChecker =
+      options.connectionChecker ?? createSystemBuildDaemonConnectionChecker();
+    this.homeDir = options.homeDir;
     this.sleep = options.sleep ?? defaultSleep;
     this.reportDeviceSample = options.reportDeviceSample;
     this.modeLog = new MonitorModeLog(options.logger);
@@ -1585,8 +1598,15 @@ export class AgentResourceMonitor {
       this.ownerUid,
       this.reapMemory,
     );
-    const [pidCwd, agentRecords] = await Promise.all([
+    const pidsNeedingConnectionCheck = selectBuildDaemonPidsNeedingConnectionCheck(
+      rows,
+      attributedPids,
+      this.ownerUid,
+      this.reapMemory,
+    );
+    const [pidCwd, pidTcpConnected, agentRecords] = await Promise.all([
       this.cwdResolver.resolve(pidsNeedingCwd),
+      this.connectionChecker.check(pidsNeedingConnectionCheck),
       this.agentStorage.list(),
     ]);
     const agentOwnedDirs = [...this.worktreeRootDirs, ...agentRecords.map((record) => record.cwd)];
@@ -1597,6 +1617,8 @@ export class AgentResourceMonitor {
       config: reaper,
       agentOwnedDirs,
       pidCwd,
+      pidTcpConnected,
+      ...(this.homeDir !== undefined ? { homeDir: this.homeDir } : {}),
       previous: this.reapMemory,
       nowMs,
     });

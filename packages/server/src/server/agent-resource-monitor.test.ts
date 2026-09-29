@@ -4,6 +4,7 @@ import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-ma
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentResourceMonitorState } from "./agent/resource-monitor-detector.js";
 import type {
+  BuildDaemonConnectionChecker,
   BuildDaemonCwdResolver,
   ProcessSignalOutcome,
   ProcessSignaller,
@@ -224,6 +225,7 @@ function createMonitor(params: {
   agentCwds?: string[];
   worktreeRootDirs?: readonly string[];
   cwdResolver?: BuildDaemonCwdResolver;
+  connectionChecker?: BuildDaemonConnectionChecker;
 }) {
   const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
   const push = createFakePushSender();
@@ -249,6 +251,11 @@ function createMonitor(params: {
     ...(params.worktreeRootDirs ? { worktreeRootDirs: params.worktreeRootDirs } : {}),
     // Never shells out to a real lsof in a test unless a test explicitly injects one.
     cwdResolver: params.cwdResolver ?? { resolve: async () => new Map() },
+    // No test reaches a real lsof: by default every Metro is checked and has no client.
+    connectionChecker: params.connectionChecker ?? {
+      check: async (pids) => new Map(pids.map((pid) => [pid, false] as const)),
+    },
+    homeDir: "/Users/t",
     serverId: "server-1",
     processSampler: sampler,
     sendSystemMessageToAgent: steer.fn,
@@ -1157,6 +1164,74 @@ describe("AgentResourceMonitor reaper", () => {
 
     expect(sent).toEqual([]);
     expect(reapPushes(push.sent)).toHaveLength(0);
+  });
+
+  test("an agent that ran in $HOME does not make Tyler's own Studio Gradle daemon reapable", async () => {
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    const studioCommand =
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
+      "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
+      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
+    const { monitor, push } = createMonitor({
+      agents: [],
+      processRows: [gradleDaemonRow({ command: studioCommand })],
+      config: REAP_ON,
+      signaller,
+      now: () => clock.ms,
+      agentCwds: ["/Users/t", "/Users/t/.paseo/worktrees/abc12345"],
+      cwdResolver: {
+        resolve: async () => new Map([[28056, "/Users/t/.gradle/daemon/9.7.1"]]),
+      },
+    });
+
+    await sweep(monitor, 60, clock);
+
+    expect(sent).toEqual([]);
+    expect(reapPushes(push.sent)).toHaveLength(0);
+  });
+
+  test("an agent's idle Metro is reaped only while no client is connected to it", async () => {
+    const metroRow = row({
+      pid: 31337,
+      ppid: 1,
+      uid: OWNER_UID,
+      rssKb: 900_000,
+      cpuPercent: 0,
+      command:
+        "/usr/local/bin/node /Users/t/.paseo/worktrees/abc12345/node_modules/.bin/expo start",
+    });
+    const run = async (connected: boolean) => {
+      const clock = { ms: 1_000_000 };
+      const { signaller, sent } = createFakeSignaller();
+      const asked: number[][] = [];
+      const { monitor } = createMonitor({
+        agents: [],
+        processRows: [metroRow],
+        config: REAP_ON,
+        signaller,
+        now: () => clock.ms,
+        agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
+        cwdResolver: {
+          resolve: async () => new Map([[31337, "/Users/t/.paseo/worktrees/abc12345"]]),
+        },
+        connectionChecker: {
+          check: async (pids) => {
+            asked.push([...pids]);
+            return new Map(pids.map((pid) => [pid, connected] as const));
+          },
+        },
+      });
+      await sweep(monitor, 30, clock);
+      return { sent, asked };
+    };
+
+    const phoneConnected = await run(true);
+    expect(phoneConnected.sent).toEqual([]);
+    expect(phoneConnected.asked.every((pids) => pids.length === 1 && pids[0] === 31337)).toBe(true);
+
+    const nobodyConnected = await run(false);
+    expect(nobodyConnected.sent).toEqual([{ pid: 31337, signal: "SIGTERM" }]);
   });
 
   test("a daemon that refuses the signal is warned about once and then left alone", async () => {
