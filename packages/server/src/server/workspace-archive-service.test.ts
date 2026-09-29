@@ -235,10 +235,14 @@ describe("archiveByScope", () => {
       const { tempDir, repoDir } = createGitRepo();
       const paseoHome = path.join(tempDir, ".paseo");
       const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, slug);
+      // The shape the done janitor reclaims: a worktree record flagged Paseo-owned.
       const record: ActiveWorkspaceRef = {
         workspaceId: `ws-${slug}`,
         cwd: worktree.worktreePath,
         kind: "worktree",
+        worktreeRoot: worktree.worktreePath,
+        isPaseoOwnedWorktree: true,
+        mainRepoRoot: repoDir,
       };
       const deps = createArchiveDeps({ paseoHome, activeWorkspaces: [record] });
       return { worktree, record, deps };
