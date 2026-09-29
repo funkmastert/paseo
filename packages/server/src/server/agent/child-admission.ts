@@ -148,7 +148,13 @@ export interface ChildAdmissionControllerOptions {
   queueFilePath?: string;
   now?: () => Date;
   cores?: number;
+  /** Injectable so tests drive the paced drain after a hold without waiting. */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
+
+// The drain after a hold never goes slower than this, whatever bulkResumesPerMinute says.
+const MIN_DRAIN_PER_MINUTE = 0.001;
 
 export class ChildAdmissionController {
   private readonly queue: QueueEntry[] = [];
@@ -166,12 +172,29 @@ export class ChildAdmissionController {
   >();
   private persistTail: Promise<void> = Promise.resolve();
   private persistenceFrozen = false;
+  /**
+   * Set when the last hold ends with children waiting. Until the line is empty it drains one turn
+   * per `bulkResumesPerMinute` interval instead of filling every free slot at once.
+   */
+  private pacedDrain = false;
+  private lastPacedAdmitMs: number | null = null;
+  private drainTimer: unknown = null;
   private readonly logger: Logger;
   private readonly now: () => Date;
+  private readonly setTimer: (fn: () => void, ms: number) => unknown;
+  private readonly clearTimer: (handle: unknown) => void;
 
   constructor(private readonly options: ChildAdmissionControllerOptions) {
     this.logger = options.logger.child({ module: "child-admission" });
     this.now = options.now ?? (() => new Date());
+    this.setTimer =
+      options.setTimer ??
+      ((fn, ms) => {
+        const handle = setTimeout(fn, ms);
+        handle.unref?.();
+        return handle;
+      });
+    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   }
 
   settings(): ChildAdmissionSettings {
@@ -306,8 +329,10 @@ export class ChildAdmissionController {
   }
 
   /**
-   * Holds admission for `source` (the saturation rung, for one). Admission resumes when no source
-   * holds. Queued children stay queued; running turns and roots are never touched.
+   * Holds admission for `source` (the resource monitor's CPU and memory brake, for one). Admission
+   * resumes when no source holds, and then the waiting children drain one at a time: on 09-28 a
+   * release started six turns in one millisecond into 0.2 GB of free memory. Queued children stay
+   * queued; running turns and roots are never touched.
    */
   setHold(source: string, held: boolean, reason?: string): void {
     const wasHeld = this.holds.has(source);
@@ -318,29 +343,80 @@ export class ChildAdmissionController {
       { source, held, reason, holds: [...this.holds.keys()], queueLength: this.queue.length },
       held ? "Child admission held" : "Child admission hold released",
     );
-    if (!held) this.pump();
+    if (held) return;
+    if (this.holds.size === 0 && this.queue.length > 0) this.pacedDrain = true;
+    this.pump();
   }
 
   isHeld(): boolean {
     return this.holds.size > 0;
   }
 
-  /** Admits queued children FIFO while slots are free. Cheap when the queue is empty. */
+  /**
+   * Admits queued children FIFO while slots are free, or one per pacing interval while the line
+   * drains after a hold. Cheap when the queue is empty.
+   */
   pump(): void {
-    if (this.queue.length === 0) return;
+    if (this.queue.length === 0) {
+      this.endPacedDrain();
+      return;
+    }
     const settings = this.settings();
     if (!settings.enabled) {
       for (const entry of this.queue.splice(0)) this.admit(entry, "admission disabled");
+      this.endPacedDrain();
       this.persist();
       return;
     }
     if (this.holds.size > 0) return;
+    if (this.pacedDrain) {
+      this.pumpPaced(settings);
+      return;
+    }
     let admitted = false;
     while (this.queue.length > 0 && this.occupiedSlots() < settings.maxConcurrentChildTurns) {
       this.admit(this.queue.shift()!, "slot free");
       admitted = true;
     }
     if (admitted) this.persist();
+  }
+
+  /**
+   * The first turn goes at once, then one per interval, and never past the cap: a turn ending
+   * pumps again. A hold set in between stops the drain where it is (`pump` returns early).
+   */
+  private pumpPaced(settings: ChildAdmissionSettings): void {
+    const intervalMs = 60_000 / Math.max(settings.bulkResumesPerMinute, MIN_DRAIN_PER_MINUTE);
+    const nowMs = this.now().getTime();
+    const dueAtMs = this.lastPacedAdmitMs === null ? nowMs : this.lastPacedAdmitMs + intervalMs;
+    if (nowMs < dueAtMs) {
+      this.scheduleDrain(dueAtMs - nowMs);
+      return;
+    }
+    if (this.occupiedSlots() >= settings.maxConcurrentChildTurns) return;
+    this.admit(this.queue.shift()!, "paced after a hold");
+    this.lastPacedAdmitMs = nowMs;
+    this.persist();
+    if (this.queue.length === 0) this.endPacedDrain();
+    else this.scheduleDrain(intervalMs);
+  }
+
+  private scheduleDrain(delayMs: number): void {
+    if (this.drainTimer !== null) return;
+    this.drainTimer = this.setTimer(
+      () => {
+        this.drainTimer = null;
+        this.pump();
+      },
+      Math.max(1, Math.ceil(delayMs)),
+    );
+  }
+
+  private endPacedDrain(): void {
+    this.pacedDrain = false;
+    this.lastPacedAdmitMs = null;
+    if (this.drainTimer !== null) this.clearTimer(this.drainTimer);
+    this.drainTimer = null;
   }
 
   heldTurns(): HeldTurn[] {
@@ -399,6 +475,7 @@ export class ChildAdmissionController {
    * set is captured now: a write still pending would otherwise read the queue after the closes.
    */
   prepareForShutdown(): void {
+    this.endPacedDrain();
     if (this.persistenceFrozen) return;
     const held = this.fileContents();
     this.persist(held);

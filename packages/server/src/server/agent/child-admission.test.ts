@@ -274,6 +274,144 @@ describe("ChildAdmissionController", () => {
   });
 });
 
+/** A controller whose clock and timers the test moves by hand. */
+function pacedHarness(config: ChildAdmissionConfig) {
+  const agents = new Map<string, AdmissionAgentView>();
+  const clock = { ms: Date.parse("2026-09-28T05:23:05.000Z") };
+  const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  let currentConfig = config;
+  const controller = new ChildAdmissionController({
+    readConfig: () => currentConfig,
+    listAgents: () => [...agents.values()],
+    logger: createTestLogger(),
+    now: () => new Date(clock.ms),
+    setTimer: (fn, ms) => {
+      const timer = { fn, ms, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimer: (handle) => {
+      (handle as { cleared: boolean }).cleared = true;
+    },
+  });
+  const admitted: string[] = [];
+  const recordAdmission = async (id: string, result: Promise<AdmissionOutcome>) => {
+    if ((await result).outcome === "admitted") admitted.push(id);
+  };
+  const queue = (id: string) => {
+    const result = controller.request({ agentId: id, parentAgentId: "leader", prompt: id });
+    agents.set(id, { id, parentAgentId: "leader", lifecycle: "running" });
+    if (result.status === "queued") void recordAdmission(id, result.result);
+    else admitted.push(id);
+  };
+  /** Moves the clock and fires every timer that is due, the way the event loop would. */
+  const advance = async (ms: number) => {
+    clock.ms += ms;
+    for (const timer of timers.splice(0)) {
+      if (!timer.cleared) timer.fn();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+  return {
+    controller,
+    agents,
+    queue,
+    admitted,
+    timers,
+    advance,
+    setConfig: (next: ChildAdmissionConfig) => {
+      currentConfig = next;
+      controller.pump();
+    },
+    flush: () => new Promise((resolve) => setTimeout(resolve, 0)),
+  };
+}
+
+describe("draining the line after a hold", () => {
+  test("a release admits one waiting child, then one per pacing interval, never all at once", async () => {
+    // 09-28 05:23:05Z: the CPU hold released with six children waiting and eight free slots,
+    // and all six started in the same millisecond into 0.2 GB of free memory.
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2", "c3", "c4", "c5", "c6"]) h.queue(id);
+    expect(h.controller.queueLength()).toBe(6);
+
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    expect(h.admitted).toEqual(["c1"]);
+    expect(h.timers.at(-1)?.ms).toBe(15_000);
+
+    // Anything that pumps in between (a turn ending, a config change) does not skip the wait.
+    h.controller.pump();
+    h.controller.settleStart("c1");
+    await h.flush();
+    expect(h.admitted).toEqual(["c1"]);
+
+    await h.advance(15_000);
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    for (let index = 0; index < 4; index += 1) await h.advance(15_000);
+    expect(h.admitted).toEqual(["c1", "c2", "c3", "c4", "c5", "c6"]);
+    expect(h.controller.queueLength()).toBe(0);
+  });
+
+  test("once the line is empty a new child is admitted straight away", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    h.queue("c1");
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    h.queue("c2");
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+  });
+
+  test("a hold that comes back mid-drain stops it, and the next release paces again", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("memory-pressure", true);
+    for (const id of ["c1", "c2", "c3"]) h.queue(id);
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    h.controller.setHold("memory-pressure", true);
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1"]);
+
+    h.controller.setHold("memory-pressure", false);
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    await h.advance(1_000);
+    expect(h.admitted).toEqual(["c1", "c2"]);
+    await h.advance(14_000);
+    expect(h.admitted).toEqual(["c1", "c2", "c3"]);
+  });
+
+  test("the drain still respects the cap", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 1, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2"]) h.queue(id);
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    h.controller.settleStart("c1");
+    await h.advance(60_000);
+    expect(h.admitted).toEqual(["c1"]);
+
+    h.agents.set("c1", { id: "c1", parentAgentId: "leader", lifecycle: "idle" });
+    h.controller.pump();
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2"]);
+  });
+
+  test("turning admission off mid-drain admits everything left", async () => {
+    const h = pacedHarness({ maxConcurrentChildTurns: 8, bulkResumesPerMinute: 4 });
+    h.controller.setHold("cpu-saturation", true);
+    for (const id of ["c1", "c2", "c3"]) h.queue(id);
+    h.controller.setHold("cpu-saturation", false);
+    await h.flush();
+    h.setConfig({ enabled: false });
+    await h.flush();
+    expect(h.admitted).toEqual(["c1", "c2", "c3"]);
+  });
+});
+
 describe("held-turn persistence", () => {
   let dir: string | null = null;
   afterEach(async () => {

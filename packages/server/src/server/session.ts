@@ -4296,7 +4296,11 @@ export class Session {
       let snapshot: ManagedAgent;
       const existing = this.agentManager.getAgent(agentId);
       if (existing) {
-        await this.interruptAgentIfRunning(agentId);
+        // A queued child has no turn to stop, and interrupting it would drop its held prompt,
+        // messages merged in from other senders included. The reload re-queues it in place.
+        if (!existing.turnQueued) {
+          await this.interruptAgentIfRunning(agentId);
+        }
         snapshot = await this.agentManager.reloadAgentSession(agentId, undefined, {
           rehydrateFromDisk: true,
         });

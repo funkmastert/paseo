@@ -25,6 +25,9 @@ import type { AgentSnapshotPayload, SessionOutboundMessage } from "@getpaseo/pro
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { createTerminalManager } from "../terminal/terminal-manager.js";
 import { AgentManager, type AgentManagerEvent, type ManagedAgent } from "./agent/agent-manager.js";
+import { startAgentRun } from "./agent/agent-prompt.js";
+import { ChildAdmissionController } from "./agent/child-admission.js";
+import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import type { ProviderSubagentDescriptor } from "./agent/provider-subagents/store.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import type {
@@ -9631,4 +9634,73 @@ test("workspace.create.request reports an archived explicit project", async () =
     workspace: null,
     errorCode: "archived_project",
   });
+});
+
+test("refresh_agent_request keeps a queued child's held prompt in line, merged messages included", async () => {
+  const workdir = mkdtempSync(path.join(tmpdir(), "refresh-queued-child-"));
+  const logger = createTestLogger();
+  const manager = new AgentManager({ clients: { codex: new CreateAgentTestClient() }, logger });
+  const admission = new ChildAdmissionController({
+    readConfig: () => ({ maxConcurrentChildTurns: 4 }),
+    listAgents: () => manager.listAgentsForAdmission(),
+    logger,
+  });
+  manager.setChildAdmission(admission);
+  try {
+    const root = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: {},
+    });
+    const child = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { [PARENT_AGENT_ID_LABEL]: root.id },
+    });
+    // Held by the memory brake: the child's turn waits in line, and a second sender joins it.
+    admission.setHold("memory-pressure", true);
+    await startAgentRun(manager, child.id, "the task", logger, { replaceRunning: true });
+    await startAgentRun(manager, child.id, "a message from another agent", logger, {
+      replaceRunning: true,
+    });
+    expect(admission.heldTurns().map((turn) => turn.prompt)).toEqual([
+      "the task\n\na message from another agent",
+    ]);
+
+    const emitted: SessionOutboundMessage[] = [];
+    const session = createSessionForWorkspaceTests({
+      onMessage: (message) => {
+        if (isSessionOutboundMessage(message)) emitted.push(message);
+      },
+    });
+    session.agentStorage.get = async () => null;
+    session.agentManager.getAgent = (id: string) => manager.getAgent(id);
+    session.agentManager.hasInFlightRun = (id: string) => manager.hasInFlightRun(id);
+    session.agentManager.cancelAgentRun = (id: string, reason?: string) =>
+      manager.cancelAgentRun(id, reason as Parameters<AgentManager["cancelAgentRun"]>[1]);
+    session.agentManager.reloadAgentSession = (
+      ...args: Parameters<AgentManager["reloadAgentSession"]>
+    ) => manager.reloadAgentSession(...args);
+    session.agentManager.hydrateTimelineFromProvider = async () => undefined;
+    session.agentManager.getTimeline = (id: string) => manager.getTimeline(id);
+    session.agentUpdates.forwardLiveAgent = async () => undefined;
+
+    await session.handleMessage({
+      type: "refresh_agent_request",
+      agentId: child.id,
+      requestId: "req-refresh-queued",
+    });
+
+    expect(findByType(emitted, "rpc_error")).toBeUndefined();
+    expect(admission.heldTurns()).toEqual([
+      expect.objectContaining({
+        agentId: child.id,
+        prompt: "the task\n\na message from another agent",
+      }),
+    ]);
+    expect(manager.getAgent(child.id)?.turnQueued).toBeDefined();
+  } finally {
+    for (const agent of manager.listAgents()) {
+      await manager.closeAgent(agent.id).catch(() => undefined);
+    }
+    rmSync(workdir, { recursive: true, force: true });
+  }
 });

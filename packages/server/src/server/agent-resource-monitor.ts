@@ -25,6 +25,7 @@ import {
   markBuildDaemonHandled,
   type ProcessSignaller,
 } from "./agent/build-daemon-reaper.js";
+import { evaluateMemoryBrake, type MemoryBrakeState } from "./agent/memory-brake.js";
 import {
   describeProcess,
   formatMemoryConsumers,
@@ -121,6 +122,9 @@ const DEFAULT_SATURATION_ATTRIBUTED_GRACE_MINUTES = 30;
 const DEFAULT_SATURATION_UNATTRIBUTED_GRACE_MINUTES = 5;
 // An episode's list of what was done to it is capped so a daemon-heavy day cannot grow it forever.
 const MAX_EPISODE_ATTEMPTS = 20;
+
+// A critical-pressure push is announced once per spell; the key also rides the policy's cooldown.
+const MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY = "resource-monitor:memory-pressure-critical";
 
 const ORPHAN_DAEMONS_KEY = "orphan-build-daemons";
 const SYSTEM_MEMORY_KEY = "system-memory";
@@ -283,8 +287,9 @@ export interface AgentResourceMonitorOptions {
   }) => Promise<TestArtifactSweepResult>;
   /**
    * Holds (true) or releases (false) the start of new child-agent turns while the machine is
-   * saturated. Called on changes only, and always with false on stop, when the monitor or
-   * saturation is turned off, and when the incident clears. Absent: the rung holds nothing.
+   * saturated or short of memory: one hold for both, released only when neither holds it. Called
+   * on changes only, and always with false on stop and when the monitor is turned off. Absent:
+   * nothing is held.
    */
   holdChildAdmission?: (held: boolean, reason: string) => void;
   /** Injectable so tests never renice a real pid. Defaults to utils/process-priority.ts's. */
@@ -428,6 +433,22 @@ function formatBytes(bytes: number): string {
   return bytes >= GIBIBYTE
     ? `${(bytes / GIBIBYTE).toFixed(1)} GB`
     : `${Math.round(bytes / 1_048_576)} MB`;
+}
+
+/**
+ * Pushed at once when macOS reports critical memory pressure: jetsam is about to start killing,
+ * and the ladder's system-memory grace is ten minutes. `resource_system_memory` is the swap
+ * alarm's reason, so the app opens the server as it does for that one.
+ */
+function buildMemoryPressureCriticalPayload(serverId: string, systemMemory: SystemMemorySample) {
+  return {
+    title: "Memory pressure is critical",
+    body:
+      `macOS reports critical memory pressure (swap ${formatBytes(systemMemory.swapUsedBytes)} ` +
+      `of ${formatBytes(systemMemory.swapTotalBytes)}). New child-agent turns are held; ` +
+      "running turns are untouched.",
+    data: { serverId, reason: "resource_system_memory" as const },
+  };
 }
 
 function computeSwapUsedRatio(systemMemory: SystemMemorySample): number {
@@ -587,8 +608,13 @@ export class AgentResourceMonitor {
   private orphanEpisode: RemedyAttempt[] | null = null;
   private systemMemoryEpisode: RemedyAttempt[] | null = null;
   private saturationEpisode: RemedyAttempt[] | null = null;
-  /** Whether this monitor currently holds child admission (holdChildAdmission). */
-  private admissionHeld = false;
+  /** Which conditions hold child admission now; holdChildAdmission hears their union. */
+  private cpuHoldsAdmission = false;
+  private memoryHoldsAdmission = false;
+  /** The memory brake's state between sweeps (agent/memory-brake.ts). */
+  private memoryBrake: MemoryBrakeState | undefined;
+  /** Whether this critical-pressure spell has been pushed. */
+  private memoryCriticalAlerted = false;
   /** The last process sample that worked. A failed sample reuses it for evidence, never to act. */
   private lastProcessSample: AttributedProcessSample | undefined;
   private saturationState: SaturationState | undefined;
@@ -641,8 +667,11 @@ export class AgentResourceMonitor {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Nothing will be watching the load to release it later.
-    this.setAdmissionHeld(false, "resource monitor stopped");
+    // Nothing will be watching load or memory to release it later. A restart starts the brake
+    // over, so a condition still present holds again on its first sweep.
+    this.releaseAdmission("resource monitor stopped");
+    this.memoryBrake = undefined;
+    this.memoryCriticalAlerted = false;
   }
 
   async tick(): Promise<void> {
@@ -738,6 +767,7 @@ export class AgentResourceMonitor {
       nowMs,
     );
     const janitorAttempts = await this.reclaimTestArtifacts(cpu.rows, nowMs);
+    const brakeAttempts = await this.applyMemoryBrake(systemMemory, nowMs);
 
     // Last, so a reap or a reclaim in this very sweep is in what the ladder is told.
     await this.observeOrphanBuildDaemons({
@@ -752,7 +782,7 @@ export class AgentResourceMonitor {
       sample,
       config,
       reaperPass,
-      janitorAttempts,
+      janitorAttempts: [...janitorAttempts, ...brakeAttempts],
       nowMs,
     });
     await this.observeSaturation({
@@ -790,12 +820,14 @@ export class AgentResourceMonitor {
       config,
     );
     this.breakReaperIdleEvidence();
+    // Memory comes from sysctl, not ps, so the brake runs whatever happened to the process sample.
+    const brakeAttempts = await this.applyMemoryBrake(systemMemory, nowMs);
     await this.observeSystemMemory({
       systemMemory,
       sample,
       config,
       reaperPass: NO_REAPER_PASS,
-      janitorAttempts: [],
+      janitorAttempts: brakeAttempts,
       nowMs,
     });
     await this.observeSaturation({
@@ -840,7 +872,7 @@ export class AgentResourceMonitor {
   }): Promise<void> {
     const { config, nowMs } = input;
     if (!config.saturation.enabled) {
-      this.setAdmissionHeld(false, "saturation monitoring turned off");
+      this.setAdmissionHold("cpu", false, "cpu-saturation: saturation monitoring turned off");
     }
     const saturation: SaturationConfig = config.saturation.enabled
       ? config.saturation
@@ -905,8 +937,10 @@ export class AgentResourceMonitor {
     const load = sweep.systemLoad.load;
     const attempts: RemedyAttempt[] = [];
     const hold = (held: boolean, detail: string): void => {
-      if (this.setAdmissionHeld(held, `cpu-saturation: ${detail}`)) {
-        attempts.push({ remedy: "admission-hold", outcome: "acted", detail, at });
+      const said =
+        !held && this.memoryHoldsAdmission ? `${detail}; memory pressure still holds it` : detail;
+      if (this.setAdmissionHold("cpu", held, `cpu-saturation: ${said}`)) {
+        attempts.push({ remedy: "admission-hold", outcome: "acted", detail: said, at });
       }
     };
 
@@ -978,20 +1012,94 @@ export class AgentResourceMonitor {
     return attempts;
   }
 
-  /** Returns whether the state changed. Only changes reach holdChildAdmission. */
-  private setAdmissionHeld(held: boolean, reason: string): boolean {
-    if (!this.holdChildAdmission || this.admissionHeld === held) return false;
-    this.admissionHeld = held;
+  /**
+   * Sets one condition's hold. Returns whether that condition's hold changed; holdChildAdmission
+   * hears only changes to the union, so a release while the other condition holds releases nothing.
+   */
+  private setAdmissionHold(source: "cpu" | "memory", held: boolean, reason: string): boolean {
+    if (!this.holdChildAdmission) return false;
+    const current = source === "cpu" ? this.cpuHoldsAdmission : this.memoryHoldsAdmission;
+    if (current === held) return false;
+    const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
+    if (source === "cpu") this.cpuHoldsAdmission = held;
+    else this.memoryHoldsAdmission = held;
+    this.applyAdmissionHold(wasHeld, reason, source);
+    return true;
+  }
+
+  private releaseAdmission(reason: string): void {
+    const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
+    this.cpuHoldsAdmission = false;
+    this.memoryHoldsAdmission = false;
+    this.applyAdmissionHold(wasHeld, reason);
+  }
+
+  private applyAdmissionHold(wasHeld: boolean, reason: string, source?: "cpu" | "memory"): void {
+    const held = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
+    if (held === wasHeld) {
+      if (held) {
+        this.logger.info(
+          { source, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
+          "Child admission stays held",
+        );
+      }
+      return;
+    }
     this.logger.info(
-      { held, reason },
+      { held, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
       held ? "Holding child admission" : "Releasing child admission",
     );
     try {
-      this.holdChildAdmission(held, reason);
+      this.holdChildAdmission?.(held, reason);
     } catch (error) {
       this.logger.warn({ err: error, held }, "Failed to change child admission");
     }
-    return true;
+  }
+
+  /**
+   * The memory brake: holds child admission on macOS memory pressure or fast swap growth, and
+   * pushes an alert the moment pressure turns critical. It only ever holds new child turns: no
+   * running process is signalled, stopped or lowered, since a stopped tree frees no memory and a
+   * Bash timeout's SIGTERM waits on it, which can hang the turn. Returns what it did, for the
+   * system-memory episode.
+   */
+  private async applyMemoryBrake(
+    systemMemory: SystemMemorySample | undefined,
+    nowMs: number,
+  ): Promise<RemedyAttempt[]> {
+    const result = evaluateMemoryBrake(systemMemory, this.memoryBrake);
+    this.memoryBrake = result.next;
+    const attempts: RemedyAttempt[] = [];
+    if (result.transition !== "none") {
+      const held = result.transition === "held";
+      const detail = held
+        ? `Held new child-agent turns: ${result.detail}`
+        : `Released child admission: ${result.detail}` +
+          (this.cpuHoldsAdmission ? "; CPU saturation still holds it" : "");
+      if (this.setAdmissionHold("memory", held, `memory-pressure: ${detail}`)) {
+        attempts.push({
+          remedy: "admission-hold",
+          outcome: "acted",
+          detail,
+          at: new Date(nowMs).toISOString(),
+        });
+      }
+    }
+    if (systemMemory?.memoryPressureLevel !== undefined && !result.critical) {
+      this.memoryCriticalAlerted = false;
+    }
+    if (result.critical && systemMemory && !this.memoryCriticalAlerted) {
+      this.memoryCriticalAlerted = true;
+      this.logger.warn(
+        { memoryPressureLevel: systemMemory.memoryPressureLevel },
+        "Memory pressure is critical",
+      );
+      await this.sendPush(buildMemoryPressureCriticalPayload(this.serverId, systemMemory), {
+        level: "alert",
+        dedupeKey: MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY,
+      });
+    }
+    return attempts;
   }
 
   /**
@@ -1510,7 +1618,9 @@ export class AgentResourceMonitor {
 
   /** The monitor was switched off mid-condition: nothing is observing it any more. */
   private async closeMachineEpisodes(): Promise<void> {
-    this.setAdmissionHeld(false, "resource monitor turned off");
+    this.releaseAdmission("resource monitor turned off");
+    this.memoryBrake = undefined;
+    this.memoryCriticalAlerted = false;
     if (this.saturationEpisode) {
       const attempts = this.saturationEpisode;
       this.saturationEpisode = null;
