@@ -1165,6 +1165,7 @@ export const en = {
       sessions: "History",
       search: "Search",
       schedules: "Schedules",
+      askJev: "Ask JEV",
     },
     worktreeSetup: {
       title: "Set up worktree scripts",

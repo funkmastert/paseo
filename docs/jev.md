@@ -48,6 +48,7 @@ Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Ever
 | 9 Compaction timing   | A leader's user messages since its last compaction, clipped; daemon envelopes; the last restore note; its last reply, clipped; the names of tools it used. The cut point also sends up to 60 user turns of 120 characters each inside the question                                    |
 | 10 Stall judgment     | The agent's title; the first 800 characters of its assignment; its last 25 timeline rows, clipped: tool inputs including full Bash command lines, error text, assistant text and reasoning text. The loop watch sends this for running agents that are not stalled, up to 8 per sweep |
 | 11 UI                 | Nothing                                                                                                                                                                                                                                                                               |
+| 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text     |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -122,12 +123,13 @@ The key's variable is `PASEO_JEV_API_KEY`, for both providers (D5). The provider
 
 Features run in two lanes, so agent tools can neither starve nor bankrupt the features that steer the daemon:
 
-| Lane         | Features                                                                                    | Concurrency                                            | Spend cap per day                                                  |
-| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
-| `control`    | `spawnHint`, `remediationTriage`, `notificationTriage`, `compactionTiming`, `stallJudgment` | `maxConcurrent`, default 4                             | `maxUsdPerDay`, default $1.00                                      |
-| `agentTools` | features 4–6                                                                                | `agentTools.maxConcurrent`, default 4; 2 per tool call | `agentTools.maxUsdPerDay`, default $0.50; $0.05 per agent per hour |
+| Lane          | Features                                                                                    | Concurrency                                            | Spend cap per day                                                  |
+| ------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `control`     | `spawnHint`, `remediationTriage`, `notificationTriage`, `compactionTiming`, `stallJudgment` | `maxConcurrent`, default 4                             | `maxUsdPerDay`, default $1.00                                      |
+| `agentTools`  | features 4–6                                                                                | `agentTools.maxConcurrent`, default 4; 2 per tool call | `agentTools.maxUsdPerDay`, default $0.50; $0.05 per agent per hour |
+| `interactive` | 15 `askJev`                                                                                 | `askJev.maxConcurrent`, default 2                      | `askJev.maxUsdPerDay`, default $0.25                               |
 
-The lanes have separate slots; neither can borrow the other's. An `agentTools` call waits for its tool call's group slot (`callGroup` on `JevDecideInput`) before it takes a lane slot, so a call queued on its group's cap never holds lane capacity another agent could use. A daemon-wide rate limiter, one token per attempt, (`maxRequestsPerSecond`, default 10, at most 15; TypeSafe publishes 1,200 per minute) serves `control` first.
+The lanes have separate slots, circuits and caps; none can borrow another's, so a paired phone asking questions cannot spend the budget that steers the daemon. An `agentTools` call waits for its tool call's group slot (`callGroup` on `JevDecideInput`) before it takes a lane slot, so a call queued on its group's cap never holds lane capacity another agent could use. A daemon-wide rate limiter, one token per attempt, (`maxRequestsPerSecond`, default 10, at most 15; TypeSafe publishes 1,200 per minute) serves `control` and `interactive` first: a person waiting does not queue behind agents' tool calls.
 
 Each call site has a deadline that covers the queue, every retry and the response body. Defaults, in `agents.jev.<feature>.timeoutMs`:
 
@@ -139,6 +141,7 @@ Each call site has a deadline that covers the queue, every retry and the respons
 | `agentTools`         | 8,000 ms per JEV call | The agent is waiting on its own tool call                                                       |
 | `compactionTiming`   | 5,000 ms              | Off the agent's path; the monitor sweeps every 60 s                                             |
 | `stallJudgment`      | 5,000 ms              | The sweep is serialized and runs every 5 minutes                                                |
+| `askJev`             | 15,000 ms, at most 30 | A person is waiting and can cancel; a slow call holds one of two `interactive` slots            |
 
 - **The deadline starts before the scope check.** Step 2 runs inside it: each git gets only the time left, no git starts once it is spent, and the service races the check against the deadline and the caller's signal. A spawn hint whose scope check would take 4 seconds answers at 1.5.
 - **Saturated.** A call whose deadline passes during its scope check, or while it waits for a lane slot or a rate token, returns `unavailable: saturated`. Nothing was sent, and it never counts toward a circuit.
@@ -180,7 +183,7 @@ type JevOutcome =
   | { kind: "failed"; callId; reason; meta | null };
 ```
 
-The full types are in `jev/contract.ts`. Only `answered` may change behaviour. Write every call site as `if (outcome.kind !== "answered") return todaysBehaviour();` and shadow mode, failures, outages, exclusions and saturation all take the default branch. In shadow mode (`agents.jev.<feature>.shadow: true`, the default) the call is still made and the call site records what it would have done, through its own pure decision function, without doing it.
+The full types are in `jev/contract.ts`. Only `answered` may change behaviour. Write every call site as `if (outcome.kind !== "answered") return todaysBehaviour();` and shadow mode, failures, outages, exclusions and saturation all take the default branch. `agentTools` and `askJev` have no shadow mode: an agent or a person asked, so they get the answer. For the rest, in shadow mode (`agents.jev.<feature>.shadow: true`, the default) the call is still made and the call site records what it would have done, through its own pure decision function, without doing it.
 
 `isActive(feature)` answers synchronously whether a call could be sent now: key present, switches on, the lane's budget not spent, the lane's circuit closed. `checkScope(scope)` answers whether a subject is excluded. Call sites use both to skip building state — reading files, fetching a timeline tail — when the answer would be `unavailable`. `decide` checks both again and never trusts the call site's earlier check.
 
@@ -220,6 +223,8 @@ The full types are in `jev/contract.ts`. Only `answered` may change behaviour. W
 | `compactionTiming.cutPoint`                           | `true`                    | Ask where the live work starts before `/compact`                              |
 | `stallJudgment.enabled`, `.shadow`, `.timeoutMs`      | `true`, `true`, `5000`    | Feature 10                                                                    |
 | `stallJudgment.loopWatch`                             | `true`                    | Watch running agents for loops                                                |
+| `askJev.enabled`, `.timeoutMs`                        | `true`, `15000`           | Feature 15. `timeoutMs` is clamped to 1,000–30,000                            |
+| `askJev.maxConcurrent`, `.maxUsdPerDay`               | `2`, `0.25`               | `interactive` lane slots and daily cap                                        |
 
 `agents.jev` and `agents.childEnv` need a daemon that has the JEV foundation (its `server_info.features.jev` is set). An older daemon rejects a `config.json` that has either: new connections, config reloads and the next boot all fail. Write them only once the running daemon has the foundation, and delete them before you roll back to `/Applications/Bozeo.prev.app` or any other older build.
 
@@ -268,6 +273,7 @@ An excluded call sends nothing and audits nothing. The ledger records it with th
 | 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                            |
 | 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                      |
 | 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                 |
+| 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                           |
 
 The plugin decides the `paseo.jev-tools` label before the agent exists, so it asks `jev.scope.check` with the new agent's cwd and parent; an excluded agent never gets the tools.
 
@@ -326,6 +332,7 @@ One entry per `decide` call, including `unavailable` ones: `callId`, time, featu
 `$PASEO_HOME/jev/audit.jsonl`, one JSON line per sent call, appended off the request path and rotated to `audit.1.jsonl` at `audit.maxBytes`; lines older than `audit.retainDays` (3) are dropped at startup and on rotation. Appending a line keeps multi-megabyte `JSON.stringify` and rewrite cycles off the daemon's event loop, which the [daemon vitals](daemon-vitals.md) wedge detector watches.
 
 - **What a line holds.** One line per sent call, written after the response so it carries the answers; a crash mid-send loses that line. For the `control` lane: the redacted state (first 16 KB, plus a SHA-256 and the byte length of all of it), the questions, the answers, and the ledger fields. For `agentTools`: paths, the command text, SHA-256 and sizes, never file content, which is on disk and reproducible from the hash. The tools track puts a single file's content in `state.content` and several files' in `state.files` keyed by path (`JEV_AGENT_TOOLS_CONTENT_FIELDS` in `contract.ts`), and the audit hashes exactly those; command output is kept like a `control` state. Unknown response fields are not stored. Excluded, unavailable and redaction-failed calls store nothing.
+- **Who asked.** Every line carries `initiator`: `person` on the `interactive` lane, whose only door is the `jev.ask` RPC, and `daemon` for everything the daemon asked on its own.
 - **Mode.** The file is created 0600 and `jev/` 0700; at startup the daemon narrows either if it is wider. `writeFileAtomic` (`atomic-file.ts`) takes a `mode`, applied to the temp file at creation and again with `chmod` before the rename, and the ledger passes 0600. The live `~/.paseo` is 0700, which protects it today; dev and scratch homes have no such parent. On Windows, POSIX modes do nothing; the ACL inherited from the user profile is the control.
 
 It exists so you can see exactly what left the machine and what came back.
@@ -348,7 +355,7 @@ A scripted `choice` gets a distribution with the named option at `confidence` an
 
 ### RPCs
 
-Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-schemas.ts`). All four are gated on `server_info.features.jev`.
+Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-schemas.ts`). The first four are gated on `server_info.features.jev`; `jev.ask` on `server_info.features.jevAsk`.
 
 | RPC                    | Permission        | Request                                                                                                                                                                                            | Response payload                                                                                                                                            |
 | ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -356,9 +363,10 @@ Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-s
 | `jev.status.*`         | `daemon.read`     | none                                                                                                                                                                                               | `status`: the `JevStatus` shape in `contract.ts`                                                                                                            |
 | `jev.scope.check.*`    | `workspace.read`  | `cwd`, optional `parentAgentId`                                                                                                                                                                    | `scope`: `ok` or `excluded`                                                                                                                                 |
 | `jev.decisions.list.*` | `workspace.read`  | `agentId`                                                                                                                                                                                          | `decisions`: the agent's `JevDecisionRecord`s, newest first                                                                                                 |
+| `jev.ask.*`            | `workspace.write` | `context`, one `question` (any type), optional `agentId`, optional `deadlineMs`                                                                                                                    | `callId`, `outcome`, `reason`, `answer` (or null), `model`, `elapsedMs`, `cost` (`{ usd, source }`, null when nothing was sent), `redactions`               |
 
 - Outcome, reason and feature are plain strings on the wire with the values listed in a comment, so adding one never narrows a schema. The question and answer schemas are `z.discriminatedUnion("type", …)`.
-- `jev.decide` from a client serves feature 2 only; any other `feature` answers `failed: invalid-request` without a call. Every other feature is daemon-internal, so a paired phone cannot spend under `agentTools`' name.
+- `jev.decide` from a client serves feature 2 only; any other `feature` answers `failed: invalid-request` without a call. Every other feature is daemon-internal, so a paired phone cannot spend under `agentTools`' name. A person's own question is `jev.ask`, which always runs as `askJev` on the `interactive` lane.
 - `PaseoApi` gains `jev: { decide, status, checkScope }` (`packages/client/src/index.ts:483-491`); `DaemonClient` gains `jevDecide`, `jevStatus`, `jevScopeCheck` and `listJevDecisions`, each taking a `timeout` option. The session RPC default of 60 seconds is longer than a plugin's 30-second hook budget, so the JEV methods default lower: `jevDecide` to its `deadlineMs` (spawnHint's 1,500 when absent) plus 500 ms, at most 20 seconds; `jevStatus` and `jevScopeCheck` to 10 seconds. A caller that forgets a timeout fails open inside its hook.
 - `PaseoApi` also lands in the public plugin SDK type through `packages/plugin/src/client/contracts.ts:2`: fork-only surface on an upstream type, and a merge-friction note.
 - **A plugin cannot assume `paseo.jev` exists.** The daemon's plugin host builds `context.paseo` (`plugin-process.ts:255-263`), so a plugin reloaded from new source against an older daemon binary has no `paseo.jev`, and a call is a `TypeError` before any RPC. Reloading plugins without a daemon restart is the normal deploy here. Plugin code checks `typeof paseo.jev?.decide === "function"` first, tagged `COMPAT(jevPaseoApi)`.
@@ -1046,6 +1054,38 @@ Decisions stay out of the timeline ([Decision store](#decision-store)), so no ti
 - The app: `account-budget-strip.browser.test.tsx` with a `jev` row in the fixture; a test for the decisions section with a fixture list, an empty list and an old daemon.
 - Verify: `npx vitest run packages/server/src/services/quota-fetcher/providers/jev.test.ts --bail=1`.
 
+## Feature 15: Ask JEV
+
+A screen in the app where a person asks JEV one typed question: paste context, write the question, pick the answer type, read the answer as bars. It is how Tyler tries JEV by hand.
+
+### Where it lives
+
+A builtin sidebar item, **Ask JEV**, opening the app-wide route `/ask-jev` (`packages/app/src/screens/ask-jev-screen.tsx`), plus a command-center action of the same name. A question is about a host, not a workspace, so it sits with History and Schedules rather than in a workspace pane; the sidebar item reaches the desktop sidebar, the web app and the phone's overlay sidebar through one component, and Appearance settings can hide or move it like the other builtins. With more than one host, the form has a host field; it opens on the host of the last active workspace.
+
+### The form
+
+`ask-jev/ask-jev-form-model.ts` follows [the schedule form](forms.md): one model per mount, the host list and the host's availability applied as inputs.
+
+- **Context**: pasted text, 60 KB. **Agent thread**, optional: one of the host's agents. The daemon adds that agent's title and the last 8,000 characters of its curated recent activity (`curateAgentActivity` over the last 40 projected timeline rows) to the state. It reads only an agent already loaded; resuming one would start its provider, so an unloaded agent answers `agent-unavailable`. Attaching a workspace file is deferred; paste its text.
+- **Answer**: Yes / No (`noul`, with optional "Yes means" and "No means" criteria), Pick one (`choice`, 2–20 options, each with an optional description), or Score (`score`, 2–10 levels lowest first, from a Low–High or 1–5 preset or typed).
+- The question is the instructions, sent under the id `answer`. The state is `{ context, agent? }`.
+
+### The answer
+
+`ask-jev/ask-jev-result.ts` maps the response. Yes / No shows the verdict, the probability of yes and two bars; Pick one the chosen option and a bar per option in the order asked; Score the nearest level, the position on the scale and a bar per level. Under each answer: cost (reported, estimated, or "$0 (fake backend)"), latency, model, how many values redaction replaced, and one line saying JEV classifies and never writes text. The bars are the usage bars' `MeterBar` (`provider-usage/window-bar.tsx`).
+
+### States
+
+The screen polls `jev.status` every 15 seconds and shows the host's state before anything is typed: not configured (`PASEO_JEV_API_KEY` in `~/.config/paseo/jev.env`, read within seconds, nothing sent until then), switched off, today's `interactive` budget spent, or an older daemon without `jevAsk`, which reads "Update the host". The Ask button stays off in each. A daemon on `PASEO_JEV_BACKEND=fake` shows a "Fake backend" note. Every refusal and failure reason has its own message, and each says whether anything was sent: the Wonderly exclusion, redaction, size, invalid question, budget, saturation, an open circuit, a rejected key, a timeout, an HTTP or network error, a malformed answer.
+
+The call never blocks the screen. Cancel drops the answer when it arrives; the daemon still finishes a call it has sent, within the deadline, and charges it.
+
+### Tests and verification
+
+- The form model and result mapping: `packages/app/src/ask-jev/*.test.ts`.
+- The RPC through the real service over the fake, including the D7 refusal, no key, the lane's own cap and the audit's `initiator`: `packages/server/src/server/session/jev/jev-session-ask.test.ts`.
+- By hand: a scratch daemon with `PASEO_JEV_BACKEND=fake` answers every question type; one with no key shows the not-configured state.
+
 ## Testing
 
 - Every track tests against the fake. No test makes a live call or reads a real key. A test process with `OPENROUTER_API_KEY` set, as CI's is, still uses the fake: the service reads only `PASEO_JEV_API_KEY`, and refuses a live transport under Vitest.
@@ -1070,6 +1110,7 @@ Each item is out of v1 on purpose, with the reason.
 - **Read deny rules in user-level Claude settings files.** The daemon honours `denyRead` and the deny rules in the agent's stored config; rules only in `~/.claude/settings.json` are not loaded by the daemon.
 - **Routing a loop verdict through the existing nudge.** It would let the loop watch save tokens, and a nudge is D1-compatible, but it acts on running agents on a JEV answer; revisit after the shadow data.
 - **Decisions interleaved in the agent's stream, and kept across restarts.** The popover list serves the need without touching the timeline; the ledger totals and the audit already survive a restart.
+- **Ask JEV attachments beyond an agent's activity.** A workspace file, and a daemon-side cancel for a sent question, wait until the text-only screen shows what Tyler asks.
 - **A per-request zero-retention field on OpenRouter.** Whether one exists is UNKNOWN until a key exists; it is a pre-live check, and the transport sends it if it does.
 
 ## Reference implementation

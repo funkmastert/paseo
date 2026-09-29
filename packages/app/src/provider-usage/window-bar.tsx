@@ -5,8 +5,10 @@ import { clampPct, formatPct, formatResetLabel, resolveUsedPct } from "./format"
 import { deriveTone } from "./tone";
 import type { ProviderUsageTone, ProviderUsageWindow } from "./types";
 
-function fillToneStyle(tone: ProviderUsageTone) {
+function fillToneStyle(tone: ProviderUsageTone | "emphasis") {
   switch (tone) {
+    case "emphasis":
+      return styles.fillEmphasis;
     case "ok":
       return styles.fillOk;
     case "warning":
@@ -18,21 +20,36 @@ function fillToneStyle(tone: ProviderUsageTone) {
   }
 }
 
-/** The track and tone-coloured fill alone, for callers that lay the label out themselves. */
-export function ProviderUsageMeter({ window }: { window: ProviderUsageWindow }) {
-  const usedPct = resolveUsedPct(window);
-  const tone = window.tone ?? deriveTone(usedPct);
-
-  const fillWidth = clampPct(usedPct ?? 0);
+/**
+ * The shared bar: a thin track and a fill to `pct` percent. Usage windows colour the fill by tone;
+ * other rows (JEV's answer distribution) use the default fill and `emphasis` for the one that won.
+ */
+export function MeterBar({
+  pct,
+  tone = "default",
+  testID,
+}: {
+  pct: number;
+  tone?: ProviderUsageTone | "emphasis";
+  testID?: string;
+}) {
+  const fillWidth = clampPct(pct);
   const fillStyle = useMemo<StyleProp<ViewStyle>>(
     () => [styles.fill, fillToneStyle(tone), { width: `${fillWidth}%` }],
     [fillWidth, tone],
   );
   return (
-    <View style={styles.track}>
+    <View style={styles.track} testID={testID}>
       <View style={fillStyle} />
     </View>
   );
+}
+
+/** The track and tone-coloured fill alone, for callers that lay the label out themselves. */
+export function ProviderUsageMeter({ window }: { window: ProviderUsageWindow }) {
+  const usedPct = resolveUsedPct(window);
+  const tone = window.tone ?? deriveTone(usedPct);
+  return <MeterBar pct={usedPct ?? 0} tone={tone} />;
 }
 
 export function ProviderUsageWindowBar({ window }: { window: ProviderUsageWindow }) {
@@ -110,5 +127,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   fillDanger: {
     backgroundColor: theme.colors.statusDanger,
+  },
+  fillEmphasis: {
+    backgroundColor: theme.colors.foreground,
   },
 }));

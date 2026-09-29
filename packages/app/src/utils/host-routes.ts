@@ -428,6 +428,10 @@ export function buildSchedulesRoute() {
   return "/schedules" as const;
 }
 
+export function buildAskJevRoute() {
+  return "/ask-jev" as const;
+}
+
 export function buildPinnedGridRoute() {
   return "/pinned-grid" as const;
 }
