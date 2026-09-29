@@ -167,6 +167,7 @@ import {
   archiveByScope,
   archivePersistedWorkspaceRecord,
   killTerminalsForWorkspace,
+  resolveArchiveDirectory,
   type ActiveWorkspaceRef,
   type ArchiveResult,
 } from "./workspace-archive-service.js";
@@ -977,7 +978,11 @@ function createDoneJanitor(input: {
   scheduleService: Pick<ScheduleService, "list">;
   terminalManager: TerminalManager | null;
   scriptRuntimeStore: Pick<WorkspaceScriptRuntimeStore, "listForWorkspace">;
-  archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
+  archiveWorkspaceById: (
+    workspaceId: string,
+    requestId: string,
+    options?: { keepDirectory?: boolean },
+  ) => Promise<ArchiveResult>;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
     "getProviderUsageService" | "getPushNotificationSender"
@@ -1037,9 +1042,19 @@ function createDoneJanitor(input: {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
         return { removedDirectory: result.removedDirectory };
       },
+      resolveArchiveDirectory: (workspace) =>
+        resolveArchiveDirectory(workspace, {
+          paseoHome: input.config.paseoHome,
+          paseoWorktreesBaseRoot: input.config.worktreesRoot,
+        }),
       archiveWorkspace: async (workspaceId) => {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle");
         return { removedDirectory: result.removedDirectory };
+      },
+      archiveWorkspaceRecord: async (workspaceId) => {
+        await input.archiveWorkspaceById(workspaceId, "done-janitor-idle-record", {
+          keepDirectory: true,
+        });
       },
       countRunningScripts: async (workspaceId) =>
         input.scriptRuntimeStore
@@ -2151,7 +2166,11 @@ export async function createPaseoDaemon(
   };
   const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
     createAgentCommand(createAgentCommandDependencies, input);
-  const archiveWorkspaceByIdExternal = (workspaceId: string, requestId: string) =>
+  const archiveWorkspaceByIdExternal = (
+    workspaceId: string,
+    requestId: string,
+    options: { keepDirectory?: boolean } = {},
+  ) =>
     archiveByScope(
       {
         paseoHome: config.paseoHome,
@@ -2174,7 +2193,11 @@ export async function createPaseoDaemon(
           assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, guardedWorkspaceId),
         sessionLogger: logger,
       },
-      { scope: { kind: "workspace", workspaceId }, requestId },
+      {
+        scope: { kind: "workspace", workspaceId },
+        requestId,
+        keepDirectory: options.keepDirectory,
+      },
     );
   const hubAgentLifecycle = new CreateAgentLifecycleDispatch({
     paseoHome: config.paseoHome,

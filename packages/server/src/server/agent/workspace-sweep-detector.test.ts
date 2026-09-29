@@ -4,10 +4,10 @@ import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-jan
 import type { DoneJanitorAgentView } from "./done-janitor-detector.js";
 import type { WorktreeCoverage } from "../done-janitor-worktree.js";
 import {
-  archiveDeletesDirectory,
   checkDeletionInvariant,
   classifyWorkspace,
   idleProjectVerdict,
+  isBuildManifest,
   isRegenerablePath,
   resolveWorkspaceSweepConfig,
   type WorkspaceActivitySignals,
@@ -438,47 +438,6 @@ describe("classifyWorkspace", () => {
   });
 });
 
-describe("archiveDeletesDirectory", () => {
-  test("a Paseo-owned worktree's directory is deleted by archive", () => {
-    expect(
-      archiveDeletesDirectory({
-        workspace: workspace({ isPaseoOwnedWorktree: true }),
-        pathInsidePaseoWorktrees: true,
-      }),
-    ).toBe(true);
-  });
-
-  test("a worktree record without the owned flag but under the Paseo root is treated as owned", () => {
-    // Archive-by-scope's legacy path discovers ownership from the path and deletes it.
-    expect(
-      archiveDeletesDirectory({ workspace: workspace(), pathInsidePaseoWorktrees: true }),
-    ).toBe(true);
-  });
-
-  test("an external worktree, a local checkout and a directory keep their directory", () => {
-    expect(
-      archiveDeletesDirectory({ workspace: workspace(), pathInsidePaseoWorktrees: false }),
-    ).toBe(false);
-    for (const kind of ["local_checkout", "directory"] as const) {
-      expect(
-        archiveDeletesDirectory({ workspace: workspace({ kind }), pathInsidePaseoWorktrees: true }),
-      ).toBe(false);
-    }
-  });
-
-  test("a record flagged Paseo-owned is treated as owned whatever its kind", () => {
-    // Archive-by-scope reads the flag before the kind, so such a record's directory can go.
-    for (const kind of ["local_checkout", "directory"] as const) {
-      expect(
-        archiveDeletesDirectory({
-          workspace: workspace({ kind, isPaseoOwnedWorktree: true }),
-          pathInsidePaseoWorktrees: false,
-        }),
-      ).toBe(true);
-    }
-  });
-});
-
 describe("checkDeletionInvariant", () => {
   function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
     return {
@@ -488,6 +447,11 @@ describe("checkDeletionInvariant", () => {
       ignored: [],
       gitlinks: [],
       unbackedCommits: 0,
+      hidden: [],
+      lfs: [],
+      unreadable: [],
+      nestedRepositories: [],
+      manifestDirectories: [],
       ...overrides,
     };
   }
@@ -495,7 +459,10 @@ describe("checkDeletionInvariant", () => {
   test("a clean, pushed tree with only regenerable ignored paths holds", () => {
     expect(
       checkDeletionInvariant(
-        coverage({ ignored: ["node_modules/", "packages/app/dist/", ".DS_Store"] }),
+        coverage({
+          ignored: ["node_modules/", "packages/app/dist/", ".DS_Store"],
+          manifestDirectories: ["packages/app"],
+        }),
         "head",
       ),
     ).toEqual({
@@ -566,6 +533,57 @@ describe("checkDeletionInvariant", () => {
     );
   });
 
+  test("a build directory beside source, not beside a manifest, is somebody's files and keeps it", () => {
+    for (const entry of ["src/build/", "src/.cache/"]) {
+      expect(checkDeletionInvariant(coverage({ ignored: [entry] }), "head")).toEqual({
+        holds: false,
+        reason: `1 ignored path(s) that are not regenerable and no backup holds (${entry})`,
+      });
+    }
+  });
+
+  test("a nested repository inside a regenerable directory keeps it: its commits are its own", () => {
+    expect(
+      checkDeletionInvariant(
+        coverage({ ignored: [".cache/"], nestedRepositories: [".cache/tool/"] }),
+        "head",
+      ),
+    ).toEqual({
+      holds: false,
+      reason:
+        "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (.cache/tool/)",
+    });
+  });
+
+  test("a directory the delete cannot read or empty keeps it: the delete would stop part-way", () => {
+    for (const basis of ["plan", "head", "snapshot"] as const) {
+      expect(checkDeletionInvariant(coverage({ unreadable: ["notes/"] }), basis)).toEqual({
+        holds: false,
+        reason: "1 director(ies) it cannot read or empty, so a delete would stop part-way (notes/)",
+      });
+    }
+  });
+
+  test("a change hidden with --assume-unchanged or --skip-worktree keeps it", () => {
+    for (const basis of ["plan", "head", "snapshot"] as const) {
+      expect(checkDeletionInvariant(coverage({ hidden: ["src/a.ts"] }), basis)).toEqual({
+        holds: false,
+        reason:
+          "1 tracked file(s) git is told not to check, with --assume-unchanged or --skip-worktree (src/a.ts)",
+      });
+    }
+  });
+
+  test("a file stored with Git LFS keeps it: nothing proves its contents are off this machine", () => {
+    for (const basis of ["plan", "head", "snapshot"] as const) {
+      expect(checkDeletionInvariant(coverage({ lfs: ["assets/hero.png"] }), basis)).toEqual({
+        holds: false,
+        reason:
+          "1 file(s) stored with Git LFS, whose contents nothing shows are off this machine (assets/hero.png)",
+      });
+    }
+  });
+
   test("with no snapshot, anything that differs from HEAD or is not pushed keeps it", () => {
     expect(checkDeletionInvariant(coverage({ changed: ["README.md"] }), "head").holds).toBe(false);
     expect(checkDeletionInvariant(coverage({ unbackedCommits: 1 }), "head")).toEqual({
@@ -576,6 +594,16 @@ describe("checkDeletionInvariant", () => {
 });
 
 describe("isRegenerablePath", () => {
+  // Directories that hold a build manifest, as readWorktreeCoverage lists them.
+  const MANIFESTS = new Set([
+    "packages/server",
+    "packages/app",
+    "ios",
+    "game",
+    "tools",
+    "ios/Packages",
+  ]);
+
   test.each([
     ["node_modules/", true],
     ["packages/server/dist/", true],
@@ -591,6 +619,7 @@ describe("isRegenerablePath", () => {
     [".swiftpm/", true],
     [".yarn/cache/", true],
     [".yarn/install-state.gz", true],
+    ["node_modules/pkg/build/", true],
     [".yarn/", false],
     [".yarn/releases/yarn.cjs", false],
     [".env", false],
@@ -601,8 +630,37 @@ describe("isRegenerablePath", () => {
     ["src-tauri/binaries/", false],
     ["results/", false],
     ["install-state.gz", false],
+    // A regenerable name away from the root and from any manifest is somebody's directory.
+    ["src/build/", false],
+    ["src/.cache/", false],
+    ["src/build/release-signing.json", false],
+    ["config/build/hand-written.json", false],
+    ["docs/notes/dist/", false],
+    ["docs/.yarn/cache/", false],
   ])("%s → %s", (entry, expected) => {
-    expect(isRegenerablePath(entry)).toBe(expected);
+    expect(isRegenerablePath(entry, MANIFESTS)).toBe(expected);
+  });
+});
+
+describe("isBuildManifest", () => {
+  test.each([
+    ["package.json", true],
+    ["Cargo.toml", true],
+    ["build.gradle", true],
+    ["build.gradle.kts", true],
+    ["settings.gradle", true],
+    ["settings.gradle.kts", true],
+    ["Package.swift", true],
+    ["pyproject.toml", true],
+    ["setup.py", true],
+    ["App.xcodeproj", true],
+    ["go.mod", true],
+    ["pom.xml", true],
+    ["README.md", false],
+    ["package-lock.json", false],
+    ["tsconfig.json", false],
+  ])("%s → %s", (name, expected) => {
+    expect(isBuildManifest(name)).toBe(expected);
   });
 });
 

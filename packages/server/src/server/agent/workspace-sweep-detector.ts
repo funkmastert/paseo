@@ -34,9 +34,10 @@ export const FIXER_SETTLE_MS = 10 * 60_000;
 /**
  * The regenerable allowlist, part (c) of the deletion invariant: directories a build, an install
  * or a test run recreates. An ignored path counts only when a directory on its way is one of
- * these. Anything else ignored — `.env`, `.xcode.env.local`, `google-services.json`, evidence
- * logs, `.data/`, `results/` — may exist nowhere else and keeps the worktree. Keep it short: a
- * name added here is a name whose contents the janitor may delete unread.
+ * these, at the worktree root or beside a build manifest (`isBuildManifest`). Anything else
+ * ignored — `.env`, `.xcode.env.local`, `google-services.json`, evidence logs, `.data/`,
+ * `results/`, a `src/build/` beside source — may exist nowhere else and keeps the worktree. Keep
+ * it short: a name added here is a name whose contents the janitor may delete unread.
  */
 const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
   // JavaScript and TypeScript
@@ -79,6 +80,23 @@ const REGENERABLE_DIRS: ReadonlySet<string> = new Set([
 const REGENERABLE_NESTED_DIRS: ReadonlySet<string> = new Set([".yarn/cache"]);
 const REGENERABLE_FILES: ReadonlySet<string> = new Set([".DS_Store", ".yarn/install-state.gz"]);
 const REGENERABLE_EXTENSIONS = [".pyc", ".pyo", ".tsbuildinfo"] as const;
+/**
+ * Files that make their directory a build's: a tool writes its output beside its manifest. An
+ * Xcode project is a directory, matched by its extension.
+ */
+const BUILD_MANIFESTS: ReadonlySet<string> = new Set([
+  "package.json",
+  "Cargo.toml",
+  "build.gradle",
+  "build.gradle.kts",
+  "settings.gradle",
+  "settings.gradle.kts",
+  "Package.swift",
+  "pyproject.toml",
+  "setup.py",
+  "go.mod",
+  "pom.xml",
+]);
 
 /** `agents.doneJanitor.workspaceSweep`. Every key is optional; the resolver owns the defaults. */
 export interface DoneJanitorWorkspaceSweepConfig {
@@ -325,21 +343,6 @@ function agentWorkingReason(agent: DoneJanitorAgentView): string | null {
   return null;
 }
 
-/**
- * Whether archiving the workspace deletes its directory. Archive-by-scope deletes a worktree it
- * decides is Paseo-owned: by the record's flag, or, for an older record without it, by the path
- * lying under the Paseo worktrees root (workspace-archive-service.ts). Every other workspace
- * keeps its directory; only the record is archived.
- */
-export function archiveDeletesDirectory(input: {
-  workspace: Pick<DoneJanitorWorkspace, "kind" | "isPaseoOwnedWorktree">;
-  pathInsidePaseoWorktrees: boolean;
-}): boolean {
-  // The flag first, whatever the kind: archive-by-scope reads it before the kind.
-  if (input.workspace.isPaseoOwnedWorktree) return true;
-  return input.workspace.kind === "worktree" && input.pathInsidePaseoWorktrees;
-}
-
 /** Which commit the coverage was read against, and so what it must show. */
 export type CoverageBasis =
   /** Before any snapshot, against HEAD: whatever differs is what the snapshot must hold. */
@@ -354,24 +357,27 @@ export type DeletionInvariant = { holds: true; detail: string } | { holds: false
 /**
  * The deletion invariant (docs/done-janitor.md): a worktree's directory goes only when every file
  * in it is (a) tracked and pushed, (b) in a verified backup, or (c) under a regenerable directory.
- * Anything else present keeps it. The caller verifies the backup; this judges the files.
+ * Anything else present keeps it, and so does anything that stops the listing being the whole
+ * truth: a directory the delete could not read or empty, a change git is told not to look for,
+ * a file whose contents Git LFS keeps outside git. The caller verifies the backup; this judges
+ * the files.
  */
 export function checkDeletionInvariant(
   coverage: WorktreeCoverage | null,
   basis: CoverageBasis,
 ): DeletionInvariant {
   if (coverage === null) return { holds: false, reason: "git could not list its files" };
-  const kept = coverage.ignored.filter((entry) => !isRegenerablePath(entry));
+  const unlisted = describeUnlisted(coverage);
+  if (unlisted) return { holds: false, reason: unlisted };
+  const manifestDirectories = new Set(coverage.manifestDirectories);
+  const kept = coverage.ignored.filter((entry) => !isRegenerablePath(entry, manifestDirectories));
   if (kept.length > 0) {
     return {
       holds: false,
       reason: `${kept.length} ignored path(s) that are not regenerable and no backup holds (${listSome(kept)})`,
     };
   }
-  const nested = [
-    ...coverage.gitlinks,
-    ...coverage.untracked.filter((entry) => entry.endsWith("/")),
-  ];
+  const nested = listNestedRepositories(coverage);
   if (nested.length > 0) {
     return {
       holds: false,
@@ -415,18 +421,72 @@ export function checkDeletionInvariant(
   };
 }
 
+/**
+ * Why git's listing of the worktree is not the whole of what a deletion loses; null when it is.
+ * A snapshot cannot help with any of these, so they keep the worktree whatever the basis.
+ */
+function describeUnlisted(coverage: WorktreeCoverage): string | null {
+  if (coverage.unreadable.length > 0) {
+    // Git skips a directory it cannot open, and a delete that meets one stops part-way.
+    return `${coverage.unreadable.length} director(ies) it cannot read or empty, so a delete would stop part-way (${listSome(coverage.unreadable)})`;
+  }
+  if (coverage.hidden.length > 0) {
+    // git status, git diff and the snapshot all read such a file as unchanged.
+    return `${coverage.hidden.length} tracked file(s) git is told not to check, with --assume-unchanged or --skip-worktree (${listSome(coverage.hidden)})`;
+  }
+  if (coverage.lfs.length > 0) {
+    // Git and the backup hold a pointer; the contents are in the LFS store, and nothing the
+    // janitor reads shows the LFS server has them. `git lfs push --dry-run` and `git lfs status`
+    // compare refs, not the server's objects.
+    return `${coverage.lfs.length} file(s) stored with Git LFS, whose contents nothing shows are off this machine (${listSome(coverage.lfs)})`;
+  }
+  return null;
+}
+
+/**
+ * Every repository inside the worktree a backup would hold only as a pointer, if at all: a
+ * submodule or a snapshotted nested repository (a gitlink), an untracked one (git lists it as
+ * `dir/`), and any `.git` the walk found, inside an ignored regenerable directory too. Once each.
+ */
+function listNestedRepositories(coverage: WorktreeCoverage): string[] {
+  const seen = new Set<string>();
+  const nested: string[] = [];
+  for (const entry of [
+    ...coverage.gitlinks,
+    ...coverage.untracked.filter((path) => path.endsWith("/")),
+    ...coverage.nestedRepositories,
+  ]) {
+    const key = entry.replace(/\/$/u, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    nested.push(entry);
+  }
+  return nested;
+}
+
 function describeRegenerable(ignored: readonly string[]): string {
   return ignored.length > 0 ? `; ignored only regenerable (${listSome(ignored)})` : "";
 }
 
-/** Whether an ignored path is on the regenerable allowlist. Directories end with `/`. */
-export function isRegenerablePath(entry: string): boolean {
+/**
+ * Whether an ignored path is on the regenerable allowlist. Directories end with `/`. A listed
+ * directory name counts only at the worktree root or in a directory holding a build manifest
+ * (`manifestDirectories`, relative, as readWorktreeCoverage lists them): a `build/` beside a
+ * `package.json` is that package's output, a `src/build/` beside source is somebody's files.
+ */
+export function isRegenerablePath(
+  entry: string,
+  manifestDirectories: ReadonlySet<string>,
+): boolean {
   const isDirectory = entry.endsWith("/");
   const segments = entry.split("/").filter(Boolean);
   const directories = isDirectory ? segments : segments.slice(0, -1);
-  if (directories.some((segment) => REGENERABLE_DIRS.has(segment))) return true;
-  for (let index = 1; index < directories.length; index += 1) {
-    if (REGENERABLE_NESTED_DIRS.has(`${directories[index - 1]}/${directories[index]}`)) return true;
+  const besideManifest = (index: number): boolean =>
+    index === 0 || manifestDirectories.has(directories.slice(0, index).join("/"));
+  for (const [index, name] of directories.entries()) {
+    if (REGENERABLE_DIRS.has(name) && besideManifest(index)) return true;
+    const nested = index > 0 ? `${directories[index - 1]}/${name}` : null;
+    if (nested && REGENERABLE_NESTED_DIRS.has(nested) && besideManifest(index - 1)) return true;
   }
   if (isDirectory) return false;
   const name = segments[segments.length - 1] ?? "";
@@ -436,6 +496,11 @@ export function isRegenerablePath(entry: string): boolean {
     REGENERABLE_FILES.has(parentAndName) ||
     REGENERABLE_EXTENSIONS.some((extension) => name.endsWith(extension))
   );
+}
+
+/** Whether a file (or an Xcode project directory) is a build manifest; see `BUILD_MANIFESTS`. */
+export function isBuildManifest(name: string): boolean {
+  return BUILD_MANIFESTS.has(name) || name.endsWith(".xcodeproj");
 }
 
 export type IdleProjectVerdict =

@@ -76,6 +76,11 @@ export interface ArchiveResult {
 export interface ArchiveByScopeRequest {
   scope: ArchiveScope;
   requestId: string;
+  /**
+   * Archive the records only: agents, terminals and workspaces go, and no directory is torn down
+   * or deleted, whatever the records say. The done janitor's record-only archive.
+   */
+  keepDirectory?: boolean;
 }
 
 export async function requireActiveWorkspaceForArchive(
@@ -169,7 +174,7 @@ async function archiveByScopeWithPriority(
       }
     }
 
-    if (target.backing !== null) {
+    if (target.backing !== null && !request.keepDirectory) {
       removedDirectory = await maybeRemoveDirectory(
         dependencies,
         request,
@@ -267,6 +272,20 @@ async function stopWorkspaceSetups(
       );
     }
   }
+}
+
+/**
+ * The directory archiving this workspace deletes, resolved the way archive-by-scope resolves it;
+ * null when it deletes none. For an older worktree record without the ownership flag that is the
+ * worktree root above its cwd, whether or not the cwd exists. The done janitor checks this
+ * directory, not the record's own, before it archives.
+ */
+export async function resolveArchiveDirectory(
+  workspace: ActiveWorkspaceRef,
+  dependencies: Pick<ArchiveDependencies, "paseoHome" | "paseoWorktreesBaseRoot">,
+): Promise<string | null> {
+  const backing = await resolveWorkspaceBackingDirectory(workspace, dependencies);
+  return backing.isPaseoOwnedWorktree ? backing.path : null;
 }
 
 async function resolveWorkspaceBackingDirectory(

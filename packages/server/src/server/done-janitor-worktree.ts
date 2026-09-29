@@ -9,11 +9,12 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, realpathSync, rmSync } from "node:fs";
-import { stat } from "node:fs/promises";
+import { copyFileSync, existsSync, realpathSync, rmSync, type Dirent } from "node:fs";
+import { access, constants, lstat, opendir, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
+import { isBuildManifest } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeSnapshotOffsite } from "./remediation/contract.js";
 import { runGitCommand, type RunGitCommand } from "../utils/run-git-command.js";
 
@@ -74,6 +75,8 @@ function realpathOrSelf(path: string): string {
  * - `git status` reports nothing: no staged, unstaged, untracked or submodule change. Ignored
  *   files are not counted — they are build output and dependencies, which is the space being
  *   reclaimed;
+ * - no tracked file is marked `--assume-unchanged` or `--skip-worktree` while on disk: `git status`
+ *   never looks at such a file, so an edit to it would read as clean;
  * - every commit reachable from HEAD is also reachable from a remote-tracking ref or from the
  *   local base branch. Both survive the deletion. A local branch other than the base does not
  *   count: it may be another worktree's branch, and the next sweep may delete that one.
@@ -113,7 +116,8 @@ function createReadOnlyGit(
         timeout: 30_000,
       });
       if (result.truncated) return null;
-      return result.exitCode === 0 || result.exitCode === null ? result.stdout : null;
+      // A null exit code is a signal: the output may be cut short.
+      return result.exitCode === 0 ? result.stdout : null;
     } catch {
       return null;
     }
@@ -164,9 +168,63 @@ async function readTreeProblem(
   ]);
   if (status === null) return { reason: "git status failed" };
   const changed = status.split("\n").filter((line) => line.trim().length > 0).length;
-  return changed > 0
-    ? { reason: `it has ${changed} uncommitted or untracked file(s)`, atRisk: "dirty" }
-    : null;
+  if (changed > 0) {
+    return { reason: `it has ${changed} uncommitted or untracked file(s)`, atRisk: "dirty" };
+  }
+  const hidden = await readHiddenFiles(git, cwd);
+  if (hidden === null) return { reason: "git cannot list its index" };
+  return hidden.length > 0 ? { reason: describeHiddenFiles(hidden) } : null;
+}
+
+/**
+ * Tracked files whose changes git is told not to look for: `--assume-unchanged` (a lowercase tag
+ * in `ls-files -v`), or `--skip-worktree` (`S`) with the file on disk. `git status`, `git diff`
+ * and a snapshot's `add` all read such a file as unchanged, whatever is in it. A skip-worktree
+ * file that is not on disk is a sparse checkout's, with nothing there to lose. Null when git
+ * cannot list the index.
+ */
+async function readHiddenFiles(git: ReadOnlyGit, worktreePath: string): Promise<string[] | null> {
+  const listing = await git(["ls-files", "-v", "-z"]);
+  if (listing === null) return null;
+  const hidden: string[] = [];
+  const presentDirectories = new Map<string, boolean>();
+  for (const entry of splitNul(listing)) {
+    const tag = entry.slice(0, 1);
+    const path = entry.slice(2);
+    if (/^[a-z]$/u.test(tag)) {
+      hidden.push(path);
+    } else if (tag === "S" && (await isOnDisk(worktreePath, path, presentDirectories))) {
+      hidden.push(path);
+    }
+  }
+  return hidden;
+}
+
+/** Whether a path exists, not following a final symlink; a missing directory is read once. */
+async function isOnDisk(
+  root: string,
+  path: string,
+  presentDirectories: Map<string, boolean>,
+): Promise<boolean> {
+  const directory = dirname(path);
+  let present = presentDirectories.get(directory);
+  if (present === undefined) {
+    present = await lstat(join(root, directory)).then(
+      () => true,
+      () => false,
+    );
+    presentDirectories.set(directory, present);
+  }
+  if (!present) return false;
+  return lstat(join(root, path)).then(
+    () => true,
+    () => false,
+  );
+}
+
+function describeHiddenFiles(hidden: readonly string[]): string {
+  const shown = hidden.slice(0, 3).join(", ");
+  return `${hidden.length} tracked file(s) git is told not to check, with --assume-unchanged or --skip-worktree (${hidden.length > 3 ? `${shown}, …` : shown})`;
 }
 
 async function readReachability(
@@ -245,12 +303,25 @@ export interface WorktreeCoverage {
   changed: string[];
   /** Neither ignored nor in `commit`. An untracked nested repository is one `dir/` entry. */
   untracked: string[];
-  /** Ignored paths. A wholly ignored directory is one `dir/` entry; an empty one is none. */
+  /**
+   * Ignored paths. A directory an ignore rule names is one `dir/` entry; every other ignored file
+   * is listed on its own, inside an untracked directory too. An empty directory is none.
+   */
   ignored: string[];
   /** Submodules and nested repositories `commit` holds only as a pointer to a commit. */
   gitlinks: string[];
   /** Commits reachable from HEAD that neither a remote-tracking ref nor `commit` holds. */
   unbackedCommits: number;
+  /** Tracked files git is told not to check for changes: `--assume-unchanged`, or `--skip-worktree` on disk. */
+  hidden: string[];
+  /** Files, tracked or untracked, whose `filter` attribute is `lfs`. */
+  lfs: string[];
+  /** Directories the delete could not read or empty. Each ends with `/`; the root is `./`. */
+  unreadable: string[];
+  /** Directories below the root holding a `.git`, ignored ones included. Each ends with `/`. */
+  nestedRepositories: string[];
+  /** Directories on the way to an ignored path that hold a build manifest, relative, sorted. */
+  manifestDirectories: string[];
 }
 
 /**
@@ -258,8 +329,10 @@ export interface WorktreeCoverage {
  * repository, seeded from the worktree's own index so unchanged files are not re-hashed. The
  * worktree's index, HEAD and refs are never written. It judges nothing a snapshot decided: a file
  * the snapshot left out, for its size or because it looked like a secret, is simply not in
- * `commit`, and reads as untracked here. Null when git cannot read any of it: that is not the
- * same as nothing to lose.
+ * `commit`, and reads as untracked here. Then what git's listing cannot show: the flags that hide
+ * a change, Git LFS, and a walk of the whole tree for directories the delete could not get
+ * through and repositories nested in ignored ones. Null when git cannot read any of it: that is
+ * not the same as nothing to lose.
  */
 export async function readWorktreeCoverage(input: {
   worktreePath: string;
@@ -289,16 +362,29 @@ export async function readWorktreeCoverage(input: {
       "-z",
     ]);
     const untracked = await scratch(["ls-files", "-z", "--others", "--exclude-standard"]);
-    const ignored = await scratch([
+    // Not `ls-files --ignored --directory`: it never looks inside an untracked directory, so a
+    // `.env` beside a new, untracked source file would be in neither list. `matching` shows a
+    // directory an ignore rule names as one entry, and every other ignored file on its own.
+    const status = await scratch([
+      "status",
+      "--porcelain=v1",
+      "-z",
+      "--no-renames",
+      "--ignored=matching",
+      "--untracked-files=all",
+    ]);
+    const ignored = status === null ? null : await listIgnored(worktreePath, status);
+    const staged = await scratch(["ls-files", "-z", "--stage"]);
+    const hidden = await readHiddenFiles(git, worktreePath);
+    const lfs = await git([
       "ls-files",
       "-z",
+      "--cached",
       "--others",
-      "--ignored",
       "--exclude-standard",
-      "--directory",
-      "--no-empty-directory",
+      "--",
+      ":(attr:filter=lfs)",
     ]);
-    const staged = await scratch(["ls-files", "-z", "--stage"]);
     const unbacked = await git([
       "rev-list",
       "--count",
@@ -313,20 +399,28 @@ export async function readWorktreeCoverage(input: {
       untracked === null ||
       ignored === null ||
       staged === null ||
+      hidden === null ||
+      lfs === null ||
       !Number.isFinite(unbackedCommits)
     ) {
       return null;
     }
+    const tree = await walkWorktree(worktreePath);
     return {
       commit,
       changed: splitNul(changed),
       untracked: splitNul(untracked),
-      ignored: splitNul(ignored),
+      ignored,
       gitlinks: splitNul(staged).flatMap((entry) => {
         const [meta = "", path = ""] = entry.split("\t");
         return meta.startsWith(`${GITLINK_MODE} `) ? [path] : [];
       }),
       unbackedCommits,
+      hidden,
+      lfs: [...new Set(splitNul(lfs))].sort(),
+      unreadable: tree.unreadable,
+      nestedRepositories: tree.nestedRepositories,
+      manifestDirectories: await readManifestDirectories(worktreePath, ignored),
     };
   } finally {
     rmSync(indexFile, { force: true });
@@ -362,6 +456,120 @@ async function seedScratchIndex(input: {
 
 function splitNul(output: string): string[] {
   return output.split("\0").filter(Boolean);
+}
+
+/**
+ * The `!!` entries of `git status --porcelain=v1 -z --ignored=matching`, less directories that
+ * hold no file at any depth: an empty ignored directory has nothing to lose.
+ */
+async function listIgnored(worktreePath: string, status: string): Promise<string[]> {
+  const ignored: string[] = [];
+  for (const entry of splitNul(status)) {
+    if (!entry.startsWith("!! ")) continue;
+    const path = entry.slice(3);
+    if (path.endsWith("/") && !(await holdsAnyFile(join(worktreePath, path)))) continue;
+    ignored.push(path);
+  }
+  return ignored;
+}
+
+/** Whether anything but directories is under `directory`; true when it cannot be read. */
+async function holdsAnyFile(directory: string): Promise<boolean> {
+  const pending = [directory];
+  for (let current = pending.pop(); current !== undefined; current = pending.pop()) {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(current, { withFileTypes: true });
+    } catch {
+      return true;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) return true;
+      pending.push(join(current, entry.name));
+    }
+  }
+  return false;
+}
+
+/**
+ * What only the file system can tell about the tree the delete goes through: directories it
+ * could not read or empty, and every `.git` below the root. Git skips a directory it cannot open
+ * without failing and collapses an ignored one to a single entry, so the whole tree is walked,
+ * ignored directories included. Emptying a directory takes read, write and search permission on
+ * it; a file's own permissions do not matter to the delete. Symbolic links are not followed: the
+ * delete does not follow them either.
+ */
+async function walkWorktree(
+  worktreePath: string,
+): Promise<{ unreadable: string[]; nestedRepositories: string[] }> {
+  const unreadable: string[] = [];
+  const nestedRepositories: string[] = [];
+  const pending: string[] = [""];
+  for (let relative = pending.pop(); relative !== undefined; relative = pending.pop()) {
+    const directory = join(worktreePath, relative);
+    const label = relative === "" ? "./" : `${relative}/`;
+    const writable = await access(directory, constants.R_OK | constants.W_OK | constants.X_OK).then(
+      () => true,
+      () => false,
+    );
+    let entries: Awaited<ReturnType<typeof opendir>>;
+    try {
+      entries = await opendir(directory, { bufferSize: 256 });
+    } catch {
+      unreadable.push(label);
+      continue;
+    }
+    if (!writable) unreadable.push(label);
+    try {
+      for await (const entry of entries) {
+        const child = relative === "" ? entry.name : `${relative}/${entry.name}`;
+        // The root's own `.git` is this worktree's; any other is a repository of its own.
+        if (entry.name === ".git" && relative !== "") nestedRepositories.push(label);
+        if (relative === "" && entry.name === ".git") continue;
+        if (await isDirectoryEntry(entry, join(worktreePath, child))) pending.push(child);
+      }
+    } catch {
+      if (!unreadable.includes(label)) unreadable.push(label);
+    }
+  }
+  return { unreadable: unreadable.sort(), nestedRepositories: nestedRepositories.sort() };
+}
+
+async function isDirectoryEntry(
+  entry: { isDirectory(): boolean; isSymbolicLink(): boolean; isFile(): boolean },
+  path: string,
+): Promise<boolean> {
+  if (entry.isDirectory()) return true;
+  if (entry.isSymbolicLink() || entry.isFile()) return false;
+  // Some file systems do not report a type: ask, without following a link.
+  return lstat(path).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
+}
+
+/**
+ * The directories on the way to each ignored path that hold a build manifest (`isBuildManifest`):
+ * the only places besides the root where a regenerable directory counts. A directory that cannot
+ * be listed holds none, so what is under it keeps the worktree.
+ */
+async function readManifestDirectories(
+  worktreePath: string,
+  ignored: readonly string[],
+): Promise<string[]> {
+  const candidates = new Set<string>();
+  for (const entry of ignored) {
+    const segments = entry.split("/").filter(Boolean);
+    for (let length = 1; length < segments.length; length += 1) {
+      candidates.add(segments.slice(0, length).join("/"));
+    }
+  }
+  const found: string[] = [];
+  for (const candidate of candidates) {
+    const names = await readdir(join(worktreePath, candidate)).catch(() => []);
+    if (names.some(isBuildManifest)) found.push(candidate);
+  }
+  return found.sort();
 }
 
 /**

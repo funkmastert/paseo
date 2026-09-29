@@ -27,7 +27,6 @@ import {
   type ProbeOutcome,
 } from "./agent/done-janitor-detector.js";
 import {
-  archiveDeletesDirectory,
   checkDeletionInvariant,
   classifyWorkspace,
   idleProjectVerdict,
@@ -195,10 +194,22 @@ export interface DoneJanitorDependencies {
   /** Archives the workspace record and deletes its worktree: archive-by-scope, the same path a person's archive takes. */
   reclaimWorkspace(workspaceId: string): Promise<{ removedDirectory: boolean }>;
   /**
-   * The idle-workspace sweep's archive: archive-by-scope again, so its agents, terminals and
-   * record go, and its directory too when it is a Paseo-owned worktree. Nothing else is deleted.
+   * The directory archive-by-scope deletes with this workspace, resolved the way it resolves it
+   * (`resolveArchiveDirectory`, workspace-archive-service.ts); null when it deletes none. For an
+   * older record without the ownership flag that is the worktree root above its cwd, so the
+   * idle-workspace sweep checks this directory and never the record's own.
+   */
+  resolveArchiveDirectory(workspace: DoneJanitorWorkspace): Promise<string | null>;
+  /**
+   * The idle-workspace sweep's archive when it deletes a directory: archive-by-scope again, so
+   * its agents, terminals and record go with the directory `resolveArchiveDirectory` names.
    */
   archiveWorkspace(workspaceId: string): Promise<{ removedDirectory: boolean }>;
+  /**
+   * The idle-workspace sweep's record-only archive: archive-by-scope with the directory kept, so
+   * a plan that deletes nothing cannot delete anything, whatever the record resolves to by then.
+   */
+  archiveWorkspaceRecord(workspaceId: string): Promise<void>;
   /** Scripts and services the workspace has running (workspace-script-runtime-store.ts). */
   countRunningScripts(workspaceId: string): Promise<number>;
   /** HEAD's commit time and the directory's own mtime; never the git index. */
@@ -254,10 +265,19 @@ type WorkspacePlan =
     }
   | { kind: "keep"; workspace: DoneJanitorWorkspace | null; reason: string };
 
-/** What the idle-workspace sweep does with one idle workspace. */
+/**
+ * What the idle-workspace sweep does with one idle workspace. `directory` is the one its archive
+ * deletes, when it deletes one; a record-only archive goes through the archive that keeps it.
+ */
 type IdleWorkspacePlan =
   | { kind: "archive"; deletesDirectory: false; detail: string }
-  | { kind: "archive"; deletesDirectory: true; detail: string; invariant: string }
+  | {
+      kind: "archive";
+      deletesDirectory: true;
+      directory: string;
+      detail: string;
+      invariant: string;
+    }
   | { kind: "keep"; reason: string };
 
 /** Whether a worktree's directory may go: the deletion invariant's verdict, or why not. */
@@ -593,6 +613,10 @@ export class AgentDoneJanitor {
    * Archives one idle workspace, or reports why not. True when it spent the sweep's budget: any
    * attempt does, whatever the last checks then decide, so a dry run and a live run take the same
    * candidates and a live run never goes past what the dry run listed.
+   *
+   * Every check reads the directory archive-by-scope would delete (`resolveArchiveDirectory`),
+   * and every line names it. A plan that deletes nothing archives through the archive that keeps
+   * the directory.
    */
   private async archiveIdleWorkspace(
     report: DoneJanitorSweepReport,
@@ -603,18 +627,15 @@ export class AgentDoneJanitor {
     sweep: ResolvedWorkspaceSweepConfig,
   ): Promise<boolean> {
     const { workspace, verdict } = candidate;
-    const path = resolve(workspace.worktreeRoot ?? workspace.cwd);
-    const deletesDirectory = archiveDeletesDirectory({
-      workspace,
-      pathInsidePaseoWorktrees:
-        workspace.kind === "worktree" && (await this.deps.isPaseoOwnedWorktreePath(path)),
-    });
-    const plan: IdleWorkspacePlan = deletesDirectory
-      ? await this.planIdleWorktree({ workspace, path, views, workspaces, config })
+    const directory = await this.deps.resolveArchiveDirectory(workspace);
+    const describe = (action: DoneJanitorReportEntry["action"], reason: string) =>
+      describeIdleWorkspace(workspace, action, reason, directory);
+    const plan: IdleWorkspacePlan = directory
+      ? await this.planIdleWorktree({ workspace, path: directory, views, workspaces, config })
       : { kind: "archive", deletesDirectory: false, detail: "record only, its directory stays" };
     if (plan.kind === "keep") {
       // The reason alone, no idle time: it would change the line, and re-log it, every hour.
-      report.entries.push(describeIdleWorkspace(workspace, "kept-idle-workspace", plan.reason));
+      report.entries.push(describe("kept-idle-workspace", plan.reason));
       return false;
     }
     const reason = `${describeIdleRule(verdict, sweep)}; ${plan.detail}`;
@@ -622,7 +643,7 @@ export class AgentDoneJanitor {
     if (sweep.dryRun) {
       const action = plan.deletesDirectory ? "would-delete" : "would-archive-workspace";
       report.entries.push({
-        ...describeIdleWorkspace(workspace, action, reason),
+        ...describe(action, reason),
         ...facts,
         ...(plan.deletesDirectory ? { invariant: plan.invariant } : {}),
         dryRun: true,
@@ -632,86 +653,118 @@ export class AgentDoneJanitor {
 
     // A person may have opened it, or an agent started in it, since the sweep's read.
     const changed = await this.idleWorkspaceChange(workspace.workspaceId, sweep);
-    if (changed !== null) {
-      if (changed !== "archived") {
+    if (changed.kind !== "idle") {
+      if (changed.kind === "changed") {
         report.entries.push(
-          describeIdleWorkspace(
-            workspace,
-            "kept-idle-workspace",
-            `it was idle, but then ${changed}`,
-          ),
+          describe("kept-idle-workspace", `it was idle, but then ${changed.reason}`),
         );
       }
       return true;
     }
-    let bytes: number | undefined;
-    let invariant: string | undefined;
-    if (plan.deletesDirectory) {
-      // `du` first: the last check has to be the last thing before the archive.
-      bytes = await this.deps.measureBytes(path);
-      const check = await this.confirmDeletion(
-        report,
-        path,
-        `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
+    if (!plan.deletesDirectory) {
+      return this.archiveIdleRecord(report, workspace, describe, { reason, facts });
+    }
+    // The record, read afresh, has to name the directory every check read.
+    const now = await this.deps.resolveArchiveDirectory(changed.workspace);
+    if (now !== plan.directory) {
+      report.entries.push(
+        describe(
+          "kept-idle-workspace",
+          `it was idle, but then the directory its archive deletes changed from ${plan.directory} to ${now ?? "none"}`,
+        ),
       );
-      if (!check.ok) {
-        report.entries.push(describeIdleWorkspace(workspace, "kept-idle-workspace", check.reason));
-        return true;
-      }
-      invariant = check.invariant;
+      return true;
+    }
+    // `du` first: the last check has to be the last thing before the archive.
+    const bytes = await this.deps.measureBytes(plan.directory);
+    const check = await this.confirmDeletion(
+      report,
+      plan.directory,
+      `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
+    );
+    if (!check.ok) {
+      report.entries.push(describe("kept-idle-workspace", check.reason));
+      return true;
     }
     let removedDirectory: boolean;
     try {
       ({ removedDirectory } = await this.deps.archiveWorkspace(workspace.workspaceId));
     } catch (error) {
-      this.options.logger.warn(
-        { err: error, workspaceId: workspace.workspaceId },
-        "Done janitor: archiving an idle workspace failed",
-      );
-      report.entries.push(
-        describeIdleWorkspace(
-          workspace,
-          "kept-idle-workspace",
-          `archive failed: ${error instanceof Error ? error.message : String(error)}`,
-        ),
-      );
+      this.reportIdleArchiveFailure(report, workspace, describe, error);
       return true;
     }
-    const done = { ...facts, ...(invariant ? { invariant } : {}) };
-    if (plan.deletesDirectory && removedDirectory) {
-      report.entries.push({
-        ...describeIdleWorkspace(workspace, "deleted", reason),
-        ...done,
-        bytes,
-      });
-    } else if (plan.deletesDirectory) {
-      report.entries.push({
-        ...describeIdleWorkspace(
-          workspace,
-          "archived-workspace",
-          `${reason}; the record is archived, but the directory was not removed (see daemon log)`,
-        ),
-        ...done,
-      });
-    } else {
-      report.entries.push({
-        ...describeIdleWorkspace(workspace, "archived-workspace", reason),
-        ...done,
-      });
-    }
+    const done = { ...facts, invariant: check.invariant };
+    report.entries.push(
+      removedDirectory
+        ? { ...describe("deleted", reason), ...done, bytes }
+        : {
+            ...describe(
+              "archived-workspace",
+              `${reason}; the record is archived, but the directory was not removed (see daemon log)`,
+            ),
+            ...done,
+          },
+    );
     this.options.logger.info(
       {
         workspaceId: workspace.workspaceId,
-        path,
+        path: plan.directory,
         rule: verdict.rule,
         idleFor: facts.idleFor,
         removedDirectory,
-        invariant,
+        invariant: check.invariant,
         reason,
       },
       "Done janitor: archived an idle workspace",
     );
     return true;
+  }
+
+  /** The record-only archive: through the archive that keeps the directory, so nothing is deleted. */
+  private async archiveIdleRecord(
+    report: DoneJanitorSweepReport,
+    workspace: DoneJanitorWorkspace,
+    describe: (action: DoneJanitorReportEntry["action"], reason: string) => DoneJanitorReportEntry,
+    line: { reason: string; facts: Pick<DoneJanitorReportEntry, "rule" | "idleFor"> },
+  ): Promise<boolean> {
+    try {
+      await this.deps.archiveWorkspaceRecord(workspace.workspaceId);
+    } catch (error) {
+      this.reportIdleArchiveFailure(report, workspace, describe, error);
+      return true;
+    }
+    const entry = describe("archived-workspace", line.reason);
+    report.entries.push({ ...entry, ...line.facts });
+    this.options.logger.info(
+      {
+        workspaceId: workspace.workspaceId,
+        path: entry.path,
+        rule: line.facts.rule,
+        idleFor: line.facts.idleFor,
+        removedDirectory: false,
+        reason: line.reason,
+      },
+      "Done janitor: archived an idle workspace",
+    );
+    return true;
+  }
+
+  private reportIdleArchiveFailure(
+    report: DoneJanitorSweepReport,
+    workspace: DoneJanitorWorkspace,
+    describe: (action: DoneJanitorReportEntry["action"], reason: string) => DoneJanitorReportEntry,
+    error: unknown,
+  ): void {
+    this.options.logger.warn(
+      { err: error, workspaceId: workspace.workspaceId },
+      "Done janitor: archiving an idle workspace failed",
+    );
+    report.entries.push(
+      describe(
+        "kept-idle-workspace",
+        `archive failed: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
   }
 
   /**
@@ -752,6 +805,7 @@ export class AgentDoneJanitor {
     return {
       kind: "archive",
       deletesDirectory: true,
+      directory: path,
       detail: safety.safe ? describeCleanTree(safety.branch) : safety.reason,
       invariant: preview.invariant,
     };
@@ -846,20 +900,26 @@ export class AgentDoneJanitor {
   }
 
   /**
-   * Why a workspace the sweep found idle is no longer, read afresh; `archived` when someone
-   * archived it meanwhile, null when it is still idle.
+   * Whether a workspace the sweep found idle still is, read afresh: `idle` with the fresh record,
+   * `changed` with why not, or `archived` when someone archived it meanwhile.
    */
   private async idleWorkspaceChange(
     workspaceId: string,
     sweep: ResolvedWorkspaceSweepConfig,
-  ): Promise<string | null> {
+  ): Promise<
+    | { kind: "idle"; workspace: DoneJanitorWorkspace }
+    | { kind: "changed"; reason: string }
+    | { kind: "archived" }
+  > {
     const views = await this.loadViews();
     const fresh = (await this.deps.listWorkspaces()).find(
       (workspace) => workspace.workspaceId === workspaceId,
     );
-    if (!fresh || fresh.archivedAt) return "archived";
+    if (!fresh || fresh.archivedAt) return { kind: "archived" };
     const verdict = await this.classifyForSweep(fresh, views, sweep, this.now());
-    return verdict.kind === "active" ? verdict.reason : null;
+    return verdict.kind === "active"
+      ? { kind: "changed", reason: verdict.reason }
+      : { kind: "idle", workspace: fresh };
   }
 
   /**
@@ -1634,16 +1694,18 @@ export class AgentDoneJanitor {
   }
 }
 
+/** One line for an idle workspace; `directory`, when its archive deletes one, is the path. */
 function describeIdleWorkspace(
   workspace: DoneJanitorWorkspace,
   action: DoneJanitorReportEntry["action"],
   reason: string,
+  directory: string | null = null,
 ): DoneJanitorReportEntry {
   return {
     action,
     workspaceId: workspace.workspaceId,
     title: workspace.title ?? workspace.displayName,
-    path: workspace.worktreeRoot ?? workspace.cwd,
+    path: directory ?? workspace.worktreeRoot ?? workspace.cwd,
     reason,
   };
 }
