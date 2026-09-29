@@ -40,7 +40,9 @@ One push per episode, `alert` for `disk-low`/`disk-falling` and `urgent` for `di
 
 ## Growth evidence
 
-`disk-growth-sampler.ts`'s `DiskGrowthSampler` answers "what grew, and by how much": a bounded, deterministic `du` sample of the known growth roots and their immediate children, run sequentially with a per-root timeout, at most once per `sampleIntervalMinutes` while a condition is active, plus an hourly baseline so there is always something recent to compare against even on a quiet machine. It reads and remembers; it never deletes anything.
+`disk-growth-sampler.ts`'s `DiskGrowthSampler` answers "what grew, and by how much": a bounded, deterministic `du` sample of the known growth roots and their immediate children, run sequentially with a per-root timeout at background priority (`utils/spawn.ts`'s `priority: "background"`, the `backgroundNice` policy; by default the same nice agents run at, so a sample yields to your own apps and the daemon but competes with agent work on equal terms), at most once per `sampleIntervalMinutes` while a condition is active, plus an hourly baseline so there is always something recent to compare against even on a quiet machine. It reads and remembers; it never deletes anything.
+
+A root that times out on `TIMEOUT_BACKOFF_THRESHOLD` (2) consecutive real attempts is backed off: the next `TIMEOUT_BACKOFF_SAMPLES` (5) samples skip it outright (recorded `unmeasured` with reason `skipped`, derived from the persisted history rather than separate state) before it is tried again for real. Without this, a root that reliably can't finish inside its timeout — a directory too large to walk in the budget — blocks every single sample on it, forever, for no measurement.
 
 Default roots (skipped if they don't exist):
 

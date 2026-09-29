@@ -833,6 +833,19 @@ export async function getGitCommonDir(cwd: string): Promise<string> {
   return commonDir;
 }
 
+/** The top of the specific worktree containing `cwd` (not the main checkout for a linked one). */
+export async function getGitWorktreeRoot(cwd: string): Promise<string> {
+  const { stdout } = await runGitCommand(["rev-parse", "--show-toplevel"], {
+    cwd,
+    envOverlay: READ_ONLY_GIT_ENV,
+  });
+  const root = resolveGitRevParsePath(cwd, stdout);
+  if (!root) {
+    throw new Error("Not in a git repository");
+  }
+  return root;
+}
+
 const WORKTREE_PROJECT_HASH_LENGTH = 8;
 
 function deriveShortAlphanumericHash(value: string): string {

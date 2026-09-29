@@ -2862,6 +2862,15 @@ export async function createPaseoDaemon(
               remediationSink,
               serverId,
               processSampler,
+              // The reaper's other attribution root, alongside every agent's own recorded cwd
+              // (from agentStorage): a build daemon left running under here was an agent's, even
+              // one whose agent record is long gone.
+              worktreeRootDirs: [
+                resolvePaseoWorktreesBaseRoot({
+                  paseoHome: config.paseoHome,
+                  worktreesRoot: config.worktreesRoot,
+                }),
+              ],
               saturationLedger: createSaturationLedger({ paseoHome: config.paseoHome, logger }),
               // The cap counts devices from this same sweep sample rather than taking its own
               // `ps` — one scan a minute on a machine that is already struggling.

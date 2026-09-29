@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, rmSync, type Stats } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, rmSync, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Logger } from "pino";
@@ -25,6 +25,7 @@ import type {
   WorktreeSnapshotter,
 } from "../remediation/contract.js";
 import type { ResolvedWorkSnapshotsConfig } from "../remediation/config.js";
+import { resolveGitRevParsePath } from "../../utils/git-rev-parse-path.js";
 import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
 import {
   lookupGitHubRepoVisibility,
@@ -337,6 +338,50 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   }
 
   /**
+   * Seeds the temporary index with HEAD's tree, carrying the stat cache over from a copy of the
+   * worktree's own index, so `add -u` below only re-hashes a file whose mtime or size actually
+   * moved since git last looked at it, instead of every tracked file in the worktree.
+   *
+   * The copy is reset to HEAD with a one-tree `read-tree -m`, which keeps an entry's stat data only
+   * where it still matches HEAD. Without the reset, a file the agent staged but never committed
+   * would already be in the index, so `ls-files --others` would not list it and it would skip the
+   * untracked-file filter. `read-tree -m` refuses an index with unmerged entries (a worktree
+   * mid-merge); that, and a real index that can't be found or copied, falls back to a plain
+   * `read-tree HEAD` — no stat cache, so `add -u` must hash everything. That plain read also seeds
+   * an unborn branch's empty tree.
+   */
+  private async seedSnapshotIndex(
+    worktreePath: string,
+    indexFile: string,
+    head: string | null,
+  ): Promise<void> {
+    if (head) {
+      const realIndexPath = await this.tryGit(worktreePath, ["rev-parse", "--git-path", "index"]);
+      const resolved = realIndexPath ? resolveGitRevParsePath(worktreePath, realIndexPath) : null;
+      let copied = false;
+      if (resolved && existsSync(resolved)) {
+        try {
+          copyFileSync(resolved, indexFile);
+          copied = true;
+        } catch {
+          // Fall through to a fresh index seeded from HEAD.
+        }
+      }
+      if (copied) {
+        try {
+          await this.git(worktreePath, ["read-tree", "-m", head], { GIT_INDEX_FILE: indexFile });
+          return;
+        } catch {
+          // Unmerged entries: fall through to a fresh index seeded from HEAD.
+        }
+      }
+    }
+    await this.git(worktreePath, head ? ["read-tree", head] : ["read-tree", "--empty"], {
+      GIT_INDEX_FILE: indexFile,
+    });
+  }
+
+  /**
    * HEAD's tree plus the working tree's changes, written through an index nobody else reads.
    * Untracked files over the size cap or that look like secrets are left out; `add -u` still
    * stages tracked changes as they are.
@@ -349,7 +394,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     const indexFile = join(tmpdir(), `paseo-snapshot-index-${process.pid}-${randomUUID()}`);
     const env = { GIT_INDEX_FILE: indexFile };
     try {
-      await this.git(worktreePath, head ? ["read-tree", head] : ["read-tree", "--empty"], env);
+      await this.seedSnapshotIndex(worktreePath, indexFile, head);
       await this.git(worktreePath, ["add", "-u"], env);
       // Relative to the temporary index, so a file staged in the agent's index but new since HEAD
       // is listed here too.
@@ -638,6 +683,8 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         cwd,
         envOverlay: { ...BASE_ENV, ...env },
         timeout,
+        // A background sweep nobody is waiting on: it yields to the agents and Tyler's own work.
+        priority: "background",
       });
       return result.stdout;
     } catch (error) {

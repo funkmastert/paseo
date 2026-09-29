@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
 import { lookupGitHubRepoVisibility, type RepoVisibility } from "./github-repo-visibility.js";
+import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
 import { GitWorktreeSnapshotter, formatSnapshotDate } from "./worktree-snapshot.js";
 
 // Real repositories under a temp dir. The snapshot's whole promise is that it never writes the
@@ -65,6 +66,7 @@ function snapshotter(
     lookupRepoVisibility?: (owner: string, repo: string) => Promise<RepoVisibility>;
     logger?: Logger;
     pushScanMaxBytes?: number;
+    runGit?: RunGitCommand;
   } = {},
 ): GitWorktreeSnapshotter {
   return new GitWorktreeSnapshotter({
@@ -79,6 +81,7 @@ function snapshotter(
     // Never the network: tests say what GitHub would answer.
     lookupRepoVisibility: overrides.lookupRepoVisibility ?? (async () => "private"),
     pushScanMaxBytes: overrides.pushScanMaxBytes,
+    runGit: overrides.runGit,
   });
 }
 
@@ -253,6 +256,48 @@ describe("GitWorktreeSnapshotter", () => {
     const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
     expect(files).toContain("small.txt");
     expect(files).not.toContain("big.bin");
+  });
+
+  test("a file the agent staged but never committed still goes through the size cap", async () => {
+    writeFileSync(join(repo, "big.bin"), Buffer.alloc(2048));
+    git(repo, "add", "big.bin");
+    const result = expectSnapshotted(
+      await snapshotter({ maxUntrackedFileBytes: 1024 }).snapshot({
+        cwd: repo,
+        reason: "test",
+        offsite: false,
+      }),
+    );
+    expect(result.skippedFiles).toEqual(["big.bin"]);
+    const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
+    expect(files).not.toContain("big.bin");
+  });
+
+  // Whatever the untracked-file filter keeps out (size, owner-only modes, secret names), `git add`
+  // must not smuggle in: a file new since HEAD is judged the same whether the agent staged it or not.
+  test.each([
+    { name: "an owner-only file", untracked: "loose-notes.txt", staged: "staged-notes.txt" },
+    { name: "a .env file", untracked: "a/.env", staged: "b/.env" },
+    { name: "a file over the size cap", untracked: "loose.bin", staged: "staged.bin" },
+  ])("staging $name does not change whether the snapshot takes it", async (item) => {
+    for (const file of [item.untracked, item.staged]) {
+      mkdirSync(join(repo, file, ".."), { recursive: true });
+      writeFileSync(join(repo, file), item.untracked.endsWith(".bin") ? Buffer.alloc(2048) : "x\n");
+      if (item.name === "an owner-only file") chmodSync(join(repo, file), 0o600);
+    }
+    git(repo, "add", item.staged);
+
+    const result = expectSnapshotted(
+      await snapshotter({ maxUntrackedFileBytes: 1024 }).snapshot({
+        cwd: repo,
+        reason: "test",
+        offsite: false,
+      }),
+    );
+
+    const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
+    expect(files.includes(item.staged)).toBe(files.includes(item.untracked));
+    expect(files).not.toContain(item.staged);
   });
 
   test("a clean tree with commits on no remote is at risk", async () => {
@@ -877,5 +922,82 @@ describe("lookupGitHubRepoVisibility", () => {
       lookupGitHubRepoVisibility("o", "r/../../x", { runGh, fetch: notCalled }),
     ).resolves.toBe("unknown");
     expect(runGh).not.toHaveBeenCalled();
+  });
+});
+
+describe("GitWorktreeSnapshotter git process scheduling", () => {
+  function spy(): { runGit: RunGitCommand; commands: string[][] } {
+    const commands: string[][] = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      commands.push(args);
+      return runGitCommand(args, options);
+    };
+    return { runGit, commands };
+  }
+
+  test("every git call it makes runs at background priority", async () => {
+    const priorities: Array<[string, unknown]> = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      priorities.push([args[1] ?? "", options.priority]);
+      return runGitCommand(args, options);
+    };
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(priorities.length).toBeGreaterThan(0);
+    expect(priorities.every(([, priority]) => priority === "background")).toBe(true);
+  });
+
+  test("seeds the temporary index from the worktree's own index, reset to HEAD with read-tree -m", async () => {
+    const { runGit, commands } = spy();
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const head = git(repo, "rev-parse", "HEAD");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "rev-parse", "--git-path", "index"]);
+    // A one-tree `read-tree -m` keeps the copied stat cache for every entry that still matches
+    // HEAD; a plain `read-tree` drops it, and `add -u` would have to hash every tracked file.
+    expect(commands.filter((c) => c[1] === "read-tree")).toEqual([
+      ["--no-optional-locks", "read-tree", "-m", head],
+    ]);
+  });
+
+  test("a worktree mid-merge, with unmerged entries, still snapshots and keeps its own index", async () => {
+    git(repo, "checkout", "-q", "-b", "side");
+    commit(repo, "README.md", "side\n");
+    git(repo, "checkout", "-q", "main");
+    commit(repo, "README.md", "main\n");
+    expect(() => git(repo, "merge", "-q", "side")).toThrow();
+    const unmergedBefore = git(repo, "ls-files", "-u");
+    expect(unmergedBefore.split("\n")).toHaveLength(3);
+    const indexBefore = hash(join(repo, ".git", "index"));
+    const head = git(repo, "rev-parse", "HEAD");
+    const { runGit, commands } = spy();
+
+    const result = expectSnapshotted(
+      await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false }),
+    );
+
+    expect(git(repo, "show", `${result.ref}:README.md`)).toContain("<<<<<<<");
+    expect(hash(join(repo, ".git", "index"))).toBe(indexBefore);
+    expect(git(repo, "ls-files", "-u")).toBe(unmergedBefore);
+    // `read-tree -m` refuses unmerged entries, so the seed falls back to a plain read of HEAD.
+    expect(commands.filter((c) => c[1] === "read-tree")).toEqual([
+      ["--no-optional-locks", "read-tree", "-m", head],
+      ["--no-optional-locks", "read-tree", head],
+    ]);
+  });
+
+  test("an unborn branch, with no index of its own yet, still seeds from read-tree --empty", async () => {
+    const unborn = join(root, "unborn-seed");
+    git(root, "init", "-q", "-b", "main", unborn);
+    writeFileSync(join(unborn, "first.txt"), "first\n");
+    const { runGit, commands } = spy();
+
+    await snapshotter({ runGit }).snapshot({ cwd: unborn, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "read-tree", "--empty"]);
   });
 });
