@@ -483,6 +483,8 @@ interface PushArgs {
   force: boolean;
   deletes: boolean;
   dryRun: boolean;
+  /** `--tags` pushes only `refs/tags/*`, so it never touches the current branch. */
+  tags: boolean;
   /** The repository, then the refspecs. */
   operands: ExpandedWord[];
 }
@@ -501,7 +503,7 @@ function readShortPushFlags(text: string, push: PushArgs): boolean {
 }
 
 function parsePushArgs(args: ExpandedWord[]): PushArgs {
-  const push: PushArgs = { force: false, deletes: false, dryRun: false, operands: [] };
+  const push: PushArgs = { force: false, deletes: false, dryRun: false, tags: false, operands: [] };
   let endOfOptions = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -516,6 +518,8 @@ function parsePushArgs(args: ExpandedWord[]): PushArgs {
       if (PUSH_FORCE_FLAGS.has(name)) push.force = true;
       else if (name === "--delete") push.deletes = true;
       else if (name === "--dry-run") push.dryRun = true;
+      // `--follow-tags` also pushes the current branch, so it is not `--tags`.
+      else if (name === "--tags") push.tags = true;
       else if (PUSH_OPTIONS_WITH_VALUE.has(name) && !text.includes("=")) index++;
     } else if (readShortPushFlags(text, push)) {
       index++;
@@ -554,7 +558,10 @@ function checkGitPush(args: ExpandedWord[], location: GitLocation, state: GateSt
   if (push.dryRun) return;
   const refspecs = push.operands.slice(1);
   if (refspecs.length === 0) {
-    if (push.force && !push.deletes) addBranchCheck(location, "with no refspec", state);
+    // `--tags` appends `refs/tags/*` as its own refspec, so a bare push with no other refspec
+    // pushes tags, not the current branch.
+    if (push.force && !push.deletes && !push.tags)
+      addBranchCheck(location, "with no refspec", state);
     return;
   }
   for (const refspec of refspecs) {

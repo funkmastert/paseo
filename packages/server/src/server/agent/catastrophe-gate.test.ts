@@ -82,6 +82,17 @@ const MUST_BLOCK: BlockCase[] = [
   { command: "git push --force-with-lease origin HEAD", branches: onMain, rule: "force-push-main" },
   { command: "git push origin +HEAD", branches: onMain, rule: "force-push-main" },
   { command: "git push --mirror origin", branches: onMain, rule: "force-push-main" },
+  {
+    command: "git push -f --follow-tags origin main",
+    rule: "force-push-main",
+    note: "--follow-tags still pushes the current branch",
+  },
+  {
+    command: "git push --follow-tags -f",
+    branches: onMain,
+    rule: "force-push-main",
+    note: "--follow-tags with no refspec",
+  },
   // `git -C` and `cd` move the repository the push runs in.
   { command: "git -C ../repo push -f origin main", rule: "force-push-main" },
   {
@@ -238,6 +249,21 @@ const MUST_NEVER_BLOCK: GateCase[] = [
   { command: "git push -f origin $BRANCH", note: "unresolvable refspec" },
   { command: "git -C ../repo push -f origin feature" },
   { command: "git push --mirror backup", note: "mirror from a feature branch" },
+  {
+    command: "git push -f origin --tags",
+    branches: onMain,
+    note: "--tags pushes only refs/tags/*, never the current branch",
+  },
+  {
+    command: "git push --force --tags",
+    branches: onMain,
+    note: "--tags pushes only refs/tags/*, never the current branch",
+  },
+  {
+    command: "git push --tags -f origin",
+    branches: onMain,
+    note: "--tags before the remote",
+  },
   { command: "git fetch -f origin main" },
   { command: "git pull --force origin main" },
   { command: "git reset --hard origin/main" },
