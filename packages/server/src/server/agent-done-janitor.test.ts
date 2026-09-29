@@ -485,6 +485,55 @@ describe("AgentDoneJanitor", () => {
     );
   });
 
+  test("a workspace in a directory above the worktree does not keep it", async () => {
+    // A self-heal fixer runs in the home directory; its workspace once kept every worktree.
+    const h = harness({
+      config: ON,
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-home",
+          kind: "directory",
+          cwd: "/home/t",
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        }),
+      ],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual(["ws-1"]);
+  });
+
+  test("a workspace inside the worktree keeps it", async () => {
+    const h = harness({
+      config: ON,
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-inner",
+          kind: "directory",
+          cwd: "/home/t/.paseo/worktrees/h/feature/packages/app",
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "workspace ws-inner (directory) uses the same directory",
+      }),
+    );
+  });
+
   test("workspace reclamation can be turned off without turning off archiving", async () => {
     const h = harness({ config: { ...ON, reclaimWorkspaces: false } });
 

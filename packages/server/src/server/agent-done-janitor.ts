@@ -1247,8 +1247,10 @@ function workspaceRecordProblem(workspace: DoneJanitorWorkspace | null): string 
 }
 
 /**
- * Anything else living in or around the directory: the primary checkout, another active
- * workspace (a local checkout above all), or an agent not being archived with it.
+ * Anything else living in the directory: the primary checkout, another active workspace at or
+ * inside it (a local checkout above all), or an agent not being archived with it. A workspace in
+ * a directory above it does not count: deleting the worktree leaves that directory as it was, and
+ * a self-heal fixer's workspace in the home directory would otherwise keep every worktree.
  */
 function directoryConflict(
   workspace: DoneJanitorWorkspace,
@@ -1262,7 +1264,7 @@ function directoryConflict(
   }
   for (const other of workspaces) {
     if (other.workspaceId === workspace.workspaceId || other.archivedAt) continue;
-    if (overlaps(path, other.worktreeRoot ?? other.cwd)) {
+    if (isRealpathInsideRoot(path, other.worktreeRoot ?? other.cwd)) {
       return `workspace ${other.workspaceId} (${other.kind}) uses the same directory`;
     }
   }
