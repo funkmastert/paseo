@@ -1538,6 +1538,8 @@ export class AgentDoneJanitor {
     if (conflict) return keep(conflict);
     const terminals = await this.deps.countTerminals(workspaceId);
     if (terminals > 0) return keep(`it has ${terminals} open terminal(s)`);
+    const scripts = await this.deps.countRunningScripts(workspaceId);
+    if (scripts > 0) return keep(`${scripts} script(s) run in it`);
     const safety = await this.deps.checkWorktree({
       worktreePath: path,
       baseBranch: workspace.baseBranch,

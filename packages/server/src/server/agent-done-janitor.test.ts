@@ -1091,6 +1091,18 @@ describe("AgentDoneJanitor dead pass", () => {
     );
   });
 
+  test("a running script keeps the worktree; the agent is still archived", async () => {
+    const h = harness({ config: DEAD_ON, runningScripts: 1 });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-workspace", reason: "1 script(s) run in it" }),
+    );
+  });
+
   test("reclaimWorkspaces off archives the agent and keeps every worktree", async () => {
     const h = harness({ config: { ...DEAD_ON, reclaimWorkspaces: false } });
 
