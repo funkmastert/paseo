@@ -419,6 +419,19 @@ const MutableContextMeterConfigSchema = z
   .passthrough();
 
 const MutableContextMeterPatchSchema = MutableContextMeterConfigSchema;
+// The done janitor's idle-workspace sweep. On whenever the janitor is, unless `enabled` says
+// otherwise. See docs/done-janitor.md, "Idle workspaces".
+const MutableDoneJanitorWorkspaceSweepConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    idleHours: z.number().positive().optional(),
+    emptyIdleHours: z.number().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    projectGraceHours: z.number().positive().optional(),
+    maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+  })
+  .passthrough();
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/done-janitor.md.
 const MutableDoneJanitorConfigSchema = z
@@ -434,6 +447,8 @@ const MutableDoneJanitorConfigSchema = z
     deadQuietHours: z.number().positive().optional(),
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
+    // COMPAT(doneJanitorWorkspaceSweep): additive optional config, nothing to remove.
+    workspaceSweep: MutableDoneJanitorWorkspaceSweepConfigSchema.optional(),
   })
   .passthrough();
 

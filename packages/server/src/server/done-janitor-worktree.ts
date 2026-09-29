@@ -9,6 +9,7 @@
  */
 
 import { existsSync, realpathSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { runGitCommand, type RunGitCommand } from "../utils/run-git-command.js";
@@ -27,7 +28,15 @@ const IN_PROGRESS_MARKERS: ReadonlyArray<readonly [string, string]> = [
 
 export type WorktreeDeletionSafety =
   | { safe: true; branch: string | null; head: string }
-  | { safe: false; reason: string };
+  | {
+      safe: false;
+      reason: string;
+      /**
+       * Set when the only problem is work a snapshot can save: uncommitted or untracked files
+       * (`dirty`), or commits nothing else holds (`unpushed`). Absent for every other refusal.
+       */
+      atRisk?: "dirty" | "unpushed";
+    };
 
 export interface CheckWorktreeDeletionSafetyInput {
   worktreePath: string;
@@ -69,7 +78,7 @@ export async function checkWorktreeDeletionSafety(
   if (!identity.ok) return { safe: false, reason: identity.reason };
 
   const treeProblem = await readTreeProblem(git, cwd, identity.gitDir);
-  if (treeProblem) return { safe: false, reason: treeProblem };
+  if (treeProblem) return { safe: false, ...treeProblem };
 
   return readReachability(git, input.baseBranch);
 }
@@ -115,14 +124,14 @@ async function readTreeProblem(
   git: ReadOnlyGit,
   cwd: string,
   gitDir: string,
-): Promise<string | null> {
+): Promise<{ reason: string; atRisk?: "dirty" } | null> {
   const worktreeList = await git(["worktree", "list", "--porcelain"]);
-  if (worktreeList === null) return "git cannot list its worktrees";
+  if (worktreeList === null) return { reason: "git cannot list its worktrees" };
   if (isLockedWorktree(worktreeList, realpathOrSelf(cwd))) {
-    return "it is locked with git worktree lock";
+    return { reason: "it is locked with git worktree lock" };
   }
   for (const [marker, operation] of IN_PROGRESS_MARKERS) {
-    if (existsSync(join(gitDir, marker))) return `it has ${operation} in progress`;
+    if (existsSync(join(gitDir, marker))) return { reason: `it has ${operation} in progress` };
   }
   const status = await git([
     "status",
@@ -130,9 +139,11 @@ async function readTreeProblem(
     "--untracked-files=all",
     "--ignore-submodules=none",
   ]);
-  if (status === null) return "git status failed";
+  if (status === null) return { reason: "git status failed" };
   const changed = status.split("\n").filter((line) => line.trim().length > 0).length;
-  return changed > 0 ? `it has ${changed} uncommitted or untracked file(s)` : null;
+  return changed > 0
+    ? { reason: `it has ${changed} uncommitted or untracked file(s)`, atRisk: "dirty" }
+    : null;
 }
 
 async function readReachability(
@@ -158,6 +169,7 @@ async function readReachability(
     return {
       safe: false,
       reason: `${branch ?? "HEAD"} has ${count} commit(s) neither ${base} nor pushed to any remote`,
+      atRisk: "unpushed",
     };
   }
   return { safe: true, branch, head };
@@ -171,4 +183,44 @@ function isLockedWorktree(porcelain: string, worktreePath: string): boolean {
     return lines.some((line) => line === "locked" || line.startsWith("locked "));
   }
   return false;
+}
+
+/**
+ * What the directory says about when it was last used: HEAD's committer time and the directory's
+ * own mtime. Never the git index: `git status` rewrites it, so reading it would make every
+ * workspace look used whenever anything looked at it. Null for whatever cannot be read.
+ */
+export async function readWorkspaceActivitySignals(
+  directory: string,
+  runGit: RunGitCommand = runGitCommand,
+): Promise<{ headCommitMs: number | null; directoryMtimeMs: number | null }> {
+  let directoryMtimeMs: number | null = null;
+  try {
+    directoryMtimeMs = (await stat(directory)).mtimeMs;
+  } catch {
+    return { headCommitMs: null, directoryMtimeMs: null };
+  }
+  const git = createReadOnlyGit(directory, runGit);
+  const committed = await git(["log", "-1", "--format=%ct", "HEAD"]);
+  const seconds = committed === null ? Number.NaN : Number.parseInt(committed.trim(), 10);
+  return {
+    headCommitMs: Number.isFinite(seconds) ? seconds * 1000 : null,
+    directoryMtimeMs,
+  };
+}
+
+/**
+ * Every ignored path in the worktree, a wholly ignored directory as one `dir/` entry, so
+ * `node_modules` costs one line. Null when git cannot list them: that is not the same as none.
+ */
+export async function listIgnoredEntries(
+  worktreePath: string,
+  runGit: RunGitCommand = runGitCommand,
+): Promise<string[] | null> {
+  if (!existsSync(worktreePath)) return null;
+  const listing = await createReadOnlyGit(
+    worktreePath,
+    runGit,
+  )(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
+  return listing === null ? null : listing.split("\0").filter(Boolean);
 }

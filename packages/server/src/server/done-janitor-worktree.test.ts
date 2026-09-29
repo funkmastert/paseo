@@ -1,10 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  checkWorktreeDeletionSafety,
+  listIgnoredEntries,
+  readWorkspaceActivitySignals,
+} from "./done-janitor-worktree.js";
 
 // Real repositories under a temp dir: the gate is only as good as its reading of real git
 // output, so nothing here is faked.
@@ -95,6 +99,7 @@ describe("checkWorktreeDeletionSafety", () => {
     expect(result).toEqual({
       safe: false,
       reason: "feature has 2 commit(s) neither merged into main nor pushed to any remote",
+      atRisk: "unpushed",
     });
   });
 
@@ -135,7 +140,11 @@ describe("checkWorktreeDeletionSafety", () => {
       baseBranch: "main",
     });
 
-    expect(result).toEqual({ safe: false, reason: "it has 1 uncommitted or untracked file(s)" });
+    expect(result).toEqual({
+      safe: false,
+      reason: "it has 1 uncommitted or untracked file(s)",
+      atRisk: "dirty",
+    });
   });
 
   test("a staged change is not safe", async () => {
@@ -244,5 +253,91 @@ describe("checkWorktreeDeletionSafety", () => {
     });
 
     expect(result).toEqual({ safe: false, reason: "the directory does not exist" });
+  });
+});
+
+describe("readWorkspaceActivitySignals", () => {
+  const OLD = new Date("2026-09-01T00:00:00.000Z");
+
+  function commitAt(cwd: string, file: string, date: Date): void {
+    writeFileSync(join(cwd, file), `${date.toISOString()}\n`);
+    git(cwd, "add", file);
+    execFileSync("git", ["commit", "-q", "-m", `edit ${file}`], {
+      cwd,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.com",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.com",
+        GIT_AUTHOR_DATE: date.toISOString(),
+        GIT_COMMITTER_DATE: date.toISOString(),
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+      },
+    });
+  }
+
+  test("reads HEAD's commit time and the directory's own mtime", async () => {
+    const worktree = addWorktree("signals", "feature");
+    commitAt(worktree, "a.txt", OLD);
+    utimesSync(worktree, OLD, OLD);
+
+    expect(await readWorkspaceActivitySignals(worktree)).toEqual({
+      headCommitMs: OLD.getTime(),
+      directoryMtimeMs: OLD.getTime(),
+    });
+  });
+
+  test("the git index is not activity: git status and a touched index change nothing", async () => {
+    commitAt(repo, "a.txt", OLD);
+    utimesSync(repo, OLD, OLD);
+    git(repo, "status", "--porcelain");
+    const index = join(repo, ".git", "index");
+    utimesSync(index, new Date(), new Date());
+    expect(statSync(index).mtimeMs).toBeGreaterThan(OLD.getTime());
+
+    expect(await readWorkspaceActivitySignals(repo)).toEqual({
+      headCommitMs: OLD.getTime(),
+      directoryMtimeMs: OLD.getTime(),
+    });
+  });
+
+  test("a directory outside git has only its mtime", async () => {
+    const plain = join(root, "plain");
+    mkdirSync(plain);
+    utimesSync(plain, OLD, OLD);
+
+    expect(await readWorkspaceActivitySignals(plain)).toEqual({
+      headCommitMs: null,
+      directoryMtimeMs: OLD.getTime(),
+    });
+  });
+
+  test("a missing directory has no signal at all", async () => {
+    expect(await readWorkspaceActivitySignals(join(root, "gone"))).toEqual({
+      headCommitMs: null,
+      directoryMtimeMs: null,
+    });
+  });
+});
+
+describe("listIgnoredEntries", () => {
+  test("lists ignored files, and a wholly ignored directory as one entry", async () => {
+    const worktree = addWorktree("ignored-list", "feature");
+    commit(worktree, ".gitignore", "node_modules/\n.env\n");
+    mkdirSync(join(worktree, "node_modules", "x"), { recursive: true });
+    writeFileSync(join(worktree, "node_modules", "x", "index.js"), "1\n");
+    writeFileSync(join(worktree, ".env"), "SECRET=1\n");
+    writeFileSync(join(worktree, "notes.txt"), "untracked, not ignored\n");
+
+    expect((await listIgnoredEntries(worktree))?.sort()).toEqual([".env", "node_modules/"]);
+  });
+
+  test("a directory git cannot read lists nothing, which is not the same as none", async () => {
+    const plain = join(root, "plain-ignored");
+    mkdirSync(plain);
+
+    expect(await listIgnoredEntries(plain)).toBeNull();
   });
 });
