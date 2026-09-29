@@ -93,7 +93,11 @@ export interface DoneJanitorWorkspaceSweepConfig {
 
 export interface ResolvedWorkspaceSweepConfig {
   enabled: boolean;
-  /** The janitor's own `dryRun` makes the sweep dry too. */
+  /**
+   * On unless `workspaceSweep.dryRun` is `false`: the sweep's first run on a machine reports and
+   * waits for a person to approve it (docs/done-janitor.md, "Approving the first live run"). The
+   * janitor's own `dryRun` makes the sweep dry too.
+   */
   dryRun: boolean;
   /** Anything with agents, or in a git checkout. */
   idleMs: number;
@@ -112,7 +116,7 @@ export function resolveWorkspaceSweepConfig(janitor: {
   const sweep = janitor.workspaceSweep;
   return {
     enabled: sweep?.enabled ?? true,
-    dryRun: (janitor.dryRun ?? false) || (sweep?.dryRun ?? false),
+    dryRun: (janitor.dryRun ?? false) || (sweep?.dryRun ?? true),
     idleMs: (sweep?.idleHours ?? 72) * HOUR_MS,
     emptyIdleMs: (sweep?.emptyIdleHours ?? 24) * HOUR_MS,
     maxArchivesPerSweep: sweep?.maxArchivesPerSweep ?? 10,

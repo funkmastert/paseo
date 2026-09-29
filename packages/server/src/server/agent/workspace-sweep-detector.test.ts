@@ -607,10 +607,10 @@ describe("isRegenerablePath", () => {
 });
 
 describe("resolveWorkspaceSweepConfig", () => {
-  test("defaults when absent", () => {
+  test("defaults when absent, dry until a person turns it live", () => {
     expect(resolveWorkspaceSweepConfig({})).toEqual({
       enabled: true,
-      dryRun: false,
+      dryRun: true,
       idleMs: 72 * HOUR,
       emptyIdleMs: 24 * HOUR,
       maxArchivesPerSweep: 10,
@@ -619,9 +619,13 @@ describe("resolveWorkspaceSweepConfig", () => {
     });
   });
 
-  test("the janitor's dry run makes the sweep dry too", () => {
-    expect(resolveWorkspaceSweepConfig({ dryRun: true }).dryRun).toBe(true);
-    expect(resolveWorkspaceSweepConfig({ workspaceSweep: { dryRun: true } }).dryRun).toBe(true);
+  test("only an explicit dryRun: false makes it live, and the janitor's dry run still wins", () => {
+    expect(resolveWorkspaceSweepConfig({ dryRun: false }).dryRun).toBe(true);
+    expect(resolveWorkspaceSweepConfig({ workspaceSweep: { enabled: true } }).dryRun).toBe(true);
+    expect(resolveWorkspaceSweepConfig({ workspaceSweep: { dryRun: false } }).dryRun).toBe(false);
+    expect(
+      resolveWorkspaceSweepConfig({ dryRun: true, workspaceSweep: { dryRun: false } }).dryRun,
+    ).toBe(true);
   });
 
   test("honours every key", () => {

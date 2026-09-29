@@ -2491,6 +2491,22 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       );
       expect(live.archivedWorkspaces).toEqual([]);
     });
+
+    test("with no workspaceSweep key at all, the sweep only reports", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, archiveDead: false, askFinished: false },
+        stored: [record()],
+        workspaces: [workspace()],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-delete", workspaceId: "ws-1", dryRun: true }),
+      );
+    });
   });
 
   test("a self-heal fixer's workspace goes as soon as its fixer finished, however fresh its directory", async () => {
