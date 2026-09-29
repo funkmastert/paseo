@@ -442,18 +442,22 @@ export class AgentLeaderCompactionMonitor {
   ): Promise<void> {
     const label = agent.title?.trim() || "A leader";
     try {
-      await this.options.pushNotificationSender.send({
-        title: "Could not compact a leader's context",
-        body:
-          `${label} is over ${formatTokens(config.prepareAtTokens)} tokens of context. The ` +
-          `${step} step did not take after ${config.maxAttempts} tries (${describeFailure(failure)}). ` +
-          "It keeps running at its current size until it is compacted by hand.",
-        data: {
-          serverId: this.options.serverId,
-          agentId: agent.id,
-          reason: "leader_compaction_gave_up",
+      await this.options.pushNotificationSender.send(
+        {
+          title: "Could not compact a leader's context",
+          body:
+            `${label} is over ${formatTokens(config.prepareAtTokens)} tokens of context. The ` +
+            `${step} step did not take after ${config.maxAttempts} tries (${describeFailure(failure)}). ` +
+            "It keeps running at its current size until it is compacted by hand.",
+          data: {
+            serverId: this.options.serverId,
+            agentId: agent.id,
+            reason: "leader_compaction_gave_up",
+          },
         },
-      });
+        // `alert`: the retries are spent, and only a person can compact the leader now.
+        { level: "alert" },
+      );
     } catch (error) {
       this.options.logger.warn({ err: error }, "Leader compaction: push notification failed");
     }
