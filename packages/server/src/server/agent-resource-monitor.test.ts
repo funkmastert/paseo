@@ -2,6 +2,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { ResourceAlert } from "@getpaseo/protocol/agent-types";
 import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
+import { type AdmissionAgentView, ChildAdmissionController } from "./agent/child-admission.js";
 import type { AgentResourceMonitorState } from "./agent/resource-monitor-detector.js";
 import type { ProcessSignalOutcome, ProcessSignaller } from "./agent/build-daemon-reaper.js";
 import type {
@@ -19,16 +20,21 @@ import {
 import type { PushPayload } from "./push/push-service.js";
 import type { PushSendMeta } from "./push/index.js";
 import type { RemediationObservation, RemediationSink } from "./remediation/contract.js";
+import { createTestLogger } from "../test-utils/test-logger.js";
 
 function createLogger() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-function createFakeAgentManager(agents: ResourceMonitorAgentSummary[]) {
+function createFakeAgentManager(
+  agents: ResourceMonitorAgentSummary[],
+  childAdmission: ChildAdmissionController | null = null,
+) {
   const states = new Map<string, AgentResourceMonitorState>();
   const alerts = new Map<string, ResourceAlert>();
   return {
     listAgentsForResourceMonitor: vi.fn(() => agents),
+    getChildAdmission: vi.fn(() => childAdmission),
     getResourceMonitorState: vi.fn((id: string) => states.get(id)),
     setResourceMonitorState: vi.fn((id: string, state: AgentResourceMonitorState) => {
       states.set(id, state);
@@ -208,8 +214,12 @@ function createMonitor(params: {
   saturationLedger?: AgentResourceMonitorOptions["saturationLedger"];
   holdChildAdmission?: AgentResourceMonitorOptions["holdChildAdmission"];
   lowerProcessPriority?: AgentResourceMonitorOptions["lowerProcessPriority"];
+  childAdmission?: ChildAdmissionController;
 }) {
-  const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
+  const agentManager = createFakeAgentManager(
+    params.agents ?? [summary({})],
+    params.childAdmission ?? null,
+  );
   const push = createFakePushSender();
   const steer = createFakeSteer();
   const sampler =
@@ -1450,7 +1460,12 @@ function createAdmissionRecorder() {
   return {
     fn: vi.fn((held: boolean, reason: string) => void calls.push({ held, reason })),
     calls,
-    held: () => calls.map((call) => call.held),
+    /** Each change of the hold; a call that only says why it still holds is not one. */
+    held: () =>
+      calls
+        .map((call) => call.held)
+        .filter((held, index, all) => index === 0 || held !== all[index - 1]),
+    lastReason: () => calls.at(-1)?.reason,
   };
 }
 
@@ -1774,5 +1789,353 @@ describe("AgentResourceMonitor saturation remedies", () => {
     await sweep(monitor, 1, clock);
 
     expect(remediation.last("cpu-saturation")?.remedy).toBe("none");
+  });
+});
+
+function macMemory(memoryPressureLevel: number | undefined, swapUsedGiB: number) {
+  return {
+    totalPhysicalBytes: 64 * 1024 ** 3,
+    swapTotalBytes: 44 * 1024 ** 3,
+    swapUsedBytes: swapUsedGiB * 1024 ** 3,
+    ...(memoryPressureLevel !== undefined ? { memoryPressureLevel } : {}),
+  } satisfies SystemMemorySample;
+}
+
+function setMemory(
+  sampler: ReturnType<typeof createFakeSampler>,
+  memoryPressureLevel: number | undefined,
+  swapUsedGiB: number,
+): void {
+  sampler.sampleSystemMemory.mockResolvedValue(macMemory(memoryPressureLevel, swapUsedGiB));
+}
+
+describe("AgentResourceMonitor memory brake", () => {
+  const CHILD = summary({ id: "child-1", parentAgentId: "leader-1" });
+  const LEADER = summary({ id: "leader-1" });
+
+  function setup(overrides: { load?: number } = {}) {
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({
+      processRows: [...agentTreeRows("child-1", 300, [50, 100]), agentProcessRow("leader-1", 1, 5)],
+      systemMemory: macMemory(1, 0),
+      load: loadavg(overrides.load ?? 4),
+    });
+    const admission = createAdmissionRecorder();
+    const priority = createPriorityRecorder();
+    const { signaller, sent } = createFakeSignaller();
+    const created = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      signaller,
+      holdChildAdmission: admission.fn,
+      lowerProcessPriority: priority.fn,
+      now: () => clock.ms,
+    });
+    return { ...created, clock, sampler, admission, priority, signalsSent: sent };
+  }
+
+  test("pressure 2 holds child admission, and five calm sweeps at pressure 1 release it", async () => {
+    const { monitor, sampler, admission, clock } = setup();
+
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([]);
+
+    setMemory(sampler, 2, 0);
+    await sweep(monitor, 1, clock);
+    expect(admission.calls).toEqual([
+      { held: true, reason: expect.stringContaining("memory-pressure") },
+    ]);
+
+    setMemory(sampler, 1, 0);
+    await sweep(monitor, 4, clock);
+    expect(admission.held()).toEqual([true]);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+  });
+
+  test("swap growing by a gibibyte in one sweep holds admission", async () => {
+    const { monitor, sampler, admission, clock } = setup();
+    setMemory(sampler, 1, 10);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, 1, 11.5);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+  });
+
+  test("sticky high swap that is not growing never holds admission", async () => {
+    const { monitor, sampler, admission, clock } = setup();
+    setMemory(sampler, 1, 42.7);
+    await sweep(monitor, 10, clock);
+    expect(admission.held()).toEqual([]);
+  });
+
+  test("with no pressure reading (not macOS) swap growth holds nothing", async () => {
+    const { monitor, sampler, admission, push, clock } = setup();
+    setMemory(sampler, undefined, 1);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, undefined, 20);
+    await sweep(monitor, 3, clock);
+    expect(admission.held()).toEqual([]);
+    expect(push.sent).toEqual([]);
+  });
+
+  test("the memory hold keeps working while process sampling fails", async () => {
+    const { monitor, sampler, admission, clock } = setup();
+    failProcessSamples(sampler);
+    setMemory(sampler, 2, 0);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+  });
+
+  test("CPU and memory share one hold: it is released only once neither holds it", async () => {
+    const { monitor, sampler, admission, clock } = setup({ load: 40 });
+    setMemory(sampler, 2, 0);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+
+    // CPU falls under the release line; memory still holds.
+    setLoad(sampler, 10);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true]);
+
+    setMemory(sampler, 1, 0);
+    await sweep(monitor, 5, clock);
+    expect(admission.held()).toEqual([true, false]);
+
+    // And the other way round: memory calms first, CPU still holds.
+    setLoad(sampler, 40);
+    setMemory(sampler, 2, 0);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, 1, 0);
+    await sweep(monitor, 5, clock);
+    expect(admission.held()).toEqual([true, false, true]);
+    setLoad(sampler, 10);
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false, true, false]);
+  });
+
+  test("pressure 4 pushes an alert at once, once per critical spell", async () => {
+    const { monitor, sampler, push, clock } = setup();
+    setMemory(sampler, 4, 30);
+    await sweep(monitor, 3, clock);
+    expect(push.sent.map((payload) => payload.title)).toEqual(["Memory pressure is critical"]);
+    expect(push.levels).toEqual(["alert"]);
+    expect(push.sent[0]?.data).toMatchObject({
+      serverId: "server-1",
+      reason: "resource_system_memory",
+    });
+
+    setMemory(sampler, 2, 30);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, 4, 30);
+    await sweep(monitor, 1, clock);
+    expect(push.levels).toEqual(["alert", "alert"]);
+  });
+
+  test("the brake never touches a running turn: no signal, no renice, no message", async () => {
+    const { monitor, sampler, steer, priority, signalsSent, clock } = setup();
+    setMemory(sampler, 4, 50);
+    await sweep(monitor, 5, clock);
+    expect(signalsSent).toEqual([]);
+    expect(priority.lowered).toEqual([]);
+    expect(steer.calls).toEqual([]);
+  });
+
+  test("stop, and the monitor being turned off, release a memory hold", async () => {
+    const first = setup();
+    setMemory(first.sampler, 2, 0);
+    await sweep(first.monitor, 1, first.clock);
+    first.monitor.stop();
+    expect(first.admission.held()).toEqual([true, false]);
+    // Started again with the pressure still there, it holds again on the first sweep.
+    await sweep(first.monitor, 1, first.clock);
+    expect(first.admission.held()).toEqual([true, false, true]);
+
+    const clock = { ms: 1_000_000 };
+    const config: ResourceMonitorConfig = {};
+    const sampler = createFakeSampler({ systemMemory: macMemory(2, 0) });
+    const admission = createAdmissionRecorder();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler,
+      config,
+      holdChildAdmission: admission.fn,
+      now: () => clock.ms,
+    });
+    await sweep(monitor, 1, clock);
+    config.enabled = false;
+    await sweep(monitor, 1, clock);
+    expect(admission.held()).toEqual([true, false]);
+  });
+});
+
+describe("AgentResourceMonitor long memory hold", () => {
+  const CHILD = summary({ id: "child-1", parentAgentId: "leader-1" });
+  const LEADER = summary({ id: "leader-1" });
+
+  /** The monitor wired to a real admission controller the way bootstrap wires it. */
+  function setup() {
+    const clock = { ms: 1_000_000 };
+    const fleet = new Map<string, AdmissionAgentView>();
+    const childAdmission = new ChildAdmissionController({
+      readConfig: () => ({ maxConcurrentChildTurns: 8 }),
+      listAgents: () => [...fleet.values()],
+      logger: createTestLogger(),
+      now: () => new Date(clock.ms),
+    });
+    const sampler = createFakeSampler({
+      processRows: [agentProcessRow("leader-1", 1, 5)],
+      systemMemory: macMemory(1, 5),
+      load: loadavg(4),
+    });
+    const created = createMonitor({
+      agents: [LEADER, CHILD],
+      sampler,
+      holdChildAdmission: (held, reason) => childAdmission.setHold("cpu-saturation", held, reason),
+      childAdmission,
+      now: () => clock.ms,
+    });
+    const started: string[] = [];
+    /** A child asks for a turn: it runs now or waits in line, as AgentManager.streamAgent does. */
+    const ask = (id: string) => {
+      const result = childAdmission.request({ agentId: id, parentAgentId: "leader-1", prompt: id });
+      fleet.set(id, { id, parentAgentId: "leader-1", lifecycle: "running" });
+      if (result.status === "admitted") started.push(id);
+      else void result.result.then((outcome) => outcome.outcome === "admitted" && started.push(id));
+    };
+    const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+    return { ...created, clock, sampler, childAdmission, ask, started, flush };
+  }
+
+  test("ten hours at warn with swap not growing: one push at 15 minutes, then one child per sweep from 30", async () => {
+    // fix-review-A A-01: before, this held all ten hours with no push and no ladder record.
+    const { monitor, sampler, push, childAdmission, ask, started, flush, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    expect(childAdmission.isHeld()).toBe(true);
+    for (const id of ["w1", "w2", "w3", "w4", "w5"]) ask(id);
+    expect(childAdmission.queueLength()).toBe(5);
+
+    await sweep(monitor, 14, clock);
+    expect(push.sent).toEqual([]);
+    await sweep(monitor, 1, clock);
+    expect(push.sent.map((payload) => payload.title)).toEqual([
+      "Child agents are waiting on memory",
+    ]);
+    expect(push.levels).toEqual(["notice"]);
+    expect(push.sent[0]?.body).toContain("15 min");
+    expect(push.sent[0]?.body).toContain("5 child-agent turns");
+    expect(push.sent[0]?.body).toContain("agents.admission.enabled");
+    expect(push.sent[0]?.data).toMatchObject({ reason: "resource_system_memory" });
+
+    // Up to 30 minutes: a full hold.
+    await sweep(monitor, 14, clock);
+    await flush();
+    expect(started).toEqual([]);
+    // From 30: one per sweep, oldest first.
+    await sweep(monitor, 1, clock);
+    await flush();
+    expect(started).toEqual(["w1"]);
+    await sweep(monitor, 2, clock);
+    await flush();
+    expect(started).toEqual(["w1", "w2", "w3"]);
+
+    // The rest of the ten hours: the line empties, the hold stays, and nobody is pushed again.
+    await sweep(monitor, 600 - 33, clock);
+    await flush();
+    expect(started).toEqual(["w1", "w2", "w3", "w4", "w5"]);
+    expect(childAdmission.isHeld()).toBe(true);
+    expect(push.sent).toHaveLength(1);
+  });
+
+  test("swap growing or pressure turning critical goes back to a full hold for another half hour", async () => {
+    const { monitor, sampler, childAdmission, ask, started, flush, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    for (const id of ["w1", "w2", "w3", "w4"]) ask(id);
+    await sweep(monitor, 30, clock);
+    await flush();
+    expect(started).toEqual(["w1"]);
+
+    setMemory(sampler, 2, 7);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, 2, 7);
+    await sweep(monitor, 29, clock);
+    await flush();
+    expect(started).toEqual(["w1"]);
+    await sweep(monitor, 1, clock);
+    await flush();
+    expect(started).toEqual(["w1", "w2"]);
+
+    setMemory(sampler, 4, 7);
+    await sweep(monitor, 1, clock);
+    setMemory(sampler, 2, 7);
+    await sweep(monitor, 29, clock);
+    await flush();
+    expect(started).toEqual(["w1", "w2"]);
+    expect(childAdmission.queueLength()).toBe(2);
+  });
+
+  test("never trickles while CPU saturation holds admission too", async () => {
+    const { monitor, sampler, ask, started, flush, clock } = setup();
+    setMemory(sampler, 2, 5);
+    setLoad(sampler, 40);
+    await sweep(monitor, 1, clock);
+    for (const id of ["w1", "w2"]) ask(id);
+    await sweep(monitor, 60, clock);
+    await flush();
+    expect(started).toEqual([]);
+  });
+
+  test("with nobody waiting there is nothing to say; the push waits for a child in line", async () => {
+    const { monitor, sampler, push, ask, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 20, clock);
+    expect(push.sent).toEqual([]);
+    ask("w1");
+    await sweep(monitor, 1, clock);
+    expect(push.sent).toHaveLength(1);
+    expect(push.sent[0]?.body).toContain("1 child-agent turn ");
+  });
+
+  test("each hold spell is pushed once: a release re-arms it", async () => {
+    const { monitor, sampler, push, ask, clock } = setup();
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    ask("w1");
+    await sweep(monitor, 20, clock);
+    setMemory(sampler, 1, 5);
+    await sweep(monitor, 5, clock);
+    setMemory(sampler, 2, 5);
+    await sweep(monitor, 1, clock);
+    ask("w2");
+    await sweep(monitor, 16, clock);
+    expect(push.levels).toEqual(["notice", "notice"]);
+  });
+});
+
+describe("AgentResourceMonitor admission hold reasons", () => {
+  test("admission is told which condition holds it now, not only which one started the hold", async () => {
+    // fix-review-A A-04: every queued line said cpu-saturation during a memory hold.
+    const clock = { ms: 1_000_000 };
+    const sampler = createFakeSampler({ systemMemory: macMemory(2, 5), load: loadavg(4) });
+    const admission = createAdmissionRecorder();
+    const { monitor } = createMonitor({
+      agents: [],
+      sampler,
+      holdChildAdmission: admission.fn,
+      now: () => clock.ms,
+    });
+    await sweep(monitor, 1, clock);
+    expect(admission.lastReason()).toMatch(/^memory-pressure: /);
+
+    setLoad(sampler, 40);
+    await sweep(monitor, 1, clock);
+    expect(admission.lastReason()).toMatch(/^memory-pressure: .*; cpu-saturation: /);
+
+    setMemory(sampler, 1, 5);
+    await sweep(monitor, 5, clock);
+    expect(admission.held()).toEqual([true]);
+    expect(admission.lastReason()).toMatch(/^cpu-saturation: /);
   });
 });
