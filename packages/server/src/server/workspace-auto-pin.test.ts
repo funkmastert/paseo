@@ -71,7 +71,7 @@ describe("autoPinWorkspaceOnSessionStart", () => {
       }),
     );
 
-    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-1", now);
+    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-1", { now });
 
     expect(result?.pinnedAt).toBe("2026-06-01T00:00:00.000Z");
     expect(result?.pinSource).toBe("auto");
@@ -95,7 +95,7 @@ describe("autoPinWorkspaceOnSessionStart", () => {
       }),
     );
 
-    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-2", now);
+    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-2", { now });
 
     expect(result?.pinnedAt).toBe("2026-02-01T00:00:00.000Z");
     expect(result?.pinSource).toBe("manual");
@@ -116,13 +116,40 @@ describe("autoPinWorkspaceOnSessionStart", () => {
       }),
     );
 
-    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-3", now);
+    const result = await autoPinWorkspaceOnSessionStart(registry, "ws-3", { now });
 
     expect(result?.pinnedAt).toBe("2026-02-01T00:00:00.000Z");
   });
 
+  test("tells clients a workspace still waiting on its first agent is running", async () => {
+    await registry.upsert(
+      createPersistedWorkspaceRecord({
+        workspaceId: "ws-4",
+        projectId: "proj-1",
+        cwd: "/tmp/repo4",
+        kind: "worktree",
+        displayName: "feature",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const mutations: Array<{ workspaceId: string; expectsInitialAgent?: boolean }> = [];
+    registry.subscribeToMutations((mutation) => {
+      mutations.push(mutation);
+    });
+
+    await autoPinWorkspaceOnSessionStart(registry, "ws-4", {
+      now,
+      context: { expectsInitialAgent: true },
+    });
+
+    expect(mutations).toEqual([
+      expect.objectContaining({ workspaceId: "ws-4", expectsInitialAgent: true }),
+    ]);
+  });
+
   test("returns null for a workspace that does not exist", async () => {
-    const result = await autoPinWorkspaceOnSessionStart(registry, "does-not-exist", now);
+    const result = await autoPinWorkspaceOnSessionStart(registry, "does-not-exist", { now });
     expect(result).toBeNull();
   });
 });

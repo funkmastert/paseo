@@ -14,7 +14,11 @@
  */
 
 import type { DoneJanitorAgentSummary } from "./agent/agent-manager.js";
-import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "./workspace-registry.js";
+import type {
+  PersistedWorkspaceRecord,
+  WorkspaceMutationContext,
+  WorkspaceRegistry,
+} from "./workspace-registry.js";
 
 /**
  * How long after Tyler last used a workspace it still counts as active. `agents.autoPinRecentUseMinutes`
@@ -84,20 +88,28 @@ export function isProtectivePin(
  *
  * Callers gate this on a human-attributable create (see docs/done-janitor.md#manual-pin-vs-auto-pin for the
  * signal and its known gap) and on the `agents.autoPinSessions` config flag.
+ *
+ * `context.expectsInitialAgent` rides on the pin's mutation for a workspace created with its first
+ * agent still to come: without it, clients get the pinned workspace as done until the agent exists.
  */
 export async function autoPinWorkspaceOnSessionStart(
   registry: Pick<WorkspaceRegistry, "get" | "update">,
   workspaceId: string,
-  now: () => string = () => new Date().toISOString(),
+  options: { now?: () => string; context?: WorkspaceMutationContext } = {},
 ): Promise<PersistedWorkspaceRecord | null> {
+  const now = options.now ?? (() => new Date().toISOString());
   const existing = await registry.get(workspaceId);
   if (!existing) return null;
   if (existing.pinnedAt) return existing;
-  return registry.update(workspaceId, (record) => {
-    if (record.pinnedAt) return record;
-    const timestamp = now();
-    return { ...record, pinnedAt: timestamp, pinSource: "auto", updatedAt: timestamp };
-  });
+  return registry.update(
+    workspaceId,
+    (record) => {
+      if (record.pinnedAt) return record;
+      const timestamp = now();
+      return { ...record, pinnedAt: timestamp, pinSource: "auto", updatedAt: timestamp };
+    },
+    options.context,
+  );
 }
 
 export interface AutoPinExpiryConfig {

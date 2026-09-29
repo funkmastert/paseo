@@ -162,6 +162,7 @@ import {
   type ProjectMutation,
   type ProjectRegistry,
   type WorkspaceMutation,
+  type WorkspaceMutationContext,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
 import { wrapSpokenInput } from "./voice-config.js";
@@ -3813,12 +3814,15 @@ export class Session {
    * for a human-attributable create; agent- and daemon-triggered creates go through the separate
    * "mcp"-kind create path and never call it. See workspace-auto-pin.ts.
    */
-  private async maybeAutoPinWorkspace(workspaceId: string): Promise<void> {
+  private async maybeAutoPinWorkspace(
+    workspaceId: string,
+    context?: WorkspaceMutationContext,
+  ): Promise<void> {
     if (this.daemonConfigStore.get().autoPinSessions === false) return;
     // Before the pin: starting a session is a use, and an expiry sweep racing this reads it.
     this.autoPinExpiry?.noteWorkspaceUsed(workspaceId);
     try {
-      await autoPinWorkspaceOnSessionStart(this.workspaceRegistry, workspaceId);
+      await autoPinWorkspaceOnSessionStart(this.workspaceRegistry, workspaceId, { context });
     } catch (error) {
       this.sessionLogger.warn({ err: error, workspaceId }, "Failed to auto-pin new session");
     }
@@ -6613,7 +6617,9 @@ export class Session {
     );
     // This RPC is only reachable over a client connection (app or CLI), never from the
     // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
-    await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId);
+    await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId, {
+      expectsInitialAgent: Boolean(request.firstAgentContext),
+    });
     const workspace =
       (await this.workspaceRegistry.get(createdWorkspace.workspaceId)) ?? createdWorkspace;
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
@@ -6696,7 +6702,9 @@ export class Session {
     );
     // This RPC is only reachable over a client connection (app or CLI), never from the
     // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
-    await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId);
+    await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId, {
+      expectsInitialAgent: Boolean(request.firstAgentContext),
+    });
     const refreshedWorkspace = await this.workspaceRegistry.get(
       workflowResult.workspace.workspaceId,
     );

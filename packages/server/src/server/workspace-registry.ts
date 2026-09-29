@@ -186,6 +186,7 @@ export interface WorkspaceRegistry {
   update(
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    context?: WorkspaceMutationContext,
   ): Promise<PersistedWorkspaceRecord | null>;
   upsert(record: PersistedWorkspaceRecord, context?: WorkspaceMutationContext): Promise<void>;
   archive(
@@ -569,10 +570,16 @@ export class FileBackedWorkspaceRegistry
   override async update(
     workspaceId: string,
     updater: (record: PersistedWorkspaceRecord) => PersistedWorkspaceRecord,
+    context?: WorkspaceMutationContext,
   ): Promise<PersistedWorkspaceRecord | null> {
     const workspace = await super.update(workspaceId, updater);
     if (workspace) {
-      await this.notifyMutation({ kind: "upsert", workspaceId, workspace });
+      await this.notifyMutation({
+        kind: "upsert",
+        workspaceId,
+        workspace,
+        ...(context?.expectsInitialAgent ? { expectsInitialAgent: true } : {}),
+      });
     }
     return workspace;
   }
