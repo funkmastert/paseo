@@ -12,63 +12,78 @@ are documented stopgaps: they exist because the daemon does not yet do the
 equivalent job itself, and get deleted once it does (each says so in its own
 header comment).
 
-**This copy can drift from the live one.** The running LaunchAgents load
-their scripts from `~/bozeo-ops`, not from this repo, so editing a file here
-does not change what is running. The simplest way to stop the drift, without
-doing it here, is to symlink the `~/bozeo-ops` copies at the files in this
-directory, so one edit updates both.
+**Edit `~/bozeo-ops`, then copy into `ops/` and commit.** The running
+LaunchAgents load their scripts from `~/bozeo-ops`, not from this repo, so an
+edit here changes nothing that runs, and an edit there leaves this copy stale
+until you copy it back. Replace a live file with a copy and a `mv` over it, not
+an in-place write: `heavy.sh` is bash, which reads its script while it runs.
+`ops/check-drift.sh` exits non-zero when the two disagree; run it before you
+commit here and after you change anything live. Every file in `ops/` except
+this README and `check-drift.sh` is a copy of `~/bozeo-ops/<same path>`; the
+plists map to `~/Library/LaunchAgents` (and `retired/` to
+`~/Library/LaunchAgents.disabled`). Scan a script with `secret-scan.py` before
+you vendor it.
 
 ## Scripts
 
-| Script | Problem it solves |
-| --- | --- |
-| `cpu-guard.mjs` | Renices agent-CLI process trees every 20s so agents never starve interactive use. Stopgap until the daemon lowers agent priority itself. |
-| `disk-guard.mjs` | Deletes orphaned WonderlyMobileCore build caches and retires finished orchestrator worktrees when free space runs low — two disk sinks the daemon's disk rung can't see yet. |
-| `failover-watch.mjs` | Moves agents off a Claude account whose usage window has hit 100% onto one that still has room. Stand-in for the daemon's account failover until flexible-placement ships. |
-| `retire-merged-worktrees.mjs` | Removes the orchestrator's own worktrees once their work is on a remote, clean, and idle — reusing the done janitor's own safety check. Dry run unless `--apply`. |
-| `retire-worktrees.mjs` | Archives every non-running agent whose cwd is under given worktree dirs; exits 2 if any agent there is still running, so a worktree with live work is never removed. |
-| `reclaim-worktrees.mjs` | Same safety check as the done janitor, run by hand against Paseo worktrees. Dry run unless `--apply`. |
-| `mobile-worktrees-report.mjs` | Read-only report of which `~/mobile-worktrees` checkouts could go without losing anything (pushed/merged, clean, idle 48h+). `--apply` runs `git worktree remove` on the safe ones; branches are kept. |
-| `rehome.mjs` | Moves agents stranded on an exhausted Claude account to one that can run them, then resumes them. Waits for a mid-turn agent to finish its turn before moving it. |
-| `move-when-idle.mjs` | Moves one agent to another provider once its current turn ends, since the daemon refuses to move an agent mid-turn. |
-| `work-audit.mjs` | Finds every worktree/branch where work could be lost (uncommitted changes, commits on no remote, stashes) and snapshots it to `refs/backup/<date>/<slug>`. |
-| `replay-classifier.mts` | Replays the agent role/model classifier over real `~/.paseo` agent records to compare old vs. fixed policy output. Read-only, throwaway by design — kept for re-runs during classifier changes. |
-| `pr-backup.ts` | A point-in-time safety copy of `packages/server/src/server/agent/provider-registry.ts`, taken before a risky refactor. Historical reference, not meant to be run. |
-| `cpu-policing/heavy.sh` | Wraps one heavy command (`npm ci`, a build, a typecheck, a vitest run) so at most two run machine-wide at once; waits for a free slot, reclaims a slot whose holder died. |
-| `cpu-policing/common-rules.md` | Shared context for every CPU-policing workstream: why the machine saturates, what the guard already does, which docs to read first. |
-| `public-web/server.mjs` | Serves the fork's static web UI at `https://bozeo.ngrok.app` and keeps the ngrok tunnel up, so Tyler can reach it from his phone. Static files only — nothing here reaches the daemon directly; the app pairs through the E2E relay. |
-| `public-web/publish.sh` | Publishes a new web UI build to what `server.mjs` serves, via a two-rename swap so a visitor never sees a half-copied tree. |
-| `public-web/e2e-pair.mjs` | End-to-end check of `bozeo.ngrok.app`: loads the app at phone size, pairs through the relay with a fresh offer, confirms it reaches the daemon. Throwaway browser context. |
-| `public-web/sidebar-dump.mjs` | One-off Playwright script that opens a paired session and dumps the sidebar for visual verification. |
+| Script                         | Problem it solves                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cpu-guard.mjs`                | **RETIRED 2026-09-29.** Reniced agent-CLI process trees every 20s. The daemon now sets agent priority at spawn and runs the saturation rung (docs/resource-monitor.md); this script had become a no-op. Kept for history.                                                                                                                                  |
+| `disk-guard.mjs`               | Deletes orphaned WonderlyMobileCore build caches, the one disk sink the daemon's disk rung can't see. Deletes nothing in a sweep where any mobile repo fails to list. Logs each removal with its worktree, size and lease. `--dry-run` prints a decision per cache and cannot delete. Worktree reclaim is the daemon's (disk rung 1 and the done janitor). |
+| `disk-guard.test.mjs`          | `node --test` for `disk-guard.mjs` against temp repos and a temp cache root.                                                                                                                                                                                                                                                                               |
+| `failover-watch.mjs`           | **RETIRED 2026-09-29.** Moved agents off a capped Claude account. The daemon's account failover does this (docs/account-failover.md); running both raced on the same agents. Kept for history.                                                                                                                                                             |
+| `retire-merged-worktrees.mjs`  | Removes the orchestrator's own worktrees once their work is on a remote, clean, and idle — reusing the done janitor's own safety check. Dry run unless `--apply`. Hand-run only. It imports the dev checkout's `dist`, so it runs whatever was last built there.                                                                                           |
+| `retire-worktrees.mjs`         | Archives every non-running agent whose cwd is under given worktree dirs; exits 2 if any agent there is still running, so a worktree with live work is never removed.                                                                                                                                                                                       |
+| `reclaim-worktrees.mjs`        | Same safety check as the done janitor, run by hand against Paseo worktrees. Dry run unless `--apply`.                                                                                                                                                                                                                                                      |
+| `mobile-worktrees-report.mjs`  | Read-only report of which `~/mobile-worktrees` checkouts could go without losing anything (pushed/merged, clean, idle 48h+). `--apply` runs `git worktree remove` on the safe ones; branches are kept.                                                                                                                                                     |
+| `rehome.mjs`                   | Moves agents stranded on an exhausted Claude account to one that can run them, then resumes them. Waits for a mid-turn agent to finish its turn before moving it.                                                                                                                                                                                          |
+| `move-when-idle.mjs`           | Moves one agent to another provider once its current turn ends, since the daemon refuses to move an agent mid-turn.                                                                                                                                                                                                                                        |
+| `work-audit.mjs`               | Finds every worktree/branch where work could be lost (uncommitted changes, commits on no remote, stashes) and snapshots it to `refs/backup/<date>/<slug>`.                                                                                                                                                                                                 |
+| `replay-classifier.mts`        | Replays the agent role/model classifier over real `~/.paseo` agent records to compare old vs. fixed policy output. Read-only, throwaway by design — kept for re-runs during classifier changes.                                                                                                                                                            |
+| `pr-backup.ts`                 | A point-in-time safety copy of `packages/server/src/server/agent/provider-registry.ts`, taken before a risky refactor. Historical reference, not meant to be run.                                                                                                                                                                                          |
+| `cpu-policing/heavy.sh`        | Wraps one heavy command (`npm ci`, a build, a typecheck, a vitest run) so at most two run machine-wide at once; waits for a free slot. A slot is a kernel lock the wrapper holds, so a dead holder frees it at once. Refuses to run (exit 75) if it can't create its lock file.                                                                            |
+| `cpu-policing/heavy.test.mjs`  | `node --test` for `heavy.sh` with a temp lock dir.                                                                                                                                                                                                                                                                                                         |
+| `cpu-policing/common-rules.md` | Shared context for every CPU-policing workstream: why the machine saturates, what the guard already does, which docs to read first.                                                                                                                                                                                                                        |
+| `public-web/server.mjs`        | Serves the fork's static web UI at `https://bozeo.ngrok.app` and keeps the ngrok tunnel up, so Tyler can reach it from his phone. Static files only — nothing here reaches the daemon directly; the app pairs through the E2E relay.                                                                                                                       |
+| `public-web/publish.sh`        | Publishes a new web UI build to what `server.mjs` serves, via a two-rename swap so a visitor never sees a half-copied tree. Names the commit it publishes (also in `~/.paseo/public-web-ui.commit`) and refuses if the source checkout is dirty or its HEAD moved after the build.                                                                         |
+| `public-web/e2e-pair.mjs`      | End-to-end check of `bozeo.ngrok.app`: loads the app at phone size, pairs through the relay with a fresh offer, confirms it reaches the daemon. Throwaway browser context.                                                                                                                                                                                 |
+| `public-web/sidebar-dump.mjs`  | One-off Playwright script that opens a paired session and dumps the sidebar for visual verification.                                                                                                                                                                                                                                                       |
+| `ws-cleanup/inventory.mjs`     | Dry-run inventory of every active workspace: what it is, whether anything could be lost, and a verdict. Writes `inventory.json` next to itself.                                                                                                                                                                                                            |
+| `ws-cleanup/cleanup.mjs`       | The 2026-09-29 workspace cleanup. Archives temporary and long-idle workspaces; backs up HEAD and untracked files before a Paseo-owned directory is deleted. Dry run unless `--apply`.                                                                                                                                                                      |
+| `jev-research/read_share.py`   | Read-only: what share of weighted Claude spend file reads drive, from fleet transcripts (memory `weighted-vs-raw-token-share`).                                                                                                                                                                                                                            |
+| `secret-scan.py`               | Scans files for secrets and prints only `file:line:kind`, never the match. Exit 1 on any hit.                                                                                                                                                                                                                                                              |
+| `check-drift.sh`               | Exits non-zero when `ops/` and `~/bozeo-ops` or the installed plists disagree. Lives only here.                                                                                                                                                                                                                                                            |
 
 ## LaunchAgents
 
-Four services in `launch-agents/` (copies of `~/Library/LaunchAgents/sh.bozeo.*.plist`
+Two services in `launch-agents/` (copies of `~/Library/LaunchAgents/sh.bozeo.*.plist`
 — the real, running plists; do not touch those from this repo):
 
-| Service | Runs | Logs |
-| --- | --- | --- |
-| `sh.bozeo.cpu-guard` | `cpu-guard.mjs` | `~/Library/Logs/Bozeo/cpu-guard.log` |
-| `sh.bozeo.disk-guard` | `disk-guard.mjs` | `~/Library/Logs/Bozeo/disk-guard.log` |
-| `sh.bozeo.failover-watch` | `failover-watch.mjs` | `~/Library/Logs/Bozeo/failover-watch.log` |
+| Service               | Runs                    | Logs                                  |
+| --------------------- | ----------------------- | ------------------------------------- |
+| `sh.bozeo.disk-guard` | `disk-guard.mjs`        | `~/Library/Logs/Bozeo/disk-guard.log` |
 | `sh.bozeo.public-web` | `public-web/server.mjs` | `~/Library/Logs/Bozeo/public-web.log` |
+
+`launch-agents/retired/` holds `sh.bozeo.cpu-guard` and `sh.bozeo.failover-watch`,
+booted out on 2026-09-29 and parked in `~/Library/LaunchAgents.disabled/`. Don't
+reinstall them: the daemon does both jobs, and failover-watch racing the daemon's
+failover moved the same agents twice.
 
 Install one. The plist goes in `~/Library/LaunchAgents`, and it points at the
 script under `~/bozeo-ops`, not at this repo — make sure the script is there
 first:
 
 ```sh
-cp ops/launch-agents/sh.bozeo.cpu-guard.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/sh.bozeo.cpu-guard.plist
+cp ops/launch-agents/sh.bozeo.disk-guard.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/sh.bozeo.disk-guard.plist
 ```
 
 Uninstall:
 
 ```sh
-launchctl bootout gui/$(id -u)/sh.bozeo.cpu-guard
-rm ~/Library/LaunchAgents/sh.bozeo.cpu-guard.plist
+launchctl bootout gui/$(id -u)/sh.bozeo.disk-guard
+rm ~/Library/LaunchAgents/sh.bozeo.disk-guard.plist
 ```
 
-`retire-merged-worktrees.mjs`, `reclaim-worktrees.mjs`, `mobile-worktrees-report.mjs`,
-`work-audit.mjs`, `move-when-idle.mjs`, `replay-classifier.mts`, and the `public-web/`
-scripts other than `server.mjs` are run by hand, not as LaunchAgents.
+Everything else is run by hand, not as a LaunchAgent. Restart a service after
+changing its live script: `launchctl kickstart -k gui/$(id -u)/sh.bozeo.<name>`.

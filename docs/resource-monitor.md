@@ -174,7 +174,7 @@ What the ladder is told depends on who is loading the machine. Agent trees are t
 
 Agent trees are what the remedies act on. Your own apps and disk work are known causes that no agent may touch, so an agent can't help. Only a load nothing can attribute justifies sending one: its task is to find what is loading the CPU and stop only provable leftovers, never a running agent's processes, the daemon, or your own apps such as Android Studio, Xcode or a browser. The grace counts from the episode's open, so an incident that loses its cause 10 minutes in escalates on that sweep.
 
-The stopgap `sh.bozeo.cpu-guard` LaunchAgent renices agent trees and logs load, which this rung and [low priority](#agents-run-at-low-priority) now do in the daemon. Once this branch runs in the daemon, retire it with `launchctl bootout gui/$(id -u)/sh.bozeo.cpu-guard`, then delete `~/Library/LaunchAgents/sh.bozeo.cpu-guard.plist` and its script `~/bozeo-ops/cpu-guard.mjs`.
+The stopgap `sh.bozeo.cpu-guard` LaunchAgent reniced agent trees and logged load, which this rung and [low priority](#agents-run-at-low-priority) now do in the daemon. It was retired on 2026-09-29: booted out, its plist parked in `~/Library/LaunchAgents.disabled/` (see `ops/README.md`). Don't reinstall it.
 
 ## Reaping abandoned build daemons
 
