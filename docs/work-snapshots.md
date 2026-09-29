@@ -58,7 +58,7 @@ The next sweep reports the condition inactive, which closes the episode; the lad
 
 ## The done janitor
 
-The done janitor snapshots every worktree of a dead tree before archiving it, and every worktree before deleting it. A snapshot that fails on a worktree at risk spares the worktree from reclamation that sweep, with the reason in the report. See [done-janitor.md](done-janitor.md#reclaiming-the-worktree). Its idle-workspace sweep deletes a dirty or unpushed worktree only when the snapshot holds all of it ([done-janitor.md](done-janitor.md#the-directory)).
+The done janitor snapshots every worktree of a dead tree before archiving it, and every worktree before deleting it. A snapshot that fails on a worktree at risk spares the worktree from reclamation that sweep, with the reason in the report. See [done-janitor.md](done-janitor.md#reclaiming-the-worktree). Before any deletion it verifies the snapshot's bundle or pushed branch and reads the worktree against the snapshot commit, so a file the snapshot left out, for any reason, keeps the worktree ([done-janitor.md](done-janitor.md#the-deletion-invariant)).
 
 ## Restoring a snapshot
 

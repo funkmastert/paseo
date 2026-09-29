@@ -25,7 +25,7 @@ Off by default. Config lives under `agents.doneJanitor` and is live-toggleable l
 | `askFinished`             | `true`  | False never asks a live agent anything; only the dead pass runs                     |
 | `workspaceSweep`          | on      | The [idle-workspace sweep](#idle-workspaces) and its project rule, with their keys  |
 
-`agents.*` sections are strict: a daemon built before this key existed rejects the whole config file, and every agent MCP request fails with it. Add the key only once the running daemon has this build.
+`agents.*` sections are strict: a daemon built before a key existed rejects the whole config file, and every agent MCP request fails with it. [Approving the first live run](#approving-the-first-live-run) says when `workspaceSweep` may be written.
 
 Enabling the janitor with `dryRun` on and reading the log is the whole rollout. `archiveDead` and `askFinished` are independent: `{ enabled: true, askFinished: false }` archives dead sessions and never resumes or prompts anything.
 
@@ -142,16 +142,30 @@ Only after the agent is archived, through archive-by-scope, and only when all of
 - It passes the git gate (`done-janitor-worktree.ts`), which refuses on any git failure:
   - the directory is the root of a **linked** worktree — its git dir differs from the common dir, so a primary checkout is refused wherever it lives;
   - it is not locked with `git worktree lock`, and no merge, rebase, cherry-pick, revert or bisect is half done;
-  - `git status --untracked-files=all` is empty. Ignored files do not count: they are the build output being reclaimed;
+  - `git status --untracked-files=all` is empty. Ignored files are the [deletion invariant](#the-deletion-invariant)'s to judge;
   - every commit reachable from HEAD is reachable from a remote-tracking ref or the local base branch recorded at creation. Both survive the deletion. Another local branch does not count: it may be the next worktree the janitor deletes. A squash-merged branch whose remote branch was deleted fails this check and is kept.
+- The [deletion invariant](#the-deletion-invariant) holds.
 
 Dead agents follow the same rules with one difference: nobody said the work was finished, so the git gate is the only proof, and it is enough. The gate keeps the worktree of a session that was cut off with uncommitted files, and the [work-at-risk sweep](work-snapshots.md#the-work-at-risk-sweep) decides whether that work needs anyone. Worktrees are planned after every dead tree in a sweep is archived, once each, so one shared by several dead agents is judged on what is true then. A sweep deletes at most `maxArchivesPerSweep` worktrees; the rest are picked up next sweep as orphans.
 
 A workspace whose agents were all archived earlier — by a person, or by a sweep whose reclaim failed — is reclaimed on the same terms once it has been quiet for `quietHours`, without asking anyone. A workspace that never had an agent is never touched: it may be one someone created a minute ago.
 
-Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each worktree of a dead tree before the tree is archived, and each worktree before it is deleted. The second matters because the gate counts a commit on the local base branch as safe while the snapshot counts only remotes. A snapshot that fails on a worktree at risk keeps that worktree for the sweep, reported as `its work is at risk and could not be snapshotted: …`. A dry run takes no snapshot.
+Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each worktree of a dead tree before the tree is archived, and each worktree as the last check before it is deleted. The second matters because the gate counts a commit on the local base branch as safe while the snapshot counts only remotes. A snapshot that fails keeps that worktree for the sweep, reported as `its work is at risk and could not be snapshotted: …`. A dry run takes no snapshot.
 
-The size is sampled with `du` immediately before the deletion.
+### The deletion invariant
+
+Deleting a directory is the one thing the janitor cannot undo, so every deletion it makes, by any pass, meets one rule: **every file in the worktree is tracked and pushed, or in a verified backup, or under a regenerable directory.** Anything else present keeps the worktree, and the reason is logged. When in doubt, it keeps: a git command that fails, output cut off at the runner's cap, or a process list that cannot be read all keep it.
+
+Regenerable means a directory on the path is one a build, an install or a test run recreates: `node_modules`, `dist`, `build`, `out-tsc`, `tsc-out`, `.next`, `.turbo`, `.cache`, `coverage`, `test-results`, `target`, `.gradle`, `DerivedData`, `Pods`, `.build`, `.swiftpm`, `__pycache__`, `.venv` and the rest named in `REGENERABLE_DIRS` (`agent/workspace-sweep-detector.ts`), plus `.yarn/cache`, `.DS_Store`, `*.pyc` and `*.tsbuildinfo`. Everything else that is ignored keeps the worktree: `.env`, `.xcode.env.local`, `google-services.json`, playtest evidence logs, `.data/`, `results/`, `src-tauri/binaries/`. Add a name to the list only for a directory whose contents are always rebuilt.
+
+The check runs twice:
+
+1. **Planning, read-only, the same in a dry run and a live one.** No schedule starts agents in the worktree; no process has its cwd, its executable or a file open inside it (one `lsof` over every process the daemon's user can see; the daemon's own process is left out); and the worktree read against HEAD (`readWorktreeCoverage`) shows no ignored path outside the list and no submodule or nested repository, which a backup holds only as a pointer. What differs from HEAD, and any unpushed commit, is what the snapshot will have to hold.
+2. **Confirming, live only, after `du` and right before the archive.** The schedule and process checks again, then the snapshot. If it reports nothing at risk, the worktree is read against HEAD again and nothing may differ. Otherwise the backup is verified — the ref points at the snapshot, the bundle exists, is non-empty, passes `git bundle verify` and holds the snapshot, or the personal remote holds the pushed branch; a snapshot with no copy outside the repository is not a backup — and the worktree is read against the snapshot commit through a scratch index. Any file not in it keeps the worktree: one written since the plan, or one the snapshot left out for its size, for looking like a secret, or for a rule added later. The next sweep snapshots it again.
+
+The read against the snapshot does not trust anything the snapshotter says about what it held, so its filters can change without this rule changing. A snapshot that does report files it left out (`skippedFiles`, and `possibleSecrets` once the snapshotter fills it) keeps the worktree with that reason.
+
+A loaded agent's own CLI process counts as a process inside: its worktree stays until the agent is closed, and a daemon restart closes every agent.
 
 ## Idle workspaces
 
@@ -160,7 +174,7 @@ The passes above reach only Paseo-owned worktrees, and only through their agents
 A workspace is archived when all of these hold:
 
 - **Not manually pinned** ([Manual pin vs. auto-pin](#manual-pin-vs-auto-pin)), and no agent in it carries `paseo.keep`. An auto-pinned workspace is swept like an unpinned one.
-- **Nothing in it is at work.** No agent is running, initializing, mid-turn, waiting on a permission, running provider subagents, or cut off by a daemon stop. No schedule or heartbeat targets one. No agent in it leads a live subagent anywhere: that is an orchestrator whose fleet is still loaded. No terminal is open and no script runs.
+- **Nothing in it is at work.** No agent is running, initializing, mid-turn, waiting on a permission, running provider subagents, or cut off by a daemon stop. No schedule or heartbeat targets one. No agent in it leads a live subagent anywhere: that is an orchestrator whose fleet is still loaded. No agent in it is a subagent whose leader, in another workspace, is loaded, at work or active within `idleHours`: a worker waits days while its leader works elsewhere and may send it more. No terminal is open and no script runs.
 - **It is idle past its threshold**, measured from the newest of the record's `createdAt` and `updatedAt`, every agent's last activity and, for an archived one, when it was archived, HEAD's commit time, and the directory's own mtime. Never the git index: `git status` rewrites it. A timestamp that does not parse reads as just now, and a workspace with no signal at all is active.
 - **No earlier pass archived or asked one of its agents this sweep.** Otherwise the dead pass could archive a 24h-quiet agent and this sweep delete its dirty worktree in the same run, skipping the 72 hours.
 
@@ -180,25 +194,38 @@ The archive goes through archive-by-scope, the path of a person's **Archive work
 
 - **External worktrees, local checkouts and directories** keep their directory, dirty or not. Only the record is archived.
 - **A Paseo-owned worktree** goes through the conflict and snapshot-failure checks and the [git gate](#reclaiming-the-worktree):
-  - clean and pushed: snapshotted like every deletion, then archived with its directory;
-  - dirty or unpushed: [snapshotted](work-snapshots.md), and archived with its directory only when the snapshot holds all of it. The snapshot leaves out untracked files over its size cap and every ignored file, and stores an untracked nested repository as a pointer to a commit. So any of those keeps the worktree, except ignored build output (`node_modules`, `dist`, `build`, `Pods`, `.gradle`, `.godot`, `__pycache__` and the rest listed in the detector). A `.env` or an ignored raw asset is the case this exists for. The snapshot is taken whatever the outcome;
+  - clean and pushed, or dirty or unpushed work a snapshot can hold: archived with its directory once the [deletion invariant](#the-deletion-invariant) holds. A worktree it keeps is not snapshotted by this pass; the [work-at-risk sweep](work-snapshots.md#the-work-at-risk-sweep) looks after its work;
   - gone: the record is archived;
   - anything else the gate refuses, a lock or a merge in progress: kept.
 - With `reclaimWorkspaces` off, no Paseo-owned worktree is archived.
 
-Each archive is decided again on freshly read state. A sweep archives at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. A dry run takes no snapshot.
+Each archive is decided again on freshly read state. A sweep attempts at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. An attempt spends the budget whatever the last checks decide, in a dry run and a live one alike, so a live run deletes only directories the dry run listed as `would-delete`. It may keep more: a snapshot that fails or leaves a file out, a backup that does not verify, or a file or process that appeared between the plan and the delete.
 
 | Key (`agents.doneJanitor.workspaceSweep`) | Default | Meaning                                                                               |
 | ----------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
 | `enabled`                                 | `true`  | Runs whenever the janitor is `enabled`. False also stops the idle-project rule        |
-| `dryRun`                                  | `false` | Report only. The janitor's own `dryRun` makes it dry too                              |
+| `dryRun`                                  | `true`  | Report only until set to `false`. The janitor's own `dryRun` makes it dry too         |
 | `idleHours`                               | `72`    | The `idle` rule's threshold                                                           |
 | `emptyIdleHours`                          | `24`    | The `empty` rule's threshold                                                          |
 | `maxArchivesPerSweep`                     | `10`    | Workspaces archived per sweep                                                         |
 | `projectGraceHours`                       | `24`    | How long a project with no active workspace stays ([Empty projects](#empty-projects)) |
 | `maxProjectRemovalsPerSweep`              | `10`    | Projects that rule removes per sweep                                                  |
 
-Scheduled runs need nothing more. A `new-agent` schedule archives its run's workspace when the run ends unless `archiveOnFinish` is false (`schedule/service.ts`); a run that keeps its workspace, or whose archive failed, is an ordinary idle workspace here.
+Scheduled runs need nothing more. A `new-agent` schedule archives its run's workspace when the run ends unless `archiveOnFinish` is false (`schedule/service.ts`); a run that keeps its workspace, or whose archive failed, is an ordinary idle workspace here. A schedule that is not completed and starts agents inside a worktree keeps that worktree's directory, so its next run does not start in a missing cwd.
+
+### Approving the first live run
+
+The sweep reports and deletes nothing until `workspaceSweep.dryRun` is `false`, set in code rather than config so the first daemon on a build cannot delete anything. The janitor's other passes keep their own `dryRun`. The first sweep runs 30 minutes after boot and logs every line once; later sweeps log only lines that changed.
+
+1. Read what it would do:
+   ```
+   grep '"Done janitor (dry run)"' ~/.paseo/daemon.log | grep -E '"action":"(would-archive-workspace|would-delete|kept-idle-workspace|would-remove-project)"'
+   ```
+   Each `would-delete` line carries its `rule`, its `idleFor` age and its `invariant` verdict: which files and commits the snapshot will have to back up, and which ignored paths go as regenerable. Each `would-archive-workspace` and `would-remove-project` line should name clutter.
+2. Approve by setting `agents.doneJanitor.workspaceSweep.dryRun` to `false` in `$PASEO_HOME/config.json` and running `paseo reload`.
+3. Watch the first live sweeps: `"msg":"Done janitor: archived an idle workspace"` lines carry `rule`, `idleFor`, `removedDirectory` and `invariant`, and `"action":"deleted"` lines carry `bytes`.
+
+**Never write `workspaceSweep` into `config.json` while an older daemon runs.** `agents.doneJanitor` is strict, so a daemon built before the key rejects the whole file and every agent MCP request fails with it. Rolling back to an older build with the key on disk does the same: remove the key first.
 
 ## Empty projects
 
@@ -222,7 +249,7 @@ Each report line is logged to `daemon.log` when it changes, never every sweep. G
 
 ```
 {"action":"would-archive","agentId":"a1…","title":"Build the feature","workspaceId":"ws-1","reason":"dead: closed, quiet for 4d; with 1 subagent(s) by cascade; 1 unread flag(s) (finished) will be cleared","dryRun":true,"msg":"Done janitor (dry run)"}
-{"action":"would-delete","workspaceId":"ws-1","path":"~/.paseo/worktrees/…/feature","reason":"every agent in it is dead or archived; clean tree and branch feature is merged or pushed","dryRun":true,…}
+{"action":"would-delete","workspaceId":"ws-1","path":"~/.paseo/worktrees/…/feature","reason":"every agent in it is dead or archived; clean tree and branch feature is merged or pushed","invariant":"holds: every file is tracked and pushed; ignored only regenerable (node_modules/)","dryRun":true,…}
 {"action":"kept-agent","agentId":"c3…","title":"Fix the bug","reason":"its workspace is pinned","dryRun":true,…}
 {"action":"kept-agent","agentId":"d4…","reason":"quiet for 14h of the 3d required","dryRun":true,…}
 {"action":"kept-workspace","workspaceId":"ws-4","path":"…","reason":"it has 2 uncommitted or untracked file(s)","dryRun":true,…}
@@ -232,10 +259,11 @@ Each report line is logged to `daemon.log` when it changes, never every sweep. G
 for idle workspaces and projects, where `kept-idle-workspace` appears only for one that is idle and was spared:
 
 ```
-{"action":"would-archive-workspace","workspaceId":"wks_06fe…","title":"iOS: stale-deals sender","path":"~/mobile-worktrees/stale-deals-csm-ios","reason":"idle for 12d; record only, its directory stays","dryRun":true,…}
+{"action":"would-archive-workspace","workspaceId":"wks_06fe…","title":"iOS: stale-deals sender","path":"~/mobile-worktrees/stale-deals-csm-ios","reason":"idle past 3d; record only, its directory stays","rule":"idle","idleFor":"12d","dryRun":true,…}
 {"action":"would-archive-workspace","workspaceId":"wks_79ff…","title":"Remediate disk-falling condition","path":"~","reason":"a self-heal fixer's workspace, and every fixer in it is finished; record only, its directory stays","dryRun":true,…}
-{"action":"would-delete","workspaceId":"wks_6290…","path":"~/.paseo/worktrees/…/qa-tests-silent-drop","reason":"idle for 5d; qa/silent-drop has 3 commit(s) neither merged into main nor pushed to any remote, backed up first by a snapshot","dryRun":true,…}
-{"action":"kept-idle-workspace","workspaceId":"wks_17e5…","path":"~/.paseo/worktrees/…/r7b-attack-visuals","reason":"224 ignored file(s) outside build output that no snapshot covers (docs/style/assets/raw/effect-burst-arcane.png, …)","dryRun":true,…}
+{"action":"would-delete","workspaceId":"wks_6290…","path":"~/.paseo/worktrees/…/qa-tests-silent-drop","reason":"idle past 3d; qa/silent-drop has 3 commit(s) neither merged into main nor pushed to any remote","rule":"idle","idleFor":"5d","invariant":"holds once a verified snapshot backs up 3 unpushed commit(s); ignored only regenerable (node_modules/)","dryRun":true,…}
+{"action":"kept-idle-workspace","workspaceId":"wks_17e5…","path":"~/.paseo/worktrees/…/r7b-attack-visuals","reason":"224 ignored path(s) that are not regenerable and no backup holds (docs/style/assets/raw/effect-burst-arcane.png, …)","dryRun":true,…}
+{"action":"kept-idle-workspace","workspaceId":"wks_a3c1…","path":"~/.paseo/worktrees/…/subterfuge-c3","reason":"a process runs inside it: bun (pid 48213) and 12 more","dryRun":true,…}
 {"action":"would-remove-project","projectId":"prj_9c…","path":"~/bn-worktrees/csm-required-actions","reason":"it has had no active workspace for 3d","dryRun":true,…}
 ```
 
@@ -254,7 +282,9 @@ and for live agents:
 ## Not automated
 
 - **Squash-merged branches whose remote branch is gone.** Their commits are unreachable from anything that survives, so they are kept and reported; delete them by hand after checking.
-- **Ignored files in a clean worktree.** Treated as build output. A clean, pushed worktree holding the only copy of a file matched by `.gitignore` loses it. A dirty one is kept instead ([Idle workspaces](#the-directory)) and stays until someone backs the file up or deletes it.
+- **Ignored files outside the regenerable list.** They keep their worktree ([The deletion invariant](#the-deletion-invariant)) until someone backs them up or deletes them.
+- **A regenerable name at any depth.** An ignored path counts as regenerable when any directory on its way is on the list, so an ignored `notes/build/` would go with its worktree. Git ignoring it is the other half of the test; matching only where each build tool puts its output would need a rule per tool.
+- **Windows.** There is no `lsof`, so the process check fails and the janitor deletes no worktree there. Records are still archived.
 - **Background shells and `Monitor` watches inside a Claude process.** The daemon cannot see them. The quiet period and the question are the only defence: an agent waiting on one should answer `NOT_DONE`.
 - **Dead subagents of a live leader.** The dead pass judges whole trees from the root, so a live idle leader keeps every dead child until it answers the question and is archived. The subagents track's **Archive finished** row clears them by hand.
 - **Subagents on their own.** A subagent is archived with its root. One in another workspace, or open in a tab, is detached instead ([agent-lifecycle.md](agent-lifecycle.md#relationships)), becomes a root, and is asked on its own later.
