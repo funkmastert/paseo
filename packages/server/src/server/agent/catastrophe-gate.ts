@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { createRunGitCommand } from "../../utils/run-git-command.js";
+import { createRunGitCommand, runWithGitCommandPriority } from "../../utils/run-git-command.js";
 import {
   type ExpandedWord,
   type ShellContext,
@@ -114,14 +114,21 @@ export function formatCatastropheDenial(decision: CatastropheBlock, command: str
 const BRANCH_LOOKUP_TIMEOUT_MS = 5_000;
 const runGitCommand = createRunGitCommand("catastrophe-gate");
 
-/** `git rev-parse --abbrev-ref HEAD` where the push would run; null on any failure. */
+/**
+ * `git rev-parse --abbrev-ref HEAD` where the push would run; null on any failure. Runs at high
+ * git-command queue priority: this is the only I/O the gate does, and it sits in front of a real
+ * `git push -f`, so it must not wait behind the daemon's other git traffic for longer than its
+ * own 5 s kill allows.
+ */
 export async function resolveCurrentBranchWithGit(
   cwd: string,
   gitDir?: string,
 ): Promise<string | null> {
   const args = [...(gitDir ? [`--git-dir=${gitDir}`] : []), "rev-parse", "--abbrev-ref", "HEAD"];
   try {
-    const result = await runGitCommand(args, { cwd, timeout: BRANCH_LOOKUP_TIMEOUT_MS });
+    const result = await runWithGitCommandPriority("high", () =>
+      runGitCommand(args, { cwd, timeout: BRANCH_LOOKUP_TIMEOUT_MS }),
+    );
     return result.exitCode === 0 ? result.stdout.trim() || null : null;
   } catch {
     return null;

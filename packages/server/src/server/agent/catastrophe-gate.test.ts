@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 
 import {
   type CatastropheRule,
@@ -423,6 +423,32 @@ describe("catastrophe gate: real repository", () => {
     expect(await checkCatastrophe("git push -f", root, resolveCurrentBranchWithGit)).toEqual({
       block: false,
     });
+  });
+});
+
+describe("catastrophe gate: branch lookup priority", () => {
+  test("requests the branch lookup at high git-command priority", async () => {
+    vi.resetModules();
+    const priorities: string[] = [];
+    vi.doMock("../../utils/run-git-command.js", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("../../utils/run-git-command.js")>();
+      return {
+        ...actual,
+        runWithGitCommandPriority: <T>(priority: "high" | "normal", operation: () => T): T => {
+          priorities.push(priority);
+          return operation();
+        },
+        createRunGitCommand: () => async () => ({ exitCode: 0, stdout: "main\n", stderr: "" }),
+      };
+    });
+    try {
+      const gate = await import("./catastrophe-gate.js");
+      await gate.resolveCurrentBranchWithGit("/tmp");
+      expect(priorities).toEqual(["high"]);
+    } finally {
+      vi.doUnmock("../../utils/run-git-command.js");
+      vi.resetModules();
+    }
   });
 });
 
