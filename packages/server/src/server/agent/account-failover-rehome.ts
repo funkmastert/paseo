@@ -11,13 +11,18 @@
  */
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
-import { getMigratedToFromLabels, isLimitShapedError } from "./account-failover-detector.js";
+import {
+  getMigratedToFromLabels,
+  isAccountDeadFor,
+  isLimitShapedError,
+} from "./account-failover-detector.js";
 
 export interface PlanIdleRehomesInput {
   agents: readonly AccountFailoverAgentSummary[];
   poolProviderIds: ReadonlySet<string>;
-  /** This sweep's dead accounts, from planAccountFailoverSweep. */
+  /** This sweep's dead accounts and capped model windows, from planAccountFailoverSweep. */
   deadProviderIds: ReadonlySet<string>;
+  cappedModelWindows: ReadonlyMap<string, readonly string[]>;
   /** Per-agent earliest next attempt after a refused move. */
   backoffs: ReadonlyMap<string, number>;
   nowMs: number;
@@ -27,7 +32,7 @@ export function planIdleRehomes(input: PlanIdleRehomesInput): AccountFailoverAge
   return input.agents.filter((agent) => {
     if (agent.internal) return false;
     if (!input.poolProviderIds.has(agent.provider)) return false;
-    if (!input.deadProviderIds.has(agent.provider)) return false;
+    if (!isAccountDeadFor(input, agent)) return false;
     if (getMigratedToFromLabels(agent.labels)) return false;
     // Cut off by the cap: the rescue leg moves it and resumes the turn it lost.
     if (isLimitShapedError(agent.lastError)) return false;

@@ -85,6 +85,9 @@ relay:
 plugin:
   - "plugins/claude-account-pool/**"
   - "packages/plugin/**"
+  # classify.test.ts checks the plugin's copy of the daemon's limit pattern, so a change on the
+  # daemon side alone must run it too.
+  - "packages/server/src/server/agent/account-failover-detector.ts"
 
 cli:
   - "packages/cli/**"

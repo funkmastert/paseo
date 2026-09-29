@@ -79,6 +79,48 @@ export function resolveLeaderRole(policy: RoleModelPolicy): RoleRecord {
   return requireStandardRole(policy, LEADER_ROLE_ID);
 }
 
+/**
+ * The role a create with no calling agent declared for itself, or undefined when it declared
+ * none that a role owns.
+ *
+ * Only explicit labels count: `paseo.agent-type` found in `agentTypeMappings` (tier 1), or
+ * `paseo.agent-role` naming a role (tier 2). No title fallback and no text classification, so an
+ * unlabelled root stays the leader whatever its prompt says. Daemon jobs such as the remediation
+ * ladder start agents with no caller and label them workers; ignoring the label ran each one as a
+ * leader.
+ */
+export function resolveDeclaredRootRole(
+  policy: RoleModelPolicy,
+  labels: Record<string, string> | undefined,
+): { role: RoleRecord; tier: 1 | 2 } | undefined {
+  const typeLabelValue = labels?.[AGENT_TYPE_LABEL];
+  if (typeLabelValue !== undefined) {
+    const mappedRoleId = policy.agentTypeMappings[typeLabelValue];
+    const role = mappedRoleId !== undefined ? findRoleById(policy, mappedRoleId) : undefined;
+    if (role) {
+      return { role, tier: 1 };
+    }
+  }
+  const declaredRole = labels?.[AGENT_ROLE_LABEL];
+  if (declaredRole !== undefined) {
+    const role = findRoleByExactWordCI(policy, declaredRole);
+    if (role) {
+      return { role, tier: 2 };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether a create with no calling agent is placed and configured like a child: it declared a
+ * role, and that role is not the leader. The classifier and the account router both ask this, so
+ * the model a create runs and the account it runs on can't disagree about what it is.
+ */
+export function placesRootAsChild(policy: RoleModelPolicy, labels: Record<string, string> | undefined): boolean {
+  const declared = resolveDeclaredRootRole(policy, labels);
+  return declared !== undefined && declared.role.id !== LEADER_ROLE_ID;
+}
+
 /** Exact (not substring) case-insensitive match against every role's name + aliases. */
 function findRoleByExactWordCI(policy: RoleModelPolicy, value: string): RoleRecord | undefined {
   const lower = value.toLowerCase();

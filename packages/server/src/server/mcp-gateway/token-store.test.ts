@@ -43,23 +43,27 @@ describe("McpGatewayTokenStore", () => {
     expect(store.getStaticHeaders("slack")).toBeUndefined();
   });
 
-  test("round-trips OAuth tokens and writes the file 0600", () => {
-    const paseoHome = createTempHome();
-    const store = new McpGatewayTokenStore(paseoHome);
+  // Windows has no POSIX file modes; "tokens survive reload" still covers the round trip there.
+  test.skipIf(process.platform === "win32")(
+    "round-trips OAuth tokens and writes the file 0600",
+    () => {
+      const paseoHome = createTempHome();
+      const store = new McpGatewayTokenStore(paseoHome);
 
-    store.saveOAuthTokens("github", {
-      access_token: "at-1",
-      token_type: "Bearer",
-      refresh_token: "rt-1",
-    });
+      store.saveOAuthTokens("github", {
+        access_token: "at-1",
+        token_type: "Bearer",
+        refresh_token: "rt-1",
+      });
 
-    expect(store.getOAuthTokens("github")).toEqual({
-      access_token: "at-1",
-      token_type: "Bearer",
-      refresh_token: "rt-1",
-    });
-    expect(modeOf(path.join(paseoHome, TOKENS_RELATIVE_PATH))).toBe(PRIVATE_FILE_MODE);
-  });
+      expect(store.getOAuthTokens("github")).toEqual({
+        access_token: "at-1",
+        token_type: "Bearer",
+        refresh_token: "rt-1",
+      });
+      expect(modeOf(path.join(paseoHome, TOKENS_RELATIVE_PATH))).toBe(PRIVATE_FILE_MODE);
+    },
+  );
 
   test("tokens survive reload via a fresh store instance", () => {
     const paseoHome = createTempHome();

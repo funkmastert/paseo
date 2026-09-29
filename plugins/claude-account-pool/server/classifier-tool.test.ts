@@ -46,6 +46,7 @@ function world(): ClassifierWorld {
       isHealthyFor: () => true,
       isHealthyForAllWindows: () => true,
       isLastResortEligible: () => true,
+      isExhaustedFor: () => false,
       windowUtilization: () => undefined,
       describeWindow: () => undefined,
       windowIds: () => [],

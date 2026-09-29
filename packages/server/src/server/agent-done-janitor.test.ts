@@ -17,10 +17,13 @@ import {
   type DoneJanitorConfig,
   type DoneJanitorDependencies,
   type DoneJanitorProject,
+  type DoneJanitorReportEntry,
   type DoneJanitorWorkspace,
   type ProviderHealth,
 } from "./agent-done-janitor.js";
-import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import type { WorktreeCoverage, WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import type { ProcessScan } from "./worktree-process-scan.js";
+import type { WorkspaceActivitySignals } from "./agent/workspace-sweep-detector.js";
 import type { PushPayload } from "./push/index.js";
 import type { WorktreeSnapshotResult } from "./remediation/contract.js";
 
@@ -66,11 +69,32 @@ function workspace(overrides: Partial<DoneJanitorWorkspace> = {}): DoneJanitorWo
   };
 }
 
+function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
+  return {
+    commit: "head",
+    changed: [],
+    untracked: [],
+    ignored: [],
+    gitlinks: [],
+    unbackedCommits: 0,
+    hidden: [],
+    lfs: [],
+    unreadable: [],
+    nestedRepositories: [],
+    manifestDirectories: [],
+    ...overrides,
+  };
+}
+
 interface Harness {
   janitor: AgentDoneJanitor;
   asked: string[];
   archived: string[];
   reclaimed: string[];
+  /** Workspaces the idle-workspace sweep archived. */
+  archivedWorkspaces: string[];
+  /** The directory each deleting archive was told its checks read (`expectedDirectory`). */
+  expectedDirectories: string[];
   removedProjects: string[];
   pushes: PushPayload[];
   levels: (string | undefined)[];
@@ -108,6 +132,20 @@ function harness(input: {
   /** Runs as each read of the stored agents is served; `call` counts from 1. */
   onListStored?: (call: number, stored: StoredAgentRecord[]) => void;
   snapshot?: (cwd: string) => WorktreeSnapshotResult;
+  /** The directory's activity; absent: nothing readable (no git, no directory). */
+  signals?: (directory: string) => WorkspaceActivitySignals;
+  /** Ignored paths the coverage read lists; null: git could not list them. */
+  ignored?: (worktreePath: string) => string[] | null;
+  nestedRepositories?: string[];
+  /** The whole coverage read; overrides `ignored` and `nestedRepositories`. */
+  coverage?: (worktreePath: string, commit: string | null) => WorktreeCoverage | null;
+  /** Why a snapshot's backup is not verified; absent: it is. */
+  unverifiedBackup?: (snapshot: WorktreeSnapshotResult) => string | null;
+  processes?: (directory: string) => ProcessScan;
+  scheduledCwds?: string[];
+  runningScripts?: number;
+  /** The directory archive-by-scope would delete; absent: its resolution, by path shape. */
+  resolveArchiveDirectory?: (workspace: DoneJanitorWorkspace) => string | null;
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -115,6 +153,8 @@ function harness(input: {
   const asked: string[] = [];
   const archived: string[] = [];
   const reclaimed: string[] = [];
+  const archivedWorkspaces: string[] = [];
+  const expectedDirectories: string[] = [];
   const removedProjects: string[] = [];
   const projects = input.projects ?? [];
   const pushes: PushPayload[] = [];
@@ -124,6 +164,19 @@ function harness(input: {
   let listProjectCalls = 0;
   let probeCalls = 0;
   const config = input.config;
+  /** Archive-by-scope's record half: the workspace and every agent in it. */
+  const archiveWorkspaceRecords = (workspaceId: string, event: string): void => {
+    archivedWorkspaces.push(workspaceId);
+    events.push(event);
+    const archivedAt = new Date(now).toISOString();
+    const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
+    workspaces[index] = { ...workspaces[index], archivedAt };
+    for (const [agentIndex, candidate] of stored.entries()) {
+      if (candidate.workspaceId === workspaceId && !candidate.archivedAt) {
+        stored[agentIndex] = { ...candidate, archivedAt, updatedAt: archivedAt };
+      }
+    }
+  };
   const deps: DoneJanitorDependencies = {
     listLiveAgents: () => input.live ?? [],
     listStoredAgents: async () => {
@@ -133,6 +186,7 @@ function harness(input: {
     },
     listWorkspaces: async () => workspaces,
     listScheduledAgentIds: async () => new Set(input.scheduled ?? []),
+    listScheduledCwds: async () => input.scheduledCwds ?? [],
     getProviderHealth: async () => input.health ?? { askable: true },
     askAgent: async ({ agentId }) => {
       asked.push(agentId);
@@ -163,13 +217,50 @@ function harness(input: {
       input.checkWorktree?.(worktreePath) ??
       input.safety ?? { safe: true, branch: "feature", head: "abc" },
     measureBytes: async () => 3 * GB,
-    reclaimWorkspace: async (workspaceId) => {
+    reclaimWorkspace: async (workspaceId, directory) => {
       reclaimed.push(workspaceId);
+      expectedDirectories.push(directory);
       events.push(`reclaim:${workspaceId}`);
       const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
       workspaces[index] = { ...workspaces[index], archivedAt: new Date(now).toISOString() };
       return { removedDirectory: true };
     },
+    resolveArchiveDirectory: async (candidate) => {
+      if (input.resolveArchiveDirectory) return input.resolveArchiveDirectory(candidate);
+      // Archive-by-scope's own resolution: the flag, or an older record's path shape.
+      if (candidate.isPaseoOwnedWorktree && candidate.worktreeRoot && candidate.mainRepoRoot) {
+        return candidate.worktreeRoot;
+      }
+      if (candidate.kind !== "worktree") return null;
+      const owned = /^\/home\/t\/\.paseo\/worktrees\/[^/]+\/[^/]+/u.exec(
+        candidate.worktreeRoot ?? candidate.cwd,
+      );
+      return owned?.[0] ?? null;
+    },
+    archiveWorkspace: async (workspaceId, directory) => {
+      expectedDirectories.push(directory);
+      archiveWorkspaceRecords(workspaceId, `archive-workspace:${workspaceId}`);
+      return { removedDirectory: true };
+    },
+    archiveWorkspaceRecord: async (workspaceId) => {
+      archiveWorkspaceRecords(workspaceId, `archive-record:${workspaceId}`);
+    },
+    countRunningScripts: async () => input.runningScripts ?? 0,
+    readActivitySignals: async (directory) =>
+      input.signals?.(directory) ?? { headCommitMs: null, directoryMtimeMs: null },
+    readWorktreeCoverage: async ({ worktreePath, commit }) => {
+      if (input.coverage) return input.coverage(worktreePath, commit);
+      const ignored = input.ignored ? input.ignored(worktreePath) : [];
+      if (ignored === null) return null;
+      return coverage({
+        commit: commit ?? "head",
+        ignored,
+        gitlinks: input.nestedRepositories ?? [],
+      });
+    },
+    verifyBackup: async ({ snapshot }) => input.unverifiedBackup?.(snapshot) ?? null,
+    listProcessesInside: async (directory) =>
+      input.processes?.(directory) ?? { kind: "scanned", processes: [] },
     snapshotWorktree: async ({ cwd }) => {
       events.push(`snapshot:${cwd}`);
       return input.snapshot?.(cwd) ?? { kind: "nothing-at-risk", worktreePath: cwd };
@@ -209,6 +300,8 @@ function harness(input: {
     asked,
     archived,
     reclaimed,
+    archivedWorkspaces,
+    expectedDirectories,
     removedProjects,
     pushes,
     levels,
@@ -221,8 +314,11 @@ function harness(input: {
   };
 }
 
+/** The idle-workspace sweep, off: these suites are about the passes that came before it. */
+const SWEEP_OFF = { workspaceSweep: { enabled: false } } as const;
+
 // The ask path, on its own: the dead pass would archive these stored (closed) records unasked.
-const ON: DoneJanitorConfig = { enabled: true, archiveDead: false };
+const ON: DoneJanitorConfig = { enabled: true, archiveDead: false, ...SWEEP_OFF };
 
 describe("AgentDoneJanitor", () => {
   test("absent config does nothing at all — today's behaviour", async () => {
@@ -240,6 +336,8 @@ describe("AgentDoneJanitor", () => {
     expect(h.asked).toEqual(["agent-1"]);
     expect(h.archived).toEqual(["agent-1"]);
     expect(h.reclaimed).toEqual(["ws-1"]);
+    // The archive deletes only the directory the checks read, or throws.
+    expect(h.expectedDirectories).toEqual(["/home/t/.paseo/worktrees/h/feature"]);
     expect(report?.entries).toContainEqual(
       expect.objectContaining({ action: "deleted", workspaceId: "ws-1", bytes: 3 * GB }),
     );
@@ -485,6 +583,55 @@ describe("AgentDoneJanitor", () => {
     );
   });
 
+  test("a workspace in a directory above the worktree does not keep it", async () => {
+    // A self-heal fixer runs in the home directory; its workspace once kept every worktree.
+    const h = harness({
+      config: ON,
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-home",
+          kind: "directory",
+          cwd: "/home/t",
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        }),
+      ],
+    });
+
+    await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual(["ws-1"]);
+  });
+
+  test("a workspace inside the worktree keeps it", async () => {
+    const h = harness({
+      config: ON,
+      workspaces: [
+        workspace(),
+        workspace({
+          workspaceId: "ws-inner",
+          kind: "directory",
+          cwd: "/home/t/.paseo/worktrees/h/feature/packages/app",
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        }),
+      ],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "workspace ws-inner (directory) uses the same directory",
+      }),
+    );
+  });
+
   test("workspace reclamation can be turned off without turning off archiving", async () => {
     const h = harness({ config: { ...ON, reclaimWorkspaces: false } });
 
@@ -590,7 +737,7 @@ describe("AgentDoneJanitor", () => {
   });
 });
 
-const DEAD_ON: DoneJanitorConfig = { enabled: true };
+const DEAD_ON: DoneJanitorConfig = { enabled: true, ...SWEEP_OFF };
 const PARENT = "paseo.parent-agent-id";
 
 describe("AgentDoneJanitor dead pass", () => {
@@ -741,6 +888,51 @@ describe("AgentDoneJanitor dead pass", () => {
 
     expect(h.reclaimed).toEqual([]);
     expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-workspace", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("an auto-pinned workspace does not pin a dead agent: it reclaims like unpinned", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "auto" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual(["ws-1"]);
+    expect(report?.entries).not.toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("a manually pinned workspace still pins every agent in it, and its worktree", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "manual" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("an auto-pinned workspace is reclaimed once every agent in it is already archived", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "auto" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual(["ws-1"]);
+    expect(report?.entries).not.toContainEqual(
       expect.objectContaining({ action: "kept-workspace", reason: "its workspace is pinned" }),
     );
   });
@@ -1031,17 +1223,25 @@ describe("AgentDoneJanitor dead pass", () => {
     );
   });
 
-  test("a snapshot that could not read the directory at all spares nothing", async () => {
+  test("a snapshot that could not read the directory at all keeps it: nothing vouches for its files", async () => {
     const h = harness({
       config: DEAD_ON,
       snapshot: () => ({
         kind: "failed",
         worktreePath: null,
-        error: "the directory does not exist",
+        error: "it is not inside a git repository",
       }),
     });
-    await h.janitor.tick();
-    expect(h.reclaimed).toEqual(["ws-1"]);
+    const report = await h.janitor.tick();
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason:
+          "its work is at risk and could not be snapshotted: it is not inside a git repository",
+      }),
+    );
   });
 
   test("a dry run takes no snapshot", async () => {
@@ -1061,7 +1261,7 @@ describe("AgentDoneJanitor dead pass", () => {
   });
 
   test("archiveDead off leaves closed agents to the question, as before", async () => {
-    const h = harness({ config: { enabled: true, archiveDead: false } });
+    const h = harness({ config: { enabled: true, archiveDead: false, ...SWEEP_OFF } });
 
     await h.janitor.tick();
 
@@ -1178,7 +1378,7 @@ describe("AgentDoneJanitor empty projects", () => {
   });
 
   // Nothing but projects: no agents, so the other passes have nothing to do.
-  const ON_PROJECTS: DoneJanitorConfig = { enabled: true };
+  const ON_PROJECTS: DoneJanitorConfig = { enabled: true, ...SWEEP_OFF };
   const TWO_HOURS_AGO = new Date(NOW - 2 * HOUR).toISOString();
 
   /** A project whose root was never created: the shape of a deleted worktree's leftover. */
@@ -1548,7 +1748,13 @@ describe("AgentDoneJanitor empty projects", () => {
   test("a project pass runs even when the janitor has no agents to look at", async () => {
     const h = projectsHarness({
       projects: [project("wt4-gone")],
-      config: { enabled: true, archiveDead: false, askFinished: false, reclaimWorkspaces: false },
+      config: {
+        enabled: true,
+        archiveDead: false,
+        askFinished: false,
+        reclaimWorkspaces: false,
+        ...SWEEP_OFF,
+      },
     });
 
     await h.janitor.tick();
@@ -1631,5 +1837,1044 @@ describe("volumeRootOf", () => {
     "",
   ])("%s is on the system volume", (rootPath) => {
     expect(volumeRootOf(rootPath)).toBeNull();
+  });
+});
+
+function projectIdsReported(
+  report: Awaited<ReturnType<AgentDoneJanitor["tick"]>>,
+  action: DoneJanitorReportEntry["action"],
+): string[] {
+  const entries = report?.entries ?? [];
+  return entries
+    .flatMap((entry) => (entry.action === action && entry.projectId ? [entry.projectId] : []))
+    .sort();
+}
+
+describe("AgentDoneJanitor idle-workspace sweep", () => {
+  // Only the sweep: nothing is asked, nothing dead is archived, so each test sees the sweep alone.
+  const SWEEP: DoneJanitorConfig = {
+    enabled: true,
+    archiveDead: false,
+    askFinished: false,
+    workspaceSweep: { dryRun: false },
+  };
+  const OLD_SIGNALS: WorkspaceActivitySignals = {
+    headCommitMs: NOW - 120 * HOUR,
+    directoryMtimeMs: NOW - 120 * HOUR,
+  };
+  const EXTERNAL = "/home/t/mobile-worktrees/feature";
+
+  function external(overrides: Partial<DoneJanitorWorkspace> = {}): DoneJanitorWorkspace {
+    return workspace({
+      cwd: EXTERNAL,
+      worktreeRoot: EXTERNAL,
+      isPaseoOwnedWorktree: false,
+      mainRepoRoot: "/home/t/mobile",
+      ...overrides,
+    });
+  }
+
+  function sweepHarness(input: Parameters<typeof harness>[0] = {}): Harness {
+    return harness({
+      config: SWEEP,
+      stored: [record({ cwd: EXTERNAL })],
+      workspaces: [external()],
+      signals: () => OLD_SIGNALS,
+      ...input,
+    });
+  }
+
+  const snapshotted = (cwd: string): WorktreeSnapshotResult => ({
+    kind: "snapshotted",
+    worktreePath: cwd,
+    ref: "refs/backup/2026-09-21/feature",
+    commit: "abc",
+    dirtyFiles: 1,
+    unpushedCommits: 0,
+    skippedFiles: [],
+    offsite: { kind: "bundled", path: "/b/feature.bundle" },
+  });
+
+  test("an idle external worktree is archived, record only: its directory stays", async () => {
+    const h = sweepHarness();
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+    // The archive that keeps the directory: record only cannot delete anything.
+    expect(h.events).toEqual(["archive-record:ws-1"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "archived-workspace",
+        workspaceId: "ws-1",
+        path: EXTERNAL,
+        reason: "idle past 3d; record only, its directory stays",
+        rule: "idle",
+        idleFor: "4d",
+      }),
+    );
+    expect(h.pushes).toEqual([expect.objectContaining({ body: "Archived 1 idle workspace." })]);
+  });
+
+  test("an external worktree with uncommitted work is archived record only, without a git gate", async () => {
+    const h = sweepHarness({
+      checkWorktree: () => {
+        throw new Error("an external worktree never goes through the deletion gate");
+      },
+    });
+
+    await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+  });
+
+  test("a workspace used recently is left alone and not reported", async () => {
+    const h = sweepHarness({
+      signals: () => ({ ...OLD_SIGNALS, headCommitMs: NOW - 5 * HOUR }),
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+    expect(report?.entries).toEqual([]);
+  });
+
+  test("a running agent keeps its workspace", async () => {
+    const h = sweepHarness({ live: [liveSummary({ cwd: EXTERNAL, lifecycle: "running" })] });
+
+    await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+  });
+
+  test("a pinned workspace is kept", async () => {
+    const h = sweepHarness({ workspaces: [external({ pinnedAt: FOUR_DAYS_AGO })] });
+
+    await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+  });
+
+  test("a running script keeps its workspace", async () => {
+    const h = sweepHarness({ runningScripts: 1 });
+
+    await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+  });
+
+  test("an agent that starts between the sweep's read and the archive keeps the workspace", async () => {
+    const h = sweepHarness({
+      onListStored: (call, stored) => {
+        // The sweep's own read is the second; everything after it sees the agent at work.
+        if (call >= 3) stored[0] = { ...stored[0], lastStatus: "running" };
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-idle-workspace",
+        workspaceId: "ws-1",
+        reason: "it was idle, but then agent agent-1 is running",
+      }),
+    );
+  });
+
+  describe("agents archived this sweep", () => {
+    const FIVE_DAYS_AGO = new Date(NOW - 120 * HOUR).toISOString();
+    const DIRTY: WorktreeDeletionSafety = {
+      safe: false,
+      reason: "it has 1 uncommitted or untracked file(s)",
+      atRisk: "dirty",
+    };
+
+    test("the dead pass archives a 24h-quiet agent; its dirty worktree is not deleted in the same sweep", async () => {
+      const h = sweepHarness({
+        config: {
+          enabled: true,
+          askFinished: false,
+          deadQuietHours: 24,
+          workspaceSweep: { dryRun: false },
+        },
+        stored: [record({ updatedAt: new Date(NOW - 25 * HOUR).toISOString() })],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archived).toEqual(["agent-1"]);
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).not.toContainEqual(expect.objectContaining({ action: "deleted" }));
+    });
+
+    test("an agent that answered DONE a minute ago does not take its dirty worktree with it", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, archiveDead: false, workspaceSweep: { dryRun: false } },
+        live: [liveSummary({})],
+        stored: [record()],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archived).toEqual(["agent-1"]);
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
+    test("a dry run reports the same: the would-be archive keeps the worktree this sweep", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, askFinished: false, deadQuietHours: 24, dryRun: true },
+        stored: [record({ updatedAt: new Date(NOW - 25 * HOUR).toISOString() })],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-archive", agentId: "agent-1" }),
+      );
+      expect(report?.entries).not.toContainEqual(
+        expect.objectContaining({ action: "would-delete" }),
+      );
+    });
+
+    test("an agent archived long ago still dates the workspace from its archive", async () => {
+      const h = sweepHarness({
+        stored: [
+          record({
+            updatedAt: new Date(NOW - 200 * HOUR).toISOString(),
+            archivedAt: new Date(NOW - 30 * HOUR).toISOString(),
+          }),
+        ],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+  });
+
+  describe("Paseo-owned worktrees, whose directory the archive deletes", () => {
+    test("clean and pushed: snapshotted, archived and its directory deleted", async () => {
+      const h = sweepHarness({ stored: [record()], workspaces: [workspace()] });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([
+        "snapshot:/home/t/.paseo/worktrees/h/feature",
+        "archive-workspace:ws-1",
+      ]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "deleted",
+          workspaceId: "ws-1",
+          bytes: 3 * GB,
+          reason: "idle past 3d; clean tree and branch feature is merged or pushed",
+          rule: "idle",
+          idleFor: "4d",
+          invariant: "holds: every file is tracked and pushed",
+        }),
+      );
+      expect(h.pushes[0]?.body).toBe("Deleted 1 worktree, freeing 3.0 GB.");
+    });
+
+    test("dirty with no backup: kept, and reported", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: {
+          safe: false,
+          reason: "it has 1 uncommitted or untracked file(s)",
+          atRisk: "dirty",
+        },
+        snapshot: (cwd) => ({ kind: "failed", worktreePath: cwd, error: "disk full" }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          workspaceId: "ws-1",
+          reason: "its work is at risk and could not be snapshotted: disk full",
+        }),
+      );
+    });
+
+    test("dirty with ignored files that are not regenerable: kept, before any snapshot", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: {
+          safe: false,
+          reason: "it has 1 uncommitted or untracked file(s)",
+          atRisk: "dirty",
+        },
+        snapshot: snapshotted,
+        ignored: () => ["node_modules/", ".env"],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      // The work-at-risk sweep snapshots a kept worktree; this pass does not every 30 minutes.
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "1 ignored path(s) that are not regenerable and no backup holds (.env)",
+        }),
+      );
+    });
+
+    test("dirty with an untracked nested repository: kept", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: {
+          safe: false,
+          reason: "it has 1 uncommitted or untracked file(s)",
+          atRisk: "dirty",
+        },
+        snapshot: snapshotted,
+        nestedRepositories: ["vendor/tool/"],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
+    test("unpushed with a backup of that exact state: archived after the snapshot", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: {
+          safe: false,
+          reason: "feature has 2 commit(s) neither merged into main nor pushed to any remote",
+          atRisk: "unpushed",
+        },
+        snapshot: snapshotted,
+        coverage: (_path, commit) =>
+          coverage({
+            commit: commit ?? "head",
+            ignored: ["node_modules/", "ios/Pods/"],
+            manifestDirectories: ["ios"],
+          }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([
+        "snapshot:/home/t/.paseo/worktrees/h/feature",
+        "archive-workspace:ws-1",
+      ]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "deleted",
+          reason:
+            "idle past 3d; feature has 2 commit(s) neither merged into main nor pushed to any remote",
+          invariant:
+            "holds: every file is in the verified snapshot; ignored only regenerable (node_modules/, ios/Pods/); backed up at refs/backup/2026-09-21/feature, bundled at /b/feature.bundle",
+        }),
+      );
+    });
+
+    test("refused by the gate for anything but saveable work: kept, nothing snapshotted", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: { safe: false, reason: "it is locked with git worktree lock" },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "it is locked with git worktree lock",
+        }),
+      );
+    });
+
+    test("with reclamation off, nothing whose archive deletes a directory is touched", async () => {
+      const h = sweepHarness({
+        config: { ...SWEEP, reclaimWorkspaces: false },
+        stored: [record()],
+        workspaces: [workspace()],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
+    test("a worktree whose directory is gone is archived, record only", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: { safe: false, reason: "the directory does not exist", gone: true },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      // Through the archive that keeps the directory, so a directory back by then stays.
+      expect(h.events).toEqual(["archive-record:ws-1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "archived-workspace",
+          reason: "idle past 3d; its directory is gone",
+        }),
+      );
+    });
+  });
+
+  describe("an older record without the ownership flag, whose cwd is a missing subdirectory", () => {
+    // Archive-by-scope deletes the worktree root above the cwd (workspace-archive-service.ts,
+    // COMPAT(archiveMissingWorkspacePlacement)): the root is what every check must read.
+    const ROOT = "/home/t/.paseo/worktrees/h1/slug";
+    const CWD = `${ROOT}/packages/app`;
+    const GONE: WorktreeDeletionSafety = {
+      safe: false,
+      reason: "the directory does not exist",
+      gone: true,
+    };
+    const legacy = (): DoneJanitorWorkspace =>
+      workspace({
+        cwd: CWD,
+        worktreeRoot: null,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      });
+    const legacyHarness = (input: Parameters<typeof harness>[0] = {}) => {
+      const checked: string[] = [];
+      const h = sweepHarness({
+        stored: [record({ cwd: CWD })],
+        workspaces: [legacy()],
+        checkWorktree: (path) => {
+          checked.push(path);
+          return path === ROOT
+            ? {
+                safe: false,
+                reason: "it has 1 uncommitted or untracked file(s)",
+                atRisk: "dirty",
+              }
+            : GONE;
+        },
+        ...input,
+      });
+      return { h, checked };
+    };
+
+    test("the dry run checks the root and names it: a would-delete, never 'record only'", async () => {
+      const { h, checked } = legacyHarness({
+        config: { ...SWEEP, workspaceSweep: {} },
+        coverage: (_path, commit) =>
+          coverage({ commit: commit ?? "head", untracked: ["src/only-copy.txt"] }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(checked).toEqual([ROOT]);
+      expect(report?.entries).toEqual([
+        expect.objectContaining({
+          action: "would-delete",
+          workspaceId: "ws-1",
+          path: ROOT,
+          reason: "idle past 3d; it has 1 uncommitted or untracked file(s)",
+          invariant: "holds once a verified snapshot backs up 1 changed or untracked file(s)",
+          dryRun: true,
+        }),
+      ]);
+    });
+
+    test("a root holding files nothing backs up is kept, and the line names the root", async () => {
+      const { h, checked } = legacyHarness({ ignored: () => ["src/only-copy.env"] });
+
+      const report = await h.janitor.tick();
+
+      expect(checked).toEqual([ROOT]);
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          path: ROOT,
+          reason:
+            "1 ignored path(s) that are not regenerable and no backup holds (src/only-copy.env)",
+        }),
+      );
+    });
+
+    test("a live run snapshots and verifies the root before archive-by-scope deletes it", async () => {
+      const { h } = legacyHarness({
+        snapshot: snapshotted,
+        coverage: (_path, commit) =>
+          coverage({
+            commit: commit ?? "head",
+            untracked: commit === null ? ["src/only-copy.txt"] : [],
+          }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([`snapshot:${ROOT}`, "archive-workspace:ws-1"]);
+      expect(h.expectedDirectories).toEqual([ROOT]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "deleted", path: ROOT }),
+      );
+    });
+
+    test("with the root gone too, only the record goes, and the line names the root", async () => {
+      const { h, checked } = legacyHarness({ checkWorktree: () => GONE });
+
+      const report = await h.janitor.tick();
+
+      expect(checked).toEqual([]);
+      expect(h.events).toEqual(["archive-record:ws-1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "archived-workspace",
+          path: ROOT,
+          reason: "idle past 3d; its directory is gone",
+        }),
+      );
+    });
+
+    test("a record that changes its directory between the plan and the archive is kept", async () => {
+      let resolutions = 0;
+      const { h } = legacyHarness({
+        snapshot: snapshotted,
+        resolveArchiveDirectory: () => {
+          resolutions += 1;
+          return resolutions === 1 ? ROOT : "/home/t/.paseo/worktrees/h1/other";
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: `it was idle, but then the directory its archive deletes changed from ${ROOT} to /home/t/.paseo/worktrees/h1/other`,
+        }),
+      );
+    });
+  });
+  describe("the deletion invariant", () => {
+    const PASEO = "/home/t/.paseo/worktrees/h/feature";
+    const DIRTY: WorktreeDeletionSafety = {
+      safe: false,
+      reason: "it has 1 uncommitted or untracked file(s)",
+      atRisk: "dirty",
+    };
+    const owned = (input: Parameters<typeof harness>[0] = {}) =>
+      sweepHarness({ stored: [record()], workspaces: [workspace()], ...input });
+    /** Coverage against HEAD shows the dirty file; against the snapshot, `afterSnapshot`. */
+    const dirtyCoverage =
+      (afterSnapshot: Partial<WorktreeCoverage> = {}) =>
+      (_path: string, commit: string | null): WorktreeCoverage =>
+        coverage({
+          commit: commit ?? "head",
+          changed: commit === null ? ["src/app.ts"] : [],
+          ignored: ["node_modules/"],
+          ...(commit === null ? {} : afterSnapshot),
+        });
+
+    test("a clean, pushed worktree holding a non-regenerable ignored file is kept, unsnapshotted", async () => {
+      const h = owned({ ignored: () => ["node_modules/", "apps/mobile/ios/.xcode.env.local"] });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason:
+            "1 ignored path(s) that are not regenerable and no backup holds (apps/mobile/ios/.xcode.env.local)",
+        }),
+      );
+    });
+
+    test("the same holds for the older passes: a dead agent's clean worktree with a .env stays", async () => {
+      const h = harness({ config: DEAD_ON, ignored: () => [".env"] });
+
+      await h.janitor.tick();
+
+      expect(h.archived).toEqual(["agent-1"]);
+      expect(h.reclaimed).toEqual([]);
+    });
+
+    test("a file the snapshot left out keeps the worktree, whatever rule left it out", async () => {
+      // The secret filter (1c82709a9) drops such a file without saying so; the read against the
+      // snapshot finds it anyway.
+      const h = owned({
+        safety: DIRTY,
+        snapshot: snapshotted,
+        coverage: dirtyCoverage({ untracked: ["src/CredentialsForm.kt"] }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason:
+            "1 file(s) not in the snapshot, changed since or left out (src/CredentialsForm.kt)",
+        }),
+      );
+    });
+
+    test.each([
+      [
+        "over its size cap",
+        { skippedFiles: ["data/big.bin"] },
+        "the snapshot left out untracked files: 1 over its size cap (data/big.bin)",
+      ],
+      [
+        "reported as possible secrets",
+        { possibleSecrets: [".env.local"] },
+        "the snapshot left out untracked files: 1 possible secret(s) (.env.local)",
+      ],
+    ])("a snapshot that reports files %s keeps the worktree", async (_name, omitted, reason) => {
+      const h = owned({
+        safety: DIRTY,
+        snapshot: (cwd) => ({ ...snapshotted(cwd), ...omitted }) as WorktreeSnapshotResult,
+        coverage: dirtyCoverage(),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "kept-idle-workspace", reason }),
+      );
+    });
+
+    test("a backup that does not verify keeps the worktree", async () => {
+      const h = owned({
+        safety: DIRTY,
+        snapshot: snapshotted,
+        coverage: dirtyCoverage(),
+        unverifiedBackup: () => "its bundle /b/feature.bundle fails git bundle verify",
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason:
+            "its backup is not verified: its bundle /b/feature.bundle fails git bundle verify",
+        }),
+      );
+    });
+
+    test("a file changed after the snapshot keeps the worktree until a later sweep snapshots it", async () => {
+      const h = owned({
+        safety: DIRTY,
+        snapshot: snapshotted,
+        coverage: dirtyCoverage({ changed: ["src/app.ts"] }),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "1 file(s) not in the snapshot, changed since or left out (src/app.ts)",
+        }),
+      );
+    });
+
+    test("a clean tree that changed after it was planned is not deleted on the stale read", async () => {
+      let reads = 0;
+      const h = owned({
+        coverage: (_path, commit) => {
+          reads += 1;
+          return coverage({ commit: commit ?? "head", changed: reads > 1 ? ["notes.md"] : [] });
+        },
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
+    test.each([
+      [
+        "a process inside it",
+        {
+          kind: "scanned",
+          processes: [{ pid: 42, command: "bun", path: `${PASEO}/Clone` }],
+        } as ProcessScan,
+        "a process runs inside it: bun (pid 42)",
+      ],
+      [
+        "a process scan that failed",
+        { kind: "failed", error: "lsof is not available on Windows" } as ProcessScan,
+        "the processes inside it could not be listed: lsof is not available on Windows",
+      ],
+    ])("%s keeps the worktree, in a dry run too", async (_name, scan, reason) => {
+      for (const dryRun of [false, true]) {
+        const h = owned({
+          config: { ...SWEEP, workspaceSweep: { dryRun } },
+          processes: () => scan,
+        });
+
+        const report = await h.janitor.tick();
+
+        expect(h.archivedWorkspaces).toEqual([]);
+        expect(report?.entries).toContainEqual(
+          expect.objectContaining({ action: "kept-idle-workspace", reason }),
+        );
+      }
+    });
+
+    test("a schedule that starts agents in the worktree keeps it", async () => {
+      const h = owned({ scheduledCwds: [`${PASEO}/packages/app`, "/home/t/elsewhere"] });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "1 schedule(s) start agents in it",
+        }),
+      );
+    });
+
+    test("a schedule elsewhere keeps nothing", async () => {
+      const h = owned({ scheduledCwds: ["/home/t/.paseo/worktrees/h/feature-2"] });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+    });
+  });
+
+  describe("the dry run lists everything a live run could delete", () => {
+    const DIRTY: WorktreeDeletionSafety = {
+      safe: false,
+      reason: "it has 1 uncommitted or untracked file(s)",
+      atRisk: "dirty",
+    };
+    const dirtyCoverage = (_path: string, commit: string | null): WorktreeCoverage =>
+      coverage({
+        commit: commit ?? "head",
+        changed: commit === null ? ["src/app.ts"] : [],
+        ignored: ["node_modules/"],
+        unbackedCommits: commit === null ? 2 : 0,
+      });
+
+    test("one line per would-delete, with its rule, idle age and invariant", async () => {
+      const h = sweepHarness({
+        config: { ...SWEEP, workspaceSweep: { dryRun: true } },
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: DIRTY,
+        coverage: dirtyCoverage,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(report?.entries).toEqual([
+        {
+          action: "would-delete",
+          workspaceId: "ws-1",
+          title: "feature",
+          path: "/home/t/.paseo/worktrees/h/feature",
+          reason: "idle past 3d; it has 1 uncommitted or untracked file(s)",
+          rule: "idle",
+          idleFor: "4d",
+          invariant:
+            "holds once a verified snapshot backs up 1 changed or untracked file(s) and 2 unpushed commit(s); ignored only regenerable (node_modules/)",
+          dryRun: true,
+        },
+      ]);
+    });
+
+    test("a live run spends the budget on every attempt, so it never deletes past the dry run", async () => {
+      const two = (): DoneJanitorWorkspace[] => [
+        workspace(),
+        workspace({
+          workspaceId: "ws-2",
+          cwd: "/home/t/.paseo/worktrees/h/feature-2",
+          worktreeRoot: "/home/t/.paseo/worktrees/h/feature-2",
+          createdAt: new Date(NOW - 90 * HOUR).toISOString(),
+          updatedAt: new Date(NOW - 90 * HOUR).toISOString(),
+        }),
+      ];
+      const common = {
+        stored: [],
+        safety: DIRTY,
+        coverage: dirtyCoverage,
+        // The older worktree's snapshot fails: only a live run can find that out.
+        snapshot: (cwd: string): WorktreeSnapshotResult =>
+          cwd.endsWith("feature")
+            ? { kind: "failed", worktreePath: cwd, error: "disk full" }
+            : snapshotted(cwd),
+      };
+      const dry = sweepHarness({
+        ...common,
+        workspaces: two(),
+        config: { ...SWEEP, workspaceSweep: { dryRun: true, maxArchivesPerSweep: 1 } },
+      });
+      const live = sweepHarness({
+        ...common,
+        workspaces: two(),
+        config: { ...SWEEP, workspaceSweep: { dryRun: false, maxArchivesPerSweep: 1 } },
+      });
+
+      const dryReport = await dry.janitor.tick();
+      await live.janitor.tick();
+
+      expect(dryReport?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-delete", workspaceId: "ws-1" }),
+      );
+      expect(dryReport?.entries).not.toContainEqual(
+        expect.objectContaining({ action: "would-delete", workspaceId: "ws-2" }),
+      );
+      expect(live.archivedWorkspaces).toEqual([]);
+    });
+
+    test("with no workspaceSweep key at all, the sweep only reports", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, archiveDead: false, askFinished: false },
+        stored: [record()],
+        workspaces: [workspace()],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.events).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-delete", workspaceId: "ws-1", dryRun: true }),
+      );
+    });
+  });
+
+  test("a self-heal fixer's workspace goes as soon as its fixer finished, however fresh its directory", async () => {
+    const home = workspace({
+      kind: "directory",
+      cwd: "/home/t",
+      worktreeRoot: null,
+      isPaseoOwnedWorktree: false,
+      mainRepoRoot: null,
+      createdAt: new Date(NOW - 2 * HOUR).toISOString(),
+      updatedAt: new Date(NOW - 2 * HOUR).toISOString(),
+    });
+    const h = sweepHarness({
+      workspaces: [home],
+      stored: [
+        record({
+          cwd: "/home/t",
+          updatedAt: new Date(NOW - HOUR).toISOString(),
+          labels: { "paseo.remediation": "disk-falling" },
+        }),
+      ],
+      signals: () => ({ headCommitMs: null, directoryMtimeMs: NOW - 60_000 }),
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "archived-workspace",
+        reason:
+          "a self-heal fixer's workspace, and every fixer in it is finished; record only, its directory stays",
+      }),
+    );
+  });
+
+  test("a sweep archives at most maxArchivesPerSweep, the longest idle first", async () => {
+    const ids = ["a", "b", "c", "d"];
+    const h = sweepHarness({
+      config: { ...SWEEP, workspaceSweep: { dryRun: false, maxArchivesPerSweep: 2 } },
+      stored: [],
+      workspaces: ids.map((id, index) =>
+        external({
+          workspaceId: id,
+          cwd: `/home/t/mobile-worktrees/${id}`,
+          worktreeRoot: `/home/t/mobile-worktrees/${id}`,
+          createdAt: new Date(NOW - (100 + index) * HOUR).toISOString(),
+          updatedAt: new Date(NOW - (100 + index) * HOUR).toISOString(),
+        }),
+      ),
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual(["d", "c"]);
+    expect(report?.entries.filter((entry) => entry.action === "kept-idle-workspace")).toEqual([
+      expect.objectContaining({
+        workspaceId: "b",
+        reason: "idle, but this sweep's archive budget is spent; next sweep",
+      }),
+      expect.objectContaining({
+        workspaceId: "a",
+        reason: "idle, but this sweep's archive budget is spent; next sweep",
+      }),
+    ]);
+  });
+
+  test("a dry run archives, snapshots and deletes nothing, and says what it would do", async () => {
+    const h = sweepHarness({
+      config: { ...SWEEP, workspaceSweep: { dryRun: true } },
+      stored: [record(), record({ id: "agent-2", workspaceId: "ws-2", cwd: EXTERNAL })],
+      workspaces: [workspace(), external({ workspaceId: "ws-2" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+    expect(h.events).toEqual([]);
+    expect(h.pushes).toEqual([]);
+    expect(report?.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: "would-delete", workspaceId: "ws-1" }),
+        expect.objectContaining({ action: "would-archive-workspace", workspaceId: "ws-2" }),
+      ]),
+    );
+  });
+
+  test("the janitor's own dry run makes the sweep dry", async () => {
+    const h = sweepHarness({ config: { ...SWEEP, dryRun: true } });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "would-archive-workspace", workspaceId: "ws-1" }),
+    );
+  });
+
+  test("the sweep can be turned off on its own", async () => {
+    const h = sweepHarness({ config: { ...SWEEP, workspaceSweep: { enabled: false } } });
+
+    await h.janitor.tick();
+
+    expect(h.archivedWorkspaces).toEqual([]);
+  });
+
+  describe("projects with no active workspace", () => {
+    function idleProject(id: string, overrides: Partial<DoneJanitorProject> = {}) {
+      return {
+        projectId: id,
+        // A root that exists, so the older rule (no workspace and a root that is gone) spares it.
+        rootPath: tmpdir(),
+        projectKey: null,
+        createdAt: FOUR_DAYS_AGO,
+        updatedAt: FOUR_DAYS_AGO,
+        archivedAt: null,
+        ...overrides,
+      } satisfies DoneJanitorProject;
+    }
+    const archivedAgo = (hours: number) =>
+      external({
+        workspaceId: `ws-${hours}`,
+        projectId: "p1",
+        archivedAt: new Date(NOW - hours * HOUR).toISOString(),
+      });
+
+    test("are removed once their last workspace has been gone for the grace period", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        projects: [idleProject("p1")],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual(["p1"]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "removed-project",
+          projectId: "p1",
+          reason: "it has had no active workspace for 30h",
+        }),
+      );
+      expect(h.pushes[0]?.body).toBe("Removed 1 empty project.");
+    });
+
+    test("stay within the grace period, so a project just emptied or opened is not pulled away", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [archivedAgo(2)],
+        projects: [
+          idleProject("p1"),
+          idleProject("p2", {
+            createdAt: new Date(NOW - HOUR).toISOString(),
+            updatedAt: new Date(NOW - HOUR).toISOString(),
+          }),
+        ],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual([]);
+    });
+
+    test("a project with an active workspace is never removed", async () => {
+      const h = sweepHarness({
+        stored: [],
+        workspaces: [external({ projectId: "p1", pinnedAt: FOUR_DAYS_AGO })],
+        projects: [idleProject("p1")],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual([]);
+    });
+
+    test("a dry run says which it would remove, once each, and removes none", async () => {
+      const h = sweepHarness({
+        config: { ...SWEEP, dryRun: true },
+        stored: [],
+        workspaces: [archivedAgo(30)],
+        // p2 has no workspace at all and a root that is gone: the older rule reports it first.
+        projects: [idleProject("p1"), idleProject("p2", { rootPath: "/nonexistent/p2-root" })],
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.removedProjects).toEqual([]);
+      expect(projectIdsReported(report, "would-remove-project")).toEqual(["p1", "p2"]);
+    });
+
+    test("a sweep removes at most maxProjectRemovalsPerSweep", async () => {
+      const h = sweepHarness({
+        config: { ...SWEEP, workspaceSweep: { dryRun: false, maxProjectRemovalsPerSweep: 1 } },
+        stored: [],
+        workspaces: [],
+        projects: [idleProject("p1"), idleProject("p2"), idleProject("p3")],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.removedProjects).toHaveLength(1);
+    });
   });
 });

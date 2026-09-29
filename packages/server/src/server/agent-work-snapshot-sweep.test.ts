@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -91,6 +91,8 @@ function harness(input: {
     paseoHome: join(root, "paseo-home"),
     logger: pino({ level: "silent" }),
     now: () => now,
+    // Never the network, whatever origin a test gives its repositories.
+    lookupRepoVisibility: async () => "unknown",
   });
   const sweep = new AgentWorkSnapshotSweep({
     dependencies: {
@@ -317,7 +319,10 @@ describe("AgentWorkSnapshotSweep", () => {
   test("worktrees under /tmp go first when the per-sweep cap bites", async () => {
     const tmpParent = realpathSync(mkdtempSync("/tmp/work-snapshot-sweep-"));
     cleanup.push(tmpParent);
-    const elsewhere = makeRepo(root, "elsewhere");
+    // Not `root`: on Linux tmpdir() is /tmp, so both repos would rank as /tmp.
+    const elsewhereParent = realpathSync(mkdtempSync(join(homedir(), ".work-snapshot-sweep-")));
+    cleanup.push(elsewhereParent);
+    const elsewhere = makeRepo(elsewhereParent, "elsewhere");
     const inTmp = makeRepo(tmpParent, "in-tmp");
     writeFileSync(join(elsewhere, "README.md"), "wip\n");
     writeFileSync(join(inTmp, "README.md"), "wip\n");

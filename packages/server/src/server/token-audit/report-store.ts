@@ -34,6 +34,15 @@ export type StoredReport = z.infer<typeof StoredReportSchema>;
 
 const NAME = /^report-(\d{8}T\d{6}Z)\.json$/;
 
+/** Whether the run that just tried to produce a report succeeded, for `checkDue`'s backoff. */
+const AttemptRecordSchema = z.object({
+  at: z.string(),
+  ok: z.boolean(),
+  consecutiveFailures: z.number(),
+});
+
+export type AttemptRecord = z.infer<typeof AttemptRecordSchema>;
+
 export class TokenAuditReportStore {
   constructor(private readonly dir: string) {}
 
@@ -86,6 +95,28 @@ export class TokenAuditReportStore {
 
   async latest(): Promise<StoredReport | null> {
     return (await this.list())[0] ?? null;
+  }
+
+  private attemptPath(): string {
+    return path.join(this.dir, "attempt.json");
+  }
+
+  /** Records whether the run that just tried to produce a report succeeded. */
+  async saveAttempt(record: AttemptRecord): Promise<void> {
+    await fs.mkdir(this.dir, { recursive: true });
+    await writeJsonFileAtomic(this.attemptPath(), record);
+  }
+
+  /** The last attempt, successful or not, or null before the first run or after a fresh home. */
+  async lastAttempt(): Promise<AttemptRecord | null> {
+    try {
+      const parsed = AttemptRecordSchema.safeParse(
+        JSON.parse(await fs.readFile(this.attemptPath(), "utf8")),
+      );
+      return parsed.success ? parsed.data : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Keeps the newest `keep` reports (both files of each). */

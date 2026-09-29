@@ -98,6 +98,7 @@ async function createAgentInBranchOffWorktree(options?: {
   autoArchive?: boolean;
   branchName?: string;
   repoDir?: string;
+  initialPrompt?: string;
 }): Promise<{ repoDir: string; agentId: string; worktreePath: string }> {
   const repoDir = options?.repoDir ?? createGitRepo();
   const branchName = options?.branchName ?? `agent-lifecycle-${Date.now()}`;
@@ -112,7 +113,7 @@ async function createAgentInBranchOffWorktree(options?: {
       base: "main",
     },
     ...(options?.autoArchive !== undefined ? { autoArchive: options.autoArchive } : {}),
-    initialPrompt: "Say done.",
+    initialPrompt: options?.initialPrompt ?? "Say done.",
   });
   return { repoDir, agentId: created.id, worktreePath: created.cwd };
 }
@@ -347,7 +348,13 @@ test("archiving a created worktree removes the directory on last reference", asy
 });
 
 test("auto-archiving a created worktree keeps the directory when a sibling workspace references it", async () => {
-  const created = await createAgentInBranchOffWorktree({ autoArchive: true });
+  // The first turn stays open until the sibling exists. The fake provider ends "Say done." in
+  // milliseconds, so a turn that could end on its own archived and deleted the worktree before
+  // the sibling workspace was created, and the test raced the archive instead of testing it.
+  const created = await createAgentInBranchOffWorktree({
+    autoArchive: true,
+    initialPrompt: "Hold the turn open.",
+  });
 
   // Create a sibling workspace that shares the same backing directory.
   const sibling = await ctx.client.createWorkspace({
@@ -357,8 +364,10 @@ test("auto-archiving a created worktree keeps the directory when a sibling works
   if (!sibling.workspace) {
     throw new Error(sibling.error ?? "Failed to create sibling workspace");
   }
+  await expectAgentPresentInActiveList(created.agentId);
 
-  await ctx.client.waitForFinish(created.agentId, 10000);
+  // Ending the turn, canceled, is what auto-archives it.
+  await ctx.client.cancelAgent(created.agentId);
 
   await expectAgentAbsentFromActiveList(created.agentId);
   await expectWorktreePresentInList(created.repoDir, created.worktreePath);

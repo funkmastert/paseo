@@ -836,6 +836,65 @@ test("emits agent state for lastActivitySummary only when the summary text actua
   }
 });
 
+test("an accepted turn publishes one running state, carrying the prompt's activity summary", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-turn-start-"));
+  class ManualTurnSession extends TestAgentSession {
+    override async startTurn(): Promise<{ turnId: string }> {
+      return { turnId: "manual-turn-1" };
+    }
+  }
+  const session = new ManualTurnSession({ provider: "codex", cwd: workdir });
+  const manager = new AgentManager({
+    clients: {
+      codex: new (class extends TestAgentClient {
+        override async createSession(): Promise<AgentSession> {
+          return session;
+        }
+      })(),
+    },
+    logger,
+  });
+  let agentId: string | null = null;
+  try {
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    agentId = agent.id;
+
+    const running: Array<string | undefined> = [];
+    const unsubscribe = manager.subscribe(
+      (event) => {
+        if (
+          event.type === "agent_state" &&
+          event.agent.id === agent.id &&
+          event.agent.lifecycle === "running"
+        ) {
+          running.push(event.agent.lastActivitySummary);
+        }
+      },
+      { agentId: agent.id, replayState: false },
+    );
+
+    const run = manager.streamAgent(agent.id, "Second prompt keeps streaming.", {
+      clientMessageId: "client-1",
+    });
+    void (async () => {
+      for await (const _event of run) {
+        // Drain so foreground state transitions apply.
+      }
+    })();
+    await manager.waitForAgentRunStart(agent.id);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    unsubscribe();
+
+    // Two identical snapshots let a client that holds back the first one open the turn early.
+    expect(running).toEqual(["[User] Second prompt keeps streaming."]);
+  } finally {
+    if (agentId) await manager.closeAgent(agentId).catch(() => undefined);
+    rmSync(workdir, { recursive: true, force: true });
+  }
+});
+
 test("streamed assistant/reasoning deltas never update lastActivitySummary, but a tool_call still does", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-activity-summary-streaming-"));
   class ManualTurnSession extends TestAgentSession {

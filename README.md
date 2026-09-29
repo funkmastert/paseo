@@ -21,7 +21,7 @@ You sign in to each of your Claude accounts once and give them roles: one leader
 Also in this fork:
 
 - **Orchestration panel.** Every agent and subagent in one tree, with each account's usage and where its agents run. [docs/orchestration-panel.md](docs/orchestration-panel.md)
-- **Restart recovery.** Agents a daemon stop cut off mid-turn are listed in the sidebar and resumed, leaders first. `paseo recover` does the same from a terminal. [docs/restart-recovery.md](docs/restart-recovery.md)
+- **Restart recovery.** Agents a daemon stop cut off mid-turn are listed in the app, and **Resume all** brings them back, leaders first. With `agents.restartRecovery.mode: "resume"` that happens at boot. `paseo recover --apply` does the same from a terminal. [docs/restart-recovery.md](docs/restart-recovery.md)
 - **`paseo doctor`.** Read-only checks for signed-out accounts, plugins that did not load, a stale daemon and more. Each finding prints the command that fixes it. [docs/doctor.md](docs/doctor.md)
 - **MCP gateway.** The daemon signs in to OAuth MCP servers once and hands the login to every account, with a status strip in the sidebar. [docs/mcp-gateway.md](docs/mcp-gateway.md)
 - **Pinned grid and context meter.** Open every pinned chat side by side, and see what fills each agent's context. [docs/pinned-grid.md](docs/pinned-grid.md), [docs/context-usage.md](docs/context-usage.md)
@@ -43,18 +43,18 @@ Run Paseo or Bozeo, not both at once: they share `~/.paseo` and port 6767 ([deta
 
 ## Install
 
-There are no releases yet, so you build the desktop app from source. If the [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download it instead. [docs/install.md](docs/install.md) has every step, the Windows differences and troubleshooting.
+There are no releases yet, so you build the desktop app from source. If the [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download it instead. [docs/install.md](docs/install.md) has every step, the Windows differences and troubleshooting. Or run `/install` in Claude Code to be walked through it.
 
 You need Git, Node.js 22, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. On Windows, run these commands in Git Bash.
 
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci
 npm run build:desktop -- --publish never
 ```
 
-Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream.
+Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream. The two variables on `npm ci` stop its hook installer from replacing your global git hooks ([why](docs/install.md#build)).
 
 The installer lands in `packages/desktop/release/`: a `.dmg` on macOS, a `Paseo-Setup-<version>-<arch>.exe` on Windows. Then set up the account pool with the plugin's [operator setup](plugins/claude-account-pool/README.md#operator-setup), as [docs/install.md](docs/install.md#set-up-the-account-pool) describes.
 

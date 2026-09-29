@@ -202,7 +202,10 @@ test("focused contracts stay inside existing required checks", () => {
   assert.doesNotMatch(changes, /Install dependencies|npm run build/);
 
   assert.match(server, /test:hub-cli-contract/);
-  assert.match(server, /npm run test --workspace=@getpaseo\/server/);
+  // Two steps, not `npm run test`: that chains integration behind unit with &&, so a red unit
+  // run hid every integration result.
+  assert.match(server, /npm run test:unit --workspace=@getpaseo\/server/);
+  assert.match(server, /npm run test:integration --workspace=@getpaseo\/server/);
   assert.ok(!jobs.has("hub-cli-contract"));
 
   assert.match(desktop, /test:e2e:renderer/);
@@ -283,7 +286,11 @@ test("PR routing declares stable behavior ownership", () => {
       "packages/app/package.json",
     ],
     relay: ["packages/relay/**"],
-    plugin: ["plugins/claude-account-pool/**", "packages/plugin/**"],
+    plugin: [
+      "plugins/claude-account-pool/**",
+      "packages/plugin/**",
+      "packages/server/src/server/agent/account-failover-detector.ts",
+    ],
     cli: ["packages/cli/**"],
   });
 });

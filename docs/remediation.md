@@ -31,7 +31,7 @@ The ladder keeps one episode per key (`orphan-build-daemons`, `stalled-agent:<ag
 
 ## The remediation agent
 
-The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`), so the classifier decides model, thinking and account from the labels:
+The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`) and no caller. A create with no caller is the leader unless its labels declare another role. The `paseo.agent-type: worker` label below does, so the classifier configures it like a child, with the model and thinking its `paseo.task-class` picks, and places it on a worker account first ([Root agents](../plugins/claude-account-pool/README.md#root-agents)). Without that label it would run on the leader tier (Opus 5.5, `xhigh`, the leader account). It carries these labels:
 
 | Label                   | Value                                                                                           |
 | ----------------------- | ----------------------------------------------------------------------------------------------- |
@@ -41,7 +41,11 @@ The ladder creates it through the normal create path (`createAgentCommand`, `kin
 | `paseo.remediation-key` | the episode key                                                                                 |
 | `paseo.agent-type`      | `worker`                                                                                        |
 
-It runs in the observation's `escalation.cwd`, else the home directory. The prompt (`remediation/escalation.ts`) carries the condition, the summary, the evidence cut at 8 KB, the attempts, the monitor's task, and these limits: stay inside the task; no pushes to shared company forges; never restart the Paseo daemon or edit `~/.paseo/config.json`; never touch another agent's worktree except as the task says; never delete uncommitted work.
+`paseo.agent-type: worker` is the same for every condition, including the advisory (read-only) episodes below — there is no per-task role today.
+
+It runs in a new workspace at the observation's `escalation.cwd`, else the home directory. The done janitor archives that workspace, and the agent with it, ten minutes after the agent stops ([done-janitor.md](done-janitor.md#idle-workspaces)); a push still opens it from the archive. The prompt (`remediation/escalation.ts`) carries the condition, the summary, the evidence cut at 8 KB, the attempts, the monitor's task, and these limits: stay inside the task; no pushes to shared company forges; never restart the Paseo daemon or edit `~/.paseo/config.json`; never touch another agent's worktree except as the task says; never delete uncommitted work.
+
+The create call passes no `mode` and no `unattended`, so the agent starts in the provider's default (attended) mode. A pending permission it cannot resolve itself then runs out its clock instead of asking a person, and — since a directory outside a trusted workspace ignores `.claude/settings.json`'s `permissions.allow` — the home-directory default cwd above loses even the allowlist. `remediation/ladder.ts`'s `RemediationAgentRequest` and the `createAgentCommand` call inside `bootstrap.ts`'s `createRemediationLadder` are both the JEV remediation track's region; the fix is `unattended: true` on that call.
 
 The agent ends its final message with exactly one line:
 

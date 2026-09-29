@@ -12,6 +12,7 @@ import { createRecentAgentTypes, type RecentAgentTypes } from "./server/recent-a
 import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
 import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
+import { placesRootAsChild } from "./server/role-resolve";
 import { createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
@@ -198,6 +199,8 @@ export default function contribute(server: PluginServerContext) {
       health,
       providerIds,
       accountIdentity,
+      // The classifier's own rule, so a labelled daemon job's model and account agree.
+      placesRootAsChild: (labels) => placesRootAsChild(startedPolicyCache.get(), labels),
       onPoolDry: (episode) => notifier?.notePoolDry(episode),
       onPoolCollapsed: (episode) => {
         notifier?.notePoolCollapsed(episode);
@@ -208,7 +211,7 @@ export default function contribute(server: PluginServerContext) {
       onPoolExhausted: (episode) => {
         notifier?.notePoolExhausted(episode);
         console.error(
-          `[claude-account-pool] router: every pooled account is out of budget (${episode.exhaustedProviderIds.join(", ")}); refusing the spawn from caller "${episode.callerAgentId}" rather than starting it on a dead account (earliest reset: ${episode.earliestResetAt?.toISOString() ?? "unknown"})`,
+          `[claude-account-pool] router: every pooled account is out of budget (${episode.exhaustedProviderIds.join(", ")}); ${episode.refused ? `refusing the spawn from caller "${episode.callerAgentId}" rather than starting it on a dead account` : "a create with no calling agent is never refused, so it keeps the account it asked for"} (earliest reset: ${episode.earliestResetAt?.toISOString() ?? "unknown"})`,
         );
       },
       onFailOpen: (episode) => notifier?.noteFailOpen(episode),

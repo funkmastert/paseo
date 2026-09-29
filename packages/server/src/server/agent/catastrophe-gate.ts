@@ -6,6 +6,7 @@ import {
   type ExpandedWord,
   type ShellContext,
   commandName,
+  gitBashPath,
   resolvePath,
   walkShellCommands,
 } from "./shell-commands.js";
@@ -40,9 +41,20 @@ export type CatastropheDecision = { block: false } | CatastropheBlock;
 /** The branch checked out in `cwd` (or in `gitDir`), or null when it cannot be told. */
 export type CurrentBranchResolver = (cwd: string, gitDir?: string) => Promise<string | null>;
 
+/** Whether `ref` exists in the repository at `cwd` (or `gitDir`), or null when it cannot be told. */
+export type LocalRefResolver = (
+  cwd: string,
+  ref: string,
+  gitDir?: string,
+) => Promise<boolean | null>;
+
 export interface CatastropheCheckOptions {
   /** Defaults to the daemon's home directory. */
   homeDir?: string;
+  /** Defaults to asking git. */
+  resolveLocalRef?: LocalRefResolver;
+  /** Defaults to the daemon's. On win32 the command is read the way Git Bash reads it. */
+  platform?: NodeJS.Platform;
 }
 
 export async function checkCatastrophe(
@@ -52,10 +64,17 @@ export async function checkCatastrophe(
   options: CatastropheCheckOptions = {},
 ): Promise<CatastropheDecision> {
   const home = options.homeDir ?? homedir();
-  const state: GateState = { found: null, branchChecks: [] };
+  const windows = (options.platform ?? process.platform) === "win32";
+  const state: GateState = { found: null, branchChecks: [], refChecks: [] };
+  // Claude Code runs Bash through Git Bash on Windows, where C:\Users\x is /c/Users/x.
+  const shellPath = (native: string) => {
+    const spelled = windows ? gitBashPath(native) : native;
+    return path.posix.isAbsolute(spelled) ? path.posix.resolve(spelled) : null;
+  };
   const context: ShellContext = {
-    cwd: path.posix.isAbsolute(cwd) ? path.posix.resolve(cwd) : null,
-    home: path.posix.isAbsolute(home) ? path.posix.resolve(home) : null,
+    cwd: shellPath(cwd),
+    home: shellPath(home),
+    ...(windows ? { windowsPaths: true } : {}),
   };
   walkShellCommands(command, context, {
     command: (args, where) => {
@@ -75,23 +94,57 @@ export async function checkCatastrophe(
   });
   if (state.found) return { block: true, ...state.found };
 
-  // The only I/O, and only for a force push that names no ref (or names HEAD): what it
-  // rewrites depends on the branch checked out where it runs.
+  // The only I/O, and only for a force push whose target depends on the repository: one that
+  // names no ref (or names HEAD) rewrites the branch checked out where it runs, and one that
+  // carries every branch rewrites main only when the repository has a main to carry.
+  const native = (shell: string) => (windows ? windowsNativePath(shell) : shell);
   const seen = new Set<string>();
   for (const check of state.branchChecks) {
     const key = `${check.cwd}\0${check.gitDir ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    const branch = await resolveCurrentBranch(check.cwd, check.gitDir).catch(() => null);
+    const gitDir = check.gitDir === undefined ? undefined : native(check.gitDir);
+    const branch = await resolveCurrentBranch(native(check.cwd), gitDir).catch(() => null);
     if (branch === "main") {
       return {
         block: true,
         rule: "force-push-main",
-        reason: `it force-pushes ${check.detail} while main is checked out in ${check.cwd}, which rewrites main on the remote`,
+        reason: `it force-pushes ${check.detail} while main is checked out in ${native(check.cwd)}, which rewrites main on the remote`,
+      };
+    }
+  }
+  const resolveLocalRef = options.resolveLocalRef ?? localRefExistsWithGit;
+  for (const check of state.refChecks) {
+    const key = `${check.cwd}\0${check.gitDir ?? ""}\0${check.ref}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const gitDir = check.gitDir === undefined ? undefined : native(check.gitDir);
+    const exists = await Promise.resolve()
+      .then(() => resolveLocalRef(native(check.cwd), check.ref, gitDir))
+      .catch(() => null);
+    if (exists === true && check.forced) {
+      return {
+        block: true,
+        rule: "force-push-main",
+        reason: `it force-pushes ${check.detail}, which carries ${check.ref} in ${native(check.cwd)} onto main on the remote`,
+      };
+    }
+    if (exists === false && check.prune) {
+      return {
+        block: true,
+        rule: "delete-main",
+        reason: `it prunes ${check.detail}, and ${check.ref} does not exist in ${native(check.cwd)}, which deletes main on the remote`,
       };
     }
   }
   return { block: false };
+}
+
+/** `/c/Users/x` back to `C:\Users\x`, for git; a path with no drive is left alone. */
+function windowsNativePath(shellPath: string): string {
+  const drive = /^\/([a-zA-Z])(?=\/|$)/.exec(shellPath);
+  if (!drive?.[1]) return shellPath;
+  return path.win32.normalize(`${drive[1].toUpperCase()}:${shellPath.slice(2) || "/"}`);
 }
 
 const DENIAL_COMMAND_LIMIT = 2_000;
@@ -135,6 +188,35 @@ export async function resolveCurrentBranchWithGit(
   }
 }
 
+/**
+ * `git rev-parse --verify --quiet <ref>` where the push would run: true when the ref exists,
+ * false when git says it does not, null on any other failure. Same priority and kill as the
+ * branch lookup.
+ */
+export async function localRefExistsWithGit(
+  cwd: string,
+  ref: string,
+  gitDir?: string,
+): Promise<boolean | null> {
+  const args = [
+    ...(gitDir ? [`--git-dir=${gitDir}`] : []),
+    "rev-parse",
+    "--verify",
+    "--quiet",
+    ref,
+  ];
+  try {
+    // --verify --quiet exits 1 for a missing ref; 128 (outside a repository) throws.
+    const result = await runWithGitCommandPriority("high", () =>
+      runGitCommand(args, { cwd, timeout: BRANCH_LOOKUP_TIMEOUT_MS, acceptExitCodes: [0, 1] }),
+    );
+    if (result.exitCode === 0) return true;
+    return result.exitCode === 1 ? false : null;
+  } catch {
+    return null;
+  }
+}
+
 interface Finding {
   rule: CatastropheRule;
   reason: string;
@@ -146,9 +228,21 @@ interface BranchCheck {
   detail: string;
 }
 
+/**
+ * A push that touches the remote's main via `ref`: `forced` means a matching local `ref` rewrites
+ * main (blocked when it exists), `prune` means the push deletes any remote ref with no local
+ * counterpart, main included (blocked when `ref` does not exist).
+ */
+interface RefCheck extends BranchCheck {
+  ref: string;
+  forced: boolean;
+  prune: boolean;
+}
+
 interface GateState {
   found: Finding | null;
   branchChecks: BranchCheck[];
+  refChecks: RefCheck[];
 }
 
 function checkCommand(args: ExpandedWord[], context: ShellContext, state: GateState): void {
@@ -166,8 +260,19 @@ function checkCommand(args: ExpandedWord[], context: ShellContext, state: GateSt
 const DATA_VOLUME = "/system/volumes/data";
 
 /** Why deleting `absolute` wipes a disk, a volume or a home directory; null when it does not. */
-function describeProtectedRoot(absolute: string, home: string | null): string | null {
+function describeProtectedRoot(
+  absolute: string,
+  home: string | null,
+  windows: boolean,
+): string | null {
   let lower = absolute.toLowerCase();
+  if (windows) {
+    if (home !== null && lower === home.toLowerCase()) return "the home directory";
+    // Git Bash mounts each drive at /c, /d, …: /c is C:\ and /c/Users/x is C:\Users\x.
+    const drive = /^\/[a-z](?=\/|$)/.exec(lower)?.[0];
+    if (drive === lower) return "a drive root";
+    if (drive) lower = lower.slice(drive.length);
+  }
   if (lower === DATA_VOLUME) return "the macOS data volume";
   // The data volume's firmlinks: /System/Volumes/Data/Users/x is /Users/x.
   if (lower.startsWith(`${DATA_VOLUME}/`)) lower = lower.slice(DATA_VOLUME.length);
@@ -188,15 +293,16 @@ function protectedTarget(
   context: ShellContext,
 ): { path: string; what: string; everythingIn: boolean } | null {
   const base = word.globsDirectory ? word.text.slice(0, -1) || "." : word.text;
-  const absolute = resolvePath(context.cwd, base);
+  const absolute = resolvePath(context.cwd, base, context.windowsPaths);
   if (absolute === null) return null;
-  const what = describeProtectedRoot(absolute, context.home);
+  const what = describeProtectedRoot(absolute, context.home, context.windowsPaths === true);
   return what ? { path: absolute, what, everythingIn: word.globsDirectory } : null;
 }
 
 /** rm refuses any operand whose last component is `.` or `..`, so those delete nothing. */
-function endsInDotComponent(text: string): boolean {
-  const trimmed = text.replace(/\/+$/, "");
+function endsInDotComponent(text: string, windows: boolean): boolean {
+  // Git Bash's rm also splits on `\`.
+  const trimmed = (windows ? text.replaceAll("\\", "/") : text).replace(/\/+$/, "");
   const last = trimmed.slice(trimmed.lastIndexOf("/") + 1);
   return last === "." || last === "..";
 }
@@ -222,7 +328,8 @@ function checkRm(args: ExpandedWord[], context: ShellContext, state: GateState):
   if (!recursive) return;
   for (const operand of operands) {
     if (!operand.resolved) continue;
-    if (!operand.globsDirectory && endsInDotComponent(operand.text)) continue;
+    if (!operand.globsDirectory && endsInDotComponent(operand.text, context.windowsPaths === true))
+      continue;
     const target = protectedTarget(operand, context);
     if (target) {
       const subject = target.everythingIn ? `everything in ${target.path}` : target.path;
@@ -418,7 +525,7 @@ function checkDiskutil(args: ExpandedWord[], state: GateState): void {
 const RAW_DISK_DEVICE = /^\/dev\/(r?disk\d|sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d)/;
 
 function rawDiskPath(target: string, context: ShellContext): string | null {
-  const absolute = resolvePath(context.cwd, target);
+  const absolute = resolvePath(context.cwd, target, context.windowsPaths);
   return absolute !== null && RAW_DISK_DEVICE.test(absolute) ? absolute : null;
 }
 
@@ -477,11 +584,15 @@ function checkGit(args: ExpandedWord[], context: ShellContext, state: GateState)
     const text = arg.text;
     if (text === "-C") {
       const dir = args[index + 1];
-      location.cwd = dir?.resolved ? resolvePath(location.cwd, dir.text) : null;
+      location.cwd = dir?.resolved
+        ? resolvePath(location.cwd, dir.text, context.windowsPaths)
+        : null;
       index += 2;
     } else if (text === "--git-dir" || text.startsWith("--git-dir=")) {
       const value = text === "--git-dir" ? args[index + 1] : { ...arg, text: text.slice(10) };
-      const gitDir = value?.resolved ? resolvePath(location.cwd, value.text) : null;
+      const gitDir = value?.resolved
+        ? resolvePath(location.cwd, value.text, context.windowsPaths)
+        : null;
       if (gitDir === null) location.cwd = null;
       else location.gitDir = gitDir;
       index += text === "--git-dir" ? 2 : 1;
@@ -508,6 +619,10 @@ interface PushArgs {
   dryRun: boolean;
   /** `--tags` pushes only `refs/tags/*`, so it never touches the current branch. */
   tags: boolean;
+  /** Deletes any remote ref with no matching local one, main included. */
+  prune: boolean;
+  /** `--mirror`, `--all` or `--branches`: every local branch, whatever is checked out. */
+  everyBranch: string | null;
   /** The repository, then the refspecs. */
   operands: ExpandedWord[];
 }
@@ -525,8 +640,36 @@ function readShortPushFlags(text: string, push: PushArgs): boolean {
   return false;
 }
 
+/** Sets the boolean fields a recognized long push flag turns on; false for anything else. */
+function applyLongPushFlag(name: string, push: PushArgs): boolean {
+  if (name === "--mirror" || name === "--all" || name === "--branches") push.everyBranch = name;
+  if (PUSH_FORCE_FLAGS.has(name)) {
+    push.force = true;
+  } else if (name === "--delete") {
+    push.deletes = true;
+  } else if (name === "--dry-run") {
+    push.dryRun = true;
+  } else if (name === "--prune") {
+    push.prune = true;
+  } else if (name === "--tags") {
+    // `--follow-tags` also pushes the current branch, so it is not `--tags`.
+    push.tags = true;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 function parsePushArgs(args: ExpandedWord[]): PushArgs {
-  const push: PushArgs = { force: false, deletes: false, dryRun: false, tags: false, operands: [] };
+  const push: PushArgs = {
+    force: false,
+    deletes: false,
+    dryRun: false,
+    tags: false,
+    prune: false,
+    everyBranch: null,
+    operands: [],
+  };
   let endOfOptions = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -538,12 +681,12 @@ function parsePushArgs(args: ExpandedWord[]): PushArgs {
       endOfOptions = true;
     } else if (text.startsWith("--")) {
       const name = text.split("=", 1)[0] ?? text;
-      if (PUSH_FORCE_FLAGS.has(name)) push.force = true;
-      else if (name === "--delete") push.deletes = true;
-      else if (name === "--dry-run") push.dryRun = true;
-      // `--follow-tags` also pushes the current branch, so it is not `--tags`.
-      else if (name === "--tags") push.tags = true;
-      else if (PUSH_OPTIONS_WITH_VALUE.has(name) && !text.includes("=")) index++;
+      if (
+        !applyLongPushFlag(name, push) &&
+        PUSH_OPTIONS_WITH_VALUE.has(name) &&
+        !text.includes("=")
+      )
+        index++;
     } else if (readShortPushFlags(text, push)) {
       index++;
     }
@@ -551,8 +694,14 @@ function parsePushArgs(args: ExpandedWord[]): PushArgs {
   return push;
 }
 
-/** What one refspec does to main: a finding, a branch lookup (for HEAD), or nothing. */
-function classifyRefspec(refspec: string, push: PushArgs): Finding | "current-branch" | null {
+/**
+ * What one refspec does to main: a finding, a branch lookup (for HEAD), a local ref lookup (for
+ * a refspec that pushes many branches), or nothing.
+ */
+function classifyRefspec(
+  refspec: string,
+  push: PushArgs,
+): Finding | "current-branch" | { ref: string } | null {
   const forced = push.force || refspec.startsWith("+");
   const spec = refspec.replace(/^\+/, "");
   if (push.deletes) {
@@ -564,6 +713,14 @@ function classifyRefspec(refspec: string, push: PushArgs): Finding | "current-br
   const source = colon === -1 ? spec : spec.slice(0, colon);
   const destination = colon === -1 ? spec : spec.slice(colon + 1);
   if (colon === -1 && forced && (spec === "HEAD" || spec === "@")) return "current-branch";
+  // `:` pushes every branch that exists on both sides, main among them.
+  if (spec === ":") return forced ? { ref: "refs/heads/main" } : null;
+  if (spec.includes("*")) {
+    // A pattern refspec with `--prune` deletes the remote's main when the repository has no
+    // matching local ref to push there, whether or not the push is forced.
+    const ref = forced || push.prune ? patternSourceOfMain(source, destination) : null;
+    return ref ? { ref } : null;
+  }
   if (!isMainRef(destination)) return null;
   if (source === "") {
     return { rule: "delete-main", reason: `it deletes main on the remote (refspec ${refspec})` };
@@ -576,9 +733,49 @@ function classifyRefspec(refspec: string, push: PushArgs): Finding | "current-br
     : null;
 }
 
+const REMOTE_MAIN = "refs/heads/main";
+
+/**
+ * The local ref a pattern refspec pushes onto the remote's main: `refs/heads/main` for
+ * `refs/heads/*:refs/heads/*` or `refs/*:refs/*`, `refs/remotes/origin/main` for
+ * `refs/remotes/origin/*:refs/heads/*`. Null when the destination pattern cannot name main.
+ */
+function patternSourceOfMain(source: string, destination: string): string | null {
+  const [prefix, suffix, extra] = destination.split("*");
+  const [sourcePrefix, sourceSuffix, sourceExtra] = source.split("*");
+  if (prefix === undefined || suffix === undefined || extra !== undefined) return null;
+  if (sourcePrefix === undefined || sourceSuffix === undefined || sourceExtra !== undefined)
+    return null;
+  if (REMOTE_MAIN.length <= prefix.length + suffix.length) return null;
+  if (!REMOTE_MAIN.startsWith(prefix) || !REMOTE_MAIN.endsWith(suffix)) return null;
+  const matched = REMOTE_MAIN.slice(prefix.length, REMOTE_MAIN.length - suffix.length);
+  return `${sourcePrefix}${matched}${sourceSuffix}`;
+}
+
 function checkGitPush(args: ExpandedWord[], location: GitLocation, state: GateState): void {
   const push = parsePushArgs(args);
   if (push.dryRun) return;
+  // `--mirror` is `+refs/*:refs/*` plus prune: it force-updates the remote's main when the
+  // repository has one, and deletes it otherwise. Both outcomes are catastrophic, so it blocks
+  // outright rather than by local-ref lookup; the fleet replay found no real use of it.
+  if (push.everyBranch === "--mirror") {
+    state.found = {
+      rule: "force-push-main",
+      reason:
+        "it mirrors every ref onto the remote (--mirror), which force-updates or deletes main there",
+    };
+    return;
+  }
+  // A forced `--all`/`--branches` is `+refs/heads/*:refs/heads/*`: it rewrites the remote's main
+  // from any branch, if the repository has a main to push. `--prune` with `--all`/`--branches`
+  // deletes the remote's main outright when the repository does not, forced or not.
+  if (push.everyBranch !== null && (push.force || push.prune)) {
+    addRefCheck(location, REMOTE_MAIN, `with ${push.everyBranch}`, state, {
+      forced: push.force,
+      prune: push.prune,
+    });
+    return;
+  }
   const refspecs = push.operands.slice(1);
   if (refspecs.length === 0) {
     // `--tags` appends `refs/tags/*` as its own refspec, so a bare push with no other refspec
@@ -592,6 +789,11 @@ function checkGitPush(args: ExpandedWord[], location: GitLocation, state: GateSt
     const outcome = classifyRefspec(refspec.text, push);
     if (outcome === "current-branch") {
       addBranchCheck(location, refspec.text, state);
+    } else if (outcome && "ref" in outcome) {
+      addRefCheck(location, outcome.ref, `refspec ${refspec.text}`, state, {
+        forced: push.force || refspec.text.startsWith("+"),
+        prune: push.prune,
+      });
     } else if (outcome) {
       state.found = outcome;
       return;
@@ -605,5 +807,23 @@ function addBranchCheck(location: GitLocation, detail: string, state: GateState)
     cwd: location.cwd,
     ...(location.gitDir ? { gitDir: location.gitDir } : {}),
     detail,
+  });
+}
+
+function addRefCheck(
+  location: GitLocation,
+  ref: string,
+  detail: string,
+  state: GateState,
+  flags: { forced: boolean; prune: boolean },
+): void {
+  if (location.cwd === null) return;
+  state.refChecks.push({
+    cwd: location.cwd,
+    ...(location.gitDir ? { gitDir: location.gitDir } : {}),
+    detail,
+    ref,
+    forced: flags.forced,
+    prune: flags.prune,
   });
 }

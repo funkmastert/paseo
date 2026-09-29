@@ -167,6 +167,7 @@ import {
   archiveByScope,
   archivePersistedWorkspaceRecord,
   killTerminalsForWorkspace,
+  resolveArchiveDirectory,
   type ActiveWorkspaceRef,
   type ArchiveResult,
 } from "./workspace-archive-service.js";
@@ -250,7 +251,13 @@ import {
   type DaemonVitals,
   type DaemonVitalsConfig,
 } from "./daemon-vitals/daemon-vitals.js";
-import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  checkWorktreeDeletionSafety,
+  readWorkspaceActivitySignals,
+  readWorktreeCoverage,
+  verifyWorktreeBackup,
+} from "./done-janitor-worktree.js";
+import { listProcessesInside } from "./worktree-process-scan.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { RemediationConfig } from "./remediation/config.js";
@@ -569,6 +576,7 @@ export interface PaseoDaemonConfig {
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   providerCatalogRefreshTimeoutMs?: number;
+  autoPinSessions?: boolean;
   metadataGeneration?: {
     providers?: Array<{
       provider: string;
@@ -787,6 +795,12 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
   return config.trustedProxies ?? ["loopback"];
 }
 
+function withAutoPinSessionsConfig(
+  config: Pick<PaseoDaemonConfig, "autoPinSessions">,
+): Pick<MutableDaemonConfig, "autoPinSessions"> {
+  return config.autoPinSessions !== undefined ? { autoPinSessions: config.autoPinSessions } : {};
+}
+
 function withTokenBurnMonitorConfig(
   config: Pick<PaseoDaemonConfig, "tokenBurnMonitor">,
 ): Pick<MutableDaemonConfig, "tokenBurnMonitor"> {
@@ -835,8 +849,16 @@ function withAdmissionConfig(
 function withDoneJanitorConfig(
   config: Pick<PaseoDaemonConfig, "doneJanitor">,
 ): Pick<MutableDaemonConfig, "doneJanitor"> {
-  // Spread: an interface carries no index signature, and the wire schema is passthrough.
-  return config.doneJanitor !== undefined ? { doneJanitor: { ...config.doneJanitor } } : {};
+  if (config.doneJanitor === undefined) return {};
+  // Spread, the nested block too: an interface carries no index signature, and the wire schema
+  // is passthrough.
+  const { workspaceSweep, ...doneJanitor } = config.doneJanitor;
+  return {
+    doneJanitor: {
+      ...doneJanitor,
+      ...(workspaceSweep !== undefined ? { workspaceSweep: { ...workspaceSweep } } : {}),
+    },
+  };
 }
 
 function withRefocusConfig(
@@ -975,7 +997,12 @@ function createDoneJanitor(input: {
   projectRegistry: Pick<FileBackedProjectRegistry, "list" | "remove">;
   scheduleService: Pick<ScheduleService, "list">;
   terminalManager: TerminalManager | null;
-  archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
+  scriptRuntimeStore: Pick<WorkspaceScriptRuntimeStore, "listForWorkspace">;
+  archiveWorkspaceById: (
+    workspaceId: string,
+    requestId: string,
+    options?: { keepDirectory?: boolean; expectedDirectory?: string },
+  ) => Promise<ArchiveResult>;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
     "getProviderUsageService" | "getPushNotificationSender"
@@ -999,6 +1026,12 @@ function createDoneJanitor(input: {
               ? [schedule.target.agentId]
               : [],
           ),
+        ),
+      listScheduledCwds: async () =>
+        (await input.scheduleService.list()).flatMap((schedule) =>
+          schedule.target.type === "new-agent" && schedule.status !== "completed"
+            ? [schedule.target.config.cwd]
+            : [],
         ),
       getProviderHealth: (provider) =>
         readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider }),
@@ -1025,10 +1058,42 @@ function createDoneJanitor(input: {
       checkWorktree: (check) => checkWorktreeDeletionSafety(check),
       measureBytes: (worktreePath) =>
         sampleDirectorySizeBytes(worktreePath, { timeoutMs: 120_000 }),
-      reclaimWorkspace: async (workspaceId) => {
-        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
+      reclaimWorkspace: async (workspaceId, directory) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor", {
+          expectedDirectory: directory,
+        });
         return { removedDirectory: result.removedDirectory };
       },
+      resolveArchiveDirectory: (workspace) =>
+        resolveArchiveDirectory(workspace, {
+          paseoHome: input.config.paseoHome,
+          paseoWorktreesBaseRoot: input.config.worktreesRoot,
+        }),
+      archiveWorkspace: async (workspaceId, directory) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle", {
+          expectedDirectory: directory,
+        });
+        return { removedDirectory: result.removedDirectory };
+      },
+      archiveWorkspaceRecord: async (workspaceId) => {
+        await input.archiveWorkspaceById(workspaceId, "done-janitor-idle-record", {
+          keepDirectory: true,
+        });
+      },
+      countRunningScripts: async (workspaceId) =>
+        input.scriptRuntimeStore
+          .listForWorkspace(workspaceId)
+          .filter((entry) => entry.lifecycle === "running").length,
+      readActivitySignals: (directory) => readWorkspaceActivitySignals(directory),
+      readWorktreeCoverage: (read) => readWorktreeCoverage(read),
+      verifyBackup: ({ worktreePath, snapshot }) =>
+        verifyWorktreeBackup({
+          worktreePath,
+          ref: snapshot.ref,
+          commit: snapshot.commit,
+          offsite: snapshot.offsite,
+        }),
+      listProcessesInside: (directory) => listProcessesInside(directory),
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,
@@ -1227,6 +1292,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
       ...config.metadataGeneration,
       providers: config.metadataGeneration?.providers ?? [],
     },
+    ...withAutoPinSessionsConfig(config),
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
     ...withProcessPriorityConfig(config),
@@ -2197,7 +2263,11 @@ export async function createPaseoDaemon(
   };
   const createAgent = (input: Parameters<typeof createAgentCommand>[1]) =>
     createAgentCommand(createAgentCommandDependencies, input);
-  const archiveWorkspaceByIdExternal = (workspaceId: string, requestId: string) =>
+  const archiveWorkspaceByIdExternal = (
+    workspaceId: string,
+    requestId: string,
+    options: { keepDirectory?: boolean; expectedDirectory?: string } = {},
+  ) =>
     archiveByScope(
       {
         paseoHome: config.paseoHome,
@@ -2220,7 +2290,12 @@ export async function createPaseoDaemon(
           assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, guardedWorkspaceId),
         sessionLogger: logger,
       },
-      { scope: { kind: "workspace", workspaceId }, requestId },
+      {
+        scope: { kind: "workspace", workspaceId },
+        requestId,
+        keepDirectory: options.keepDirectory,
+        expectedDirectory: options.expectedDirectory,
+      },
     );
   const hubAgentLifecycle = new CreateAgentLifecycleDispatch({
     paseoHome: config.paseoHome,
@@ -2901,6 +2976,15 @@ export async function createPaseoDaemon(
               remediationSink,
               serverId,
               processSampler,
+              // The reaper's other attribution root, alongside every agent's own recorded cwd
+              // (from agentStorage): a build daemon left running under here was an agent's, even
+              // one whose agent record is long gone.
+              worktreeRootDirs: [
+                resolvePaseoWorktreesBaseRoot({
+                  paseoHome: config.paseoHome,
+                  worktreesRoot: config.worktreesRoot,
+                }),
+              ],
               saturationLedger: createSaturationLedger({ paseoHome: config.paseoHome, logger }),
               // The cap counts devices from this same sweep sample rather than taking its own
               // `ps` — one scan a minute on a machine that is already struggling.
@@ -3036,6 +3120,7 @@ export async function createPaseoDaemon(
               projectRegistry,
               scheduleService,
               terminalManager,
+              scriptRuntimeStore,
               archiveWorkspaceById: archiveWorkspaceByIdExternal,
               wsServer,
               daemonConfigStore,

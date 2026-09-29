@@ -71,13 +71,11 @@ const INDENT_STYLES = RNStyleSheet.create({
   depth3: { width: INDENT_PER_LEVEL * 3 },
   depth4: { width: INDENT_PER_LEVEL * 4 },
 });
-const INDENT_STYLE_LIST = [
-  INDENT_STYLES.depth0,
-  INDENT_STYLES.depth1,
-  INDENT_STYLES.depth2,
-  INDENT_STYLES.depth3,
-  INDENT_STYLES.depth4,
-];
+
+// Looked up at render time, like every style read (unistyles-module-scope.test.ts).
+function indentStyleFor(depth: number) {
+  return INDENT_STYLES[`depth${Math.min(depth, MAX_INDENT_LEVELS)}` as keyof typeof INDENT_STYLES];
+}
 
 const ROW_BADGES = {
   "needs-input": { labelKey: "agentList.badges.needsInput", variant: "warning" },
@@ -150,7 +148,7 @@ function WideOrchestrationRow({
   const { t } = useTranslation();
   const { agent } = row;
   const relativeTime = useCompactTimeAgo(agent.updatedAt);
-  const indentStyle = INDENT_STYLE_LIST[Math.min(row.depth, MAX_INDENT_LEVELS)];
+  const indentStyle = indentStyleFor(row.depth);
   const displayTitle = agent.title?.trim() || t("agentList.fallbackTitle");
   // A compact form factor renders CompactOrchestrationRow, so only a touch tablet reaches here
   // without hover.
@@ -292,7 +290,7 @@ function CompactOrchestrationRow({
   const { t } = useTranslation();
   const { agent } = row;
   const relativeTime = useCompactTimeAgo(agent.updatedAt);
-  const indentStyle = INDENT_STYLE_LIST[Math.min(row.depth, MAX_INDENT_LEVELS)];
+  const indentStyle = indentStyleFor(row.depth);
   const displayTitle = agent.title?.trim() || t("agentList.fallbackTitle");
   const presentation = resolveOrchestrationRowPresentation(agent);
   const showDetach = canDetach && row.depth > 0;

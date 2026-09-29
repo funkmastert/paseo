@@ -73,8 +73,20 @@ export interface HealthTracker {
   noteTurnCompleted(providerId: string): void;
   /** True when the account is usable for a fresh spawn of the given model. */
   isHealthyFor(providerId: string, modelId: string): boolean;
-  /** True when the account may still be used as a last resort (e.g. only drained, not capped). */
-  isLastResortEligible(providerId: string): boolean;
+  /**
+   * True when the account may still be used as a last resort (e.g. only drained, not capped).
+   * With a model named, only the windows a spawn of that model must get past count: a capped
+   * Sonnet week does not stop an Opus spawn. With none, any capped window disqualifies.
+   */
+  isLastResortEligible(providerId: string, modelId?: string): boolean;
+  /**
+   * True when a window the spawn must get past (every window with no model named, as for
+   * isLastResortEligible) is capped on evidence that may refuse a spawn: a usage reading at the
+   * cap, or refusal-grade text (classify.ts's REFUSAL_LIMIT_PATTERN). A cap read only from the
+   * CLI's per-window refusal text rules the account out of isLastResortEligible but not in here,
+   * so it ranks the account last without making a pool count as exhausted.
+   */
+  isExhaustedFor(providerId: string, modelId?: string): boolean;
   /**
    * True when every window ever observed for this account is usable (healthy or
    * probation). Used for model-less spawns, where no model-scoped window can be
@@ -125,6 +137,11 @@ interface InternalWindowState {
    * turn (noteTurnCompleted) proves the account is usable again.
    */
   authFailure?: boolean;
+  /**
+   * True while the current cap rests only on the CLI's per-window refusal text. Cleared by a usage
+   * reading at the cap or by refusal-grade text for the same window.
+   */
+  placementOnly?: boolean;
 }
 
 /**
@@ -199,6 +216,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     state.capExpiry = undefined;
     state.probationExpiry = undefined;
     state.authFailure = false;
+    state.placementOnly = false;
     if (wasCappedLineage) {
       emit({ providerId, window, kind: "recovered" });
     }
@@ -210,11 +228,13 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     state: InternalWindowState,
     resetsAt?: Date,
     authFailure = false,
+    placementOnly = false,
   ): void {
     const currentTime = now().getTime();
     state.status = "capped";
     state.resetsAt = resetsAt;
     state.authFailure = authFailure;
+    state.placementOnly = placementOnly;
     // An auth failure is account-wide and retried quickly; otherwise the fallback tracks the
     // window's own clock, so a weekly cap with no reset time doesn't expire on a session-window
     // timer and hand the account back out days early.
@@ -245,11 +265,13 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
       return;
     }
     const window = classification.window ?? WINDOW_ACCOUNT;
+    const placementOnly = classification.placementOnly === true;
     const state = getSettled(providerId, window);
     if (state.status === "capped") {
+      state.placementOnly = state.placementOnly === true && placementOnly;
       return;
     }
-    toCapped(providerId, window, state, classification.resetsAt, classification.isAuthFailure);
+    toCapped(providerId, window, state, classification.resetsAt, classification.isAuthFailure, placementOnly);
   }
 
   function reportUsage(providerId: string, readings: UsageWindowReading[]): void {
@@ -267,6 +289,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
         if (state.status !== "capped") {
           toCapped(providerId, reading.window, state, reading.resetsAt ?? undefined);
         }
+        state.placementOnly = false;
         continue;
       }
 
@@ -303,15 +326,24 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     });
   }
 
-  function isLastResortEligible(providerId: string): boolean {
+  /** The settled windows a spawn of `modelId` must get past; every observed window with none named. */
+  function gatingWindows(providerId: string, modelId?: string): InternalWindowState[] {
+    if (modelId) {
+      return relevantWindows(modelId).map((window) => getSettled(providerId, window));
+    }
     const providerWindows = windowsFor(providerId);
     for (const [window, state] of providerWindows) {
       settle(providerId, window, state);
-      if (state.status === "capped") {
-        return false;
-      }
     }
-    return true;
+    return [...providerWindows.values()];
+  }
+
+  function isLastResortEligible(providerId: string, modelId?: string): boolean {
+    return gatingWindows(providerId, modelId).every((state) => state.status !== "capped");
+  }
+
+  function isExhaustedFor(providerId: string, modelId?: string): boolean {
+    return gatingWindows(providerId, modelId).some((state) => state.status === "capped" && !state.placementOnly);
   }
 
   function isHealthyForAllWindows(providerId: string): boolean {
@@ -377,6 +409,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     noteTurnCompleted,
     isHealthyFor,
     isLastResortEligible,
+    isExhaustedFor,
     isHealthyForAllWindows,
     windowUtilization,
     describeWindow,

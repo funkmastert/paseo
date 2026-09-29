@@ -1,8 +1,12 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
-import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
-import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import {
+  describeHookAgent,
+  isPluginUnresponsive,
+  publishAgentStream,
+} from "../plugins/lifecycle/index.js";
+import type { PluginBeforeRequests, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
@@ -2407,19 +2411,21 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     if (this.pluginLifecycle && !config.internal) {
-      const request = await this.pluginLifecycle.before("agent.create", {
+      const request = await this.runAgentCreateHooks(this.pluginLifecycle, {
         config,
         env: options.env,
         callerAgentId: options.callerAgentId,
         labels: options.labels,
         initialPrompt: options.initialPrompt,
       });
-      config = { ...request.config, internal: config.internal };
-      // labels are mutable by design; initialPrompt is read-only context for
-      // the hook — the actual prompt was already resolved by the caller and
-      // is sent independently after this create completes, so a hook's
-      // mutation of it here is intentionally dropped rather than applied.
-      options = { ...options, env: request.env, labels: request.labels };
+      if (request) {
+        config = { ...request.config, internal: config.internal };
+        // labels are mutable by design; initialPrompt is read-only context for
+        // the hook — the actual prompt was already resolved by the caller and
+        // is sent independently after this create completes, so a hook's
+        // mutation of it here is intentionally dropped rather than applied.
+        options = { ...options, env: request.env, labels: request.labels };
+      }
     }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
@@ -2458,6 +2464,31 @@ export class AgentManager {
       });
     }
     return agent;
+  }
+
+  /**
+   * The `agent.create` before hooks, or null when a plugin did not answer. A plugin that timed
+   * out, exited or was stopped mid-call is stepped around the way an unloaded one is, and the
+   * create goes ahead unmodified: otherwise one stalled plugin fails every create for the length
+   * of its RPC timeout. A plugin that answered with an error refused the create on purpose, and
+   * that error stands.
+   */
+  private async runAgentCreateHooks(
+    pluginLifecycle: PluginLifecycle,
+    request: PluginBeforeRequests["agent.create"],
+  ): Promise<PluginBeforeRequests["agent.create"] | null> {
+    try {
+      return await pluginLifecycle.before("agent.create", request);
+    } catch (error) {
+      if (!isPluginUnresponsive(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        { err: error, callerAgentId: request.callerAgentId },
+        "A plugin did not answer the agent.create hook; creating the agent without it",
+      );
+      return null;
+    }
   }
 
   private buildCreateSessionOptions(options?: {
@@ -3992,6 +4023,9 @@ export class AgentManager {
             stagedSubmittedPromptEcho?.item.type === "user_message"
               ? stagedSubmittedPromptEcho.item.messageId
               : undefined,
+          // The emitState below carries the prompt's activity summary. Emitting here too sent
+          // every client two identical running snapshots per accepted turn.
+          deferStateEmit: true,
         });
       }
       for (const stagedEvent of pendingRun.stagedEvents.splice(0)) {
@@ -6416,9 +6450,10 @@ export class AgentManager {
     item: AgentTimelineItem,
     provider: AgentProvider,
     turnId?: string,
-    options?: { providerMessageId?: string },
+    options?: { providerMessageId?: string; deferStateEmit?: boolean },
   ): AgentStreamEvent {
-    const row = this.recordTimeline(agentId, item, { ...options, turnId });
+    const { deferStateEmit, ...timelineOptions } = options ?? {};
+    const row = this.recordTimeline(agentId, item, { ...timelineOptions, turnId });
     const event: AgentStreamEvent = {
       type: "timeline",
       item,
@@ -6454,7 +6489,8 @@ export class AgentManager {
         // Avoid an emitState storm: only broadcast when the summary actually
         // changed, not on every coalesced item. lastActivitySummary is
         // live-only (never persisted), so skip the snapshot write too.
-        this.emitState(agent, { persist: false });
+        // deferStateEmit: the caller publishes state right after.
+        if (!deferStateEmit) this.emitState(agent, { persist: false });
       }
 
       if (
@@ -6474,7 +6510,12 @@ export class AgentManager {
     agent: ActiveManagedAgent,
     prompt: AgentPromptInput,
     clientMessageId: string,
-    options?: { messageId?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      messageId?: string;
+      providerMessageId?: string;
+      turnId?: string;
+      deferStateEmit?: boolean;
+    },
   ): void {
     if (this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId)) {
       return;

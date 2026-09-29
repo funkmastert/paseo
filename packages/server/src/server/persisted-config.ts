@@ -493,6 +493,20 @@ const AgentLeaderCompactionSchema = z
   })
   .strict();
 
+// The done janitor's idle-workspace sweep: on whenever the janitor is, unless `enabled` says
+// otherwise. See docs/done-janitor.md, "Idle workspaces".
+const AgentDoneJanitorWorkspaceSweepSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    idleHours: z.number().positive().optional(),
+    emptyIdleHours: z.number().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    projectGraceHours: z.number().positive().optional(),
+    maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+  })
+  .strict();
+
 // Off unless `enabled` says otherwise. See docs/done-janitor.md.
 const AgentDoneJanitorSchema = z
   .object({
@@ -507,6 +521,7 @@ const AgentDoneJanitorSchema = z
     deadQuietHours: z.number().positive().optional(),
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
+    workspaceSweep: AgentDoneJanitorWorkspaceSweepSchema.optional(),
   })
   .strict();
 
@@ -909,6 +924,10 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
+        // Off switch for auto-pinning a workspace when Tyler starts a session in it (a new
+        // workspace, or a new agent tab in an existing one). Absent means on.
+        // See workspace-auto-pin.ts and docs/done-janitor.md#manual-pin-vs-auto-pin.
+        autoPinSessions: z.boolean().optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),

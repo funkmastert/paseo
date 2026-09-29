@@ -95,6 +95,34 @@ describe("PersistedConfigSchema agents.doneJanitor config", () => {
       PersistedConfigSchema.parse({ agents: { doneJanitor: { quietDays: 3 } } }),
     ).toThrow();
   });
+
+  test("accepts the workspace sweep section, every key optional", () => {
+    const workspaceSweep = {
+      enabled: true,
+      dryRun: true,
+      idleHours: 96,
+      emptyIdleHours: 12,
+      maxArchivesPerSweep: 5,
+      projectGraceHours: 48,
+      maxProjectRemovalsPerSweep: 5,
+    };
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { workspaceSweep } } }).agents
+        ?.doneJanitor?.workspaceSweep,
+    ).toEqual(workspaceSweep);
+    expect(
+      PersistedConfigSchema.parse({ agents: { doneJanitor: { workspaceSweep: {} } } }).agents
+        ?.doneJanitor?.workspaceSweep,
+    ).toEqual({});
+  });
+
+  test("rejects an unknown workspace sweep key", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({
+        agents: { doneJanitor: { workspaceSweep: { idleDays: 3 } } },
+      }),
+    ).toThrow();
+  });
 });
 
 describe("PersistedConfigSchema daemon append system prompt config", () => {

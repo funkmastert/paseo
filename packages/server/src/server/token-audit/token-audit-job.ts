@@ -18,6 +18,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 /** A restart closes and reopens every agent at once; the audit waits for that to settle. */
 const FIRST_CHECK_DELAY_MS = 10 * 60 * 1000;
+/** A failed run (e.g. ENOSPC) doubles the wait each time it recurs, capped at a day. */
+const RETRY_BACKOFF_CAP_MS = DAY_MS;
 /** The ladder cuts evidence at 8 KB; the worst rows go first so the cut takes GREEN ones. */
 const EVIDENCE_ROWS = 40;
 
@@ -105,13 +107,30 @@ export class TokenAuditJob {
     if (latest && this.now() - Date.parse(latest.generatedAt) < config.intervalDays * DAY_MS) {
       return null;
     }
+    const lastAttempt = await this.store.lastAttempt();
+    if (lastAttempt && !lastAttempt.ok) {
+      const checkIntervalMs = this.options.checkIntervalMs ?? CHECK_INTERVAL_MS;
+      const backoffMs = Math.min(
+        checkIntervalMs * 2 ** lastAttempt.consecutiveFailures,
+        RETRY_BACKOFF_CAP_MS,
+      );
+      if (this.now() - Date.parse(lastAttempt.at) < backoffMs) return null;
+    }
     return this.runOnce();
   }
 
   async runOnce(): Promise<TokenAuditRunOutcome> {
     this.running = true;
+    const attemptAt = new Date(this.now()).toISOString();
     try {
-      return await this.run();
+      const outcome = await this.run();
+      await this.store.saveAttempt({ at: attemptAt, ok: true, consecutiveFailures: 0 });
+      return outcome;
+    } catch (error) {
+      const previous = await this.store.lastAttempt();
+      const consecutiveFailures = (previous && !previous.ok ? previous.consecutiveFailures : 0) + 1;
+      await this.store.saveAttempt({ at: attemptAt, ok: false, consecutiveFailures });
+      throw error;
     } finally {
       this.running = false;
     }

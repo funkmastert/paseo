@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino, { type Logger } from "pino";
@@ -12,10 +20,12 @@ import type { ManagedAgent } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import {
+  ArchiveDirectoryMismatchError,
   archiveByScope,
   type ActiveWorkspaceRef,
   type ArchiveDependencies,
   type ArchiveResult,
+  resolveArchiveDirectory,
   resolveWorkspaceIdAtPath,
 } from "./workspace-archive-service.js";
 import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
@@ -555,6 +565,141 @@ describe("archiveByScope", () => {
       removedDirectory: false,
     });
     expect(existsSync(localCheckoutDir)).toBe(true);
+  });
+
+  describe("an older worktree record whose cwd is a missing subdirectory", () => {
+    // No ownership flag, so archive-by-scope discovers the backing directory from the path: the
+    // worktree root above the cwd, which exists and may hold work (the done janitor's B1).
+    async function legacyRecord(slug: string) {
+      const { tempDir, repoDir } = createGitRepo();
+      const paseoHome = path.join(tempDir, ".paseo");
+      const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, slug);
+      writeFileSync(path.join(worktree.worktreePath, "only-copy.txt"), "work\n");
+      const record: ActiveWorkspaceRef = {
+        workspaceId: `ws-${slug}`,
+        cwd: path.join(worktree.worktreePath, "packages", "app"),
+        kind: "worktree",
+        worktreeRoot: null,
+        isPaseoOwnedWorktree: false,
+        mainRepoRoot: null,
+      };
+      return { tempDir, paseoHome, worktree, record };
+    }
+
+    /** Archive-by-scope told to delete `expectedDirectory`, the way the done janitor calls it. */
+    function archiveExpecting(
+      input: { paseoHome: string; record: ActiveWorkspaceRef },
+      expectedDirectory: string,
+    ) {
+      const deps = createArchiveDeps({
+        paseoHome: input.paseoHome,
+        activeWorkspaces: [input.record],
+      });
+      const archived = archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: input.record.workspaceId },
+        requestId: `req-${input.record.workspaceId}`,
+        expectedDirectory,
+      });
+      return { deps, archived };
+    }
+
+    test("resolves to the worktree root: the directory its archive deletes", async () => {
+      const { paseoHome, worktree, record } = await legacyRecord("legacy-resolve");
+
+      const directory = await resolveArchiveDirectory(record, { paseoHome });
+      if (directory === null) throw new Error("expected a directory to delete");
+      expect(createRealpathAwarePathMatcher(worktree.worktreePath)(directory)).toBe(true);
+      const result = await archiveExpecting({ paseoHome, record }, directory).archived;
+
+      // The checked directory and the deleted one, compared as strings.
+      expect(result.deletedDirectory).toBe(directory);
+      expect(result.removedDirectory).toBe(true);
+      expect(existsSync(worktree.worktreePath)).toBe(false);
+    });
+
+    test.skipIf(process.platform === "win32")(
+      "names that directory one way, whatever spelling of the Paseo home it is given",
+      async () => {
+        const { tempDir, paseoHome, worktree, record } = await legacyRecord("legacy-alias");
+        const alias = `${tempDir}-alias`;
+        symlinkSync(tempDir, alias, "dir");
+        cleanupPaths.push(alias);
+        const aliasHome = path.join(alias, ".paseo");
+
+        const directory = await resolveArchiveDirectory(record, { paseoHome: aliasHome });
+        expect(directory).toBe(await resolveArchiveDirectory(record, { paseoHome }));
+        if (directory === null) throw new Error("expected a directory to delete");
+        const result = await archiveExpecting({ paseoHome: aliasHome, record }, directory).archived;
+
+        expect(result.deletedDirectory).toBe(directory);
+        expect(existsSync(worktree.worktreePath)).toBe(false);
+      },
+    );
+
+    test("an archive expecting another directory refuses before it touches anything", async () => {
+      const { paseoHome, worktree, record } = await legacyRecord("legacy-mismatch");
+
+      const { deps, archived } = archiveExpecting(
+        { paseoHome, record },
+        path.join(worktree.worktreePath, "packages"),
+      );
+
+      await expect(archived).rejects.toBeInstanceOf(ArchiveDirectoryMismatchError);
+      expect(await deps.listActiveWorkspaces()).toEqual([record]);
+      expect(readFileSync(path.join(worktree.worktreePath, "only-copy.txt"), "utf8")).toBe(
+        "work\n",
+      );
+    });
+
+    test("an archive that keeps the directory archives the record and leaves the root", async () => {
+      const { paseoHome, worktree, record } = await legacyRecord("legacy-keep");
+
+      const result = await archiveByScope(
+        createArchiveDeps({ paseoHome, activeWorkspaces: [record] }),
+        {
+          scope: { kind: "workspace", workspaceId: record.workspaceId },
+          requestId: "req-legacy-keep",
+          keepDirectory: true,
+        },
+      );
+
+      assertArchiveResult(result, {
+        archivedWorkspaceIds: [record.workspaceId],
+        removedDirectory: false,
+      });
+      expect(readFileSync(path.join(worktree.worktreePath, "only-copy.txt"), "utf8")).toBe(
+        "work\n",
+      );
+    });
+  });
+
+  test("resolveArchiveDirectory: a flagged worktree's root, and nothing for a local checkout", async () => {
+    expect(
+      await resolveArchiveDirectory(
+        {
+          workspaceId: "ws-owned",
+          cwd: "/w/h/slug/sub",
+          kind: "worktree",
+          worktreeRoot: "/w/h/slug",
+          isPaseoOwnedWorktree: true,
+          mainRepoRoot: "/repo",
+        },
+        {},
+      ),
+    ).toBe("/w/h/slug");
+    expect(
+      await resolveArchiveDirectory(
+        {
+          workspaceId: "ws-local",
+          cwd: "/repo",
+          kind: "local_checkout",
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        },
+        {},
+      ),
+    ).toBeNull();
   });
 
   test("worktree scope keeps the directory when one record teardown fails", async () => {

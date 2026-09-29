@@ -16,6 +16,10 @@ const MAX_CHILDREN_PER_ROOT = 50;
 const MAX_STORED_SAMPLES = 6;
 const MAX_GROWERS = 10;
 const DU_MAX_BUFFER_BYTES = 32 * MIB;
+/** Consecutive real timeouts on one root before the sampler starts skipping it. */
+const TIMEOUT_BACKOFF_THRESHOLD = 2;
+/** Samples to skip once backed off, before trying that root again for real. */
+const TIMEOUT_BACKOFF_SAMPLES = 5;
 const FILE_NAME = "disk-growth.json";
 
 /**
@@ -49,7 +53,9 @@ const RootSampleSchema = z.object({
 const DiskGrowthSampleSchema = z.object({
   at: z.string(),
   roots: z.array(RootSampleSchema),
-  unmeasured: z.array(z.object({ path: z.string(), reason: z.enum(["timeout", "failed"]) })),
+  unmeasured: z.array(
+    z.object({ path: z.string(), reason: z.enum(["timeout", "failed", "skipped"]) }),
+  ),
 });
 const PersistedGrowthSchema = z.object({
   version: z.literal(1),
@@ -80,6 +86,8 @@ async function runDu(root: string, timeoutMs: number): Promise<DuOutcome> {
       timeout: timeoutMs,
       killSignal: "SIGKILL",
       maxBuffer: DU_MAX_BUFFER_BYTES,
+      // A periodic walk nobody is waiting on: it yields to the agents and Tyler's own work.
+      priority: "background",
     });
     return { kind: "ok", stdout };
   } catch (error) {
@@ -153,6 +161,31 @@ export function pickReferenceSample(
 }
 
 /**
+ * Whether `path` just hit `du`'s timeout for `TIMEOUT_BACKOFF_THRESHOLD` real attempts in a row,
+ * and hasn't yet skipped `TIMEOUT_BACKOFF_SAMPLES` samples since — a root that reliably times out
+ * (a directory the walk can never finish inside the budget) otherwise blocks every single sample
+ * for its whole timeout, forever, measuring nothing each time.
+ */
+export function shouldBackOffRoot(history: readonly DiskGrowthSample[], path: string): boolean {
+  let index = history.length - 1;
+  let skippedRun = 0;
+  while (index >= 0) {
+    const entry = history[index]?.unmeasured.find((candidate) => candidate.path === path);
+    if (entry?.reason !== "skipped") break;
+    skippedRun += 1;
+    index -= 1;
+  }
+  let timeoutRun = 0;
+  while (index >= 0) {
+    const entry = history[index]?.unmeasured.find((candidate) => candidate.path === path);
+    if (entry?.reason !== "timeout") break;
+    timeoutRun += 1;
+    index -= 1;
+  }
+  return timeoutRun >= TIMEOUT_BACKOFF_THRESHOLD && skippedRun < TIMEOUT_BACKOFF_SAMPLES;
+}
+
+/**
  * A bounded, deterministic size sample of the places disk goes: one `du` per root, one after
  * another, each with its own timeout. It reads and remembers; it deletes nothing. The last few
  * samples live in `$PASEO_HOME/disk-growth.json` so a restart keeps the baseline.
@@ -217,6 +250,10 @@ export class DiskGrowthSampler {
       const path = this.expandHome(configured);
       const resolved = await realpath(path).catch(() => null);
       if (resolved === null) continue;
+      if (shouldBackOffRoot(history, path)) {
+        unmeasured.push({ path, reason: "skipped" });
+        continue;
+      }
       const outcome = await this.runDu(resolved, request.timeoutMs);
       if (outcome.kind === "timeout") {
         unmeasured.push({ path, reason: "timeout" });
@@ -353,6 +390,12 @@ function formatDelta(deltaBytes: number): string {
   return `${deltaBytes < 0 ? "-" : "+"}${formatBytes(Math.abs(deltaBytes))}`;
 }
 
+const UNMEASURED_REASON_TEXT: Record<DiskGrowthSample["unmeasured"][number]["reason"], string> = {
+  timeout: "timed out",
+  skipped: "skipped after repeated timeouts",
+  failed: "du failed",
+};
+
 /** The growth evidence handed to the escalation agent and shown in the push. Plain text. */
 export function formatGrowthEvidence(report: DiskGrowthReport, homeDir: string): string {
   const lines: string[] = [];
@@ -378,7 +421,7 @@ export function formatGrowthEvidence(report: DiskGrowthReport, homeDir: string):
   }
   for (const missed of report.sample.unmeasured) {
     lines.push(
-      `- ${abbreviateHome(missed.path, homeDir)}: not measured (${missed.reason === "timeout" ? "timed out" : "du failed"})`,
+      `- ${abbreviateHome(missed.path, homeDir)}: not measured (${UNMEASURED_REASON_TEXT[missed.reason]})`,
     );
   }
   return lines.join("\n");

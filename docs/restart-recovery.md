@@ -25,7 +25,7 @@ A marker with no `endedAt` is open. Two rules keep an open marker meaning "inter
 | `plan` (default) | Logs each interrupted agent with its readiness. The app shows the strip. |
 | `resume`         | Logs the plan, then applies it.                                          |
 
-The RPCs work in every mode. `plan` stays the default until the chaos test below has passed on Tyler's machine.
+The RPCs work in every mode. The chaos test below passed on Tyler's machine on 2026-09-24. It uses the fake provider and does not run in CI. Moving the default to `resume` is Tyler's call. `agents.restartRecovery.mode` is read at startup, so a change takes effect at the next daemon start.
 
 ## The plan
 

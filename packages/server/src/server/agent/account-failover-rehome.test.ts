@@ -41,6 +41,7 @@ function plan(
     agents,
     poolProviderIds: new Set(["claude", "claude-personal", "claude-backup"]),
     deadProviderIds: new Set(["claude-backup"]),
+    cappedModelWindows: new Map(),
     backoffs: new Map(),
     nowMs: NOW,
     ...overrides,
@@ -89,6 +90,21 @@ describe("planIdleRehomes", () => {
 
   it("leaves an agent in error to the rescue leg, which resumes it", () => {
     expect(plan([idleRoot({ lifecycle: "error", lastError: "tool crashed" })])).toEqual([]);
+  });
+
+  it("moves an idle Opus root off an account at its Opus weekly cap, and leaves a Sonnet root", () => {
+    const opus = idleRoot({ id: "opus", provider: "claude-personal", model: "claude-opus-5-5" });
+    const sonnet = idleRoot({
+      id: "sonnet",
+      provider: "claude-personal",
+      model: "claude-sonnet-5",
+    });
+    expect(
+      plan([opus, sonnet], {
+        deadProviderIds: new Set(),
+        cappedModelWindows: new Map([["claude-personal", ["weekly_model_opus"]]]),
+      }),
+    ).toEqual(["opus"]);
   });
 
   it("holds an agent whose move was refused until its backoff runs out", () => {

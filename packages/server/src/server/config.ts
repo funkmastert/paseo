@@ -685,6 +685,7 @@ export function resolveConfigFromPersisted(
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
+    autoPinSessions: persisted.agents?.autoPinSessions,
     metadataGeneration: persisted.agents?.metadataGeneration,
     ...resolveAgentMonitorConfig(persisted),
     diskSweeper: persisted.worktrees?.diskSweeper,

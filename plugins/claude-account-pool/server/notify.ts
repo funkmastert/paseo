@@ -255,7 +255,7 @@ function formatPoolExhaustedMessage(episode: PoolExhaustedEpisode): string {
     : " No account reported a reset time.";
   return (
     `Account pool: EVERY Claude account is out of budget (${episode.exhaustedProviderIds.join(", ")}). ` +
-    `New agents are being refused rather than started on a dead account.${when} ` +
+    `${episode.refused ? "New agents are being refused rather than started on a dead account." : "An agent with no calling agent was started anyway, on the account it asked for."}${when} ` +
     `Nothing will run until an account resets or another one is signed in.`
   );
 }
