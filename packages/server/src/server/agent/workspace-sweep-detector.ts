@@ -9,7 +9,7 @@
  */
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
-import type { DoneJanitorWorkspace } from "../agent-done-janitor.js";
+import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
 import {
   DONE_JANITOR_KEEP_LABEL,
   formatDuration,
@@ -288,15 +288,16 @@ export function archiveDeletesDirectory(input: {
  * work that would be lost with the directory.
  */
 export function describeUncoveredWork(input: {
-  snapshot: WorktreeSnapshotResult;
+  /** Null in a dry run, which takes no snapshot: only the ignored files are judged. */
+  snapshot: WorktreeSnapshotResult | null;
   /** `git ls-files --others --ignored --exclude-standard --directory` entries; null when it failed. */
   ignoredEntries: readonly string[] | null;
 }): string | null {
   const { snapshot } = input;
-  if (snapshot.kind === "failed") {
+  if (snapshot?.kind === "failed") {
     return `its work is at risk and could not be snapshotted: ${snapshot.error}`;
   }
-  if (snapshot.kind === "snapshotted" && snapshot.skippedFiles.length > 0) {
+  if (snapshot?.kind === "snapshotted" && snapshot.skippedFiles.length > 0) {
     return `${snapshot.skippedFiles.length} untracked file(s) too large for the snapshot (${listSome(snapshot.skippedFiles)})`;
   }
   if (input.ignoredEntries === null) return "its ignored files could not be listed";
@@ -319,6 +320,54 @@ export function isBuildOutputPath(entry: string): boolean {
     BUILD_OUTPUT_FILES.has(name) ||
     BUILD_OUTPUT_EXTENSIONS.some((extension) => name.endsWith(extension))
   );
+}
+
+export type IdleProjectVerdict =
+  | { kind: "keep"; reason: string }
+  | { kind: "remove"; quietForMs: number; reason: string };
+
+/**
+ * Whether a project is sidebar clutter: not archived, not remote, no active workspace, and quiet
+ * for `projectGraceMs` since the newest of its own timestamps and every one of its workspaces'.
+ * An archived workspace's `archivedAt` is when it went, so the grace runs from the last one gone.
+ * Removal is record-only and re-adding the project undoes it; its root is never looked at.
+ */
+export function idleProjectVerdict(
+  project: DoneJanitorProject,
+  workspaces: readonly DoneJanitorWorkspace[],
+  config: Pick<ResolvedWorkspaceSweepConfig, "projectGraceMs">,
+  nowMs: number,
+): IdleProjectVerdict {
+  if (project.archivedAt) return { kind: "keep", reason: "it is archived" };
+  if (project.projectKey?.startsWith("remote:") || project.projectId.startsWith("remote:")) {
+    return { kind: "keep", reason: "it is a remote project" };
+  }
+  const own = workspaces.filter((workspace) => workspace.projectId === project.projectId);
+  if (own.some((workspace) => !workspace.archivedAt)) {
+    return { kind: "keep", reason: "it has an active workspace" };
+  }
+  const newest = newestOf([
+    parseStamp(project.createdAt),
+    parseStamp(project.updatedAt),
+    ...own.flatMap((workspace) => [
+      parseStamp(workspace.createdAt),
+      parseStamp(workspace.updatedAt),
+      parseStamp(workspace.archivedAt),
+    ]),
+  ]);
+  if (newest === null) return { kind: "keep", reason: "it has no usable activity signal" };
+  const quietForMs = nowMs - newest;
+  if (quietForMs < config.projectGraceMs) {
+    return {
+      kind: "keep",
+      reason: `its last workspace went ${formatDuration(quietForMs)} ago; removed after ${formatDuration(config.projectGraceMs)}`,
+    };
+  }
+  return {
+    kind: "remove",
+    quietForMs,
+    reason: `it has had no active workspace for ${formatDuration(quietForMs)}`,
+  };
 }
 
 function listSome(items: readonly string[]): string {
