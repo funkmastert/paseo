@@ -15,6 +15,7 @@ import {
   DONE_JANITOR_KEEP_LABEL,
   formatDuration,
   listDescendants,
+  parentOf,
   type DoneJanitorAgentView,
 } from "./done-janitor-detector.js";
 
@@ -161,7 +162,7 @@ export function classifyWorkspace(
   config: Pick<ResolvedWorkspaceSweepConfig, "idleMs" | "emptyIdleMs">,
   nowMs: number,
 ): WorkspaceSweepVerdict {
-  const busy = workspaceBusyReason(facts);
+  const busy = workspaceBusyReason(facts, { idleMs: config.idleMs, nowMs });
   if (busy) return { kind: "active", reason: busy };
 
   const unarchived = facts.agents.filter((agent) => !agent.archived);
@@ -240,15 +241,16 @@ function isFixerWorkspace(agents: readonly DoneJanitorAgentView[]): boolean {
 
 /**
  * What keeps the workspace whatever its age: a manual pin, an agent at work or about to be woken,
- * an orchestrator whose fleet is still loaded, a terminal, a script. Null when nothing does. A
- * schedule that starts agents in a worktree keeps its directory, not its record: the janitor
- * checks that before a deletion.
+ * an orchestrator whose fleet is still loaded, a subagent whose leader is still at it elsewhere, a
+ * terminal, a script. Null when nothing does. A schedule that starts agents in a worktree keeps
+ * its directory, not its record: the janitor checks that before a deletion.
  */
 export function workspaceBusyReason(
   facts: Pick<
     WorkspaceSweepFacts,
     "workspace" | "agents" | "views" | "terminalCount" | "runningScriptCount"
   >,
+  context: { idleMs: number; nowMs: number },
 ): string | null {
   // An auto pin only sorts the workspace to the top while it is in use (workspace-auto-pin.ts).
   if (isProtectivePin(facts.workspace)) return "it is pinned";
@@ -267,10 +269,41 @@ export function workspaceBusyReason(
       (descendant) => descendant.live || agentWorkingReason(descendant) !== null,
     );
     if (live) return `agent ${agent.id} leads subagent ${live.id}, which is live`;
+    const leader = activeLeaderElsewhere(agent, facts.views, context);
+    if (leader) return `agent ${agent.id} is a subagent of ${leader.id}, which is still active`;
   }
   if (facts.terminalCount > 0) return `it has ${facts.terminalCount} open terminal(s)`;
   if (facts.runningScriptCount > 0) {
     return `it has ${facts.runningScriptCount} running script(s)`;
+  }
+  return null;
+}
+
+/**
+ * The nearest unarchived ancestor in another workspace that is live, at work, or active within
+ * `idleMs`; null when none is. A leader in the same workspace already dates it. A multi-day
+ * orchestration leaves a worker idle for days while its leader works elsewhere and may send it
+ * more; archiving the worker's workspace would delete the directory it would be sent back to.
+ */
+function activeLeaderElsewhere(
+  agent: DoneJanitorAgentView,
+  views: readonly DoneJanitorAgentView[],
+  context: { idleMs: number; nowMs: number },
+): DoneJanitorAgentView | null {
+  const byId = new Map(views.map((view) => [view.id, view]));
+  const seen = new Set<string>([agent.id]);
+  let parentId = parentOf(agent);
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) return null;
+    const active =
+      parent.live ||
+      agentWorkingReason(parent) !== null ||
+      parent.lastActivityAtMs === null ||
+      context.nowMs - parent.lastActivityAtMs < context.idleMs;
+    if (!parent.archived && parent.workspaceId !== agent.workspaceId && active) return parent;
+    parentId = parentOf(parent);
   }
   return null;
 }

@@ -251,6 +251,52 @@ describe("classifyWorkspace", () => {
     });
   });
 
+  describe("a subagent whose leader works elsewhere", () => {
+    const worker = (overrides: Partial<DoneJanitorAgentView> = {}) =>
+      agent({ id: "worker", labels: { "paseo.parent-agent-id": "leader" }, ...overrides });
+    const leader = (overrides: Partial<DoneJanitorAgentView> = {}) =>
+      agent({ id: "leader", workspaceId: "ws-leader", cwd: "/home/t/leader", ...overrides });
+
+    test("is kept while its leader was active within the idle threshold", () => {
+      const views = [worker(), leader({ lastActivityAtMs: NOW - 2 * HOUR })];
+      expect(classify({ agents: [views[0]], views })).toEqual({
+        kind: "active",
+        reason: "agent worker is a subagent of leader, which is still active",
+      });
+    });
+
+    test("is kept while its leader is loaded, however long it has been idle", () => {
+      const views = [worker(), leader({ live: true, lifecycle: "idle" })];
+      expect(classify({ agents: [views[0]], views }).kind).toBe("active");
+    });
+
+    test("is kept while any ancestor up the chain is active", () => {
+      const middle = agent({
+        id: "leader",
+        workspaceId: "ws-middle",
+        labels: { "paseo.parent-agent-id": "root" },
+      });
+      const root = agent({ id: "root", workspaceId: "ws-root", lastActivityAtMs: NOW - HOUR });
+      const views = [worker(), middle, root];
+      expect(classify({ agents: [views[0]], views })).toMatchObject({
+        kind: "active",
+        reason: "agent worker is a subagent of root, which is still active",
+      });
+    });
+
+    test("is idle once its leader is quiet past the threshold or archived", () => {
+      const quiet = [worker(), leader()];
+      expect(classify({ agents: [quiet[0]], views: quiet }).kind).toBe("idle");
+      const archived = [worker(), leader({ archived: true, lastActivityAtMs: NOW - HOUR })];
+      expect(classify({ agents: [archived[0]], views: archived }).kind).toBe("idle");
+    });
+
+    test("a leader in the same workspace already dates it, and is not counted twice", () => {
+      const views = [worker(), leader({ workspaceId: "ws-1", live: true, lifecycle: "idle" })];
+      expect(classify({ agents: views, views }).kind).toBe("idle");
+    });
+  });
+
   test("a closed leader whose subagents are all closed is not an orchestrator at work", () => {
     const leader = agent({ id: "leader" });
     const child = agent({
