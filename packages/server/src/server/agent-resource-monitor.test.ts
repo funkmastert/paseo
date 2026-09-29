@@ -3,7 +3,11 @@ import type { ResourceAlert } from "@getpaseo/protocol/agent-types";
 import type { AgentManager, ResourceMonitorAgentSummary } from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { AgentResourceMonitorState } from "./agent/resource-monitor-detector.js";
-import type { ProcessSignalOutcome, ProcessSignaller } from "./agent/build-daemon-reaper.js";
+import type {
+  BuildDaemonCwdResolver,
+  ProcessSignalOutcome,
+  ProcessSignaller,
+} from "./agent/build-daemon-reaper.js";
 import type {
   ProcessSampleRow,
   ProcessTableSample,
@@ -43,12 +47,13 @@ function createFakeAgentManager(agents: ResourceMonitorAgentSummary[]) {
   } as unknown as AgentManager & { __alerts: Map<string, ResourceAlert> };
 }
 
-function createFakeAgentStorage(titles: Record<string, string> = {}) {
+function createFakeAgentStorage(titles: Record<string, string> = {}, agentCwds: string[] = []) {
   return {
     get: vi.fn(async (id: string) =>
       titles[id] ? ({ title: titles[id] } as StoredAgentRecord) : null,
     ),
-  } as Pick<AgentStorage, "get">;
+    list: vi.fn(async () => agentCwds.map((cwd) => ({ cwd }) as StoredAgentRecord)),
+  } as Pick<AgentStorage, "get" | "list">;
 }
 
 function createFakePushSender() {
@@ -215,6 +220,10 @@ function createMonitor(params: {
   saturationLedger?: AgentResourceMonitorOptions["saturationLedger"];
   holdChildAdmission?: AgentResourceMonitorOptions["holdChildAdmission"];
   lowerProcessPriority?: AgentResourceMonitorOptions["lowerProcessPriority"];
+  /** Cwds `AgentStorage.list()` returns — every agent's recorded cwd, live or archived. */
+  agentCwds?: string[];
+  worktreeRootDirs?: readonly string[];
+  cwdResolver?: BuildDaemonCwdResolver;
 }) {
   const agentManager = createFakeAgentManager(params.agents ?? [summary({})]);
   const push = createFakePushSender();
@@ -229,7 +238,7 @@ function createMonitor(params: {
   const remediation = createRecordingSink();
   const monitor = new AgentResourceMonitor({
     agentManager,
-    agentStorage: createFakeAgentStorage(params.titles),
+    agentStorage: createFakeAgentStorage(params.titles, params.agentCwds),
     pushNotificationSender: push.sender,
     remediationSink: remediation.sink,
     ...(params.sweepTestArtifacts ? { sweepTestArtifacts: params.sweepTestArtifacts } : {}),
@@ -237,6 +246,9 @@ function createMonitor(params: {
     ...(params.saturationLedger ? { saturationLedger: params.saturationLedger } : {}),
     ...(params.holdChildAdmission ? { holdChildAdmission: params.holdChildAdmission } : {}),
     ...(params.lowerProcessPriority ? { lowerProcessPriority: params.lowerProcessPriority } : {}),
+    ...(params.worktreeRootDirs ? { worktreeRootDirs: params.worktreeRootDirs } : {}),
+    // Never shells out to a real lsof in a test unless a test explicitly injects one.
+    cwdResolver: params.cwdResolver ?? { resolve: async () => new Map() },
     serverId: "server-1",
     processSampler: sampler,
     sendSystemMessageToAgent: steer.fn,
@@ -1089,6 +1101,56 @@ describe("AgentResourceMonitor reaper", () => {
       config: REAP_ON,
       signaller,
       now: () => clock.ms,
+    });
+
+    await sweep(monitor, 60, clock);
+
+    expect(sent).toEqual([]);
+    expect(reapPushes(push.sent)).toHaveLength(0);
+  });
+
+  test("a same-uid daemon with no marker is reaped once its resolved cwd sits under an agent's worktree", async () => {
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    const unmarkedCommand =
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
+      "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
+      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
+    const { monitor, push } = createMonitor({
+      agents: [],
+      processRows: [gradleDaemonRow({ command: unmarkedCommand })],
+      config: REAP_ON,
+      signaller,
+      now: () => clock.ms,
+      agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
+      cwdResolver: {
+        resolve: async () => new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+      },
+    });
+
+    await sweep(monitor, 20, clock);
+
+    expect(sent).toEqual([{ pid: 28056, signal: "SIGTERM" }]);
+    expect(reapPushes(push.sent)).toHaveLength(1);
+  });
+
+  test("a same-uid daemon whose resolved cwd is nobody's agent workspace is still spared", async () => {
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    const unmarkedCommand =
+      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
+      "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
+      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
+    const { monitor, push } = createMonitor({
+      agents: [],
+      processRows: [gradleDaemonRow({ command: unmarkedCommand })],
+      config: REAP_ON,
+      signaller,
+      now: () => clock.ms,
+      agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
+      cwdResolver: {
+        resolve: async () => new Map([[28056, "/Users/t/Projects/tylers-own-app"]]),
+      },
     });
 
     await sweep(monitor, 60, clock);

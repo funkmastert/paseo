@@ -1,10 +1,14 @@
+import { realpathSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import {
   type BuildDaemonReaperConfig,
   type BuildDaemonReaperMemory,
+  createSystemBuildDaemonCwdResolver,
   createSystemProcessSignaller,
   evaluateBuildDaemonReapCandidates,
   markBuildDaemonHandled,
+  parseLsofCwdOutput,
+  selectBuildDaemonPidsNeedingCwd,
 } from "./build-daemon-reaper.js";
 import { parsePsOutput, type ProcessSampleRow } from "./process-sampler.js";
 
@@ -58,8 +62,12 @@ function runSweeps(params: {
   ownerUid?: number | undefined;
   config?: Partial<BuildDaemonReaperConfig>;
   startMs?: number;
+  agentOwnedDirs?: readonly string[];
+  pidCwd?: ReadonlyMap<number, string>;
 }) {
   const config = { ...CONFIG, ...params.config };
+  const agentOwnedDirs = params.agentOwnedDirs ?? [];
+  const pidCwd = params.pidCwd ?? new Map();
   let memory: BuildDaemonReaperMemory | undefined;
   let nowMs = params.startMs ?? 1_000_000;
   let last = evaluateBuildDaemonReapCandidates({
@@ -69,6 +77,8 @@ function runSweeps(params: {
     config,
     previous: undefined,
     nowMs,
+    agentOwnedDirs,
+    pidCwd,
   });
   for (let index = 0; index < params.sweeps; index += 1) {
     last = evaluateBuildDaemonReapCandidates({
@@ -78,6 +88,8 @@ function runSweeps(params: {
       config,
       previous: memory,
       nowMs,
+      agentOwnedDirs,
+      pidCwd,
     });
     memory = last.memory;
     nowMs += 60_000;
@@ -186,6 +198,71 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     const result = runSweeps({
       sweeps: 60,
       rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("a daemon with no marker but a cwd under an agent worktree is attributable and reapable", () => {
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+      pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+    });
+
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+  });
+
+  test("a daemon whose cwd falls outside every agent-owned directory is spared, however idle", () => {
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+      pidCwd: new Map([[28056, "/Users/t/Projects/some-other-repo"]]),
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("a same-named sibling directory is not treated as under the agent-owned root", () => {
+    // "/Users/t/.paseo/worktrees/abc123" must not match a directory just because it starts with
+    // the same characters as "/Users/t/.paseo/worktrees/abc12345" — only real containment counts.
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+      pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc123"]]),
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
+  test("a Gradle daemon with no cwd resolved is attributed from a project path in its argv", () => {
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [
+        row({
+          pid: 28056,
+          command: `${UNATTRIBUTED_GRADLE_COMMAND} -Dorg.gradle.project.dir=/Users/t/.paseo/worktrees/abc12345/app`,
+        }),
+      ],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+      // No lsof entry for 28056 — this daemon is attributed by argv alone.
+      pidCwd: new Map(),
+    });
+
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+  });
+
+  test("a failed cwd resolution leaves an unmarked daemon judged on argv alone, and spares it", () => {
+    // Simulates every pid missing from `pidCwd` because the batched lsof call itself failed —
+    // the reaper must not treat "unresolved" as "attributed".
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+      pidCwd: new Map(),
     });
 
     expect(result.candidates).toEqual([]);
@@ -400,6 +477,95 @@ describe("the ps snapshot a real Gradle daemon produces", () => {
     });
 
     expect(result.candidates).toMatchObject([{ pid: 28056, kind: "gradle" }]);
+  });
+});
+
+describe("selectBuildDaemonPidsNeedingCwd", () => {
+  test("selects only same-uid, ppid-1, allowlisted daemons with no marker and no prior handling", () => {
+    const rows = [
+      row({ pid: 1, command: "/sbin/launchd" }), // pid 1 itself, never a candidate
+      row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND }), // selected
+      row({ pid: 28057, command: GRADLE_COMMAND }), // carries the marker already
+      row({ pid: 28058, ppid: 4242, command: UNATTRIBUTED_GRADLE_COMMAND }), // has a live parent
+      row({ pid: 28059, uid: 502, command: UNATTRIBUTED_GRADLE_COMMAND }), // another user
+      row({ pid: 28060, command: "vim notes.md" }), // not on the allowlist
+    ];
+
+    expect(selectBuildDaemonPidsNeedingCwd(rows, new Set(), OWNER_UID, undefined)).toEqual([28056]);
+  });
+
+  test("skips a pid the reaper has already attributed via a live agent tree", () => {
+    const rows = [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })];
+
+    expect(selectBuildDaemonPidsNeedingCwd(rows, new Set([28056]), OWNER_UID, undefined)).toEqual(
+      [],
+    );
+  });
+
+  test("skips a pid already marked handled in a previous sweep's memory", () => {
+    const rows = [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })];
+    const previous: BuildDaemonReaperMemory = new Map([
+      [
+        28056,
+        { kind: "gradle", firstSeenAtMs: 0, idleSinceMs: 0, idleSweeps: 5, handled: "reported" },
+      ],
+    ]);
+
+    expect(selectBuildDaemonPidsNeedingCwd(rows, new Set(), OWNER_UID, previous)).toEqual([]);
+  });
+
+  test("selects nothing when the owner uid is unknown", () => {
+    const rows = [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })];
+
+    expect(selectBuildDaemonPidsNeedingCwd(rows, new Set(), undefined, undefined)).toEqual([]);
+  });
+});
+
+describe("parseLsofCwdOutput", () => {
+  test("pairs each p-line with the n-line that follows it", () => {
+    const output = ["p28056", "n/Users/t/.paseo/worktrees/abc12345/app", "p900", "n/Users/t"].join(
+      "\n",
+    );
+
+    expect(parseLsofCwdOutput(output)).toEqual(
+      new Map([
+        [28056, "/Users/t/.paseo/worktrees/abc12345/app"],
+        [900, "/Users/t"],
+      ]),
+    );
+  });
+
+  test("ignores an n-line before any p-line, and tolerates blank lines", () => {
+    const output = ["", "n/orphaned", "p28056", "", "n/Users/t/app", ""].join("\n");
+
+    expect(parseLsofCwdOutput(output)).toEqual(new Map([[28056, "/Users/t/app"]]));
+  });
+
+  test("empty output resolves nothing", () => {
+    expect(parseLsofCwdOutput("")).toEqual(new Map());
+  });
+});
+
+describe("createSystemBuildDaemonCwdResolver", () => {
+  test("resolves this very process's own cwd via a real lsof call", async () => {
+    const resolver = createSystemBuildDaemonCwdResolver();
+
+    const result = await resolver.resolve([process.pid]);
+
+    // lsof reports the real (symlink-resolved) path, which is what realpathSync gives too.
+    expect(result.get(process.pid)).toBe(realpathSync(process.cwd()));
+  });
+
+  test("an empty pid list never shells out and resolves nothing", async () => {
+    const resolver = createSystemBuildDaemonCwdResolver();
+
+    expect(await resolver.resolve([])).toEqual(new Map());
+  });
+
+  test("a pid that cannot exist resolves to an empty map rather than throwing", async () => {
+    const resolver = createSystemBuildDaemonCwdResolver();
+
+    await expect(resolver.resolve([0x7fff_fffe])).resolves.toEqual(new Map());
   });
 });
 
