@@ -3,10 +3,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { execCommand, runWithSpawnPriority, spawnProcess } from "./spawn.js";
 import { resetProcessPriorityPolicy, setProcessPriorityPolicy } from "./process-priority.js";
+import { isPlatform } from "../test-utils/platform.js";
 
 // Real processes through the real spawn path: the nice value the kernel reports is the behavior.
 // The values differ from 10 because the test runner may itself already run at nice 10.
-describe("spawn priority option", () => {
+// Windows has priority classes, not nice values: setPriority(12) reads back as 10.
+describe.skipIf(isPlatform("win32"))("spawn priority option", () => {
   afterEach(() => {
     resetProcessPriorityPolicy();
   });

@@ -38,14 +38,18 @@ function writeClaudeCredentials(dir: string, accessToken: string): void {
 }
 
 describe("claudeConfigDirKeychainService", () => {
-  it("matches the hash scheme observed in the real macOS Keychain", () => {
-    // Empirically verified against a live item on this machine: sha256 of the absolute
-    // path "/Users/tylerthackray/.claude-personal" (no trailing slash), first 8 hex
-    // chars, produced service "Claude Code-credentials-a30b61cd".
-    expect(claudeConfigDirKeychainService("/Users/tylerthackray/.claude-personal")).toBe(
-      "Claude Code-credentials-a30b61cd",
-    );
-  });
+  // The Keychain is macOS-only, and on Windows the POSIX path below resolves onto a drive.
+  it.skipIf(process.platform === "win32")(
+    "matches the hash scheme observed in the real macOS Keychain",
+    () => {
+      // Empirically verified against a live item on this machine: sha256 of the absolute
+      // path "/Users/tylerthackray/.claude-personal" (no trailing slash), first 8 hex
+      // chars, produced service "Claude Code-credentials-a30b61cd".
+      expect(claudeConfigDirKeychainService("/Users/tylerthackray/.claude-personal")).toBe(
+        "Claude Code-credentials-a30b61cd",
+      );
+    },
+  );
 
   it("agrees on a path with and without a trailing slash", () => {
     expect(claudeConfigDirKeychainService("/tmp/claude-work/")).toBe(
