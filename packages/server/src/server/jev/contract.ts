@@ -87,6 +87,32 @@ export type JevFeatureId =
   | "compactionTiming"
   | "stallJudgment";
 
+/**
+ * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
+ * the features that steer the daemon. `agentTools` is its own lane; every other feature is
+ * `control`.
+ */
+export type JevLane = "control" | "agentTools";
+
+/**
+ * What a call's state is about, for the D7 exclusion (docs/jev.md, "The D7 exclusion"). Required
+ * on every call: the service resolves every path, the agents' cwds and their git signals, and
+ * sends nothing when any of them is under an excluded root or remote.
+ */
+export interface JevEgressScope {
+  /** Working directories whose content feeds the state. */
+  cwds: string[];
+  /** Files whose content or diff is in the state. Relative paths resolve against `baseCwd`. */
+  files?: string[];
+  /** An agent's recorded cwd, never `process.cwd()`. A relative file with no `baseCwd` is excluded. */
+  baseCwd?: string;
+  /**
+   * Agents whose prompt, conversation or timeline is in the state. The service adds their cwds,
+   * every ancestor's cwd, and every descendant's cwd (live, or archived in the last 24 h).
+   */
+  agentIds?: string[];
+}
+
 export interface JevSubject {
   /** The agent the decision is about. Absent for a spawn hint: the agent does not exist yet. */
   agentId?: string;
@@ -99,8 +125,11 @@ export interface JevDecideInput {
   callSite: string;
   state: JevState;
   questions: JevQuestions;
+  /** Required. `decide` checks it itself and never trusts an earlier `checkScope` by the caller. */
+  scope: JevEgressScope;
+  /** Ledger and audit attribution. Not used for the exclusion: that is `scope`. */
   subject?: JevSubject;
-  /** Clamped to `agents.jev.<feature>.timeoutMs`. Covers every retry. */
+  /** Clamped to `agents.jev.<feature>.timeoutMs`. Covers the queue, every retry and the body. */
   deadlineMs?: number;
   signal?: AbortSignal;
 }
@@ -115,8 +144,12 @@ export interface JevCallMeta {
   attempts: number;
   inputTokens: number;
   outputTokens: number;
-  /** UTF-8 bytes of the state after redaction: what left the machine. */
+  /** UTF-8 bytes of the state after redaction. */
   stateBytes: number;
+  /** UTF-8 bytes of the whole serialized body after redaction: what left the machine. */
+  bodyBytes: number;
+  /** How many values redaction replaced. `ask_jev` reports it to the agent. */
+  redactions: number;
   cost: JevCost;
 }
 
@@ -125,12 +158,24 @@ export type JevUnavailableReason =
   | "no-key"
   | "disabled"
   | "feature-disabled"
+  /** The lane's daily cap, or the call's estimate would pass it. Resets at local midnight. */
   | "daily-budget"
+  /** `agentTools.maxUsdPerAgentPerHour`. */
   | "agent-budget"
   | "key-rejected"
-  | "circuit-open";
+  /** The lane's circuit is open. */
+  | "circuit-open"
+  /** The deadline passed while waiting for a lane slot or a rate token. Never counts toward a circuit. */
+  | "saturated"
+  /** The D7 exclusion matched, or resolving the scope or the text scan threw. */
+  | "excluded"
+  /** `config.json` could not be read. */
+  | "config-unreadable";
 
-/** Something was sent and no usable answer came back. The call site runs today's behaviour. */
+/**
+ * No usable answer. `redaction`, `invalid-request`, `state-too-large` and `request-too-large`
+ * stop before sending; the rest were sent. The call site runs today's behaviour.
+ */
 export type JevFailureReason =
   | "timeout"
   | "aborted"
@@ -138,7 +183,10 @@ export type JevFailureReason =
   | "network"
   | "contract"
   | "state-too-large"
-  | "invalid-request";
+  | "request-too-large"
+  | "invalid-request"
+  /** Redaction or a size check threw. Nothing was sent and nothing audited. */
+  | "redaction";
 
 /**
  * `decide` never rejects. Only `answered` may change behaviour. `shadow` carries real answers
@@ -151,9 +199,13 @@ export type JevOutcome =
   | { kind: "unavailable"; callId: string; reason: JevUnavailableReason }
   | { kind: "failed"; callId: string; reason: JevFailureReason; meta: JevCallMeta | null };
 
-/** A decision worth showing in an agent's timeline (feature 11). */
+/** A decision worth showing for an agent (feature 11). Never a timeline row. */
 export interface JevDecisionNote {
-  agentId: string;
+  /**
+   * The agent it is about. Null for a spawn hint, recorded before the agent exists;
+   * `jev.decisions.list` attaches it through the agent's `paseo.jev-call` label.
+   */
+  agentId: string | null;
   callId: string;
   feature: JevFeatureId;
   /** A short label for what was asked, e.g. "Does this finish need Tyler?". */
@@ -167,7 +219,14 @@ export interface JevDecisionNote {
   applied: boolean;
 }
 
-/** The foundation ships a ledger-only sink; the ui track replaces it with timeline rows. */
+/** What `jev.decisions.list` returns per decision. */
+export interface JevDecisionRecord extends JevDecisionNote {
+  /** ISO time the decision was recorded. */
+  at: string;
+  costUsd: number | null;
+}
+
+/** The foundation's in-memory store (`decisions.ts`). Feature tracks only call `record`. */
 export interface JevDecisionSink {
   record(note: JevDecisionNote): void;
 }
@@ -187,20 +246,36 @@ export interface JevSpendTotals {
   usdSource: "reported" | "estimated" | "mixed" | "none";
 }
 
+export interface JevLaneStatus {
+  today: JevSpendTotals;
+  maxUsdPerDay: number;
+  /** True once today's spend reached the cap. */
+  exhausted: boolean;
+  circuit: "closed" | "open" | "half-open";
+  /** ISO time of the next local midnight, when the cap resets. */
+  resetsAt: string;
+}
+
 export interface JevStatus {
   available: boolean;
   /** Null when available. */
   reason: JevUnavailableReason | null;
+  /** Whether a key is present. Never the value, a prefix, the last characters or a hash. */
+  keyPresent: boolean;
   provider: "openrouter" | "typesafe" | "fake";
   model: string;
   features: Record<JevFeatureId, JevFeatureStatus>;
-  today: JevSpendTotals;
+  lanes: Record<JevLane, JevLaneStatus>;
+  /** Read by the account-pool plugin on its 60-second poll. */
+  spawnHint: { applyHard: boolean; applyRole: boolean };
+  /** Read by the account-pool plugin to split eligible creates into the D8 arms. */
+  agentTools: { assignShare: number };
   todayByFeature: Record<JevFeatureId, JevSpendTotals>;
   last7Days: JevDaySpend[];
 }
 
 export interface JevDaySpend {
-  /** UTC day, `YYYY-MM-DD`. */
+  /** The daemon's local calendar day, `YYYY-MM-DD`. */
   day: string;
   calls: number;
   usd: number;
@@ -209,12 +284,20 @@ export interface JevDaySpend {
 export interface JevService {
   decide(input: JevDecideInput): Promise<JevOutcome>;
   /**
-   * Cheap and synchronous: whether a call for `feature` would be sent right now. Call sites use it
-   * to skip building state (reading files, a timeline tail) when the answer would be `unavailable`.
+   * Cheap and synchronous: whether a call for `feature` could be sent right now (key, switches,
+   * the lane's budget and circuit). Call sites use it to skip building state when the answer would
+   * be `unavailable`.
    */
   isActive(feature: JevFeatureId): boolean;
+  /**
+   * The D7 check alone, for call sites that would otherwise read files or a timeline for an
+   * excluded subject. Any error answers `excluded`.
+   */
+  checkScope(scope: JevEgressScope): Promise<"ok" | "excluded">;
   status(): JevStatus;
   readonly decisions: JevDecisionSink;
+  /** The agent's decisions, newest first, including its spawn hint. Serves `jev.decisions.list`. */
+  listDecisions(agentId: string): JevDecisionRecord[];
 }
 
 export interface JevTransportResponse {
@@ -233,7 +316,9 @@ export interface JevTransport {
 
 /**
  * How `ask_jev` asks the catastrophe gate (feature 1) whether its `command` may run. The tools
- * track codes against this; bootstrap adapts the gate's real export to it.
+ * track codes against this; bootstrap adapts `checkCatastrophe(command, cwd,
+ * resolveCurrentBranchWithGit)` and `formatCatastropheDenial` from `agent/catastrophe-gate.ts` to
+ * it, honouring `agents.catastropheGate.enabled` as the Bash hook does.
  */
 export interface CommandGateVerdict {
   allowed: boolean;
@@ -241,4 +326,9 @@ export interface CommandGateVerdict {
   reason: string | null;
 }
 
-export type CommandGate = (input: { command: string; cwd: string }) => CommandGateVerdict;
+/**
+ * Async, like the gate: a force push that names no ref asks git which branch is checked out.
+ * A throw or rejection means refused. `ask_jev` never calls it on Windows, where it refuses
+ * `command` outright: the gate reads POSIX shell and resolves only POSIX cwds.
+ */
+export type CommandGate = (input: { command: string; cwd: string }) => Promise<CommandGateVerdict>;
