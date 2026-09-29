@@ -24,7 +24,9 @@ export interface BuildDoneJanitorNotificationPayloadInput {
   /** Agents archived because they were closed or errored and unpinned, not because they answered. */
   archivedDeadAgentCount?: number;
   deletedWorktreeCount: number;
-  /** Projects removed because they had no workspaces and their directory was gone. */
+  /** Idle workspaces archived by the workspace sweep whose directory was kept. */
+  archivedWorkspaceCount?: number;
+  /** Projects removed because they had no active workspace, or no workspace and no directory. */
   removedProjectCount?: number;
   /** Total freed, summed over worktrees whose size was sampled before deletion. */
   reclaimedBytes: number;
@@ -55,6 +57,12 @@ export function buildDoneJanitorNotificationPayload(
     const verb = parts.length > 0 ? "deleted" : "Deleted";
     parts.push(
       `${verb} ${plural(input.deletedWorktreeCount, "worktree")}, freeing ${formatGigabytes(input.reclaimedBytes)}`,
+    );
+  }
+  const archivedWorkspaces = input.archivedWorkspaceCount ?? 0;
+  if (archivedWorkspaces > 0) {
+    parts.push(
+      `${parts.length > 0 ? "archived" : "Archived"} ${plural(archivedWorkspaces, "idle workspace")}`,
     );
   }
   const removedProjects = input.removedProjectCount ?? 0;

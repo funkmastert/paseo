@@ -817,8 +817,16 @@ function withAdmissionConfig(
 function withDoneJanitorConfig(
   config: Pick<PaseoDaemonConfig, "doneJanitor">,
 ): Pick<MutableDaemonConfig, "doneJanitor"> {
-  // Spread: an interface carries no index signature, and the wire schema is passthrough.
-  return config.doneJanitor !== undefined ? { doneJanitor: { ...config.doneJanitor } } : {};
+  if (config.doneJanitor === undefined) return {};
+  // Spread, the nested block too: an interface carries no index signature, and the wire schema
+  // is passthrough.
+  const { workspaceSweep, ...doneJanitor } = config.doneJanitor;
+  return {
+    doneJanitor: {
+      ...doneJanitor,
+      ...(workspaceSweep !== undefined ? { workspaceSweep: { ...workspaceSweep } } : {}),
+    },
+  };
 }
 
 function withRefocusConfig(

@@ -26,6 +26,7 @@ import {
   type DoneJanitorMemory,
   type ProbeOutcome,
 } from "./agent/done-janitor-detector.js";
+import type { DoneJanitorWorkspaceSweepConfig } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import type { PushNotificationSender } from "./push/index.js";
 import type {
@@ -81,6 +82,8 @@ export interface DoneJanitorConfig {
   maxDeadArchivesPerSweep?: number;
   /** Ask idle live agents whether they are finished. Default true. */
   askFinished?: boolean;
+  /** The idle-workspace sweep (docs/done-janitor.md, "Idle workspaces"). On by default. */
+  workspaceSweep?: DoneJanitorWorkspaceSweepConfig;
 }
 
 interface ResolvedDoneJanitorConfig {
