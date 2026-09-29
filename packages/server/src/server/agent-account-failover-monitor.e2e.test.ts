@@ -421,6 +421,13 @@ async function startHeldTurn(harness: Harness, agentId: string): Promise<void> {
   await expect.poll(() => managed(harness, agentId).lifecycle, { timeout: 10_000 }).toBe("running");
 }
 
+/** Sends `text` to a child and waits until child admission holds the turn in line. */
+async function queueTurnBehindHold(harness: Harness, agentId: string, text: string): Promise<void> {
+  const admission = harness.daemon.agentManager.getChildAdmission();
+  await harness.client.sendMessage(agentId, text);
+  await expect.poll(() => admission?.holdsTurnFor(agentId), { timeout: 10_000 }).toBe(true);
+}
+
 async function endHeldTurn(harness: Harness, agentId: string): Promise<void> {
   await harness.client.cancelAgent(agentId);
   await expect
@@ -1295,10 +1302,9 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await failOnLimit(harness, child);
     const agentsBefore = agentCount(harness);
     admission.setHold("memory-pressure", true, "memory-pressure: test");
-    harness.duringNextSweep(async () => {
-      await harness.client.sendMessage(child, "respond with exactly: QUEUED-MARKER");
-      await expect.poll(() => admission.holdsTurnFor(child), { timeout: 10_000 }).toBe(true);
-    });
+    harness.duringNextSweep(() =>
+      queueTurnBehindHold(harness, child, "respond with exactly: QUEUED-MARKER"),
+    );
 
     await harness.sweep();
 
