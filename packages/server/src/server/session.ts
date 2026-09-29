@@ -4039,6 +4039,14 @@ export class Session {
       );
       createdAgentId = snapshot.id;
       await this.agentUpdates.forwardLiveAgent(snapshot);
+      // Before anything else is awaited: the first turn is already running, and the auto-archive
+      // listens for its end with no replay, so a turn that ended during the auto-pin below was
+      // never archived.
+      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
+        autoArchive,
+        agentId: snapshot.id,
+        createdWorktree,
+      });
       if (!msg.callerAgentId) {
         // No caller agent means this "session" create came straight from a client connection
         // (app or CLI), not on behalf of another agent (docs/done-janitor.md#manual-pin-vs-auto-pin covers
@@ -4056,11 +4064,6 @@ export class Session {
           { currentSelection: this.getFocusedAgentSelectionForCwd(resolvedIntent.config.cwd) },
         );
       }
-      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
-        autoArchive,
-        agentId: snapshot.id,
-        createdWorktree,
-      });
       this.sessionLogger.info(
         { agentId: snapshot.id, provider: snapshot.provider },
         "Created agent",

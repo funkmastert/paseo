@@ -107,7 +107,7 @@ function buildHarness(options: { autoPinSessions?: boolean } = {}) {
     handleMessage(message: Record<string, unknown>): Promise<void>;
   };
 
-  return { cwd, session, agentManager, projectRegistry, workspaceRegistry };
+  return { cwd, session, agentManager, agentStorage, projectRegistry, workspaceRegistry };
 }
 
 function createTestLoggerLike() {
@@ -280,4 +280,65 @@ test("agents.autoPinSessions: false turns auto-pin off", async () => {
 
   const [record] = await workspaceRegistry.list();
   expect(record?.pinnedAt).toBeNull();
+});
+
+test("create_agent_request with autoArchive still archives an agent whose first turn ends during the auto-pin", async () => {
+  const { cwd, session, agentManager, agentStorage, projectRegistry, workspaceRegistry } =
+    buildHarness();
+  await projectRegistry.upsert(
+    createPersistedProjectRecord({
+      projectId: "proj-existing",
+      rootPath: cwd,
+      kind: "git",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+  await workspaceRegistry.upsert(
+    createPersistedWorkspaceRecord({
+      workspaceId: "ws-auto-archive",
+      projectId: "proj-existing",
+      cwd,
+      kind: "local_checkout",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+  // The first turn ends while the auto-pin write is still in flight: the auto-archive listens for
+  // that end with no replay, so it has to be listening before the auto-pin is awaited.
+  let firstTurnAgentId: string | null = null;
+  const firstTurnEnded = new Promise<void>((resolve) => {
+    agentManager.subscribe((event) => {
+      if (event.type !== "agent_stream" || event.event.type !== "turn_completed") return;
+      firstTurnAgentId = event.agentId;
+      resolve();
+    });
+  });
+  const update = workspaceRegistry.update.bind(workspaceRegistry);
+  workspaceRegistry.update = async (workspaceId, updater) => {
+    const current = await workspaceRegistry.get(workspaceId);
+    if (current && updater(current).pinSource === "auto") await firstTurnEnded;
+    return update(workspaceId, updater);
+  };
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-6",
+    workspaceId: "ws-auto-archive",
+    config: { provider: "codex", cwd },
+    initialPrompt: "Say done.",
+    autoArchive: true,
+    attachments: [],
+  });
+
+  expect((await workspaceRegistry.get("ws-auto-archive"))?.pinSource).toBe("auto");
+  expect(firstTurnAgentId).not.toBeNull();
+  await expect
+    .poll(async () => (await agentStorage.get(firstTurnAgentId!))?.archivedAt ?? null, {
+      timeout: 5000,
+      interval: 50,
+    })
+    .not.toBeNull();
 });
