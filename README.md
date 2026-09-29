@@ -21,7 +21,7 @@ You sign in to each of your Claude accounts once and give them roles: one leader
 Also in this fork:
 
 - **Orchestration panel.** Every agent and subagent in one tree, with each account's usage and where its agents run. [docs/orchestration-panel.md](docs/orchestration-panel.md)
-- **Restart recovery.** Agents a daemon stop cut off mid-turn are listed in the sidebar and resumed, leaders first. `paseo recover` does the same from a terminal. [docs/restart-recovery.md](docs/restart-recovery.md)
+- **Restart recovery.** Agents a daemon stop cut off mid-turn are listed in the app, and **Resume all** brings them back, leaders first. With `agents.restartRecovery.mode: "resume"` that happens at boot. `paseo recover --apply` does the same from a terminal. [docs/restart-recovery.md](docs/restart-recovery.md)
 - **`paseo doctor`.** Read-only checks for signed-out accounts, plugins that did not load, a stale daemon and more. Each finding prints the command that fixes it. [docs/doctor.md](docs/doctor.md)
 - **MCP gateway.** The daemon signs in to OAuth MCP servers once and hands the login to every account, with a status strip in the sidebar. [docs/mcp-gateway.md](docs/mcp-gateway.md)
 - **Pinned grid and context meter.** Open every pinned chat side by side, and see what fills each agent's context. [docs/pinned-grid.md](docs/pinned-grid.md), [docs/context-usage.md](docs/context-usage.md)

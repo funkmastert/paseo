@@ -31,7 +31,7 @@ The ladder keeps one episode per key (`orphan-build-daemons`, `stalled-agent:<ag
 
 ## The remediation agent
 
-The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`), so the classifier decides model, thinking and account from the labels:
+The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`) and no caller. The classifier treats a create with no caller as a root, so the agent runs on the leader tier (Opus 5.5, `xhigh`, the leader account) whatever `paseo.task-class` says. It starts in the provider's default permission mode, so a tool call that needs approval waits for a person. It carries these labels:
 
 | Label                   | Value                                                                                           |
 | ----------------------- | ----------------------------------------------------------------------------------------------- |

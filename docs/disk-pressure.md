@@ -32,7 +32,7 @@ Both on-demand functions are wired lazily (`getDoneJanitorRunner`/`getArtifactJa
 
 ## Rung 2: the escalation task
 
-When a remedy is live but the condition outlasts its grace window, the ladder starts one `standard` agent with a task built from this observation: free space now, how much it fell and over what window, the top growers, and the remedies already tried. The agent is told to find what is consuming space, reclaim only what is provably safe (build outputs and caches — DerivedData of projects with no running agent, Gradle caches, `/private/tmp` build junk older than a day), never delete a worktree with uncommitted or unpushed work, and report.
+When a remedy is live but the condition outlasts its grace window, the ladder starts one [remediation agent](remediation.md#the-remediation-agent) with a task built from this observation: free space now, how much it fell and over what window, the top growers, and the remedies already tried. The agent is told to find what is consuming space, reclaim only what is provably safe (build outputs and caches — DerivedData of projects with no running agent, Gradle caches, `/private/tmp` build junk older than a day), never delete a worktree with uncommitted or unpushed work, and report.
 
 ## Rung 3: the push
 

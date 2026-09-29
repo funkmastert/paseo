@@ -13,7 +13,7 @@ How desktop builds ship from the fork, `funkmastert/paseo`. The upstream playboo
 
 ## Cutting a release
 
-You need GitHub Actions enabled on the fork and the commit you release to contain this workflow.
+You need GitHub Actions enabled on the fork (it is, since 2026-09-27) and the commit you release to contain this workflow. The fork has never registered `desktop-release.yml`: `gh workflow list -R funkmastert/paseo --all` shows only CI, Docker and Nix, so step 1 returns HTTP 404. GitHub registers a workflow when an event runs it, and the first `v*` tag push (step 2) does. Making `multi-account-orchestrator` the fork's default branch may also register it, but that is untested.
 
 1. **Dry run.** This builds every platform without creating a tag or a release. Each build launches the packaged app as a smoke test on macOS arm64 and x64, Windows x64, and Linux.
 
