@@ -16,7 +16,11 @@ import {
   type LimitErrorSighting,
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
-import { headroomByProvider, saturatedProviderIds } from "./agent/account-pool-headroom.js";
+import {
+  headroomByProvider,
+  saturatedProviderIds,
+  windowLimitsModel,
+} from "./agent/account-pool-headroom.js";
 import {
   resolveAccountPoolEntries,
   type AccountPoolProviderEntry,
@@ -236,42 +240,45 @@ export class AccountFailoverMonitor {
     // Before the early return below: a queue of agents waiting to be restarted is work to do
     // even on a sweep that finds no new candidates, which is the usual case.
     await this.retryUnresumed();
-    // Ranked from the same rows the plan read, so "which account is deadest" and "which has the
-    // most left" can never disagree about what the usage said this sweep.
-    const headroom = headroomByProvider(usage?.providers ?? null, nowMs);
-    // Never a move target: a dead account, or one with a window at 90% or more, which would cap
-    // the agent again within a turn or two.
-    const unusable = new Set([
-      ...plan.deadProviderIds,
-      ...saturatedProviderIds(usage?.providers ?? null),
-    ]);
+    const rows = usage?.providers ?? null;
+    // Per agent, because a model's weekly window stops only that model. Ranked from the same rows
+    // the plan read, so "which account is deadest" and "which has the most left" can never
+    // disagree about what the usage said this sweep.
+    const targetsFor = (agent: AccountFailoverAgentSummary) => ({
+      headroom: headroomByProvider(rows, nowMs, agent.model),
+      // Never a move target: a dead account, or one with a window at 90% or more that stops the
+      // agent's model, which would cap it again within a turn or two.
+      unusable: new Set([...plan.deadProviderIds, ...saturatedProviderIds(rows, agent.model)]),
+    });
     // An account move rebuilds the agent's whole prompt cache, so only two kinds of agent move:
     // one whose turn was cut off on a dead account (rescued and resumed here), and an idle root on
     // one (moved below, unprompted). Nothing else moves, and nothing moves back.
     const limit = pLimit({ concurrency: config.migrationConcurrency });
     const outcomes = await Promise.all(
       plan.candidates.map((agent) =>
-        limit(() =>
-          this.migrateOne({
+        limit(() => {
+          const targets = targetsFor(agent);
+          return this.migrateOne({
             agent,
             poolEntries,
-            deadProviderIds: unusable,
-            headroom,
+            deadProviderIds: targets.unusable,
+            headroom: targets.headroom,
             accounts,
             sighting: plan.sightings.get(agent.id),
             config,
-          }),
-        ),
+          });
+        }),
       ),
     );
 
     const stranded = plan.candidates.filter((_, index) => outcomes[index] === "no-target");
+    const strandedOn = new Set(stranded.flatMap((agent) => [...targetsFor(agent).unusable]));
     await this.observeStranding({
       stranded,
       deadPoolIds: poolEntries
         .map((entry) => entry.providerId)
-        .filter((providerId) => unusable.has(providerId)),
-      usage: usage?.providers ?? null,
+        .filter((providerId) => strandedOn.has(providerId)),
+      usage: rows,
     });
 
     // Re-read: the migrations above moved agents.
@@ -280,15 +287,17 @@ export class AccountFailoverMonitor {
       agents: afterRescues,
       poolProviderIds: new Set(poolEntries.map((entry) => entry.providerId)),
       deadProviderIds: plan.deadProviderIds,
+      cappedModelWindows: plan.cappedModelWindows,
       backoffs: this.idleBackoffs,
       nowMs,
     });
     for (const agent of idle) {
+      const targets = targetsFor(agent);
       await this.rehomeIdleOne({
         agent,
         poolEntries,
-        deadProviderIds: unusable,
-        headroom,
+        deadProviderIds: targets.unusable,
+        headroom: targets.headroom,
         accounts,
         config,
       });
@@ -649,6 +658,14 @@ export class AccountFailoverMonitor {
         // retired one is never a candidate again.
         this.logDuplicate(outcome);
         return outcome.kind;
+      case "skipped":
+        // Not a failure and not stranded: the agent changed after this sweep planned it. The next
+        // sweep plans from its state then.
+        logger.info(
+          { agentId: outcome.agentId, reason: outcome.reason },
+          "Account failover: the agent changed since the sweep planned it; leaving it this sweep",
+        );
+        return outcome.kind;
       case "migrated":
         logger.info(
           {
@@ -773,7 +790,12 @@ function strandingEvidence(input: {
     .filter((row) => input.deadPoolIds.includes(row.providerId))
     .flatMap((row) =>
       row.windows
-        .filter((window) => typeof window.usedPct === "number" && window.usedPct >= 100)
+        .filter(
+          (window) =>
+            typeof window.usedPct === "number" &&
+            window.usedPct >= 100 &&
+            input.stranded.some((agent) => windowLimitsModel(window.id, agent.model)),
+        )
         .flatMap((window) => (window.resetsAt ? [{ at: window.resetsAt, row }] : [])),
     )
     .filter((reset) => Number.isFinite(Date.parse(reset.at)))

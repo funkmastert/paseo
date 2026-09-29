@@ -55,10 +55,35 @@ export interface PluginLifecycle {
     name: Name,
     event: PluginLifecycleEvents[Name],
   ): void;
+  /**
+   * Runs every loaded plugin's before hook. Rejects when one fails; when the plugin did not
+   * answer at all, the rejection's cause chain holds a `PluginUnresponsiveError`.
+   */
   before<Name extends keyof PluginBeforeRequests>(
     name: Name,
     request: PluginBeforeRequests[Name],
   ): Promise<PluginBeforeRequests[Name]>;
+}
+
+/**
+ * A plugin that did not answer: its RPC timed out, its process exited, or it was stopped while
+ * the call was pending. Kept apart from a plugin that answered with an error, which is the
+ * plugin's own decision — an `agent.create` hook refuses a create by throwing.
+ */
+export class PluginUnresponsiveError extends Error {
+  override readonly name = "PluginUnresponsiveError";
+}
+
+/** Whether `error`, or anything in its cause chain, is a plugin that did not answer. */
+export function isPluginUnresponsive(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current)) {
+    if (current instanceof PluginUnresponsiveError) return true;
+    seen.add(current);
+    current = current.cause;
+  }
+  return false;
 }
 
 export function validateBeforeRequest<Name extends keyof PluginBeforeRequests>(

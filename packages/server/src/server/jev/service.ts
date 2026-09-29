@@ -36,6 +36,7 @@ import {
   type JevRedactionResult,
   type JevSecretValue,
 } from "./redact.js";
+import { JEV_UNATTRIBUTED_AGENT, JevSpendReservations, type JevSpendReservation } from "./spend.js";
 import { createHttpJevTransport } from "./transport.js";
 import {
   reportedCostUsd,
@@ -132,6 +133,16 @@ type StopOutcome =
   | { kind: "unavailable"; reason: JevUnavailableReason; signal?: string | null }
   | { kind: "failed"; reason: JevFailureReason };
 
+/** One call's view of its lane's circuit. */
+interface CallCircuit {
+  /** Asks the circuit before an attempt. A retry of the half-open probe is still the probe. */
+  pass(): boolean;
+  success(): void;
+  failure(): void;
+  /** Reports a failure for a probe nothing else reported: a probe always resolves the circuit. */
+  settle(): void;
+}
+
 interface SendContext {
   input: JevDecideInput;
   callId: string;
@@ -143,7 +154,19 @@ interface SendContext {
   redacted: JevRedactionResult;
   deadlineAt: number;
   limits: JevLaneLimits;
+  circuit: CallCircuit;
+  reservation: JevSpendReservation;
 }
+
+/** What `decide` must undo after the ledger has the call, whatever step it stopped at. */
+interface CallHolds {
+  reservation: JevSpendReservation | null;
+}
+
+type ScopeRace =
+  | { kind: "checked"; signal: string | null }
+  | { kind: "late" }
+  | { kind: "aborted" };
 
 interface AttemptState {
   cost: JevCost | null;
@@ -198,8 +221,15 @@ function newLedgerEntry(
     outputTokens: 0,
     cost: { usd: 0, source: "estimated" },
     verdicts: [],
+    // Every agentTools call has an hourly bucket: its caller, its subject, its first scoped agent,
+    // or the one bucket shared by calls that name none.
     chargedAgentId:
-      lane === "agentTools" ? (subject.callerAgentId ?? subject.agentId ?? null) : null,
+      lane === "agentTools"
+        ? (subject.callerAgentId ??
+          subject.agentId ??
+          input.scope?.agentIds?.[0] ??
+          JEV_UNATTRIBUTED_AGENT)
+        : null,
   };
 }
 
@@ -283,6 +313,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     },
   });
   const audit = new JevAudit({ dir: jevDir, logger, now, platform: options.platform });
+  const reservations = new JevSpendReservations();
   const decisions = new JevDecisionStore({
     now,
     costFor: (callId) => ledger.find(callId)?.cost.usd ?? null,
@@ -403,9 +434,10 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     const startedAt = now();
     const lane = JEV_FEATURE_LANES[input.feature] ?? "control";
     const entry = newLedgerEntry(input, callId, startedAt, lane);
+    const holds: CallHolds = { reservation: null };
     let outcome: JevOutcome;
     try {
-      outcome = await decideSteps(input, callId, startedAt, lane, entry);
+      outcome = await decideSteps(input, callId, startedAt, lane, entry, holds);
     } catch (error) {
       // Nothing below is allowed to throw; this is the backstop that keeps `decide` total.
       logger.warn({ err: error, callId, feature: input.feature }, "jev: decide threw");
@@ -424,6 +456,9 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       }
     } catch (error) {
       logger.warn({ err: error, callId }, "jev: ledger record failed");
+    } finally {
+      // Released only now that the ledger holds the charge, so no check sees neither.
+      if (holds.reservation) reservations.release(holds.reservation);
     }
     logger.debug(
       {
@@ -446,12 +481,14 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     startedAt: number,
     lane: JevLane,
     entry: JevLedgerEntry,
+    holds: CallHolds,
   ): Promise<JevOutcome> {
     const unavailable = (reason: JevUnavailableReason): JevOutcome => ({
       kind: "unavailable",
       callId,
       reason,
     });
+    const aborted = (): JevOutcome => ({ kind: "failed", callId, reason: "aborted", meta: null });
 
     // 1. Switches, key, circuit.
     const snap = readSnapshot(false);
@@ -460,10 +497,20 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     const config = snap.config!;
     const transport = transportFor(config)!;
 
-    // 2. Scope.
-    const scopeSignal = await scopeExclusion(input.scope, config);
-    if (scopeSignal) {
-      entry.exclusionSignal = scopeSignal;
+    // The deadline runs from here and covers every step below, the scope check included.
+    const feature = featureConfig(config, input.feature);
+    const deadlineMs = Math.max(
+      0,
+      Math.min(input.deadlineMs ?? feature.timeoutMs, feature.timeoutMs),
+    );
+    const deadlineAt = startedAt + deadlineMs;
+
+    // 2. Scope, inside the deadline. Running out of time sends nothing and opens no circuit.
+    const scope = await scopeWithinDeadline(input.scope, config, deadlineAt, input.signal);
+    if (scope.kind === "aborted") return aborted();
+    if (scope.kind === "late") return unavailable("saturated");
+    if (scope.signal) {
+      entry.exclusionSignal = scope.signal;
       return unavailable("excluded");
     }
 
@@ -477,17 +524,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       return { kind: "failed", callId, reason: prepared.stop.reason, meta: null };
     }
 
-    // 8. Spend, against an estimate.
-    const refusal = spendRefusal(config, lane, entry);
-    if (refusal) return unavailable(refusal);
-
-    // 9. A lane slot, inside the deadline.
-    const feature = featureConfig(config, input.feature);
-    const deadlineMs = Math.max(
-      0,
-      Math.min(input.deadlineMs ?? feature.timeoutMs, feature.timeoutMs),
-    );
-    const deadlineAt = startedAt + deadlineMs;
+    // 8. A lane slot, inside the deadline.
     const limits = laneLimits(config);
     const slot = await lanes.acquireSlot(lane, {
       deadlineAt,
@@ -495,12 +532,12 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       limits,
       signal: input.signal,
     });
-    if (!slot.ok) {
-      return slot.reason === "aborted"
-        ? { kind: "failed", callId, reason: "aborted", meta: null }
-        : unavailable("saturated");
-    }
+    if (!slot.ok) return slot.reason === "aborted" ? aborted() : unavailable("saturated");
     try {
+      // 9. Spend: reserved while holding the slot, so the calls in flight are all counted.
+      const spend = reserveSpend(config, lane, entry);
+      if (spend.kind === "refused") return unavailable(spend.reason);
+      holds.reservation = spend.reservation;
       return await sendWithRetries({
         input,
         callId,
@@ -512,9 +549,47 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
         redacted: prepared.redacted,
         deadlineAt,
         limits,
+        circuit: callCircuit(lane),
+        reservation: spend.reservation,
       });
     } finally {
       slot.release();
+    }
+  }
+
+  /** Step 2 raced against the deadline and the caller's signal; the check is told both. */
+  async function scopeWithinDeadline(
+    scope: JevEgressScope | undefined,
+    config: ResolvedJevConfig,
+    deadlineAt: number,
+    signal: AbortSignal | undefined,
+  ): Promise<ScopeRace> {
+    if (signal?.aborted) return { kind: "aborted" };
+    const remainingMs = deadlineAt - now();
+    if (remainingMs <= 0) return { kind: "late" };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    const late = new Promise<ScopeRace>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "late" }), remainingMs);
+      timer.unref?.();
+    });
+    const aborted = new Promise<ScopeRace>((resolve) => {
+      onAbort = () => resolve({ kind: "aborted" });
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    const checked = scopeExclusion(scope, config, { deadlineAt, signal }).then(
+      (excluded): ScopeRace => {
+        // The checker stops at the deadline or the abort itself and answers with these signals.
+        if (excluded === "deadline") return { kind: "late" };
+        if (excluded === "aborted") return { kind: "aborted" };
+        return { kind: "checked", signal: excluded };
+      },
+    );
+    try {
+      return await Promise.race([checked, late, aborted]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
   }
 
@@ -522,10 +597,11 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   async function scopeExclusion(
     scope: JevEgressScope | undefined,
     config: ResolvedJevConfig,
+    bounds: { deadlineAt: number; signal: AbortSignal | undefined },
   ): Promise<string | null> {
     if (!scope) return "missing";
     try {
-      const verdict = await scopeChecker.check(scope, exclusionOf(config));
+      const verdict = await scopeChecker.check(scope, exclusionOf(config), bounds);
       return verdict.excluded ? verdict.signal : null;
     } catch {
       return "error";
@@ -585,48 +661,109 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     }
   }
 
-  /** Step 8: refuse a call the remaining budget cannot cover. */
-  function spendRefusal(
+  /**
+   * Step 9: refuse a call the budget cannot cover, counting what is already spent and what the
+   * calls in flight hold; otherwise reserve this call's estimate.
+   */
+  function reserveSpend(
     config: ResolvedJevConfig,
     lane: JevLane,
     entry: JevLedgerEntry,
-  ): "daily-budget" | "agent-budget" | null {
-    const estimateUsd = usdForTokens(entry.bodyBytes / ESTIMATE_BYTES_PER_TOKEN, config);
-    if (ledger.spentTodayUsd(lane) + estimateUsd > laneCapUsd(config, lane)) {
+  ):
+    | { kind: "reserved"; reservation: JevSpendReservation }
+    | { kind: "refused"; reason: "daily-budget" | "agent-budget" } {
+    const estimateUsd = reservations.estimate(
+      entry.bodyBytes,
+      usdForTokens(entry.bodyBytes / ESTIMATE_BYTES_PER_TOKEN, config),
+    );
+    const capUsd = laneCapUsd(config, lane);
+    const spentUsd = ledger.spentTodayUsd(lane);
+    if (spentUsd + estimateUsd > capUsd) {
+      // Spend already recorded leaves no room: the lane is done until local midnight.
       ledger.markExhausted(lane);
-      return "daily-budget";
+      return { kind: "refused", reason: "daily-budget" };
     }
-    if (lane !== "agentTools" || !entry.chargedAgentId) return null;
-    const agentSpent = ledger.spentByAgentLastHourUsd(entry.chargedAgentId);
-    return agentSpent + estimateUsd > config.agentTools.maxUsdPerAgentPerHour
-      ? "agent-budget"
-      : null;
+    // The calls in flight hold the rest. They may fail and give it back, so the lane stays open.
+    if (spentUsd + reservations.reservedUsd(lane) + estimateUsd > capUsd) {
+      return { kind: "refused", reason: "daily-budget" };
+    }
+    const agentId = lane === "agentTools" ? entry.chargedAgentId : null;
+    if (
+      agentId !== null &&
+      ledger.spentByAgentLastHourUsd(agentId) +
+        reservations.reservedForAgentUsd(agentId) +
+        estimateUsd >
+        config.agentTools.maxUsdPerAgentPerHour
+    ) {
+      return { kind: "refused", reason: "agent-budget" };
+    }
+    return {
+      kind: "reserved",
+      reservation: reservations.reserve({
+        lane,
+        agentId,
+        bodyBytes: entry.bodyBytes,
+        estimateUsd,
+      }),
+    };
   }
 
-  /** Steps 9b–12: a rate token and the circuit per attempt, the send, retries, the answer. */
+  function callCircuit(lane: JevLane): CallCircuit {
+    const circuit = lanes.circuits[lane];
+    let probe = false;
+    const failure = () => {
+      circuit.recordFailure(now(), { probe });
+      probe = false;
+    };
+    return {
+      pass() {
+        // Asking again would refuse the probe's own retry and leave the lane half-open for good.
+        if (probe) return true;
+        const pass = circuit.tryPass(now());
+        probe = pass === "probe";
+        return pass !== "refused";
+      },
+      success() {
+        circuit.recordSuccess();
+        probe = false;
+      },
+      failure,
+      settle() {
+        if (probe) failure();
+      },
+    };
+  }
+
+  /** Steps 10–12: a rate token and the circuit per attempt, the send, retries, the answer. */
   async function sendWithRetries(ctx: SendContext): Promise<JevOutcome> {
     const attempt: AttemptState = { cost: null, failure: null, response: null, attempts: 0 };
-    while (attempt.attempts < MAX_ATTEMPTS) {
-      const pass = await passForAttempt(ctx);
-      if (pass.kind === "refused") {
-        if (attempt.attempts === 0) return pass.first;
-        attempt.failure ??= "timeout";
-        break;
+    try {
+      while (attempt.attempts < MAX_ATTEMPTS) {
+        const pass = await passForAttempt(ctx);
+        if (pass.kind === "refused") {
+          if (attempt.attempts === 0) return pass.first;
+          attempt.failure ??= "timeout";
+          break;
+        }
+        const step = await attemptOnce(ctx, attempt);
+        if (step.kind === "done") break;
+        await sleep(step.waitMs, ctx.input.signal ?? new AbortController().signal);
+        if (ctx.input.signal?.aborted) {
+          attempt.failure = "aborted";
+          break;
+        }
       }
-      const step = await attemptOnce(ctx, attempt, pass.probing);
-      if (step.kind === "done") break;
-      await sleep(step.waitMs, ctx.input.signal ?? new AbortController().signal);
-      if (ctx.input.signal?.aborted) {
-        attempt.failure = "aborted";
-        break;
-      }
+      return finishSend(ctx, attempt);
+    } finally {
+      // Every exit resolves a probe: a refused rate token, an abort in the backoff, a deadline.
+      ctx.circuit.settle();
+      reservations.settle(ctx.reservation, attempt.cost?.usd ?? 0);
     }
-    return finishSend(ctx, attempt);
   }
 
   async function passForAttempt(
     ctx: SendContext,
-  ): Promise<{ kind: "go"; probing: boolean } | { kind: "refused"; first: JevOutcome }> {
+  ): Promise<{ kind: "go" } | { kind: "refused"; first: JevOutcome }> {
     const token = await lanes.takeRateToken(ctx.lane, {
       deadlineAt: ctx.deadlineAt,
       limits: ctx.limits,
@@ -639,25 +776,20 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
           : { kind: "unavailable", callId: ctx.callId, reason: "saturated" };
       return { kind: "refused", first };
     }
-    const circuit = lanes.circuits[ctx.lane];
-    const probing = circuit.state(now()) === "half-open";
-    if (!circuit.tryPass(now())) {
+    if (!ctx.circuit.pass()) {
       return {
         kind: "refused",
         first: { kind: "unavailable", callId: ctx.callId, reason: "circuit-open" },
       };
     }
-    return { kind: "go", probing };
+    return { kind: "go" };
   }
 
-  async function attemptOnce(
-    ctx: SendContext,
-    attempt: AttemptState,
-    probing: boolean,
-  ): Promise<AttemptStep> {
+  async function attemptOnce(ctx: SendContext, attempt: AttemptState): Promise<AttemptStep> {
     attempt.attempts += 1;
     ctx.entry.attempts = attempt.attempts;
-    const deadlineSignal = AbortSignal.timeout(Math.max(1, ctx.deadlineAt - now()));
+    // `AbortSignal.timeout` throws on a fractional delay, and a jittered backoff makes one.
+    const deadlineSignal = AbortSignal.timeout(Math.max(1, Math.ceil(ctx.deadlineAt - now())));
     const signal = ctx.input.signal
       ? AbortSignal.any([ctx.input.signal, deadlineSignal])
       : deadlineSignal;
@@ -666,13 +798,12 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       result = await ctx.transport.send(ctx.redacted.request, { signal });
     } catch (error) {
       attempt.cost = addCost(attempt.cost, charge(ctx.entry.bodyBytes, null, ctx.config));
-      const circuit = lanes.circuits[ctx.lane];
       if (ctx.input.signal?.aborted) {
-        if (probing) circuit.recordFailure(now());
+        // The caller gave up: no evidence about JEV. A probe still settles, in sendWithRetries.
         attempt.failure = "aborted";
       } else {
         attempt.failure = deadlineSignal.aborted || isAbortError(error) ? "timeout" : "network";
-        circuit.recordFailure(now());
+        ctx.circuit.failure();
       }
       return { kind: "done" };
     }
@@ -685,17 +816,18 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
 
   function acceptResponse(ctx: SendContext, attempt: AttemptState, body: unknown): void {
     const validated = validateJevResponse(body, ctx.redacted.request.questions);
-    lanes.circuits[ctx.lane].recordSuccess();
+    ctx.circuit.success();
     if (!validated.ok) {
       attempt.cost = addCost(attempt.cost, charge(ctx.entry.bodyBytes, null, ctx.config));
       attempt.failure = "contract";
       return;
     }
     attempt.response = validated.response;
-    attempt.cost = addCost(
-      attempt.cost,
-      charge(ctx.entry.bodyBytes, validated.response, ctx.config),
-    );
+    const cost = charge(ctx.entry.bodyBytes, validated.response, ctx.config);
+    if (cost.source === "reported" && cost.usd !== null) {
+      reservations.observe(cost.usd, ctx.entry.bodyBytes);
+    }
+    attempt.cost = addCost(attempt.cost, cost);
     attempt.failure = null;
   }
 
@@ -704,11 +836,10 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     attempt: AttemptState,
     result: JevTransportResponse,
   ): AttemptStep {
-    const circuit = lanes.circuits[ctx.lane];
     attempt.cost = addCost(attempt.cost, charge(ctx.entry.bodyBytes, null, ctx.config));
     attempt.failure = "http";
     if (result.status === 401 || result.status === 402) {
-      circuit.recordSuccess();
+      ctx.circuit.success();
       keyRejectedUntil = now() + KEY_REJECTED_MS;
       if (!loggedKeyRejected) {
         loggedKeyRejected = true;
@@ -725,11 +856,11 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       if (attempt.attempts < MAX_ATTEMPTS && now() + waitMs < ctx.deadlineAt) {
         return { kind: "retry", waitMs };
       }
-      circuit.recordFailure(now());
+      ctx.circuit.failure();
       return { kind: "done" };
     }
-    if (result.status >= 500) circuit.recordFailure(now());
-    else circuit.recordSuccess();
+    if (result.status >= 500) ctx.circuit.failure();
+    else ctx.circuit.success();
     return { kind: "done" };
   }
 

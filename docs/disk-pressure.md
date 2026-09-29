@@ -32,7 +32,7 @@ Both on-demand functions are wired lazily (`getDoneJanitorRunner`/`getArtifactJa
 
 ## Rung 2: the escalation task
 
-When a remedy is live but the condition outlasts its grace window, the ladder starts one `standard` agent with a task built from this observation: free space now, how much it fell and over what window, the top growers, and the remedies already tried. The agent is told to find what is consuming space, reclaim only what is provably safe (build outputs and caches — DerivedData of projects with no running agent, Gradle caches, `/private/tmp` build junk older than a day), never delete a worktree with uncommitted or unpushed work, and report.
+When a remedy is live but the condition outlasts its grace window, the ladder starts one [remediation agent](remediation.md#the-remediation-agent) with a task built from this observation: free space now, how much it fell and over what window, the top growers, and the remedies already tried. The agent is told to find what is consuming space, reclaim only what is provably safe (build outputs and caches — DerivedData of projects with no running agent, Gradle caches, `/private/tmp` build junk older than a day), never delete a worktree with uncommitted or unpushed work, and report.
 
 ## Rung 3: the push
 
@@ -40,7 +40,9 @@ One push per episode, `alert` for `disk-low`/`disk-falling` and `urgent` for `di
 
 ## Growth evidence
 
-`disk-growth-sampler.ts`'s `DiskGrowthSampler` answers "what grew, and by how much": a bounded, deterministic `du` sample of the known growth roots and their immediate children, run sequentially with a per-root timeout, at most once per `sampleIntervalMinutes` while a condition is active, plus an hourly baseline so there is always something recent to compare against even on a quiet machine. It reads and remembers; it never deletes anything.
+`disk-growth-sampler.ts`'s `DiskGrowthSampler` answers "what grew, and by how much": a bounded, deterministic `du` sample of the known growth roots and their immediate children, run sequentially with a per-root timeout at background priority (`utils/spawn.ts`'s `priority: "background"`, the `backgroundNice` policy; by default the same nice agents run at, so a sample yields to your own apps and the daemon but competes with agent work on equal terms), at most once per `sampleIntervalMinutes` while a condition is active, plus an hourly baseline so there is always something recent to compare against even on a quiet machine. It reads and remembers; it never deletes anything.
+
+A root that times out on `TIMEOUT_BACKOFF_THRESHOLD` (2) consecutive real attempts is backed off: the next `TIMEOUT_BACKOFF_SAMPLES` (5) samples skip it outright (recorded `unmeasured` with reason `skipped`, derived from the persisted history rather than separate state) before it is tried again for real. Without this, a root that reliably can't finish inside its timeout — a directory too large to walk in the budget — blocks every single sample on it, forever, for no measurement.
 
 Default roots (skipped if they don't exist):
 

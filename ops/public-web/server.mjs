@@ -125,19 +125,31 @@ function redirectToHttps(req, res) {
   res.writeHead(308, { Location: PUBLIC_URL + pathname + search, ...SECURITY_HEADERS }).end();
 }
 
-function listen(server, port, host, label) {
+function listen(server, port, host, label, onListening = () => {}) {
   server.on("error", (err) => log(`${label} not listening`, { host, port, code: err.code }));
-  server.listen(port, host, () => log(`${label} listening`, { host, port }));
+  server.listen(port, host, () => {
+    log(`${label} listening`, { host, port });
+    onListening();
+  });
 }
 
-listen(http.createServer(serveStatic), STATIC_PORT, "127.0.0.1", "static web UI");
+// The tunnel publishes whatever answers on STATIC_PORT, so it starts only once this process owns
+// the port. If the bind fails, exit non-zero and let launchd retry (ThrottleInterval) rather than
+// run a tunnel to a port something else holds.
+const staticServer = http.createServer(serveStatic);
+staticServer.once("error", (err) => {
+  log("static web UI can't bind; exiting so launchd retries", { port: STATIC_PORT, code: err.code });
+  process.exit(1);
+});
+listen(staticServer, STATIC_PORT, "127.0.0.1", "static web UI", startTunnel);
 // macOS lets an unprivileged process bind a port below 1024 only on the wildcard address. The
 // listener only ever answers with a redirect, so being reachable on the LAN exposes nothing, and
 // the dual-stack wildcard catches `ngrok http 80` dialling localhost as either family.
 listen(http.createServer(redirectToHttps), 80, "::", "https redirect");
 
-// The tunnel. Pooling lets a leftover agent from an earlier run share the endpoint instead of
-// blocking this one; both forward to the same static port.
+// The tunnel. No endpoint pooling: with pooling, anyone holding the authtoken could join
+// bozeo.ngrok.app and serve a share of its requests. A leftover agent from an earlier run makes
+// this one fail with "endpoint already online" instead; the exit handler retries with backoff.
 let child = null;
 let backoffMs = 2000;
 let stopping = false;
@@ -155,7 +167,6 @@ function startTunnel() {
       `127.0.0.1:${STATIC_PORT}`,
       "--url",
       PUBLIC_URL,
-      "--pooling-enabled",
       "--inspect=false",
       "--log",
       "stdout",
@@ -188,7 +199,6 @@ function startTunnel() {
     backoffMs = Math.min(backoffMs * 2, 60_000);
   });
 }
-startTunnel();
 
 for (const sig of ["SIGTERM", "SIGINT"]) {
   process.on(sig, () => {

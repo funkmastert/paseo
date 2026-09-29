@@ -634,6 +634,9 @@
           "exclusiveMinimum": 0,
           "maximum": 2147483647
         },
+        "autoPinSessions": {
+          "type": "boolean"
+        },
         "metadataGeneration": {
           "type": "object",
           "properties": {
@@ -1326,6 +1329,40 @@
             },
             "askFinished": {
               "type": "boolean"
+            },
+            "workspaceSweep": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "dryRun": {
+                  "type": "boolean"
+                },
+                "idleHours": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "emptyIdleHours": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "maxArchivesPerSweep": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "projectGraceHours": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "maxProjectRemovalsPerSweep": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "additionalProperties": false
             }
           },
           "additionalProperties": false
@@ -1382,6 +1419,19 @@
           "properties": {
             "enabled": {
               "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "childEnv": {
+          "type": "object",
+          "properties": {
+            "strip": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           },
           "additionalProperties": false
@@ -1737,268 +1787,243 @@
           "additionalProperties": false
         },
         "jev": {
-          "type": "object",
-          "properties": {
-            "enabled": {
-              "type": "boolean"
-            },
-            "provider": {
-              "type": "string",
-              "enum": ["openrouter", "typesafe"]
-            },
-            "model": {
-              "type": "string",
-              "minLength": 1
-            },
-            "endpointUrl": {
-              "type": "string",
-              "minLength": 1
-            },
-            "envFile": {
-              "type": "string",
-              "minLength": 1
-            },
-            "maxConcurrent": {
-              "type": "integer",
-              "exclusiveMinimum": 0,
-              "maximum": 9007199254740991
-            },
-            "maxRequestsPerSecond": {
-              "type": "number",
-              "exclusiveMinimum": 0,
-              "maximum": 15
-            },
-            "maxUsdPerDay": {
-              "type": "number",
-              "exclusiveMinimum": 0
-            },
-            "inputUsdPerMillion": {
-              "type": "number",
-              "exclusiveMinimum": 0
-            },
-            "excludeCwds": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "excludeRemotes": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "excludeTextMarkers": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
-            },
-            "audit": {
+          "anyOf": [
+            {
               "type": "object",
               "properties": {
                 "enabled": {
                   "type": "boolean"
                 },
-                "maxBytes": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
+                "provider": {
+                  "type": "string",
+                  "enum": ["openrouter", "typesafe"]
                 },
-                "retainDays": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                }
-              },
-              "additionalProperties": false
-            },
-            "spawnHint": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
+                "model": {
+                  "type": "string"
                 },
-                "shadow": {
-                  "type": "boolean"
+                "endpointUrl": {
+                  "type": "string"
                 },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "applyHard": {
-                  "type": "boolean"
-                },
-                "applyRole": {
-                  "type": "boolean"
-                }
-              },
-              "additionalProperties": false
-            },
-            "remediationTriage": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "shadow": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                }
-              },
-              "additionalProperties": false
-            },
-            "notificationTriage": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "shadow": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                }
-              },
-              "additionalProperties": false
-            },
-            "agentTools": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
+                "envFile": {
+                  "type": "string"
                 },
                 "maxConcurrent": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
+                  "type": "number"
                 },
-                "maxConcurrentPerCall": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
+                "maxRequestsPerSecond": {
+                  "type": "number"
                 },
                 "maxUsdPerDay": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
+                  "type": "number"
                 },
-                "maxUsdPerAgentPerHour": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
+                "inputUsdPerMillion": {
+                  "type": "number"
                 },
-                "assignShare": {
-                  "type": "number",
-                  "minimum": 0,
-                  "maximum": 1
+                "excludeCwds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "excludeRemotes": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "excludeTextMarkers": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "audit": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "maxBytes": {
+                      "type": "number"
+                    },
+                    "retainDays": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "spawnHint": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "applyHard": {
+                      "type": "boolean"
+                    },
+                    "applyRole": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "remediationTriage": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "notificationTriage": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "agentTools": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "maxConcurrent": {
+                      "type": "number"
+                    },
+                    "maxConcurrentPerCall": {
+                      "type": "number"
+                    },
+                    "maxUsdPerDay": {
+                      "type": "number"
+                    },
+                    "maxUsdPerAgentPerHour": {
+                      "type": "number"
+                    },
+                    "assignShare": {
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "compactionTiming": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "considerAtTokens": {
+                      "type": "number"
+                    },
+                    "ceilingTokens": {
+                      "type": "number"
+                    },
+                    "maxDeferrals": {
+                      "type": "number"
+                    },
+                    "cutPoint": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "stallJudgment": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "shadow": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number"
+                    },
+                    "loopWatch": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "awayReply": {
+                  "type": "object",
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "dryRun": {
+                      "type": "boolean"
+                    },
+                    "timeoutMs": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "thresholdMinutes": {
+                      "type": "number",
+                      "exclusiveMinimum": 0
+                    },
+                    "maxRepliesPerAgentPerDay": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "maxRepliesPerDay": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "destructiveThreshold": {
+                      "type": "number",
+                      "exclusiveMinimum": 0,
+                      "maximum": 0.5
+                    },
+                    "approveReadOnlyPermissions": {
+                      "type": "boolean"
+                    },
+                    "skipPinnedWorkspaces": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
                 }
               },
               "additionalProperties": false
             },
-            "compactionTiming": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "shadow": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "considerAtTokens": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "ceilingTokens": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "maxDeferrals": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "cutPoint": {
-                  "type": "boolean"
-                }
-              },
-              "additionalProperties": false
-            },
-            "stallJudgment": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "shadow": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "loopWatch": {
-                  "type": "boolean"
-                }
-              },
-              "additionalProperties": false
-            },
-            "awayReply": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "dryRun": {
-                  "type": "boolean"
-                },
-                "timeoutMs": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "thresholdMinutes": {
-                  "type": "number",
-                  "exclusiveMinimum": 0
-                },
-                "maxRepliesPerAgentPerDay": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "maxRepliesPerDay": {
-                  "type": "integer",
-                  "exclusiveMinimum": 0,
-                  "maximum": 9007199254740991
-                },
-                "destructiveThreshold": {
-                  "type": "number",
-                  "exclusiveMinimum": 0,
-                  "maximum": 0.5
-                },
-                "approveReadOnlyPermissions": {
-                  "type": "boolean"
-                },
-                "skipPinnedWorkspaces": {
-                  "type": "boolean"
-                }
-              },
-              "additionalProperties": false
-            }
-          },
-          "additionalProperties": false
+            {}
+          ]
         },
         "skills": {
           "type": "object",

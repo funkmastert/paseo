@@ -2,6 +2,7 @@ import path from "node:path";
 import type { Logger } from "pino";
 
 import { resolveAwayReplyConfig, type ResolvedAwayReplyConfig } from "../away-reply/config.js";
+import { AgentJevSchema } from "../persisted-config.js";
 import { readRawConfig } from "../session/doctor/facts.js";
 
 /**
@@ -172,6 +173,22 @@ function resolveFeature(
   };
 }
 
+/**
+ * Where `agents.jev` breaks `AgentJevSchema`, as `agents.jev.<path>: <message>` lines. Messages
+ * name what was expected, never the value. Empty when the section is absent or valid.
+ */
+export function jevConfigIssues(section: unknown): string[] {
+  if (section === undefined) return [];
+  const result = AgentJevSchema.safeParse(section);
+  if (result.success) return [];
+  return result.error.issues.map((issue) => {
+    const where = ["agents", "jev", ...issue.path.map(String)].join(".");
+    return issue.code === "unrecognized_keys"
+      ? `${where}: unknown key(s) ${issue.keys.join(", ")}`
+      : `${where}: ${issue.message}`;
+  });
+}
+
 /** `agents.jev` out of a parsed `config.json`. */
 export function jevConfigSection(rawConfig: Record<string, unknown> | null): unknown {
   return record(rawConfig?.["agents"])["jev"];
@@ -300,6 +317,7 @@ export function createJevConfigReader(options: JevConfigReaderOptions): JevConfi
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
   const readRaw = options.readRaw ?? readRawConfig;
   const loggedRejectedEndpoints = new Set<string>();
+  let loggedIssues: string | null = null;
   let cached: { at: number; result: ReturnType<JevConfigReader["read"]> } | null = null;
 
   function logRejectedEndpointOnce(rawValue: unknown): void {
@@ -316,6 +334,20 @@ export function createJevConfigReader(options: JevConfigReaderOptions): JevConfi
     const { rawConfig, rawConfigError } = readRaw(options.paseoHome);
     if (rawConfigError) return { ok: false, reason: "config-unreadable" };
     const section = jevConfigSection(rawConfig);
+    // A section that does not match is off, not guessed at: `enabled: "false"` must not read as on.
+    const issues = jevConfigIssues(section);
+    if (issues.length > 0) {
+      const summary = issues.join("; ");
+      if (loggedIssues !== summary) {
+        loggedIssues = summary;
+        logger.warn(
+          { issues },
+          `jev: agents.jev does not match the schema; JEV is off (${summary})`,
+        );
+      }
+      return { ok: false, reason: "config-unreadable" };
+    }
+    loggedIssues = null;
     const rawEndpoint = record(section)["endpointUrl"];
     const config = resolveJevConfig(section, {
       homeDir: options.homeDir,

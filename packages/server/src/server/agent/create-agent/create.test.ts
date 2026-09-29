@@ -11,7 +11,7 @@ import type { TestAgentClientOptions } from "../../test-utils/fake-agent-client.
 import { createProviderSnapshotManagerStub } from "../../test-utils/session-stubs.js";
 import { AgentManager } from "../agent-manager.js";
 import { AgentStorage } from "../agent-storage.js";
-import { PluginHookHandlers } from "../../plugins/lifecycle/index.js";
+import { PluginHookHandlers, PluginUnresponsiveError } from "../../plugins/lifecycle/index.js";
 import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
 import { createAgentCommand } from "./create.js";
@@ -163,9 +163,13 @@ test("session create forwards clientMessageId to the initial prompt run options"
     buildSessionConfig: async (config) => ({ sessionConfig: config }),
   });
 
-  expect(streamAgent).toHaveBeenCalledWith("agent-1", "hello from create", {
-    clientMessageId: "msg-create-1",
-  });
+  // The fourth argument is `queuedAt`, which only a held turn restored after a restart carries.
+  expect(streamAgent).toHaveBeenCalledWith(
+    "agent-1",
+    "hello from create",
+    { clientMessageId: "msg-create-1" },
+    undefined,
+  );
 });
 
 test("session create validates the requested mode against the provider's modes", async () => {
@@ -846,6 +850,71 @@ test("session create keeps an explicit title after the initial prompt settles", 
 
     const settled = await storage.get(snapshot.id);
     expect(settled?.title).toBe(title);
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+// A loaded plugin that stops answering used to fail every create for the length of its RPC
+// timeout, while an absent plugin let creates through. The two now behave the same.
+function failingPluginLifecycle(error: Error): PluginLifecycle {
+  return {
+    emit: () => {},
+    before: async (name, request) => {
+      if (name === "agent.create") {
+        throw error;
+      }
+      return request;
+    },
+  };
+}
+
+test("a create goes ahead unmodified when a plugin does not answer its agent.create hook", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const timedOut = new PluginUnresponsiveError("Plugin RPC timed out: claude-account-pool.hook");
+  const agentManager = createRealAgentManager(storage, {
+    pluginLifecycle: failingPluginLifecycle(
+      new Error("Plugin claude-account-pool before agent.create failed: Plugin RPC timed out", {
+        cause: timedOut,
+      }),
+    ),
+  });
+
+  try {
+    const agent = await agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+      labels: { "paseo.agent-type": "worker" },
+    });
+
+    expect(agent.provider).toBe("codex");
+    expect(agent.labels).toEqual({ "paseo.agent-type": "worker" });
+  } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+test("a create still fails when a plugin's agent.create hook refuses it", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage, {
+    pluginLifecycle: failingPluginLifecycle(
+      new Error(
+        "Plugin claude-account-pool before agent.create failed: every Claude account is out of budget",
+        {
+          cause: new Error("every Claude account is out of budget"),
+        },
+      ),
+    ),
+  });
+
+  try {
+    await expect(
+      agentManager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+      }),
+    ).rejects.toThrow("every Claude account is out of budget");
+    expect(agentManager.listAgents()).toEqual([]);
   } finally {
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }

@@ -573,6 +573,7 @@ function resolveAgentMonitorConfig(
   | "daemonVitals"
   | "restartRecovery"
   | "catastropheGate"
+  | "childEnvStrip"
 > {
   const agents = persisted.agents;
   return {
@@ -592,6 +593,7 @@ function resolveAgentMonitorConfig(
     daemonVitals: agents?.daemonVitals,
     restartRecovery: agents?.restartRecovery,
     catastropheGate: agents?.catastropheGate,
+    childEnvStrip: agents?.childEnv?.strip,
   };
 }
 
@@ -685,6 +687,7 @@ export function resolveConfigFromPersisted(
     voiceLlmModel: voiceLlm.model,
     agentProviderSettings: extractAgentProviderSettings(providerOverrides),
     providerCatalogRefreshTimeoutMs: persisted.agents?.catalogRefreshTimeoutMs,
+    autoPinSessions: persisted.agents?.autoPinSessions,
     metadataGeneration: persisted.agents?.metadataGeneration,
     ...resolveAgentMonitorConfig(persisted),
     diskSweeper: persisted.worktrees?.diskSweeper,

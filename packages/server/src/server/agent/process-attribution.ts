@@ -6,6 +6,9 @@
  * get reparented to pid 1 (a crashed shell, a detached daemon) fall out of every agent's tree;
  * see docs/resource-monitor.md for why that's a separate machine-level signal instead of an
  * attribution gap we try to paper over.
+ *
+ * `buildChildrenByPpid` and `collectDescendants` are exported for build-daemon-reaper.ts, which
+ * reuses the same walk to sum a build daemon's worker children into its own CPU reading.
  */
 
 import { isOrphanBuildDaemonCommand } from "./build-daemon-signatures.js";
@@ -43,7 +46,9 @@ function findRootPid(rows: readonly ProcessSampleRow[], agentId: string): number
   return rows.find((row) => marker.test(row.command))?.pid;
 }
 
-function buildChildrenByPpid(rows: readonly ProcessSampleRow[]): Map<number, ProcessSampleRow[]> {
+export function buildChildrenByPpid(
+  rows: readonly ProcessSampleRow[],
+): Map<number, ProcessSampleRow[]> {
   const childrenByPpid = new Map<number, ProcessSampleRow[]>();
   for (const row of rows) {
     const siblings = childrenByPpid.get(row.ppid) ?? [];
@@ -53,7 +58,7 @@ function buildChildrenByPpid(rows: readonly ProcessSampleRow[]): Map<number, Pro
   return childrenByPpid;
 }
 
-function collectDescendants(
+export function collectDescendants(
   rootPid: number,
   rowsByPid: Map<number, ProcessSampleRow>,
   childrenByPpid: Map<number, ProcessSampleRow[]>,

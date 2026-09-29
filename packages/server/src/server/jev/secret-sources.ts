@@ -32,10 +32,25 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** Any name containing one of these is collected, on top of the secret-name rule. */
+const SECRET_ENV_WORD_RE = /token|secret|passw|credential|authorization|api_?key/i;
+/** The daemon's cwd: as an exact value it would turn every path under it into `[redacted:exact]/…`. */
+const NOT_SECRET_ENV_NAMES = new Set(["PWD", "OLDPWD"]);
+
+/**
+ * Which environment variables' values are collected as exact secrets. Wider than the secret-name
+ * rule for assignments (`NGROK_AUTHTOKEN`, `GITHUB_TOKEN_2`, `SECRET_KEY_BASE`), since a value
+ * collected in error is only redacted where it appears, while a missed one is sent.
+ */
+export function isSecretEnvName(name: string): boolean {
+  if (NOT_SECRET_ENV_NAMES.has(name.toUpperCase())) return false;
+  return isSecretName(name) || SECRET_ENV_WORD_RE.test(name);
+}
+
 function secretEnvValues(env: Readonly<Record<string, unknown>>): string[] {
   const values: string[] = [];
   for (const [name, value] of Object.entries(env)) {
-    if (typeof value === "string" && isSecretName(name)) values.push(value);
+    if (typeof value === "string" && isSecretEnvName(name)) values.push(value);
   }
   return values;
 }

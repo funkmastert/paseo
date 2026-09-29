@@ -1,8 +1,12 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
-import { describeHookAgent, publishAgentStream } from "../plugins/lifecycle/index.js";
-import type { PluginSessionOpenRequest } from "@getpaseo/plugin/server";
+import {
+  describeHookAgent,
+  isPluginUnresponsive,
+  publishAgentStream,
+} from "../plugins/lifecycle/index.js";
+import type { PluginBeforeRequests, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { randomUUID } from "node:crypto";
 import { basename, resolve } from "node:path";
 import { stat } from "node:fs/promises";
@@ -501,6 +505,17 @@ export type IdleTurnOutcome =
   | { status: "canceled" }
   | { status: "failed"; error: string };
 
+/** A turn {@link AgentManager.startQuietTurnIfIdle} started. Its handle touches that turn only. */
+export interface QuietIdleTurn {
+  /** Settles when the turn ends, however it ends. */
+  outcome: Promise<IdleTurnOutcome>;
+  /**
+   * Cancels this turn and nothing else. Resolves false, having done nothing, once the turn has
+   * ended, been replaced, or been joined by a message another sender steered into it.
+   */
+  cancel(reason: AgentCancelReason): Promise<boolean>;
+}
+
 /**
  * Lean per-agent view for AgentStallSweep: the done janitor's view plus the three things a stall
  * needs that it does not carry. See agent/stall-detector.ts.
@@ -706,10 +721,11 @@ interface ManagedAgentBase {
    */
   turnCanceled?: boolean;
   /**
-   * Set by `markQuietTurn` before the done janitor asks an idle agent whether it is finished.
-   * Consumed at the next edge out of `running`, so the answer to that question raises no
-   * `finished` attention, sends no push and does not refresh the title: the janitor asking is not
-   * the agent finishing work. An error on that turn still flags. Live-only, never persisted.
+   * Set when the done janitor's question turn starts (`startQuietTurnIfIdle`), and cleared when
+   * another sender joins or replaces that turn. Consumed at the next edge out of `running`, so
+   * the answer to that question raises no `finished` attention, sends no push and does not
+   * refresh the title: the janitor asking is not the agent finishing work. An error on that turn
+   * still flags. Live-only, never persisted.
    */
   quietTurn?: boolean;
   persistence: AgentPersistenceHandle | null;
@@ -1234,6 +1250,10 @@ export class AgentManager {
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
   private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
+  /** Streams whose turn is the done janitor's question: quiet once the turn starts. */
+  private readonly quietStreams = new WeakSet<AsyncGenerator<AgentStreamEvent>>();
+  /** Each agent's quiet turn, by run token, until it ends or another sender takes it over. */
+  private readonly quietRunTokens = new Map<string, string>();
   private promptQueue: PromptQueue | null = null;
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
@@ -1957,6 +1977,42 @@ export class AgentManager {
    * run in one synchronous stretch, so nothing can begin a turn in between.
    */
   startTurnIfIdle(agentId: string, prompt: AgentPromptInput): Promise<IdleTurnOutcome> | null {
+    return this.startIdleTurn(agentId, prompt)?.outcome ?? null;
+  }
+
+  /**
+   * `startTurnIfIdle` for the done janitor's question: the turn is quiet, so its end raises no
+   * `finished` flag, sends no push and does not refresh the title. Quiet from the moment the
+   * turn starts and not before, so a question that never starts silences nothing. A message
+   * another sender steers into it, or a turn that replaces it, is theirs, and ends as theirs.
+   */
+  startQuietTurnIfIdle(agentId: string, prompt: AgentPromptInput): QuietIdleTurn | null {
+    const started = this.startIdleTurn(agentId, prompt, { quiet: true });
+    if (!started) return null;
+    const { token, outcome } = started;
+    this.quietRunTokens.set(agentId, token);
+    void outcome.finally(() => {
+      if (this.quietRunTokens.get(agentId) === token) this.quietRunTokens.delete(agentId);
+    });
+    return {
+      outcome,
+      cancel: (reason) =>
+        this.runForegroundMutation(agentId, async () => {
+          // Checked and interrupted in one synchronous stretch: nothing can take the agent over
+          // in between.
+          if (this.quietRunTokens.get(agentId) !== token) return false;
+          if (this.runs.getRun(agentId)?.token !== token) return false;
+          await this.cancelAgentRunUnlocked(agentId, reason);
+          return true;
+        }),
+    };
+  }
+
+  private startIdleTurn(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: { quiet?: boolean },
+  ): { token: string; outcome: Promise<IdleTurnOutcome> } | null {
     const agent = this.agents.get(agentId);
     if (
       !agent ||
@@ -1968,7 +2024,31 @@ export class AgentManager {
       return null;
     }
     const events = this.streamAgent(agentId, prompt);
-    return this.collectIdleTurnOutcome(events);
+    // The run exists from here: `streamAgent` creates it synchronously, so the agent is claimed.
+    const token = this.runs.getPendingRun(agentId)?.token;
+    if (!token) throw new Error(`Agent ${agentId} has no run after starting one`);
+    if (options?.quiet) this.quietStreams.add(events);
+    return { token, outcome: this.collectIdleTurnOutcome(events) };
+  }
+
+  /**
+   * Called as a turn starts. A quiet stream's turn is quiet from here, consumed at its edge out of
+   * `running`; one that never started, or that another sender took over first, set nothing.
+   */
+  private markQuietOnStart(
+    agent: ManagedAgent,
+    stream: AsyncGenerator<AgentStreamEvent>,
+    token: string,
+  ): void {
+    if (this.quietStreams.has(stream) && this.quietRunTokens.get(agent.id) === token) {
+      agent.quietTurn = true;
+    }
+  }
+
+  /** A quiet turn another sender joined or replaced is theirs: it ends as theirs, uncancelled. */
+  private releaseQuietTurn(agent: ManagedAgent): void {
+    this.quietRunTokens.delete(agent.id);
+    agent.quietTurn = false;
   }
 
   private async collectIdleTurnOutcome(
@@ -2016,17 +2096,6 @@ export class AgentManager {
         .join(""),
       itemTypes: rows.map((row) => row.item.type),
     };
-  }
-
-  /**
-   * Marks the next turn of a loaded agent as the done janitor's question, so its finish is not
-   * reported as the agent finishing. Returns false when the agent is not loaded.
-   */
-  markQuietTurn(agentId: string): boolean {
-    const agent = this.agents.get(agentId);
-    if (!agent) return false;
-    agent.quietTurn = true;
-    return true;
   }
 
   getAccountFailoverSummary(agentId: string): AccountFailoverAgentSummary | null {
@@ -2407,19 +2476,21 @@ export class AgentManager {
     this.assertAcceptingAgentRegistrations();
     const resolvedAgentId = validateAgentId(agentId ?? this.idFactory(), "createAgent");
     if (this.pluginLifecycle && !config.internal) {
-      const request = await this.pluginLifecycle.before("agent.create", {
+      const request = await this.runAgentCreateHooks(this.pluginLifecycle, {
         config,
         env: options.env,
         callerAgentId: options.callerAgentId,
         labels: options.labels,
         initialPrompt: options.initialPrompt,
       });
-      config = { ...request.config, internal: config.internal };
-      // labels are mutable by design; initialPrompt is read-only context for
-      // the hook — the actual prompt was already resolved by the caller and
-      // is sent independently after this create completes, so a hook's
-      // mutation of it here is intentionally dropped rather than applied.
-      options = { ...options, env: request.env, labels: request.labels };
+      if (request) {
+        config = { ...request.config, internal: config.internal };
+        // labels are mutable by design; initialPrompt is read-only context for
+        // the hook — the actual prompt was already resolved by the caller and
+        // is sent independently after this create completes, so a hook's
+        // mutation of it here is intentionally dropped rather than applied.
+        options = { ...options, env: request.env, labels: request.labels };
+      }
     }
     await this.deleteAgentState(resolvedAgentId);
     const { storedConfig, launchConfig, paseoToolPolicy } = await this.prepareSessionConfig(
@@ -2458,6 +2529,31 @@ export class AgentManager {
       });
     }
     return agent;
+  }
+
+  /**
+   * The `agent.create` before hooks, or null when a plugin did not answer. A plugin that timed
+   * out, exited or was stopped mid-call is stepped around the way an unloaded one is, and the
+   * create goes ahead unmodified: otherwise one stalled plugin fails every create for the length
+   * of its RPC timeout. A plugin that answered with an error refused the create on purpose, and
+   * that error stands.
+   */
+  private async runAgentCreateHooks(
+    pluginLifecycle: PluginLifecycle,
+    request: PluginBeforeRequests["agent.create"],
+  ): Promise<PluginBeforeRequests["agent.create"] | null> {
+    try {
+      return await pluginLifecycle.before("agent.create", request);
+    } catch (error) {
+      if (!isPluginUnresponsive(error)) {
+        throw error;
+      }
+      this.logger.warn(
+        { err: error, callerAgentId: request.callerAgentId },
+        "A plugin did not answer the agent.create hook; creating the agent without it",
+      );
+      return null;
+    }
   }
 
   private buildCreateSessionOptions(options?: {
@@ -3964,6 +4060,7 @@ export class AgentManager {
       agent.activeForegroundTurnId = turnId;
       this.openActiveTurn(agent, turnId, turnStartedAt);
       agent.lifecycle = "running";
+      this.markQuietOnStart(agent, stream, pendingRun.token);
       // Lifecycle now counts this turn, so the admitted-but-starting mark can go.
       this.childAdmission?.settleStart(agentId);
       this.touchUpdatedAt(agent);
@@ -3992,6 +4089,9 @@ export class AgentManager {
             stagedSubmittedPromptEcho?.item.type === "user_message"
               ? stagedSubmittedPromptEcho.item.messageId
               : undefined,
+          // The emitState below carries the prompt's activity summary. Emitting here too sent
+          // every client two identical running snapshots per accepted turn.
+          deferStateEmit: true,
         });
       }
       for (const stagedEvent of pendingRun.stagedEvents.splice(0)) {
@@ -4252,6 +4352,7 @@ export class AgentManager {
     }
 
     const agent = this.requireSessionAgent(agentId);
+    this.releaseQuietTurn(agent);
     agent.pendingReplacement = true;
     agent.lifecycle = "running";
     this.touchUpdatedAt(agent);
@@ -4406,6 +4507,7 @@ export class AgentManager {
         expectedTurnId,
       });
       if (admission.status === "accepted") {
+        this.releaseQuietTurn(agent);
         await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
       }
       return admission;
@@ -4633,18 +4735,26 @@ export class AgentManager {
     agentId: string,
     cancelReason: AgentCancelReason = "unspecified",
   ): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, async () => {
-      if (this.childAdmission?.drop(agentId, "canceled")) {
-        // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
-        await this.runs.getRun(agentId)?.settledPromise;
-        return { status: "settled" };
-      }
-      const result = await this.cancelAgentRunNow(agentId, cancelReason);
-      if (cancelReason === "account-capped" && result.status === "settled") {
-        await this.recordAccountCappedCancel(agentId);
-      }
-      return result;
-    });
+    return this.runForegroundMutation(agentId, () =>
+      this.cancelAgentRunUnlocked(agentId, cancelReason),
+    );
+  }
+
+  /** `cancelAgentRun`'s body, for a caller already inside the agent's foreground mutation. */
+  private async cancelAgentRunUnlocked(
+    agentId: string,
+    cancelReason: AgentCancelReason,
+  ): Promise<AgentRunCancellationResult> {
+    if (this.childAdmission?.drop(agentId, "canceled")) {
+      // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
+      await this.runs.getRun(agentId)?.settledPromise;
+      return { status: "settled" };
+    }
+    const result = await this.cancelAgentRunNow(agentId, cancelReason);
+    if (cancelReason === "account-capped" && result.status === "settled") {
+      await this.recordAccountCappedCancel(agentId);
+    }
+    return result;
   }
 
   /**
@@ -6416,9 +6526,10 @@ export class AgentManager {
     item: AgentTimelineItem,
     provider: AgentProvider,
     turnId?: string,
-    options?: { providerMessageId?: string },
+    options?: { providerMessageId?: string; deferStateEmit?: boolean },
   ): AgentStreamEvent {
-    const row = this.recordTimeline(agentId, item, { ...options, turnId });
+    const { deferStateEmit, ...timelineOptions } = options ?? {};
+    const row = this.recordTimeline(agentId, item, { ...timelineOptions, turnId });
     const event: AgentStreamEvent = {
       type: "timeline",
       item,
@@ -6454,7 +6565,8 @@ export class AgentManager {
         // Avoid an emitState storm: only broadcast when the summary actually
         // changed, not on every coalesced item. lastActivitySummary is
         // live-only (never persisted), so skip the snapshot write too.
-        this.emitState(agent, { persist: false });
+        // deferStateEmit: the caller publishes state right after.
+        if (!deferStateEmit) this.emitState(agent, { persist: false });
       }
 
       if (
@@ -6474,7 +6586,12 @@ export class AgentManager {
     agent: ActiveManagedAgent,
     prompt: AgentPromptInput,
     clientMessageId: string,
-    options?: { messageId?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      messageId?: string;
+      providerMessageId?: string;
+      turnId?: string;
+      deferStateEmit?: boolean;
+    },
   ): void {
     if (this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId)) {
       return;

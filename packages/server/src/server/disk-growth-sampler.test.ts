@@ -7,6 +7,7 @@ import {
   DiskGrowthSampler,
   formatGrowthEvidence,
   pickReferenceSample,
+  shouldBackOffRoot,
   type DiskGrowthSample,
   type DuRunner,
 } from "./disk-growth-sampler.js";
@@ -127,6 +128,49 @@ describe("DiskGrowthSampler — measuring", () => {
     expect(order.map((root) => root.split("/").pop())).toEqual(["one", "two", "three"]);
     expect(report.sample.roots.map((root) => root.path.split("/").pop())).toEqual(["one", "three"]);
     expect(report.sample.unmeasured).toEqual([{ path: join(home, "two"), reason: "timeout" }]);
+  });
+
+  test("backs off a root after repeated timeouts instead of blocking every sample on it", async () => {
+    const home = makeTempDir("paseo-growth-");
+    mkdirSync(join(home, "slow"));
+    mkdirSync(join(home, "fast"));
+    let attempts = 0;
+    const runDu: DuRunner = async (root) => {
+      if (root.endsWith("slow")) {
+        attempts += 1;
+        return { kind: "timeout" };
+      }
+      return { kind: "ok", stdout: `1024\t${root}\n` };
+    };
+    const clock = { nowMs: T0 };
+    const sampler = makeSampler({ home, clock, runDu });
+    const roots = [join(home, "slow"), join(home, "fast")];
+    const sample = () => sampler.sample({ roots, timeoutMs: 1_000 });
+
+    await sample();
+    clock.nowMs += MINUTE_MS;
+    await sample();
+    expect(attempts).toBe(2);
+
+    // Backed off now: the next several samples skip "slow" without calling runDu on it again.
+    for (let i = 0; i < 5; i += 1) {
+      clock.nowMs += MINUTE_MS;
+      const report = await sample();
+      expect(report.sample.unmeasured).toContainEqual({
+        path: join(home, "slow"),
+        reason: "skipped",
+      });
+    }
+    expect(attempts).toBe(2);
+
+    // The backoff is bounded: it tries again for real, and times out again.
+    clock.nowMs += MINUTE_MS;
+    const retried = await sample();
+    expect(attempts).toBe(3);
+    expect(retried.sample.unmeasured).toContainEqual({
+      path: join(home, "slow"),
+      reason: "timeout",
+    });
   });
 });
 
@@ -252,6 +296,73 @@ describe("pickReferenceSample", () => {
 
   test("returns null with no history", () => {
     expect(pickReferenceSample([], T0, 30 * MINUTE_MS)).toBeNull();
+  });
+});
+
+describe("shouldBackOffRoot", () => {
+  function unmeasured(reason: "timeout" | "failed" | "skipped"): DiskGrowthSample {
+    return {
+      at: new Date(T0).toISOString(),
+      roots: [],
+      unmeasured: [{ path: "/slow", reason }],
+    };
+  }
+  function measured(): DiskGrowthSample {
+    return {
+      at: new Date(T0).toISOString(),
+      roots: [{ path: "/slow", bytes: 1, children: [], childFloorBytes: 0 }],
+      unmeasured: [],
+    };
+  }
+
+  test("does not back off a root that has not timed out enough times in a row", () => {
+    expect(shouldBackOffRoot([], "/slow")).toBe(false);
+    expect(shouldBackOffRoot([unmeasured("timeout")], "/slow")).toBe(false);
+  });
+
+  test("backs off once a root has timed out threshold times in a row", () => {
+    expect(shouldBackOffRoot([unmeasured("timeout"), unmeasured("timeout")], "/slow")).toBe(true);
+  });
+
+  test("a success or a different failure in between resets the streak", () => {
+    expect(shouldBackOffRoot([measured(), unmeasured("timeout")], "/slow")).toBe(false);
+    expect(
+      shouldBackOffRoot(
+        [unmeasured("failed"), unmeasured("timeout"), unmeasured("timeout")],
+        "/slow",
+      ),
+    ).toBe(true);
+    expect(
+      shouldBackOffRoot([unmeasured("timeout"), measured(), unmeasured("timeout")], "/slow"),
+    ).toBe(false);
+  });
+
+  test("stops backing off once the skip budget since the last real timeout is spent", () => {
+    const backedOff = [unmeasured("timeout"), unmeasured("timeout")];
+    expect(shouldBackOffRoot(backedOff, "/slow")).toBe(true);
+    const stillSkipping = [...backedOff, unmeasured("skipped"), unmeasured("skipped")];
+    expect(shouldBackOffRoot(stillSkipping, "/slow")).toBe(true);
+    const budgetSpent = [
+      ...backedOff,
+      unmeasured("skipped"),
+      unmeasured("skipped"),
+      unmeasured("skipped"),
+      unmeasured("skipped"),
+      unmeasured("skipped"),
+    ];
+    expect(shouldBackOffRoot(budgetSpent, "/slow")).toBe(false);
+  });
+
+  test("is keyed by path: a different root's timeouts never back this one off", () => {
+    const other: DiskGrowthSample = {
+      at: new Date(T0).toISOString(),
+      roots: [],
+      unmeasured: [
+        { path: "/other", reason: "timeout" },
+        { path: "/other", reason: "timeout" },
+      ],
+    };
+    expect(shouldBackOffRoot([other], "/slow")).toBe(false);
   });
 });
 

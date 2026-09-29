@@ -493,6 +493,20 @@ const AgentLeaderCompactionSchema = z
   })
   .strict();
 
+// The done janitor's idle-workspace sweep: on whenever the janitor is, unless `enabled` says
+// otherwise. See docs/done-janitor.md, "Idle workspaces".
+const AgentDoneJanitorWorkspaceSweepSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    idleHours: z.number().positive().optional(),
+    emptyIdleHours: z.number().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    projectGraceHours: z.number().positive().optional(),
+    maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+  })
+  .strict();
+
 // Off unless `enabled` says otherwise. See docs/done-janitor.md.
 const AgentDoneJanitorSchema = z
   .object({
@@ -507,6 +521,7 @@ const AgentDoneJanitorSchema = z
     deadQuietHours: z.number().positive().optional(),
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
+    workspaceSweep: AgentDoneJanitorWorkspaceSweepSchema.optional(),
   })
   .strict();
 
@@ -537,6 +552,15 @@ const AgentRefocusSchema = z
 const AgentCatastropheGateSchema = z
   .object({
     enabled: z.boolean().optional(),
+  })
+  .strict();
+
+// Names removed from the environment agents, terminals and commands inherit from the daemon, before
+// any provider `env` applies. Exact names, or a prefix ending in `*`. Read at daemon start. Absent
+// means `["BIBLIO_*"]`; the JEV key is removed whatever this says. See docs/jev.md, "Key".
+const AgentChildEnvSchema = z
+  .object({
+    strip: z.array(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -682,36 +706,37 @@ const AgentTokenAuditSchema = z
   .strict();
 
 // `agents.jev`: JEV, the hosted decision model between deterministic code and an LLM agent
-// (docs/jev.md). Read through its own 5-second cache (`jev/config.ts`), not the mutable config;
-// a malformed value there falls back to its default, so this schema only rejects a shape that
-// isn't close at all.
+// (docs/jev.md). Read through its own 5-second cache (`jev/config.ts`), not the mutable config.
+// Shapes and types only: the resolver there clamps or ignores a value out of range. A section this
+// schema rejects turns JEV off (the reader answers `config-unreadable`) and never the whole file:
+// `PersistedConfigSchema` accepts any `agents.jev` and keeps it as written.
 const AgentJevFeatureSchema = z
   .object({
     enabled: z.boolean().optional(),
     shadow: z.boolean().optional(),
-    timeoutMs: z.number().positive().optional(),
+    timeoutMs: z.number().optional(),
   })
   .strict();
 
-const AgentJevSchema = z
+export const AgentJevSchema = z
   .object({
     enabled: z.boolean().optional(),
     provider: z.enum(["openrouter", "typesafe"]).optional(),
-    model: z.string().min(1).optional(),
-    endpointUrl: z.string().min(1).optional(),
-    envFile: z.string().min(1).optional(),
-    maxConcurrent: z.number().int().positive().optional(),
-    maxRequestsPerSecond: z.number().positive().max(15).optional(),
-    maxUsdPerDay: z.number().positive().optional(),
-    inputUsdPerMillion: z.number().positive().optional(),
+    model: z.string().optional(),
+    endpointUrl: z.string().optional(),
+    envFile: z.string().optional(),
+    maxConcurrent: z.number().optional(),
+    maxRequestsPerSecond: z.number().optional(),
+    maxUsdPerDay: z.number().optional(),
+    inputUsdPerMillion: z.number().optional(),
     excludeCwds: z.array(z.string()).optional(),
     excludeRemotes: z.array(z.string()).optional(),
     excludeTextMarkers: z.array(z.string()).optional(),
     audit: z
       .object({
         enabled: z.boolean().optional(),
-        maxBytes: z.number().int().positive().optional(),
-        retainDays: z.number().int().positive().optional(),
+        maxBytes: z.number().optional(),
+        retainDays: z.number().optional(),
       })
       .strict()
       .optional(),
@@ -719,7 +744,7 @@ const AgentJevSchema = z
       .object({
         enabled: z.boolean().optional(),
         shadow: z.boolean().optional(),
-        timeoutMs: z.number().positive().optional(),
+        timeoutMs: z.number().optional(),
         applyHard: z.boolean().optional(),
         applyRole: z.boolean().optional(),
       })
@@ -730,12 +755,15 @@ const AgentJevSchema = z
     agentTools: z
       .object({
         enabled: z.boolean().optional(),
-        timeoutMs: z.number().positive().optional(),
-        maxConcurrent: z.number().int().positive().optional(),
-        maxConcurrentPerCall: z.number().int().positive().optional(),
-        maxUsdPerDay: z.number().positive().optional(),
-        maxUsdPerAgentPerHour: z.number().positive().optional(),
-        assignShare: z.number().min(0).max(1).optional(),
+        // agentTools has no shadow mode; the key is accepted so a config written as if it did
+        // still loads, and the resolver ignores it.
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        maxConcurrent: z.number().optional(),
+        maxConcurrentPerCall: z.number().optional(),
+        maxUsdPerDay: z.number().optional(),
+        maxUsdPerAgentPerHour: z.number().optional(),
+        assignShare: z.number().optional(),
       })
       .strict()
       .optional(),
@@ -743,10 +771,10 @@ const AgentJevSchema = z
       .object({
         enabled: z.boolean().optional(),
         shadow: z.boolean().optional(),
-        timeoutMs: z.number().positive().optional(),
-        considerAtTokens: z.number().int().positive().optional(),
-        ceilingTokens: z.number().int().positive().optional(),
-        maxDeferrals: z.number().int().positive().optional(),
+        timeoutMs: z.number().optional(),
+        considerAtTokens: z.number().optional(),
+        ceilingTokens: z.number().optional(),
+        maxDeferrals: z.number().optional(),
         cutPoint: z.boolean().optional(),
       })
       .strict()
@@ -755,7 +783,7 @@ const AgentJevSchema = z
       .object({
         enabled: z.boolean().optional(),
         shadow: z.boolean().optional(),
-        timeoutMs: z.number().positive().optional(),
+        timeoutMs: z.number().optional(),
         loopWatch: z.boolean().optional(),
       })
       .strict()
@@ -925,6 +953,10 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
+        // Off switch for auto-pinning a workspace when Tyler starts a session in it (a new
+        // workspace, or a new agent tab in an existing one). Absent means on.
+        // See workspace-auto-pin.ts and docs/done-janitor.md#manual-pin-vs-auto-pin.
+        autoPinSessions: z.boolean().optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),
@@ -939,12 +971,14 @@ export const PersistedConfigSchema = z
         admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
         catastropheGate: AgentCatastropheGateSchema.optional(),
+        childEnv: AgentChildEnvSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
         providerUsage: AgentProviderUsageSchema.optional(),
-        jev: AgentJevSchema.optional(),
+        // Any value loads; `AgentJevSchema` is what JEV itself checks (see above).
+        jev: z.union([AgentJevSchema, z.unknown()]).optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()
@@ -1039,6 +1073,20 @@ export function stripRemovedConfigFields(parsed: unknown): unknown {
   return root;
 }
 
+/**
+ * "config.json is not valid JSON at line N, column M". The parser's own message quotes the text
+ * around the error, which in config.json can be part of a key, so only its position is used.
+ */
+export function describeInvalidConfigJson(text: string, error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const match = /at position (\d+)/.exec(message);
+  const offset = match ? Math.min(Number(match[1]), text.length) : text.length;
+  const before = text.slice(0, offset);
+  const line = before.split("\n").length;
+  const column = offset - (before.lastIndexOf("\n") + 1) + 1;
+  return `config.json is not valid JSON at line ${line}, column ${column}`;
+}
+
 export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): PersistedConfig {
   const log = getLogger(logger);
   const configPath = getConfigPath(paseoHome);
@@ -1071,10 +1119,9 @@ export function loadPersistedConfig(paseoHome: string, logger?: LoggerLike): Per
   try {
     parsed = JSON.parse(raw);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`[Config] Invalid JSON in ${configPath}: ${message}`, {
-      cause: err,
-    });
+    // No `cause`: a logger serializes it, and the parser's message quotes the file.
+    // eslint-disable-next-line preserve-caught-error -- the cause would carry that quote
+    throw new Error(`[Config] ${describeInvalidConfigJson(raw, err)} (${configPath})`);
   }
 
   const migrated = stripRemovedConfigFields(parsed);

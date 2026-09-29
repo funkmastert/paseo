@@ -9,6 +9,7 @@ import type { ProviderEvent, ProviderRegistration } from "@getpaseo/plugin/serve
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentStreamEvent } from "../agent/agent-sdk-types.js";
 import { PluginAgentClientRegistry } from "../agent/plugin-provider.js";
+import { isPluginUnresponsive } from "./lifecycle/index.js";
 import { pluginChildEnv, PluginRuntime } from "./runtime.js";
 import type { PluginSessionSocket } from "./session-socket.js";
 
@@ -221,6 +222,16 @@ describe("plugin child env", () => {
     expect(env.PASEO_JEV_API_KEY).toBeUndefined();
   });
 });
+
+/** Resolves with a rejected promise's reason, so a test can inspect the error it failed with. */
+function failureOf(promise: Promise<unknown>): Promise<unknown> {
+  return promise.then(
+    () => {
+      throw new Error("expected the call to fail");
+    },
+    (error: unknown) => error,
+  );
+}
 
 describe("PluginRuntime", () => {
   it.each([
@@ -1788,5 +1799,79 @@ export default function contribute(plugin: any) {
     await expect(runtime.invoke("crashing", "anything", {})).rejects.toThrow(
       "Plugin is not available",
     );
+  });
+
+  describe("a before hook's failure says whether the plugin answered", () => {
+    const createRequest = { config: { provider: "claude", cwd: "/tmp" } };
+
+    async function startHookedPlugin(id: string) {
+      const directory = await createPlugin(
+        id,
+        `export default function contribute(plugin: unknown) { void plugin; return () => undefined; }`,
+      );
+      const child = createReloadChild(id, []);
+      const hookRequestIds: string[] = [];
+      const send = child.send.bind(child);
+      child.send = (message, callback) => {
+        if (message.type === "hook")
+          hookRequestIds.push((message as { requestId: string }).requestId);
+        return send(message, callback);
+      };
+      const runtime = createTestRuntime({ spawnChild: () => child });
+      await runtime.startPlugin(id, directory);
+      child.emitMessage({ type: "hooks.changed", hooks: { events: [], before: ["agent.create"] } });
+      return { runtime, child, hookRequestIds };
+    }
+
+    it("a plugin that exits mid-call did not answer", async () => {
+      const { runtime, child } = await startHookedPlugin("exits");
+
+      const failure = failureOf(runtime.before("agent.create", createRequest));
+      child.kill();
+
+      expect(isPluginUnresponsive(await failure)).toBe(true);
+      await runtime.stopAll();
+    });
+
+    it("a plugin that is stopped mid-call did not answer", async () => {
+      const { runtime } = await startHookedPlugin("stopped");
+
+      const failure = failureOf(runtime.before("agent.create", createRequest));
+      await runtime.stopPluginById("stopped");
+
+      expect(isPluginUnresponsive(await failure)).toBe(true);
+    });
+
+    it("a plugin that never replies did not answer", async () => {
+      const { runtime } = await startHookedPlugin("silent");
+      vi.useFakeTimers();
+      try {
+        const failure = failureOf(runtime.before("agent.create", createRequest));
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        const error = await failure;
+        expect(isPluginUnresponsive(error)).toBe(true);
+        expect(String(error)).toContain("Plugin RPC timed out");
+      } finally {
+        vi.useRealTimers();
+      }
+      await runtime.stopAll();
+    });
+
+    it("a hook that throws answered: its error is the plugin's decision", async () => {
+      const { runtime, child, hookRequestIds } = await startHookedPlugin("refuses");
+
+      const failure = failureOf(runtime.before("agent.create", createRequest));
+      child.emitMessage({
+        type: "error",
+        requestId: hookRequestIds[0],
+        error: "every Claude account is out of budget",
+      });
+
+      const error = await failure;
+      expect(isPluginUnresponsive(error)).toBe(false);
+      expect(String(error)).toContain("every Claude account is out of budget");
+      await runtime.stopAll();
+    });
   });
 });

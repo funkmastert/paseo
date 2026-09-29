@@ -6,7 +6,11 @@ import {
   type SkillSelection,
 } from "../../orchestration-skills/internal/operations.js";
 import { resolveSkillTargets } from "../../orchestration-skills/internal/paths.js";
-import { PersistedConfigSchema, stripRemovedConfigFields } from "../../persisted-config.js";
+import {
+  describeInvalidConfigJson,
+  PersistedConfigSchema,
+  stripRemovedConfigFields,
+} from "../../persisted-config.js";
 import type { DoctorConfigIssue, DoctorContext, DoctorFacts, DoctorProbes } from "./context.js";
 import { createRealProbes } from "./probes.js";
 
@@ -34,7 +38,7 @@ export function readRawConfig(paseoHome: string): {
   } catch (error) {
     return {
       rawConfig: null,
-      rawConfigError: `Invalid JSON in ${file}: ${(error as Error).message}`,
+      rawConfigError: `${describeInvalidConfigJson(text, error)} (${file})`,
     };
   }
 }

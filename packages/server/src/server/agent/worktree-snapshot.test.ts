@@ -8,14 +8,17 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import pino from "pino";
+import pino, { type Logger } from "pino";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
+import { lookupGitHubRepoVisibility, type RepoVisibility } from "./github-repo-visibility.js";
+import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
 import { GitWorktreeSnapshotter, formatSnapshotDate } from "./worktree-snapshot.js";
 
 // Real repositories under a temp dir. The snapshot's whole promise is that it never writes the
@@ -56,7 +59,15 @@ function hash(path: string): string {
 }
 
 function snapshotter(
-  overrides: { personalOwners?: string[]; maxUntrackedFileBytes?: number; now?: () => number } = {},
+  overrides: {
+    personalOwners?: string[];
+    maxUntrackedFileBytes?: number;
+    now?: () => number;
+    lookupRepoVisibility?: (owner: string, repo: string) => Promise<RepoVisibility>;
+    logger?: Logger;
+    pushScanMaxBytes?: number;
+    runGit?: RunGitCommand;
+  } = {},
 ): GitWorktreeSnapshotter {
   return new GitWorktreeSnapshotter({
     readConfig: () => ({
@@ -65,9 +76,60 @@ function snapshotter(
       maxUntrackedFileBytes: overrides.maxUntrackedFileBytes ?? 1024 * 1024,
     }),
     paseoHome: join(root, "paseo-home"),
-    logger: pino({ level: "silent" }),
+    logger: overrides.logger ?? pino({ level: "silent" }),
     now: overrides.now ?? (() => NOW),
+    // Never the network: tests say what GitHub would answer.
+    lookupRepoVisibility: overrides.lookupRepoVisibility ?? (async () => "private"),
+    pushScanMaxBytes: overrides.pushScanMaxBytes,
+    runGit: overrides.runGit,
   });
+}
+
+/** A logger whose lines land in `lines`, to check what a log line names. */
+function capturingLogger(lines: string[]): Logger {
+  return pino({ level: "info" }, { write: (line: string) => void lines.push(line) });
+}
+
+// Fake tokens assembled at runtime, so no secret scanner flags this file.
+const FAKE_TOKENS = [
+  ["a Notion token", "ntn_" + "x".repeat(46)],
+  ["an Anthropic key", ["sk", "ant", "api03"].join("-") + "-" + "y".repeat(40)],
+  ["a GitHub token", ["ghp", "z".repeat(36)].join("_")],
+  ["a private key", ["-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"].join(" ")],
+  ["an OpenAI service-account key", ["sk", "svcacct", "a".repeat(40)].join("-")],
+  ["an OpenAI admin key", ["sk", "admin", "b".repeat(40)].join("-")],
+  ["a legacy Notion token", ["secret", "c".repeat(43)].join("_")],
+  ["a Stripe secret key", ["sk", "live", "d".repeat(24)].join("_")],
+  ["a Stripe restricted key", ["rk", "live", "e".repeat(24)].join("_")],
+  ["a Google API key", ["AI", "za", "f".repeat(35)].join("")],
+  ["a GitLab token", ["glpat", "g".repeat(20)].join("-")],
+  ["a Hugging Face token", ["hf", "h".repeat(34)].join("_")],
+  ["an npm token", ["npm", "i".repeat(36)].join("_")],
+  [
+    "a Slack webhook",
+    [
+      "https://hooks.slack.com/services",
+      "T" + "0".repeat(8),
+      "B" + "1".repeat(8),
+      "j".repeat(24),
+    ].join("/"),
+  ],
+  ["a database URL with a password", ["postgres", "//app:hunter2@db.internal:5432/prod"].join(":")],
+] as const;
+
+const NOTION_TOKEN = FAKE_TOKENS[0][1];
+
+function writeRepoFile(name: string, content: string, mode = 0o644): void {
+  writeFileSync(join(repo, name), content);
+  chmodSync(join(repo, name), mode);
+}
+
+function snapshotFiles(ref: string): string[] {
+  return git(repo, "ls-tree", "-r", "--name-only", ref).split("\n");
+}
+
+function snapshotMessage(ref: string): string {
+  return git(repo, "log", "-1", "--format=%B", ref);
 }
 
 function expectSnapshotted(
@@ -194,6 +256,48 @@ describe("GitWorktreeSnapshotter", () => {
     const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
     expect(files).toContain("small.txt");
     expect(files).not.toContain("big.bin");
+  });
+
+  test("a file the agent staged but never committed still goes through the size cap", async () => {
+    writeFileSync(join(repo, "big.bin"), Buffer.alloc(2048));
+    git(repo, "add", "big.bin");
+    const result = expectSnapshotted(
+      await snapshotter({ maxUntrackedFileBytes: 1024 }).snapshot({
+        cwd: repo,
+        reason: "test",
+        offsite: false,
+      }),
+    );
+    expect(result.skippedFiles).toEqual(["big.bin"]);
+    const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
+    expect(files).not.toContain("big.bin");
+  });
+
+  // Whatever the untracked-file filter keeps out (size, owner-only modes, secret names), `git add`
+  // must not smuggle in: a file new since HEAD is judged the same whether the agent staged it or not.
+  test.each([
+    { name: "an owner-only file", untracked: "loose-notes.txt", staged: "staged-notes.txt" },
+    { name: "a .env file", untracked: "a/.env", staged: "b/.env" },
+    { name: "a file over the size cap", untracked: "loose.bin", staged: "staged.bin" },
+  ])("staging $name does not change whether the snapshot takes it", async (item) => {
+    for (const file of [item.untracked, item.staged]) {
+      mkdirSync(join(repo, file, ".."), { recursive: true });
+      writeFileSync(join(repo, file), item.untracked.endsWith(".bin") ? Buffer.alloc(2048) : "x\n");
+      if (item.name === "an owner-only file") chmodSync(join(repo, file), 0o600);
+    }
+    git(repo, "add", item.staged);
+
+    const result = expectSnapshotted(
+      await snapshotter({ maxUntrackedFileBytes: 1024 }).snapshot({
+        cwd: repo,
+        reason: "test",
+        offsite: false,
+      }),
+    );
+
+    const files = git(repo, "ls-tree", "-r", "--name-only", result.ref).split("\n");
+    expect(files.includes(item.staged)).toBe(files.includes(item.untracked));
+    expect(files).not.toContain(item.staged);
   });
 
   test("a clean tree with commits on no remote is at risk", async () => {
@@ -390,5 +494,510 @@ describe("GitWorktreeSnapshotter", () => {
       atRisk: true,
     });
     expect(backupRefs(repo)).toEqual([]);
+  });
+});
+
+describe("GitWorktreeSnapshotter leaves likely secrets out of the untracked set", () => {
+  async function localSnapshot() {
+    return expectSnapshotted(
+      await snapshotter().snapshot({ cwd: repo, reason: "test", offsite: false }),
+    );
+  }
+
+  test("an owner-only file is left out, named in the message, and left on disk untouched", async () => {
+    writeRepoFile("notes.txt", "private notes\n", 0o600);
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+    expect(snapshotFiles(result.ref)).not.toContain("notes.txt");
+    expect(snapshotMessage(result.ref)).toContain(
+      "Not snapshotted: possible secret (left on disk): notes.txt",
+    );
+    expect(readFileSync(join(repo, "notes.txt"), "utf8")).toBe("private notes\n");
+    expect(statSync(join(repo, "notes.txt")).mode & 0o777).toBe(0o600);
+    // The size-cap list stays the size-cap list.
+    expect(result.skippedFiles).toEqual([]);
+  });
+
+  test(".env and .env.* are left out; .env.example, .env.sample and .env.template are kept", async () => {
+    writeRepoFile(".env", "A=1\n");
+    writeRepoFile(".env.local", "A=1\n");
+    writeRepoFile(".env.example", "A=\n");
+    writeRepoFile(".env.sample", "A=\n");
+    writeRepoFile(".env.template", "A=\n");
+
+    const result = await localSnapshot();
+
+    const files = snapshotFiles(result.ref);
+    expect(files).not.toContain(".env");
+    expect(files).not.toContain(".env.local");
+    expect(files).toEqual(expect.arrayContaining([".env.example", ".env.sample", ".env.template"]));
+    expect(snapshotMessage(result.ref)).toContain(
+      "Not snapshotted: possible secret (left on disk): .env, .env.local",
+    );
+  });
+
+  test.each([
+    ".notion-secret",
+    "client_secret.json",
+    "aws-credentials",
+    "server.pem",
+    "tls.key",
+    "cert.p12",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "release.keystore",
+    "prod.env",
+    ".env-local",
+    ".env_prod",
+    "token.txt",
+    "github-token",
+    "api_key.txt",
+    "db_password.txt",
+    ".htpasswd",
+    "kubeconfig",
+    ".pgpass",
+  ])("a readable file named %s is left out", async (name) => {
+    writeRepoFile(name, "nothing secret-looking inside\n");
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).not.toContain(name);
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+    expect(snapshotMessage(result.ref)).toContain(name);
+  });
+
+  test.each(FAKE_TOKENS)(
+    "an ordinary file holding %s is left out, and the token never reaches the message",
+    async (_label, token) => {
+      mkdirSync(join(repo, "config"));
+      writeRepoFile("config/settings.json", `{\n  "key": "${token}"\n}\n`);
+      writeRepoFile("ordinary.txt", "ordinary\n");
+
+      const result = await localSnapshot();
+
+      expect(snapshotFiles(result.ref)).not.toContain("config/settings.json");
+      expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+      const message = snapshotMessage(result.ref);
+      expect(message).toContain("config/settings.json");
+      expect(message).not.toContain(token);
+    },
+  );
+
+  test("an ordinary file is kept, including one whose words only look like a token prefix", async () => {
+    writeRepoFile(
+      "plan.md",
+      `Run task-${"a".repeat(30)} next; see the disk-${"b".repeat(30)} log.\n`,
+    );
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).toContain("plan.md");
+    expect(snapshotMessage(result.ref)).not.toContain("possible secret");
+  });
+
+  test.each([
+    "secrets/api.json",
+    ".secrets/app.json",
+    "credentials/gcp.json",
+    "config/secret/db.yml",
+    ".aws/config",
+    ".ssh/config",
+    ".kube/config",
+    ".docker/config.json",
+  ])("a file under a secret-shaped directory, %s, is left out", async (path) => {
+    mkdirSync(join(repo, path, ".."), { recursive: true });
+    writeRepoFile(path, "nothing secret-looking inside\n");
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).not.toContain(path);
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+  });
+
+  test("names that only mention a token or a password are kept", async () => {
+    const names = [
+      "useToken.ts",
+      "token-burn.ts",
+      "design-tokens.css",
+      "ResetPassword.tsx",
+      "password-reset.tsx",
+      ".env-example",
+      ".env_sample",
+    ];
+    for (const name of names) writeRepoFile(name, "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).toEqual(expect.arrayContaining(names));
+    expect(snapshotMessage(result.ref)).not.toContain("possible secret");
+  });
+
+  test("a file whose name is a token is left out, and its name is withheld from the message", async () => {
+    const token = ["ghp", "k".repeat(36)].join("_");
+    writeRepoFile(`${token}.txt`, "benign\n");
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).not.toContain(`${token}.txt`);
+    const message = snapshotMessage(result.ref);
+    expect(message).toContain("<path withheld: looks like a token>");
+    expect(message).not.toContain(token);
+  });
+
+  test("an oversize file whose name is a token is withheld from the size-cap list", async () => {
+    const token = ["ghp", "m".repeat(36)].join("_");
+    writeFileSync(join(repo, `${token}.bin`), Buffer.alloc(2048));
+    const result = expectSnapshotted(
+      await snapshotter({ maxUntrackedFileBytes: 1024 }).snapshot({
+        cwd: repo,
+        reason: "test",
+        offsite: false,
+      }),
+    );
+    expect(result.skippedFiles).toEqual(["<path withheld: looks like a token>"]);
+    expect(snapshotMessage(result.ref)).not.toContain(token);
+  });
+
+  test("a token saved as UTF-16 is still found", async () => {
+    writeFileSync(join(repo, "notes.txt"), Buffer.from(`KEY=${NOTION_TOKEN}\n`, "utf16le"));
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).not.toContain("notes.txt");
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+  });
+
+  test("a filtered file never reaches the pushed branch", async () => {
+    writeRepoFile(".env", "A=1\n");
+    writeRepoFile("notes.txt", `token: ${NOTION_TOKEN}\n`);
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = expectSnapshotted(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+
+    expect(result.offsite.kind).toBe("pushed");
+    if (result.offsite.kind !== "pushed") return;
+    const pushed = git(
+      remote,
+      "ls-tree",
+      "-r",
+      "--name-only",
+      `refs/heads/${result.offsite.branch}`,
+    );
+    expect(pushed.split("\n")).toContain("ordinary.txt");
+    expect(pushed.split("\n")).not.toContain(".env");
+    expect(pushed.split("\n")).not.toContain("notes.txt");
+    expect(git(remote, "log", "-p", `refs/heads/${result.offsite.branch}`)).not.toContain(
+      NOTION_TOKEN,
+    );
+  });
+});
+
+describe("GitWorktreeSnapshotter scans what a push would send", () => {
+  function expectBundledNotPushed(result: WorktreeSnapshotResult) {
+    const snapshot = expectSnapshotted(result);
+    expect(snapshot.offsite.kind).toBe("bundled");
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+    return snapshot;
+  }
+
+  test("a token added to a tracked file is bundled, and the log names the path and kind only", async () => {
+    const lines: string[] = [];
+    writeFileSync(join(repo, "README.md"), `hello\nkey ${NOTION_TOKEN}\n`);
+
+    expectBundledNotPushed(
+      await snapshotter({ logger: capturingLogger(lines) }).snapshot({ cwd: repo, reason: "test" }),
+    );
+
+    const log = lines.join("\n");
+    expect(log).toContain("possible secret in what the push would send");
+    expect(log).toContain("README.md");
+    expect(log).toContain("Notion token");
+    expect(log).not.toContain(NOTION_TOKEN);
+  });
+
+  test("a token in an unpushed commit is bundled", async () => {
+    commit(repo, "config.json", `{ "key": "${FAKE_TOKENS[2][1]}" }\n`);
+    expectBundledNotPushed(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+  });
+
+  test("a token added and removed again in unpushed commits is bundled, since both commits go", async () => {
+    commit(repo, "config.json", `{ "key": "${NOTION_TOKEN}" }\n`);
+    commit(repo, "config.json", `{ "key": "" }\n`);
+    expectBundledNotPushed(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+  });
+
+  test("a secret-shaped path in an unpushed commit is bundled", async () => {
+    commit(repo, ".env", "A=1\n");
+    expectBundledNotPushed(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+  });
+
+  test("a token in an unpushed commit's message is bundled", async () => {
+    writeFileSync(join(repo, "a.txt"), "a\n");
+    git(repo, "add", "a.txt");
+    git(repo, "commit", "-q", "-m", `use ${NOTION_TOKEN} for now`);
+    expectBundledNotPushed(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+  });
+
+  test("a token past the untracked filter's 64 KB window is caught before the push", async () => {
+    writeRepoFile("big.log", `${"x".repeat(70 * 1024)}\nKEY=${NOTION_TOKEN}\n`);
+
+    const result = expectBundledNotPushed(
+      await snapshotter().snapshot({ cwd: repo, reason: "test" }),
+    );
+
+    // The local snapshot keeps it: only what leaves the machine is held back.
+    expect(snapshotFiles(result.ref)).toContain("big.log");
+  });
+
+  test("a token the remote already has does not hold back a push of other changes", async () => {
+    commit(repo, "fixture.txt", `${NOTION_TOKEN}\n`);
+    git(repo, "push", "-q", "origin", "main");
+    git(repo, "fetch", "-q", "origin");
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    commit(repo, "local.txt", "one\n");
+
+    const result = expectSnapshotted(await snapshotter().snapshot({ cwd: repo, reason: "test" }));
+
+    expect(result.offsite.kind).toBe("pushed");
+  });
+
+  test("more to scan than the cap is bundled", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n".repeat(20));
+    expectBundledNotPushed(
+      await snapshotter({ pushScanMaxBytes: 64 }).snapshot({ cwd: repo, reason: "test" }),
+    );
+  });
+});
+
+describe("GitWorktreeSnapshotter pushes only to a repository GitHub says is private", () => {
+  test("a public personal repository is bundled, never pushed", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: async () => "public" }).snapshot({
+        cwd: repo,
+        reason: "test",
+      }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+  });
+
+  test("a private personal repository is pushed, after asking about owner and repository", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => "private");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: lookup }).snapshot({ cwd: repo, reason: "test" }),
+    );
+    expect(result.offsite.kind).toBe("pushed");
+    expect(lookup).toHaveBeenCalledWith("funkmastert", "x");
+  });
+
+  test("an unknown visibility is bundled", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: async () => "unknown" }).snapshot({
+        cwd: repo,
+        reason: "test",
+      }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+  });
+
+  test("a company origin is never looked up", async () => {
+    const url = "https://github.com/wonderlydotcom/x.git";
+    git(repo, "remote", "set-url", "origin", url);
+    git(repo, "config", `url.${remote}.insteadOf`, url);
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => "private");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: lookup }).snapshot({ cwd: repo, reason: "test" }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("an answer is cached per repository for five minutes; an unknown one is not cached", async () => {
+    let now = NOW;
+    const answers: RepoVisibility[] = ["unknown", "private", "public"];
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => answers.shift() ?? "public");
+    const instance = snapshotter({ now: () => now, lookupRepoVisibility: lookup });
+    const snapshotEdit = async (content: string) => {
+      writeFileSync(join(repo, "README.md"), content);
+      return expectSnapshotted(await instance.snapshot({ cwd: repo, reason: "test" }));
+    };
+
+    expect((await snapshotEdit("one\n")).offsite.kind).toBe("bundled");
+    expect((await snapshotEdit("two\n")).offsite.kind).toBe("pushed");
+    now += 3 * 60_000;
+    expect((await snapshotEdit("three\n")).offsite.kind).toBe("pushed");
+    expect(lookup).toHaveBeenCalledTimes(2);
+
+    now += 3 * 60_000;
+    expect((await snapshotEdit("four\n")).offsite.kind).toBe("bundled");
+    expect(lookup).toHaveBeenCalledTimes(3);
+  });
+
+  test("a snapshot bundled on an unknown answer is pushed once GitHub answers, even unchanged", async () => {
+    const answers: RepoVisibility[] = ["unknown", "private"];
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => answers.shift() ?? "private");
+    const instance = snapshotter({ lookupRepoVisibility: lookup });
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    const first = expectSnapshotted(await instance.snapshot({ cwd: repo, reason: "test" }));
+    const second = expectSnapshotted(await instance.snapshot({ cwd: repo, reason: "test" }));
+    const third = expectSnapshotted(await instance.snapshot({ cwd: repo, reason: "test" }));
+
+    expect(first.offsite.kind).toBe("bundled");
+    expect(second.commit).toBe(first.commit);
+    expect(second.offsite.kind).toBe("pushed");
+    // Once pushed, the same snapshot is not pushed or looked up again.
+    expect(third.offsite).toEqual(second.offsite);
+    expect(lookup).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("lookupGitHubRepoVisibility", () => {
+  const notCalled = async (): Promise<Response> => {
+    throw new Error("fetch should not be called");
+  };
+
+  test("gh answers first", async () => {
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh: async () => "true\n", fetch: notCalled }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh: async () => "false\n", fetch: notCalled }),
+    ).resolves.toBe("public");
+  });
+
+  test.each([
+    ["gh is missing", async () => null],
+    [
+      "gh fails",
+      async () => {
+        throw new Error("gh: not logged in");
+      },
+    ],
+  ] as const)("when %s, the anonymous API decides", async (_label, runGh) => {
+    const respond = (status: number, body: unknown) => async () =>
+      new Response(JSON.stringify(body), { status });
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(404, {}) }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, { private: false }) }),
+    ).resolves.toBe("public");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, { private: true }) }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(403, {}) }),
+    ).resolves.toBe("unknown");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, {}) }),
+    ).resolves.toBe("unknown");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", {
+        runGh,
+        fetch: async () => {
+          throw new Error("timeout");
+        },
+      }),
+    ).resolves.toBe("unknown");
+  });
+
+  test("an owner or repository name GitHub could not have is unknown without asking", async () => {
+    const runGh = vi.fn(async () => "false\n");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r/../../x", { runGh, fetch: notCalled }),
+    ).resolves.toBe("unknown");
+    expect(runGh).not.toHaveBeenCalled();
+  });
+});
+
+describe("GitWorktreeSnapshotter git process scheduling", () => {
+  function spy(): { runGit: RunGitCommand; commands: string[][] } {
+    const commands: string[][] = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      commands.push(args);
+      return runGitCommand(args, options);
+    };
+    return { runGit, commands };
+  }
+
+  test("every git call it makes runs at background priority", async () => {
+    const priorities: Array<[string, unknown]> = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      priorities.push([args[1] ?? "", options.priority]);
+      return runGitCommand(args, options);
+    };
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(priorities.length).toBeGreaterThan(0);
+    expect(priorities.every(([, priority]) => priority === "background")).toBe(true);
+  });
+
+  test("seeds the temporary index from the worktree's own index, reset to HEAD with read-tree -m", async () => {
+    const { runGit, commands } = spy();
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const head = git(repo, "rev-parse", "HEAD");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "rev-parse", "--git-path", "index"]);
+    // A one-tree `read-tree -m` keeps the copied stat cache for every entry that still matches
+    // HEAD; a plain `read-tree` drops it, and `add -u` would have to hash every tracked file.
+    expect(commands.filter((c) => c[1] === "read-tree")).toEqual([
+      ["--no-optional-locks", "read-tree", "-m", head],
+    ]);
+  });
+
+  test("a worktree mid-merge, with unmerged entries, still snapshots and keeps its own index", async () => {
+    git(repo, "checkout", "-q", "-b", "side");
+    commit(repo, "README.md", "side\n");
+    git(repo, "checkout", "-q", "main");
+    commit(repo, "README.md", "main\n");
+    expect(() => git(repo, "merge", "-q", "side")).toThrow();
+    const unmergedBefore = git(repo, "ls-files", "-u");
+    expect(unmergedBefore.split("\n")).toHaveLength(3);
+    const indexBefore = hash(join(repo, ".git", "index"));
+    const head = git(repo, "rev-parse", "HEAD");
+    const { runGit, commands } = spy();
+
+    const result = expectSnapshotted(
+      await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false }),
+    );
+
+    expect(git(repo, "show", `${result.ref}:README.md`)).toContain("<<<<<<<");
+    expect(hash(join(repo, ".git", "index"))).toBe(indexBefore);
+    expect(git(repo, "ls-files", "-u")).toBe(unmergedBefore);
+    // `read-tree -m` refuses unmerged entries, so the seed falls back to a plain read of HEAD.
+    expect(commands.filter((c) => c[1] === "read-tree")).toEqual([
+      ["--no-optional-locks", "read-tree", "-m", head],
+      ["--no-optional-locks", "read-tree", head],
+    ]);
+  });
+
+  test("an unborn branch, with no index of its own yet, still seeds from read-tree --empty", async () => {
+    const unborn = join(root, "unborn-seed");
+    git(root, "init", "-q", "-b", "main", unborn);
+    writeFileSync(join(unborn, "first.txt"), "first\n");
+    const { runGit, commands } = spy();
+
+    await snapshotter({ runGit }).snapshot({ cwd: unborn, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "read-tree", "--empty"]);
   });
 });

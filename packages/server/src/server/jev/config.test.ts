@@ -332,6 +332,67 @@ describe("createJevConfigReader", () => {
     expect(reads).toBe(2);
   });
 
+  test("out-of-range values of the right type are clamped or ignored, and JEV stays on", () => {
+    const { logger } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: {
+        agents: {
+          jev: {
+            maxRequestsPerSecond: 20,
+            maxConcurrent: 2.5,
+            spawnHint: { timeoutMs: 0 },
+            agentTools: { shadow: true },
+          },
+        },
+      } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+    });
+    const result = reader.read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.maxRequestsPerSecond).toBe(15);
+    expect(result.config.maxConcurrent).toBe(2);
+    expect(result.config.spawnHint.timeoutMs).toBe(1500);
+    expect(result.config.agentTools.shadow).toBe(false);
+  });
+
+  test.each([
+    ["a string where a boolean goes", { enabled: "false" }, "agents.jev.enabled"],
+    ["a string where a number goes", { maxConcurrent: "4" }, "agents.jev.maxConcurrent"],
+    ["an unknown provider", { provider: "typsafe" }, "agents.jev.provider"],
+    ["an unknown key", { maxConcurent: 4 }, "agents.jev"],
+  ])("%s turns JEV off and logs the path once, never the value", (_name, jev, where) => {
+    const { logger, text } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: { agents: { jev } } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    let time = 0;
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+      now: () => time,
+      ttlMs: 1,
+    });
+    expect(reader.read()).toEqual({ ok: false, reason: "config-unreadable" });
+    time += 2;
+    reader.read();
+    const lines = text()
+      .split("\n")
+      .filter((line) => line.includes("does not match"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain(where);
+    expect(lines[0]).not.toContain("typsafe");
+  });
+
   test("logs one line per distinct rejected endpoint value, naming no path or query", () => {
     const { logger, text } = capturingLogger();
     const paseoHome = createTempPaseoHome();

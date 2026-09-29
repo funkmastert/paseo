@@ -23,7 +23,7 @@ export interface AvailabilityPool {
 
 export interface AvailabilityHealth {
   isHealthyFor(providerId: string, modelId: string): boolean;
-  isLastResortEligible(providerId: string): boolean;
+  isLastResortEligible(providerId: string, modelId?: string): boolean;
   windowUtilization(providerId: string, window: string): number | undefined;
 }
 
@@ -83,7 +83,8 @@ export type SelectModelResult =
 function poolHasViableMember(pool: AvailabilityPool, health: AvailabilityHealth, modelId: string): boolean {
   const members: readonly AvailabilityPoolMember[] = pool.leader ? [...pool.workers, pool.leader] : pool.workers;
   return members.some(
-    (member) => health.isHealthyFor(member.providerId, modelId) || health.isLastResortEligible(member.providerId),
+    (member) =>
+      health.isHealthyFor(member.providerId, modelId) || health.isLastResortEligible(member.providerId, modelId),
   );
 }
 

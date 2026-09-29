@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { resetProcessPriorityPolicy, setProcessPriorityPolicy } from "./process-priority.js";
 import { runGitCommand } from "./run-git-command.js";
+import { isPlatform } from "../test-utils/platform.js";
 
 const tempDirs: string[] = [];
 
@@ -51,7 +52,8 @@ describe("runGitCommand fsmonitor isolation", () => {
   });
 });
 
-describe("runGitCommand priority", () => {
+// Reads the nice value with `ps -o ni`, which Windows has no equivalent of.
+describe.skipIf(isPlatform("win32"))("runGitCommand priority", () => {
   afterEach(() => {
     resetProcessPriorityPolicy();
   });

@@ -56,7 +56,7 @@ uses the same port and directory: if the app is running, quit it and run
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci   # keeps your global git hooks: docs/install.md#build
 npm run build:server
 export PATH="$PWD/packages/cli/bin:$PATH"   # this checkout's paseo, ahead of any other
 which paseo                                 # …/paseo/packages/cli/bin/paseo
@@ -282,12 +282,48 @@ The ladder, for an agent-spawned claude-family child:
 1. a worker that is **healthy** for the requested model;
 2. a worker that is **drained but not capped**;
 3. the **leader account**, if it can run anything — isolation is gone here;
-4. nothing. The pool is exhausted and the create is **refused**.
+4. a worker, then the leader, **capped only by a per-window CLI refusal** (see
+   [Healthy, drained, capped](#healthy-drained-capped));
+5. nothing. The pool is exhausted and the create is **refused** (see
+   [No account left](#no-account-left)).
 
 Tiers 1 and 2 stay separate rather than merging into one ranking: a drained
 account has less room than a healthy one by definition, and letting a score
 put a nearly-capped account ahead of a healthy one would trade the pool's
 purpose for a rounding difference.
+
+### Healthy, drained, capped
+
+An account is judged per window: `five_hour`, `weekly`, one
+`weekly_model_<family>` per model family, and `account` for a cap no narrower
+window explains. Two signals move a window:
+
+- **The usage poll**, every 5 minutes: 90% or more is drained, 100% is capped,
+  and a lower reading heals it.
+- **A refused turn.** The Claude CLI refuses turns before the usage API reads
+  100%, with one message per window. `server/classify.ts` maps each to the
+  window it names:
+
+| The CLI says                                             | Window capped                    |
+| -------------------------------------------------------- | -------------------------------- |
+| `You've hit your session limit · resets 2:50pm`          | `five_hour`                      |
+| `You've hit your weekly limit · resets …`                | `weekly`                         |
+| `You've hit your Opus limit` / `Sonnet limit` / `Fable 5 limit` | that model's `weekly_model_*` |
+| `You've hit your usage credit limit`                     | `account`                        |
+| any other limit text (spend limit, quota, credits)       | `five_hour` or `weekly` if the text names one, else `account` |
+
+A model-scoped refusal caps only that model's window: an Opus cap leaves Sonnet
+work running on the account. A cap resting only on one of the per-window
+messages above ranks the account last (tier 4) but never counts toward
+refusing a spawn; a usage reading at 100% or the older limit text does. The
+reset in the message, `2:50pm` or `Oct 2 at 9am`, is when the cap ends. The limit pattern is a copy of the daemon's failover detector's
+(`packages/server/src/server/agent/account-failover-detector.ts`), because the
+plugin cannot import daemon code; `classify.test.ts` fails if the two drift.
+
+A spawn only has to get past the windows its model uses: `account`,
+`five_hour`, `weekly`, and its own model's weekly window. Another model's
+weekly window, capped or nearly full, neither rules an account out nor lowers
+its headroom score. With no model named, every window counts.
 
 ### Headroom, not priority order
 
@@ -306,7 +342,9 @@ there is until the weekend. The horizon is a day — the span a placement
 decision actually covers.
 
 An account with no usage reading scores as empty, the same optimistic
-convention the Fable gate uses. With no readings at all every candidate ties
+convention the Fable gate uses. A capped window rules an account out before
+scoring, so an account the CLI is refusing never outranks a healthy one for
+lack of a reading. With no readings at all every candidate ties
 and the tie-break is the configured `priority`, which is exactly the order
 this plugin used before — so a daemon whose usage polls are failing places
 the way it always did.
@@ -319,9 +357,10 @@ exhausted account with no reported reset time was handed back out five hours
 later, to fail again.
 
 They now age on their own clocks: 5 hours for the session window, 7 days for
-a weekly one. This only applies when the daemon reports no `resets_at` for
-the window — a real state, since those rows are nullish — because a known
-reset time is always used in preference to either default.
+a weekly one. This only applies when neither the daemon's `resets_at` for the
+window nor the refusal's own `resets …` gives a time — a real state, since
+those rows are nullish — because a known reset time is always used in
+preference to either default.
 
 ### One account left
 
@@ -346,16 +385,27 @@ the shared account are the return leg's business, not this one's.
 
 ### No account left
 
-Every account capped is the one case where a spawn is **refused** — the hook
-throws, and the caller sees text naming every exhausted account and the
-earliest known reset.
+When no pooled account can run a spawn from an agent, the account hook
+**refuses** it: the hook throws, and the calling agent sees text naming every
+exhausted account and the earliest reset of a window that blocks the requested
+model. "No account can run it" is per model: a pool whose Sonnet weeks are all
+used up still takes Opus spawns.
 
 Passing the request through instead puts the child on a dead account where it
 fails on its first turn, and a leader that reads that as "that one didn't
 work, try another" spawns the next one straight into the same wall. One clear
 error costs less than an unbounded loop. Refusal requires positive evidence —
-every pool member actually capped — so an unreadable pool still fails open,
-and a root agent is never refused (see below), so it can never lock you out of
+every pool member capped by a usage reading at 100% or by the older limit
+text (spend limit, usage limit, quota, credits, rate limit) — so an unreadable
+pool still fails open. A per-window CLI refusal alone places the child last
+instead: it fails its first turn and account failover moves it with its prompt
+intact, where a refused create is lost. Whether the pool should refuse at all
+is still open, so the refusal stays as wide as it was before the plugin read
+those messages.
+
+Only a create with a calling agent is refused. A create with no caller — a
+root agent, or a daemon job's agent (see [Root agents](#root-agents)) — keeps
+the account it asked for and starts, so the pool can never lock you out of
 your own daemon.
 
 Set `refuseWhenExhausted: false` on `createRouter` to go back to passing
@@ -385,6 +435,12 @@ root agent, with the account filled in) shows the same sentence. When nothing in
 account and starts anyway: a root is never refused. Nor can routing itself
 fail one: any error while placing a root logs a warning and keeps the account
 it asked for.
+
+A create with no caller whose labels declare a role other than `leader` is
+not a root (see [The leader role](#the-leader-role-and-why-restricting-it-forces-real-delegation)).
+The remediation ladder starts its agents this way. It walks the child ladder,
+healthy worker first, and like a root it is never refused: with every account
+capped it keeps the account it asked for.
 
 ## Role policy
 
@@ -528,7 +584,8 @@ The rules, in the order they apply:
 
 1. **Leaders run at the leader level, Extra High by default.** The leader
    tier is a root agent (no calling agent: the app, the CLI, a schedule, a
-   heartbeat) or an agent resolved to the `leader` role. The leader level
+   heartbeat, unless its labels declare another role) or an agent resolved to
+   the `leader` role. The leader level
    outranks a level the caller asked for. Set `leader` to `null` to switch the
    rule off; a leader then gets the level it asked for, else its task class's
    level.
@@ -1179,8 +1236,10 @@ means exactly what the hook did.
 reason: it rewrites labels, and an agent that can rewrite its own labels can
 erase the record of its own restriction and spawn a clean child.
 
-**Lookups never block a create.** The hook's standing contract is that it
-never blocks agent creation, so the parent lookup is synchronous against a
+**Lookups never block a create.** The role hook's standing contract is that
+it never blocks agent creation (only the account hook refuses one, and only
+when [no account is left](#no-account-left)), so the parent lookup is
+synchronous against a
 map fed from two places: the `agent.created` lifecycle event (free, covers
 everything created since plugin start) and one paginated `paseo.agents.list()`
 sweep at plugin start (covers agents that predate it). A miss schedules a
@@ -1277,6 +1336,17 @@ applies depend on wording. For the same reason the leader role is excluded
 from automatic text classification, so a child whose prompt happens to mention
 leading something doesn't inherit it. Naming it explicitly (an agent-type
 mapping, or the `paseo.agent-role` label) still selects it.
+
+A label is the one thing that makes a create with no caller something other
+than the leader: a `paseo.agent-type` in `agentTypeMappings`, or a
+`paseo.agent-role` naming a role, gives it that role. Daemon jobs start agents
+with no caller and label them workers; before this each one ran as a leader,
+on the leader's model, thinking level and account. A labelled non-leader create
+is configured like a child — its task class picks its model and thinking level,
+never Ultra Code — and placed like one (see [Root agents](#root-agents)). It
+keeps what depends on a real caller: nothing is inherited, it gets no child
+output style, and it keeps every MCP server. The title never counts: an
+unlabelled create stays the leader whatever it is called.
 
 The point of restricting the leader is that **it is the only thing that
 forces spend onto another account.** Claude Code's native subagents (`Task`)
@@ -1478,6 +1548,12 @@ The role hook never blocks agent creation. Malformed policy, an unreadable
 daemon config, a vanished provider, an unknown declared role — every one of
 them passes the request through and logs, rather than failing the create.
 
-The account router has exactly one case that does block: every pooled account
-capped, with the evidence to prove it. See [No account left](#no-account-left)
-for why that one is worth the exception.
+The account router has exactly one case that does block: a spawn from an agent
+when every pooled account is capped for its model, with the evidence to prove
+it. See [No account left](#no-account-left) for why that one is worth the
+exception.
+
+A plugin that stops answering does not block creates either. The daemon waits
+out the 30-second hook timeout, logs `A plugin did not answer the agent.create
+hook`, and creates the agent as requested, the same as when the plugin is not
+loaded. A refusal is different: the plugin answered, and the create fails.

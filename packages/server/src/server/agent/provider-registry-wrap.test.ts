@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "vitest";
 
 import type {
   AgentCapabilityFlags,
+  AgentClient,
   AgentPromptInput,
   AgentSession,
   AgentStreamEvent,
@@ -13,7 +14,7 @@ import type {
 } from "./agent-sdk-types.js";
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { findPerDirMcpServer } from "../mcp-gateway/per-dir-stdio.js";
-import { createAllClients, wrapSessionProvider } from "./provider-registry.js";
+import { createAllClients, wrapClientProvider, wrapSessionProvider } from "./provider-registry.js";
 
 type OptionalAgentSessionMethodName = {
   [K in keyof AgentSession]-?: undefined extends AgentSession[K]
@@ -219,6 +220,84 @@ describe("wrapSessionProvider", () => {
       "tryHandleOutOfBand",
       "tryHandleOutOfBand.run",
     ]);
+  });
+});
+
+describe("wrapClientProvider forwarding", () => {
+  // Every account-pool account is a derived provider, so this wrapper sits in front of every
+  // pooled Claude client. Anything it drops is lost only when a derived account serves the call.
+  test("forwards createSession's options and every optional client member, as the base provider", async () => {
+    const calls: unknown[][] = [];
+    const inner: AgentClient = {
+      provider: "claude",
+      capabilities: CAPABILITIES,
+      async createSession(config, _launchContext, options) {
+        calls.push(["createSession", config.provider, options]);
+        return new FakeSession();
+      },
+      async resumeSession() {
+        return new FakeSession();
+      },
+      async fetchCatalog() {
+        return { models: [], modes: [] };
+      },
+      async isAvailable() {
+        return true;
+      },
+      async listCommands(config) {
+        calls.push(["listCommands", config.provider]);
+        return [];
+      },
+      async archiveNativeSession(handle) {
+        calls.push(["archiveNativeSession", handle.provider, handle.sessionId]);
+      },
+      async unarchiveNativeSession(handle) {
+        calls.push(["unarchiveNativeSession", handle.provider, handle.sessionId]);
+      },
+      async shutdown() {
+        calls.push(["shutdown"]);
+      },
+    };
+
+    const wrapped = wrapClientProvider("claude-personal", inner, [], [], false);
+    const session = await wrapped.createSession(
+      { provider: "claude-personal", cwd: "/tmp" },
+      undefined,
+      {
+        persistSession: false,
+      },
+    );
+    await wrapped.listCommands?.({ provider: "claude-personal", cwd: "/tmp" });
+    await wrapped.archiveNativeSession?.({ provider: "claude-personal", sessionId: "s-1" });
+    await wrapped.unarchiveNativeSession?.({ provider: "claude-personal", sessionId: "s-1" });
+    await wrapped.shutdown?.();
+
+    expect(session.provider).toBe("claude-personal");
+    expect(calls).toEqual([
+      ["createSession", "claude", { persistSession: false }],
+      ["listCommands", "claude"],
+      ["archiveNativeSession", "claude", "s-1"],
+      ["unarchiveNativeSession", "claude", "s-1"],
+      ["shutdown"],
+    ]);
+  });
+
+  test("leaves an optional member absent when the base client has none", () => {
+    const inner: AgentClient = {
+      provider: "claude",
+      capabilities: CAPABILITIES,
+      createSession: async () => new FakeSession(),
+      resumeSession: async () => new FakeSession(),
+      fetchCatalog: async () => ({ models: [], modes: [] }),
+      isAvailable: async () => true,
+    };
+
+    const wrapped = wrapClientProvider("claude-personal", inner, [], [], false);
+
+    expect(wrapped.listCommands).toBeUndefined();
+    expect(wrapped.archiveNativeSession).toBeUndefined();
+    expect(wrapped.unarchiveNativeSession).toBeUndefined();
+    expect(wrapped.shutdown).toBeUndefined();
   });
 });
 

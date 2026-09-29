@@ -24,7 +24,8 @@ beforeEach(async () => {
   clockMs = Date.now();
   pushes.length = 0;
   ctx = await createDaemonTestContext({
-    doneJanitor: { enabled: true },
+    // The idle-workspace sweep has its own test below; the clock jumps here would feed it everything.
+    doneJanitor: { enabled: true, workspaceSweep: { enabled: false } },
     doneJanitorOverrides: { sweepIntervalMs: 60 * 60 * 1000, now: () => clockMs },
     pushNotificationSender: { send: async (payload) => void pushes.push(payload) },
   });
@@ -290,3 +291,80 @@ test("an empty project whose directory is gone leaves every connected sidebar wi
     await other.close();
   }
 }, 30_000);
+
+test("the idle-workspace sweep archives every idle kind, and deletes a dirty worktree only after backing it up", async () => {
+  const repoDir = createGitRepo();
+  writeFileSync(path.join(repoDir, ".gitignore"), ".env\n");
+  execFileSync("git", ["add", ".gitignore"], { cwd: repoDir });
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "ignore .env"], {
+    cwd: repoDir,
+  });
+  const dirty = await createWorktreeWithAgent(repoDir, "sweep-dirty");
+  writeFileSync(path.join(dirty.dir, "notes.txt"), "unsaved thoughts\n");
+  const secret = await createWorktreeWithAgent(repoDir, "sweep-secret");
+  writeFileSync(path.join(secret.dir, "notes.txt"), "draft\n");
+  writeFileSync(path.join(secret.dir, ".env"), "TOKEN=only-copy\n");
+  const plainDir = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-plain-")));
+  tempRoots.push(plainDir);
+  const plain = (
+    await ctx.client.createWorkspace({
+      source: { kind: "directory", path: plainDir },
+      title: "notes",
+    })
+  ).workspace;
+  if (!plain) throw new Error("no directory workspace");
+  clockMs += 4 * DAY_MS;
+
+  await ctx.client.patchDaemonConfig({
+    doneJanitor: {
+      askFinished: false,
+      archiveDead: false,
+      workspaceSweep: { enabled: true, dryRun: true },
+    },
+  });
+  const dryRun = await sweep();
+
+  expect(dryRun?.entries).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ action: "would-delete", workspaceId: dirty.workspaceId }),
+      expect.objectContaining({ action: "would-archive-workspace", workspaceId: plain.id }),
+      expect.objectContaining({
+        action: "kept-idle-workspace",
+        workspaceId: secret.workspaceId,
+        reason: expect.stringContaining("1 ignored path(s) that are not regenerable"),
+      }),
+    ]),
+  );
+  expect(existsSync(dirty.dir)).toBe(true);
+  expect((await activeWorkspaceIds()).has(plain.id)).toBe(true);
+
+  await ctx.client.patchDaemonConfig({ doneJanitor: { workspaceSweep: { dryRun: false } } });
+  const live = await sweep();
+
+  // The dirty worktree is gone, and its unsaved file lives on in the backup ref.
+  expect(live?.entries).toContainEqual(
+    expect.objectContaining({
+      action: "deleted",
+      workspaceId: dirty.workspaceId,
+      invariant: expect.stringContaining("holds: every file is in the verified snapshot"),
+    }),
+  );
+  expect(existsSync(dirty.dir)).toBe(false);
+  const refs = execFileSync("git", ["for-each-ref", "--format=%(refname)", "refs/backup/"], {
+    cwd: repoDir,
+    encoding: "utf8",
+  })
+    .split("\n")
+    .filter((ref) => ref.endsWith("sweep-dirty"));
+  expect(refs).toHaveLength(1);
+  expect(
+    execFileSync("git", ["show", `${refs[0]}:notes.txt`], { cwd: repoDir, encoding: "utf8" }),
+  ).toBe("unsaved thoughts\n");
+  // The one with an ignored file no snapshot holds is kept, file and all.
+  expect(existsSync(path.join(secret.dir, ".env"))).toBe(true);
+  expect((await activeWorkspaceIds()).has(secret.workspaceId)).toBe(true);
+  // A plain directory's record goes; the directory stays.
+  expect((await activeWorkspaceIds()).has(plain.id)).toBe(false);
+  expect(existsSync(plainDir)).toBe(true);
+  expect(await isArchived(dirty.agentId)).toBe(true);
+}, 60_000);

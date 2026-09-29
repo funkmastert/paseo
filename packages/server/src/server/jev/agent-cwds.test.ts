@@ -1,14 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { JEV_ARCHIVED_DESCENDANT_WINDOW_MS, resolveJevAgentCwds } from "./agent-cwds.js";
+import {
+  JEV_ARCHIVED_DESCENDANT_WINDOW_MS,
+  type JevAgentPlacement,
+  resolveJevAgentCwds,
+} from "./agent-cwds.js";
 
 const NOW = Date.parse("2026-09-28T12:00:00Z");
 
-function agent(id: string, cwd: string, parent?: string, archivedAt?: string | null) {
+function agent(
+  id: string,
+  cwd: string,
+  parent?: string,
+  archivedAt?: string | null,
+): JevAgentPlacement {
+  const labels: Record<string, string> = parent ? { "paseo.parent-agent-id": parent } : {};
   return {
     id,
     cwd,
-    labels: parent ? { "paseo.parent-agent-id": parent } : {},
+    labels,
     archivedAt: archivedAt ?? null,
   };
 }
@@ -36,6 +46,33 @@ describe("resolveJevAgentCwds", () => {
     ];
     expect(resolveJevAgentCwds(["leader"], placements, NOW)?.sort()).toEqual(
       ["/home/u", "/home/u/backend-net"].sort(),
+    );
+  });
+
+  it("keeps walking below a descendant archived before the window, and counts it with its live descendant", () => {
+    const old = new Date(NOW - JEV_ARCHIVED_DESCENDANT_WINDOW_MS - 60_000).toISOString();
+    const placements = [
+      agent("leader", "/home/u/scratch"),
+      agent("archived", "/home/u/scratch2", "leader", old),
+      agent("live", "/home/u/mobile-worktrees/app", "archived"),
+    ];
+    expect(resolveJevAgentCwds(["leader"], placements, NOW)?.sort()).toEqual(
+      ["/home/u/mobile-worktrees/app", "/home/u/scratch", "/home/u/scratch2"].sort(),
+    );
+  });
+
+  it("drops a whole subtree once every agent in it is archived before the window", () => {
+    const old = new Date(NOW - JEV_ARCHIVED_DESCENDANT_WINDOW_MS - 60_000).toISOString();
+    const recent = new Date(NOW - 60_000).toISOString();
+    const placements = [
+      agent("leader", "/home/u"),
+      agent("old", "/home/u/a", "leader", old),
+      agent("older", "/home/u/b", "old", old),
+      agent("old-parent", "/home/u/c", "leader", old),
+      agent("recent-child", "/home/u/backend-net", "old-parent", recent),
+    ];
+    expect(resolveJevAgentCwds(["leader"], placements, NOW)?.sort()).toEqual(
+      ["/home/u", "/home/u/backend-net", "/home/u/c"].sort(),
     );
   });
 

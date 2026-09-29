@@ -11,6 +11,7 @@
  * Scoring never overrides a cap.
  */
 import { relevantWindows, type HealthTracker } from "./health";
+import { isOtherModelWindow } from "./windows";
 
 /** Just the reads scoring needs, so callers can pass a full HealthTracker or a stub. */
 export type HeadroomHealth = Pick<HealthTracker, "describeWindow" | "windowIds">;
@@ -96,10 +97,15 @@ export function scoreAccount(
 ): number {
   const horizonMs = options.horizonMs ?? DEFAULT_HORIZON_MS;
   // Every window the health check would enforce, plus anything else observed for this account:
-  // a per-model weekly window for a model we aren't spawning still bounds nothing, but an
-  // account-wide or surface-scoped window nobody enumerated does, and missing it is how a
-  // "best" candidate turns out to be capped.
-  const windows = new Set([...relevantWindows(modelId), ...health.windowIds(providerId)]);
+  // an account-wide or surface-scoped window nobody enumerated bounds the spawn, and missing it
+  // is how a "best" candidate turns out to be capped. Another model's weekly window bounds
+  // nothing this spawn needs, and scoring it demoted an account with a full Sonnet week for Opus
+  // work it had room for.
+  const windows = new Set(
+    [...relevantWindows(modelId), ...health.windowIds(providerId)].filter(
+      (window) => !isOtherModelWindow(window, modelId),
+    ),
+  );
 
   let lowest: number | null = null;
   for (const window of windows) {

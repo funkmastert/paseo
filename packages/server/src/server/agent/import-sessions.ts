@@ -214,6 +214,16 @@ async function importProviderSessionNow(
   if (activeRecord) {
     throw new Error(`Provider session is already imported: ${providerHandleId}`);
   }
+  // Another account's record of this conversation may be imported beside it (the manual handoff
+  // retires it afterwards), but never while it runs a turn: that would put two writers on one
+  // transcript.
+  const writer = (await input.agentStorage.listBySession(providerHandleId)).find((record) => {
+    const lifecycle = input.agentManager.getAgent(record.id)?.lifecycle;
+    return lifecycle === "running" || lifecycle === "initializing";
+  });
+  if (writer) {
+    throw new Error(`Provider session ${providerHandleId} is running in agent ${writer.id}`);
+  }
   const archivedRecord = matchingRecords.find((record) => record.archivedAt);
   if (archivedRecord?.persistence && archivedRecord.archivedAt) {
     if (!createRealpathAwarePathMatcher(cwd)(archivedRecord.cwd)) {

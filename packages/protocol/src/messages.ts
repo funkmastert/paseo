@@ -429,6 +429,19 @@ const MutableContextMeterConfigSchema = z
   .passthrough();
 
 const MutableContextMeterPatchSchema = MutableContextMeterConfigSchema;
+// The done janitor's idle-workspace sweep. On whenever the janitor is, unless `enabled` says
+// otherwise. See docs/done-janitor.md, "Idle workspaces".
+const MutableDoneJanitorWorkspaceSweepConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    dryRun: z.boolean().optional(),
+    idleHours: z.number().positive().optional(),
+    emptyIdleHours: z.number().positive().optional(),
+    maxArchivesPerSweep: z.number().int().positive().optional(),
+    projectGraceHours: z.number().positive().optional(),
+    maxProjectRemovalsPerSweep: z.number().int().positive().optional(),
+  })
+  .passthrough();
 // Live-toggleable like accountFailover above — same mutable/patch split, same reason. Off unless
 // `enabled` says otherwise. See docs/done-janitor.md.
 const MutableDoneJanitorConfigSchema = z
@@ -444,6 +457,8 @@ const MutableDoneJanitorConfigSchema = z
     deadQuietHours: z.number().positive().optional(),
     maxDeadArchivesPerSweep: z.number().int().positive().optional(),
     askFinished: z.boolean().optional(),
+    // COMPAT(doneJanitorWorkspaceSweep): additive optional config, nothing to remove.
+    workspaceSweep: MutableDoneJanitorWorkspaceSweepConfigSchema.optional(),
   })
   .passthrough();
 
@@ -780,6 +795,9 @@ export const MutableDaemonConfigSchema = z
     skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    // COMPAT(autoPinSessions): added in v0.9.0, nothing to remove — additive optional config.
+    // Off switch for auto-pinning a workspace when Tyler starts a session in it. Absent means on.
+    autoPinSessions: z.boolean().optional(),
   })
   .passthrough();
 

@@ -108,7 +108,7 @@ Cascade is what keeps subagent fleets from outliving their orchestrator.
 Workspace archive is a separate lifecycle: archiving an agent never archives its workspace, so a
 finished agent's worktree stays on disk until someone archives the workspace. The opt-in
 [done janitor](done-janitor.md) archives dead unpinned agents and agents that say they are done,
-and deletes the worktrees of work it can prove is saved. Archiving or removing a worktree can close a surviving
+deletes the worktrees of work it can prove is saved, and archives idle workspaces of every kind. Archiving or removing a worktree can close a surviving
 agent record without setting the agent's `archivedAt`, while its `workspaceId` still points at the
 archived workspace. History navigation must not infer workspace lifecycle from `agent.archivedAt`
 or mutate either lifecycle. The workspace route asks the daemon for authoritative recovery state;

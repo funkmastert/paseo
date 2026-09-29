@@ -1,9 +1,11 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import {
   buildSelfNodeCommand,
+  configureChildEnvStrip,
   createExternalCommandProcessEnv,
   createExternalProcessEnv,
   createPaseoInternalEnv,
+  DEFAULT_CHILD_ENV_STRIP,
   resolvePaseoNodeEnv,
   SECRET_ENV_KEYS,
 } from "./paseo-env.js";
@@ -133,5 +135,69 @@ describe("paseo env contract", () => {
       "production",
     );
     expect(resolvePaseoNodeEnv({ NODE_ENV: "test", PASEO_NODE_ENV: "local" })).toBeUndefined();
+  });
+});
+
+describe("agents.childEnv.strip", () => {
+  afterEach(() => configureChildEnvStrip(undefined));
+
+  const daemonEnv = {
+    PATH: "/usr/bin",
+    BIBLIO_ACCESS_TOKEN: "fake-biblio-access-token",
+    BIBLIO_CLIENT_SECRET: "fake-biblio-client-secret",
+    OPENAI_API_KEY: "fake-openai-key",
+    FIGMA_TOKEN: "fake-figma-token",
+    ANTHROPIC_API_KEY: "fake-anthropic-key",
+    CLAUDE_CODE_OAUTH_TOKEN: "fake-claude-oauth-token",
+    CLAUDE_CONFIG_DIR: "/daemon/.claude",
+  };
+
+  test("by default strips the retired Biblio credentials from what agents and terminals inherit", () => {
+    expect(DEFAULT_CHILD_ENV_STRIP).toEqual(["BIBLIO_*"]);
+    const env = createExternalProcessEnv(daemonEnv);
+    expect(env.BIBLIO_ACCESS_TOKEN).toBeUndefined();
+    expect(env.BIBLIO_CLIENT_SECRET).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  test("by default keeps what providers authenticate with, and keys an agent may use", () => {
+    const env = createExternalProcessEnv(daemonEnv);
+    expect(env.ANTHROPIC_API_KEY).toBe("fake-anthropic-key");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("fake-claude-oauth-token");
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/daemon/.claude");
+    expect(env.OPENAI_API_KEY).toBe("fake-openai-key");
+    expect(env.FIGMA_TOKEN).toBe("fake-figma-token");
+  });
+
+  test("a configured name leaves the inherited env, but a provider overlay that sets it still reaches the child", () => {
+    configureChildEnvStrip(["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN"]);
+    const env = createExternalProcessEnv(daemonEnv, { CLAUDE_CONFIG_DIR: "/provider/.claude" });
+    expect(env.CLAUDE_CONFIG_DIR).toBe("/provider/.claude");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    expect(env.BIBLIO_ACCESS_TOKEN).toBe("fake-biblio-access-token");
+  });
+
+  test("a trailing * strips every inherited name with that prefix, and nothing else", () => {
+    configureChildEnvStrip(["FIGMA_*", "OPENAI_API_KEY"]);
+    const env = createExternalCommandProcessEnv("git", { ...daemonEnv, FIGMA_OTHER: "x" });
+    expect(env.FIGMA_TOKEN).toBeUndefined();
+    expect(env.FIGMA_OTHER).toBeUndefined();
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBe("fake-anthropic-key");
+  });
+
+  test("an empty list strips nothing but the JEV key", () => {
+    configureChildEnvStrip([]);
+    const env = createExternalProcessEnv({ ...daemonEnv, PASEO_JEV_API_KEY: "fake-jev-key" });
+    expect(env.BIBLIO_ACCESS_TOKEN).toBe("fake-biblio-access-token");
+    expect(env.PASEO_JEV_API_KEY).toBeUndefined();
+  });
+
+  test("the JEV key never reaches a child, even from an overlay", () => {
+    configureChildEnvStrip([]);
+    const env = createExternalProcessEnv(daemonEnv, { PASEO_JEV_API_KEY: "fake-jev-key" });
+    expect(env.PASEO_JEV_API_KEY).toBeUndefined();
+    const command = buildSelfNodeCommand(["script.js"], { PASEO_JEV_API_KEY: "fake-jev-key" });
+    expect(command.env.PASEO_JEV_API_KEY).toBeUndefined();
   });
 });

@@ -5,6 +5,7 @@ import {
   createSystemProcessSampler,
   execFileAtLowPriority,
   parseClockSeconds,
+  parseMacosMemoryPressureLevel,
   parseMacosSwapUsage,
   parseMacosVmStat,
   parseProcMeminfo,
@@ -327,6 +328,47 @@ describe("parseMacosSwapUsage", () => {
 
   test("returns undefined on unrecognized output", () => {
     expect(parseMacosSwapUsage("unexpected output")).toBeUndefined();
+  });
+});
+
+describe("parseMacosMemoryPressureLevel", () => {
+  test("reads the kernel's level: 1 normal, 2 warn, 4 critical", () => {
+    expect(parseMacosMemoryPressureLevel("1\n")).toBe(1);
+    expect(parseMacosMemoryPressureLevel("2")).toBe(2);
+    expect(parseMacosMemoryPressureLevel(" 4\n")).toBe(4);
+  });
+
+  test("anything else is no reading", () => {
+    expect(parseMacosMemoryPressureLevel("")).toBeUndefined();
+    expect(parseMacosMemoryPressureLevel("0")).toBeUndefined();
+    expect(parseMacosMemoryPressureLevel("sysctl: unknown oid")).toBeUndefined();
+    expect(parseMacosMemoryPressureLevel("1.5")).toBeUndefined();
+  });
+});
+
+describe("system memory on this machine", () => {
+  test.runIf(process.platform === "darwin")(
+    "macOS reports the memory pressure level beside swap",
+    async () => {
+      const sampler = createSystemProcessSampler({
+        logger: { info: vi.fn(), warn: vi.fn() },
+        readProcessTable: async () => [],
+      });
+
+      const memory = await sampler.sampleSystemMemory();
+
+      expect(memory?.swapTotalBytes).toBeGreaterThanOrEqual(0);
+      expect([1, 2, 4]).toContain(memory?.memoryPressureLevel);
+    },
+  );
+
+  test.runIf(process.platform === "linux")("Linux has no pressure level", async () => {
+    const sampler = createSystemProcessSampler({
+      logger: { info: vi.fn(), warn: vi.fn() },
+      readProcessTable: async () => [],
+    });
+
+    expect((await sampler.sampleSystemMemory())?.memoryPressureLevel).toBeUndefined();
   });
 });
 

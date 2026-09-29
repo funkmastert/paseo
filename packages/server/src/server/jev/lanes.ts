@@ -12,49 +12,70 @@ type SlotResult =
   | { ok: false; reason: "saturated" | "aborted" };
 type TokenResult = { ok: true } | { ok: false; reason: "saturated" | "aborted" };
 
+/** What `tryPass` lets through: a call while closed, the one probe while half-open, or nothing. */
+export type JevCircuitPass = "pass" | "probe" | "refused";
+
+/**
+ * Per-lane breaker. Five consecutive failures open it for `openMs`; then one probe is let through.
+ * The probe's success closes it; its failure reopens it for twice the last window, up to
+ * `maxOpenMs`. A probe that never reports is presumed lost once the window it would have reopened
+ * for has passed, so a lane is never shut past its backoff without a new probe.
+ */
 export class JevCircuit {
   private readonly failureThreshold: number;
   private readonly openMs: number;
+  private readonly maxOpenMs: number;
   private failures = 0;
   private openedAt: number | null = null;
-  private probeInFlight = false;
+  private windowMs: number;
+  private failedProbes = 0;
+  private probeStartedAt: number | null = null;
 
-  constructor(options?: { failureThreshold?: number; openMs?: number }) {
+  constructor(options?: { failureThreshold?: number; openMs?: number; maxOpenMs?: number }) {
     this.failureThreshold = options?.failureThreshold ?? 5;
     this.openMs = options?.openMs ?? 60_000;
+    this.maxOpenMs = Math.max(this.openMs, options?.maxOpenMs ?? 10 * 60_000);
+    this.windowMs = this.openMs;
   }
 
   state(now: number): "closed" | "open" | "half-open" {
     if (this.openedAt === null) return "closed";
-    return now - this.openedAt >= this.openMs ? "half-open" : "open";
+    return now - this.openedAt >= this.windowMs ? "half-open" : "open";
   }
 
-  /** False while open. In half-open exactly one probe is let through until it reports. */
-  tryPass(now: number): boolean {
+  tryPass(now: number): JevCircuitPass {
     const currentState = this.state(now);
-    if (currentState === "closed") return true;
-    if (currentState === "open") return false;
-    if (this.probeInFlight) return false;
-    this.probeInFlight = true;
-    return true;
+    if (currentState === "closed") return "pass";
+    if (currentState === "open") return "refused";
+    if (this.probeStartedAt !== null && now - this.probeStartedAt < this.windowMs) return "refused";
+    this.probeStartedAt = now;
+    return "probe";
   }
 
   recordSuccess(): void {
-    this.probeInFlight = false;
     this.failures = 0;
     this.openedAt = null;
+    this.windowMs = this.openMs;
+    this.failedProbes = 0;
+    this.probeStartedAt = null;
   }
 
-  recordFailure(now: number): void {
-    const wasProbe = this.probeInFlight;
-    this.probeInFlight = false;
-    if (wasProbe) {
+  /** `probe`: the failure is the probe's own, which `tryPass` answered `"probe"` for. */
+  recordFailure(now: number, options?: { probe?: boolean }): void {
+    if (options?.probe) {
+      this.probeStartedAt = null;
+      this.failedProbes += 1;
+      this.windowMs = Math.min(this.maxOpenMs, this.openMs * 2 ** (this.failedProbes - 1));
       this.openedAt = now;
       return;
     }
+    // A late failure from a call let through before the circuit opened adds nothing: the
+    // circuit's window is the probe's to set.
+    if (this.openedAt !== null) return;
     this.failures += 1;
     if (this.failures >= this.failureThreshold) {
       this.openedAt = now;
+      this.windowMs = this.openMs;
     }
   }
 }

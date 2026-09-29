@@ -179,6 +179,20 @@ export interface SystemMemorySample {
    * and the gate treats no signal as no objection.
    */
   availableBytes?: number;
+  /**
+   * macOS `kern.memorystatus_vm_pressure_level`: 1 normal, 2 warn, 4 critical. The memory brake
+   * (memory-brake.ts) holds child admission on it. Absent on other platforms, and when the read
+   * fails, which the brake treats as no signal.
+   */
+  memoryPressureLevel?: number;
+}
+
+/** Parses `sysctl -n kern.memorystatus_vm_pressure_level`: a bare positive integer. */
+export function parseMacosMemoryPressureLevel(output: string): number | undefined {
+  const text = output.trim();
+  if (!/^\d+$/.test(text)) return undefined;
+  const level = Number.parseInt(text, 10);
+  return level >= 1 ? level : undefined;
 }
 
 const SWAP_UNIT_MULTIPLIER: Record<string, number> = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
@@ -303,19 +317,24 @@ export async function execFileAtLowPriority(
 async function sampleMacosMemory(): Promise<SystemMemorySample | undefined> {
   const options = { timeout: SAMPLE_TIMEOUT_MS };
   try {
-    const [memsize, swapUsage, vmStat] = await Promise.all([
+    const [memsize, swapUsage, vmStat, pressure] = await Promise.all([
       execFileAtLowPriority("sysctl", ["-n", "hw.memsize"], options),
       execFileAtLowPriority("sysctl", ["vm.swapusage"], options),
       execFileAtLowPriority("vm_stat", [], options).catch(() => undefined),
+      execFileAtLowPriority("sysctl", ["-n", "kern.memorystatus_vm_pressure_level"], options).catch(
+        () => undefined,
+      ),
     ]);
     const totalPhysicalBytes = Number.parseInt(memsize.trim(), 10);
     const swap = parseMacosSwapUsage(swapUsage);
     if (!Number.isFinite(totalPhysicalBytes) || !swap) return undefined;
     const availableBytes = vmStat ? parseMacosVmStat(vmStat) : undefined;
+    const memoryPressureLevel = pressure ? parseMacosMemoryPressureLevel(pressure) : undefined;
     return {
       totalPhysicalBytes,
       ...swap,
       ...(availableBytes !== undefined ? { availableBytes } : {}),
+      ...(memoryPressureLevel !== undefined ? { memoryPressureLevel } : {}),
     };
   } catch {
     // sysctl is unavailable or its output shape changed — no system memory signal this sweep.

@@ -231,12 +231,16 @@ test("createPaseoApi borrows daemon capabilities without exposing connection own
   expect(Object.keys(paseo).sort()).toEqual([
     "agents",
     "config",
+    "jev",
     "mcpGateway",
     "projects",
     "providers",
     "terminals",
     "workspaces",
   ]);
+  expect(typeof paseo.jev?.decide).toBe("function");
+  expect(typeof paseo.jev?.status).toBe("function");
+  expect(typeof paseo.jev?.checkScope).toBe("function");
   expect("connect" in paseo).toBe(false);
   expect("close" in paseo).toBe(false);
   expect("skills" in paseo.agents).toBe(false);

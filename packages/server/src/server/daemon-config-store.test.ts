@@ -1211,6 +1211,41 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch live-toggles doneJanitor.workspaceSweep.dryRun and keeps the rest of the sweep on disk", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    const doneJanitor = {
+      enabled: true,
+      workspaceSweep: { idleHours: 96, maxArchivesPerSweep: 4 },
+    };
+    writeFileSync(
+      path.join(paseoHome, "config.json"),
+      `${JSON.stringify({ version: 1, agents: { doneJanitor } }, null, 2)}\n`,
+    );
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+        doneJanitor,
+      },
+      undefined,
+    );
+
+    const next = store.patch({ doneJanitor: { workspaceSweep: { dryRun: true } } });
+
+    const expected = {
+      enabled: true,
+      workspaceSweep: { idleHours: 96, maxArchivesPerSweep: 4, dryRun: true },
+    };
+    expect(next.doneJanitor).toEqual(expected);
+    expect(loadPersistedConfig(paseoHome).agents?.doneJanitor).toEqual(expected);
+  });
+
   test("patch sets admission.maxConcurrentChildTurns live without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);
@@ -1821,7 +1856,7 @@ describe("DaemonConfigStore reload", () => {
   test("invalid JSON and invalid schema apply nothing", () => {
     const { paseoHome, store } = createReloadableStore();
     writeFileSync(path.join(paseoHome, "config.json"), "{ nope\n");
-    expect(() => store.reload()).toThrow("Invalid JSON");
+    expect(() => store.reload()).toThrow("config.json is not valid JSON at line 1, column 3");
     expect(store.get().browserTools.enabled).toBe(false);
 
     writeConfig(paseoHome, { daemon: { browserTools: { enabled: "yes" } } });

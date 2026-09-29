@@ -50,7 +50,7 @@ function leader(overrides: Partial<LeaderCompactionAgentSummary> = {}) {
 }
 
 function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings) {
-  const pushes: Array<{ title: string; body: string }> = [];
+  const pushes: Array<{ title: string; body: string; level?: string }> = [];
   const logs: Array<{ msg: string; obj: object }> = [];
   const logger = {
     info: (obj: object, msg?: string) => logs.push({ obj, msg: msg ?? "" }),
@@ -60,8 +60,8 @@ function createMonitor(fake: FakeAgents, settings: LeaderCompactionSettings) {
   const monitor = new AgentLeaderCompactionMonitor({
     agentManager: fake,
     pushNotificationSender: {
-      send: async (payload) => {
-        pushes.push(payload);
+      send: async (payload, meta) => {
+        pushes.push({ ...payload, level: meta?.level });
       },
     },
     serverId: "server-1",
@@ -174,6 +174,8 @@ describe("AgentLeaderCompactionMonitor", () => {
     ]);
     expect(pushes).toHaveLength(1);
     expect(pushes[0]?.title).toBe("Could not compact a leader's context");
+    // Automation has run out of tries and only a person can compact it now.
+    expect(pushes[0]?.level).toBe("alert");
     expect(monitor.getState("leader-1")).toEqual({ phase: "settled", reason: "gaveUp" });
   });
 });

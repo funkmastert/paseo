@@ -209,6 +209,7 @@ const RELOADABLE_PATHS = [
   "app.baseUrl",
   "agents.providers",
   "agents.catalogRefreshTimeoutMs",
+  "agents.autoPinSessions",
   "agents.metadataGeneration",
   "agents.tokenBurnMonitor",
   "agents.resourceMonitor",
@@ -262,6 +263,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["app.baseUrl", "app.baseUrl"],
   ["agents.providers", "providers"],
   ["agents.catalogRefreshTimeoutMs", "catalogRefreshTimeoutMs"],
+  ["agents.autoPinSessions", "autoPinSessions"],
   ["agents.metadataGeneration", "metadataGeneration"],
   ["agents.tokenBurnMonitor", "tokenBurnMonitor"],
   ["agents.resourceMonitor", "resourceMonitor"],
@@ -989,6 +991,8 @@ function mergeAccountFailoverForPersist(
 
 type PersistedDoneJanitor = NonNullable<PersistedConfig["agents"]>["doneJanitor"];
 
+// Deep, like remediation: `workspaceSweep` is a nested block, so a
+// `{ workspaceSweep: { dryRun: true } }` patch has to keep the rest of the sweep on disk.
 function mergeDoneJanitorForPersist(
   persisted: PersistedDoneJanitor,
   patch: SupportedMutableConfigPatch["doneJanitor"],
@@ -996,12 +1000,15 @@ function mergeDoneJanitorForPersist(
   if (patch === undefined) {
     return persisted;
   }
-  return { ...persisted, ...patch };
+  return deepMerge(
+    (persisted ?? {}) as Record<string, unknown>,
+    patch as Record<string, unknown>,
+  ) as PersistedDoneJanitor;
 }
 
 type PersistedAdmission = NonNullable<PersistedConfig["agents"]>["admission"];
 
-// Flat, like doneJanitor above: every key is a scalar.
+// Flat: every key is a scalar.
 function mergeAdmissionForPersist(
   persisted: PersistedAdmission,
   patch: SupportedMutableConfigPatch["admission"],

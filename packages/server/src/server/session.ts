@@ -263,6 +263,7 @@ import {
   type CreatePaseoWorktreeResult,
 } from "./paseo-worktree-service.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
+import { autoPinWorkspaceOnSessionStart } from "./workspace-auto-pin.js";
 import {
   buildAgentSessionConfig as buildWorktreeAgentSessionConfig,
   createPaseoWorktreeWorkflow as createWorktreeWorkflow,
@@ -3772,6 +3773,9 @@ export class Session {
       const updated = await this.workspaceRegistry.update(workspaceId, (existing) => ({
         ...existing,
         pinnedAt: nextPinnedAt,
+        // A person's own pin gesture is always manual, even upgrading a workspace the daemon
+        // auto-pinned; unpinning clears the source along with the pin itself.
+        pinSource: pinned ? "manual" : undefined,
         updatedAt,
       }));
       if (!updated) {
@@ -3795,6 +3799,21 @@ export class Session {
         },
       });
       emitResponse(false, null, getErrorMessageOr(error, "Failed to pin workspace"));
+    }
+  }
+
+  /**
+   * Auto-pins a workspace the first time Tyler starts a session in it over this client
+   * connection — a new workspace, or a new agent tab in an existing one. Callers only reach this
+   * for a human-attributable create; agent- and daemon-triggered creates go through the separate
+   * "mcp"-kind create path and never call it. See workspace-auto-pin.ts.
+   */
+  private async maybeAutoPinWorkspace(workspaceId: string): Promise<void> {
+    if (this.daemonConfigStore.get().autoPinSessions === false) return;
+    try {
+      await autoPinWorkspaceOnSessionStart(this.workspaceRegistry, workspaceId);
+    } catch (error) {
+      this.sessionLogger.warn({ err: error, workspaceId }, "Failed to auto-pin new session");
     }
   }
 
@@ -4050,6 +4069,21 @@ export class Session {
       );
       createdAgentId = snapshot.id;
       await this.agentUpdates.forwardLiveAgent(snapshot);
+      // Before anything else is awaited: the first turn is already running, and the auto-archive
+      // listens for its end with no replay, so a turn that ended during the auto-pin below was
+      // never archived.
+      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
+        autoArchive,
+        agentId: snapshot.id,
+        createdWorktree,
+      });
+      if (!msg.callerAgentId) {
+        // No caller agent means this "session" create came straight from a client connection
+        // (app or CLI), not on behalf of another agent (docs/done-janitor.md#manual-pin-vs-auto-pin covers
+        // the known gap: a CLI invocation that clears PASEO_AGENT_ID looks the same as a human).
+        await this.maybeAutoPinWorkspace(resolvedIntent.intent.workspaceId);
+        await this.emitWorkspaceUpdateForWorkspaceId(resolvedIntent.intent.workspaceId);
+      }
       if (resolvedIntent.createdDirectoryWorkspace && trimmedPrompt) {
         this.workspaceAutoName.scheduleForDirectory(
           {
@@ -4060,11 +4094,6 @@ export class Session {
           { currentSelection: this.getFocusedAgentSelectionForCwd(resolvedIntent.config.cwd) },
         );
       }
-      this.createAgentLifecycleDispatch.registerAutoArchiveIfRequested({
-        autoArchive,
-        agentId: snapshot.id,
-        createdWorktree,
-      });
       this.sessionLogger.info(
         { agentId: snapshot.id, provider: snapshot.provider },
         "Created agent",
@@ -4300,7 +4329,11 @@ export class Session {
       let snapshot: ManagedAgent;
       const existing = this.agentManager.getAgent(agentId);
       if (existing) {
-        await this.interruptAgentIfRunning(agentId);
+        // A queued child has no turn to stop, and interrupting it would drop its held prompt,
+        // messages merged in from other senders included. The reload re-queues it in place.
+        if (!existing.turnQueued) {
+          await this.interruptAgentIfRunning(agentId);
+        }
         snapshot = await this.agentManager.reloadAgentSession(agentId, undefined, {
           rehydrateFromDisk: true,
         });
@@ -6545,7 +6578,7 @@ export class Session {
 
     const explicitTitle = request.title?.trim() || null;
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
-    const workspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
+    const createdWorkspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
@@ -6555,6 +6588,11 @@ export class Session {
         titleSource: explicitTitle ? "manual" : "auto",
       },
     );
+    // This RPC is only reachable over a client connection (app or CLI), never from the
+    // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
+    await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId);
+    const workspace =
+      (await this.workspaceRegistry.get(createdWorkspace.workspaceId)) ?? createdWorkspace;
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
     const descriptor = await this.describeWorkspaceRecord(workspace);
     this.emit({
@@ -6616,7 +6654,7 @@ export class Session {
 
     const sourceCwd = await resolveWorktreeSourceCwd(source, this.projectRegistry);
 
-    const result = await this.createPaseoWorktreeWorkflow(
+    const workflowResult = await this.createPaseoWorktreeWorkflow(
       {
         cwd: sourceCwd,
         projectId: source.projectId,
@@ -6633,6 +6671,15 @@ export class Session {
         ? { resolveDefaultBranch: async () => source.baseBranch as string }
         : undefined,
     );
+    // This RPC is only reachable over a client connection (app or CLI), never from the
+    // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
+    await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId);
+    const refreshedWorkspace = await this.workspaceRegistry.get(
+      workflowResult.workspace.workspaceId,
+    );
+    const result = refreshedWorkspace
+      ? { ...workflowResult, workspace: refreshedWorkspace }
+      : workflowResult;
 
     const descriptor = await this.describeCreatedWorktreeWorkspace(result);
     this.emit({
