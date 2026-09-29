@@ -5,6 +5,7 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { AgentManager, type DoneJanitorAgentSummary } from "./agent/agent-manager.js";
+import type { AgentStreamEvent } from "./agent/agent-sdk-types.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
 import {
@@ -1269,7 +1270,92 @@ describe("AgentDoneJanitor dead pass", () => {
   });
 });
 
+/** An agent on the fake provider, idle after one finished turn, with its finishes recorded. */
+async function askFixture() {
+  const logger = pino({ level: "silent" });
+  const workdir = mkdtempSync(join(tmpdir(), "done-janitor-ask-"));
+  const agentStorage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const finishedTurns: string[] = [];
+  const agentManager = new AgentManager({
+    clients: { claude: createTestAgentClient("claude") },
+    registry: agentStorage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+  });
+  const agent = await agentManager.createAgent(
+    { provider: "claude", cwd: workdir, title: "Asked" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  await agentManager.runAgent(agent.id, "say 'state saved'");
+  await agentManager.flush();
+  await agentManager.clearAgentAttention(agent.id);
+  attentionReasons.length = 0;
+  finishedTurns.length = 0;
+  return { logger, agentStorage, agentManager, agentId: agent.id, attentionReasons, finishedTurns };
+}
+
+async function drain(stream: AsyncGenerator<AgentStreamEvent>): Promise<AgentStreamEvent[]> {
+  const events: AgentStreamEvent[] = [];
+  for await (const event of stream) events.push(event);
+  return events;
+}
+
 describe("askAgentWhetherDone against a real AgentManager", () => {
+  test("never joins a turn someone else started, and leaves it running", async () => {
+    const f = await askFixture();
+    // Someone else's turn, held on a permission until they answer it.
+    const theirs = drain(f.agentManager.streamAgent(f.agentId, "rm -f permission.txt"));
+    const waiting = await f.agentManager.waitForAgentEvent(f.agentId, { waitForActive: true });
+    if (!waiting.permission) throw new Error("expected their turn to wait on a permission");
+
+    const result = await askAgentWhetherDone(
+      { agentManager: f.agentManager, agentStorage: f.agentStorage, logger: f.logger },
+      { agentId: f.agentId, prompt: "Are you finished?", timeoutMs: 30_000 },
+    );
+
+    expect(result).toEqual({ kind: "busy" });
+    expect(f.agentManager.getPendingPermissions(f.agentId)).toHaveLength(1);
+    await f.agentManager.respondToPermission(f.agentId, waiting.permission.id, {
+      behavior: "allow",
+    });
+    const types = (await theirs).map((event) => event.type);
+    expect(types).toContain("turn_completed");
+    expect(types).not.toContain("turn_canceled");
+    await f.agentManager.flush();
+    // The question never started, so nothing silenced the end of theirs.
+    expect(f.finishedTurns).toEqual([f.agentId]);
+  });
+
+  test.each([
+    { ending: "a permission", prompt: "rm -f permission.txt", timeoutMs: 30_000 },
+    { ending: "a timeout", prompt: "hold the turn open", timeoutMs: 200 },
+  ])(
+    "cancels its own question's turn on $ending, quietly, and the next finish still flags",
+    async ({ ending, prompt, timeoutMs }) => {
+      const f = await askFixture();
+
+      const result = await askAgentWhetherDone(
+        { agentManager: f.agentManager, agentStorage: f.agentStorage, logger: f.logger },
+        { agentId: f.agentId, prompt, timeoutMs },
+      );
+      await f.agentManager.flush();
+
+      expect(result).toEqual({ kind: ending === "a permission" ? "permission" : "timeout" });
+      expect(f.agentManager.getAgent(f.agentId)?.lifecycle).toBe("idle");
+      expect(f.agentManager.getPendingPermissions(f.agentId)).toEqual([]);
+      // The question's end is not the agent finishing. (A permission request still flags as one.)
+      expect(f.finishedTurns).toEqual([]);
+      expect(f.attentionReasons).not.toContain("finished");
+
+      await f.agentManager.runAgent(f.agentId, "say hello");
+      await f.agentManager.flush();
+      expect(f.finishedTurns).toEqual([f.agentId]);
+    },
+  );
+
   test("reads the answer from the question's own turn and raises no finish", async () => {
     const logger = pino({ level: "silent" });
     const workdir = mkdtempSync(join(tmpdir(), "done-janitor-ask-"));

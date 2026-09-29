@@ -1,14 +1,18 @@
-import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type { Logger } from "pino";
 
 import { buildDoneJanitorNotificationPayload } from "@getpaseo/protocol/done-janitor-notification";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
-import type { AgentManager, DoneJanitorAgentSummary } from "./agent/agent-manager.js";
+import type {
+  AgentManager,
+  DoneJanitorAgentSummary,
+  IdleTurnOutcome,
+  QuietIdleTurn,
+} from "./agent/agent-manager.js";
 import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import { ensureAgentLoaded } from "./agent/agent-loading.js";
-import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
+import { formatSystemNotificationPrompt } from "./agent/agent-prompt.js";
 import { isLimitShapedError } from "./agent/account-failover-detector.js";
 import { isRunMarkerOpen } from "./agent/restart-recovery/run-marker.js";
 import {
@@ -161,10 +165,12 @@ export type ProjectRootProbe =
   | { kind: "volume-absent"; volumeRoot: string }
   | { kind: "unknown"; error: string };
 
+/** `busy`: another sender's turn owns the agent, so it was not asked, or its question is theirs now. */
 export type AskAgentResult =
   | { kind: "answered"; reply: string; usedTools: boolean }
   | { kind: "permission" }
   | { kind: "timeout" }
+  | { kind: "busy" }
   | { kind: "failed"; error: string };
 
 export type ProviderHealth = { askable: true } | { askable: false; reason: string };
@@ -1348,6 +1354,15 @@ export class AgentDoneJanitor {
       prompt: buildDoneQuestion(candidate.quietForMs),
       timeoutMs: config.answerTimeoutMs,
     });
+    if (result.kind === "busy") {
+      // Someone else's turn has it. Nothing is remembered: a later sweep that finds it idle asks.
+      report.entries.push({
+        ...describeAgent(root),
+        action: "cannot-ask",
+        reason: "another turn has it now; the question waits for a sweep that finds it idle",
+      });
+      return false;
+    }
     const outcome = readOutcome(result);
     report.entries.push({
       ...describeAgent(root),
@@ -1904,7 +1919,9 @@ function describeAgent(
   return { agentId: view.id, title: view.title, workspaceId: view.workspaceId };
 }
 
-function readOutcome(result: AskAgentResult): ProbeOutcome {
+type AskedResult = Exclude<AskAgentResult, { kind: "busy" }>;
+
+function readOutcome(result: AskedResult): ProbeOutcome {
   switch (result.kind) {
     case "answered":
       // A tool call while answering is work, whatever the last word was.
@@ -1918,7 +1935,7 @@ function readOutcome(result: AskAgentResult): ProbeOutcome {
   }
 }
 
-function describeOutcome(result: AskAgentResult): string {
+function describeOutcome(result: AskedResult): string {
   switch (result.kind) {
     case "answered": {
       const quoted = JSON.stringify(result.reply.trim().slice(0, 80));
@@ -2112,11 +2129,12 @@ export async function readProviderHealth(input: {
 }
 
 /**
- * The production `askAgent`: load the agent, mark the turn quiet so its answer raises no
- * `finished` flag or push, send the question in a `<paseo-system>` envelope (hidden from the
- * timeline like every system-injected prompt), and wait for the turn. A permission request or a
- * timeout cancels the turn it started, so the janitor never leaves an agent blocked on its
- * question.
+ * The production `askAgent`. The question goes only to an idle agent, in a turn of its own
+ * (`startQuietTurnIfIdle`): an agent someone else is using is left `busy`, never steered into.
+ * The turn is quiet from the moment it starts, so its answer raises no `finished` flag or push,
+ * and the question goes in a `<paseo-system>` envelope, hidden from the timeline like every
+ * system-injected prompt. A permission request or a timeout cancels that turn and no other: one
+ * another sender has joined or replaced is theirs, and is left running as `busy`.
  */
 export async function askAgentWhetherDone(
   deps: { agentManager: AgentManager; agentStorage: AgentStorage; logger: Logger },
@@ -2127,51 +2145,60 @@ export async function askAgentWhetherDone(
   try {
     await ensureAgentLoaded(agentId, { agentManager, agentStorage, logger });
     const cursor = agentManager.getTimelineCursor(agentId);
-    if (cursor === null || !agentManager.markQuietTurn(agentId)) {
-      return { kind: "failed", error: "the agent did not load" };
-    }
-    await sendPromptToAgent({
-      agentManager,
-      agentStorage,
+    if (cursor === null) return { kind: "failed", error: "the agent did not load" };
+    const turn = agentManager.startQuietTurnIfIdle(
       agentId,
-      prompt: formatSystemNotificationPrompt(input.prompt),
-      messageId: randomUUID(),
-      unarchive: false,
-      logger,
-    });
-    const abort = new AbortController();
-    const timeout = setTimeout(() => abort.abort(), input.timeoutMs);
-    try {
-      const result = await agentManager.waitForAgentEvent(agentId, {
-        signal: abort.signal,
-        waitForActive: true,
-      });
-      if (result.permission) {
-        await agentManager.cancelAgentRun(agentId, "done-janitor").catch(() => undefined);
-        return { kind: "permission" };
-      }
-      if (result.status === "error") {
-        return {
-          kind: "failed",
-          error: agentManager.getAgent(agentId)?.lastError ?? "turn failed",
-        };
-      }
-      // Read from the cursor, not the last assistant message: an agent that said nothing this
-      // turn would otherwise be credited with whatever it said last time.
-      const since = agentManager.readTimelineSince(agentId, cursor);
-      return {
-        kind: "answered",
-        reply: since?.assistantText ?? "",
-        usedTools: since?.itemTypes.includes("tool_call") ?? false,
-      };
-    } catch (error) {
-      if (!abort.signal.aborted) throw error;
-      await agentManager.cancelAgentRun(agentId, "done-janitor").catch(() => undefined);
-      return { kind: "timeout" };
-    } finally {
-      clearTimeout(timeout);
+      formatSystemNotificationPrompt(input.prompt),
+    );
+    if (!turn) return { kind: "busy" };
+    const ending = await waitForQuestionTurn(agentManager, agentId, turn, input.timeoutMs);
+    if (ending.kind !== "ended") {
+      return (await turn.cancel("done-janitor")) ? ending : { kind: "busy" };
     }
+    const { outcome } = ending;
+    if (outcome.status === "failed") return { kind: "failed", error: outcome.error };
+    if (outcome.status === "canceled") {
+      return { kind: "failed", error: "its turn was cancelled before it answered" };
+    }
+    // Read from the cursor, not the last assistant message: an agent that said nothing this
+    // turn would otherwise be credited with whatever it said last time.
+    const since = agentManager.readTimelineSince(agentId, cursor);
+    return {
+      kind: "answered",
+      reply: since?.assistantText ?? "",
+      usedTools: since?.itemTypes.includes("tool_call") ?? false,
+    };
   } catch (error) {
     return { kind: "failed", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+type QuestionEnding =
+  | { kind: "ended"; outcome: IdleTurnOutcome }
+  | { kind: "permission" }
+  | { kind: "timeout" };
+
+/** The question's turn ending, a permission request on the agent, or the timeout: the first. */
+async function waitForQuestionTurn(
+  agentManager: AgentManager,
+  agentId: string,
+  turn: QuietIdleTurn,
+  timeoutMs: number,
+): Promise<QuestionEnding> {
+  const abort = new AbortController();
+  const timeout = setTimeout(() => abort.abort(), timeoutMs);
+  try {
+    const ended = turn.outcome.then((outcome): QuestionEnding => ({ kind: "ended", outcome }));
+    const watched = agentManager
+      .waitForAgentEvent(agentId, { signal: abort.signal, waitForActive: true })
+      .then(
+        (result): QuestionEnding | null => (result.permission ? { kind: "permission" } : null),
+        (): QuestionEnding | null => (abort.signal.aborted ? { kind: "timeout" } : null),
+      );
+    // Null: the agent settled, so the turn has ended or is about to.
+    return (await Promise.race([ended, watched])) ?? (await ended);
+  } finally {
+    clearTimeout(timeout);
+    abort.abort();
   }
 }
