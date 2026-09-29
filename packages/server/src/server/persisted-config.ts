@@ -760,6 +760,22 @@ const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    // Feature 14. Live by default (D10); `dryRun` is its shadow switch. An older daemon rejects
+    // this key (strict schema), so nothing writes it by default.
+    awayReply: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        thresholdMinutes: z.number().positive().optional(),
+        maxRepliesPerAgentPerDay: z.number().int().positive().optional(),
+        maxRepliesPerDay: z.number().int().positive().optional(),
+        destructiveThreshold: z.number().positive().max(0.5).optional(),
+        approveReadOnlyPermissions: z.boolean().optional(),
+        skipPinnedWorkspaces: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

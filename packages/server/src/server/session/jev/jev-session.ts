@@ -32,6 +32,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
     agentTools: { enabled: false, shadow: false },
     compactionTiming: { enabled: false, shadow: true },
     stallJudgment: { enabled: false, shadow: true },
+    awayReply: { enabled: false, shadow: false },
   },
   lanes: {
     control: {
@@ -114,6 +115,15 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       usdSource: "none",
     },
     stallJudgment: {
+      calls: 0,
+      answered: 0,
+      failed: 0,
+      unavailable: 0,
+      inputTokens: 0,
+      usd: 0,
+      usdSource: "none",
+    },
+    awayReply: {
       calls: 0,
       answered: 0,
       failed: 0,

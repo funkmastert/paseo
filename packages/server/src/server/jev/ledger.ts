@@ -23,6 +23,7 @@ const KNOWN_FEATURES = new Set<JevFeatureId>([
   "agentTools",
   "compactionTiming",
   "stallJudgment",
+  "awayReply",
 ]);
 const KNOWN_LANES = new Set<JevLane>(["control", "agentTools"]);
 
