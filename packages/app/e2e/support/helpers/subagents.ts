@@ -1,7 +1,7 @@
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { expect, type Page } from "@playwright/test";
 import { daemonWsRoutePattern } from "./daemon-port";
-import type { SeededWorkspace } from "./seed-client";
+import { settleAutoPin, type SeededWorkspace } from "./seed-client";
 
 type WebSocketMessage = string | Buffer;
 
@@ -115,6 +115,12 @@ export async function seedParentWithCrossWorkspaceSubagent(
     (snapshot) => snapshot.status === "running",
     15_000,
   );
+
+  // Both workspaces above were created through the e2e client without a callerAgentId, so the
+  // daemon auto-pins them the same as a real session start (workspace-auto-pin.ts). Callers read
+  // `workspace-status-indicator-*` directly on these rows, so settle both.
+  await settleAutoPin(workspace.client, workspace.workspaceId);
+  await settleAutoPin(workspace.client, createdWorkspace.workspace.id);
 
   return {
     parent: {

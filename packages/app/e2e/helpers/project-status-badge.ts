@@ -1,6 +1,6 @@
 import { expect, type Page } from "@playwright/test";
 import { gotoAppShell } from "../support/helpers/app";
-import { seedWorkspace, type SeededWorkspace } from "../support/helpers/seed-client";
+import { seedWorkspace, settleAutoPin, type SeededWorkspace } from "../support/helpers/seed-client";
 import { waitForSidebarHydration } from "../support/helpers/workspace-ui";
 
 export interface StatusProject {
@@ -21,6 +21,12 @@ export async function seedStatusProject(): Promise<StatusProject> {
     await seed.cleanup();
     throw new Error(created.error ?? "Failed to create the needs-input workspace");
   }
+  // This test is about the project's collapsed aggregate status, which only reads workspaces
+  // still grouped under the project — not ones a session-start auto-pin hoisted into Pinned.
+  // startWorkingWorkspace/startNeedsInputWorkspace settle again after their createAgent calls,
+  // which re-pin (workspace-auto-pin.ts treats every create_agent_request the same way).
+  await settleAutoPin(seed.client, seed.workspaceId);
+  await settleAutoPin(seed.client, created.workspace.id);
   return { seed, needsInputWorkspaceId: created.workspace.id };
 }
 
@@ -50,6 +56,8 @@ export async function startWorkingWorkspace(project: StatusProject): Promise<voi
     model: "thirty-minute-stream",
     initialPrompt: "keep streaming for the test",
   });
+  // createAgent re-pins its workspace the same way a session start does.
+  await settleAutoPin(project.seed.client, project.seed.workspaceId);
 }
 
 export async function startNeedsInputWorkspace(project: StatusProject): Promise<void> {
@@ -62,6 +70,8 @@ export async function startNeedsInputWorkspace(project: StatusProject): Promise<
     model: "thirty-minute-stream",
     initialPrompt: "emit a synthetic plan approval",
   });
+  // createAgent re-pins its workspace the same way a session start does.
+  await settleAutoPin(project.seed.client, project.needsInputWorkspaceId);
 }
 
 export async function expectCollapsedProjectStatus(

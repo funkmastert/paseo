@@ -6,6 +6,7 @@ import {
   seedMockAgentWorkspace,
   type MockAgentWorkspace,
 } from "../support/helpers/mock-agent";
+import { settleAutoPin } from "../support/helpers/seed-client";
 import { getServerId } from "../support/helpers/server-id";
 import { closeMobileAgentSidebar, openMobileAgentSidebar } from "../support/helpers/sidebar";
 
@@ -26,6 +27,10 @@ const test = base.extend<{ workspaces: FinishedWorkspaces }>({
       seeded.push(workspace);
       await workspace.client.waitForFinish(workspace.agentId, 20_000);
       await workspace.client.clearWorkspaceAttention(workspace.workspaceId);
+      // These tests read `workspace-status-indicator-*` on the row directly; a pinned row shows
+      // its project icon there instead (workspace-auto-pin.ts), so settle the session-start auto
+      // pin first.
+      await settleAutoPin(workspace.client, workspace.workspaceId);
       return workspace;
     }
     try {
@@ -166,7 +171,7 @@ async function expectSelectedAgent(page: Page, agentId: string) {
 }
 
 async function addFinishedAgent(workspace: MockAgentWorkspace) {
-  return workspace.client.createAgent({
+  const agent = await workspace.client.createAgent({
     provider: "mock",
     cwd: workspace.cwd,
     workspaceId: workspace.workspaceId,
@@ -174,6 +179,9 @@ async function addFinishedAgent(workspace: MockAgentWorkspace) {
     modeId: "load-test",
     model: "e2e-fast-stream",
   });
+  // createAgent re-pins its workspace the same way a session start does.
+  await settleAutoPin(workspace.client, workspace.workspaceId);
+  return agent;
 }
 
 async function openCompactWorkspace(page: Page, workspace: MockAgentWorkspace) {
