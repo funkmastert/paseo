@@ -132,6 +132,36 @@ const MUST_BLOCK: BlockCase[] = [
     rule: "force-push-main",
   },
   {
+    command: "git push --mirror backup",
+    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
+    rule: "force-push-main",
+    note: "--mirror blocks outright, even with no local main to rewrite",
+  },
+  // `--prune` deletes any remote ref with no matching local one, main included.
+  {
+    command: "git push --prune --all origin",
+    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
+    rule: "delete-main",
+    note: "no local main: prune deletes the remote's",
+  },
+  {
+    command: "git push --prune --branches origin",
+    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
+    rule: "delete-main",
+  },
+  {
+    command: "git push -f --all --prune origin",
+    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
+    rule: "delete-main",
+    note: "forced and pruned, but still no local main to force-update",
+  },
+  {
+    command: "git push --prune origin 'refs/heads/*:refs/heads/*'",
+    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
+    rule: "delete-main",
+    note: "unforced pattern refspec, but prune still deletes main",
+  },
+  {
     command: "cd /srv/site && git push -f --all",
     refs: { "/srv/site": ["refs/heads/main"] },
     rule: "force-push-main",
@@ -312,14 +342,29 @@ const MUST_NEVER_BLOCK: GateCase[] = [
   { command: "git push -n --mirror origin", note: "dry run" },
   { command: "git push --dry-run -f --all origin" },
   {
-    command: "git push --mirror backup",
-    refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
-    note: "a repository with no main mirrors no main",
-  },
-  {
     command: "git push -f --all origin",
     refs: { [REPO]: ["refs/heads/trunk", "refs/heads/feature/x"] },
-    note: "no local main",
+    note: "no local main, and no prune to delete it",
+  },
+  {
+    command: "git push --prune --all origin",
+    note: "prune, but local main exists so nothing is deleted; unforced so nothing rewrites",
+  },
+  {
+    command: "git push --prune --branches origin",
+    note: "same, via --branches",
+  },
+  {
+    command: "git push --prune origin 'refs/heads/*:refs/heads/*'",
+    note: "unforced pattern refspec with prune, but local main exists",
+  },
+  {
+    command: "git push --prune origin 'refs/tags/*:refs/tags/*'",
+    note: "prune scoped to tags never touches heads/main",
+  },
+  {
+    command: "git push --prune origin feature",
+    note: "prune scoped to a single non-wildcard refspec never touches main",
   },
   { command: "git push -f origin '+refs/heads/feature/*:refs/heads/feature/*'" },
   { command: "git push -f origin 'refs/heads/*:refs/remotes/mine/*'", note: "lands outside heads" },
@@ -567,12 +612,19 @@ describe("catastrophe gate: local ref lookup", () => {
       "git push origin 'refs/heads/*:refs/heads/*'",
       "git push -f origin 'refs/tags/*:refs/tags/*'",
       "git push -n --mirror origin",
+      "git push --mirror origin",
+      "git push --prune origin feature",
     ]) {
       await checkCatastrophe(command, REPO, branches.resolve, options);
     }
     expect(refs.calls).toEqual([]);
 
-    await checkCatastrophe("git -C ../repo push --mirror backup", REPO, branches.resolve, options);
+    await checkCatastrophe(
+      "git -C ../repo push --prune --all backup",
+      REPO,
+      branches.resolve,
+      options,
+    );
     await checkCatastrophe(
       "git push backup '+refs/remotes/origin/*:refs/heads/*'",
       REPO,
@@ -587,10 +639,15 @@ describe("catastrophe gate: local ref lookup", () => {
   });
 
   test("allows the push when the refs cannot be resolved", async () => {
-    const decision = await checkCatastrophe("git push --mirror backup", REPO, async () => "main", {
-      homeDir: HOME,
-      resolveLocalRef: async () => null,
-    });
+    const decision = await checkCatastrophe(
+      "git push --prune --all backup",
+      REPO,
+      async () => "main",
+      {
+        homeDir: HOME,
+        resolveLocalRef: async () => null,
+      },
+    );
     expect(decision).toEqual({ block: false });
   });
 
@@ -668,12 +725,30 @@ describe("catastrophe gate: real repository", () => {
     }
   });
 
-  test("allows a mirror of a repository that has no main", async () => {
-    expect(await localRefExistsWithGit(featureRepo, "refs/heads/main")).toBe(true);
+  test("blocks a mirror of a repository that has no main too, since it is a static block", async () => {
     expect(await localRefExistsWithGit(trunkRepo, "refs/heads/main")).toBe(false);
     const decision = await checkCatastrophe(
       "git push --mirror backup",
       trunkRepo,
+      resolveCurrentBranchWithGit,
+    );
+    expect(decision).toMatchObject({ block: true, rule: "force-push-main" });
+  });
+
+  test("blocks --prune --all from a repository with no local main", async () => {
+    const decision = await checkCatastrophe(
+      "git push --prune --all backup",
+      trunkRepo,
+      resolveCurrentBranchWithGit,
+    );
+    expect(decision).toMatchObject({ block: true, rule: "delete-main" });
+  });
+
+  test("allows --prune --all, unforced, from a repository that has main", async () => {
+    expect(await localRefExistsWithGit(featureRepo, "refs/heads/main")).toBe(true);
+    const decision = await checkCatastrophe(
+      "git push --prune --all backup",
+      featureRepo,
       resolveCurrentBranchWithGit,
     );
     expect(decision).toEqual({ block: false });
@@ -682,11 +757,18 @@ describe("catastrophe gate: real repository", () => {
   test("allows the push outside a repository", async () => {
     expect(await resolveCurrentBranchWithGit(root)).toBeNull();
     expect(await localRefExistsWithGit(root, "refs/heads/main")).toBeNull();
-    for (const command of ["git push -f", "git push --mirror backup"]) {
-      expect(await checkCatastrophe(command, root, resolveCurrentBranchWithGit)).toEqual({
-        block: false,
-      });
-    }
+    expect(await checkCatastrophe("git push -f", root, resolveCurrentBranchWithGit)).toEqual({
+      block: false,
+    });
+  });
+
+  test("blocks --mirror even outside a repository, since it is a static block", async () => {
+    const decision = await checkCatastrophe(
+      "git push --mirror backup",
+      root,
+      resolveCurrentBranchWithGit,
+    );
+    expect(decision).toMatchObject({ block: true, rule: "force-push-main" });
   });
 });
 

@@ -122,11 +122,18 @@ export async function checkCatastrophe(
     const exists = await Promise.resolve()
       .then(() => resolveLocalRef(native(check.cwd), check.ref, gitDir))
       .catch(() => null);
-    if (exists === true) {
+    if (exists === true && check.forced) {
       return {
         block: true,
         rule: "force-push-main",
         reason: `it force-pushes ${check.detail}, which carries ${check.ref} in ${native(check.cwd)} onto main on the remote`,
+      };
+    }
+    if (exists === false && check.prune) {
+      return {
+        block: true,
+        rule: "delete-main",
+        reason: `it prunes ${check.detail}, and ${check.ref} does not exist in ${native(check.cwd)}, which deletes main on the remote`,
       };
     }
   }
@@ -221,9 +228,15 @@ interface BranchCheck {
   detail: string;
 }
 
-/** A push that writes the remote's main from `ref`, if the repository has one. */
+/**
+ * A push that touches the remote's main via `ref`: `forced` means a matching local `ref` rewrites
+ * main (blocked when it exists), `prune` means the push deletes any remote ref with no local
+ * counterpart, main included (blocked when `ref` does not exist).
+ */
 interface RefCheck extends BranchCheck {
   ref: string;
+  forced: boolean;
+  prune: boolean;
 }
 
 interface GateState {
@@ -606,6 +619,8 @@ interface PushArgs {
   dryRun: boolean;
   /** `--tags` pushes only `refs/tags/*`, so it never touches the current branch. */
   tags: boolean;
+  /** Deletes any remote ref with no matching local one, main included. */
+  prune: boolean;
   /** `--mirror`, `--all` or `--branches`: every local branch, whatever is checked out. */
   everyBranch: string | null;
   /** The repository, then the refspecs. */
@@ -625,12 +640,33 @@ function readShortPushFlags(text: string, push: PushArgs): boolean {
   return false;
 }
 
+/** Sets the boolean fields a recognized long push flag turns on; false for anything else. */
+function applyLongPushFlag(name: string, push: PushArgs): boolean {
+  if (name === "--mirror" || name === "--all" || name === "--branches") push.everyBranch = name;
+  if (PUSH_FORCE_FLAGS.has(name)) {
+    push.force = true;
+  } else if (name === "--delete") {
+    push.deletes = true;
+  } else if (name === "--dry-run") {
+    push.dryRun = true;
+  } else if (name === "--prune") {
+    push.prune = true;
+  } else if (name === "--tags") {
+    // `--follow-tags` also pushes the current branch, so it is not `--tags`.
+    push.tags = true;
+  } else {
+    return false;
+  }
+  return true;
+}
+
 function parsePushArgs(args: ExpandedWord[]): PushArgs {
   const push: PushArgs = {
     force: false,
     deletes: false,
     dryRun: false,
     tags: false,
+    prune: false,
     everyBranch: null,
     operands: [],
   };
@@ -645,13 +681,12 @@ function parsePushArgs(args: ExpandedWord[]): PushArgs {
       endOfOptions = true;
     } else if (text.startsWith("--")) {
       const name = text.split("=", 1)[0] ?? text;
-      if (name === "--mirror" || name === "--all" || name === "--branches") push.everyBranch = name;
-      if (PUSH_FORCE_FLAGS.has(name)) push.force = true;
-      else if (name === "--delete") push.deletes = true;
-      else if (name === "--dry-run") push.dryRun = true;
-      // `--follow-tags` also pushes the current branch, so it is not `--tags`.
-      else if (name === "--tags") push.tags = true;
-      else if (PUSH_OPTIONS_WITH_VALUE.has(name) && !text.includes("=")) index++;
+      if (
+        !applyLongPushFlag(name, push) &&
+        PUSH_OPTIONS_WITH_VALUE.has(name) &&
+        !text.includes("=")
+      )
+        index++;
     } else if (readShortPushFlags(text, push)) {
       index++;
     }
@@ -681,7 +716,9 @@ function classifyRefspec(
   // `:` pushes every branch that exists on both sides, main among them.
   if (spec === ":") return forced ? { ref: "refs/heads/main" } : null;
   if (spec.includes("*")) {
-    const ref = forced ? patternSourceOfMain(source, destination) : null;
+    // A pattern refspec with `--prune` deletes the remote's main when the repository has no
+    // matching local ref to push there, whether or not the push is forced.
+    const ref = forced || push.prune ? patternSourceOfMain(source, destination) : null;
     return ref ? { ref } : null;
   }
   if (!isMainRef(destination)) return null;
@@ -718,10 +755,25 @@ function patternSourceOfMain(source: string, destination: string): string | null
 function checkGitPush(args: ExpandedWord[], location: GitLocation, state: GateState): void {
   const push = parsePushArgs(args);
   if (push.dryRun) return;
-  // `--mirror` is `+refs/*:refs/*`, and a forced `--all` is `+refs/heads/*:refs/heads/*`. Either
-  // one rewrites the remote's main from any branch, if the repository has a main to push.
-  if (push.everyBranch !== null && push.force) {
-    addRefCheck(location, REMOTE_MAIN, `with ${push.everyBranch}`, state);
+  // `--mirror` is `+refs/*:refs/*` plus prune: it force-updates the remote's main when the
+  // repository has one, and deletes it otherwise. Both outcomes are catastrophic, so it blocks
+  // outright rather than by local-ref lookup; the fleet replay found no real use of it.
+  if (push.everyBranch === "--mirror") {
+    state.found = {
+      rule: "force-push-main",
+      reason:
+        "it mirrors every ref onto the remote (--mirror), which force-updates or deletes main there",
+    };
+    return;
+  }
+  // A forced `--all`/`--branches` is `+refs/heads/*:refs/heads/*`: it rewrites the remote's main
+  // from any branch, if the repository has a main to push. `--prune` with `--all`/`--branches`
+  // deletes the remote's main outright when the repository does not, forced or not.
+  if (push.everyBranch !== null && (push.force || push.prune)) {
+    addRefCheck(location, REMOTE_MAIN, `with ${push.everyBranch}`, state, {
+      forced: push.force,
+      prune: push.prune,
+    });
     return;
   }
   const refspecs = push.operands.slice(1);
@@ -738,7 +790,10 @@ function checkGitPush(args: ExpandedWord[], location: GitLocation, state: GateSt
     if (outcome === "current-branch") {
       addBranchCheck(location, refspec.text, state);
     } else if (outcome && "ref" in outcome) {
-      addRefCheck(location, outcome.ref, `refspec ${refspec.text}`, state);
+      addRefCheck(location, outcome.ref, `refspec ${refspec.text}`, state, {
+        forced: push.force || refspec.text.startsWith("+"),
+        prune: push.prune,
+      });
     } else if (outcome) {
       state.found = outcome;
       return;
@@ -755,12 +810,20 @@ function addBranchCheck(location: GitLocation, detail: string, state: GateState)
   });
 }
 
-function addRefCheck(location: GitLocation, ref: string, detail: string, state: GateState): void {
+function addRefCheck(
+  location: GitLocation,
+  ref: string,
+  detail: string,
+  state: GateState,
+  flags: { forced: boolean; prune: boolean },
+): void {
   if (location.cwd === null) return;
   state.refChecks.push({
     cwd: location.cwd,
     ...(location.gitDir ? { gitDir: location.gitDir } : {}),
     detail,
     ref,
+    forced: flags.forced,
+    prune: flags.prune,
   });
 }
