@@ -148,9 +148,13 @@ function entry(plan: RestartRecoveryPlan, agentId: string) {
 }
 
 async function runCli(root: string, port: number, args: string[]): Promise<RestartRecoveryPlan> {
+  // node --import tsx rather than node_modules/.bin/tsx: on Windows that is a .cmd shim, which
+  // execFile cannot start.
   const { stdout } = await execFileAsync(
-    path.join(REPO_ROOT, "node_modules/.bin/tsx"),
+    process.execPath,
     [
+      "--import",
+      "tsx",
       path.join(REPO_ROOT, "packages/cli/src/index.ts"),
       "recover",
       ...args,

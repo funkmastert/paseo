@@ -4023,6 +4023,9 @@ export class AgentManager {
             stagedSubmittedPromptEcho?.item.type === "user_message"
               ? stagedSubmittedPromptEcho.item.messageId
               : undefined,
+          // The emitState below carries the prompt's activity summary. Emitting here too sent
+          // every client two identical running snapshots per accepted turn.
+          deferStateEmit: true,
         });
       }
       for (const stagedEvent of pendingRun.stagedEvents.splice(0)) {
@@ -6447,9 +6450,10 @@ export class AgentManager {
     item: AgentTimelineItem,
     provider: AgentProvider,
     turnId?: string,
-    options?: { providerMessageId?: string },
+    options?: { providerMessageId?: string; deferStateEmit?: boolean },
   ): AgentStreamEvent {
-    const row = this.recordTimeline(agentId, item, { ...options, turnId });
+    const { deferStateEmit, ...timelineOptions } = options ?? {};
+    const row = this.recordTimeline(agentId, item, { ...timelineOptions, turnId });
     const event: AgentStreamEvent = {
       type: "timeline",
       item,
@@ -6485,7 +6489,8 @@ export class AgentManager {
         // Avoid an emitState storm: only broadcast when the summary actually
         // changed, not on every coalesced item. lastActivitySummary is
         // live-only (never persisted), so skip the snapshot write too.
-        this.emitState(agent, { persist: false });
+        // deferStateEmit: the caller publishes state right after.
+        if (!deferStateEmit) this.emitState(agent, { persist: false });
       }
 
       if (
@@ -6505,7 +6510,12 @@ export class AgentManager {
     agent: ActiveManagedAgent,
     prompt: AgentPromptInput,
     clientMessageId: string,
-    options?: { messageId?: string; providerMessageId?: string; turnId?: string },
+    options?: {
+      messageId?: string;
+      providerMessageId?: string;
+      turnId?: string;
+      deferStateEmit?: boolean;
+    },
   ): void {
     if (this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId)) {
       return;

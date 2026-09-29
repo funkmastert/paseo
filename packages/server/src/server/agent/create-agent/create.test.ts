@@ -163,9 +163,13 @@ test("session create forwards clientMessageId to the initial prompt run options"
     buildSessionConfig: async (config) => ({ sessionConfig: config }),
   });
 
-  expect(streamAgent).toHaveBeenCalledWith("agent-1", "hello from create", {
-    clientMessageId: "msg-create-1",
-  });
+  // The fourth argument is `queuedAt`, which only a held turn restored after a restart carries.
+  expect(streamAgent).toHaveBeenCalledWith(
+    "agent-1",
+    "hello from create",
+    { clientMessageId: "msg-create-1" },
+    undefined,
+  );
 });
 
 test("session create validates the requested mode against the provider's modes", async () => {
