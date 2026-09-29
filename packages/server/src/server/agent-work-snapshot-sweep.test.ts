@@ -91,6 +91,8 @@ function harness(input: {
     paseoHome: join(root, "paseo-home"),
     logger: pino({ level: "silent" }),
     now: () => now,
+    // Never the network, whatever origin a test gives its repositories.
+    lookupRepoVisibility: async () => "unknown",
   });
   const sweep = new AgentWorkSnapshotSweep({
     dependencies: {

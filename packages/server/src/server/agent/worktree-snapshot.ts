@@ -3,16 +3,17 @@
  * docs/work-snapshots.md.
  *
  * The snapshot is a commit built through a temporary `GIT_INDEX_FILE`: HEAD's tree, plus every
- * tracked change, plus untracked files that are not ignored. It is stored at
- * `refs/backup/<date>/<slug>` in the repository's common dir, so it outlives the worktree. The
- * agent's index, HEAD, working tree and branch refs are never written: the only writes are git
- * objects, the one backup ref, and, offsite, a branch on a personal GitHub remote or a bundle file.
+ * tracked change, plus untracked files that are not ignored and do not look like secrets. It is
+ * stored at `refs/backup/<date>/<slug>` in the repository's common dir, so it outlives the
+ * worktree. The agent's index, HEAD, working tree and branch refs are never written: the only
+ * writes are git objects, the one backup ref, and, offsite, a branch on a private personal GitHub
+ * repository or a bundle file.
  *
  * Nothing here throws. A git failure is a `failed` result with the reason.
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, rmSync, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Logger } from "pino";
@@ -25,6 +26,18 @@ import type {
 } from "../remediation/contract.js";
 import type { ResolvedWorkSnapshotsConfig } from "../remediation/config.js";
 import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
+import {
+  lookupGitHubRepoVisibility,
+  parseGitHubRepository,
+  type RepoVisibility,
+} from "./github-repo-visibility.js";
+import {
+  displayPath,
+  findTokenKind,
+  hasSecretName,
+  looksLikeSecret,
+  WITHHELD_PATH,
+} from "./snapshot-secret-filter.js";
 
 const BACKUP_REF_PREFIX = "refs/backup/";
 const GIT_TIMEOUT_MS = 60_000;
@@ -32,6 +45,12 @@ const PUSH_TIMEOUT_MS = 120_000;
 /** Untracked paths per `git add`, so a huge scratch directory cannot overflow argv. */
 const ADD_BATCH = 200;
 const MAX_SLUG_LENGTH = 120;
+/** How long a repository's private or public answer is trusted. */
+const VISIBILITY_TTL_MS = 5 * 60_000;
+/** Git output the pre-push scan reads at most; more than this is bundled unscanned. */
+const PUSH_SCAN_MAX_BYTES = 32 * 1024 * 1024;
+/** Findings a held-back push logs at most. */
+const MAX_PUSH_FINDINGS = 20;
 
 const BASE_ENV = {
   GIT_OPTIONAL_LOCKS: "0",
@@ -52,7 +71,22 @@ export interface GitWorktreeSnapshotterOptions {
   logger: Logger;
   now?: () => number;
   runGit?: RunGitCommand;
+  /** Whether a GitHub repository is private. Defaults to asking GitHub; tests answer instead. */
+  lookupRepoVisibility?: (owner: string, repo: string) => Promise<RepoVisibility>;
+  /** Overrides `PUSH_SCAN_MAX_BYTES`, so a test can reach the cap. */
+  pushScanMaxBytes?: number;
 }
+
+/** A path, or where in a commit, and what kind of secret was seen there. Never the secret. */
+interface PushFinding {
+  path: string;
+  kind: string;
+}
+
+type PushScan =
+  | { kind: "clean" }
+  | { kind: "possible-secret"; findings: PushFinding[] }
+  | { kind: "unscanned"; reason: string };
 
 /** What a worktree holds that exists nowhere else, read without writing anything. */
 export type WorktreeAssessment =
@@ -131,13 +165,21 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   private readonly options: GitWorktreeSnapshotterOptions;
   private readonly runGit: RunGitCommand;
   private readonly now: () => number;
+  private readonly lookupRepoVisibility: (owner: string, repo: string) => Promise<RepoVisibility>;
   /** Offsite results by snapshot commit, so a reused snapshot is not pushed or bundled again. */
   private readonly offsiteByCommit = new Map<string, WorktreeSnapshotOffsite>();
+  /** Definite answers by `owner/repo`. An unknown one is asked again next time. */
+  private readonly visibilityByRepo = new Map<
+    string,
+    { visibility: "public" | "private"; atMs: number }
+  >();
 
   constructor(options: GitWorktreeSnapshotterOptions) {
     this.options = options;
     this.runGit = options.runGit ?? runGitCommand;
     this.now = options.now ?? Date.now;
+    this.lookupRepoVisibility =
+      options.lookupRepoVisibility ?? ((owner, repo) => lookupGitHubRepoVisibility(owner, repo));
   }
 
   async snapshot(request: WorktreeSnapshotRequest): Promise<WorktreeSnapshotResult> {
@@ -232,7 +274,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     const config = this.options.readConfig();
     const nowMs = this.now();
     const slug = request.slug ? sanitizeSlug(request.slug) : slugForWorktreePath(worktreePath);
-    const { tree, skippedFiles } = await this.writeSnapshotTree(
+    const { tree, skippedFiles, possibleSecrets } = await this.writeSnapshotTree(
       worktreePath,
       head,
       config.maxUntrackedFileBytes,
@@ -253,6 +295,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         dirtyFiles: assessment.dirtyFiles,
         unpushedCommits: assessment.unpushedCommits,
         skippedFiles,
+        possibleSecrets,
       });
       commit = (
         await this.git(
@@ -269,7 +312,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         ? ({ kind: "none", reason: "offsite copy not requested" } as const)
         : await this.sendOffsite({ worktreePath, ref, commit, config });
     this.options.logger.info(
-      { worktreePath, ref, commit, reused, offsite, reason: request.reason },
+      { worktreePath, ref, commit, reused, offsite, possibleSecrets, reason: request.reason },
       reused
         ? "Work snapshot: reused the newest snapshot"
         : "Work snapshot: snapshotted a worktree",
@@ -292,12 +335,16 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     };
   }
 
-  /** HEAD's tree plus the working tree's changes, written through an index nobody else reads. */
+  /**
+   * HEAD's tree plus the working tree's changes, written through an index nobody else reads.
+   * Untracked files over the size cap or that look like secrets are left out; `add -u` still
+   * stages tracked changes as they are.
+   */
   private async writeSnapshotTree(
     worktreePath: string,
     head: string | null,
     maxUntrackedFileBytes: number,
-  ): Promise<{ tree: string; skippedFiles: string[] }> {
+  ): Promise<{ tree: string; skippedFiles: string[]; possibleSecrets: string[] }> {
     const indexFile = join(tmpdir(), `paseo-snapshot-index-${process.pid}-${randomUUID()}`);
     const env = { GIT_INDEX_FILE: indexFile };
     try {
@@ -312,21 +359,24 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         .filter(Boolean);
       const keep: string[] = [];
       const skippedFiles: string[] = [];
+      const possibleSecrets: string[] = [];
       for (const file of untracked) {
-        let size: number;
+        const path = join(worktreePath, file);
+        let stats: Stats;
         try {
-          size = lstatSync(join(worktreePath, file)).size;
+          stats = lstatSync(path);
         } catch {
           continue; // Gone since it was listed.
         }
-        if (size > maxUntrackedFileBytes) skippedFiles.push(file);
+        if (stats.size > maxUntrackedFileBytes) skippedFiles.push(displayPath(file));
+        else if (await looksLikeSecret(path, file, stats)) possibleSecrets.push(displayPath(file));
         else keep.push(file);
       }
       for (let index = 0; index < keep.length; index += ADD_BATCH) {
         await this.git(worktreePath, ["add", "--", ...keep.slice(index, index + ADD_BATCH)], env);
       }
       const tree = (await this.git(worktreePath, ["write-tree"], env)).trim();
-      return { tree, skippedFiles };
+      return { tree, skippedFiles, possibleSecrets };
     } finally {
       rmSync(indexFile, { force: true });
       rmSync(`${indexFile}.lock`, { force: true });
@@ -376,8 +426,9 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   }
 
   /**
-   * A personal GitHub origin gets the snapshot as branch `backup/<date>/<slug>`; anything else,
-   * or no origin, gets a bundle file. The push goes to the URL rather than the remote name, so no
+   * A personal GitHub origin that GitHub says is private gets the snapshot as branch
+   * `backup/<date>/<slug>`, unless what the push would send may hold a secret; anything else, or no
+   * origin, gets a bundle file. The push goes to the URL rather than the remote name, so no
    * remote-tracking ref is written and the done janitor's reachability check reads as before.
    */
   private async sendOffsite(input: {
@@ -388,29 +439,164 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
   }): Promise<WorktreeSnapshotOffsite> {
     const cached = this.offsiteByCommit.get(input.commit);
     if (cached) return cached;
-    const { worktreePath, ref, config } = input;
+    const { worktreePath, ref, commit, config } = input;
     const url = (await this.tryGit(worktreePath, ["config", "--get", "remote.origin.url"]))?.trim();
     let offsite: WorktreeSnapshotOffsite | null = null;
+    // A bundle made because GitHub did not answer is not the last word on this snapshot: the next
+    // sweep asks again, even when the worktree has not changed.
+    let settled = true;
     if (url && isPersonalGitHubRemote(url, config.personalOwners)) {
-      const branch = `backup/${ref.slice(BACKUP_REF_PREFIX.length)}`;
-      try {
-        await this.git(
-          worktreePath,
-          ["push", "--no-verify", "--quiet", url, `${ref}:refs/heads/${branch}`],
-          {},
-          PUSH_TIMEOUT_MS,
-        );
-        offsite = { kind: "pushed", remote: "origin", branch };
-      } catch (error) {
-        this.options.logger.warn(
-          { err: error, worktreePath, ref },
-          "Work snapshot: push to the personal remote failed; bundling instead",
-        );
+      const visibility = await this.repositoryVisibility(worktreePath, url);
+      settled = visibility !== "unknown";
+      if (visibility === "private" && (await this.pushIsClean(worktreePath, ref, commit))) {
+        const branch = `backup/${ref.slice(BACKUP_REF_PREFIX.length)}`;
+        try {
+          await this.git(
+            worktreePath,
+            ["push", "--no-verify", "--quiet", url, `${ref}:refs/heads/${branch}`],
+            {},
+            PUSH_TIMEOUT_MS,
+          );
+          offsite = { kind: "pushed", remote: "origin", branch };
+        } catch (error) {
+          this.options.logger.warn(
+            { err: error, worktreePath, ref },
+            "Work snapshot: push to the personal remote failed; bundling instead",
+          );
+        }
       }
     }
     offsite ??= await this.writeBundle(worktreePath, ref, config);
-    if (offsite.kind !== "none") this.offsiteByCommit.set(input.commit, offsite);
+    if (settled && offsite.kind !== "none") this.offsiteByCommit.set(commit, offsite);
     return offsite;
+  }
+
+  private async repositoryVisibility(worktreePath: string, url: string): Promise<RepoVisibility> {
+    const parsed = parseGitHubRepository(url);
+    const key = parsed ? `${parsed.owner}/${parsed.repo}`.toLowerCase() : null;
+    const cached = key ? this.visibilityByRepo.get(key) : undefined;
+    let visibility: RepoVisibility;
+    if (cached && this.now() - cached.atMs < VISIBILITY_TTL_MS) {
+      visibility = cached.visibility;
+    } else {
+      visibility = parsed ? await this.lookupRepoVisibility(parsed.owner, parsed.repo) : "unknown";
+      if (key && visibility !== "unknown") {
+        this.visibilityByRepo.set(key, { visibility, atMs: this.now() });
+      }
+    }
+    if (visibility !== "private") {
+      this.options.logger.info(
+        { worktreePath, repository: key, visibility },
+        "Work snapshot: the personal repository is not known to be private; bundling instead of pushing",
+      );
+    }
+    return visibility;
+  }
+
+  /** Scans what the push would send and logs why when it holds the push back. */
+  private async pushIsClean(worktreePath: string, ref: string, commit: string): Promise<boolean> {
+    let scan: PushScan;
+    try {
+      scan = await this.scanPush(worktreePath, commit);
+    } catch (error) {
+      scan = { kind: "unscanned", reason: describeError(error) };
+    }
+    if (scan.kind === "possible-secret") {
+      this.options.logger.warn(
+        { worktreePath, ref, findings: scan.findings },
+        "Work snapshot: possible secret in what the push would send; bundling instead of pushing",
+      );
+    } else if (scan.kind === "unscanned") {
+      this.options.logger.warn(
+        { worktreePath, ref, reason: scan.reason },
+        "Work snapshot: could not scan what the push would send; bundling instead of pushing",
+      );
+    }
+    return scan.kind === "clean";
+  }
+
+  /**
+   * Everything the push sends that no remote has: the snapshot and HEAD's unpushed commits. Their
+   * added lines and messages are scanned for tokens and their changed paths for secret-shaped
+   * names. This reads the objects actually sent, so it also covers tracked edits, committed files,
+   * and untracked files past the untracked filter's 64 KB window or changed after it ran.
+   */
+  private async scanPush(worktreePath: string, commit: string): Promise<PushScan> {
+    const maxBytes = this.options.pushScanMaxBytes ?? PUSH_SCAN_MAX_BYTES;
+    const range = ["--diff-merges=first-parent", commit, "--not", "--remotes"];
+    const names = await this.readForScan(
+      worktreePath,
+      ["log", "--format=", "--name-only", "-z", "--diff-filter=d", ...range],
+      maxBytes,
+    );
+    const patch = await this.readForScan(
+      worktreePath,
+      [
+        "log",
+        "--patch",
+        "--text",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-prefix",
+        "--unified=0",
+        "--format=%x1e%B",
+        ...range,
+      ],
+      maxBytes,
+    );
+    if (names === null || patch === null) {
+      return { kind: "unscanned", reason: `more than ${maxBytes} bytes to scan` };
+    }
+
+    const findings = new Map<string, PushFinding>();
+    const note = (path: string, kind: string) => {
+      if (findings.size < MAX_PUSH_FINDINGS) findings.set(`${path}\0${kind}`, { path, kind });
+    };
+    for (const name of names.split("\0")) {
+      if (!name) continue;
+      if (findTokenKind(name) !== null) note(WITHHELD_PATH, "token in the path");
+      else if (hasSecretName(name)) note(name, "secret-shaped name");
+    }
+    let section: "message" | "header" | "hunk" = "header";
+    let path = "(unknown path)";
+    for (const line of patch.split("\n")) {
+      let text: string | null = null;
+      if (line.startsWith("\x1e")) {
+        section = "message";
+        text = line.slice(1);
+      } else if (line.startsWith("diff --git ")) {
+        section = "header";
+        path = "(unknown path)";
+      } else if (section === "message") {
+        text = line;
+      } else if (section === "header") {
+        if (line.startsWith("+++ ")) path = line.slice(4);
+        else if (line.startsWith("@@")) section = "hunk";
+      } else if (line.startsWith("+")) {
+        text = line.slice(1);
+      }
+      const kind = text === null ? null : findTokenKind(text);
+      if (kind !== null) note(section === "message" ? "(commit message)" : displayPath(path), kind);
+    }
+    return findings.size === 0
+      ? { kind: "clean" }
+      : { kind: "possible-secret", findings: [...findings.values()] };
+  }
+
+  /** Git's stdout, or null when it is over `maxBytes`. */
+  private async readForScan(cwd: string, args: string[], maxBytes: number): Promise<string | null> {
+    try {
+      const result = await this.runGit(["--no-optional-locks", ...args], {
+        cwd,
+        envOverlay: BASE_ENV,
+        timeout: GIT_TIMEOUT_MS,
+        maxOutputBytes: maxBytes,
+      });
+      return result.truncated ? null : result.stdout;
+    } catch (error) {
+      throw new GitFailure(args, error);
+    }
   }
 
   private async writeBundle(
@@ -497,6 +683,7 @@ function buildCommitMessage(input: {
   dirtyFiles: number;
   unpushedCommits: number;
   skippedFiles: readonly string[];
+  possibleSecrets: readonly string[];
 }): string {
   const lines = [
     `backup: snapshot of ${input.worktreePath}`,
@@ -506,6 +693,11 @@ function buildCommitMessage(input: {
   ];
   if (input.skippedFiles.length > 0) {
     lines.push(`Left out, over the size cap: ${input.skippedFiles.join(", ")}`);
+  }
+  if (input.possibleSecrets.length > 0) {
+    lines.push(
+      `Not snapshotted: possible secret (left on disk): ${input.possibleSecrets.join(", ")}`,
+    );
   }
   return lines.join("\n");
 }
