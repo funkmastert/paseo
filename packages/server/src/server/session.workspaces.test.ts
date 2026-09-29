@@ -1353,7 +1353,7 @@ test("create_agent_request does not title an existing workspace from the agent p
     expect(createdAgent?.workspaceId).toBe("ws-existing");
     expect(generateCalls).toBe(0);
     // updatedAt moves because this human-attributable create auto-pins the workspace
-    // (docs/agent-lifecycle.md#pinning) — the title itself is untouched.
+    // (docs/done-janitor.md#manual-pin-vs-auto-pin) — the title itself is untouched.
     await expect(workspaceRegistry.get("ws-existing")).resolves.toMatchObject({
       title: null,
       pinnedAt: expect.any(String),

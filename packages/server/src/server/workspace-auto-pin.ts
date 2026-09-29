@@ -7,7 +7,7 @@
  * flood the pinned list.
  *
  * The pin this sets is not the same guarantee as a pin Tyler sets by hand: see isProtectivePin.
- * See docs/agent-lifecycle.md#pinning.
+ * See docs/done-janitor.md#manual-pin-vs-auto-pin.
  */
 
 import type { PersistedWorkspaceRecord, WorkspaceRegistry } from "./workspace-registry.js";
@@ -30,7 +30,7 @@ export function isProtectivePin(
  * takes precedence and is never downgraded or overwritten here — this only ever moves a workspace
  * from unpinned to auto-pinned.
  *
- * Callers gate this on a human-attributable create (see docs/agent-lifecycle.md#pinning for the
+ * Callers gate this on a human-attributable create (see docs/done-janitor.md#manual-pin-vs-auto-pin for the
  * signal and its known gap) and on the `agents.autoPinSessions` config flag.
  */
 export async function autoPinWorkspaceOnSessionStart(

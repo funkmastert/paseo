@@ -4041,7 +4041,7 @@ export class Session {
       await this.agentUpdates.forwardLiveAgent(snapshot);
       if (!msg.callerAgentId) {
         // No caller agent means this "session" create came straight from a client connection
-        // (app or CLI), not on behalf of another agent (docs/agent-lifecycle.md#pinning covers
+        // (app or CLI), not on behalf of another agent (docs/done-janitor.md#manual-pin-vs-auto-pin covers
         // the known gap: a CLI invocation that clears PASEO_AGENT_ID looks the same as a human).
         await this.maybeAutoPinWorkspace(resolvedIntent.intent.workspaceId);
         await this.emitWorkspaceUpdateForWorkspaceId(resolvedIntent.intent.workspaceId);
