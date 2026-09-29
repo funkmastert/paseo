@@ -94,12 +94,15 @@ function preToolUseInput(command: string) {
 }
 
 describe("Claude device launch gate", () => {
-  test("registers no Bash gate when the daemon has no device cap", async () => {
+  test("registers no device gate when the daemon has no device cap", async () => {
     const { hooks } = await launchHooks();
 
-    expect(hooks.PreToolUse?.some((entry) => entry.matcher === "Bash")).toBe(false);
+    // The one Bash matcher left is the catastrophe gate's, and a device launch passes it.
+    const bashMatchers = hooks.PreToolUse?.filter((entry) => entry.matcher === "Bash") ?? [];
+    expect(bashMatchers).toHaveLength(1);
+    expect(await bashHook(hooks)(preToolUseInput("xcrun simctl boot 'iPhone 17 Pro'"))).toEqual({});
     // The effort observer is untouched by the cap.
-    expect(hooks.PreToolUse).toHaveLength(1);
+    expect(hooks.PreToolUse?.filter((entry) => entry.matcher === undefined)).toHaveLength(1);
   });
 
   test("denies a device launch the cap refused, and passes its message to the model", async () => {

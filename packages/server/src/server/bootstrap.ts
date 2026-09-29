@@ -252,6 +252,7 @@ import {
 } from "./daemon-vitals/daemon-vitals.js";
 import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
+import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { RemediationConfig } from "./remediation/config.js";
 import {
   createForwardingRemediationSink,
@@ -647,6 +648,8 @@ export interface PaseoDaemonConfig {
   doneJanitor?: DoneJanitorConfig;
   admission?: ChildAdmissionConfig;
   refocus?: RefocusConfig;
+  /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
+  catastropheGate?: MutableDaemonConfig["catastropheGate"];
   remediation?: RemediationConfig;
   daemonVitals?: DaemonVitalsConfig;
   /** Startup-only: read once at boot. See docs/restart-recovery.md. */
@@ -823,6 +826,14 @@ function withRefocusConfig(
 ): Pick<MutableDaemonConfig, "refocus"> {
   // Spread: an interface carries no index signature, and the wire schema is passthrough.
   return config.refocus !== undefined ? { refocus: { ...config.refocus } } : {};
+}
+
+function withCatastropheGateConfig(
+  config: Pick<PaseoDaemonConfig, "catastropheGate">,
+): Pick<MutableDaemonConfig, "catastropheGate"> {
+  return config.catastropheGate !== undefined
+    ? { catastropheGate: { ...config.catastropheGate } }
+    : {};
 }
 
 function withRemediationConfig(
@@ -1206,6 +1217,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
     ...withDoneJanitorConfig(config),
     ...withAdmissionConfig(config),
     ...withRefocusConfig(config),
+    ...withCatastropheGateConfig(config),
     ...withRemediationConfig(config),
     ...withDiskSweeperConfig(config),
     ...withMcpGatewayConfig(config),
@@ -1676,6 +1688,17 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "artifact-janitor" }),
   });
 
+  // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
+  // `agents.catastropheGate.enabled` reaches running agents without restarting them.
+  const isCatastropheGateEnabled = () => daemonConfigStore.get().catastropheGate?.enabled !== false;
+  const catastropheGateMode = new MonitorModeLog(logger.child({ module: "catastrophe-gate" }));
+  const reportCatastropheGateMode = () =>
+    catastropheGateMode.report([
+      { monitor: "catastrophe-gate", enabled: isCatastropheGateEnabled() },
+    ]);
+  reportCatastropheGateMode();
+  daemonConfigStore.onChange(reportCatastropheGateMode);
+
   const agentProviderRuntime = await createAgentProviderRuntime({
     paseoHome: config.paseoHome,
     logger,
@@ -1686,6 +1709,7 @@ export async function createPaseoDaemon(
       workspaceGitService,
       managedProcesses,
       deviceLaunchGate,
+      isCatastropheGateEnabled,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },

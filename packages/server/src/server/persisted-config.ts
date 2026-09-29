@@ -532,6 +532,14 @@ const AgentRefocusSchema = z
   })
   .strict();
 
+// Live-toggleable, and on unless `enabled` is false: the kill switch for the catastrophe gate.
+// See docs/catastrophe-gate.md.
+const AgentCatastropheGateSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .strict();
+
 const RemediationTaskClassSchema = z.enum(["mechanical", "standard", "hard"]);
 
 // Live-toggleable. Unlike its siblings, on unless a rung says otherwise: the remediation ladder
@@ -832,6 +840,7 @@ export const PersistedConfigSchema = z
         doneJanitor: AgentDoneJanitorSchema.optional(),
         admission: AgentAdmissionSchema.optional(),
         refocus: AgentRefocusSchema.optional(),
+        catastropheGate: AgentCatastropheGateSchema.optional(),
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),

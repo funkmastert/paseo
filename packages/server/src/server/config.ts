@@ -572,6 +572,7 @@ function resolveAgentMonitorConfig(
   | "remediation"
   | "daemonVitals"
   | "restartRecovery"
+  | "catastropheGate"
 > {
   const agents = persisted.agents;
   return {
@@ -590,6 +591,7 @@ function resolveAgentMonitorConfig(
     remediation: agents?.remediation,
     daemonVitals: agents?.daemonVitals,
     restartRecovery: agents?.restartRecovery,
+    catastropheGate: agents?.catastropheGate,
   };
 }
 

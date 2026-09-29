@@ -20,6 +20,11 @@ import {
 import type { Logger } from "pino";
 import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import {
+  checkCatastrophe,
+  formatCatastropheDenial,
+  resolveCurrentBranchWithGit,
+} from "../../catastrophe-gate.js";
+import {
   mapClaudeCanceledToolCall,
   mapClaudeCompletedToolCall,
   mapClaudeFailedToolCall,
@@ -371,6 +376,16 @@ const VALID_CLAUDE_MODES = new Set(DEFAULT_MODES.map((mode) => mode.id));
  */
 const DEVICE_GATE_TIMEOUT_SECONDS = 20;
 
+/**
+ * The catastrophe gate's hook timeout. The rules are pure and answer in well under a millisecond;
+ * only a force push that names no ref waits on a `git rev-parse`, itself capped at five seconds.
+ * On timeout the SDK proceeds, the same fail-open the gate takes on any error of its own.
+ */
+const CATASTROPHE_GATE_TIMEOUT_SECONDS = 10;
+
+/** The tools whose input is a shell command line. Monitor runs `command` in a shell too. */
+const CATASTROPHE_GATED_TOOLS = ["Bash", "Monitor"] as const;
+
 const REWIND_COMMAND_NAME = "rewind";
 const REWIND_COMMAND: AgentSlashCommand = {
   name: REWIND_COMMAND_NAME,
@@ -430,6 +445,11 @@ interface ClaudeAgentClientOptions {
   resolveVersion?: (signal?: AbortSignal) => Promise<string>;
   configDir?: string;
   deviceLaunchGate?: DeviceLaunchGate;
+  /**
+   * The catastrophe gate's kill switch, `agents.catastropheGate.enabled`, read on every gated
+   * call so a reload reaches running agents. Absent means on.
+   */
+  isCatastropheGateEnabled?: () => boolean;
 }
 
 function resolveClaudeProviderParams(raw: unknown, logger: Logger): ClaudeProviderParams {
@@ -457,6 +477,7 @@ interface ClaudeAgentSessionOptions {
   queryFactory?: ClaudeQueryFactory;
   resolveBinary: () => Promise<string>;
   deviceLaunchGate?: DeviceLaunchGate;
+  isCatastropheGateEnabled?: () => boolean;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -1558,6 +1579,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly resolveVersion: (signal?: AbortSignal) => Promise<string>;
   private readonly configDir?: string;
   private readonly deviceLaunchGate?: DeviceLaunchGate;
+  private readonly isCatastropheGateEnabled?: () => boolean;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1571,6 +1593,7 @@ export class ClaudeAgentClient implements AgentClient {
       ((signal) => resolveClaudeCodeVersion(this.runtimeSettings, signal));
     this.configDir = options.configDir;
     this.deviceLaunchGate = options.deviceLaunchGate;
+    this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
@@ -1621,6 +1644,7 @@ export class ClaudeAgentClient implements AgentClient {
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
       deviceLaunchGate: this.deviceLaunchGate,
+      isCatastropheGateEnabled: this.isCatastropheGateEnabled,
     });
   }
 
@@ -1651,6 +1675,7 @@ export class ClaudeAgentClient implements AgentClient {
       queryFactory: this.queryFactory,
       resolveBinary: this.resolveBinary,
       deviceLaunchGate: this.deviceLaunchGate,
+      isCatastropheGateEnabled: this.isCatastropheGateEnabled,
     });
   }
 
@@ -2320,6 +2345,7 @@ class ClaudeAgentSession implements AgentSession {
   private closed = false;
 
   private readonly deviceLaunchGate?: DeviceLaunchGate;
+  private readonly isCatastropheGateEnabled: () => boolean;
 
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
@@ -2334,6 +2360,7 @@ class ClaudeAgentSession implements AgentSession {
     this.queryFactory = options.queryFactory;
     this.resolveBinary = options.resolveBinary;
     this.deviceLaunchGate = options.deviceLaunchGate;
+    this.isCatastropheGateEnabled = options.isCatastropheGateEnabled ?? (() => true);
     this.contextUsage = new ClaudeContextUsageState(
       findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
@@ -5147,27 +5174,90 @@ class ClaudeAgentSession implements AgentSession {
    * they can never alter tool execution or turn control.
    */
   /**
-   * Every hook this session registers. PreToolUse carries two independent matchers: the
-   * observation one below, and the device gate, which is the only place a tool call can be
-   * refused deterministically — `canUseTool` is not consulted at all under
+   * Every hook this session registers. PreToolUse carries independent matchers: the observation
+   * one below, the device gate, and the catastrophe gate. The gates are the only place a tool
+   * call can be refused deterministically — `canUseTool` is not consulted at all under
    * `bypassPermissions` ("To gate every tool call, use a PreToolUse hook instead", per the SDK),
-   * and most of Tyler's agents run in exactly that mode.
+   * and most of Tyler's agents run in exactly that mode. Hooks also fire inside subagents.
+   *
+   * Only Claude registers the catastrophe gate. Another provider would call `checkCatastrophe`
+   * from the same seam its device gate uses (docs/providers.md, "Gating a tool call").
    */
   private buildHooks(): NonNullable<ClaudeOptions["hooks"]> {
     const hooks = this.buildSubagentEffortHooks();
-    if (!this.deviceLaunchGate || !this.agentId) {
-      return hooks;
-    }
+    const deviceGate =
+      this.deviceLaunchGate && this.agentId
+        ? [
+            // `matcher` is the SDK's tool-name filter; the callback re-checks the name because a
+            // gate that fires on the wrong tool would refuse work that boots nothing.
+            {
+              matcher: "Bash",
+              hooks: [this.gateDeviceLaunch],
+              timeout: DEVICE_GATE_TIMEOUT_SECONDS,
+            },
+          ]
+        : [];
+    // Registered unconditionally: the kill switch is read per call, so a reload reaches this
+    // session without rebuilding its hooks.
+    const catastropheGate = CATASTROPHE_GATED_TOOLS.map((tool) => ({
+      matcher: tool,
+      hooks: [this.gateCatastrophe],
+      timeout: CATASTROPHE_GATE_TIMEOUT_SECONDS,
+    }));
     return {
       ...hooks,
-      PreToolUse: [
-        ...(hooks.PreToolUse ?? []),
-        // `matcher` is the SDK's tool-name filter; the callback re-checks the name because a
-        // gate that fires on the wrong tool would refuse work that boots nothing.
-        { matcher: "Bash", hooks: [this.gateDeviceLaunch], timeout: DEVICE_GATE_TIMEOUT_SECONDS },
-      ],
+      PreToolUse: [...(hooks.PreToolUse ?? []), ...deviceGate, ...catastropheGate],
     };
   }
+
+  /**
+   * Refuses a shell command that rewrites or deletes `main` on a remote, or wipes a disk, a
+   * volume or the home directory (docs/catastrophe-gate.md). Nothing else: the rules only block
+   * what they can resolve, and the gate fails open on any error of its own.
+   */
+  private gateCatastrophe = async (input: unknown): Promise<Record<string, unknown>> => {
+    const allow: Record<string, unknown> = {};
+    if (!this.isCatastropheGateEnabled()) return allow;
+    const hookInput = input as {
+      tool_name?: unknown;
+      tool_input?: { command?: unknown };
+      cwd?: unknown;
+      agent_id?: unknown;
+    };
+    const tool = hookInput.tool_name;
+    const command = hookInput.tool_input?.command;
+    if (!CATASTROPHE_GATED_TOOLS.some((gated) => gated === tool) || typeof command !== "string") {
+      return allow;
+    }
+    // The Bash tool keeps its shell's cwd between calls; the hook reports it.
+    const cwd =
+      typeof hookInput.cwd === "string" && hookInput.cwd ? hookInput.cwd : this.config.cwd;
+    try {
+      const decision = await checkCatastrophe(command, cwd, resolveCurrentBranchWithGit);
+      if (!decision.block) return allow;
+      this.logger.warn(
+        {
+          rule: decision.rule,
+          agentId: this.agentId,
+          ...(typeof hookInput.agent_id === "string" ? { subagentId: hookInput.agent_id } : {}),
+          tool,
+          cwd,
+          command: command.slice(0, 500),
+        },
+        "Catastrophe gate blocked a command",
+      );
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: formatCatastropheDenial(decision, command),
+        },
+      };
+    } catch (error) {
+      this.logger.warn({ err: error }, "Catastrophe gate failed; allowing the command");
+      return allow;
+    }
+  };
 
   /**
    * Refuses a shell command that would boot a simulator or emulator when the machine has no

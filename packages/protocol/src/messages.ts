@@ -464,6 +464,17 @@ const MutableRefocusConfigSchema = z
 
 const MutableRefocusPatchSchema = MutableRefocusConfigSchema;
 
+// Live-toggleable like refocus above — same mutable/patch split, same reason: a kill switch that
+// needs a daemon restart is no kill switch. On unless `enabled` is false.
+// See docs/catastrophe-gate.md.
+const MutableCatastropheGateConfigSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+  })
+  .passthrough();
+
+const MutableCatastropheGatePatchSchema = MutableCatastropheGateConfigSchema;
+
 // Live-toggleable like refocus above — same mutable/patch split, same reason. The remediation
 // ladder: deterministic remedy, then one bounded agent, then a person. Escalation is on unless
 // `escalation.enabled` says otherwise. See docs/remediation.md.
@@ -745,6 +756,8 @@ export const MutableDaemonConfigSchema = z
     admission: MutableAdmissionConfigSchema.optional(),
     // COMPAT(refocus): additive optional config, nothing to remove.
     refocus: MutableRefocusConfigSchema.optional(),
+    // COMPAT(catastropheGate): additive optional config, nothing to remove.
+    catastropheGate: MutableCatastropheGateConfigSchema.optional(),
     // COMPAT(remediation): additive optional config, nothing to remove.
     remediation: MutableRemediationConfigSchema.optional(),
     diskSweeper: MutableDiskSweeperConfigSchema.optional(),
@@ -782,6 +795,7 @@ export const MutableDaemonConfigPatchSchema = z
     doneJanitor: MutableDoneJanitorPatchSchema.optional(),
     admission: MutableAdmissionPatchSchema.optional(),
     refocus: MutableRefocusPatchSchema.optional(),
+    catastropheGate: MutableCatastropheGatePatchSchema.optional(),
     remediation: MutableRemediationPatchSchema.optional(),
     diskSweeper: MutableDiskSweeperPatchSchema.optional(),
     mcpGateway: MutableMcpGatewayPatchSchema.optional(),
