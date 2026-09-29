@@ -8,7 +8,9 @@
 // There is no --push. On 2026-09-24 `--push` sent every untracked file (a Notion token included)
 // and every local-only branch to funkmastert origins, and it would have done the same to the
 // public funkmastert/paseo. Offsite copies are the daemon's work snapshots (docs/work-snapshots.md),
-// which filter secrets and never push to a public repository.
+// which filter secrets and refuse public repositories once the snapshot-secret-filter fix is
+// running. Until then the live daemon pushes nothing only because
+// agents.remediation.workSnapshots.personalOwners is [].
 //
 // Usage: node work-audit.mjs [--snapshot]   (report only by default)
 import { execFileSync } from "node:child_process";
@@ -24,7 +26,9 @@ if (process.argv.includes("--push")) {
   console.error(
     "work-audit: --push was removed; it pushed untracked secrets to GitHub on 2026-09-24.\n" +
       "Offsite copies come from the daemon's work snapshots (docs/work-snapshots.md), which filter\n" +
-      "secrets and never push to a public repository. Run with --snapshot for local refs and bundles.",
+      "secrets and refuse public repositories once the snapshot-secret-filter fix is running. Until\n" +
+      "then the live daemon pushes nothing only because agents.remediation.workSnapshots.personalOwners\n" +
+      "is []. Run with --snapshot for local refs and bundles.",
   );
   process.exit(2);
 }
