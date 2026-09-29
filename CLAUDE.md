@@ -72,6 +72,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/notification-policy.md](docs/notification-policy.md)           | Notification policy — push levels, dials, availability modes, digests, the delivery ledger, and the sender inventory             |
 | [docs/remediation.md](docs/remediation.md)                           | Remediation ladder — remedy first, one bounded agent second, a person last; episodes, the agent contract, config                 |
 | [docs/refocus.md](docs/refocus.md)                                   | Refocus — restating an agent's assignment after growth or compaction, riding on prompts it already gets, cost, compaction        |
+| [docs/jev.md](docs/jev.md)                                           | JEV — the decision-model client, its fail-open rules, what leaves the machine, each feature's seam, questions and thresholds     |
 | [docs/daemon-vitals.md](docs/daemon-vitals.md)                       | Daemon vitals — event-loop wedge detector, why suspension is not a wedge, slow-op recorder, shutdown receipt                     |
 | [docs/file-observation.md](docs/file-observation.md)                 | Recursive watcher ownership, Linux constraints, teardown invariants, and Parcel comparison                                       |
 | [docs/testing.md](docs/testing.md)                                   | TDD workflow, determinism, real dependencies over mocks, test organization                                                       |
