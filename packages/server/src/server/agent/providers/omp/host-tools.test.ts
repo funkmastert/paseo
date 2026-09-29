@@ -184,7 +184,7 @@ describe("OMP host tools", () => {
       type: "host_tool_result",
       id: "host-1",
       result: {
-        content: [{ type: "text", text: expect.stringContaining('"agentId": "child-1"') }],
+        content: [{ type: "text", text: expect.stringContaining('"agentId":"child-1"') }],
         details: { input: { initialPrompt: "Inspect the bug" }, agentId: "child-1" },
       },
     });

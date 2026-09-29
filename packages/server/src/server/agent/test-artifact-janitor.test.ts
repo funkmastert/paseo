@@ -67,10 +67,13 @@ afterEach(async () => {
  * instead of backdating the directory. Real clones are never backdated, so their birth time is
  * the one thing an obligation can safely be proven against.
  */
-async function makeClone(name: string, ageMs: number): Promise<string> {
+async function makeClone(name: string, ageMs: number, payloadBytes = 0): Promise<string> {
   const path = join(setRoot, name);
   await mkdir(join(path, "data"), { recursive: true });
   await writeFile(join(path, "device.plist"), "<plist/>");
+  if (payloadBytes > 0) {
+    await writeFile(join(path, "data", "payload"), Buffer.alloc(payloadBytes, 1));
+  }
   if (ageMs > 0) {
     const seconds = (nowMs - ageMs) / 1000;
     await utimes(path, seconds, seconds);
@@ -302,10 +305,13 @@ describe("blast radius", () => {
   });
 
   test("stops at the byte budget and picks the rest up next sweep", async () => {
-    const first = await makeClone(UDID, 40 * HOUR);
-    const second = await makeClone(OTHER_UDID, 30 * HOUR);
-    // Small enough that one clone fits and two do not.
-    config = { enabled: true, maxBytesPerSweep: 4096 };
+    const first = await makeClone(UDID, 40 * HOUR, 256 * 1024);
+    const second = await makeClone(OTHER_UDID, 30 * HOUR, 256 * 1024);
+    // One clone fits and two do not. Measured rather than fixed: `du` counts directories as 0
+    // bytes on APFS and 4 KiB each on ext4.
+    const cloneBytes = await createSystemTestArtifactFileSystem().measureSizeBytes(first);
+    expect(cloneBytes).toBeGreaterThan(0);
+    config = { enabled: true, maxBytesPerSweep: Math.floor((cloneBytes ?? 0) * 1.5) };
     const janitor = buildJanitor();
 
     const result = await sweepTimes(janitor, 3);
