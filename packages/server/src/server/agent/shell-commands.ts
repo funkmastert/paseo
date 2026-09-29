@@ -15,6 +15,11 @@ export interface ShellContext {
   /** Null once a `cd` goes somewhere unresolvable; relative paths are then unknown too. */
   readonly cwd: string | null;
   readonly home: string | null;
+  /**
+   * Git Bash on Windows: `\` also separates, `C:\x` and `C:/x` are `/c/x`, and `$USERPROFILE`
+   * is the home directory. `cwd` and `home` are already in the `/c/x` form.
+   */
+  readonly windowsPaths?: boolean;
 }
 
 export interface ShellVisitor {
@@ -551,6 +556,7 @@ interface EvalContext {
   /** Variables assigned earlier in the command; null means assigned to something unknown. */
   vars: Map<string, string | null>;
   home: string | null;
+  windowsPaths?: boolean;
 }
 
 interface WalkState {
@@ -598,7 +604,9 @@ function evalList(list: CommandList, context: EvalContext, state: WalkState, dep
 
 function lookupVar(name: string, context: EvalContext): string | undefined {
   if (context.vars.has(name)) return context.vars.get(name) ?? undefined;
-  if (name === "HOME") return context.home ?? undefined;
+  if (name === "HOME" || (name === "USERPROFILE" && context.windowsPaths)) {
+    return context.home ?? undefined;
+  }
   if (name === "PWD") return context.cwd ?? undefined;
   if (name === "USER" || name === "LOGNAME") {
     return context.home ? path.posix.basename(context.home) : undefined;
@@ -939,12 +947,28 @@ function changeDirectory(args: ExpandedWord[], context: EvalContext): void {
   } else if (!target.resolved || target.text === "-") {
     context.cwd = null;
   } else {
-    context.cwd = resolvePath(context.cwd, target.text);
+    context.cwd = resolvePath(context.cwd, target.text, context.windowsPaths);
   }
 }
 
-export function resolvePath(cwd: string | null, target: string): string | null {
-  if (target.startsWith("/")) return path.posix.resolve(target);
+export function resolvePath(
+  cwd: string | null,
+  target: string,
+  windowsPaths = false,
+): string | null {
+  const spelled = windowsPaths ? gitBashPath(target) : target;
+  if (spelled.startsWith("/")) return path.posix.resolve(spelled);
   if (cwd === null) return null;
-  return path.posix.resolve(cwd, target);
+  return path.posix.resolve(cwd, spelled);
+}
+
+/**
+ * A Windows path as Git Bash spells it: `C:\Users\x` and `C:/Users/x` are `/c/Users/x`. A bare
+ * `C:` is the current directory on that drive, not its root, so it stays relative.
+ */
+export function gitBashPath(windowsPath: string): string {
+  const slashed = windowsPath.replaceAll("\\", "/");
+  const drive = /^([A-Za-z]):\//.exec(slashed);
+  if (!drive?.[1]) return slashed;
+  return `/${drive[1].toLowerCase()}/${slashed.slice(drive[0].length)}`;
 }
