@@ -137,6 +137,22 @@ describe("jev.ask through the fake transport", () => {
     expect(() => readFileSync(path.join(home, "jev", "audit.jsonl"), "utf8")).toThrow();
   });
 
+  it("refuses a question whose context names a Wonderly path, with no marker text, and sends nothing", async () => {
+    const { ask, transport, home } = harness();
+    const contexts = [
+      `cat ${path.join(home, "mobile-worktrees", "app", "build.gradle")}`,
+      "~/backend-net/src/Deals/DealService.cs throws on an empty page",
+      "git -C ../backend-net diff HEAD~1",
+    ];
+
+    for (const context of contexts) {
+      expect(context.toLowerCase()).not.toContain("wonderly");
+      const payload = await ask({ context, question: YES_NO });
+      expect(payload).toMatchObject({ outcome: "unavailable", reason: "excluded", cost: null });
+    }
+    expect(transport.calls).toHaveLength(0);
+  });
+
   it("refuses an attached agent whose cwd is under a D7 root and sends nothing", async () => {
     const { ask, transport, home } = harness({
       service: {

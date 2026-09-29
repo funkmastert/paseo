@@ -86,6 +86,8 @@ export type JevFeatureId =
   | "agentTools"
   | "compactionTiming"
   | "stallJudgment"
+  /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
+  | "awayReply"
   /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
   | "askJev";
 
@@ -285,6 +287,8 @@ export interface JevStatus {
   /** Whether a key is present. Never the value, a prefix, the last characters or a hash. */
   keyPresent: boolean;
   provider: "openrouter" | "typesafe" | "fake";
+  /** True when `provider` was read off the key's prefix rather than `agents.jev.provider`. */
+  providerInferred: boolean;
   model: string;
   features: Record<JevFeatureId, JevFeatureStatus>;
   lanes: Record<JevLane, JevLaneStatus>;

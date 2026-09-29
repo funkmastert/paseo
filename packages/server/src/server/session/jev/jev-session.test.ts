@@ -34,6 +34,7 @@ const BASE_STATUS: JevStatus = {
   reason: null,
   keyPresent: true,
   provider: "fake",
+  providerInferred: false,
   model: "jev-fake",
   features: {
     spawnHint: FEATURE_STATUS,
@@ -42,6 +43,7 @@ const BASE_STATUS: JevStatus = {
     agentTools: { enabled: true, shadow: false },
     compactionTiming: FEATURE_STATUS,
     stallJudgment: FEATURE_STATUS,
+    awayReply: FEATURE_STATUS,
     askJev: { enabled: true, shadow: false },
   },
   lanes: { control: LANE_STATUS, agentTools: LANE_STATUS, interactive: LANE_STATUS },
@@ -54,6 +56,7 @@ const BASE_STATUS: JevStatus = {
     agentTools: SPEND_TOTALS,
     compactionTiming: SPEND_TOTALS,
     stallJudgment: SPEND_TOTALS,
+    awayReply: SPEND_TOTALS,
     askJev: SPEND_TOTALS,
   },
   last7Days: [],

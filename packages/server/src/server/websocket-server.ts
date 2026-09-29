@@ -100,6 +100,7 @@ import {
   normalizeClientRestartRpcReason,
 } from "./lifecycle-reasons.js";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import type { EffectiveAvailability } from "./notify-policy/availability.js";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -1002,6 +1003,11 @@ export class VoiceAssistantWebSocketServer {
    * each session's `usage.history.get` reads it, so both must share one in-memory view. */
   public getUsageHistoryStore(): UsageHistoryStore {
     return this.usageHistoryStore;
+  }
+
+  /** Tyler's availability mode now (docs/notification-policy.md), read by the away auto-reply. */
+  public getAvailabilityMode(): EffectiveAvailability["mode"] {
+    return this.pushNotifications.policy.getStatus().effectiveAvailability.mode;
   }
 
   public listSessions(): Session[] {

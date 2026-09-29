@@ -11,6 +11,7 @@ import {
   AgentManagerShuttingDownError,
   commandMayHaveChangedExternalState,
   type AgentManagerEvent,
+  type AgentOperatorSignal,
   type ManagedAgent,
 } from "./agent-manager.js";
 import { AgentStorage } from "./agent-storage.js";
@@ -7346,6 +7347,47 @@ test("a cancelled turn is not a finish, and does not survive into the next one",
 
   expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
   expect(attentionReasons).toEqual(["finished"]);
+});
+
+test("a cancelled turn raises a turn-canceled signal with who cancelled it; a finish does not", async () => {
+  // The away auto-reply (docs/jev.md, feature 14) must not read a stopped turn as a finished one.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-operator-signals-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const manager = new AgentManager({
+    clients: { codex: new CancelableTestAgentClient() },
+    registry: storage,
+    logger,
+    idFactory: () => randomUUID(),
+  });
+  const signals: AgentOperatorSignal[] = [];
+  const unsubscribe = manager.subscribeOperatorSignals((signal) => signals.push(signal));
+
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Signals" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  void manager.streamAgent(agent.id, "sleep 30").next();
+  await vi.waitFor(() => expect(manager.getAgent(agent.id)?.lifecycle).toBe("running"));
+  await manager.cancelAgentRun(agent.id, "spend-governor");
+  await manager.flush();
+  expect(signals).toMatchObject([
+    { kind: "turn-canceled", agentId: agent.id, reason: "spend-governor" },
+  ]);
+
+  await manager.runAgent(agent.id, "say hello");
+  await manager.flush();
+  expect(signals).toHaveLength(1);
+
+  manager.recordHumanPrompt(agent.id, "client-msg-1");
+  manager.recordHumanPermissionResponse(agent.id, "req-1", { behavior: "deny" });
+  expect(signals.slice(1)).toMatchObject([
+    { kind: "human-prompt", agentId: agent.id, clientMessageId: "client-msg-1" },
+    { kind: "human-permission-response", agentId: agent.id, requestId: "req-1" },
+  ]);
+  unsubscribe();
+  manager.recordHumanPrompt(agent.id, "client-msg-2");
+  expect(signals).toHaveLength(3);
 });
 
 test("the done janitor's question raises no finish, and does not silence the next one", async () => {

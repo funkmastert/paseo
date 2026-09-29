@@ -132,6 +132,8 @@ export const JevStatusSchema = z.object({
   keyPresent: z.boolean(),
   // "openrouter" | "typesafe" | "fake"
   provider: z.string(),
+  // Absent from an older daemon: whether `provider` was read off the key's prefix.
+  providerInferred: z.boolean().optional(),
   model: z.string(),
   features: z.record(z.string(), JevFeatureStatusSchema),
   lanes: z.record(z.string(), JevLaneStatusSchema),

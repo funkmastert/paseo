@@ -3881,6 +3881,15 @@ export class Session {
   }
 
   /**
+   * Only an app client sends heartbeats, so a session with client activity is a person at the
+   * app, desktop or web UI; the CLI and MCP tools, which agents use too, never are. The away
+   * auto-reply counts only these as Tyler (docs/jev.md, "Feature 14").
+   */
+  private recordHumanPrompt(agentId: string, messageId: string | null): void {
+    if (this.clientActivity) this.agentManager.recordHumanPrompt(agentId, messageId);
+  }
+
+  /**
    * Handle text message to agent (with optional image attachments)
    */
   private async handleSendAgentMessage(
@@ -3924,6 +3933,7 @@ export class Session {
         clearPendingPermissions: true,
         logger: this.sessionLogger,
       });
+      this.recordHumanPrompt(agentId, messageId ?? null);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -4890,6 +4900,9 @@ export class Session {
         response,
         logger: this.sessionLogger,
       });
+      if (this.clientActivity) {
+        this.agentManager.recordHumanPermissionResponse(agentId, requestId, response);
+      }
     } catch (error) {
       this.sessionLogger.error(
         { err: error, agentId, requestId },
@@ -8117,6 +8130,7 @@ export class Session {
       } else {
         await send();
       }
+      this.recordHumanPrompt(agentId, msg.messageId ?? null);
 
       this.emit({
         type: "send_agent_message_response",

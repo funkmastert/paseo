@@ -15,7 +15,11 @@ import {
   JEV_PROVIDER_DEFAULTS,
   jevConfigSection,
   resolveJevConfig,
+  resolveJevProvider,
 } from "./config.js";
+
+const TYPESAFE_KEY = "apikey_fake-typesafe-key-do-not-use";
+const OPENROUTER_KEY = "sk-or-fake-openrouter-key-do-not-use";
 
 const HOME = "/fake/home";
 
@@ -135,6 +139,95 @@ describe("resolveJevConfig provider selection", () => {
   test("an unknown provider falls back to openrouter", () => {
     const config = resolveJevConfig({ provider: "azure" }, { homeDir: HOME });
     expect(config.provider).toBe("openrouter");
+  });
+
+  test("no explicit provider and no key stays openrouter, not inferred", () => {
+    const config = resolveJevConfig({}, { homeDir: HOME });
+    expect(config.provider).toBe("openrouter");
+    expect(config.providerInferred).toBe(false);
+  });
+});
+
+describe("resolveJevProvider: inference from the key's prefix", () => {
+  test("apikey_ infers typesafe", () => {
+    expect(resolveJevProvider(undefined, TYPESAFE_KEY)).toEqual({
+      provider: "typesafe",
+      inferred: true,
+    });
+  });
+
+  test("sk-or- infers openrouter", () => {
+    expect(resolveJevProvider(undefined, OPENROUTER_KEY)).toEqual({
+      provider: "openrouter",
+      inferred: true,
+    });
+  });
+
+  test("an unrecognized prefix keeps today's default, not inferred", () => {
+    expect(resolveJevProvider(undefined, "some-other-key-shape")).toEqual({
+      provider: "openrouter",
+      inferred: false,
+    });
+  });
+
+  test("no key keeps today's default, not inferred", () => {
+    expect(resolveJevProvider(undefined, null)).toEqual({
+      provider: "openrouter",
+      inferred: false,
+    });
+  });
+
+  test("an explicit provider wins over a key that would infer the other one", () => {
+    expect(resolveJevProvider("openrouter", TYPESAFE_KEY)).toEqual({
+      provider: "openrouter",
+      inferred: false,
+    });
+    expect(resolveJevProvider("typesafe", OPENROUTER_KEY)).toEqual({
+      provider: "typesafe",
+      inferred: false,
+    });
+  });
+});
+
+describe("resolveJevConfig: provider inferred from the key end to end", () => {
+  test("an apikey_ key with no explicit provider resolves the typesafe endpoint and model", () => {
+    const config = resolveJevConfig({}, { homeDir: HOME, key: TYPESAFE_KEY });
+    expect(config.provider).toBe("typesafe");
+    expect(config.providerInferred).toBe(true);
+    expect(config.endpointUrl).toBe(JEV_PROVIDER_DEFAULTS.typesafe.url);
+    expect(config.model).toBe(JEV_PROVIDER_DEFAULTS.typesafe.model);
+  });
+
+  test("an sk-or- key with no explicit provider resolves the openrouter endpoint and model", () => {
+    const config = resolveJevConfig({}, { homeDir: HOME, key: OPENROUTER_KEY });
+    expect(config.provider).toBe("openrouter");
+    expect(config.providerInferred).toBe(true);
+    expect(config.endpointUrl).toBe(JEV_PROVIDER_DEFAULTS.openrouter.url);
+    expect(config.model).toBe(JEV_PROVIDER_DEFAULTS.openrouter.model);
+  });
+
+  test("an explicit agents.jev.provider overrides inference both ways", () => {
+    const staysOpenrouter = resolveJevConfig(
+      { provider: "openrouter" },
+      { homeDir: HOME, key: TYPESAFE_KEY },
+    );
+    expect(staysOpenrouter.provider).toBe("openrouter");
+    expect(staysOpenrouter.providerInferred).toBe(false);
+
+    const staysTypesafe = resolveJevConfig(
+      { provider: "typesafe" },
+      { homeDir: HOME, key: OPENROUTER_KEY },
+    );
+    expect(staysTypesafe.provider).toBe("typesafe");
+    expect(staysTypesafe.providerInferred).toBe(false);
+  });
+
+  test("no key leaves resolution unchanged from today's behaviour", () => {
+    const withKey = resolveJevConfig({}, { homeDir: HOME, key: null });
+    const withoutKeyOption = resolveJevConfig({}, { homeDir: HOME });
+    expect(withKey).toEqual(withoutKeyOption);
+    expect(withKey.provider).toBe("openrouter");
+    expect(withKey.providerInferred).toBe(false);
   });
 });
 
@@ -412,6 +505,84 @@ describe("createJevConfigReader", () => {
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain(where);
     expect(lines[0]).not.toContain("typsafe");
+  });
+
+  test("resolveKey feeds provider inference through the cached reader", () => {
+    const { logger } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: { agents: { jev: {} } } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+      resolveKey: () => TYPESAFE_KEY,
+    });
+    const result = reader.read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.provider).toBe("typesafe");
+    expect(result.config.providerInferred).toBe(true);
+  });
+
+  test("an explicit provider wins over resolveKey's inference through the reader", () => {
+    const { logger } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: { agents: { jev: { provider: "openrouter" } } } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+      resolveKey: () => TYPESAFE_KEY,
+    });
+    const result = reader.read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.provider).toBe("openrouter");
+    expect(result.config.providerInferred).toBe(false);
+  });
+
+  test("with no resolveKey, the reader infers nothing (today's behaviour)", () => {
+    const { logger } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: { agents: { jev: {} } } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+    });
+    const result = reader.read();
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.config.provider).toBe("openrouter");
+    expect(result.config.providerInferred).toBe(false);
+  });
+
+  test("the key resolveKey returns never appears in a log line", () => {
+    const { logger, text } = capturingLogger();
+    const readRaw = () => ({
+      rawConfig: {
+        agents: { jev: { endpointUrl: "https://evil.example.com/steal" } },
+      } as Record<string, unknown>,
+      rawConfigError: null,
+    });
+    const reader = createJevConfigReader({
+      paseoHome: createTempPaseoHome(),
+      homeDir: HOME,
+      logger,
+      readRaw,
+      resolveKey: () => TYPESAFE_KEY,
+    });
+    reader.read();
+    expect(text()).not.toContain(TYPESAFE_KEY);
   });
 
   test("logs one line per distinct rejected endpoint value, naming no path or query", () => {
