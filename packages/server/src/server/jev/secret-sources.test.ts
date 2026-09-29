@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { collectJevSecretValues, type JevSecretSources } from "./secret-sources.js";
+import {
+  collectJevSecretValues,
+  isSecretEnvName,
+  type JevSecretSources,
+} from "./secret-sources.js";
 
 function sources(overrides: Partial<JevSecretSources> = {}): JevSecretSources {
   return {
@@ -57,6 +61,21 @@ describe("collectJevSecretValues", () => {
     expect(values(result)).toEqual(["ghp_value_111111", "zai-key-2222222"]);
   });
 
+  it("takes names that only contain a secret word, and never the working directory", () => {
+    const result = collectJevSecretValues(
+      sources({
+        startupEnv: {
+          NGROK_AUTHTOKEN: "ngrok-value-111111",
+          PGPASSWORD: "pg-value-2222222",
+          PWD: "/Users/x/paseo-worktrees/jev-foundation",
+          OLDPWD: "/Users/x/paseo-worktrees",
+        },
+      }),
+      null,
+    );
+    expect(values(result)).toEqual(["ngrok-value-111111", "pg-value-2222222"]);
+  });
+
   it("reads the OpenAI usage key from its variable and env file", () => {
     const result = collectJevSecretValues(
       sources({
@@ -87,5 +106,40 @@ describe("collectJevSecretValues", () => {
       null,
     );
     expect(values(result)).toEqual(["oauth-access-dddddddd"]);
+  });
+});
+
+describe("isSecretEnvName", () => {
+  it.each([
+    "NGROK_AUTHTOKEN",
+    "PGPASSWORD",
+    "SSHPASS",
+    "APITOKEN",
+    "NPM_CONFIG_AUTHTOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_TOKEN_2",
+    "SECRET_KEY_BASE",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "LINEAR_APIKEY",
+    "HTTP_AUTHORIZATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "MYSQL_PWD",
+    "SENTRY_DSN",
+  ])("collects %s", (name) => {
+    expect(isSecretEnvName(name)).toBe(true);
+  });
+
+  it.each([
+    "PWD",
+    "OLDPWD",
+    "HOME",
+    "PATH",
+    "TMPDIR",
+    "SSH_AUTH_SOCK",
+    "GIT_AUTHOR_NAME",
+    "AWS_ACCESS_KEY_ID",
+    "NODE_ENV",
+  ])("skips %s", (name) => {
+    expect(isSecretEnvName(name)).toBe(false);
   });
 });

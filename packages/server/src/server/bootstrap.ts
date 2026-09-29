@@ -330,8 +330,7 @@ import { resolveJevAgentCwds } from "./jev/agent-cwds.js";
 import type { JevService, JevTransport } from "./jev/contract.js";
 import { createFakeJevTransport } from "./jev/fake.js";
 import { captureJevKeyFromEnv } from "./jev/key.js";
-import { collectJevSecretValues } from "./jev/secret-sources.js";
-import { isSecretName } from "./jev/redact.js";
+import { collectJevSecretValues, isSecretEnvName } from "./jev/secret-sources.js";
 import {
   createJevService,
   type JevBudgetExhaustedEvent,
@@ -1338,7 +1337,7 @@ function captureDaemonJevKey(config: PaseoDaemonConfig): {
   secretEnv: Record<string, string | undefined>;
 } {
   const secretEnv = Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => isSecretName(name)),
+    Object.entries(process.env).filter(([name]) => isSecretEnvName(name)),
   );
   return {
     capturedKey: captureJevKeyFromEnv(process.env, [config.configReload?.env]),

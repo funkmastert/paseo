@@ -20,19 +20,24 @@ export interface JevSecretValue {
 /** A secret-shaped name, matched against the whole name and against its last segment. */
 export const SECRET_NAME_RE =
   /^(?:secret|token|passw(?:or)?d|pwd|pass|api[_-]?key|key|auth|credentials?|private[_-]?key|pat|dsn)$/i;
+/** The same words closing a run-together segment: `AUTHTOKEN`, `PGPASSWORD`, `SSHPASS`. */
+const SECRET_SUFFIX_RE =
+  /(?:secret|token|passw(?:or)?d|passphrase|pwd|pass|key|auth|credentials?)$/i;
 
 const MIN_SECRET_LENGTH = 8;
 const SAFE_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const LAST_CAMEL_WORD_RE = /(?:[A-Z][a-z0-9]+|[A-Z]+|[a-z0-9]+)$/;
 
 /**
- * The doc's secret-name rule: the name, its last `_`/`-`/`.` segment, or that segment's last
- * camelCase word (`apiKey`, `_authToken`), or a database URL (`DATABASE_URL`, `sentryDsnUrl`).
+ * The doc's secret-name rule: the name, its last `_`/`-`/`.` segment or how that segment ends
+ * (`NGROK_AUTHTOKEN`, `PGPASSWORD`), or that segment's last camelCase word (`apiKey`,
+ * `_authToken`), or a database URL (`DATABASE_URL`, `sentryDsnUrl`). Plurals and qualifiers
+ * after the word are not secrets: `max_tokens`, `key-file`, `password-stdin`.
  */
 export function isSecretName(name: string): boolean {
   if (SECRET_NAME_RE.test(name)) return true;
   const lastSegment = name.split(/[_.-]/).findLast((segment) => segment.length > 0) ?? "";
-  if (SECRET_NAME_RE.test(lastSegment)) return true;
+  if (SECRET_NAME_RE.test(lastSegment) || SECRET_SUFFIX_RE.test(lastSegment)) return true;
   const lastWord = LAST_CAMEL_WORD_RE.exec(lastSegment)?.[0] ?? "";
   if (SECRET_NAME_RE.test(lastWord)) return true;
   return /url$/i.test(name) && /database|dsn/i.test(name);
@@ -133,17 +138,69 @@ const AUTH_HEADER_RE =
   /(?<![A-Za-z0-9_-])(?:proxy-)?authorization\\?["']?[ \t]{0,16}[:=][ \t]{0,16}\\?["']?([^\r\n"'\\]{8,})/gi;
 const BEARER_RE = /(?<![A-Za-z0-9_-])bearer[ \t]{1,16}([A-Za-z0-9._~+/-]{16,}=*)/gi;
 const TOKEN_RE =
-  /(?<![A-Za-z0-9_-])(?:(?:sk-ant-|sk-or-|sk-|sk_live_|rk_live_|gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|tskey-)[A-Za-z0-9_-]{16,}|npm_[a-z0-9]{36,}|ya29\.[A-Za-z0-9_.-]{16,}|(?:akia|asia)[a-z0-9]{16}(?![a-z0-9])|aiza[a-z0-9_-]{30,})/gi;
+  /(?<![A-Za-z0-9_-])(?:(?:sk-ant-|sk-or-|sk-|sk_live_|rk_live_|gh[pousr]_|github_pat_|glpat-|xox[abeprs]-|xapp-|tskey-|figd_|glsa_)[A-Za-z0-9_-]{16,}|(?:sk_test_|rk_test_|lin_api_|ntn_|dop_v1_|whsec_)[a-z0-9]{16,}|secret_[a-z0-9]{40,}|sg\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|1\/\/0[A-Za-z0-9_-]{16,}|npm_[a-z0-9]{36,}|ya29\.[A-Za-z0-9_.-]{16,}|(?:akia|asia)[a-z0-9]{16}(?![a-z0-9])|aiza[a-z0-9_-]{30,})/gi;
+/** Slack and Discord incoming webhooks: the host stays, the path that is the credential goes. */
+const WEBHOOK_RE =
+  /(?:hooks\.slack\.com\/(?:services|workflows|triggers)|discord(?:app)?\.com\/api\/webhooks)\/([A-Za-z0-9_/-]{16,})/gi;
 const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/gi;
 const USERINFO_RE =
   /(?<![A-Za-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/([^\s/?#@:"'<>\\]{1,256}):([^\s/?#@"'<>\\]{1,256})@/gi;
 /** A name and its separator; the value is read by `assignedValue`. */
 const ASSIGNMENT_NAME_RE =
-  /(?<![\w.$-])\\?["']?([A-Za-z_][\w.-]{0,63})\\?["']?[ \t]{0,16}[:=][ \t]{0,16}/g;
+  /(?<![\w.$-])\\?["']?([A-Za-z_][\w.-]{0,63})\\?["']?[ \t]{0,16}([:=])[ \t]{0,16}/g;
+/** Names whose values can be phrases with spaces; tokens and keys never have them. */
+const PASSPHRASE_NAME_RE = /(?:passw(?:or)?d|passphrase|pass|pwd|secret)$/i;
+/** Where a YAML key starts a line, optionally as a list item. */
+const LINE_START_RE = /(?<=(?:^|[\r\n])[ \t]{0,32}(?:-[ \t]{1,8})?)/y;
+/** A YAML scalar: its words to the end of the line, stopping at a ` #` comment. */
+const LINE_VALUE_RE = /[^\s"'`,;&|]+(?:[ \t]+(?!#)[^\s"'`,;&|]+)*/y;
+const QUOTE_START_RE = /^["'\\]/;
+/** `--token X`, `--password=X`, `"--token","X"`: the name is judged by `isSecretName`. */
+const FLAG_RE =
+  /(?<![\w-])--?([A-Za-z][\w-]{0,63})(?:=|[ \t]{1,16}|\\?["'][ \t]{0,16},[ \t]{0,16})/g;
+/** A bare word and the blanks after it: `aws configure set aws_secret_access_key X`. */
+const ARGUMENT_NAME_RE = /(?<![\w.$-])([A-Za-z_][\w.-]{0,63})[ \t]{1,16}/g;
+/** Secret words that are prose on their own ("the token expired"), not an argument's name. */
+const PROSE_SECRET_WORD_RE = /^(?:secret|token|pass|pwd|key|auth|credentials?|pat|dsn)$/i;
+/** Another option where a value would start, possibly quoted: `--token --verbose`. */
+const OPTION_AHEAD_RE = /\\?["']?-/y;
+/** Not a secret argument: `$VAR`, a URL, or a path (base64 has no `.`, `~`, `-`, `_` or `\`). */
+const NOT_SECRET_ARGUMENT_RE =
+  /^(?:\$\{?[A-Za-z_]\w*\}?$|[a-z][a-z0-9+.-]*:\/\/|(?:~|\.{1,2}|[a-z]:)[\\/]|\\|\/(?=.*[^a-z0-9+/=]))/i;
+/**
+ * Commands whose `-p` is a password. The mysql family takes it attached (`-pX`), since `-p X`
+ * prompts and names a database; the others take it either way.
+ */
+const PASSWORD_COMMAND_RE =
+  /(?<![\w./-])(?:(mysql(?:dump|admin|import|show|check|pump)?|mariadb(?:-dump|-admin)?)|sshpass|mongo(?:sh|dump|restore|import|export)?|(?:docker|podman|nerdctl|buildah|skopeo|oras)[ \t]{1,16}login)(?![\w.-])/g;
+/** Where a command ends: a newline without a `\` continuation, `;`, `|` or `&`. */
+const COMMAND_END_RE = /(?<!\\)\r?\n|[;|&]/g;
+const SHORT_PASSWORD_FLAG_RE = /(?<!\S)-p/g;
+const PASSWORD_FLAG_GAP_RE = /=|[ \t]{1,16}/y;
 const GENERIC_ASSIGNMENT_RE =
   /(?:secret|token|passw(?:or)?d|pwd|api[_-]?key|auth|credential|private[_-]?key)\\?["']?\s{0,32}[:=]\s{0,32}\\?["']?([^\s"',]{8,})/gi;
 const ENTROPY_RE = /(?:[=:]|bearer[ \t]{1,16})[ \t]{0,16}\\?["']?([A-Za-z0-9+/_-]{32,})={0,2}/gi;
 const MIN_ENTROPY_BITS = 4;
+/**
+ * A run of base64 or hex characters standing alone, judged by `isSecretRun`. A run after a `.`
+ * is a host's or file's tail (`hooks.slack.com/services/…`), which other rules own.
+ */
+const BARE_RUN_RE = /(?<![A-Za-z0-9+/_.-]|sha\d{1,3}:)[A-Za-z0-9+/_-]{40,}={0,2}/gi;
+const MIN_BARE_RUN_LENGTH = 40;
+/** A content digest (`sha512-…` in a lockfile, `sha256:…` in an image), not a secret. */
+const DIGEST_RE = /^sha\d{1,3}-/i;
+const HEX_RE = /^[0-9a-f]+$/i;
+const MIN_HEX_SECRET_LENGTH = 64;
+/**
+ * Random data changes between lower case, upper case, digits and symbols on about 65% of
+ * adjacent characters and measures 4.6 bits or more over 40 characters. camelCase identifiers
+ * and paths reach 4.5 bits but change class on under 40%.
+ */
+const MIN_BARE_ENTROPY_BITS = 4.5;
+const MIN_CLASS_CHANGE_RATIO = 0.45;
+/** Base64 that decodes to this share of printable text is encoded text, which may hide a secret. */
+const MIN_PRINTABLE_RATIO = 0.95;
+const MIN_DECODED_BYTES = 24;
 const EMAIL_RE =
   /(?<![\w.+%-])[A-Za-z0-9][\w.+%-]{0,63}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,24}(?![A-Za-z0-9-])/g;
 
@@ -213,10 +270,78 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function redactValue(value: unknown, ctx: WalkContext): unknown {
   if (typeof value === "string") return redactText(value, ctx);
-  if (Array.isArray(value)) return value.map((item) => redactValue(item, ctx));
+  if (Array.isArray(value)) {
+    const items = isStringArray(value) ? redactArgvContext(value, ctx) : value;
+    return items.map((item) => redactValue(item, ctx));
+  }
   if (isRecord(value))
     return redactRecord(value, ctx, (key, item) => redactField(key, item, ctx)).record;
   return value;
+}
+
+function isStringArray(value: unknown[]): value is string[] {
+  return value.length > 1 && value.every((item) => typeof item === "string");
+}
+
+/**
+ * An argv held as an array keeps a flag and its value in separate strings, where no text rule sees
+ * both (`["ngrok", "--authtoken", X]`, `["mysql", "-pX"]`). The rules that read a value from its
+ * context run over the elements joined by spaces, and each match is cut out of the element it
+ * falls in; every element then goes through the text rules as usual.
+ */
+function redactArgvContext(items: string[], ctx: WalkContext): string[] {
+  const joined = items.join(" ");
+  const spans: SecretSpan[] = [];
+  flagSpans(joined, spans);
+  argumentSpans(joined, spans);
+  shortPasswordSpans(joined, spans);
+  if (spans.length === 0) return items;
+  const offsets: number[] = [];
+  let offset = 0;
+  for (const item of items) {
+    offsets.push(offset);
+    offset += item.length + 1;
+  }
+  const cuts: TextRange[][] = items.map(() => []);
+  for (const span of spans) {
+    for (let index = elementAt(offsets, span.start); index < items.length; index += 1) {
+      if (offsets[index] >= span.end) break;
+      const start = Math.max(span.start, offsets[index]) - offsets[index];
+      const end = Math.min(span.end, offsets[index] + items[index].length) - offsets[index];
+      if (start < end) cuts[index].push({ start, end });
+    }
+  }
+  return items.map((item, index) => cutRanges(item, cuts[index], ctx));
+}
+
+/** The element whose text holds `position` of the joined argv (offsets ascend). */
+function elementAt(offsets: number[], position: number): number {
+  let low = 0;
+  let high = offsets.length - 1;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (offsets[middle] <= position) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+function cutRanges(text: string, ranges: TextRange[], ctx: WalkContext): string {
+  if (ranges.length === 0) return text;
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  let result = "";
+  let at = 0;
+  for (const range of sorted) {
+    if (range.start < at) {
+      // Overlaps the cut before it: widen that cut, no second marker.
+      at = Math.max(at, range.end);
+      continue;
+    }
+    result += text.slice(at, range.start) + marker("argument");
+    ctx.count += 1;
+    at = range.end;
+  }
+  return result + text.slice(at);
 }
 
 /** A string under a secret-shaped key is a structured assignment: its whole value goes. */
@@ -320,11 +445,16 @@ function redactText(text: string, ctx: WalkContext): string {
   suffixSpans(text, AUTH_HEADER_RE, "bearer", findings.secrets);
   suffixSpans(text, BEARER_RE, "bearer", findings.secrets);
   wholeSpans(text, TOKEN_RE, "token", findings.secrets);
+  suffixSpans(text, WEBHOOK_RE, "webhook", findings.secrets);
   wholeSpans(text, JWT_RE, "jwt", findings.secrets);
   userinfoSpans(text, findings);
   assignmentSpans(text, findings.secrets);
   genericAssignmentSpans(text, findings.secrets);
+  flagSpans(text, findings.secrets);
+  argumentSpans(text, findings.secrets);
+  shortPasswordSpans(text, findings.secrets);
   entropySpans(text, findings.secrets);
+  bareRunSpans(text, findings.secrets);
   exactSpans(text, ctx.secrets, findings.secrets);
   for (const match of text.matchAll(EMAIL_RE)) findings.emails.push(rangeOf(match));
   if (ctx.home) {
@@ -418,16 +548,107 @@ function userinfoSpans(text: string, findings: LeafFindings): void {
 }
 
 /**
- * `NAME=value`, `export NAME=value`, `"name": "value"`, `name: value`, `_authToken=value`. The
- * search resumes after each value it read, so `token=token=…` stays linear.
+ * `NAME=value`, `export NAME=value`, `"name": "value"`, `name: value`, `_authToken=value`. A
+ * YAML password key at the start of a line takes its words to the end of the line. The search resumes
+ * after each value it read, so `token=token=…` stays linear.
  */
 function assignmentSpans(text: string, out: SecretSpan[]): void {
   const re = new RegExp(ASSIGNMENT_NAME_RE);
   for (let match = re.exec(text); match; match = re.exec(text)) {
     if (!isSecretName(match[1])) continue;
-    const value = assignedValue(text, re.lastIndex);
+    const yamlLine =
+      match[2] === ":" && PASSPHRASE_NAME_RE.test(match[1]) && startsLine(text, match.index);
+    const value = yamlLine ? lineValue(text, re.lastIndex) : assignedValue(text, re.lastIndex);
     if (value.end - value.start >= MIN_SECRET_LENGTH) out.push({ ...value, kind: "assignment" });
     re.lastIndex = Math.max(re.lastIndex, value.end);
+  }
+}
+
+function startsLine(text: string, at: number): boolean {
+  LINE_START_RE.lastIndex = at;
+  return LINE_START_RE.test(text);
+}
+
+/** A quoted value as `assignedValue` reads it; a bare one runs to the end of the line. */
+function lineValue(text: string, from: number): TextRange {
+  if (QUOTE_START_RE.test(text.slice(from, from + 1))) return assignedValue(text, from);
+  LINE_VALUE_RE.lastIndex = from;
+  return { start: from, end: from + (LINE_VALUE_RE.exec(text)?.[0].length ?? 0) };
+}
+
+/**
+ * `--token X`, `--password=X`, `-authtoken X`, and the same flag inside a JSON argv array. The
+ * search resumes after every value it read, kept or not, so `--password=--password=…` stays
+ * linear; an option where the value would be is not read, so it is still searched.
+ */
+function flagSpans(text: string, out: SecretSpan[]): void {
+  const re = new RegExp(FLAG_RE);
+  for (let match = re.exec(text); match; match = re.exec(text)) {
+    if (!isSecretName(match[1])) continue;
+    const value = argumentValue(text, re.lastIndex);
+    if (!value) continue;
+    re.lastIndex = Math.max(re.lastIndex, value.end);
+    if (isSecretArgument(text.slice(value.start, value.end)))
+      out.push({ ...value, kind: "argument" });
+  }
+}
+
+/**
+ * A bare secret name followed by its value: `aws configure set aws_secret_access_key X`,
+ * `ngrok config add-authtoken X`, `npm config set _authToken X`. Prose puts plain words after
+ * a name ("the GITHUB_TOKEN variable"), so the value needs a character that is not a letter.
+ */
+function argumentSpans(text: string, out: SecretSpan[]): void {
+  const re = new RegExp(ARGUMENT_NAME_RE);
+  for (let match = re.exec(text); match; match = re.exec(text)) {
+    const name = match[1];
+    if (PROSE_SECRET_WORD_RE.test(name) || !isSecretName(name)) continue;
+    const value = argumentValue(text, re.lastIndex);
+    if (!value) continue;
+    re.lastIndex = Math.max(re.lastIndex, value.end);
+    const argument = text.slice(value.start, value.end);
+    if (isSecretArgument(argument) && /[^A-Za-z]/.test(argument)) {
+      out.push({ ...value, kind: "argument" });
+    }
+  }
+}
+
+/** The value after a flag or an argument's name, or null when another option follows. */
+function argumentValue(text: string, from: number): TextRange | null {
+  OPTION_AHEAD_RE.lastIndex = from;
+  return OPTION_AHEAD_RE.test(text) ? null : assignedValue(text, from);
+}
+
+function isSecretArgument(value: string): boolean {
+  return value.length >= MIN_SECRET_LENGTH && !NOT_SECRET_ARGUMENT_RE.test(value);
+}
+
+/**
+ * `-p` after a command that means a password by it (`mysql -pX`, `docker login -p X`), at any
+ * length. Each command's search stops where the command ends and the next command's search
+ * starts there, so the text is read once.
+ */
+function shortPasswordSpans(text: string, out: SecretSpan[]): void {
+  const commands = new RegExp(PASSWORD_COMMAND_RE);
+  const ends = new RegExp(COMMAND_END_RE);
+  const flags = new RegExp(SHORT_PASSWORD_FLAG_RE);
+  for (let command = commands.exec(text); command; command = commands.exec(text)) {
+    const attachedOnly = command[1] !== undefined;
+    const from = commands.lastIndex;
+    ends.lastIndex = from;
+    const end = ends.exec(text)?.index ?? text.length;
+    flags.lastIndex = 0;
+    const segment = text.slice(from, end);
+    for (let flag = flags.exec(segment); flag; flag = flags.exec(segment)) {
+      let valueFrom = from + flags.lastIndex;
+      if (!attachedOnly) {
+        PASSWORD_FLAG_GAP_RE.lastIndex = valueFrom;
+        if (PASSWORD_FLAG_GAP_RE.test(text)) valueFrom = PASSWORD_FLAG_GAP_RE.lastIndex;
+      }
+      const value = assignedValue(text, valueFrom);
+      if (value.end > value.start) out.push({ ...value, kind: "argument" });
+    }
+    commands.lastIndex = Math.max(commands.lastIndex, end);
   }
 }
 
@@ -451,14 +672,89 @@ function genericAssignmentSpans(text: string, out: SecretSpan[]): void {
   }
 }
 
+/** A value after `=`, `:` or `Bearer`, such as `cookie=…`; a path there is judged by segment. */
 function entropySpans(text: string, out: SecretSpan[]): void {
   for (const match of text.matchAll(ENTROPY_RE)) {
     const run = match[1];
-    if (shannonEntropy(run) < MIN_ENTROPY_BITS) continue;
+    if (DIGEST_RE.test(run)) continue;
     const { end } = rangeOf(match);
     const padding = match[0].length - match[0].replace(/=+$/, "").length;
-    out.push({ start: end - padding - run.length, end, kind: "entropy" });
+    const start = end - padding - run.length;
+    if (isPath(run)) pathSegmentSpans(run, start, out);
+    else if (isHighEntropy(run)) out.push({ start, end, kind: "entropy" });
   }
+}
+
+/** A relative path (`app/src/main/MainActivity`) reaches 4 bits too, but changes class rarely. */
+function isHighEntropy(run: string): boolean {
+  if (shannonEntropy(run) < MIN_ENTROPY_BITS) return false;
+  if (!run.includes("/")) return true;
+  return classChangeRatio(run) >= MIN_CLASS_CHANGE_RATIO || decodesToText(run);
+}
+
+/** A standalone run of 40 or more base64 characters, or 64 or more hex. */
+function bareRunSpans(text: string, out: SecretSpan[]): void {
+  for (const match of text.matchAll(BARE_RUN_RE)) {
+    const run = match[0].replace(/=+$/, "");
+    if (DIGEST_RE.test(run)) continue;
+    const range = rangeOf(match);
+    if (isPath(run)) pathSegmentSpans(run, range.start, out);
+    else if (isSecretRun(run)) out.push({ ...range, kind: "entropy" });
+  }
+}
+
+/**
+ * An absolute path, or a run with `/` and `-` or `_`, which no base64 alphabet has together. A
+ * base64 value that starts with `/` is read as a path too, and only its long segments are judged.
+ */
+function isPath(run: string): boolean {
+  return run.startsWith("/") || (run.includes("/") && (run.includes("-") || run.includes("_")));
+}
+
+/** Each segment is judged as a bare run: a UUID directory must not make the path look random. */
+function pathSegmentSpans(path: string, start: number, out: SecretSpan[]): void {
+  let at = start;
+  for (const segment of path.split("/")) {
+    if (segment.length >= MIN_BARE_RUN_LENGTH && isSecretRun(segment)) {
+      out.push({ start: at, end: at + segment.length, kind: "entropy" });
+    }
+    at += segment.length + 1;
+  }
+}
+
+function isSecretRun(run: string): boolean {
+  if (HEX_RE.test(run)) return run.length >= MIN_HEX_SECRET_LENGTH;
+  const random =
+    shannonEntropy(run) >= MIN_BARE_ENTROPY_BITS && classChangeRatio(run) >= MIN_CLASS_CHANGE_RATIO;
+  return random || decodesToText(run);
+}
+
+function classChangeRatio(run: string): number {
+  let changes = 0;
+  for (let i = 1; i < run.length; i += 1) {
+    if (charClass(run[i]) !== charClass(run[i - 1])) changes += 1;
+  }
+  return changes / (run.length - 1);
+}
+
+function charClass(char: string): number {
+  if (char >= "a" && char <= "z") return 0;
+  if (char >= "A" && char <= "Z") return 1;
+  if (char >= "0" && char <= "9") return 2;
+  return 3;
+}
+
+/** Node's base64 decoder reads both the standard and the URL-safe alphabet. */
+function decodesToText(run: string): boolean {
+  const bytes = Buffer.from(run, "base64");
+  if (bytes.length < MIN_DECODED_BYTES) return false;
+  let printable = 0;
+  for (const byte of bytes) {
+    if ((byte >= 0x20 && byte < 0x7f) || byte === 0x09 || byte === 0x0a || byte === 0x0d) {
+      printable += 1;
+    }
+  }
+  return printable / bytes.length >= MIN_PRINTABLE_RATIO;
 }
 
 function shannonEntropy(text: string): number {

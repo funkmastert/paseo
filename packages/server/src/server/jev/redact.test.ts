@@ -11,6 +11,7 @@ import {
   restoreAnswerKeys,
   type JevRedactionResult,
 } from "./redact.js";
+import { BENIGN_TEXTS, FIXTURE_EXACT_TOKEN, SECRET_SHAPES } from "./test-utils/redact-shapes.js";
 
 const HOME = "/Users/alex";
 const MODEL = "typesafe/jev-1";
@@ -201,6 +202,55 @@ describe("redactJevRequest: line-shaped patterns in a state string", () => {
     const text = `${PEM}\nexport DEPLOY_TOKEN=f00dbabe-not-a-real-value\nmail alex@example.com about /Users/alex/x`;
     expect(redact(text).count).toBe(3);
     expect(redact({ log: text, apiKey: "k3y-v4lue-0001", path: "/Users/alex/y" }).count).toBe(4);
+  });
+});
+
+describe("redactJevRequest: secret shapes", () => {
+  it.each(SECRET_SHAPES)("redacts $label", ({ text, needle }) => {
+    const { serialized } = redact(text, { secrets: exact(FIXTURE_EXACT_TOKEN) });
+    expect(serialized).not.toContain(needle);
+    expect(serialized).not.toContain(JSON.stringify(needle).slice(1, -1));
+  });
+
+  it.each(BENIGN_TEXTS)("leaves $label", ({ text }) => {
+    expect(sentText(text)).toBe(text);
+  });
+
+  it("redacts a secret flag's value and keeps the flag", () => {
+    expect(sentText("ngrok http 80 --authtoken 2Zq8XyTbWcVdRe5fGhJk_7a1B2c3D4e5F")).toBe(
+      "ngrok http 80 --authtoken [redacted:argument]",
+    );
+    expect(sentText("mysql -uroot -pSup3rS3cretPw app")).toBe(
+      "mysql -uroot -p[redacted:argument] app",
+    );
+    expect(sentText("docker login -u ci -p Sup3rS3cretPw registry.example.com")).toBe(
+      "docker login -u ci -p [redacted:argument] registry.example.com",
+    );
+    expect(sentText("aws configure set aws_secret_access_key wJalrXUtnFEMI/K7MDENG")).toBe(
+      "aws configure set aws_secret_access_key [redacted:argument]",
+    );
+  });
+
+  it("redacts a YAML value to the end of its line", () => {
+    expect(sentText("db:\n  password: correct horse battery staple # rotated\n  port: 5432")).toBe(
+      "db:\n  password: [redacted:assignment] # rotated\n  port: 5432",
+    );
+  });
+
+  it("keeps a webhook's host", () => {
+    const path = ["T0SYNTH01", "B0SYNTH02", "AbCdEfGhIjKlMnOpQrStUvWx"].join("/");
+    expect(sentText(`post to https://hooks.slack.com/services/${path} now`)).toBe(
+      "post to https://hooks.slack.com/services/[redacted:webhook] now",
+    );
+  });
+
+  it("redacts bare base64 that looks random or encodes text, and bare 64-character hex", () => {
+    const encodedText = Buffer.from("user=alex password=correct horse battery").toString("base64");
+    expect(sentText(`echo ${encodedText} | base64 -d`)).toBe("echo [redacted:entropy] | base64 -d");
+    expect(sentText("blob Nim8iS71VSQ6EYh5Bnw+bFfUp/w4+mTuK79fAvuzQ end")).toBe(
+      "blob [redacted:entropy] end",
+    );
+    expect(sentText(`key ${"3f9a1c7e5b2d4f6a".repeat(4)} end`)).toBe("key [redacted:entropy] end");
   });
 });
 
@@ -443,6 +493,14 @@ describe("isSecretName", () => {
     "client-secret",
     "DATABASE_URL",
     "databaseUrl",
+    "NGROK_AUTHTOKEN",
+    "NPM_CONFIG_AUTHTOKEN",
+    "PGPASSWORD",
+    "SSHPASS",
+    "APITOKEN",
+    "passphrase",
+    "add-authtoken",
+    "aws_secret_access_key",
   ])("%s is secret-shaped", (name) => {
     expect(isSecretName(name)).toBe(true);
   });
@@ -456,6 +514,11 @@ describe("isSecretName", () => {
     "author",
     "keyboard",
     "API_URL",
+    "max_tokens",
+    "maxTokens",
+    "tokenCount",
+    "key-file",
+    "password-stdin",
   ])("%s is not", (name) => {
     expect(isSecretName(name)).toBe(false);
   });
@@ -494,6 +557,23 @@ describe("redactJevRequest: hostile input", () => {
       ["userinfo", fill("a://b:c@", size)],
       ["JWT fragments", fill("eyJaaaa.", size)],
       ["Bearer fragments", fill("Bearer ", size)],
+      ["secret flags", fill("--token ", size)],
+      ["secret flags with no value", fill("--password=", size)],
+      ["secret flags in JSON arrays", fill('"--token","', size)],
+      ["secret argument names", fill("aws_secret_access_key ", size)],
+      ["mysql -p in one command", fill("mysql -p", size)],
+      ["mysql commands that end at once", fill("mysql;", size)],
+      ["docker logins", fill("docker login -p ", size)],
+      ["YAML secret lines", fill("\npassword: a b c", size)],
+      ["one YAML value of many words", `password: ${fill("ab ", size)}`],
+      ["a base64 run mixing path characters", fill("Ab0+/x-", size)],
+      ["a hex run", fill("0123456789abcdef", size)],
+      ["many 42-character base64 runs", fill("AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcdEF ", size)],
+      ["vendor prefixes", fill("sk_test_", size)],
+      ["Google refresh prefixes", fill("1//0", size)],
+      ["SendGrid fragments", fill("SG.aaaaaaaaaaaaaaaa.", size)],
+      ["webhook paths", fill("hooks.slack.com/services/", size)],
+      ["digest prefixes", fill("sha256:", size)],
       ["noise", noise(size)],
     ];
   }
@@ -512,5 +592,61 @@ describe("redactJevRequest: hostile input", () => {
   // Redaction runs before the size check, so the state can be larger than the body cap.
   it.each(hostileInputs(640_000))("640 KB of %s stays linear", (_name, text) => {
     expect(elapsedMs(text)).toBeLessThan(1000);
+  });
+});
+
+describe("redactJevRequest: an argv held as an array", () => {
+  // Synthetic values, built from parts so no literal here reads as a real credential.
+  const ngrokToken = ["2Zq8XyTbWcVdRe5f", "GhJk_7a1B2c3D4e5F"].join("");
+  const password = ["Sup3r", "S3cret", "Pw"].join("");
+  const awsSecret = ["wJalrXUtnFEMI", "/K7MDENG/bPxRfiCY"].join("");
+
+  function sentArgv(argv: string[]): unknown {
+    return redact({ argv }).request.state;
+  }
+
+  it.each([
+    ["a secret flag and its value", ["node", "run.js", "--password", password], password],
+    ["an authtoken subcommand", ["ngrok", "config", "add-authtoken", ngrokToken], ngrokToken],
+    ["mysql's attached -p", ["mysql", "-uroot", `-p${password}`, "app"], password],
+    ["docker login's -p", ["docker", "login", "-u", "ci", "-p", password, "reg.example"], password],
+    [
+      "a secret argument name",
+      ["aws", "configure", "set", "aws_secret_access_key", awsSecret],
+      awsSecret,
+    ],
+  ])("redacts %s split across elements", (_name, argv, needle) => {
+    const sent = JSON.stringify(sentArgv(argv));
+    expect(sent).not.toContain(needle);
+    expect(sent).toContain("[redacted:argument]");
+  });
+
+  it("keeps the flag and every other element as they were", () => {
+    expect(sentArgv(["mysql", "-uroot", `-p${password}`, "app"])).toEqual({
+      argv: ["mysql", "-uroot", "-p[redacted:argument]", "app"],
+    });
+    expect(sentArgv(["node", "run.js", "--password", password, "--verbose"])).toEqual({
+      argv: ["node", "run.js", "--password", "[redacted:argument]", "--verbose"],
+    });
+  });
+
+  it("reads a 40,000-element argv in linear time", () => {
+    const argv = Array.from({ length: 40_000 }, (_, index) =>
+      index % 2 === 0 ? "--password" : `Pw${index}x9Q!zz`,
+    );
+    const started = performance.now();
+    const sent = JSON.stringify(sentArgv(argv));
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(sent).not.toContain("x9Q!");
+  });
+
+  it.each([
+    [["git", "log", "--max-count", "5", "--format=%H"]],
+    [["docker", "run", "-p", "8080:80", "nginx"]],
+    [["ssh", "-i", "./keys/deploy", "--port", "2222", "host.example"]],
+    [["openssl", "req", "--key-file", "./server.key"]],
+    [["the", "token", "expired", "yesterday"]],
+  ])("leaves %j unchanged", (argv) => {
+    expect(sentArgv(argv)).toEqual({ argv });
   });
 });
