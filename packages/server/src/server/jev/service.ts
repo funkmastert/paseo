@@ -57,6 +57,7 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   notificationTriage: "control",
   compactionTiming: "control",
   stallJudgment: "control",
+  awayReply: "control",
   agentTools: "agentTools",
 };
 

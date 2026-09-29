@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { Logger } from "pino";
 
+import { resolveAwayReplyConfig, type ResolvedAwayReplyConfig } from "../away-reply/config.js";
 import { AgentJevSchema } from "../persisted-config.js";
 import { readRawConfig } from "../session/doctor/facts.js";
 
@@ -55,6 +56,8 @@ export interface ResolvedJevConfig {
     cutPoint: boolean;
   };
   stallJudgment: ResolvedJevFeatureConfig & { loopWatch: boolean };
+  /** Feature 14. Dry run by default (D6); `dryRun` is its `shadow`. */
+  awayReply: ResolvedAwayReplyConfig;
 }
 
 export const JEV_PROVIDER_DEFAULTS: Record<
@@ -312,6 +315,7 @@ export function resolveJevConfig(
       ...resolveFeature(stallJudgment, { enabled: true, shadow: true, timeoutMs: 5000 }),
       loopWatch: bool(stallJudgment["loopWatch"], true),
     },
+    awayReply: resolveAwayReplyConfig(section["awayReply"]),
   };
 }
 

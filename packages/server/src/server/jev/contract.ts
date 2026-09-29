@@ -85,7 +85,9 @@ export type JevFeatureId =
   | "notificationTriage"
   | "agentTools"
   | "compactionTiming"
-  | "stallJudgment";
+  | "stallJudgment"
+  /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
+  | "awayReply";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
