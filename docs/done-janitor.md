@@ -145,7 +145,7 @@ The archive goes through archive-by-scope, the path of a person's **Archive work
 - **External worktrees, local checkouts and directories** keep their directory, dirty or not. Only the record is archived.
 - **A Paseo-owned worktree** goes through the conflict and snapshot-failure checks and the [git gate](#reclaiming-the-worktree):
   - clean and pushed: snapshotted like every deletion, then archived with its directory;
-  - dirty or unpushed: [snapshotted](work-snapshots.md), and archived with its directory only when the snapshot holds all of it. The snapshot leaves out untracked files over its size cap and every ignored file, so one of those outside build output (`node_modules`, `dist`, `build`, `Pods`, `.gradle`, `.godot`, `__pycache__` and the rest listed in the detector) keeps the worktree. A `.env` or an ignored raw asset is the case this exists for. The snapshot is taken whatever the outcome;
+  - dirty or unpushed: [snapshotted](work-snapshots.md), and archived with its directory only when the snapshot holds all of it. The snapshot leaves out untracked files over its size cap and every ignored file, and stores an untracked nested repository as a pointer to a commit. So any of those keeps the worktree, except ignored build output (`node_modules`, `dist`, `build`, `Pods`, `.gradle`, `.godot`, `__pycache__` and the rest listed in the detector). A `.env` or an ignored raw asset is the case this exists for. The snapshot is taken whatever the outcome;
   - gone: the record is archived;
   - anything else the gate refuses, a lock or a merge in progress: kept.
 - With `reclaimWorkspaces` off, no Paseo-owned worktree is archived.
@@ -199,7 +199,7 @@ for idle workspaces and projects, where `kept-idle-workspace` appears only for o
 {"action":"would-archive-workspace","workspaceId":"wks_06fe…","title":"iOS: stale-deals sender","path":"~/mobile-worktrees/stale-deals-csm-ios","reason":"idle for 12d; record only, its directory stays","dryRun":true,…}
 {"action":"would-archive-workspace","workspaceId":"wks_79ff…","title":"Remediate disk-falling condition","path":"~","reason":"a self-heal fixer's workspace, and every fixer in it is finished; record only, its directory stays","dryRun":true,…}
 {"action":"would-delete","workspaceId":"wks_6290…","path":"~/.paseo/worktrees/…/qa-tests-silent-drop","reason":"idle for 5d; qa/silent-drop has 3 commit(s) neither merged into main nor pushed to any remote, backed up first by a snapshot","dryRun":true,…}
-{"action":"kept-idle-workspace","workspaceId":"wks_17e5…","path":"~/.paseo/worktrees/…/r7b-attack-visuals","reason":"idle for 7d; 224 ignored file(s) outside build output that no snapshot covers (docs/style/assets/raw/effect-burst-arcane.png, …)","dryRun":true,…}
+{"action":"kept-idle-workspace","workspaceId":"wks_17e5…","path":"~/.paseo/worktrees/…/r7b-attack-visuals","reason":"224 ignored file(s) outside build output that no snapshot covers (docs/style/assets/raw/effect-burst-arcane.png, …)","dryRun":true,…}
 {"action":"would-remove-project","projectId":"prj_9c…","path":"~/bn-worktrees/csm-required-actions","reason":"it has had no active workspace for 3d","dryRun":true,…}
 ```
 

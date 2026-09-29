@@ -373,14 +373,25 @@ describe("archiveDeletesDirectory", () => {
     ).toBe(false);
     for (const kind of ["local_checkout", "directory"] as const) {
       expect(
-        archiveDeletesDirectory({
-          workspace: workspace({ kind, isPaseoOwnedWorktree: true }),
-          pathInsidePaseoWorktrees: true,
-        }),
+        archiveDeletesDirectory({ workspace: workspace({ kind }), pathInsidePaseoWorktrees: true }),
       ).toBe(false);
     }
   });
+
+  test("a record flagged Paseo-owned is treated as owned whatever its kind", () => {
+    // Archive-by-scope reads the flag before the kind, so such a record's directory can go.
+    for (const kind of ["local_checkout", "directory"] as const) {
+      expect(
+        archiveDeletesDirectory({
+          workspace: workspace({ kind, isPaseoOwnedWorktree: true }),
+          pathInsidePaseoWorktrees: false,
+        }),
+      ).toBe(true);
+    }
+  });
 });
+
+const NO_GAPS = { ignored: [], nestedRepositories: [] };
 
 describe("describeUncoveredWork", () => {
   const snapshotted = {
@@ -398,14 +409,20 @@ describe("describeUncoveredWork", () => {
     expect(
       describeUncoveredWork({
         snapshot: snapshotted,
-        ignoredEntries: ["node_modules/", "packages/app/dist/", ".DS_Store"],
+        gaps: {
+          ignored: ["node_modules/", "packages/app/dist/", ".DS_Store"],
+          nestedRepositories: [],
+        },
       }),
     ).toBeNull();
   });
 
   test("an ignored file outside build output is not covered", () => {
     expect(
-      describeUncoveredWork({ snapshot: snapshotted, ignoredEntries: [".env", "node_modules/"] }),
+      describeUncoveredWork({
+        snapshot: snapshotted,
+        gaps: { ignored: [".env", "node_modules/"], nestedRepositories: [] },
+      }),
     ).toBe("1 ignored file(s) outside build output that no snapshot covers (.env)");
   });
 
@@ -413,7 +430,7 @@ describe("describeUncoveredWork", () => {
     expect(
       describeUncoveredWork({
         snapshot: { ...snapshotted, skippedFiles: ["data/big.bin"] },
-        ignoredEntries: [],
+        gaps: NO_GAPS,
       }),
     ).toBe("1 untracked file(s) too large for the snapshot (data/big.bin)");
   });
@@ -422,15 +439,24 @@ describe("describeUncoveredWork", () => {
     expect(
       describeUncoveredWork({
         snapshot: { kind: "failed", worktreePath: "/w", error: "disk full" },
-        ignoredEntries: [],
+        gaps: NO_GAPS,
       }),
     ).toBe("its work is at risk and could not be snapshotted: disk full");
   });
 
-  test("an ignored-file listing that failed covers nothing", () => {
-    expect(describeUncoveredWork({ snapshot: snapshotted, ignoredEntries: null })).toBe(
-      "its ignored files could not be listed",
+  test("a listing that failed covers nothing", () => {
+    expect(describeUncoveredWork({ snapshot: snapshotted, gaps: null })).toBe(
+      "its untracked and ignored files could not be listed",
     );
+  });
+
+  test("an untracked nested repository is not covered: the snapshot holds only a pointer to it", () => {
+    expect(
+      describeUncoveredWork({
+        snapshot: snapshotted,
+        gaps: { ignored: [], nestedRepositories: ["vendor/tool/"] },
+      }),
+    ).toBe("1 untracked nested repositor(ies) a snapshot holds only as a pointer (vendor/tool/)");
   });
 });
 
