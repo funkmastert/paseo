@@ -466,8 +466,20 @@ describe("readWorktreeCoverage", () => {
     ).toMatchObject({ changed: ["notes.txt"], untracked: ["new.txt"] });
   });
 
+  test("a possible secret the snapshotter left out is reported, and listed against the snapshot", async () => {
+    const worktree = addWorktree("secret", "feature");
+    writeFileSync(join(worktree, "small.txt"), "kept\n");
+    writeFileSync(join(worktree, ".env"), "API_KEY=1\n");
+    const taken = await snapshot(worktree);
+
+    expect(taken.possibleSecrets).toEqual([".env"]);
+    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit });
+    expect(coverage).toMatchObject({ changed: [], untracked: [".env"] });
+    expect(checkDeletionInvariant(coverage, "snapshot").holds).toBe(false);
+  });
+
   test("a file the snapshotter left out is listed, whatever its rule was", async () => {
-    // The size cap here; the secret filter (1c82709a9) drops files the same silent way.
+    // The size cap here; the secret filter's omissions are listed the same way (test above).
     const worktree = addWorktree("left-out", "feature");
     writeFileSync(join(worktree, "small.txt"), "kept\n");
     writeFileSync(join(worktree, "big.bin"), "x".repeat(64));
@@ -823,5 +835,43 @@ describe("verifyWorktreeBackup", () => {
     ).toBe("the snapshot has no copy outside the repository (bundle failed: disk full)");
     git(worktree, "update-ref", "-d", taken.ref);
     expect(await verify(worktree, taken)).toBe(`its backup ref ${taken.ref} does not exist`);
+  });
+
+  test("a janitor backup on a private personal origin passes the push scan first: a token is bundled, not pushed", async () => {
+    const url = "https://github.com/funkmastert/x.git";
+    git(repo, "remote", "set-url", "origin", url);
+    git(repo, "config", `url.${remote}.insteadOf`, url);
+    const personal = new GitWorktreeSnapshotter({
+      readConfig: () => ({
+        personalOwners: ["funkmastert"],
+        bundleDir: join(root, "bundles"),
+        maxUntrackedFileBytes: 1024 * 1024,
+      }),
+      paseoHome: join(root, "paseo-home"),
+      logger: pino({ level: "silent" }),
+      lookupRepoVisibility: async () => "private",
+    });
+    // The request shape the done janitor sends (agent-done-janitor.ts takeSnapshot).
+    const janitorSnapshot = async (worktree: string) => {
+      const result = await personal.snapshot({ cwd: worktree, reason: "done janitor, test" });
+      if (result.kind !== "snapshotted") throw new Error(`expected a snapshot, got ${result.kind}`);
+      return result;
+    };
+
+    const remoteRefs = () => git(remote, "for-each-ref", "--format=%(refname)");
+    const clean = addWorktree("janitor-clean", "janitor-clean");
+    writeFileSync(join(clean, "notes.txt"), "work\n");
+    expect((await janitorSnapshot(clean)).offsite.kind).toBe("pushed");
+
+    // Assembled at runtime so no secret scanner flags this file.
+    const token = ["ghp", "z".repeat(36)].join("_");
+    const leaky = addWorktree("janitor-leaky", "janitor-leaky");
+    writeFileSync(join(leaky, "README.md"), `hello\nkey ${token}\n`);
+    const before = remoteRefs();
+    const taken = await janitorSnapshot(leaky);
+
+    expect(taken.offsite.kind).toBe("bundled");
+    expect(remoteRefs()).toBe(before);
+    expect(await verify(leaky, taken)).toBeNull();
   });
 });

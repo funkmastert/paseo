@@ -326,6 +326,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         dirtyFiles: assessment.dirtyFiles,
         unpushedCommits: assessment.unpushedCommits,
         skippedFiles,
+        possibleSecrets,
         offsite,
       },
       branch,
