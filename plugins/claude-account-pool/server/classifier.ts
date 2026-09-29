@@ -37,6 +37,8 @@ import {
   type ModelCatalog,
 } from "./role-availability";
 import {
+  placesRootAsChild,
+  resolveDeclaredRootRole,
   resolveLeaderRole,
   resolveRole,
   resolveTaskClass,
@@ -104,7 +106,8 @@ export interface ClassifierInput {
   /**
    * The agent that asked for this one. ABSENT means a ROOT agent — one a
    * human, the CLI, the app, a schedule or a heartbeat started — which is
-   * the leader by definition rather than by classification.
+   * the leader by definition rather than by classification, unless its
+   * `paseo.agent-type` / `paseo.agent-role` label declares another role.
    */
   callerAgentId?: string;
   /** `config.provider` as requested: a provider family id, or a literal pool entry id. */
@@ -750,17 +753,19 @@ function decideRootAccount(input: ClassifierInput, world: ClassifierWorld, model
 
 /**
  * The account half. Pool-family creates made BY an agent walk the child
- * ladder; a root agent walks its own (`decideRootAccount`); a `codex/gpt-5`
- * child keeps the account it was given. server/router.ts owns the episodes
- * and the refusal built on this answer.
+ * ladder, and so does a caller-less create that declared a worker role; a
+ * root agent walks its own (`decideRootAccount`); a `codex/gpt-5` child keeps
+ * the account it was given. server/router.ts owns the episodes and the
+ * refusal built on this answer, and refuses only a create that has a caller.
  */
 function decideAccount(
   input: ClassifierInput,
   world: ClassifierWorld,
   model: ModelDecision,
+  asChild: boolean,
   hasCaller: boolean,
 ): AccountDecision {
-  if (!hasCaller) {
+  if (!asChild) {
     return decideRootAccount(input, world, model);
   }
   const effectiveProvider = model.provider ?? input.requestedProvider ?? POOL_FAMILY;
@@ -803,7 +808,9 @@ function decideAccount(
       return {
         kind: "exhausted",
         usableProviderIds: usable,
-        reason: `Every pooled account is out of budget (${selection.providerIds.join(", ")}), so this spawn is refused rather than started on a dead account.`,
+        reason: hasCaller
+          ? `Every pooled account is out of budget (${selection.providerIds.join(", ")}), so this spawn is refused rather than started on a dead account.`
+          : `Every pooled account is out of budget (${selection.providerIds.join(", ")}). A create with no calling agent is never refused, so it keeps the account it asked for and will fail until a window resets.`,
       };
   }
 }
@@ -958,11 +965,11 @@ function decideThinking(
   model: ModelDecision,
   taskClass: TaskClassId | undefined,
   role: RoleDecision,
-  hasCaller: boolean,
+  asChild: boolean,
 ): ThinkingDecision {
   const requested = input.requestedThinkingOptionId;
   const requestedField = requested !== undefined ? { requested } : {};
-  const isSubagent = hasCaller;
+  const isSubagent = asChild;
   const effective = effectiveThinkingModel(input, world, model);
   const entry = effective ? world.thinkingCatalog.get(effective.family)?.get(effective.modelId) : undefined;
 
@@ -1011,7 +1018,7 @@ function decideThinking(
     };
   }
 
-  const isLeaderTier = !hasCaller || role.role.id === LEADER_ROLE_ID;
+  const isLeaderTier = !asChild || role.role.id === LEADER_ROLE_ID;
   const leaderLevel = world.policy.thinking.leader;
 
   let outcome: "leader-rule" | "requested" | "task-class-default";
@@ -1051,7 +1058,7 @@ function decideThinking(
     ...(level.clamped ? { clamped: level.clamped } : {}),
     ...requestedField,
     ...(override ? { override } : {}),
-    reason: describeThinking({ outcome, wanted, level, modelRef, taskClass, hasCaller, isSubagent, override }),
+    reason: describeThinking({ outcome, wanted, level, modelRef, taskClass, hasCaller: asChild, isSubagent, override }),
   };
 }
 
@@ -1165,6 +1172,13 @@ function decideOutputStyle(
 export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): AgentDecision {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
 
+  // A create with no caller is the leader unless its labels say otherwise. One that declares a
+  // non-leader role (a daemon job's worker) is configured, and placed, like the child it says it
+  // is — except for what depends on a caller existing: inherited restrictions, the output style a
+  // leader reads, and MCP scoping.
+  const declaredRootRole = hasCaller ? undefined : resolveDeclaredRootRole(world.policy, input.labels);
+  const asChild = hasCaller || placesRootAsChild(world.policy, input.labels);
+
   let roleDecision: RoleDecision;
   if (hasCaller) {
     const resolution = resolveRole(world.policy, {
@@ -1181,6 +1195,14 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
       ...(resolution.unknownDeclaredValue !== undefined
         ? { unknownDeclaredValue: resolution.unknownDeclaredValue }
         : {}),
+    };
+    roleDecision = { ...partial, reason: describeRole(partial, input) };
+  } else if (declaredRootRole) {
+    const partial = {
+      role: declaredRootRole.role,
+      source: roleSourceFor(declaredRootRole.tier, undefined),
+      tier: declaredRootRole.tier,
+      evidenceBased: true,
     };
     roleDecision = { ...partial, reason: describeRole(partial, input) };
   } else {
@@ -1212,8 +1234,8 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
 
   const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
   const tools = decideTools(world, roleDecision, hasCaller);
-  const account = decideAccount(input, world, model, hasCaller);
-  const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, hasCaller);
+  const account = decideAccount(input, world, model, asChild, hasCaller);
+  const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
   const mcp = decideMcp(
     { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },

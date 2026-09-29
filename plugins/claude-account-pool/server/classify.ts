@@ -1,4 +1,4 @@
-import { WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, detectModelFamily, weeklyModelWindow } from "./windows";
+import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, detectModelFamily, weeklyModelWindow } from "./windows";
 
 export interface ClassifyResult {
   isLimit: boolean;
@@ -9,17 +9,27 @@ export interface ClassifyResult {
 }
 
 /**
- * The one pattern recognizing limit-shaped failure text across this
- * plugin. Every reactive classification decision flows through here so
- * there's a single place to tune it.
+ * The one pattern recognizing limit-shaped failure text across this plugin. Every reactive
+ * classification decision flows through here so there's a single place to tune it.
  *
- * "spend limit" / "usage limit" cover the real CLI cap message ("You've
- * hit your monthly spend limit ... your session limit resets 3:10pm"),
- * which does not contain the literal phrase "hit your limit" — the word
- * "limit" there is qualified by "spend"/"usage" and a monthly/weekly/
- * session scope word, not preceded directly by "hit your".
+ * A copy of the daemon's `LIMIT_TEXT_PATTERN`
+ * (packages/server/src/server/agent/account-failover-detector.ts). The plugin compiles on its own
+ * and cannot import daemon code, and the two must agree: the daemon moves an agent off an account
+ * whose refusal this plugin didn't recognise, and the plugin keeps placing new ones there.
+ * classify.test.ts fails when they drift. `hit your <words> limit` is what catches the CLI's
+ * per-window messages ("You've hit your session limit · resets 2:50pm"); none of them contains
+ * "hit your limit".
  */
-const LIMIT_PATTERN = /hit your limit|rate limit|quota|credits|spend limit|usage limit/i;
+export const LIMIT_PATTERN =
+  /hit your (?:[\w-]+ ){0,3}limit|spend limit|session limit|usage limit|rate limit|quota|credits/i;
+
+/**
+ * The Claude CLI's per-window refusal, `You've hit your ${name}${suffix}`, with the window's name
+ * captured. The names, from the CLI binary's window map: five_hour "session", seven_day
+ * "weekly", seven_day_opus "Opus", seven_day_sonnet "Sonnet", seven_day_overage_included
+ * "Fable 5", overage "usage credit".
+ */
+const CLI_WINDOW_LIMIT_PATTERN = /hit your ((?:[\w-]+ ){1,3})limit/i;
 
 /**
  * Auth/credential failure text — an account in this state cannot serve ANY
@@ -78,7 +88,34 @@ function parseResetsAt(message: string, now: Date): Date | undefined {
   return undefined;
 }
 
+/**
+ * The window a CLI refusal names, when it names one. A model-scoped name maps to that model's
+ * weekly window and never to the whole account: an Opus cap read as an account cap would stop
+ * Sonnet work too, and count toward refusing every spawn.
+ */
+function cliLimitWindow(message: string): string | undefined {
+  const name = CLI_WINDOW_LIMIT_PATTERN.exec(message)?.[1]?.trim().toLowerCase();
+  if (!name) {
+    return undefined;
+  }
+  if (name === "session") {
+    return WINDOW_FIVE_HOUR;
+  }
+  if (name === "weekly") {
+    return WINDOW_SEVEN_DAY;
+  }
+  if (name === "usage credit") {
+    return WINDOW_ACCOUNT;
+  }
+  const family = detectModelFamily(name);
+  return family ? weeklyModelWindow(family) : undefined;
+}
+
 function detectWindow(message: string): string | undefined {
+  const named = cliLimitWindow(message);
+  if (named) {
+    return named;
+  }
   if (SESSION_WINDOW_PATTERN.test(message)) {
     return WINDOW_FIVE_HOUR;
   }

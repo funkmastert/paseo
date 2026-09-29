@@ -50,10 +50,27 @@ describe("scoreAccount", () => {
 
   it("includes an observed window the model's own window list never names", () => {
     const tracker = trackerAtNow();
-    // A weekly Opus cap bounds a Sonnet spawn's account even though relevantWindows(sonnet)
-    // never lists it — the account is the thing being scored, not the model.
-    tracker.reportUsage("worker-a", [{ window: weeklyModelWindow("opus"), usedPct: 99, resetsAt: null }]);
+    // A surface-scoped weekly window bounds every spawn on the account even though
+    // relevantWindows(sonnet) never lists it.
+    tracker.reportUsage("worker-a", [{ window: "weekly_surface_cowork", usedPct: 99, resetsAt: null }]);
     expect(scoreAccount(tracker, "worker-a", SONNET, NOW_MS)).toBe(1);
+  });
+
+  it("ignores another model's weekly window: a full Sonnet week bounds nothing an Opus spawn needs", () => {
+    const tracker = trackerAtNow();
+    tracker.reportUsage("worker-a", [
+      { window: WINDOW_FIVE_HOUR, usedPct: 20, resetsAt: null },
+      { window: weeklyModelWindow("sonnet"), usedPct: 99, resetsAt: null },
+    ]);
+    expect(scoreAccount(tracker, "worker-a", "claude-opus-5-5", NOW_MS)).toBe(80);
+    // Its own model's window still counts.
+    expect(scoreAccount(tracker, "worker-a", SONNET, NOW_MS)).toBe(1);
+  });
+
+  it("with no model named, every observed window counts", () => {
+    const tracker = trackerAtNow();
+    tracker.reportUsage("worker-a", [{ window: weeklyModelWindow("sonnet"), usedPct: 99, resetsAt: null }]);
+    expect(scoreAccount(tracker, "worker-a", "", NOW_MS)).toBe(1);
   });
 });
 

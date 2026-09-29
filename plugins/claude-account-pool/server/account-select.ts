@@ -72,7 +72,7 @@ export function isAccountHealthy(health: AccountSelectHealth, providerId: string
 /** The pool entries that could serve this request at all — healthy, or drained but not capped. */
 export function usablePoolMembers(pool: AccountPool, health: AccountSelectHealth, modelId: string): string[] {
   return poolMemberIds(pool).filter(
-    (providerId) => isAccountHealthy(health, providerId, modelId) || health.isLastResortEligible(providerId),
+    (providerId) => isAccountHealthy(health, providerId, modelId) || health.isLastResortEligible(providerId, modelId),
   );
 }
 
@@ -103,7 +103,9 @@ export function selectPoolAccount(
 
   const healthyWorkers = rank(pool.workers.filter((worker) => isHealthy(worker.providerId)));
   const drainedWorkers = rank(
-    pool.workers.filter((worker) => !isHealthy(worker.providerId) && health.isLastResortEligible(worker.providerId)),
+    pool.workers.filter(
+      (worker) => !isHealthy(worker.providerId) && health.isLastResortEligible(worker.providerId, modelId),
+    ),
   );
   const worker = healthyWorkers[0] ?? drainedWorkers[0];
   if (worker) {
@@ -111,7 +113,8 @@ export function selectPoolAccount(
   }
 
   const leaderUsable =
-    pool.leader !== null && (isHealthy(pool.leader.providerId) || health.isLastResortEligible(pool.leader.providerId));
+    pool.leader !== null &&
+    (isHealthy(pool.leader.providerId) || health.isLastResortEligible(pool.leader.providerId, modelId));
   if (pool.leader && leaderUsable) {
     return { kind: "leader", providerId: pool.leader.providerId };
   }

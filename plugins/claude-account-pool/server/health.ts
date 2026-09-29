@@ -73,8 +73,12 @@ export interface HealthTracker {
   noteTurnCompleted(providerId: string): void;
   /** True when the account is usable for a fresh spawn of the given model. */
   isHealthyFor(providerId: string, modelId: string): boolean;
-  /** True when the account may still be used as a last resort (e.g. only drained, not capped). */
-  isLastResortEligible(providerId: string): boolean;
+  /**
+   * True when the account may still be used as a last resort (e.g. only drained, not capped).
+   * With a model named, only the windows a spawn of that model must get past count: a capped
+   * Sonnet week does not stop an Opus spawn. With none, any capped window disqualifies.
+   */
+  isLastResortEligible(providerId: string, modelId?: string): boolean;
   /**
    * True when every window ever observed for this account is usable (healthy or
    * probation). Used for model-less spawns, where no model-scoped window can be
@@ -303,7 +307,10 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
     });
   }
 
-  function isLastResortEligible(providerId: string): boolean {
+  function isLastResortEligible(providerId: string, modelId?: string): boolean {
+    if (modelId) {
+      return relevantWindows(modelId).every((window) => getSettled(providerId, window).status !== "capped");
+    }
     const providerWindows = windowsFor(providerId);
     for (const [window, state] of providerWindows) {
       settle(providerId, window, state);

@@ -277,3 +277,155 @@ describe("createRouter — children keep today's behaviour", () => {
     ).toThrow(PoolExhaustedError);
   });
 });
+
+/**
+ * The CLI refuses a turn with "You've hit your <window> limit · resets …" before the usage API
+ * reads 100%. The plugin used to miss every one of those messages, so a refusing account kept
+ * taking spawns — even ahead of a healthy worker when it had no usage reading at all.
+ */
+describe("createRouter — an account the CLI is refusing", () => {
+  const SESSION_REFUSAL = "You've hit your session limit · resets 2:50pm (America/Los_Angeles)";
+  const minutes = (n: number) => new Date(NOW.getTime() + n * 60 * 1000);
+
+  it("does not outrank a healthy worker when it has no usage reading yet", () => {
+    const health = tracker();
+    health.reportUsage("claude-personal", [{ window: WINDOW_FIVE_HOUR, usedPct: 50 }]);
+    health.reportTurnFailure("claude-backup", SESSION_REFUSAL);
+
+    const result = router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext);
+
+    expect(result?.config.provider).toBe("claude-personal");
+  });
+
+  it("is not a last resort while the other worker is merely drained", () => {
+    const health = tracker();
+    health.reportUsage("claude-backup", [{ window: WINDOW_FIVE_HOUR, usedPct: 98, resetsAt: minutes(25) }]);
+    health.reportUsage("claude-personal", [{ window: WINDOW_FIVE_HOUR, usedPct: 92, resetsAt: minutes(240) }]);
+    health.reportTurnFailure("claude-backup", SESSION_REFUSAL);
+
+    const result = router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext);
+
+    expect(result?.config.provider).toBe("claude-personal");
+  });
+
+  it("moves a root that asked for it", () => {
+    const health = tracker();
+    health.reportTurnFailure("claude-backup", SESSION_REFUSAL);
+
+    const result = router(health)(rootCreate("claude-backup", "claude-opus-5-5"), fakeContext);
+
+    expect(result?.config.provider).toBe("claude");
+  });
+
+  it("refusing one model leaves every other model running there, and refuses nothing else", () => {
+    const health = tracker();
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportTurnFailure(providerId, "You've hit your Opus limit · resets Oct 2, 9am");
+    }
+
+    const sonnet = router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext);
+    expect(sonnet?.config.provider).toBe("claude-personal");
+    expect(() =>
+      router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext),
+    ).toThrow(PoolExhaustedError);
+  });
+});
+
+describe("createRouter — another model's weekly window", () => {
+  it("does not exclude an account from an Opus spawn when only Sonnet's week is used up", () => {
+    const health = tracker();
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportUsage(providerId, [
+        { window: WINDOW_FIVE_HOUR, usedPct: 91 },
+        { window: WINDOW_SEVEN_DAY, usedPct: 60 },
+        { window: weeklyModelWindow("sonnet"), usedPct: 100 },
+      ]);
+    }
+
+    const result = router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext);
+
+    expect(result?.config.provider).toBe("claude-personal");
+  });
+
+  it("does not demote an account for an Opus spawn because its Sonnet week is nearly full", () => {
+    const health = tracker();
+    health.reportUsage("claude-personal", [
+      { window: WINDOW_FIVE_HOUR, usedPct: 20 },
+      { window: weeklyModelWindow("sonnet"), usedPct: 99 },
+    ]);
+    health.reportUsage("claude-backup", [{ window: WINDOW_FIVE_HOUR, usedPct: 60 }]);
+
+    const result = router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext);
+
+    expect(result?.config.provider).toBe("claude-personal");
+  });
+
+  it("names the reset of a window that blocks the requested model when it refuses", () => {
+    const health = tracker();
+    const sessionReset = new Date("2026-09-25T02:00:00Z");
+    const sonnetReset = new Date("2026-09-24T23:00:00Z");
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportUsage(providerId, [
+        { window: WINDOW_FIVE_HOUR, usedPct: 100, resetsAt: sessionReset },
+        { window: weeklyModelWindow("sonnet"), usedPct: 100, resetsAt: sonnetReset },
+      ]);
+    }
+
+    expect(() =>
+      router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext),
+    ).toThrow(sessionReset.toISOString());
+  });
+});
+
+/**
+ * Daemon jobs start agents with no calling agent and say what they are with a role label. Such a
+ * create is placed like a child — a worker account first — but, having no caller to read a
+ * refusal, it is never refused.
+ */
+describe("createRouter — a caller-less create that declares a worker role", () => {
+  const declaresWorker = (labels: Record<string, string> | undefined) => labels?.["paseo.agent-type"] === "worker";
+  const workerLabels = { labels: { "paseo.agent-type": "worker" } };
+
+  it("is placed on the pooled worker with the most headroom, not kept on the leader account", () => {
+    const health = tracker();
+    health.reportUsage("claude", [{ window: WINDOW_FIVE_HOUR, usedPct: 10 }]);
+    health.reportUsage("claude-personal", [{ window: WINDOW_FIVE_HOUR, usedPct: 70 }]);
+    health.reportUsage("claude-backup", [{ window: WINDOW_FIVE_HOUR, usedPct: 20 }]);
+
+    const result = router(health, { placesRootAsChild: declaresWorker })(
+      rootCreate("claude", "claude-haiku-4-5", workerLabels),
+      fakeContext,
+    );
+
+    expect(result?.config.provider).toBe("claude-backup");
+    expect(labelsOf(result)).toEqual(workerLabels.labels);
+  });
+
+  it("is never refused, even when every pooled account is out", () => {
+    const health = tracker();
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportUsage(providerId, [{ window: WINDOW_SEVEN_DAY, usedPct: 100 }]);
+    }
+    const onFailOpen = vi.fn();
+
+    const result = router(health, { placesRootAsChild: declaresWorker, onFailOpen })(
+      rootCreate("claude", "claude-haiku-4-5", workerLabels),
+      fakeContext,
+    );
+
+    expect(result).toBeUndefined();
+    expect(onFailOpen).toHaveBeenCalledWith(expect.objectContaining({ reason: "every-pool-account-capped" }));
+  });
+
+  it("an unlabelled caller-less create is still a root: it keeps the account it asked for", () => {
+    const health = tracker();
+    health.reportUsage("claude", [{ window: WINDOW_FIVE_HOUR, usedPct: 10 }]);
+
+    const result = router(health, { placesRootAsChild: declaresWorker })(
+      rootCreate("claude", "claude-opus-5-5"),
+      fakeContext,
+    );
+
+    expect(result).toBeUndefined();
+  });
+});

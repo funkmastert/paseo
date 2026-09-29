@@ -448,6 +448,34 @@ describe("contribute (index.server)", () => {
       h.done();
     });
 
+    // The remediation ladder starts its agents with no calling agent and labels them workers.
+    // They used to run as leaders anyway: Opus 5.5 at Extra High, on the leader account.
+    it("REGRESSION: a caller-less create labelled a mechanical worker runs Haiku on a worker account", async () => {
+      const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+
+      const created = await h.create(undefined, {
+        config: { provider: "claude", cwd: "/tmp" },
+        labels: { "paseo.agent-type": "worker", "paseo.task-class": "mechanical" },
+      });
+
+      expect(created.config.model).toBe("claude-haiku-4-5");
+      expect(created.config.provider).toBe("claude-personal");
+      h.done();
+    });
+
+    it("an unlabelled caller-less create is still the leader, on the account it asked for", async () => {
+      const h = harness({
+        providers: PROVIDERS,
+        agentModelPolicy: { ...LIVE_POLICY, allowUnlistedModels: ["claude-opus-5-5"] },
+      });
+
+      const created = await h.create(undefined, { config: { provider: "claude", cwd: "/tmp" } });
+
+      expect(created.config.model).toBe("claude-opus-5-5");
+      expect(created.config.provider).toBe("claude");
+      h.done();
+    });
+
     it("REGRESSION: two concurrent creates that differ only in task class each log their own decision when they finish in reverse order", async () => {
       const lines = vi.spyOn(console, "log").mockImplementation(() => {});
       const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });

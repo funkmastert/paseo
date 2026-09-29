@@ -340,6 +340,52 @@ describe("auth failure (logged-out / bad-credential account)", () => {
   });
 });
 
+describe("the CLI's per-window cap messages", () => {
+  const NOW = "2026-09-28T21:25:00Z";
+
+  it("caps only the session window on a session-limit refusal, so every model on the account is out", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, "You've hit your session limit · resets 2:50pm (America/Los_Angeles)");
+    expect(tracker.snapshot()[PROVIDER]?.[WINDOW_FIVE_HOUR]?.status).toBe("capped");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isLastResortEligible(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("caps only that model on an Opus-limit refusal: Sonnet work still runs there", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, "You've hit your Opus limit · resets Oct 2, 9am");
+    expect(tracker.snapshot()[PROVIDER]?.account).toBeUndefined();
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
+  });
+
+  it("caps the whole account on a usage-credit refusal", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, "You've hit your usage credit limit · resets Oct 1, 12am");
+    expect(tracker.snapshot()[PROVIDER]?.account?.status).toBe("capped");
+    expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+});
+
+describe("isLastResortEligible, scoped to the model being placed", () => {
+  it("ignores a cap on another model's weekly window", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportUsage(PROVIDER, [
+      { window: WINDOW_FIVE_HOUR, usedPct: 91, resetsAt: null },
+      { window: weeklyModelWindow("sonnet"), usedPct: 100, resetsAt: null },
+    ]);
+    expect(tracker.isLastResortEligible(PROVIDER, OPUS_MODEL)).toBe(true);
+    expect(tracker.isLastResortEligible(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+
+  it("with no model named, any capped window disqualifies", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+    tracker.reportUsage(PROVIDER, [{ window: weeklyModelWindow("sonnet"), usedPct: 100, resetsAt: null }]);
+    expect(tracker.isLastResortEligible(PROVIDER)).toBe(false);
+    expect(tracker.isLastResortEligible(PROVIDER, "")).toBe(false);
+  });
+});
+
 describe("windowUtilization (drives the per-model budget gate)", () => {
   it("returns undefined until a usage reading covers the window", () => {
     const tracker = createHealthTracker();

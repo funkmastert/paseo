@@ -1,7 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import { ACCOUNT_REROUTED_LABEL } from "../shared/role-policy-schema";
 import type { AccountIdentity } from "./account-identity";
-import type { HealthTracker } from "./health";
+import { relevantWindows, type HealthTracker } from "./health";
 import {
   describeRootSelection,
   isValidDate,
@@ -13,6 +13,9 @@ import {
 import { createIntervalPoller } from "./interval-poller";
 import { createLogThrottle } from "./log-throttle";
 import type { PoolCache } from "./pool";
+
+/** Stands in for `callerAgentId` in episodes about a create with no calling agent. */
+const ROOT_AGENT_CALLER = "(root agent)";
 
 /** The subset of PaseoApi this module needs: reading the provider snapshot. */
 export type ProviderSnapshotApi = Pick<PluginHookContext["paseo"], "providers">;
@@ -117,6 +120,8 @@ export interface PoolExhaustedEpisode {
   exhaustedProviderIds: string[];
   /** Earliest known reset across the pool, or null when nothing reported one. */
   earliestResetAt: Date | null;
+  /** Whether the create was refused. A create with no calling agent never is: it passes through. */
+  refused: boolean;
 }
 
 /**
@@ -126,8 +131,9 @@ export interface PoolExhaustedEpisode {
  * where it fails on its first turn — and a leader that reads that failure as "that one didn't
  * work, try another" spawns the next one straight into the same wall. Refusing costs one clear
  * error instead of an unbounded loop, and the text names the reset so the caller knows whether
- * to wait or to stop. Root agents never reach this code (a root nothing can serve keeps the
- * account it asked for; see `routeRootCreate`), so this can never lock Tyler out of his own daemon.
+ * to wait or to stop. Only a create with a calling agent is refused: a root nothing can serve
+ * keeps the account it asked for (see `routeRootCreate`), and so does a caller-less create
+ * placed like a child, so this can never lock Tyler — or a daemon job — out of the daemon.
  */
 export class PoolExhaustedError extends Error {}
 
@@ -178,6 +184,12 @@ export interface RouterOptions {
    * capped one. Defaults to true; see PoolExhaustedError for why.
    */
   refuseWhenExhausted?: boolean;
+  /**
+   * Whether a create with no calling agent declared a non-leader role, and so is placed like a
+   * child (see `placesRootAsChild` in role-resolve.ts, which the classifier asks too). Such a
+   * create is still never refused. Omitted: every create with no caller is a root.
+   */
+  placesRootAsChild?: (labels: Record<string, string> | undefined) => boolean;
   /** Called when routing fell back to the leader because every worker was unhealthy. */
   onPoolDry?: (episode: PoolDryEpisode) => void;
   /** Called (once per episode, per leader, downstream) when one account is serving the whole pool. */
@@ -211,15 +223,17 @@ export interface RouterOptions {
 type LadderHealth = RouterOptions["health"];
 
 /**
- * The soonest any of these accounts gets budget back, across every capped window. Null when
- * nothing reported a reset time — an account can be capped with no known
+ * The soonest any of these accounts gets budget back, across every capped window that blocks
+ * `modelId` (every capped window when none is named — the same rule as the health check). Null
+ * when nothing reported a reset time — an account can be capped with no known
  * reset (a monthly spend cap never appears in the utilization windows at all), and saying
- * nothing is better than inventing a time.
+ * nothing is better than inventing a time. Another model's reset is not an answer: a leader told
+ * to wait for Sonnet's week spawns its Opus child into the same wall.
  */
-function earliestReset(health: LadderHealth, providerIds: readonly string[]): Date | null {
+function earliestReset(health: LadderHealth, providerIds: readonly string[], modelId: string): Date | null {
   let earliest: Date | null = null;
   for (const providerId of providerIds) {
-    for (const window of health.windowIds(providerId)) {
+    for (const window of modelId ? relevantWindows(modelId) : health.windowIds(providerId)) {
       const state = health.describeWindow(providerId, window);
       if (state?.status !== "capped" || !isValidDate(state.resetsAt)) continue;
       if (earliest === null || state.resetsAt.getTime() < earliest.getTime()) {
@@ -231,8 +245,8 @@ function earliestReset(health: LadderHealth, providerIds: readonly string[]): Da
 }
 
 /** The refusal text an agent sees. Names the accounts and the wait, so the caller can decide. */
-function describeExhaustedPool(health: LadderHealth, providerIds: readonly string[]): string {
-  const reset = earliestReset(health, providerIds);
+function describeExhaustedPool(health: LadderHealth, providerIds: readonly string[], modelId: string): string {
+  const reset = earliestReset(health, providerIds, modelId);
   const when = reset ? `The earliest window reset is ${reset.toISOString()}.` : "No account reported a reset time.";
   return (
     `Account pool: every Claude account is out of budget (${providerIds.join(", ")}), so this agent was not created. ` +
@@ -257,7 +271,9 @@ export type AgentCreateRouter = (
  *
  * A root agent (no callerAgentId: the app, the CLI, a schedule) keeps the account it was started
  * on while that account can run it. Only when that account is at a cap does it move, leader
- * account first — see `routeRootCreate`. A root is never refused.
+ * account first — see `routeRootCreate`. A root is never refused. A caller-less create that
+ * declares a worker role (`placesRootAsChild`) walks the child ladder instead, and is never
+ * refused either.
  *
  * Non-claude-family requests, and every failure mode other than a fully exhausted pool, are
  * passthrough.
@@ -319,47 +335,18 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
     } as PluginBeforeRequests["agent.create"];
   }
 
-  return function routeAgentCreate(input) {
-    const { request } = input;
-
-    const { pool, failOpen: poolFailOpen } = options.poolCache.get();
-    if (poolFailOpen) {
-      wasFailOpen = true;
-      const nowMs = now();
-      if (nowMs - lastFailOpenRefreshAt >= throttleMs) {
-        lastFailOpenRefreshAt = nowMs;
-        void options.poolCache.forceRefresh();
-        void options.providerIds.forceRefresh();
-      }
-    } else if (wasFailOpen) {
-      wasFailOpen = false;
-      options.onPoolRecovered?.();
-    }
-
-    // TYPE NOTE: the daemon supplies callerAgentId on agent.create requests at
-    // runtime (managed CLI/agent-spawned creates); the installed
-    // @getpaseo/plugin types don't declare it on PluginBeforeRequests["agent.create"]
-    // yet. Read it structurally rather than forking the SDK types.
-    const callerAgentId = (request as { callerAgentId?: string }).callerAgentId;
-    if (!callerAgentId) {
-      if (poolFailOpen) {
-        return;
-      }
-      // A placement decision must never be the reason a create fails: whatever goes wrong here,
-      // the root starts on the account it asked for, which is what it did before roots were routed.
-      try {
-        return routeRootCreate(request, pool);
-      } catch (error) {
-        logThrottle("root-routing-failed", () => {
-          console.error(
-            `[claude-account-pool] router: WARNING — routing a root agent on "${request.config.provider}" failed; keeping the requested provider`,
-            error,
-          );
-        });
-        return;
-      }
-    }
-
+  /**
+   * A child agent's account: the ladder in account-select.ts, plus the episodes and the refusal
+   * built on it. `refuseWhenExhausted` is false for a create with no caller, which passes through
+   * an exhausted pool instead.
+   */
+  function routeChildCreate(
+    request: PluginBeforeRequests["agent.create"],
+    pool: ReturnType<PoolCache["get"]>["pool"],
+    poolFailOpen: boolean,
+    callerAgentId: string,
+    refuseWhenExhausted: boolean,
+  ): PluginBeforeRequests["agent.create"] | void {
     // Only claude-family requests are pool members. A codex/gpt/etc. child
     // spawned by an agent must pass through untouched — no rewrite, and no
     // fail-open event, since the pool was never in play for it.
@@ -404,10 +391,11 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
         callerAgentId,
         requestedModel: modelId,
         exhaustedProviderIds: poolProviderIds,
-        earliestResetAt: earliestReset(options.health, poolProviderIds),
+        earliestResetAt: earliestReset(options.health, poolProviderIds, modelId),
+        refused: refuseWhenExhausted,
       });
-      if (options.refuseWhenExhausted ?? true) {
-        throw new PoolExhaustedError(describeExhaustedPool(options.health, poolProviderIds));
+      if (refuseWhenExhausted) {
+        throw new PoolExhaustedError(describeExhaustedPool(options.health, poolProviderIds, modelId));
       }
       options.onFailOpen?.({ callerAgentId, reason: "every-pool-account-capped" });
       return;
@@ -454,5 +442,54 @@ export function createRouter(options: RouterOptions): AgentCreateRouter {
       ...request,
       config: { ...request.config, provider: targetProviderId },
     };
+  }
+
+  return function routeAgentCreate(input) {
+    const { request } = input;
+
+    const { pool, failOpen: poolFailOpen } = options.poolCache.get();
+    if (poolFailOpen) {
+      wasFailOpen = true;
+      const nowMs = now();
+      if (nowMs - lastFailOpenRefreshAt >= throttleMs) {
+        lastFailOpenRefreshAt = nowMs;
+        void options.poolCache.forceRefresh();
+        void options.providerIds.forceRefresh();
+      }
+    } else if (wasFailOpen) {
+      wasFailOpen = false;
+      options.onPoolRecovered?.();
+    }
+
+    // TYPE NOTE: the daemon supplies callerAgentId on agent.create requests at
+    // runtime (managed CLI/agent-spawned creates); the installed
+    // @getpaseo/plugin types don't declare it on PluginBeforeRequests["agent.create"]
+    // yet. Read it structurally rather than forking the SDK types.
+    const callerAgentId = (request as { callerAgentId?: string }).callerAgentId;
+    if (!callerAgentId) {
+      if (poolFailOpen) {
+        return;
+      }
+      // A placement decision must never be the reason a create fails: whatever goes wrong here,
+      // the root starts on the account it asked for, which is what it did before roots were routed.
+      try {
+        // A daemon job that labels what it starts as a worker gets a worker's account. Nobody
+        // reads a refusal on its behalf, so it is never refused.
+        if (options.placesRootAsChild?.((request as { labels?: Record<string, string> }).labels)) {
+          return routeChildCreate(request, pool, false, ROOT_AGENT_CALLER, false);
+        }
+        return routeRootCreate(request, pool);
+      } catch (error) {
+        logThrottle("root-routing-failed", () => {
+          console.error(
+            `[claude-account-pool] router: WARNING — routing a root agent on "${request.config.provider}" failed; keeping the requested provider`,
+            error,
+          );
+        });
+        return;
+      }
+    }
+
+    return routeChildCreate(request, pool, poolFailOpen, callerAgentId, options.refuseWhenExhausted ?? true);
   };
 }

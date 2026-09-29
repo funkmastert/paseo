@@ -1,6 +1,67 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { classify } from "./classify";
-import { WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, weeklyModelWindow } from "./windows";
+import { classify, LIMIT_PATTERN } from "./classify";
+import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, weeklyModelWindow } from "./windows";
+
+/**
+ * Every per-window cap message the Claude CLI can print, from its one template
+ * (`You've hit your ${name}${suffix}`) and its window-name map, read with `strings` from
+ * `@anthropic-ai/claude-agent-sdk-darwin-arm64/claude`:
+ *   five_hour → "session limit", seven_day → "weekly limit", seven_day_opus → "Opus limit",
+ *   seven_day_sonnet → "Sonnet limit", seven_day_overage_included → "Fable 5 limit",
+ *   overage → "usage credit limit".
+ * The suffix is " · resets <when>" and sometimes " · progress saved".
+ */
+const CLI_CAP_MESSAGES: ReadonlyArray<{ message: string; window: string }> = [
+  { message: "You've hit your session limit · resets 2:50pm (America/Los_Angeles)", window: WINDOW_FIVE_HOUR },
+  { message: "You've hit your weekly limit · resets Oct 2, 9am (America/Los_Angeles)", window: WINDOW_SEVEN_DAY },
+  { message: "You've hit your Opus limit · resets Oct 2, 9am · progress saved", window: weeklyModelWindow("opus") },
+  { message: "You've hit your Sonnet limit · resets Oct 2, 9am", window: weeklyModelWindow("sonnet") },
+  { message: "You've hit your Fable 5 limit · resets Oct 2, 9am", window: weeklyModelWindow("fable") },
+  { message: "You've hit your usage credit limit · resets Oct 1, 12am", window: WINDOW_ACCOUNT },
+];
+
+/**
+ * The daemon's own detector, read out of its source. The plugin compiles on its own and cannot
+ * import daemon code, so it carries a copy of the pattern; this is what keeps the copy honest.
+ */
+function daemonLimitPattern(): RegExp {
+  const source = readFileSync(
+    new URL("../../../packages/server/src/server/agent/account-failover-detector.ts", import.meta.url),
+    "utf8",
+  );
+  const match = /const LIMIT_TEXT_PATTERN =\s*\/(.+)\/([a-z]*);/.exec(source);
+  if (!match) {
+    throw new Error("LIMIT_TEXT_PATTERN not found in account-failover-detector.ts; update this test");
+  }
+  return new RegExp(match[1], match[2]);
+}
+
+describe("classify — the CLI's per-window cap messages", () => {
+  it.each(CLI_CAP_MESSAGES)("recognises $message as a cap on $window", ({ message, window }) => {
+    const result = classify(message, new Date(2026, 8, 28, 14, 25, 0));
+    expect(result.isLimit).toBe(true);
+    expect(result.isAuthFailure).toBeFalsy();
+    expect(result.window).toBe(window);
+  });
+
+  it("reads the session cap's reset time", () => {
+    const result = classify(CLI_CAP_MESSAGES[0].message, new Date(2026, 8, 28, 14, 25, 0));
+    expect(result.resetsAt).toEqual(new Date(2026, 8, 28, 14, 50, 0));
+  });
+
+  it("never reads a model-scoped cap as the whole account", () => {
+    for (const family of ["Opus", "Sonnet", "Fable 5"]) {
+      const result = classify(`You've hit your ${family} limit · resets 9am`);
+      expect(result.window).toMatch(/^weekly_model_/);
+    }
+  });
+
+  it("uses the same limit pattern as the daemon's failover detector", () => {
+    expect(LIMIT_PATTERN.source).toBe(daemonLimitPattern().source);
+    expect(LIMIT_PATTERN.flags).toBe(daemonLimitPattern().flags);
+  });
+});
 
 describe("classify", () => {
   it("flags limit-shaped failure text as a limit", () => {
