@@ -67,7 +67,11 @@ grep -E '"msg":"Catastrophe gate blocked (a command|terminal input)"' "$PASEO_HO
 - **Other routes to a shell:** `paseo terminal send-keys` arrives as terminal input over the WebSocket, the same path as a person typing in the app, so it is not gated. `start_workspace_script` runs scripts from `paseo.json`, which an agent can edit. Terminal lines are checked from the terminal's starting cwd; a `cd` typed on an earlier line is not carried over.
 - **Other providers:** Codex, OpenCode, Copilot and the ACP providers, Pi and OMP.
 - **Parser limits:** globs other than a trailing `*` (`/U*`), brace expansion, `find` expressions whose `-o` changes what `-delete` applies to, `case` patterns inside a subshell.
-- **Two known false positives, both rare:** `git push --mirror <remote>` from a clone with `main` checked out (a repo migration) is blocked; so is a catastrophic line typed as text into a non-shell program through `send_terminal_keys`.
+- **Known false positives, all rare:**
+  - `git push --mirror <remote>` from a clone with `main` checked out (a repo migration).
+  - A catastrophic line typed as text into a non-shell program through `send_terminal_keys`.
+  - Setting up a RAM disk in two calls: `hdiutil attach -nomount ram://…`, then `diskutil eraseVolume`/`newfs_hfs` on the printed `/dev/diskN` in a separate command. The single-line form (`diskutil eraseVolume HFS+ RAMDisk $(hdiutil attach -nomount ram://…)`) passes; telling the two apart needs the disk's actual type, which the gate does not look up.
+  - `rm -rf /Users/Shared`, a sibling directory such as `/Users/<home>.old`, or a mounted DMG under `/Volumes/<name>`. `rm-disk-root` protects any single path segment directly under `/Users` or `/Volumes`, not only real home directories and real volumes.
 
 ## Changing the rules
 
