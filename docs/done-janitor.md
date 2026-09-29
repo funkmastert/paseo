@@ -159,7 +159,7 @@ The passes above reach only Paseo-owned worktrees, and only through their agents
 
 A workspace is archived when all of these hold:
 
-- **Not pinned**, and no agent in it carries `paseo.keep`.
+- **Not manually pinned** ([Manual pin vs. auto-pin](#manual-pin-vs-auto-pin)), and no agent in it carries `paseo.keep`. An auto-pinned workspace is swept like an unpinned one.
 - **Nothing in it is at work.** No agent is running, initializing, mid-turn, waiting on a permission, running provider subagents, or cut off by a daemon stop. No schedule or heartbeat targets one. No agent in it leads a live subagent anywhere: that is an orchestrator whose fleet is still loaded. No terminal is open and no script runs.
 - **It is idle past its threshold**, measured from the newest of the record's `createdAt` and `updatedAt`, its unarchived agents' last activity, HEAD's commit time, and the directory's own mtime. Never the git index: `git status` rewrites it. A timestamp that does not parse reads as just now, and a workspace with no signal at all is active.
 

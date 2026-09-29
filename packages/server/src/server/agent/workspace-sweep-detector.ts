@@ -10,6 +10,7 @@
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
 import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
+import { isProtectivePin } from "../workspace-auto-pin.js";
 import {
   DONE_JANITOR_KEEP_LABEL,
   formatDuration,
@@ -221,7 +222,7 @@ function isFixerWorkspace(agents: readonly DoneJanitorAgentView[]): boolean {
 }
 
 /**
- * What keeps the workspace whatever its age: a pin, an agent at work or about to be woken, an
+ * What keeps the workspace whatever its age: a manual pin, an agent at work or about to be woken, an
  * orchestrator whose fleet is still loaded, a terminal, a script. Null when nothing does.
  */
 export function workspaceBusyReason(
@@ -230,7 +231,8 @@ export function workspaceBusyReason(
     "workspace" | "agents" | "views" | "terminalCount" | "runningScriptCount"
   >,
 ): string | null {
-  if (facts.workspace.pinnedAt) return "it is pinned";
+  // An auto pin only sorts the workspace to the top while it is in use (workspace-auto-pin.ts).
+  if (isProtectivePin(facts.workspace)) return "it is pinned";
   const unarchived = facts.agents.filter((agent) => !agent.archived);
   for (const agent of unarchived) {
     if (Object.prototype.hasOwnProperty.call(agent.labels, DONE_JANITOR_KEEP_LABEL)) {

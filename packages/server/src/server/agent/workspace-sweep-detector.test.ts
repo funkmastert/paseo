@@ -151,11 +151,28 @@ describe("classifyWorkspace", () => {
     expect(classify({ signals: null })).toEqual({ kind: "needs-signals" });
   });
 
-  test("a pinned workspace is never idle", () => {
+  test("a manually pinned workspace is never idle", () => {
+    const pinned = workspace({ pinnedAt: ago(500 * HOUR), pinSource: "manual" });
+    expect(classify({ workspace: pinned })).toEqual({ kind: "active", reason: "it is pinned" });
+  });
+
+  test("a legacy pin, written before pinSource existed, is a manual pin", () => {
     expect(classify({ workspace: workspace({ pinnedAt: ago(500 * HOUR) }) })).toEqual({
       kind: "active",
       reason: "it is pinned",
     });
+  });
+
+  test("an auto pin protects nothing: the workspace is idle like any other", () => {
+    const autoPinned = workspace({ pinnedAt: ago(200 * HOUR), pinSource: "auto" });
+    expect(classify({ workspace: autoPinned })).toMatchObject({ kind: "idle", rule: "idle" });
+  });
+
+  test("an auto-pinned workspace holding a paseo.keep agent is kept by the label", () => {
+    const autoPinned = workspace({ pinnedAt: ago(200 * HOUR), pinSource: "auto" });
+    expect(
+      classify({ workspace: autoPinned, agents: [agent({ labels: { "paseo.keep": "" } })] }),
+    ).toEqual({ kind: "active", reason: "agent agent-1 is pinned with paseo.keep" });
   });
 
   test("an agent labelled paseo.keep pins its workspace", () => {
