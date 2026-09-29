@@ -143,6 +143,7 @@ Only after the agent is archived, through archive-by-scope, and only when all of
   - the directory is the root of a **linked** worktree — its git dir differs from the common dir, so a primary checkout is refused wherever it lives;
   - it is not locked with `git worktree lock`, and no merge, rebase, cherry-pick, revert or bisect is half done;
   - `git status --untracked-files=all` is empty. Ignored files are the [deletion invariant](#the-deletion-invariant)'s to judge;
+  - no tracked file on disk is marked `--assume-unchanged` or `--skip-worktree`. `git status` never looks at such a file, so an edit to it reads as clean. A sparse checkout's files are marked too, but are not on disk, and do not count;
   - every commit reachable from HEAD is reachable from a remote-tracking ref or the local base branch recorded at creation. Both survive the deletion. Another local branch does not count: it may be the next worktree the janitor deletes. A squash-merged branch whose remote branch was deleted fails this check and is kept.
 - The [deletion invariant](#the-deletion-invariant) holds.
 
@@ -156,11 +157,21 @@ Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each wo
 
 Deleting a directory is the one thing the janitor cannot undo, so every deletion it makes, by any pass, meets one rule: **every file in the worktree is tracked and pushed, or in a verified backup, or under a regenerable directory.** Anything else present keeps the worktree, and the reason is logged. When in doubt, it keeps: a git command that fails, output cut off at the runner's cap, or a process list that cannot be read all keep it.
 
-Regenerable means a directory on the path is one a build, an install or a test run recreates: `node_modules`, `dist`, `build`, `out-tsc`, `tsc-out`, `.next`, `.turbo`, `.cache`, `coverage`, `test-results`, `target`, `.gradle`, `DerivedData`, `Pods`, `.build`, `.swiftpm`, `__pycache__`, `.venv` and the rest named in `REGENERABLE_DIRS` (`agent/workspace-sweep-detector.ts`), plus `.yarn/cache`, `.DS_Store`, `*.pyc` and `*.tsbuildinfo`. Everything else that is ignored keeps the worktree: `.env`, `.xcode.env.local`, `google-services.json`, playtest evidence logs, `.data/`, `results/`, `src-tauri/binaries/`. Add a name to the list only for a directory whose contents are always rebuilt.
+Git's listing has to be the whole of what the deletion loses, so these keep the worktree too, snapshot or not:
+
+- **A directory the delete cannot get through**: one it cannot read, or cannot write or search. Git skips a directory it cannot open without failing, and a delete that meets one stops part-way, leaving half a worktree. `readWorktreeCoverage` walks the whole tree for these, ignored directories included, without following symlinks.
+- **A change git is told not to look for**: a tracked file on disk marked `--assume-unchanged` or `--skip-worktree`. Git, the scratch index and the snapshot all read an edit to it as unchanged.
+- **A file stored with Git LFS** (`filter=lfs` from any attributes file, tracked or not). Git and the backup hold only its pointer; the contents are in the LFS store, and nothing the janitor can read proves the LFS server has them: `git lfs push --dry-run` and `git lfs status` compare refs, not the server's objects.
+
+Regenerable means a directory on the path is one a build, an install or a test run recreates — `node_modules`, `dist`, `build`, `out-tsc`, `tsc-out`, `.next`, `.turbo`, `.cache`, `coverage`, `test-results`, `target`, `.gradle`, `DerivedData`, `Pods`, `.build`, `.swiftpm`, `__pycache__`, `.venv` and the rest named in `REGENERABLE_DIRS` (`agent/workspace-sweep-detector.ts`), plus `.yarn/cache` — **and it sits at the worktree root or beside a build manifest**: `package.json`, `Cargo.toml`, `build.gradle(.kts)`, `settings.gradle(.kts)`, `Package.swift`, `pyproject.toml`, `setup.py`, `go.mod`, `pom.xml` or an `*.xcodeproj`. A build tool writes its output next to its manifest; a `src/build/` or `src/.cache/` beside source is somebody's files. `.DS_Store`, `*.pyc` and `*.tsbuildinfo` count anywhere. Everything else that is ignored keeps the worktree: `.env`, `.xcode.env.local`, `google-services.json`, playtest evidence logs, `.data/`, `results/`, `src-tauri/binaries/`, and a `__pycache__/` below a package's root. Add a name to the list only for a directory whose contents are always rebuilt.
+
+A repository nested anywhere keeps the worktree: a submodule, an untracked repository, or one inside an ignored regenerable directory, where git lists only the directory and the walk finds its `.git`. A backup holds a nested repository only as a pointer to a commit, if at all.
+
+Ignored files come from `git status --ignored=matching --untracked-files=all`. Do not switch to `ls-files --ignored --directory`: it never looks inside an untracked directory, so a `.env` beside a new, untracked source file is in neither list, and the snapshot leaves it out as ignored.
 
 The check runs twice:
 
-1. **Planning, read-only, the same in a dry run and a live one.** No schedule starts agents in the worktree; no process has its cwd, its executable or a file open inside it (one `lsof` over every process the daemon's user can see; the daemon's own process is left out); and the worktree read against HEAD (`readWorktreeCoverage`) shows no ignored path outside the list and no submodule or nested repository, which a backup holds only as a pointer. What differs from HEAD, and any unpushed commit, is what the snapshot will have to hold.
+1. **Planning, read-only, the same in a dry run and a live one.** No schedule starts agents in the worktree; no process has its cwd, its executable or a file open inside it (one `lsof` over every process the daemon's user can see; the daemon's own process is left out); and the worktree read against HEAD (`readWorktreeCoverage`) shows nothing above: no ignored path that is not regenerable, no nested repository, no directory the delete cannot get through, no hidden change, no LFS file. What differs from HEAD, and any unpushed commit, is what the snapshot will have to hold.
 2. **Confirming, live only, after `du` and right before the archive.** The schedule and process checks again, then the snapshot. If it reports nothing at risk, the worktree is read against HEAD again and nothing may differ. Otherwise the backup is verified — the ref points at the snapshot, the bundle exists, is non-empty, passes `git bundle verify` and holds the snapshot, or the personal remote holds the pushed branch; a snapshot with no copy outside the repository is not a backup — and the worktree is read against the snapshot commit through a scratch index. Any file not in it keeps the worktree: one written since the plan, or one the snapshot left out for its size, for looking like a secret, or for a rule added later. The next sweep snapshots it again.
 
 The read against the snapshot does not trust anything the snapshotter says about what it held, so its filters can change without this rule changing. A snapshot that does report files it left out (`skippedFiles`, and `possibleSecrets` once the snapshotter fills it) keeps the worktree with that reason.
@@ -192,10 +203,12 @@ A fixer's workspace ignores its directory, since fixers run in the home director
 
 The archive goes through archive-by-scope, the path of a person's **Archive workspace**, which archives the workspace's agents and terminals with it. It deletes a directory only for a Paseo-owned worktree: the record says so, or an older record's path lies under the Paseo worktrees root.
 
+The janitor asks archive-by-scope's own resolution which directory that is (`resolveArchiveDirectory`, `workspace-archive-service.ts`), runs every check against it, and names it on every line. For an older record without the ownership flag it is the worktree root above the record's cwd, even when that cwd is a subdirectory that no longer exists. A live run resolves it again from the fresh record right before the deletion, and keeps the workspace if the answer changed. An archive that deletes nothing goes through archive-by-scope with `keepDirectory`, which tears down and deletes no directory whatever the record says, so a record-only line can never delete one.
+
 - **External worktrees, local checkouts and directories** keep their directory, dirty or not. Only the record is archived.
 - **A Paseo-owned worktree** goes through the conflict and snapshot-failure checks and the [git gate](#reclaiming-the-worktree):
   - clean and pushed, or dirty or unpushed work a snapshot can hold: archived with its directory once the [deletion invariant](#the-deletion-invariant) holds. A worktree it keeps is not snapshotted by this pass; the [work-at-risk sweep](work-snapshots.md#the-work-at-risk-sweep) looks after its work;
-  - gone: the record is archived;
+  - gone: the record is archived, through the archive that keeps the directory;
   - anything else the gate refuses, a lock or a merge in progress: kept.
 - With `reclaimWorkspaces` off, no Paseo-owned worktree is archived.
 
@@ -221,7 +234,7 @@ The sweep reports and deletes nothing until `workspaceSweep.dryRun` is `false`, 
    ```
    grep '"Done janitor (dry run)"' ~/.paseo/daemon.log | grep -E '"action":"(would-archive-workspace|would-delete|kept-idle-workspace|would-remove-project)"'
    ```
-   Each `would-delete` line carries its `rule`, its `idleFor` age and its `invariant` verdict: which files and commits the snapshot will have to back up, and which ignored paths go as regenerable. Each `would-archive-workspace` and `would-remove-project` line should name clutter.
+   Each `would-delete` line's `path` is the directory the archive deletes, and it carries its `rule`, its `idleFor` age and its `invariant` verdict: which files and commits the snapshot will have to back up, and which ignored paths go as regenerable. Each `would-archive-workspace` and `would-remove-project` line should name clutter.
 2. Approve by setting `agents.doneJanitor.workspaceSweep.dryRun` to `false` in `$PASEO_HOME/config.json` and running `paseo reload`.
 3. Watch the first live sweeps: `"msg":"Done janitor: archived an idle workspace"` lines carry `rule`, `idleFor`, `removedDirectory` and `invariant`, and `"action":"deleted"` lines carry `bytes`.
 
@@ -283,7 +296,7 @@ and for live agents:
 
 - **Squash-merged branches whose remote branch is gone.** Their commits are unreachable from anything that survives, so they are kept and reported; delete them by hand after checking.
 - **Ignored files outside the regenerable list.** They keep their worktree ([The deletion invariant](#the-deletion-invariant)) until someone backs them up or deletes them.
-- **A regenerable name at any depth.** An ignored path counts as regenerable when any directory on its way is on the list, so an ignored `notes/build/` would go with its worktree. Git ignoring it is the other half of the test; matching only where each build tool puts its output would need a rule per tool.
+- **Worktrees that use Git LFS, hide changes with `--assume-unchanged` or `--skip-worktree`, or hold a directory the delete cannot get through.** They are kept every sweep ([The deletion invariant](#the-deletion-invariant)); clear the flag, push the LFS objects or fix the permissions, or delete the worktree by hand.
 - **Windows.** There is no `lsof`, so the process check fails and the janitor deletes no worktree there. Records are still archived.
 - **Background shells and `Monitor` watches inside a Claude process.** The daemon cannot see them. The quiet period and the question are the only defence: an agent waiting on one should answer `NOT_DONE`.
 - **Dead subagents of a live leader.** The dead pass judges whole trees from the root, so a live idle leader keeps every dead child until it answers the question and is archived. The subagents track's **Archive finished** row clears them by hand.
