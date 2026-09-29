@@ -55,8 +55,11 @@ import type {
   FetchAgentTimelineDirection,
   FetchAgentTimelinePayload,
   FetchAgentTimelineProjection,
+  JevDecidePayload,
+  JevStatusPayload,
   WaitForFinishResult,
 } from "./daemon-client.js";
+import type { JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
 
 /**
  * Coding turns routinely run for minutes, so the handle waits far longer than
@@ -460,6 +463,27 @@ export interface PaseoMcpGatewayActions {
   ): Promise<PaseoMcpGatewayServerAdoptResult>;
 }
 
+export interface PaseoJevActions {
+  /** Feature 2's client-facing RPC (docs/jev.md, "RPCs"): only `feature: "spawnHint"` is served. */
+  decide(
+    input: {
+      feature: string;
+      callSite: string;
+      state: unknown;
+      questions: JevQuestions;
+      scope?: { cwd: string; parentAgentId?: string };
+      deadlineMs?: number;
+    },
+    options?: { timeout?: number },
+  ): Promise<JevDecidePayload>;
+  status(options?: { timeout?: number }): Promise<JevStatusPayload["status"]>;
+  /** The D7 check alone (docs/jev.md, "The D7 exclusion"). */
+  checkScope(
+    input: { cwd: string; parentAgentId?: string },
+    options?: { timeout?: number },
+  ): Promise<"ok" | "excluded">;
+}
+
 export interface PaseoConfigActions {
   /**
    * Reads daemon config through the existing config RPC. Provider profiles,
@@ -488,6 +512,9 @@ export interface PaseoApi {
   readonly providers: PaseoProviderActions;
   readonly config: PaseoConfigActions;
   readonly mcpGateway: PaseoMcpGatewayActions;
+  // COMPAT(jevPaseoApi): a plugin reloaded against an older daemon's host has no `paseo.jev`, and
+  // a call is a TypeError before any RPC. Callers check `typeof paseo.jev?.decide === "function"`.
+  readonly jev?: PaseoJevActions;
 }
 
 export interface PaseoClient extends PaseoApi {
@@ -609,6 +636,14 @@ export function createPaseoApi(daemonClient: DaemonClient): PaseoApi {
     mcpGateway: {
       startAuth: (name, options) => daemonClient.startMcpGatewayAuth(name, options),
       adopt: (name, agentId, options) => daemonClient.adoptMcpGatewayServer(name, agentId, options),
+    },
+    jev: {
+      decide: (input, options) => daemonClient.jevDecide(input, options),
+      status: async (options) => (await daemonClient.jevStatus(options)).status,
+      checkScope: async (input, options) => {
+        const { scope } = await daemonClient.jevScopeCheck(input, options);
+        return scope === "excluded" ? "excluded" : "ok";
+      },
     },
   };
 }

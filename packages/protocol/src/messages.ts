@@ -86,6 +86,16 @@ import {
   AgentContextUsageReadResponseSchema,
 } from "./context-usage/rpc-schemas.js";
 import {
+  JevDecideRequestSchema,
+  JevDecideResponseSchema,
+  JevStatusRequestSchema,
+  JevStatusResponseSchema,
+  JevScopeCheckRequestSchema,
+  JevScopeCheckResponseSchema,
+  JevDecisionsListRequestSchema,
+  JevDecisionsListResponseSchema,
+} from "./jev/rpc-schemas.js";
+import {
   PaseoConfigRawSchema,
   PaseoLifecycleCommandRawSchema,
   PaseoMetadataGenerationEntrySchema,
@@ -3838,6 +3848,10 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListRequestMessageSchema,
   UsageHistoryGetRequestSchema,
   AgentContextUsageReadRequestSchema,
+  JevDecideRequestSchema,
+  JevStatusRequestSchema,
+  JevScopeCheckRequestSchema,
+  JevDecisionsListRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4305,6 +4319,8 @@ export const ServerInfoStatusPayloadSchema = z
         usageHistory: z.boolean().optional(),
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: z.boolean().optional(),
+        // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
+        jev: z.boolean().optional(),
       })
       .optional(),
   })
@@ -7528,6 +7544,10 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListResponseMessageSchema,
   UsageHistoryGetResponseSchema,
   AgentContextUsageReadResponseSchema,
+  JevDecideResponseSchema,
+  JevStatusResponseSchema,
+  JevScopeCheckResponseSchema,
+  JevDecisionsListResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,

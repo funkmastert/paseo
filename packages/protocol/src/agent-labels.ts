@@ -1,6 +1,17 @@
 export const PARENT_AGENT_ID_LABEL = "paseo.parent-agent-id";
 const OPEN_AGENT_TAB_LABEL_PREFIX = "paseo.open-agent-tab.";
 
+/** Whether a spawned agent got the JEV agent tools (docs/jev.md, "Features 4-6"). */
+export const JEV_TOOLS_LABEL = "paseo.jev-tools";
+/** "on": the tools are exposed. "control": the D8 hold-out arm, withheld on purpose. */
+export const JEV_TOOLS_LABEL_VALUES = ["on", "control"] as const;
+
+/** The `callId` of the JEV decision behind a create, so `jev.decisions.list` can attach it. */
+export const JEV_CALL_LABEL = "paseo.jev-call";
+
+/** How `paseo.task-class` was set: "declared" | "jev" | "classified" | "default". */
+export const TASK_CLASS_SOURCE_LABEL = "paseo.task-class-source";
+
 export function getOpenAgentTabLabel(clientId: string): string {
   return `${OPEN_AGENT_TAB_LABEL_PREFIX}${clientId}`;
 }

@@ -169,6 +169,7 @@ import {
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
 import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
+import type { JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -488,6 +489,22 @@ type UsageHistoryGetPayload = Extract<
 export type AgentContextUsageReadPayload = Extract<
   SessionOutboundMessage,
   { type: "agent.context_usage.read.response" }
+>["payload"];
+export type JevDecidePayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.decide.response" }
+>["payload"];
+export type JevStatusPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.status.response" }
+>["payload"];
+export type JevScopeCheckPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.scope.check.response" }
+>["payload"];
+export type JevDecisionsListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.decisions.list.response" }
 >["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
@@ -5214,6 +5231,69 @@ export class DaemonClient {
       requestId: options?.requestId,
       timeout: options?.timeout,
       message: { type: "agent.context_usage.read.request", agentId },
+    });
+  }
+
+  /**
+   * Feature 2's client-facing RPC (docs/jev.md, "RPCs"): only `feature: "spawnHint"` is served.
+   * The default timeout (60s) is too long for a plugin's 30-second hook budget; callers pass one.
+   */
+  async jevDecide(
+    input: {
+      feature: string;
+      callSite: string;
+      state: unknown;
+      questions: JevQuestions;
+      scope?: { cwd: string; parentAgentId?: string };
+      deadlineMs?: number;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevDecidePayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "jev.decide.request", ...input },
+    });
+  }
+
+  /** `JevStatus` from `contract.ts`. The default timeout (60s) is too long for a plugin hook. */
+  async jevStatus(options?: { requestId?: string; timeout?: number }): Promise<JevStatusPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "jev.status.request" },
+    });
+  }
+
+  /** The D7 check alone (docs/jev.md, "The D7 exclusion"). The plugin asks before an agent exists. */
+  async jevScopeCheck(
+    input: { cwd: string; parentAgentId?: string },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevScopeCheckPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "jev.scope.check.request", ...input },
+    });
+  }
+
+  /** An agent's `JevDecisionRecord`s, newest first, including its spawn hint. */
+  async listJevDecisions(
+    agentId: string,
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevDecisionsListPayload> {
+    // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
+    // unknown request type with nothing, so an ungated call would only time out.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout,
+      message: { type: "jev.decisions.list.request", agentId },
     });
   }
 
