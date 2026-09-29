@@ -2,13 +2,24 @@ import { expect, test } from "vitest";
 import { WebSocket, type RawData } from "ws";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/index.js";
 import { WSOutboundMessageSchema, type WSOutboundMessage } from "./messages.js";
-import { MAX_PHYSICAL_SOCKET_BUFFERED_BYTES } from "./websocket/physical-socket.js";
+import {
+  APPLICATION_SOCKET_LEASE_MS,
+  MAX_PHYSICAL_SOCKET_BUFFERED_BYTES,
+} from "./websocket/physical-socket.js";
 
 const LARGE_REQUEST_BYTES = 512 * 1024;
-// Each pong echoes its request id, so the paused socket is owed LARGE_REQUEST_BYTES per ping. The
-// burst must cross the high-water mark plus what the kernel's loopback buffers absorb (8 MB here),
-// so 16 MB of margin; a fixed count went stale when the mark rose from 8 MB to 64 MB (#2488).
-const BURST_MESSAGE_COUNT = MAX_PHYSICAL_SOCKET_BUFFERED_BYTES / LARGE_REQUEST_BYTES + 32;
+// The paused socket's loopback kernel buffers (up to 4 MiB each way on macOS)
+// fill before the daemon's own queue starts to count toward the cap.
+const KERNEL_BUFFER_HEADROOM_BYTES = 16 * 1024 * 1024;
+// Derived from the cap so raising it cannot leave the burst below it again.
+const BURST_MESSAGE_COUNT = Math.ceil(
+  (MAX_PHYSICAL_SOCKET_BUFFERED_BYTES + KERNEL_BUFFER_HEADROOM_BYTES) / LARGE_REQUEST_BYTES,
+);
+// The replacement reads each batch before the next is sent, so only the paused
+// socket can reach the cap.
+const BATCH_MESSAGE_COUNT = 8;
+// Shorter than the application lease, so only the high-water bound can close
+// the stale socket inside the test.
 const TEST_TIMEOUT_MS = 30_000;
 
 interface SocketClose {
@@ -41,29 +52,34 @@ class ResumedPhysicalSocketSession {
   async broadcastUntilOriginalCloses(): Promise<SocketClose> {
     const replacement = this.requireReplacement();
     const originalClose = waitForClose(this.original);
-    const finalRequestId = largeRequestId(BURST_MESSAGE_COUNT - 1);
-    const finalResponse = waitForMessage(replacement, (message) => {
-      return (
-        message.type === "session" &&
-        message.message.type === "pong" &&
-        message.message.payload.requestId === finalRequestId
-      );
-    });
 
-    for (let index = 0; index < BURST_MESSAGE_COUNT; index += 1) {
-      replacement.send(
-        JSON.stringify({
-          type: "session",
-          message: {
-            type: "ping",
-            requestId: largeRequestId(index),
-            clientSentAt: index,
-          },
-        }),
-      );
+    for (let start = 0; start < BURST_MESSAGE_COUNT; start += BATCH_MESSAGE_COUNT) {
+      const end = Math.min(start + BATCH_MESSAGE_COUNT, BURST_MESSAGE_COUNT);
+      const lastRequestId = largeRequestId(end - 1);
+      const batchResponse = waitForMessage(replacement, (message) => {
+        return (
+          message.type === "session" &&
+          message.message.type === "pong" &&
+          message.message.payload.requestId === lastRequestId
+        );
+      });
+
+      for (let index = start; index < end; index += 1) {
+        replacement.send(
+          JSON.stringify({
+            type: "session",
+            message: {
+              type: "ping",
+              requestId: largeRequestId(index),
+              clientSentAt: index,
+            },
+          }),
+        );
+      }
+
+      await batchResponse;
     }
 
-    await finalResponse;
     this.original.resume();
     return originalClose;
   }
@@ -99,6 +115,7 @@ class ResumedPhysicalSocketSession {
 test(
   "a resumed stale socket is bounded and removed without disrupting its replacement",
   async () => {
+    expect(TEST_TIMEOUT_MS).toBeLessThan(APPLICATION_SOCKET_LEASE_MS);
     const session = await ResumedPhysicalSocketSession.launch();
     try {
       await session.abandonOriginal();
