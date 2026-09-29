@@ -452,10 +452,32 @@ function emptySimpleCommand(): SimpleCommand {
   return { kind: "simple", words: [], redirects: [] };
 }
 
+/**
+ * Caps literal `(…)` subshell nesting the recursive-descent parser will follow. Nothing real
+ * nests this deep; it exists so a script with thousands of nested parens cannot overflow the
+ * stack. Past the cap the nested subshell is skipped rather than walked, which is a miss, not a
+ * false positive — consistent with the gate only blocking what it can resolve.
+ */
+const MAX_PAREN_DEPTH = 200;
+
+/** Skips from just after an unwalked `(` to its matching `)`, without recursing. */
+function skipBalancedParenTokens(tokens: ShellToken[], start: number): number {
+  let depth = 1;
+  let index = start;
+  while (index < tokens.length && depth > 0) {
+    const token = tokens[index];
+    if (token?.type === "op" && token.op === "(") depth++;
+    else if (token?.type === "op" && token.op === ")") depth--;
+    index++;
+  }
+  return index;
+}
+
 function parseList(
   tokens: ShellToken[],
   start: number,
   inSubshell: boolean,
+  parenDepth = 0,
 ): { list: CommandList; next: number } {
   const list: CommandList = [];
   let pipeline: Pipeline = [];
@@ -493,7 +515,11 @@ function parseList(
         continue;
       }
       flushCommand();
-      const inner = parseList(tokens, index + 1, true);
+      if (parenDepth >= MAX_PAREN_DEPTH) {
+        index = skipBalancedParenTokens(tokens, index + 1);
+        continue;
+      }
+      const inner = parseList(tokens, index + 1, true, parenDepth + 1);
       pipeline.push({ kind: "subshell", body: inner.list });
       index = inner.next;
       continue;

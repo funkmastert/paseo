@@ -400,6 +400,15 @@ describe("catastrophe gate: real repository", () => {
   });
 });
 
+describe("catastrophe gate: parser recursion limits", () => {
+  test("does not overflow the stack on deeply nested subshells", async () => {
+    const depth = 20_000;
+    const command = `${"(".repeat(depth)}rm -rf ~${")".repeat(depth)}`;
+    const decision = await check({ command });
+    expect(decision).toBeDefined();
+  });
+});
+
 describe("catastrophe gate: denial text", () => {
   test("names the rule and the command, forbids workarounds and points at Tyler", async () => {
     const command = "git push -f origin main";

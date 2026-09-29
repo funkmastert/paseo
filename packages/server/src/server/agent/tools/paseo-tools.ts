@@ -596,7 +596,18 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     const submitted = typedTerminalLines.feed(terminalId, data);
     if (daemonConfigStore?.get().catastropheGate?.enabled === false) return;
     for (const script of submitted) {
-      const decision = await checkCatastrophe(script, cwd, resolveCurrentBranchWithGit);
+      let decision: Awaited<ReturnType<typeof checkCatastrophe>>;
+      try {
+        decision = await checkCatastrophe(script, cwd, resolveCurrentBranchWithGit);
+      } catch (error) {
+        // Fails open, like the Claude hook (docs/catastrophe-gate.md): a broken gate must never
+        // block real work, so an error here allows the input through rather than swallowing it.
+        childLogger.warn(
+          { err: error, agentId: callerAgentId, terminalId, cwd, command: script.slice(0, 500) },
+          "Catastrophe gate threw while checking terminal input; allowing it through",
+        );
+        continue;
+      }
       if (!decision.block) continue;
       // Nothing from this call reaches the terminal, so the line is still sitting at its prompt.
       typedTerminalLines.restore(terminalId, before);

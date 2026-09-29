@@ -3,6 +3,16 @@ import { describe, expect, test, vi } from "vitest";
 
 import { createPaseoToolCatalog } from "./paseo-tools.js";
 import type { PaseoToolHostDependencies } from "./types.js";
+import { checkCatastrophe } from "../catastrophe-gate.js";
+
+// The base implementation delegates to the real gate; individual tests override it with
+// `mockImplementationOnce` to exercise the error path without disturbing the others.
+vi.mock("../catastrophe-gate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../catastrophe-gate.js")>();
+  return { ...actual, checkCatastrophe: vi.fn(actual.checkCatastrophe) };
+});
+
+const mockedCheckCatastrophe = vi.mocked(checkCatastrophe);
 
 /**
  * The catastrophe gate on the terminal route: `send_terminal_keys` types into a real shell, so a
@@ -64,5 +74,16 @@ describe("send_terminal_keys catastrophe gate", () => {
     await sendKeys("rm -rf ~\r");
 
     expect(send).toHaveBeenCalledWith({ type: "input", data: "rm -rf ~\r" });
+  });
+
+  test("fails open when the gate itself throws, matching the documented fail-open behavior", async () => {
+    mockedCheckCatastrophe.mockImplementationOnce(() => {
+      throw new RangeError("Maximum call stack size exceeded");
+    });
+    const { sendKeys, send } = createCatalog("gate-throws");
+
+    await sendKeys("ls\r");
+
+    expect(send).toHaveBeenCalledWith({ type: "input", data: "ls\r" });
   });
 });
