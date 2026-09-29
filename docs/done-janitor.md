@@ -51,12 +51,47 @@ Each archive is decided against freshly read state, so an agent someone opened b
 
 ## Pinned
 
-Two things pin, and both spare the agent from the dead pass and the question, and its worktree from reclamation:
+Two things pin, and both spare the agent from the dead pass and the question, and its worktree from reclamation — but a pinned workspace only does so when the pin is **manual** (below).
 
-- **A pinned workspace** (`workspace.pin.set`, the sidebar pin). Every agent in it is pinned, and so is its worktree. This is the pin a person has a gesture for.
-- **A `paseo.keep` label** on the agent, any value, `"false"` included. It pins the agent, its tree and its workspace. Set it with `update_agent` (`labels: { "paseo.keep": "true" }`). No screen sets it.
+- **A pinned workspace** (`workspace.pin.set`, the sidebar pin). Every agent in it is pinned, and so is its worktree, as long as the pin is manual. This is the pin a person has a gesture for.
+- **A `paseo.keep` label** on the agent, any value, `"false"` included. It pins the agent, its tree and its workspace regardless of pin source. Set it with `update_agent` (`labels: { "paseo.keep": "true" }`). No screen sets it.
 
 A pinned tab is not a pin: that is per-client layout state the daemon cannot see. There is no agent-level pin gesture in the app; pinning a session means pinning its workspace, or labelling it.
+
+### Manual pin vs. auto-pin
+
+A workspace's `pinnedAt` has a `pinSource`: `"manual"` for a person's own pin gesture (or any record
+written before `pinSource` existed — absent reads as manual, so nothing already pinned loses its
+protection), and `"auto"` for the daemon pinning a workspace the moment Tyler starts a session in
+it — a new workspace from the New Workspace flow, or a new agent tab in an existing one
+(`workspace-auto-pin.ts`). Both keep the workspace at the top of the sidebar identically; they
+differ only in what the janitor does with them.
+
+A **manual** pin protects fully, as described above: the dead pass, the question, and worktree
+reclamation all skip it indefinitely.
+
+An **auto** pin protects nothing from the janitor. It exists so a workspace Tyler just started
+working in doesn't look unpinned while it's active, but once that workspace would otherwise be
+swept up by the janitor's ordinary quiet-and-done rules, the auto-pin does not stand in the way —
+otherwise every session Tyler ever starts would pin forever and the pinned list would fill with the
+same clutter the janitor exists to clear. `isProtectivePin` (`workspace-auto-pin.ts`) is the single
+place this distinction is made; the dead pass, the question pass, and worktree reclamation all read
+it instead of `pinnedAt` directly.
+
+Pinning by hand always wins: it sets `pinSource` to `"manual"` regardless of what was there before,
+so pinning an auto-pinned workspace upgrades it to a real pin. Unpinning clears both fields.
+Auto-pinning only ever moves a workspace from unpinned to auto-pinned — it never touches a
+workspace that is already pinned, by either source.
+
+Auto-pin is human-attributable-create only: it fires for a `workspace.create.request` or a
+`create_agent_request` with no `callerAgentId` (both are only reachable over a client connection —
+app or CLI), never for the agent-scoped `create_workspace`/`create_agent` MCP tools, Hub
+executions, schedules, heartbeats, remediation, or restart recovery, which all create through the
+separate `"mcp"`-kind path. The known gap: an agent that runs the CLI with `PASEO_AGENT_ID` cleared
+looks identical to a human on the wire and gets auto-pinned too — harmless, since an auto-pin is
+reclaimable the same as no pin once the janitor's rules say the work is done.
+
+Off switch: `agents.autoPinSessions` (boolean, default on, reloadable without a restart).
 
 ## What "finished" means
 

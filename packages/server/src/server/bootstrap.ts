@@ -555,6 +555,7 @@ export interface PaseoDaemonConfig {
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   providerCatalogRefreshTimeoutMs?: number;
+  autoPinSessions?: boolean;
   metadataGeneration?: {
     providers?: Array<{
       provider: string;
@@ -767,6 +768,12 @@ function mountWebUi(app: express.Application, config: PaseoDaemonConfig, logger:
 
 function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | string[] {
   return config.trustedProxies ?? ["loopback"];
+}
+
+function withAutoPinSessionsConfig(
+  config: Pick<PaseoDaemonConfig, "autoPinSessions">,
+): Pick<MutableDaemonConfig, "autoPinSessions"> {
+  return config.autoPinSessions !== undefined ? { autoPinSessions: config.autoPinSessions } : {};
 }
 
 function withTokenBurnMonitorConfig(
@@ -1205,6 +1212,7 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
       ...config.metadataGeneration,
       providers: config.metadataGeneration?.providers ?? [],
     },
+    ...withAutoPinSessionsConfig(config),
     ...withTokenBurnMonitorConfig(config),
     ...withResourceMonitorConfig(config),
     ...withProcessPriorityConfig(config),

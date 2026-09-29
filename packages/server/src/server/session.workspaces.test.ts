@@ -1352,9 +1352,12 @@ test("create_agent_request does not title an existing workspace from the agent p
     const [createdAgent] = agentManager.listAgents();
     expect(createdAgent?.workspaceId).toBe("ws-existing");
     expect(generateCalls).toBe(0);
+    // updatedAt moves because this human-attributable create auto-pins the workspace
+    // (docs/agent-lifecycle.md#pinning) — the title itself is untouched.
     await expect(workspaceRegistry.get("ws-existing")).resolves.toMatchObject({
       title: null,
-      updatedAt: "2026-05-07T00:00:00.000Z",
+      pinnedAt: expect.any(String),
+      pinSource: "auto",
     });
   } finally {
     vi.useRealTimers();

@@ -34,6 +34,7 @@ import type {
   WorktreeSnapshotResult,
 } from "./remediation/contract.js";
 import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
+import { isProtectivePin } from "./workspace-auto-pin.js";
 import { isRealpathInsideRoot } from "../utils/path.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 60_000;
@@ -127,6 +128,7 @@ export type DoneJanitorWorkspace = Pick<
   | "updatedAt"
   | "archivedAt"
   | "pinnedAt"
+  | "pinSource"
 >;
 
 export type DoneJanitorProject = Pick<
@@ -841,7 +843,7 @@ export class AgentDoneJanitor {
     const workspace = workspaces.find((candidate) => candidate.workspaceId === workspaceId) ?? null;
     const keep = (reason: string): WorkspacePlan => ({ kind: "keep", workspace, reason });
     if (!config.reclaimWorkspaces) return keep("workspace reclamation is off");
-    if (workspace?.pinnedAt) return keep("its workspace is pinned");
+    if (workspace && isProtectivePin(workspace)) return keep("its workspace is pinned");
     const recordProblem = workspaceRecordProblem(workspace);
     if (recordProblem || !workspace?.worktreeRoot) {
       return keep(recordProblem ?? "the workspace record is missing");
@@ -995,9 +997,7 @@ export class AgentDoneJanitor {
       this.deps.listWorkspaces(),
     ]);
     const pinnedWorkspaceIds = new Set(
-      workspaces
-        .filter((workspace) => workspace.pinnedAt)
-        .map((workspace) => workspace.workspaceId),
+      workspaces.filter(isProtectivePin).map((workspace) => workspace.workspaceId),
     );
     return buildAgentViews(this.deps.listLiveAgents(), stored, scheduled, pinnedWorkspaceIds);
   }

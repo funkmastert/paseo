@@ -17,8 +17,9 @@ import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "./account-failover-detector.
  * is any tree or workspace it belongs to. Presence is the whole test, so `"false"` pins too — a
  * pin that one typo could undo is not a pin.
  *
- * A pinned workspace (`pinnedAt`, the sidebar pin) pins every agent in it the same way. There is
- * no other pin the daemon can see: a pinned tab is per-client layout state.
+ * A manually pinned workspace (`pinnedAt`, the sidebar pin) pins every agent in it the same way.
+ * An auto-pinned workspace (workspace-auto-pin.ts) does not — see `workspacePinned` below. There
+ * is no other pin the daemon can see: a pinned tab is per-client layout state.
  */
 export const DONE_JANITOR_KEEP_LABEL = "paseo.keep";
 
@@ -47,7 +48,11 @@ export interface DoneJanitorAgentView {
   hasSchedule: boolean;
   /** Whether the daemon holds a runtime for it. False is `closed`, whatever the record last said. */
   live: boolean;
-  /** Its workspace is pinned in the sidebar. */
+  /**
+   * Its workspace is protectively pinned: a manual pin, or a legacy record with no pinSource.
+   * An auto-pinned workspace (workspace-auto-pin.ts) reads false here once this check runs, so it
+   * spares nothing — the pin only holds it at the top of the sidebar while it's active.
+   */
   workspacePinned: boolean;
   /**
    * A daemon stop cut its turn off and restart recovery has not settled it

@@ -770,6 +770,9 @@ export const MutableDaemonConfigSchema = z
     skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
     pluginsEnabled: z.boolean().optional(),
     plugins: z.record(PluginIdSchema, PluginSourceSchema).optional(),
+    // COMPAT(autoPinSessions): added in v0.9.0, nothing to remove — additive optional config.
+    // Off switch for auto-pinning a workspace when Tyler starts a session in it. Absent means on.
+    autoPinSessions: z.boolean().optional(),
   })
   .passthrough();
 

@@ -106,6 +106,13 @@ const PersistedWorkspaceRecordSchema = z.object({
     .nullable()
     .optional()
     .transform((value) => value ?? null),
+  // COMPAT(workspacePinSource): added in v0.9.0, remove optional after 2027-09-28.
+  // Who pinned this workspace: "manual" for a person's pin gesture (protected from the done
+  // janitor indefinitely), "auto" for the daemon pinning a session Tyler just started (kept at
+  // the top of the sidebar while active, but reclaimable by the janitor's normal rules once quiet
+  // and done — see isProtectivePin in workspace-auto-pin.ts). Absent predates the field and reads
+  // as manual for every already-pinned workspace, matching pin behavior before auto-pin existed.
+  pinSource: z.enum(["auto", "manual"]).optional(),
   labels: z.array(z.string()).optional(),
   untrustedSource: UntrustedWorkspaceSourceSchema.optional(),
 });
@@ -113,6 +120,7 @@ const PersistedWorkspaceRecordSchema = z.object({
 export type PersistedProjectRecord = z.infer<typeof PersistedProjectRecordSchema>;
 export type PersistedWorkspaceRecord = z.infer<typeof PersistedWorkspaceRecordSchema>;
 export type WorkspaceTitleSource = NonNullable<PersistedWorkspaceRecord["titleSource"]>;
+export type WorkspacePinSource = NonNullable<PersistedWorkspaceRecord["pinSource"]>;
 
 /**
  * Whether Paseo may rewrite this workspace's title. Only a title Paseo itself
@@ -702,6 +710,7 @@ export function createPersistedWorkspaceRecord(input: {
   archivedAt?: string | null;
   autoArchivedChangeRequestUrl?: string | null;
   pinnedAt?: string | null;
+  pinSource?: WorkspacePinSource;
   labels?: string[];
   untrustedSource?: UntrustedWorkspaceSource;
 }): PersistedWorkspaceRecord {

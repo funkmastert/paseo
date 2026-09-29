@@ -827,6 +827,10 @@ export const PersistedConfigSchema = z
       .object({
         providers: z.preprocess(normalizeAgentProviders, ProviderOverridesSchema).optional(),
         catalogRefreshTimeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
+        // Off switch for auto-pinning a workspace when Tyler starts a session in it (a new
+        // workspace, or a new agent tab in an existing one). Absent means on.
+        // See workspace-auto-pin.ts and docs/agent-lifecycle.md#pinning.
+        autoPinSessions: z.boolean().optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),

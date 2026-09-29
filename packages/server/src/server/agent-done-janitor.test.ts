@@ -745,6 +745,51 @@ describe("AgentDoneJanitor dead pass", () => {
     );
   });
 
+  test("an auto-pinned workspace does not pin a dead agent: it reclaims like unpinned", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "auto" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual(["ws-1"]);
+    expect(report?.entries).not.toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("a manually pinned workspace still pins every agent in it, and its worktree", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "manual" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual([]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-agent", reason: "its workspace is pinned" }),
+    );
+  });
+
+  test("an auto-pinned workspace is reclaimed once every agent in it is already archived", async () => {
+    const h = harness({
+      config: DEAD_ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      workspaces: [workspace({ pinnedAt: "2026-09-01T00:00:00.000Z", pinSource: "auto" })],
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual(["ws-1"]);
+    expect(report?.entries).not.toContainEqual(
+      expect.objectContaining({ action: "kept-workspace", reason: "its workspace is pinned" }),
+    );
+  });
+
   test("an agent a schedule will wake is not dead", async () => {
     const h = harness({ config: DEAD_ON, scheduled: ["agent-1"] });
 
