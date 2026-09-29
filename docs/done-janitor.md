@@ -65,19 +65,33 @@ A workspace's `pinnedAt` has a `pinSource`: `"manual"` for a person's own pin ge
 written before `pinSource` existed — absent reads as manual, so nothing already pinned loses its
 protection), and `"auto"` for the daemon pinning a workspace the moment Tyler starts a session in
 it — a new workspace from the New Workspace flow, or a new agent tab in an existing one
-(`workspace-auto-pin.ts`). Both keep the workspace at the top of the sidebar identically; they
-differ only in what the janitor does with them.
+(`workspace-auto-pin.ts`).
 
-A **manual** pin protects fully, as described above: the dead pass, the question, and worktree
-reclamation all skip it indefinitely.
+A **manual** pin lasts until someone unpins it and protects fully, as described above: the dead
+pass, the question, and worktree reclamation all skip it indefinitely.
 
-An **auto** pin protects nothing from the janitor. It exists so a workspace Tyler just started
-working in doesn't look unpinned while it's active, but once that workspace would otherwise be
-swept up by the janitor's ordinary quiet-and-done rules, the auto-pin does not stand in the way —
-otherwise every session Tyler ever starts would pin forever and the pinned list would fill with the
-same clutter the janitor exists to clear. `isProtectivePin` (`workspace-auto-pin.ts`) is the single
-place this distinction is made; the dead pass, the question pass, and worktree reclamation all read
-it instead of `pinnedAt` directly.
+An **auto** pin lasts only while the workspace is active, and protects nothing from the janitor.
+Active means an agent in the workspace (by `workspaceId`) is running, initializing, mid-turn or
+waiting on a permission, or Tyler used the workspace in the last two hours
+(`AUTO_PIN_RECENT_USE_MS`). A use is a session start, or a client heartbeat with an agent in the
+workspace focused while the app is visible, dated by that client's last input.
+`isWorkspaceActiveForAutoPin` is that definition; the per-agent half, `describeAgentWork`, is also
+the janitor's [last look](#the-last-look). Once the workspace is finished, the daemon's
+`AutoPinExpiry` sweep (at most a minute late) clears `pinnedAt` and `pinSource`. Every client then
+groups the workspace as unpinned — its project, its status group, Done — and hides it with a
+collapsed project, because `pinnedAt` is the only pin state any client or the janitor reads.
+Expiry leaves `updatedAt` alone: it is not activity, and the janitor's quiet clock reads it.
+
+The daemon expires the pin rather than each client computing it, so the phone, desktop, web, the
+CLI and the janitor cannot disagree, and a client build older than this rule still shows it.
+Uses are held in memory; a restart forgets them and gives every auto pin one fresh window from
+daemon start.
+
+Expiry never re-pins. A workspace whose agent resumes — a leader's prompt, a nudge, the janitor's
+question — stays unpinned until Tyler starts a new session there. `isProtectivePin`
+(`workspace-auto-pin.ts`) is the single place the janitor tells the two sources apart; the dead
+pass, the question pass, and worktree reclamation all read it instead of `pinnedAt` directly, so an
+auto pin that has not expired yet does not keep a finished workspace either.
 
 Pinning by hand always wins: it sets `pinSource` to `"manual"` regardless of what was there before,
 so pinning an auto-pinned workspace upgrades it to a real pin. Unpinning clears both fields.
@@ -89,10 +103,15 @@ Auto-pin is human-attributable-create only: it fires for a `workspace.create.req
 app or CLI), never for the agent-scoped `create_workspace`/`create_agent` MCP tools, Hub
 executions, schedules, heartbeats, remediation, or restart recovery, which all create through the
 separate `"mcp"`-kind path. The known gap: an agent that runs the CLI with `PASEO_AGENT_ID` cleared
-looks identical to a human on the wire and gets auto-pinned too — harmless, since an auto-pin is
-reclaimable the same as no pin once the janitor's rules say the work is done.
+looks identical to a human on the wire and gets auto-pinned too — harmless, since the pin expires
+once the workspace is finished.
 
-Off switch: `agents.autoPinSessions` (boolean, default on, reloadable without a restart).
+Config, both reloadable without a restart: `agents.autoPinSessions` (boolean, default on) turns
+auto-pinning off; pins already set still expire. `agents.autoPinRecentUseMinutes` (default 120)
+sets the recent-use window; the sweep runs every quarter of it, at most once a minute. A daemon
+older than the key rejects the whole config file with `Unrecognized key`, which breaks new
+connections, reloads and the next boot: `autoPinSessions` needs a build from c14e9ea32 on, and
+`autoPinRecentUseMinutes` one with this change. Remove both before rolling back to Bozeo.prev.app.
 
 ## What "finished" means
 

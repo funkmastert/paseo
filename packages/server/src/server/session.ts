@@ -263,7 +263,7 @@ import {
   type CreatePaseoWorktreeResult,
 } from "./paseo-worktree-service.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
-import { autoPinWorkspaceOnSessionStart } from "./workspace-auto-pin.js";
+import { type AutoPinExpiry, autoPinWorkspaceOnSessionStart } from "./workspace-auto-pin.js";
 import {
   buildAgentSessionConfig as buildWorktreeAgentSessionConfig,
   createPaseoWorktreeWorkflow as createWorktreeWorkflow,
@@ -523,6 +523,8 @@ export interface SessionOptions {
   renameCurrentBranch?: typeof renameCurrentBranchDefault;
   workspaceGitService: WorkspaceGitService;
   workspaceAutoName: WorkspaceAutoName;
+  /** Told when a client uses a workspace, so an auto pin lasts while it is active. */
+  autoPinExpiry?: Pick<AutoPinExpiry, "noteWorkspaceUsed">;
   daemonConfigStore: DaemonConfigStore;
   /** Reads the daemon-wide WorktreeDiskMonitor's last sample for a workspace, if any. */
   getWorktreeDiskUsage?: (workspaceId: string) => WorkspaceDiskUsage | undefined;
@@ -760,6 +762,7 @@ export class Session {
   private readonly renameCurrentBranch: typeof renameCurrentBranchDefault;
   private readonly workspaceGitService: WorkspaceGitService;
   private readonly workspaceAutoName: WorkspaceAutoName;
+  private readonly autoPinExpiry: Pick<AutoPinExpiry, "noteWorkspaceUsed"> | undefined;
   private readonly gitMutation: GitMutationService;
   private readonly workspaceProvisioning: WorkspaceProvisioningService;
   private readonly workspaceRecovery: WorkspaceRecoveryService;
@@ -869,6 +872,7 @@ export class Session {
       renameCurrentBranch,
       workspaceGitService,
       workspaceAutoName,
+      autoPinExpiry,
       daemonConfigStore,
       getWorktreeDiskUsage,
       requestWorktreeDiskUsageSample,
@@ -950,6 +954,7 @@ export class Session {
       logger: this.sessionLogger,
     });
     this.workspaceAutoName = workspaceAutoName;
+    this.autoPinExpiry = autoPinExpiry;
     this.workspaceProvisioning = createWorkspaceProvisioningService({
       lifecycle: this.pluginRuntime,
       serverId,
@@ -3810,6 +3815,8 @@ export class Session {
    */
   private async maybeAutoPinWorkspace(workspaceId: string): Promise<void> {
     if (this.daemonConfigStore.get().autoPinSessions === false) return;
+    // Before the pin: starting a session is a use, and an expiry sweep racing this reads it.
+    this.autoPinExpiry?.noteWorkspaceUsed(workspaceId);
     try {
       await autoPinWorkspaceOnSessionStart(this.workspaceRegistry, workspaceId);
     } catch (error) {
@@ -4668,9 +4675,25 @@ export class Session {
     if (msg.appVisible && focusedTerminalId) {
       void this.clearFocusedTerminalAttention(focusedTerminalId);
     }
+    this.noteFocusedWorkspaceUsed(msg);
     if (this.registeredPushToken) {
       this.pushNotifications.renew(this.registeredPushToken);
     }
+  }
+
+  /**
+   * An agent focused in a visible app is Tyler using its workspace, as of his last input on that
+   * client. Keeps the workspace's auto pin alive (workspace-auto-pin.ts).
+   */
+  private noteFocusedWorkspaceUsed(msg: {
+    focusedAgentId: string | null;
+    lastActivityAt: string;
+    appVisible: boolean;
+  }): void {
+    if (!this.autoPinExpiry || !msg.appVisible || !msg.focusedAgentId) return;
+    const workspaceId = this.agentManager.getAgent(msg.focusedAgentId)?.workspaceId;
+    if (!workspaceId) return;
+    this.autoPinExpiry.noteWorkspaceUsed(workspaceId, Date.parse(msg.lastActivityAt));
   }
 
   private async clearFocusedTerminalAttention(terminalId: string): Promise<void> {

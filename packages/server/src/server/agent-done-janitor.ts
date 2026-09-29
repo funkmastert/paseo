@@ -55,7 +55,7 @@ import {
   type ArchiveRecheckStage,
 } from "./workspace-archive-service.js";
 import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
-import { isProtectivePin } from "./workspace-auto-pin.js";
+import { describeAgentWork, isProtectivePin } from "./workspace-auto-pin.js";
 import type { ProcessScan } from "./worktree-process-scan.js";
 import { isRealpathInsideRoot } from "../utils/path.js";
 
@@ -1707,7 +1707,7 @@ export class AgentDoneJanitor {
     for (const agent of this.deps.listLiveAgents()) {
       const inWorkspace = agent.workspaceId === workspaceId;
       if (!inWorkspace && !isRealpathInsideRoot(path, agent.cwd)) continue;
-      const work = describeWork(agent);
+      const work = describeAgentWork(agent);
       if (work) return `agent ${agent.id} ${inWorkspace ? "in it" : "inside it"} ${work}`;
     }
     return null;
@@ -2127,16 +2127,6 @@ function newestActivity(
     }
   }
   return newest;
-}
-
-/** What a live agent is doing that keeps a directory, or null when it is doing nothing. */
-function describeWork(agent: DoneJanitorAgentSummary): string | null {
-  if (agent.lifecycle === "running" || agent.lifecycle === "initializing") {
-    return `is ${agent.lifecycle}`;
-  }
-  if (agent.busy) return "has a turn in flight";
-  if (agent.pendingPermissionCount > 0) return "is waiting on a permission";
-  return null;
 }
 
 function parseMs(value: string | null | undefined): number {

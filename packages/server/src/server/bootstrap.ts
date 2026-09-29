@@ -218,6 +218,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
 import { AgentLeaderCompactionMonitor } from "./agent-leader-compaction-monitor.js";
@@ -578,6 +579,7 @@ export interface PaseoDaemonConfig {
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   providerCatalogRefreshTimeoutMs?: number;
   autoPinSessions?: boolean;
+  autoPinRecentUseMinutes?: number;
   /** `agents.childEnv.strip`; absent means `DEFAULT_CHILD_ENV_STRIP`. */
   childEnvStrip?: string[];
   metadataGeneration?: {
@@ -799,9 +801,14 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
 }
 
 function withAutoPinSessionsConfig(
-  config: Pick<PaseoDaemonConfig, "autoPinSessions">,
-): Pick<MutableDaemonConfig, "autoPinSessions"> {
-  return config.autoPinSessions !== undefined ? { autoPinSessions: config.autoPinSessions } : {};
+  config: Pick<PaseoDaemonConfig, "autoPinSessions" | "autoPinRecentUseMinutes">,
+): Pick<MutableDaemonConfig, "autoPinSessions" | "autoPinRecentUseMinutes"> {
+  return {
+    ...(config.autoPinSessions !== undefined ? { autoPinSessions: config.autoPinSessions } : {}),
+    ...(config.autoPinRecentUseMinutes !== undefined
+      ? { autoPinRecentUseMinutes: config.autoPinRecentUseMinutes }
+      : {}),
+  };
 }
 
 function withTokenBurnMonitorConfig(
@@ -2180,6 +2187,17 @@ export async function createPaseoDaemon(
   });
   workspaceTitleTracker.start();
 
+  // Auto pins last while their workspace is active (workspace-auto-pin.ts). Sessions report uses.
+  const autoPinExpiry = new AutoPinExpiry({
+    workspaceRegistry,
+    listAgents: () => agentManager.listAgentsForDoneJanitor(),
+    readConfig: () => ({
+      autoPinRecentUseMinutes: daemonConfigStore.get().autoPinRecentUseMinutes,
+    }),
+    logger: logger.child({ module: "auto-pin-expiry" }),
+  });
+  autoPinExpiry.start();
+
   // Refocus (docs/refocus.md). Needs nothing but the manager and live config, so it is watching
   // before the first prompt can be dispatched.
   const agentRefocus = new AgentRefocus({
@@ -2828,6 +2846,7 @@ export async function createPaseoDaemon(
                 daemonStatusRpc: dependencies.serverFeatureOverrides?.daemonStatusRpc,
                 relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
                 startPaused: true,
+                autoPinExpiry,
               },
               workspaceAutoName,
               config.auth,
@@ -3350,6 +3369,7 @@ export async function createPaseoDaemon(
     agentManager.stopProviderSubagentSweep();
     agentTitleTracker.stop();
     workspaceTitleTracker.stop();
+    autoPinExpiry.stop();
     agentManager.setPromptDispatchInterceptor(null);
     agentRefocus.stop();
     agentTokenBurnMonitor?.stop();

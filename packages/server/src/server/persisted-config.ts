@@ -941,6 +941,9 @@ export const PersistedConfigSchema = z
         // workspace, or a new agent tab in an existing one). Absent means on.
         // See workspace-auto-pin.ts and docs/done-janitor.md#manual-pin-vs-auto-pin.
         autoPinSessions: z.boolean().optional(),
+        // How long after Tyler last used an auto-pinned workspace it stays pinned once no agent in
+        // it is working. Absent means AUTO_PIN_RECENT_USE_MS (2 hours).
+        autoPinRecentUseMinutes: z.number().nonnegative().optional(),
         metadataGeneration: AgentMetadataGenerationSchema.optional(),
         tokenBurnMonitor: AgentTokenBurnMonitorSchema.optional(),
         resourceMonitor: AgentResourceMonitorSchema.optional(),

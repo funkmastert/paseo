@@ -798,6 +798,9 @@ export const MutableDaemonConfigSchema = z
     // COMPAT(autoPinSessions): added in v0.9.0, nothing to remove — additive optional config.
     // Off switch for auto-pinning a workspace when Tyler starts a session in it. Absent means on.
     autoPinSessions: z.boolean().optional(),
+    // COMPAT(autoPinRecentUseMinutes): added in v0.9.0, nothing to remove — additive optional config.
+    // How long an auto-pinned workspace stays pinned after its last use once no agent in it works.
+    autoPinRecentUseMinutes: z.number().nonnegative().optional(),
   })
   .passthrough();
 

@@ -35,7 +35,12 @@ afterEach(() => {
   }
 });
 
-function buildHarness(options: { autoPinSessions?: boolean } = {}) {
+function buildHarness(
+  options: {
+    autoPinSessions?: boolean;
+    autoPinExpiry?: { noteWorkspaceUsed(workspaceId: string, atMs?: number): void };
+  } = {},
+) {
   const workdir = mkdtempSync(path.join(tmpdir(), "paseo-auto-pin-"));
   workdirs.push(workdir);
   const cwd = workdir;
@@ -88,6 +93,7 @@ function buildHarness(options: { autoPinSessions?: boolean } = {}) {
       dispose: () => {},
     }),
     workspaceGitService: createNoopWorkspaceGitService(),
+    autoPinExpiry: options.autoPinExpiry,
     daemonConfigStore: asDaemonConfigStore({
       get: () => ({
         mcp: { injectIntoAgents: false },
@@ -341,4 +347,60 @@ test("create_agent_request with autoArchive still archives an agent whose first 
       interval: 50,
     })
     .not.toBeNull();
+});
+
+test("a session start and a focused visible heartbeat are uses of the workspace", async () => {
+  const uses: Array<{ workspaceId: string; atMs: number | undefined }> = [];
+  const { cwd, session, agentManager, projectRegistry, workspaceRegistry } = buildHarness({
+    autoPinExpiry: { noteWorkspaceUsed: (workspaceId, atMs) => uses.push({ workspaceId, atMs }) },
+  });
+  await projectRegistry.upsert(
+    createPersistedProjectRecord({
+      projectId: "proj-existing",
+      rootPath: cwd,
+      kind: "git",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+  await workspaceRegistry.upsert(
+    createPersistedWorkspaceRecord({
+      workspaceId: "ws-existing",
+      projectId: "proj-existing",
+      cwd,
+      kind: "local_checkout",
+      displayName: "repo",
+      createdAt: "2026-05-07T00:00:00.000Z",
+      updatedAt: "2026-05-07T00:00:00.000Z",
+    }),
+  );
+
+  await session.handleMessage({
+    type: "create_agent_request",
+    requestId: "req-use",
+    workspaceId: "ws-existing",
+    config: { provider: "codex", cwd },
+    attachments: [],
+  });
+  expect(uses).toEqual([{ workspaceId: "ws-existing", atMs: undefined }]);
+
+  const [agent] = agentManager.listAgents();
+  if (!agent) throw new Error("expected the created agent");
+  const heartbeat = {
+    type: "client_heartbeat",
+    deviceType: "web",
+    focusedAgentId: agent.id,
+    focusedTerminalId: null,
+    lastActivityAt: "2026-05-07T01:02:03.000Z",
+  };
+  await session.handleMessage({ ...heartbeat, appVisible: false });
+  await session.handleMessage({ ...heartbeat, appVisible: true, focusedAgentId: null });
+  expect(uses).toHaveLength(1);
+
+  await session.handleMessage({ ...heartbeat, appVisible: true });
+  expect(uses[1]).toEqual({
+    workspaceId: "ws-existing",
+    atMs: Date.parse("2026-05-07T01:02:03.000Z"),
+  });
 });

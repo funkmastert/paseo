@@ -166,6 +166,7 @@ interface WebSocketServerConfig {
   daemonStatusRpc?: boolean;
   relayConfig?: boolean;
   startPaused?: boolean;
+  autoPinExpiry?: SessionOptions["autoPinExpiry"];
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -617,6 +618,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private readonly jev: JevService | null | undefined;
+  private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
 
   constructor(
     server: HTTPServer,
@@ -674,6 +676,7 @@ export class VoiceAssistantWebSocketServer {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
+    this.autoPinExpiry = wsConfig.autoPinExpiry;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
     this.connectionLifecycle = wsConfig.startPaused === true ? "starting" : "accepting";
     this.serverId = serverId;
@@ -1497,6 +1500,7 @@ export class VoiceAssistantWebSocketServer {
       github: this.github,
       workspaceGitService: this.workspaceGitService,
       workspaceAutoName: this.workspaceAutoName,
+      autoPinExpiry: this.autoPinExpiry,
       daemonConfigStore: this.daemonConfigStore,
       getWorktreeDiskUsage: this.getWorktreeDiskUsage,
       requestWorktreeDiskUsageSample: this.requestWorktreeDiskUsageSample,
