@@ -147,6 +147,12 @@ function createFakeSignaller(
   return { signaller, sent };
 }
 
+/**
+ * Appended by default so this fixture is attributable to an agent, the only evidence that ties a
+ * detached ppid-1 daemon to one: the reaper leaves an unmarked (Tyler's own) daemon alone.
+ */
+const AGENT_MARKER_SUFFIX = " --init-script /tmp/paseo?callerAgentId=agent-9";
+
 function gradleDaemonRow(overrides: Partial<ProcessSampleRow> = {}): ProcessSampleRow {
   return row({
     pid: 28056,
@@ -157,7 +163,8 @@ function gradleDaemonRow(overrides: Partial<ProcessSampleRow> = {}): ProcessSamp
     command:
       "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
       "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
-      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1",
+      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1" +
+      AGENT_MARKER_SUFFIX,
     ...overrides,
   });
 }
@@ -1064,6 +1071,30 @@ describe("AgentResourceMonitor reaper", () => {
     await sweep(monitor, 30, clock);
 
     expect(sent).toEqual([]);
+  });
+
+  test("a same-uid daemon with no agent marker is Tyler's own, never signalled however idle", async () => {
+    const clock = { ms: 1_000_000 };
+    const { signaller, sent } = createFakeSignaller();
+    const { monitor, push } = createMonitor({
+      agents: [],
+      processRows: [
+        gradleDaemonRow({
+          command:
+            "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
+            "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
+            "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1",
+        }),
+      ],
+      config: REAP_ON,
+      signaller,
+      now: () => clock.ms,
+    });
+
+    await sweep(monitor, 60, clock);
+
+    expect(sent).toEqual([]);
+    expect(reapPushes(push.sent)).toHaveLength(0);
   });
 
   test("a daemon that refuses the signal is warned about once and then left alone", async () => {

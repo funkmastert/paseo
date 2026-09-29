@@ -250,6 +250,43 @@ describe("TokenAuditJob", () => {
     expect(await j.checkDue()).toBeNull();
   });
 
+  it("backs off retrying a failed run instead of rerunning every 30 minutes", async () => {
+    let shouldFail = true;
+    const j = new TokenAuditJob({
+      paseoHome: dir,
+      buildContext: () => ctx,
+      readConfig: () => config,
+      sink: { observe: async (o) => void observed.push(o) },
+      getPushNotificationSender: () => ({
+        send: async (payload, meta) => void pushes.push({ payload, meta }),
+      }),
+      serverId: "srv",
+      logger: pino({ level: "silent" }),
+      now: () => nowMs,
+      runAudit: async () => {
+        if (shouldFail) throw new Error("ENOSPC");
+        return rows;
+      },
+    });
+
+    await expect(j.checkDue()).rejects.toThrow("ENOSPC");
+    // The next scheduled tick, 30 minutes later, is still within the backoff: no retry storm.
+    nowMs += 30 * 60 * 1000;
+    expect(await j.checkDue()).toBeNull();
+
+    // Once the backoff has fully elapsed, it retries, and a working run recovers cleanly.
+    shouldFail = false;
+    nowMs += 24 * 60 * 60 * 1000;
+    expect(await j.checkDue()).not.toBeNull();
+
+    // A later failure resets the schedule to a fresh 30-minute-scale backoff, not immediate.
+    shouldFail = true;
+    nowMs += 7 * DAY;
+    await expect(j.checkDue()).rejects.toThrow("ENOSPC");
+    nowMs += 30 * 60 * 1000;
+    expect(await j.checkDue()).toBeNull();
+  });
+
   it("pushes the headline at notice itself when the escalation agent is turned off", async () => {
     config = resolveTokenAuditConfig({ escalation: { enabled: false } });
     const outcome = await job().runOnce();
@@ -267,7 +304,9 @@ describe("TokenAuditJob", () => {
       await j.runOnce();
       nowMs += 7 * DAY;
     }
-    const names = (await readdir(path.join(dir, "token-audit"))).filter((n) => n.endsWith(".json"));
+    const names = (await readdir(path.join(dir, "token-audit"))).filter(
+      (n) => n.startsWith("report-") && n.endsWith(".json"),
+    );
     expect(names).toHaveLength(2);
   });
 });

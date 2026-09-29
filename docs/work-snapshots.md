@@ -15,11 +15,13 @@ Stashes and local branches other than HEAD are not looked at.
 
 ## How a snapshot is taken
 
-The snapshot is a commit built through a temporary `GIT_INDEX_FILE`: read HEAD's tree into it, `add -u`, add untracked files that are not ignored, `write-tree`, `commit-tree` with HEAD as the parent. An unborn branch gets an empty index and a commit with no parent. Untracked files over `maxUntrackedFileBytes` are left out and named in the commit message and the result.
+The snapshot is a commit built through a temporary `GIT_INDEX_FILE`: seed it, `add -u`, add untracked files that are not ignored, `write-tree`, `commit-tree` with HEAD as the parent. An unborn branch gets an empty index and a commit with no parent. Untracked files over `maxUntrackedFileBytes` are left out and named in the commit message and the result.
 
-**The agent's index, HEAD, working tree and branch refs are never written.** The only writes are git objects, one ref under `refs/backup/`, and the offsite copy. Every git call runs with `--no-optional-locks`, so even `git status` does not refresh the real index. The test that holds this line hashes `.git/index` (for a linked worktree, `.git/worktrees/<name>/index` in the common dir) and reads HEAD before and after.
+**The agent's index, HEAD, working tree and branch refs are never written.** The only writes are git objects, one ref under `refs/backup/`, and the offsite copy. Every git call runs with `--no-optional-locks`, so even `git status` does not refresh the real index, and at background priority (`utils/spawn.ts`'s `priority: "background"`), so a sweep never competes with an agent's own git or build. The test that holds this line hashes `.git/index` (for a linked worktree, `.git/worktrees/<name>/index` in the common dir) and reads HEAD before and after.
 
-The ref lives in the common dir, so it outlives the worktree. A snapshot of a worktree whose newest snapshot already has the same tree and parent reuses that ref instead of minting another, so repeated sweeps over an unchanged worktree cost nothing.
+The temporary index is seeded from a copy of the worktree's own real index when HEAD exists, not from `read-tree HEAD`: the real index carries git's stat cache (mtime, size), so `add -u` below only re-hashes a file whose stat actually moved rather than every tracked file in the worktree. `read-tree HEAD` — no stat cache — is the fallback, used only when the real index can't be found or copied, and for an unborn branch (`read-tree --empty`), which has no index of its own yet.
+
+The ref lives in the common dir, so it outlives the worktree. A snapshot of a worktree whose newest snapshot already has the same tree and parent reuses that ref instead of minting another, so repeated sweeps over an unchanged worktree write nothing new — and, with the stat-cache seed above, cost little to check even under load, rather than a full rehash of every tracked file before the reuse check can run.
 
 ## Names
 

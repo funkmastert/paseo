@@ -16,6 +16,7 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
+import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
 import { GitWorktreeSnapshotter, formatSnapshotDate } from "./worktree-snapshot.js";
 
 // Real repositories under a temp dir. The snapshot's whole promise is that it never writes the
@@ -56,7 +57,12 @@ function hash(path: string): string {
 }
 
 function snapshotter(
-  overrides: { personalOwners?: string[]; maxUntrackedFileBytes?: number; now?: () => number } = {},
+  overrides: {
+    personalOwners?: string[];
+    maxUntrackedFileBytes?: number;
+    now?: () => number;
+    runGit?: RunGitCommand;
+  } = {},
 ): GitWorktreeSnapshotter {
   return new GitWorktreeSnapshotter({
     readConfig: () => ({
@@ -67,6 +73,7 @@ function snapshotter(
     paseoHome: join(root, "paseo-home"),
     logger: pino({ level: "silent" }),
     now: overrides.now ?? (() => NOW),
+    runGit: overrides.runGit,
   });
 }
 
@@ -390,5 +397,53 @@ describe("GitWorktreeSnapshotter", () => {
       atRisk: true,
     });
     expect(backupRefs(repo)).toEqual([]);
+  });
+});
+
+describe("GitWorktreeSnapshotter git process scheduling", () => {
+  function spy(): { runGit: RunGitCommand; commands: string[][] } {
+    const commands: string[][] = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      commands.push(args);
+      return runGitCommand(args, options);
+    };
+    return { runGit, commands };
+  }
+
+  test("every git call it makes runs at background priority", async () => {
+    const priorities: Array<[string, unknown]> = [];
+    const runGit: RunGitCommand = async (args, options) => {
+      priorities.push([args[1] ?? "", options.priority]);
+      return runGitCommand(args, options);
+    };
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(priorities.length).toBeGreaterThan(0);
+    expect(priorities.every(([, priority]) => priority === "background")).toBe(true);
+  });
+
+  test("seeds the temporary index from the worktree's own index instead of a fresh read-tree", async () => {
+    const { runGit, commands } = spy();
+    writeFileSync(join(repo, "README.md"), "edited\n");
+
+    await snapshotter({ runGit }).snapshot({ cwd: repo, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "rev-parse", "--git-path", "index"]);
+    // No stat cache in a `read-tree`-seeded index: `add -u` below would have to hash every
+    // tracked file rather than just the one that changed.
+    expect(commands.some((c) => c[1] === "read-tree")).toBe(false);
+  });
+
+  test("an unborn branch, with no index of its own yet, still seeds from read-tree --empty", async () => {
+    const unborn = join(root, "unborn-seed");
+    git(root, "init", "-q", "-b", "main", unborn);
+    writeFileSync(join(unborn, "first.txt"), "first\n");
+    const { runGit, commands } = spy();
+
+    await snapshotter({ runGit }).snapshot({ cwd: unborn, reason: "test", offsite: false });
+
+    expect(commands).toContainEqual(["--no-optional-locks", "read-tree", "--empty"]);
   });
 });

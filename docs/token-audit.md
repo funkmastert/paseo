@@ -47,7 +47,7 @@ Read from the pinned Claude Code binary (`@anthropic-ai/claude-agent-sdk-darwin-
 | `escalation.budgetTokens`   | `150000` | The agent's `paseo.budget` and cancel ceiling.                                         |
 | `escalation.timeoutMinutes` | `10`     | The agent's own timeout.                                                               |
 
-The first check runs 10 minutes after the daemon starts, so a restart's burst settles first, then every 30 minutes asks whether the last report is old enough.
+The first check runs 10 minutes after the daemon starts, so a restart's burst settles first, then every 30 minutes asks whether the last report is old enough. A run that throws before the report is saved (ENOSPC during disk pressure, say) does not simply retry on the next 30-minute tick forever: the job records the attempt, successful or not (`TokenAuditReportStore.saveAttempt`), and a failed one backs off — the wait doubles with each consecutive failure, capped at a day — before the next attempt. A success resets the backoff.
 
 ## When someone hears about it
 
@@ -74,4 +74,4 @@ About 3.8K tokens per additional worktree move from write to read. The 14.8K sti
 
 ## Adding an item
 
-Add a `TokenAuditCheck` in `session/doctor/tokens/`, register it in `TOKEN_AUDIT_CHECKS` (`tokens/index.ts`) and add its name to `TOKEN_AUDIT_ITEMS`. Give each row a stable `key` built from what the row is about, never from its numbers: the diff matches rows across weeks by it. Put a number the diff should watch in `metrics` and a rule for it in `METRIC_RULES`. The checks are not in `DOCTOR_CHECKS`: a run streams gigabytes and spawns `claude`, so plain `paseo doctor` stays quick.
+Add a `TokenAuditCheck` in `session/doctor/tokens/`, register it in `TOKEN_AUDIT_CHECKS` (`tokens/index.ts`) and add its name to `TOKEN_AUDIT_ITEMS`. Give each row a stable `key` built from what the row is about, never from its numbers: the diff matches rows across weeks by it. An absolute path in a key is not automatically stable: the `cwds` default is the newest sessions' directories, and an agent worktree's path changes every task even though the repo and the file at that position in it did not. The `memory` item's rows key by `stableAuditKey` (`tokens/memory.ts`), the git common dir (shared by every worktree of one repo) plus the path relative to that worktree's own root, so the same `CLAUDE.md` keys the same across worktrees and a real RED only re-escalates when it actually recurs. Put a number the diff should watch in `metrics` and a rule for it in `METRIC_RULES`. The checks are not in `DOCTOR_CHECKS`: a run streams gigabytes and spawns `claude`, so plain `paseo doctor` stays quick.

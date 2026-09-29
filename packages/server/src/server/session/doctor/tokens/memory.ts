@@ -1,5 +1,6 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { getGitCommonDir, getGitWorktreeRoot } from "../../../../utils/worktree.js";
 import type { DoctorContext } from "../context.js";
 import { realpathOrNull } from "../helpers.js";
 import {
@@ -27,6 +28,30 @@ export function gradeAgainst(count: TokenCount, limit: number): TokenSeverity {
 
 function precision(count: TokenCount): string {
   return `${formatTokenCount(count)} as printed, ±${count.halfStep >= 1 ? Math.round(count.halfStep) : count.halfStep}`;
+}
+
+/**
+ * A row key stable across worktrees of the same repo: the shared git common dir (identical for
+ * every worktree of one repo) plus the path relative to the specific worktree's own root. A new
+ * worktree at a fresh path (a new agent task) then keys the same as the one it replaced, so an
+ * unchanged RED does not read as new. Falls back to the absolute path outside a git repo, where
+ * it was already stable.
+ */
+export async function stableAuditKey(absolutePath: string): Promise<string> {
+  // Realpath first: git resolves symlinks (e.g. macOS's /tmp -> /private/tmp) when it reports a
+  // worktree's toplevel, so relative-ing an un-realpath'd input against it walks up and back down
+  // through the whole tree instead of landing on a short in-worktree path.
+  const real = realpathOrNull(absolutePath) ?? absolutePath;
+  const dir = statSync(real, { throwIfNoEntry: false })?.isDirectory() ? real : path.dirname(real);
+  try {
+    const [commonDir, worktreeRoot] = await Promise.all([
+      getGitCommonDir(dir),
+      getGitWorktreeRoot(dir),
+    ]);
+    return `${commonDir}:${path.relative(worktreeRoot, real)}`;
+  } catch {
+    return real;
+  }
 }
 
 interface FileEntry {
@@ -230,17 +255,20 @@ function appendRow(
 
 // ---- the check -------------------------------------------------------------------------------
 
-function fileRows(runs: ContextRun[]): TokenAuditRow[] {
-  return uniqueFiles(runs).map((file) =>
-    row(
-      "memory",
-      `memory:file:${realpathOrNull(file.path) ?? file.path}`,
-      gradeAgainst(file.tokens, MEMORY_FILE_LIMIT_TOKENS),
-      `${file.type} memory file ${file.path}`,
-      `${precision(file.tokens)}; limit ${MEMORY_FILE_LIMIT_TOKENS}; loaded in ${file.seenIn.length} audited dir${file.seenIn.length === 1 ? "" : "s"}`,
-      `${file.tokens.value} tokens on the first turn of every agent that loads it, then re-read from cache on every turn`,
-      { "memory.fileTokens": file.tokens.value },
-    ),
+async function fileRows(runs: ContextRun[]): Promise<TokenAuditRow[]> {
+  return Promise.all(
+    uniqueFiles(runs).map(async (file) => {
+      const key = await stableAuditKey(realpathOrNull(file.path) ?? file.path);
+      return row(
+        "memory",
+        `memory:file:${key}`,
+        gradeAgainst(file.tokens, MEMORY_FILE_LIMIT_TOKENS),
+        `${file.type} memory file ${file.path}`,
+        `${precision(file.tokens)}; limit ${MEMORY_FILE_LIMIT_TOKENS}; loaded in ${file.seenIn.length} audited dir${file.seenIn.length === 1 ? "" : "s"}`,
+        `${file.tokens.value} tokens on the first turn of every agent that loads it, then re-read from cache on every turn`,
+        { "memory.fileTokens": file.tokens.value },
+      );
+    }),
   );
 }
 
@@ -249,7 +277,10 @@ function memoryFilesTokens(run: ContextRun): number {
 }
 
 /** One total per audited directory: the largest any account printed, with the appended prompt. */
-function totalRows(good: ContextRun[], append: AppendMeasure | null): TokenAuditRow[] {
+async function totalRows(
+  good: ContextRun[],
+  append: AppendMeasure | null,
+): Promise<TokenAuditRow[]> {
   const byCwd = new Map<string, ContextRun>();
   for (const run of good) {
     const current = byCwd.get(run.cwd);
@@ -266,10 +297,11 @@ function totalRows(good: ContextRun[], append: AppendMeasure | null): TokenAudit
         }
       : memory;
     const appendNote = append ? ` + appendSystemPrompt ${append.tokens.value}` : "";
+    const key = await stableAuditKey(cwd);
     rows.push(
       row(
         "memory",
-        `memory:total:${cwd}`,
+        `memory:total:${key}`,
         gradeAgainst(total, MEMORY_TOTAL_LIMIT_TOKENS),
         `Total memory loaded from ${cwd}`,
         `${total.value} tokens ±${Math.round(total.halfStep)}: Memory files ${formatTokenCount(memory)} (${run.configDir})${appendNote}; limit ${MEMORY_TOTAL_LIMIT_TOKENS}`,
@@ -307,7 +339,7 @@ export const memoryCheck: TokenAuditCheck = {
       const reason = runs[0]?.error ?? "no account directory to run it in";
       return staticRows(ctx, `claude -p /context unavailable: ${reason}`);
     }
-    const rows = fileRows(good);
+    const rows = await fileRows(good);
     const text = appendSystemPrompt(ctx);
     let append: AppendMeasure | null = null;
     if (text !== null) {
@@ -315,6 +347,6 @@ export const memoryCheck: TokenAuditCheck = {
       rows.push(appendRow(ctx, measured, Buffer.byteLength(text)));
       if (typeof measured !== "string") append = measured;
     }
-    return [...rows, ...totalRows(good, append), ...failedRunsRow(runs)];
+    return [...rows, ...(await totalRows(good, append)), ...failedRunsRow(runs)];
   },
 };

@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Logger } from "pino";
@@ -24,6 +24,7 @@ import type {
   WorktreeSnapshotter,
 } from "../remediation/contract.js";
 import type { ResolvedWorkSnapshotsConfig } from "../remediation/config.js";
+import { resolveGitRevParsePath } from "../../utils/git-rev-parse-path.js";
 import { runGitCommand, type RunGitCommand } from "../../utils/run-git-command.js";
 
 const BACKUP_REF_PREFIX = "refs/backup/";
@@ -292,6 +293,35 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     };
   }
 
+  /**
+   * Seeds the temporary index from a copy of the worktree's own, so `add -u` below inherits its
+   * stat cache and only re-hashes a file whose mtime or size actually moved since git last looked
+   * at it, instead of every tracked file in the worktree. Falls back to `read-tree HEAD` — no stat
+   * cache, so `add -u` must hash everything — when the real index can't be found or copied; that
+   * also correctly seeds an unborn branch's empty tree.
+   */
+  private async seedSnapshotIndex(
+    worktreePath: string,
+    indexFile: string,
+    head: string | null,
+  ): Promise<void> {
+    if (head) {
+      const realIndexPath = await this.tryGit(worktreePath, ["rev-parse", "--git-path", "index"]);
+      const resolved = realIndexPath ? resolveGitRevParsePath(worktreePath, realIndexPath) : null;
+      if (resolved && existsSync(resolved)) {
+        try {
+          copyFileSync(resolved, indexFile);
+          return;
+        } catch {
+          // Fall through to a fresh index seeded from HEAD.
+        }
+      }
+    }
+    await this.git(worktreePath, head ? ["read-tree", head] : ["read-tree", "--empty"], {
+      GIT_INDEX_FILE: indexFile,
+    });
+  }
+
   /** HEAD's tree plus the working tree's changes, written through an index nobody else reads. */
   private async writeSnapshotTree(
     worktreePath: string,
@@ -301,7 +331,7 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     const indexFile = join(tmpdir(), `paseo-snapshot-index-${process.pid}-${randomUUID()}`);
     const env = { GIT_INDEX_FILE: indexFile };
     try {
-      await this.git(worktreePath, head ? ["read-tree", head] : ["read-tree", "--empty"], env);
+      await this.seedSnapshotIndex(worktreePath, indexFile, head);
       await this.git(worktreePath, ["add", "-u"], env);
       // Relative to the temporary index, so a file staged in the agent's index but new since HEAD
       // is listed here too.
@@ -451,6 +481,8 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
         cwd,
         envOverlay: { ...BASE_ENV, ...env },
         timeout,
+        // A background sweep nobody is waiting on: it yields to the agents and Tyler's own work.
+        priority: "background",
       });
       return result.stdout;
     } catch (error) {

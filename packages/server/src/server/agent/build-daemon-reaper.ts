@@ -16,11 +16,17 @@ import {
   type BuildDaemonSignature,
   type ReapableBuildDaemonKind,
 } from "./build-daemon-signatures.js";
+import { buildChildrenByPpid, collectDescendants } from "./process-attribution.js";
 import type { ProcessSampleRow } from "./process-sampler.js";
 
 export type { ReapableBuildDaemonKind } from "./build-daemon-signatures.js";
 
-/** The marker process-attribution.ts attributes trees by; here it's purely a veto. */
+/**
+ * The marker process-attribution.ts attributes live agent trees by. A ppid-1 build daemon can
+ * never itself be a member of a live tree (it detached from its launcher), so this is the only
+ * evidence that ties one to an agent rather than to Tyler's own terminal or IDE. Its absence
+ * means the daemon is unattributed, and unattributed daemons are never signalled.
+ */
 const AGENT_MARKER = "callerAgentId=";
 
 export interface BuildDaemonReaperConfig {
@@ -99,6 +105,7 @@ export interface BuildDaemonSighting {
   verdict: BuildDaemonVerdict;
   kind: ReapableBuildDaemonKind | undefined;
   rssBytes: number;
+  /** The process tree's rate (this pid plus every descendant), not just the row's own. */
   cpuPercent: number;
   idleSweeps: number;
 }
@@ -112,8 +119,8 @@ export interface EvaluateBuildDaemonReapCandidatesResult {
 }
 
 /**
- * The four facts that together mean "nobody is using this". Not idleness — that's measured over
- * time below; this is the structural half, re-checked on every sweep.
+ * The five facts that together mean "nobody is using this, and it was an agent's". Not idleness
+ * — that's measured over time below; this is the structural half, re-checked on every sweep.
  */
 function isAbandoned(
   row: ProcessSampleRow,
@@ -126,9 +133,9 @@ function isAbandoned(
   // A live agent's tree owns it. Can't happen while ppid is 1, and cheap insurance if the
   // attribution walk ever learns to reach further.
   if (attributedPids.has(row.pid)) return false;
-  // An agent launch whose agent this daemon no longer lists — archived, or started before this
-  // daemon did. Attribution can't see it, so nothing here may claim it's unowned.
-  if (row.command.includes(AGENT_MARKER)) return false;
+  // No agent marker: this daemon cannot be tied to an agent at all, so it is left alone rather
+  // than assumed abandoned — it may be Tyler's own terminal or IDE build, same uid and all.
+  if (!row.command.includes(AGENT_MARKER)) return false;
   // Another user's process, or a platform where we can't tell whose it is. Both refuse.
   if (ownerUid === undefined || row.uid !== ownerUid) return false;
   return true;
@@ -141,16 +148,23 @@ export function evaluateBuildDaemonReapCandidates(
   const candidates: BuildDaemonReapCandidate[] = [];
   const sightings: BuildDaemonSighting[] = [];
   const idleThresholdMs = input.config.idleMinutes * 60_000;
+  // Worker JVMs, test executors and R8 workers are the daemon's children, not itself: a daemon
+  // that reads idle on its own row while they burn CPU is still serving a build.
+  const rowsByPid = new Map(input.rows.map((r) => [r.pid, r] as const));
+  const childrenByPpid = buildChildrenByPpid(input.rows);
+  const treeCpuPercent = (pid: number): number =>
+    collectDescendants(pid, rowsByPid, childrenByPpid).reduce((sum, r) => sum + r.cpuPercent, 0);
 
   for (const row of input.rows) {
     const signature: BuildDaemonSignature | undefined = matchBuildDaemonSignature(row.command);
+    const treeCpu = treeCpuPercent(row.pid);
     const sight = (verdict: BuildDaemonVerdict, idleSweeps = 0): void => {
       sightings.push({
         pid: row.pid,
         verdict,
         kind: signature?.kind,
         rssBytes: row.rssKb * 1024,
-        cpuPercent: row.cpuPercent,
+        cpuPercent: treeCpu,
         idleSweeps,
       });
     };
@@ -189,7 +203,7 @@ export function evaluateBuildDaemonReapCandidates(
       continue;
     }
 
-    if (row.cpuPercent > input.config.idleCpuPercent) {
+    if (treeCpu > input.config.idleCpuPercent) {
       // Busy: somebody is building. The idle clock restarts from zero, not from where it was.
       memory.set(row.pid, {
         kind: signature.kind,

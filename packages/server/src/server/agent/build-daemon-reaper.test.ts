@@ -9,13 +9,21 @@ import {
 import { parsePsOutput, type ProcessSampleRow } from "./process-sampler.js";
 
 const OWNER_UID = 501;
-const GRADLE_COMMAND =
+/**
+ * Appended to a daemon's command line to mark it as attributable to an agent, the same marker
+ * `withRuntimePaseoMcpServer` writes into an agent's own launch and process-attribution.ts reads
+ * back. Most fixtures below carry it: they represent a daemon an agent's build left behind.
+ */
+const AGENT_MARKER_SUFFIX = " --init-script /tmp/paseo?callerAgentId=agent-9";
+const UNATTRIBUTED_GRADLE_COMMAND =
   "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx4g " +
   "-cp /Users/t/.gradle/wrapper/dists/gradle-9.7.1/lib/gradle-daemon-main-9.7.1.jar " +
   "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
+const GRADLE_COMMAND = UNATTRIBUTED_GRADLE_COMMAND + AGENT_MARKER_SUFFIX;
 const KOTLIN_COMMAND =
   "/usr/bin/java -Xmx2g -cp kotlin-daemon.jar org.jetbrains.kotlin.daemon.KotlinCompileDaemon " +
-  "--daemon-runFilesPath=/Users/t/Library/Application Support/kotlin/daemon";
+  "--daemon-runFilesPath=/Users/t/Library/Application Support/kotlin/daemon" +
+  AGENT_MARKER_SUFFIX;
 
 const CONFIG: BuildDaemonReaperConfig = {
   idleCpuPercent: 2,
@@ -99,6 +107,20 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     ]);
   });
 
+  test("a daemon whose own reading is idle but a busy worker child keeps its tree busy", () => {
+    // Same shape as the sustained-idleness test above (18 sweeps is enough to reap on the
+    // daemon's own reading alone), but a worker JVM child stays busy the whole time.
+    const result = runSweeps({
+      sweeps: 18,
+      rowsForSweep: () => [
+        row({ pid: 28056, cpuPercent: 1 }),
+        row({ pid: 28057, ppid: 28056, cpuPercent: 180, command: "worker jvm" }),
+      ],
+    });
+
+    expect(result.candidates).toEqual([]);
+  });
+
   test("a single idle sample is never enough, however long the process has existed", () => {
     const result = runSweeps({
       sweeps: 1,
@@ -149,15 +171,21 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  test("a daemon launched by an agent this daemon no longer lists is still spared", () => {
+  test("a daemon carrying an agent marker is attributable and reapable even once that agent is gone", () => {
+    // GRADLE_COMMAND already carries the marker: attribution reads the marker itself, not
+    // membership in a currently-live agent's tree, since the daemon detached to ppid 1 long ago.
     const result = runSweeps({
-      sweeps: 30,
-      rowsForSweep: () => [
-        row({
-          pid: 28056,
-          command: `${GRADLE_COMMAND} --init-script /tmp/paseo?callerAgentId=agent-9`,
-        }),
-      ],
+      sweeps: 18,
+      rowsForSweep: () => [row({ pid: 28056 })],
+    });
+
+    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+  });
+
+  test("a same-uid daemon with no agent marker is Tyler's own and is never reaped, however idle", () => {
+    const result = runSweeps({
+      sweeps: 60,
+      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
     });
 
     expect(result.candidates).toEqual([]);
@@ -203,14 +231,19 @@ describe("evaluateBuildDaemonReapCandidates", () => {
   test("reaps every .NET and Metro kind under the same abandonment rules as Gradle", () => {
     const commands = {
       vbcscompiler:
-        "/Users/t/.dotnet/sdk/10.0.200/Roslyn/bincore/VBCSCompiler -pipename:jFFfIURcCsGm+nTDd_yF",
+        "/Users/t/.dotnet/sdk/10.0.200/Roslyn/bincore/VBCSCompiler -pipename:jFFfIURcCsGm+nTDd_yF" +
+        AGENT_MARKER_SUFFIX,
       "msbuild-node":
         "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/MSBuild.dll /noautoresponse " +
-        "/nologo /nodemode:1 /nodeReuse:true /low:false",
+        "/nologo /nodemode:1 /nodeReuse:true /low:false" +
+        AGENT_MARKER_SUFFIX,
       "razor-server":
         "/Users/t/.dotnet/dotnet /Users/t/.dotnet/sdk/10.0.200/Sdks/Microsoft.NET.Sdk.Razor/" +
-        "tools/rzc.dll server -p rzc-4f2a91c0",
-      metro: "/usr/local/bin/node /Users/t/app/node_modules/.bin/expo start --port 8081",
+        "tools/rzc.dll server -p rzc-4f2a91c0" +
+        AGENT_MARKER_SUFFIX,
+      metro:
+        "/usr/local/bin/node /Users/t/app/node_modules/.bin/expo start --port 8081" +
+        AGENT_MARKER_SUFFIX,
     } as const;
     const kinds = Object.keys(commands) as (keyof typeof commands)[];
 
@@ -259,7 +292,7 @@ describe("evaluateBuildDaemonReapCandidates", () => {
       rowsForSweep: () => [
         row({
           pid: 901,
-          command: "node /Users/t/app/node_modules/.bin/expo start",
+          command: "node /Users/t/app/node_modules/.bin/expo start" + AGENT_MARKER_SUFFIX,
           cpuPercent: 35,
         }),
       ],
@@ -348,7 +381,7 @@ describe("the ps snapshot a real Gradle daemon produces", () => {
     "-cp /Users/t/.gradle/wrapper/dists/gradle-9.7.1-bin/1w1c7tv/gradle-9.7.1/lib/" +
     "gradle-daemon-main-9.7.1.jar org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
 
-  test("parses and then reaps, so the sampler and the signature agree on the real thing", () => {
+  test("parses and then reaps an attributed daemon, so the sampler and the signature agree on the real thing", () => {
     const rows = parsePsOutput(
       ["  PID  PPID   UID    RSS %CPU     ELAPSED        TIME COMMAND", PS_LINE].join("\n"),
     );
@@ -356,9 +389,14 @@ describe("the ps snapshot a real Gradle daemon produces", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ pid: 28056, ppid: 1, uid: 501, rssKb: 3_369_792 });
 
+    // A real ps line never carries the agent marker on its own — it is added here to represent
+    // the case this daemon was left behind by an agent's build, not typed by Tyler's own hand.
+    const attributedCommand = (rows[0] as ProcessSampleRow).command + AGENT_MARKER_SUFFIX;
     const result = runSweeps({
       sweeps: 20,
-      rowsForSweep: () => [{ ...(rows[0] as ProcessSampleRow), cpuPercent: 0 }],
+      rowsForSweep: () => [
+        { ...(rows[0] as ProcessSampleRow), cpuPercent: 0, command: attributedCommand },
+      ],
     });
 
     expect(result.candidates).toMatchObject([{ pid: 28056, kind: "gradle" }]);
