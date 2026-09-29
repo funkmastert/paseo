@@ -59,6 +59,7 @@ At the start of non-trivial work, list `docs/` and skim anything relevant to the
 | [docs/resource-monitor.md](docs/resource-monitor.md)                 | Resource monitor — agent priority, child admission, process-tree attribution, CPU saturation and its ledger, build-daemon reaper |
 | [docs/doctor.md](docs/doctor.md)                                     | `paseo doctor` — read-only diagnosis of this fork's known failures, where checks run, credential and deadline gotchas            |
 | [docs/token-audit.md](docs/token-audit.md)                           | Token audit — the 7 measured items, `claude -p /context` for exact tokens, the weekly job, what escalates, the advisory agent    |
+| [docs/catastrophe-gate.md](docs/catastrophe-gate.md)                 | Catastrophe gate — the only two things agents may not do (rewrite main, wipe a disk), the shell walker, gaps, kill switch        |
 | [docs/device-leases.md](docs/device-leases.md)                       | Device cap — simulator/emulator slots, the process scan as the count, checkout queueing, the launch gate                         |
 | [docs/artifact-janitor.md](docs/artifact-janitor.md)                 | Artifact janitor — orphaned Xcode test simulator clones, cleanup obligations, the unowned sweep, the disk guard                  |
 | [docs/account-failover.md](docs/account-failover.md)                 | Account failover — moving agents off a capped Claude account, dead-account signals, idempotency labels, config                   |

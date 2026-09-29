@@ -5181,7 +5181,7 @@ class ClaudeAgentSession implements AgentSession {
    * and most of Tyler's agents run in exactly that mode. Hooks also fire inside subagents.
    *
    * Only Claude registers the catastrophe gate. Another provider would call `checkCatastrophe`
-   * from the same seam its device gate uses (docs/device-leases.md lists them per provider).
+   * from the same seam its device gate uses (docs/providers.md, "Gating a tool call").
    */
   private buildHooks(): NonNullable<ClaudeOptions["hooks"]> {
     const hooks = this.buildSubagentEffortHooks();
