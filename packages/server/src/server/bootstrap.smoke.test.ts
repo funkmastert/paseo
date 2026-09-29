@@ -447,6 +447,9 @@ describe("paseo daemon bootstrap", () => {
         "stalled-agent-sweep": { enabled: true, dryRun: true },
         // Read from config.json on every tick, not the mutable config; on unless it says false.
         "token-audit": { enabled: true, dryRun: undefined },
+        // agents.jev.awayReply, read the same way. Live by default (D10); with no JEV key it
+        // does nothing (docs/jev.md, "Feature 14: away auto-reply").
+        "away-reply": { enabled: true, dryRun: false },
       });
 
       const reloadedPersisted = {
