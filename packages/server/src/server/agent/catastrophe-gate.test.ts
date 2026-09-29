@@ -314,6 +314,9 @@ const MUST_NEVER_BLOCK: GateCase[] = [
   { command: "HOME=/tmp/fake-home; rm -rf $HOME", note: "HOME reassigned first" },
 
   // find without an unfiltered delete of a root.
+  { command: "find ~ -maxdepth 1 -type l -delete", note: "clears dangling symlinks, not data" },
+  { command: "find . -type d -empty -delete", note: "-type d with -delete only empties dirs" },
+  { command: "find /Volumes/Backup -type s -delete", note: "sockets are not data" },
   { command: "find ~ -name .DS_Store -delete" },
   { command: "find ~ -name node_modules -type d -prune -exec rm -rf {} +" },
   { command: "find ~ -type f -mtime +30 -path '*/Caches/*' -delete" },

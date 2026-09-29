@@ -328,6 +328,21 @@ function execEnd(expression: ExpandedWord[], position: number): number {
   return end;
 }
 
+function isNegatedTest(expression: ExpandedWord[], position: number): boolean {
+  const previous = expression[position - 1];
+  return previous?.resolved === true && (previous.text === "!" || previous.text === "-not");
+}
+
+/**
+ * `-type f` still selects every regular file, which `-delete`/`-exec rm` can still wipe. Any
+ * other value (d, l, p, s, b, c) is not real data: `-type d` with `-delete` only removes empty
+ * directories, and the rest name sockets, pipes and dangling symlinks.
+ */
+function isNarrowingTypeTest(expression: ExpandedWord[], position: number): boolean {
+  const value = expression[position + 1];
+  return value?.resolved === true && value.text !== "f";
+}
+
 /**
  * Whether a find expression deletes every file it reaches: `-delete` or `-exec rm …` with no
  * positive narrowing test. `find ~ -name .DS_Store -delete` is cleanup, not a wipe.
@@ -343,10 +358,11 @@ function deletesEverything(expression: ExpandedWord[]): boolean {
       deletes ||= execRunsRm(expression, position);
       // The executed command's own arguments are not find tests.
       position = execEnd(expression, position);
+    } else if (arg.text === "-type") {
+      if (!isNegatedTest(expression, position) && isNarrowingTypeTest(expression, position))
+        return false;
     } else if (FIND_NARROWING_TESTS.has(arg.text) || arg.text.startsWith("-newer")) {
-      const previous = expression[position - 1];
-      const negated = previous?.resolved && (previous.text === "!" || previous.text === "-not");
-      if (!negated) return false;
+      if (!isNegatedTest(expression, position)) return false;
     }
   }
   return deletes;
