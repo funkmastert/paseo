@@ -1,11 +1,12 @@
 import { describe, expect, test } from "vitest";
 
-import type { DoneJanitorWorkspace } from "../agent-done-janitor.js";
+import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
 import type { DoneJanitorAgentView } from "./done-janitor-detector.js";
 import {
   archiveDeletesDirectory,
   classifyWorkspace,
   describeUncoveredWork,
+  idleProjectVerdict,
   isBuildOutputPath,
   resolveWorkspaceSweepConfig,
   type WorkspaceActivitySignals,
@@ -490,5 +491,65 @@ describe("resolveWorkspaceSweepConfig", () => {
       projectGraceMs: 48 * HOUR,
       maxProjectRemovalsPerSweep: 5,
     });
+  });
+});
+
+describe("idleProjectVerdict", () => {
+  function project(overrides: Partial<DoneJanitorProject> = {}): DoneJanitorProject {
+    return {
+      projectId: "project-1",
+      rootPath: "/home/t/DayTrader",
+      projectKey: null,
+      createdAt: ago(300 * HOUR),
+      updatedAt: ago(300 * HOUR),
+      archivedAt: null,
+      ...overrides,
+    };
+  }
+  const gone = (hoursAgo: number) => workspace({ archivedAt: ago(hoursAgo * HOUR) });
+
+  test("the grace runs from when its last workspace went", () => {
+    expect(idleProjectVerdict(project(), [gone(30), gone(200)], CONFIG, NOW)).toEqual({
+      kind: "remove",
+      quietForMs: 30 * HOUR,
+      reason: "it has had no active workspace for 30h",
+    });
+    expect(idleProjectVerdict(project(), [gone(3)], CONFIG, NOW).kind).toBe("keep");
+  });
+
+  test("a project with no workspace at all waits out the grace from its own timestamps", () => {
+    expect(
+      idleProjectVerdict(project({ createdAt: ago(HOUR), updatedAt: ago(HOUR) }), [], CONFIG, NOW)
+        .kind,
+    ).toBe("keep");
+    expect(idleProjectVerdict(project(), [], CONFIG, NOW).kind).toBe("remove");
+  });
+
+  test.each([
+    ["an active workspace", project(), [workspace()], "it has an active workspace"],
+    ["an archived project", project({ archivedAt: ago(HOUR) }), [], "it is archived"],
+    [
+      "a remote project",
+      project({ projectKey: "remote:github.com/x/y" }),
+      [],
+      "it is a remote project",
+    ],
+    [
+      "no usable timestamp",
+      project({ createdAt: "", updatedAt: "" }),
+      [],
+      "it has no usable activity signal",
+    ],
+  ])("keeps a project with %s", (_name, candidate, workspaces, reason) => {
+    expect(idleProjectVerdict(candidate, workspaces, CONFIG, NOW)).toEqual({
+      kind: "keep",
+      reason,
+    });
+  });
+
+  test("an unreadable timestamp reads as just now", () => {
+    expect(idleProjectVerdict(project({ updatedAt: "garbage" }), [], CONFIG, NOW).kind).toBe(
+      "keep",
+    );
   });
 });

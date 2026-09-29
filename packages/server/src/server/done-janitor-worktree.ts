@@ -36,6 +36,8 @@ export type WorktreeDeletionSafety =
        * (`dirty`), or commits nothing else holds (`unpushed`). Absent for every other refusal.
        */
       atRisk?: "dirty" | "unpushed";
+      /** The directory does not exist: nothing is left in it to lose. */
+      gone?: true;
     };
 
 export interface CheckWorktreeDeletionSafetyInput {
@@ -71,7 +73,7 @@ export async function checkWorktreeDeletionSafety(
   input: CheckWorktreeDeletionSafetyInput,
 ): Promise<WorktreeDeletionSafety> {
   const cwd = input.worktreePath;
-  if (!existsSync(cwd)) return { safe: false, reason: "the directory does not exist" };
+  if (!existsSync(cwd)) return { safe: false, reason: "the directory does not exist", gone: true };
   const git = createReadOnlyGit(cwd, input.runGit ?? runGitCommand);
 
   const identity = await readLinkedWorktreeIdentity(git, cwd);

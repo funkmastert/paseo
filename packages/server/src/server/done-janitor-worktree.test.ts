@@ -252,7 +252,7 @@ describe("checkWorktreeDeletionSafety", () => {
       baseBranch: "main",
     });
 
-    expect(result).toEqual({ safe: false, reason: "the directory does not exist" });
+    expect(result).toEqual({ safe: false, reason: "the directory does not exist", gone: true });
   });
 });
 

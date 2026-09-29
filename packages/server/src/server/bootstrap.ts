@@ -250,7 +250,11 @@ import {
   type DaemonVitals,
   type DaemonVitalsConfig,
 } from "./daemon-vitals/daemon-vitals.js";
-import { checkWorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import {
+  checkWorktreeDeletionSafety,
+  listIgnoredEntries,
+  readWorkspaceActivitySignals,
+} from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { RemediationConfig } from "./remediation/config.js";
@@ -963,6 +967,7 @@ function createDoneJanitor(input: {
   projectRegistry: Pick<FileBackedProjectRegistry, "list" | "remove">;
   scheduleService: Pick<ScheduleService, "list">;
   terminalManager: TerminalManager | null;
+  scriptRuntimeStore: Pick<WorkspaceScriptRuntimeStore, "listForWorkspace">;
   archiveWorkspaceById: (workspaceId: string, requestId: string) => Promise<ArchiveResult>;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
@@ -1017,6 +1022,16 @@ function createDoneJanitor(input: {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor");
         return { removedDirectory: result.removedDirectory };
       },
+      archiveWorkspace: async (workspaceId) => {
+        const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle");
+        return { removedDirectory: result.removedDirectory };
+      },
+      countRunningScripts: async (workspaceId) =>
+        input.scriptRuntimeStore
+          .listForWorkspace(workspaceId)
+          .filter((entry) => entry.lifecycle === "running").length,
+      readActivitySignals: (directory) => readWorkspaceActivitySignals(directory),
+      listIgnoredEntries: (worktreePath) => listIgnoredEntries(worktreePath),
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,
@@ -2930,6 +2945,7 @@ export async function createPaseoDaemon(
               projectRegistry,
               scheduleService,
               terminalManager,
+              scriptRuntimeStore,
               archiveWorkspaceById: archiveWorkspaceByIdExternal,
               wsServer,
               daemonConfigStore,
