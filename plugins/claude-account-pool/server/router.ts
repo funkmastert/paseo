@@ -168,6 +168,7 @@ export interface RouterOptions {
     HealthTracker,
     | "isHealthyFor"
     | "isLastResortEligible"
+    | "isExhaustedFor"
     | "isHealthyForAllWindows"
     | "describeWindow"
     | "windowIds"

@@ -317,17 +317,86 @@ describe("createRouter — an account the CLI is refusing", () => {
     expect(result?.config.provider).toBe("claude");
   });
 
-  it("refusing one model leaves every other model running there, and refuses nothing else", () => {
+  it("refusing one model leaves every other model running there, and refuses nothing", () => {
     const health = tracker();
     for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
-      health.reportTurnFailure(providerId, "You've hit your Opus limit · resets Oct 2, 9am");
+      health.reportTurnFailure(providerId, "You've hit your Opus limit · resets Oct 2 at 9am");
     }
 
     const sonnet = router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext);
     expect(sonnet?.config.provider).toBe("claude-personal");
+    const opus = router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext);
+    expect(opus?.config.provider).toBe("claude-personal");
+  });
+
+  /**
+   * The live plugin (eb3c754e8) read none of the per-window messages, so a pool whose every
+   * account the CLI was refusing still placed the child, which failed its first turn and was
+   * moved by account failover with its prompt intact. Refusing the create instead loses it. The
+   * refusal stays exactly as wide as it was: only usage at the cap, or text the live plugin
+   * already read, counts an account toward it.
+   */
+  it("places a child, not refuses it, when the CLI refuses every account but no usage reading is at the cap", () => {
+    const health = createHealthTracker({ now: () => new Date(2026, 8, 28, 14, 25, 0) });
+    const reset = new Date(2026, 8, 28, 14, 50, 0);
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportUsage(providerId, [
+        { window: WINDOW_FIVE_HOUR, usedPct: 95, resetsAt: reset },
+        { window: WINDOW_SEVEN_DAY, usedPct: 50, resetsAt: null },
+      ]);
+      health.reportTurnFailure(providerId, SESSION_REFUSAL);
+    }
+    const onPoolExhausted = vi.fn();
+
+    const result = router(health, { onPoolExhausted })(
+      rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }),
+      fakeContext,
+    );
+
+    expect(["claude-personal", "claude-backup"]).toContain(result?.config.provider);
+    expect(onPoolExhausted).not.toHaveBeenCalled();
+  });
+
+  it("still refuses when a usage reading puts every account at its cap", () => {
+    const health = tracker();
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportTurnFailure(providerId, SESSION_REFUSAL);
+      health.reportUsage(providerId, [{ window: WINDOW_FIVE_HOUR, usedPct: 100 }]);
+    }
+
     expect(() =>
-      router(health)(rootCreate("claude", "claude-opus-5-5", { callerAgentId: "leader-1" }), fakeContext),
+      router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext),
     ).toThrow(PoolExhaustedError);
+  });
+
+  it("still refuses on refusal text the live plugin already read, on every account", () => {
+    const health = tracker();
+    for (const providerId of ["claude", "claude-personal", "claude-backup"]) {
+      health.reportTurnFailure(providerId, "You've hit your monthly spend limit · raise it at claude.ai/settings/usage");
+    }
+
+    expect(() =>
+      router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext),
+    ).toThrow(PoolExhaustedError);
+  });
+
+  it("ranks a refusing worker after the leader account, and still places on it before refusing", () => {
+    const health = tracker();
+    health.reportTurnFailure("claude-personal", SESSION_REFUSAL);
+    health.reportTurnFailure("claude-backup", SESSION_REFUSAL);
+    const onLeader = router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext);
+    expect(onLeader?.config.provider).toBe("claude");
+
+    health.reportUsage("claude", [{ window: WINDOW_FIVE_HOUR, usedPct: 100 }]);
+    const refusingWorker = router(health)(
+      rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }),
+      fakeContext,
+    );
+    expect(["claude-personal", "claude-backup"]).toContain(refusingWorker?.config.provider);
+
+    health.reportUsage("claude-backup", [{ window: WINDOW_FIVE_HOUR, usedPct: 100 }]);
+    const lastOne = router(health)(rootCreate("claude", "claude-sonnet-5", { callerAgentId: "leader-1" }), fakeContext);
+    expect(lastOne?.config.provider).toBe("claude-personal");
   });
 });
 

@@ -282,7 +282,9 @@ The ladder, for an agent-spawned claude-family child:
 1. a worker that is **healthy** for the requested model;
 2. a worker that is **drained but not capped**;
 3. the **leader account**, if it can run anything — isolation is gone here;
-4. nothing. The pool is exhausted and the create is **refused** (see
+4. a worker, then the leader, **capped only by a per-window CLI refusal** (see
+   [Healthy, drained, capped](#healthy-drained-capped));
+5. nothing. The pool is exhausted and the create is **refused** (see
    [No account left](#no-account-left)).
 
 Tiers 1 and 2 stay separate rather than merging into one ranking: a drained
@@ -311,8 +313,10 @@ window explains. Two signals move a window:
 | any other limit text (spend limit, quota, credits)       | `five_hour` or `weekly` if the text names one, else `account` |
 
 A model-scoped refusal caps only that model's window: an Opus cap leaves Sonnet
-work running on the account, and never counts toward refusing a spawn of
-another model. The limit pattern is a copy of the daemon's failover detector's
+work running on the account. A cap resting only on one of the per-window
+messages above ranks the account last (tier 4) but never counts toward
+refusing a spawn; a usage reading at 100% or the older limit text does. The
+reset in the message, `2:50pm` or `Oct 2 at 9am`, is when the cap ends. The limit pattern is a copy of the daemon's failover detector's
 (`packages/server/src/server/agent/account-failover-detector.ts`), because the
 plugin cannot import daemon code; `classify.test.ts` fails if the two drift.
 
@@ -353,9 +357,10 @@ exhausted account with no reported reset time was handed back out five hours
 later, to fail again.
 
 They now age on their own clocks: 5 hours for the session window, 7 days for
-a weekly one. This only applies when the daemon reports no `resets_at` for
-the window — a real state, since those rows are nullish — because a known
-reset time is always used in preference to either default.
+a weekly one. This only applies when neither the daemon's `resets_at` for the
+window nor the refusal's own `resets …` gives a time — a real state, since
+those rows are nullish — because a known reset time is always used in
+preference to either default.
 
 ### One account left
 
@@ -390,7 +395,13 @@ Passing the request through instead puts the child on a dead account where it
 fails on its first turn, and a leader that reads that as "that one didn't
 work, try another" spawns the next one straight into the same wall. One clear
 error costs less than an unbounded loop. Refusal requires positive evidence —
-every pool member actually capped — so an unreadable pool still fails open.
+every pool member capped by a usage reading at 100% or by the older limit
+text (spend limit, usage limit, quota, credits, rate limit) — so an unreadable
+pool still fails open. A per-window CLI refusal alone places the child last
+instead: it fails its first turn and account failover moves it with its prompt
+intact, where a refused create is lost. Whether the pool should refuse at all
+is still open, so the refusal stays as wide as it was before the plugin read
+those messages.
 
 Only a create with a calling agent is refused. A create with no caller — a
 root agent, or a daemon job's agent (see [Root agents](#root-agents)) — keeps

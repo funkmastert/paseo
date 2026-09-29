@@ -18,7 +18,7 @@ import type { ModelCatalog } from "./role-availability";
  * is the point of it being pure.
  */
 function healthyHealth(overrides: Partial<ClassifierWorld["health"]> = {}): ClassifierWorld["health"] {
-  return {
+  const health = {
     isHealthyFor: () => true,
     isHealthyForAllWindows: () => true,
     isLastResortEligible: () => true,
@@ -27,6 +27,11 @@ function healthyHealth(overrides: Partial<ClassifierWorld["health"]> = {}): Clas
     windowIds: () => [],
     ...overrides,
   } as ClassifierWorld["health"];
+  // Unless a test says otherwise, every cap is refusal-grade, as it is without CLI refusal text.
+  return {
+    isExhaustedFor: (providerId: string, modelId?: string) => !health.isLastResortEligible(providerId, modelId),
+    ...health,
+  };
 }
 
 const LIVE_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"];
@@ -516,6 +521,21 @@ describe("classifyAgent — the account", () => {
       at({ health: healthyHealth({ isHealthyFor: () => false, isLastResortEligible: () => false }) }),
     );
     expect(decision.account.kind).toBe("exhausted");
+  });
+
+  it("places on an account only the CLI's refusal text caps rather than refusing, and says so", () => {
+    const decision = classifyAgent(
+      child({ labels: { "paseo.agent-type": "worker" } }),
+      at({
+        health: healthyHealth({
+          isHealthyFor: () => false,
+          isLastResortEligible: () => false,
+          isExhaustedFor: () => false,
+        }),
+      }),
+    );
+    expect(decision.account).toMatchObject({ kind: "worker", providerId: "claude-work" });
+    expect(decision.account.reason).toContain("never refuses a spawn");
   });
 
   it("leaves a root agent and a non-pool-family child alone", () => {

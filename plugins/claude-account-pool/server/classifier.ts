@@ -783,20 +783,26 @@ function decideAccount(
   const collapsed =
     usable.length === 1 ? " Only one pooled account can serve this — budget isolation has collapsed." : "";
 
+  const refusing = (providerId: string): string =>
+    `Every pooled account is capped for ${modelId || "this request"}. Only the CLI's own refusal text caps ${providerId}, which ranks an account last but never refuses a spawn, so it takes this one.`;
   switch (selection.kind) {
     case "worker":
       return {
         kind: "worker",
         providerId: selection.providerId,
         usableProviderIds: usable,
-        reason: `${selection.providerId} is the pooled worker with the most headroom for ${modelId || "this request"}.${collapsed}`,
+        reason: selection.refusing
+          ? refusing(selection.providerId)
+          : `${selection.providerId} is the pooled worker with the most headroom for ${modelId || "this request"}.${collapsed}`,
       };
     case "leader":
       return {
         kind: "leader",
         providerId: selection.providerId,
         usableProviderIds: usable,
-        reason: `No worker can run ${modelId || "this request"}, so the leader account ${selection.providerId} serves it. Isolation is gone until a worker recovers.${collapsed}`,
+        reason: selection.refusing
+          ? refusing(selection.providerId)
+          : `No worker can run ${modelId || "this request"}, so the leader account ${selection.providerId} serves it. Isolation is gone until a worker recovers.${collapsed}`,
       };
     case "no-leader":
       return {

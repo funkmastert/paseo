@@ -353,7 +353,7 @@ describe("the CLI's per-window cap messages", () => {
 
   it("caps only that model on an Opus-limit refusal: Sonnet work still runs there", () => {
     const { tracker } = trackerAt(NOW);
-    tracker.reportTurnFailure(PROVIDER, "You've hit your Opus limit · resets Oct 2, 9am");
+    tracker.reportTurnFailure(PROVIDER, "You've hit your Opus limit · resets Oct 2 at 9am");
     expect(tracker.snapshot()[PROVIDER]?.account).toBeUndefined();
     expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
     expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(true);
@@ -361,9 +361,74 @@ describe("the CLI's per-window cap messages", () => {
 
   it("caps the whole account on a usage-credit refusal", () => {
     const { tracker } = trackerAt(NOW);
-    tracker.reportTurnFailure(PROVIDER, "You've hit your usage credit limit · resets Oct 1, 12am");
+    tracker.reportTurnFailure(PROVIDER, "You've hit your usage credit limit · resets Oct 1 at 12am");
     expect(tracker.snapshot()[PROVIDER]?.account?.status).toBe("capped");
     expect(tracker.isHealthyFor(PROVIDER, SONNET_MODEL)).toBe(false);
+  });
+});
+
+/**
+ * The pool refuses a child create only when every account is exhausted. A per-window CLI refusal
+ * with no usage reading at the cap behind it used to go unrecognised, so it never counted toward
+ * that. It still doesn't: it ranks the account last, and the refusal stays as wide as it was.
+ */
+describe("a per-window CLI refusal steers placement but never exhausts an account", () => {
+  const NOW = "2026-09-28T21:25:00Z";
+  const SESSION_REFUSAL = "You've hit your session limit · resets 2:50pm (America/Los_Angeles)";
+
+  it("counts the account out for placement, not toward refusing a spawn", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportUsage(PROVIDER, [
+      { window: WINDOW_FIVE_HOUR, usedPct: 95 },
+      { window: WINDOW_SEVEN_DAY, usedPct: 50 },
+    ]);
+    tracker.reportTurnFailure(PROVIDER, SESSION_REFUSAL);
+    expect(tracker.isLastResortEligible(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isExhaustedFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isExhaustedFor(PROVIDER)).toBe(false);
+  });
+
+  it("exhausts it once a usage reading puts that window at its cap", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, SESSION_REFUSAL);
+    tracker.reportUsage(PROVIDER, [{ window: WINDOW_FIVE_HOUR, usedPct: 100 }]);
+    expect(tracker.isExhaustedFor(PROVIDER, SONNET_MODEL)).toBe(true);
+  });
+
+  it("exhausts it on refusal text the pool recognised before the per-window messages", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, "You've hit your monthly spend limit");
+    expect(tracker.isExhaustedFor(PROVIDER, SONNET_MODEL)).toBe(true);
+    expect(tracker.isExhaustedFor(PROVIDER)).toBe(true);
+  });
+
+  it("exhausts it when refusal-grade text lands on a window a per-window refusal already capped", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportTurnFailure(PROVIDER, SESSION_REFUSAL);
+    tracker.reportTurnFailure(
+      PROVIDER,
+      "You've hit your monthly spend limit · your session limit resets 3:10pm (America/Los_Angeles)",
+    );
+    expect(tracker.isExhaustedFor(PROVIDER, SONNET_MODEL)).toBe(true);
+  });
+
+  it("is scoped to the model like isLastResortEligible: another model's cap exhausts nothing", () => {
+    const { tracker } = trackerAt(NOW);
+    tracker.reportUsage(PROVIDER, [{ window: weeklyModelWindow("opus"), usedPct: 100 }]);
+    expect(tracker.isExhaustedFor(PROVIDER, SONNET_MODEL)).toBe(false);
+    expect(tracker.isExhaustedFor(PROVIDER, OPUS_MODEL)).toBe(true);
+    expect(tracker.isExhaustedFor(PROVIDER)).toBe(true);
+  });
+});
+
+describe("a dated CLI refusal", () => {
+  it("comes back at the date it names, not a week later", () => {
+    const { tracker, set } = trackerAt(new Date(2026, 8, 28, 14, 25).toISOString());
+    tracker.reportTurnFailure(PROVIDER, "You've hit your weekly limit · resets Oct 2 at 9am (America/Los_Angeles)");
+    expect(tracker.describeWindow(PROVIDER, WINDOW_SEVEN_DAY)?.resetsAt).toEqual(new Date(2026, 9, 2, 9, 0));
+
+    set(new Date(2026, 9, 2, 9, 1).toISOString());
+    expect(tracker.describeWindow(PROVIDER, WINDOW_SEVEN_DAY)?.status).toBe("probation");
   });
 });
 
