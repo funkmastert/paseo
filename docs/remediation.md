@@ -31,7 +31,7 @@ The ladder keeps one episode per key (`orphan-build-daemons`, `stalled-agent:<ag
 
 ## The remediation agent
 
-The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`), so the classifier decides model, thinking and account from the labels:
+The ladder creates it through the normal create path (`createAgentCommand`, `kind: "mcp"`) as a root, background agent with no finish notification. It passes the provider only (`escalation.provider`) and no caller. A create with no caller is the leader unless its labels declare another role. The `paseo.agent-type: worker` label below does, so the classifier configures it like a child, with the model and thinking its `paseo.task-class` picks, and places it on a worker account first ([Root agents](../plugins/claude-account-pool/README.md#root-agents)). Without that label it would run on the leader tier (Opus 5.5, `xhigh`, the leader account). It carries these labels:
 
 | Label                   | Value                                                                                           |
 | ----------------------- | ----------------------------------------------------------------------------------------------- |
