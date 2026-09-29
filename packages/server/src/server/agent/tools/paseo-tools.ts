@@ -108,6 +108,18 @@ import type {
 } from "./types.js";
 import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
 import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
+import {
+  checkCatastrophe,
+  formatCatastropheDenial,
+  resolveCurrentBranchWithGit,
+} from "../catastrophe-gate.js";
+import { TypedTerminalLines } from "../typed-terminal-lines.js";
+
+/**
+ * The lines agents have typed into each terminal, for the catastrophe gate. One per daemon: a
+ * terminal outlives any one agent's tool catalog, and two agents can type into the same one.
+ */
+const typedTerminalLines = new TypedTerminalLines();
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -573,6 +585,34 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
   } = options;
   const childLogger = logger.child({ module: "agent", component: "paseo-tool-catalog" });
   const callerContext = callerAgentId ? (resolveCallerContext?.(callerAgentId) ?? null) : null;
+
+  /**
+   * The catastrophe gate on the terminal route (docs/catastrophe-gate.md): keys sent here land in
+   * a real shell, so each line they submit is checked like a Bash call, from the terminal's
+   * starting cwd. Throws the denial, which is what the agent reads; refused input is never sent.
+   */
+  const gateTerminalInput = async (terminalId: string, cwd: string, data: string) => {
+    const before = typedTerminalLines.snapshot(terminalId);
+    const submitted = typedTerminalLines.feed(terminalId, data);
+    if (daemonConfigStore?.get().catastropheGate?.enabled === false) return;
+    for (const script of submitted) {
+      const decision = await checkCatastrophe(script, cwd, resolveCurrentBranchWithGit);
+      if (!decision.block) continue;
+      // Nothing from this call reaches the terminal, so the line is still sitting at its prompt.
+      typedTerminalLines.restore(terminalId, before);
+      childLogger.warn(
+        {
+          rule: decision.rule,
+          agentId: callerAgentId,
+          terminalId,
+          cwd,
+          command: script.slice(0, 500),
+        },
+        "Catastrophe gate blocked terminal input",
+      );
+      throw new Error(formatCatastropheDenial(decision, script));
+    }
+  };
 
   const parseToolInput = async (tool: PaseoToolDefinition, input: unknown): Promise<unknown> => {
     const inputSchema = tool.inputSchema;
@@ -2532,6 +2572,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       }
 
       terminal.kill();
+      typedTerminalLines.forget(terminalId);
 
       return {
         content: [],
@@ -2608,10 +2649,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         throw new Error(`Terminal ${terminalId} not found`);
       }
 
-      terminal.send({
-        type: "input",
-        data: resolveTerminalKeyToken(keys, literal),
-      });
+      const data = resolveTerminalKeyToken(keys, literal);
+      await gateTerminalInput(terminalId, terminal.cwd, data);
+      terminal.send({ type: "input", data });
 
       return {
         content: [],
