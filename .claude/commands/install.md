@@ -48,13 +48,23 @@ So:
   real path in place of `<ENV_FILE>`, and run the step's commands in that same
   call.
 - Call the CLI only as `bozeo_cli`, which the env file defines. It runs the
-  built checkout's `packages/cli/bin/paseo`. Before any command except
-  `daemon start` and `daemon status`, it checks that the daemon for
-  `$BOZEO_HOME` is running on `$BOZEO_HOST`, and stops if it is not. It refuses
-  `daemon stop`, `daemon restart` and `restart`.
+  built checkout's `packages/cli/bin/paseo`, and only the commands this file
+  uses: `daemon start`, `daemon status`, `reload`, `plugin ls|install|logs`,
+  `doctor` and `ls`, with options after the command. It refuses `stop`,
+  `restart` and `--listen` anywhere in the arguments, and a `--home`, `--host`
+  or `--port` that is not this instance's. `daemon start` and `daemon status`
+  need the home's `config.json` to name `$BOZEO_HOST` (Step 7 writes it);
+  every other command needs the daemon for `$BOZEO_HOME` running on
+  `$BOZEO_HOST` first.
 - Pass `--home "$BOZEO_HOME"` and `--host "$BOZEO_HOST"` wherever a command
   takes them. The env file also exports `PASEO_HOME` and `PASEO_HOST` for the
   call, so a missed flag still reaches the right daemon.
+- The env file also clears what the call inherited: every `PASEO_*`,
+  `CLAUDE*` and `ANTHROPIC_*` variable, `GIT_EDITOR` and `PORT`. Your own
+  Claude Code session sets several of them, and its auth
+  (`ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, `CLAUDE_CONFIG_DIR`) would
+  otherwise reach the new daemon and every pooled session it starts, which
+  would then bill your key instead of the pool's accounts.
 - If you leave out the `.` line, `bozeo_cli` is `command not found` and nothing
   runs. Add the line and run the call again. Never fall back to a bare
   `paseo`.
@@ -71,7 +81,7 @@ the current mode.
 | ----------------- | ------------------------------------------------ | ------------------------------------------------------------------------- |
 | Fresh install     | `${PASEO_HOME:-~/.paseo}` on port 6767           | Steps 4–10, each after consent                                            |
 | Isolated instance | a new home on a new port, beside an existing one | Steps 4–10, each after consent; never the existing home, port or checkout |
-| Verify only       | the existing install                             | Nothing in the existing install                                           |
+| Verify only       | the existing install                             | Nothing: it reads files and asks the running daemon; no CLI writes there  |
 
 Verify only runs Steps 1, 2, 3 and V, then the Report. It never runs Steps
 4–10, even when a check fails.
@@ -97,11 +107,10 @@ which git ignores. They are this command's own working files.
   `paseo reload` prints `Run: paseo daemon restart`; Step 8 says which of its
   lines to ignore. If anything else asks for a restart, stop and ask the user.
   If they want the instance this run started restarted, the only form you may
-  run is
-  `"$BOZEO_CLI" daemon restart --home "$BOZEO_HOME" --port "$BOZEO_PORT"`,
-  after the `.` line.
+  run is `bozeo_restart_instance`, after the `.` line. It checks the running
+  daemon is this instance's first.
 - Never reload, install into, restart or stop a daemon this command did not
-  start. Verify only reads status and runs doctor, nothing else.
+  start. Verify only reads files and runs doctor, nothing else.
 - Never run `npm run dev`, `npm run dev:desktop` or the packaged app. They
   block a terminal or open a window. `daemon start` detaches, so it is fine.
 
@@ -147,26 +156,38 @@ From the checkout root:
 node scripts/install-preflight.mjs
 ```
 
-It only reads. It checks `~/.paseo` and any `PASEO_HOME` your shell inherited
-from the user's profile, each home's PID file and `daemon.listen`, whether
-port 6767 and each home's port are in use and by what, whether any process
-runs code from this checkout, and which `paseo` is on `PATH`. It prints
-`PASEO_*` variable names, with values only for `PASEO_HOME`, `PASEO_HOST`,
-`PASEO_LISTEN` and `PORT`.
+It only reads. It checks `~/.paseo`, any `PASEO_HOME` your shell inherited
+from the user's profile, and the home of an earlier `/install` run; each
+home's PID file and `daemon.listen`; whether port 6767, each home's port and
+the port of any running Paseo daemon are in use, and by which pid and
+executable; whether any process runs code from this checkout; and which
+`paseo` is on `PATH`. It prints `PASEO_*` variable names, with values only for
+`PASEO_HOME`, `PASEO_HOST`, `PASEO_LISTEN` and `PORT`, and never another
+process's command line.
 
-Show the user its output, then offer the modes its `verdict` line names:
+Show the user its output, then act on its `verdict` line:
 
-- `clear`: **Fresh install** into `${PASEO_HOME:-~/.paseo}` on 6767, or
-  **Stop**.
-- `EXISTING INSTALL OR BUSY PORT`: **Verify only**, **Isolated instance**, or
-  **Stop**. Never offer Fresh install here.
+- `clear`: offer **Fresh install** into `${PASEO_HOME:-~/.paseo}` on 6767,
+  or **Stop**.
+- `EXISTING INSTALL OR BUSY PORT`: offer **Verify only**, **Isolated
+  instance**, or **Stop**. Never offer Fresh install here.
+- `PREVIOUS /install RUN`: an earlier run from this checkout left
+  `.dev/install.env`; the `previous run` lines name its home, port and
+  checkout. Stop and ask the user. They can verify that instance (Verify
+  only, with its home and port), continue that run by using its env file as
+  `<ENV_FILE>` from the first step that did not pass, or stop. Never write a
+  new env file over it, and never delete it or its instance for them.
 
 Keep these lines for later steps: `protect` (Step 4 writes it into the env
-file), `separate clone` (Step 4), and `cli` (Step V).
+file), `separate clone` (Step 4), `cli` (Step V), and each home's
+`config.json` line (Step V).
 
-If the `env` lines show a `PASEO_*` variable other than `PASEO_HOME`, or
-`PORT`, tell the user. The env file clears them for every later call, so the
-new daemon does not inherit them.
+Tell the user about two kinds of `env` output. A `PASEO_*` variable other
+than `PASEO_HOME`, or `PORT`: the env file clears it for every later call.
+The `cleared` line: these names, from this Claude Code session or the user's
+profile, are kept out of the new daemon, for the reason in
+[Rules](#your-shell-forgets-everything-between-bash-calls). Never print their
+values.
 
 ### 3. Prerequisites — all modes, writes nothing
 
@@ -194,27 +215,35 @@ Pick the CLI from Step 2's `cli` lines: this checkout's CLI if it says
 stop: Verify only has no fork CLI to run, and building one is a write. Say so
 in the Report.
 
-Take the home and port from Step 2's `home` and `listens on` lines. Then, in
+Take the home and port from Step 2's `home` and `listens on` lines. Step 2
+already read that home's files: the PID file and whether its daemon runs,
+`daemon.listen`, and whether `config.json` parses. Report those lines as they
+are. Do not run `daemon status` against it: it sets the home and
+`config.json` to owner-only permissions and creates `server-id` or
+`config.json` when they are missing, which are writes to an install this mode
+must not change. Doctor is the only CLI command this mode runs.
+
+If Step 2 says the home's `config.json` is not valid JSON, report `config.json
+is not valid JSON at line <N>` and skip doctor too: doctor and the daemon
+quote the parse error, and it can contain part of an API key. Otherwise, in
 one call, with the three values substituted:
 
 ```bash
 CLI="<absolute path to the CLI>"; H="<absolute existing home>"; P="<its port>"
 : "${CLI:?}" "${H:?}" "${P:?}"
+for v in $(env | sed -n -e 's/^\(CLAUDE[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(ANTHROPIC_[A-Za-z0-9_]*\)=.*/\1/p' -e 's/^\(PASEO_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 export PASEO_HOME="$(git rev-parse --show-toplevel)/.dev/verify-client"
-if [ -f "$H/config.json" ]; then "$CLI" daemon status --home "$H"; else echo "skip daemon status: $H/config.json is missing"; fi
 "$CLI" doctor --full --home "$H" --host "127.0.0.1:$P"
 ```
 
-Every CLI command that connects to a daemon saves a client id to
-`$PASEO_HOME/cli-client-id` if there is none
-(`packages/cli/src/utils/client-id.ts`). The `export` sends it to this
-checkout's ignored `.dev/`, not the existing home; `--home` and `--host` still
-pick the install to check. `daemon status` writes a default `config.json`
-when the home has none (`packages/server/src/server/persisted-config.ts:937-947`),
-so it only runs against a home that has one. It also sets the home and
-`config.json` to owner-only permissions, as the daemon does on every start.
-`doctor` changes nothing. Report every line that is not `✓`, with the fix
-doctor names, then go to the Report. Do not fix anything.
+The `for` line keeps this session's Claude Code settings, such as
+`CLAUDE_CONFIG_DIR`, out of doctor's local checks. Every CLI command that
+connects to a daemon saves a client id to `$PASEO_HOME/cli-client-id` if
+there is none (`packages/cli/src/utils/client-id.ts`). The `export` sends it
+to this checkout's ignored `.dev/`, not the existing home; `--home` and
+`--host` still pick the install to check. `doctor` reads the home and changes
+nothing. Report every line that is not `✓`, with the fix doctor names, then
+go to the Report. Do not fix anything.
 
 ### 4. Choose the instance and write the env file — Fresh install, Isolated instance
 
@@ -234,9 +263,11 @@ Re-check the answers. Run this again whenever an answer changes:
 node scripts/install-preflight.mjs --check-port <port> --check-dir "<home>" --check-dir "<clone, if any>"
 ```
 
-It refuses the default port, a port an existing home uses, a port in use, and
-a directory that is an existing home, inside one, inside `~/.claude` or this
-checkout, or not empty.
+It refuses the default port, a port an existing home or the previous run
+uses, a port in use, and a directory that is an existing home, inside one or
+containing one, inside `~/.claude` or this checkout, your home directory, or
+not empty. It compares real paths, so a trailing `/`, a symlink or a case
+variant of an existing home is still that home.
 
 **Fresh install:** the home is `${PASEO_HOME:-$HOME/.paseo}`, expanded, and
 the port is 6767. If Step 2's `separate clone` line says `REQUIRED`, tell the
@@ -248,7 +279,39 @@ Show the user the plan and ask for one yes for Steps 4–7:
 - the env file, `<checkout>/.dev/install.env` (`.dev/` is ignored by git)
 - the clone, if any
 - `npm ci` and `npm run build:server` in the checkout that gets built
-- a daemon started with that home and port
+- the new home and its `config.json`, then a daemon started with that home
+  and port
+- what that daemon does on its own, below
+
+Tell the user plainly what the daemon does without being asked, because some
+of it starts agents that spend tokens:
+
+- **Remediation** is on by default (`agents.remediation`, docs/remediation.md).
+  It watches disk, swap, CPU and stalled agents, fixes what it can, and when
+  that fails starts an agent of its own to fix it, up to 12 a day, then pushes
+  a notification. Free disk under 20 GB counts as low (docs/disk-pressure.md),
+  so on a fuller disk the first thing the new daemon does after sign-in can be
+  to start a clean-up agent.
+- **The token audit** is on by default (`agents.tokenAudit`,
+  docs/token-audit.md). It runs 10 minutes after start and then weekly, and
+  when a report escalates it starts an agent to write it up.
+- **CPU and process jobs**: the resource monitor, CPU saturation handling and
+  process priority are on by default (docs/resource-monitor.md).
+
+**Isolated instance:** the existing install already watches this machine;
+two daemons would each act on the same disk and CPU and each start agents.
+So Step 7 writes the new home with these off: `agents.resourceMonitor` (and
+its `reaper` and `saturation`), `processPriority`, `deviceLeases`,
+`artifactJanitor` (and `diskGuard`), `tokenAudit` (and its escalation),
+`doneJanitor`, `accountFailover`, every `agents.remediation` rung, and
+`worktrees.diskSweeper`. Say so. `accountFailover` and `doneJanitor` act only
+on this instance's agents; if the user wants failover between the pool's
+accounts, they set `agents.accountFailover.enabled` to `true` in
+`$BOZEO_HOME/config.json` later. Every one of these keys is live after
+`reload`.
+
+**Fresh install:** these stay at their defaults unless the user asks for
+them off; then Step 7 uses the isolated form.
 
 Then write the env file. Fill in the values: `BOZEO_REPO` is the clone if there
 is one, else this checkout. `BOZEO_PROTECT` is Step 2's `protect` value, or
@@ -256,6 +319,7 @@ empty for a fresh install.
 
 ```bash
 ENV_FILE="$(git rev-parse --show-toplevel)/.dev/install.env"
+[ -e "$ENV_FILE" ] && { echo "STOP: $ENV_FILE exists: an earlier /install run. Ask the user (Step 2)."; exit 1; }
 mkdir -p "$(dirname "$ENV_FILE")"
 cat > "$ENV_FILE" <<'EOF'
 BOZEO_SRC='<absolute path of this checkout>'
@@ -265,11 +329,16 @@ BOZEO_PORT='<port>'
 BOZEO_PROTECT='<protect value from Step 2>'
 . "$BOZEO_SRC/scripts/install-env.sh"
 EOF
-. "$ENV_FILE" && type bozeo_cli >/dev/null && echo "ENV_FILE=$ENV_FILE" && echo "cli $BOZEO_CLI  home $BOZEO_HOME  host $BOZEO_HOST"
+. "$ENV_FILE" && type bozeo_cli >/dev/null && echo "ENV_FILE=$ENV_FILE" && echo "cli $BOZEO_CLI  home $BOZEO_HOME  host $BOZEO_HOST" && echo "cleared: ${BOZEO_CLEARED:-nothing}"
 ```
 
-If it prints `STOP:`, fix the value it names. Otherwise the printed
-`ENV_FILE=` path is `<ENV_FILE>` for every later step.
+If it prints `STOP:`, fix the value it names in the file and source it again;
+never delete the file to start over without asking. Otherwise the printed
+`ENV_FILE=` path is `<ENV_FILE>` for every later step. The env file refuses a
+home that is, contains or is inside an existing home, a port an existing
+install uses, and, for an isolated instance, `~/.paseo` and port 6767. It
+compares real paths, and from then on every step uses the canonical home it
+printed.
 
 ### 5. Clone — only when Step 4 chose a clone directory
 
@@ -336,25 +405,31 @@ diff and leave it. For anything else, show the diff and stop.
 
 ### 7. Start the daemon — Fresh install, Isolated instance
 
-**Isolated instance only**, first make the new home remember its port.
-`daemon status` creates the home and the daemon's default `config.json`,
-which says `127.0.0.1:6767`. Without this, a later
-`paseo daemon start --home <home>` without `--port` would try the existing
-daemon's port.
+First create the home and its `config.json` yourself, before any CLI command
+sees it. Every CLI command that reads a home without a `config.json` writes
+the daemon's default one, which says `127.0.0.1:6767`, and `daemon status`
+then connects to whatever listens there: with an existing install, the
+user's own daemon.
+
+**Isolated instance**, with the machine-wide jobs off (Step 4):
 
 ```bash
 . "<ENV_FILE>"
-bozeo_cli daemon status --home "$BOZEO_HOME" > /dev/null
-node -e '
-  const fs = require("fs");
-  const [file, listen] = process.argv.slice(1);
-  const config = JSON.parse(fs.readFileSync(file, "utf8"));
-  if (config.daemon?.listen !== "127.0.0.1:6767") { console.log("STOP: this home is not new"); process.exit(1); }
-  config.daemon.listen = listen;
-  fs.writeFileSync(file, JSON.stringify(config, null, 2) + "\n");
-  console.log("daemon.listen set to " + listen);
-' "$BOZEO_HOME/config.json" "$BOZEO_HOST"
+node "$BOZEO_SRC/scripts/install-instance.mjs" new-home "$BOZEO_HOME" "$BOZEO_HOST" --machine-jobs off
 ```
+
+**Fresh install**, the same without `--machine-jobs off`, unless the user
+asked for the jobs off:
+
+```bash
+. "<ENV_FILE>"
+node "$BOZEO_SRC/scripts/install-instance.mjs" new-home "$BOZEO_HOME" "$BOZEO_HOST"
+```
+
+It refuses a home that already exists, so it never rewrites one; if it
+prints `STOP:`, show the user and stop. It creates the home owner-only and
+writes the daemon's own default `config.json` with `daemon.listen` set to
+`$BOZEO_HOST` and the relay off, and prints the key paths it turned off.
 
 Then, in both modes:
 
@@ -366,7 +441,10 @@ bozeo_guard && echo "guard ok: $BOZEO_HOME is running on $BOZEO_HOST"
 ```
 
 Look for `Local Daemon  running`, `Listen` equal to `$BOZEO_HOST`,
-`Claude  available (daemon)`, and `guard ok`. If Claude shows
+`Claude  available (daemon)`, and `guard ok`. The daemon starts with the
+cleared environment from [Rules](#your-shell-forgets-everything-between-bash-calls),
+so pooled sessions run on the pool's accounts, not on this session's key or
+config directory. If Claude shows
 `not found (daemon)`, stop and point to docs/install.md's troubleshooting
 entry for it. If `daemon start` fails, show its log path and stop; don't
 retry on another home or port.
@@ -468,7 +546,9 @@ Running it twice changes nothing: an existing link is left as it is, so it
 never creates `projects/projects`. `MSYS=winsymlinks:nativestrict` makes Git
 Bash on Windows fail rather than copy `~/.claude/projects`, which can be
 many GB; elsewhere it is ignored. A `FAIL` line means the link did not
-happen: stop and show the user. Without a global `~/.claude/CLAUDE.md` there
+happen: stop and show the user. On Windows the usual cause is that creating
+symlinks needs Developer Mode (Settings → System → For developers) or an
+elevated Git Bash; the user turns one on, then you run the block again. Without a global `~/.claude/CLAUDE.md` there
 is nothing to link, and Step 11 explains doctor's line about it.
 
 Then print, for the user to run in their own terminal, one line per directory.
@@ -527,10 +607,16 @@ Look for:
 - no `not logged in` line for a pooled account
 
 Report every line that is not `✓`, with the fix doctor names. Doctor changes
-nothing, so what fails here is the user's next step. One is expected: without
-a global `~/.claude/CLAUDE.md`, doctor fails `no CLAUDE.md` for `~/.claude`
-and for each pooled account. Creating that file is the user's choice; say so
-rather than creating it.
+nothing, so what fails here is the user's next step. Two are expected:
+
+- Without a global `~/.claude/CLAUDE.md`, doctor fails `no CLAUDE.md` for
+  `~/.claude` and for each pooled account. Creating that file is the user's
+  choice; say so rather than creating it.
+- The skills row's fix names Bozeo → Settings → Skills → Update, which needs
+  the desktop app. Without the app, the warning is expected.
+
+Doctor's footer says to run `paseo doctor` again. Rerun it only as
+`bozeo_cli doctor …` after the `.` line, never as a bare `paseo`.
 
 ## Report
 
@@ -551,10 +637,18 @@ A table with one row per step (pass, fail, skipped, and why), then:
 "<BOZEO_CLI>" ls -a -g --host "<BOZEO_HOST>"
 ```
 
+- What the daemon does on its own (Step 4): for an isolated instance, which
+  machine-wide jobs are off and how to turn one back on; for a fresh install,
+  that remediation and the token audit are on and can start agents.
+- The variable names the env file kept out of the daemon (Step 4's
+  `cleared` line), without values.
 - Isolated instance: to start it again later, run
   `"<BOZEO_CLI>" daemon start --home "<BOZEO_HOME>" --port <BOZEO_PORT>`. Every
   other command needs `--host "<BOZEO_HOST>"`; without it the CLI reaches the
-  daemon on 6767.
+  daemon on 6767. Starting it from their own terminal passes that terminal's
+  environment to the daemon, including any `ANTHROPIC_API_KEY`.
+- `.dev/install.env` stays in the checkout. A later `/install` from this
+  checkout finds it and asks before doing anything.
 - Fresh install: the daemon runs from the CLI on 6767 with
   `${PASEO_HOME:-~/.paseo}`. A desktop app installed later uses the same home
   and port, so it connects to this daemon or stops it (docs/install.md,
