@@ -2,12 +2,17 @@
 //
 // At risk = uncommitted changes (tracked or untracked), commits on no remote, stashes.
 // Snapshot = a commit built through a temporary index (the worktree, its index and HEAD are
-// untouched), stored at refs/backup/<date>/<slug>. With --push, snapshots of repos on Tyler's
-// personal GitHub (funkmastert) go to origin as backup/<date>/<slug> branches; every other repo
-// (company forges, no remote) gets a local git bundle under ~/bozeo-ops/backups instead, so no
-// WIP branch or CI run lands on a shared forge.
+// untouched), stored at refs/backup/<date>/<slug>, plus a local git bundle per repo under
+// ~/bozeo-ops/backups. Nothing leaves the machine.
 //
-// Usage: node work-audit.mjs [--snapshot] [--push]   (report only by default)
+// There is no --push. On 2026-09-24 `--push` sent every untracked file (a Notion token included)
+// and every local-only branch to funkmastert origins, and it would have done the same to the
+// public funkmastert/paseo. Offsite copies are the daemon's work snapshots (docs/work-snapshots.md),
+// which filter secrets and refuse public repositories once the snapshot-secret-filter fix is
+// running. Until then the live daemon pushes nothing only because
+// agents.remediation.workSnapshots.personalOwners is [].
+//
+// Usage: node work-audit.mjs [--snapshot]   (report only by default)
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
@@ -15,9 +20,18 @@ import path from "node:path";
 import { connectToDaemon } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js";
 
 const HOME = os.homedir();
-const DATE = "2026-09-24";
+const DATE = new Date().toLocaleDateString("en-CA"); // local YYYY-MM-DD
 const SNAPSHOT = process.argv.includes("--snapshot");
-const PUSH = process.argv.includes("--push");
+if (process.argv.includes("--push")) {
+  console.error(
+    "work-audit: --push was removed; it pushed untracked secrets to GitHub on 2026-09-24.\n" +
+      "Offsite copies come from the daemon's work snapshots (docs/work-snapshots.md), which filter\n" +
+      "secrets and refuse public repositories once the snapshot-secret-filter fix is running. Until\n" +
+      "then the live daemon pushes nothing only because agents.remediation.workSnapshots.personalOwners\n" +
+      "is []. Run with --snapshot for local refs and bundles.",
+  );
+  process.exit(2);
+}
 const MAX_UNTRACKED_BYTES = 20 * 1024 * 1024;
 const BACKUP_DIR = path.join(HOME, "bozeo-ops", "backups");
 
@@ -52,7 +66,9 @@ const scanRoots = [
 ];
 const listDirs = (d) => {
   try {
-    return readdirSync(d).map((n) => path.join(d, n)).filter((p) => statSync(p).isDirectory());
+    return readdirSync(d)
+      .map((n) => path.join(d, n))
+      .filter((p) => statSync(p).isDirectory());
   } catch {
     return [];
   }
@@ -76,7 +92,11 @@ for (const dir of candidates) {
   repos.set(common, { common, anyDir: top });
 }
 
-const slug = (s) => s.replace(/^\/Users\/[^/]+\//, "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const slug = (s) =>
+  s
+    .replace(/^\/Users\/[^/]+\//, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 const inside = (root, p) => p === root || p.startsWith(root + "/");
 
 const report = [];
@@ -85,7 +105,14 @@ for (const repo of repos.values()) {
   const origin = tryGit(cwd, ["remote", "get-url", "origin"]) ?? "";
   const personal = /github\.com[:/]funkmastert\//.test(origin);
   const hasRemotes = (tryGit(cwd, ["remote"]) ?? "") !== "";
-  const repoInfo = { repo: repo.common.replace(/\/\.git$/, ""), origin, personal, worktrees: [], branches: [], stashes: 0 };
+  const repoInfo = {
+    repo: repo.common.replace(/\/\.git$/, ""),
+    origin,
+    personal,
+    worktrees: [],
+    branches: [],
+    stashes: 0,
+  };
 
   // Worktrees.
   const porcelain = tryGit(cwd, ["worktree", "list", "--porcelain"]) ?? "";
@@ -123,7 +150,9 @@ for (const repo of repos.values()) {
   }
 
   // Local branches carrying commits that are on no remote.
-  const heads = (tryGit(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]) ?? "").split("\n").filter(Boolean);
+  const heads = (tryGit(cwd, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]) ?? "")
+    .split("\n")
+    .filter(Boolean);
   for (const b of heads) {
     const n = hasRemotes
       ? Number(tryGit(cwd, ["rev-list", "--count", `refs/heads/${b}`, "--not", "--remotes"]) ?? 0)
@@ -147,7 +176,9 @@ function snapshot(repoInfo, wt) {
     git(wt.path, ["read-tree", "HEAD"], env);
     git(wt.path, ["add", "-u"], env);
     const skipped = [];
-    const untracked = (tryGit(wt.path, ["ls-files", "--others", "--exclude-standard", "-z"]) ?? "").split("\0").filter(Boolean);
+    const untracked = (tryGit(wt.path, ["ls-files", "--others", "--exclude-standard", "-z"]) ?? "")
+      .split("\0")
+      .filter(Boolean);
     const keep = [];
     for (const f of untracked) {
       try {
@@ -156,7 +187,8 @@ function snapshot(repoInfo, wt) {
         else keep.push(f);
       } catch {}
     }
-    for (let i = 0; i < keep.length; i += 200) git(wt.path, ["add", "--", ...keep.slice(i, i + 200)], env);
+    for (let i = 0; i < keep.length; i += 200)
+      git(wt.path, ["add", "--", ...keep.slice(i, i + 200)], env);
     const tree = git(wt.path, ["write-tree"], env);
     const head = git(wt.path, ["rev-parse", "HEAD"]);
     const msg = `backup: snapshot of ${wt.path} on ${DATE}\n\nBranch ${wt.branch ?? "(detached)"}, ${wt.dirtyFiles} changed file(s), ${wt.unpushed} unpushed commit(s).${skipped.length ? `\nSkipped large untracked files: ${skipped.join(", ")}` : ""}`;
@@ -187,45 +219,47 @@ if (SNAPSHOT) {
     for (const b of repoInfo.branches) refs.push(`refs/heads/${b.branch}`);
     if (refs.length === 0) continue;
     const cwd = repoInfo.worktrees.find((w) => !w.missing)?.path ?? repoInfo.repo;
-    if (PUSH && repoInfo.personal) {
-      const specs = [];
-      for (const wt of repoInfo.worktrees) if (wt.snapshot) specs.push(`${wt.snapshot.ref}:refs/heads/backup/${DATE}/${slug(wt.path)}`);
-      for (const b of repoInfo.branches) specs.push(`refs/heads/${b.branch}:refs/heads/${b.branch}`);
-      try {
-        git(cwd, ["push", "--quiet", "origin", ...specs]);
-        repoInfo.pushed = specs.length;
-      } catch (e) {
-        repoInfo.pushError = String(e.stderr ?? e.message).split("\n").slice(0, 3).join(" | ");
-      }
-    } else {
-      const bundle = path.join(BACKUP_DIR, `${slug(repoInfo.repo)}-${DATE}.bundle`);
-      try {
-        git(cwd, ["bundle", "create", bundle, ...refs]);
-        repoInfo.bundle = bundle;
-      } catch (e) {
-        repoInfo.bundleError = String(e.stderr ?? e.message).split("\n")[0];
-      }
+    const bundle = path.join(BACKUP_DIR, `${slug(repoInfo.repo)}-${DATE}.bundle`);
+    try {
+      git(cwd, ["bundle", "create", bundle, ...refs]);
+      repoInfo.bundle = bundle;
+    } catch (e) {
+      repoInfo.bundleError = String(e.stderr ?? e.message).split("\n")[0];
     }
   }
 }
 
-writeFileSync(path.join(HOME, "bozeo-ops", "work-audit.json"), JSON.stringify({ at: new Date().toISOString(), report }, null, 2));
+writeFileSync(
+  path.join(HOME, "bozeo-ops", "work-audit.json"),
+  JSON.stringify({ at: new Date().toISOString(), report }, null, 2),
+);
 
 // Summary.
 for (const r of report) {
   const risky = r.worktrees.filter((w) => w.atRisk || w.missing);
   if (risky.length === 0 && r.branches.length === 0 && r.stashes === 0) continue;
-  console.log(`\n## ${r.repo.replace(HOME, "~")}${r.agentRelated ? "" : "  (no agent involvement; report only)"}  [${r.personal ? "personal GitHub" : r.origin ? r.origin.replace(/^.*[:/]([^/]+\/[^/]+?)(\.git)?$/, "$1") : "no remote"}]`);
+  console.log(
+    `\n## ${r.repo.replace(HOME, "~")}${r.agentRelated ? "" : "  (no agent involvement; report only)"}  [${r.personal ? "personal GitHub" : r.origin ? r.origin.replace(/^.*[:/]([^/]+\/[^/]+?)(\.git)?$/, "$1") : "no remote"}]`,
+  );
   for (const w of risky) {
-    const who = (w.agents ?? []).length ? w.agents.map((a) => `${a.id} ${a.status}`).join(", ") : "no agent";
-    const snap = w.snapshot ? ` → ${w.snapshot.commit}${w.snapshot.skipped.length ? ` (skipped ${w.snapshot.skipped.length} large)` : ""}` : w.snapshotError ? ` → SNAPSHOT FAILED: ${w.snapshotError}` : "";
-    console.log(`  ${w.missing ? "MISSING" : "wt"} ${w.path.replace(HOME, "~")} [${w.branch ?? "detached"}] dirty=${w.dirtyFiles ?? "-"} unpushed=${w.unpushed ?? "-"} | ${who}${snap}`);
+    const who = (w.agents ?? []).length
+      ? w.agents.map((a) => `${a.id} ${a.status}`).join(", ")
+      : "no agent";
+    const snap = w.snapshot
+      ? ` → ${w.snapshot.commit}${w.snapshot.skipped.length ? ` (skipped ${w.snapshot.skipped.length} large)` : ""}`
+      : w.snapshotError
+        ? ` → SNAPSHOT FAILED: ${w.snapshotError}`
+        : "";
+    console.log(
+      `  ${w.missing ? "MISSING" : "wt"} ${w.path.replace(HOME, "~")} [${w.branch ?? "detached"}] dirty=${w.dirtyFiles ?? "-"} unpushed=${w.unpushed ?? "-"} | ${who}${snap}`,
+    );
   }
   const loose = r.branches.filter((b) => !r.worktrees.some((w) => w.branch === b.branch));
-  if (loose.length) console.log(`  local-only branches without a worktree: ${loose.map((b) => `${b.branch}(${b.unpushed})`).join(", ")}`);
+  if (loose.length)
+    console.log(
+      `  local-only branches without a worktree: ${loose.map((b) => `${b.branch}(${b.unpushed})`).join(", ")}`,
+    );
   if (r.stashes) console.log(`  stashes: ${r.stashes}`);
-  if (r.pushed) console.log(`  pushed ${r.pushed} ref(s) to origin`);
-  if (r.pushError) console.log(`  PUSH FAILED: ${r.pushError}`);
   if (r.bundle) console.log(`  bundle: ${r.bundle.replace(HOME, "~")}`);
   if (r.bundleError) console.log(`  BUNDLE FAILED: ${r.bundleError}`);
 }
