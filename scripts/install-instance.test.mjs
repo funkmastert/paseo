@@ -53,7 +53,7 @@ test("check-env refuses an existing home written with a trailing slash or a dot 
         BOZEO_PROTECT: `|${existing}|6767|`,
       });
       assert.equal(code, 1, alias);
-      assert.match(out, /STOP: BOZEO_HOME .* existing home/, alias);
+      assert.equal(out.match(/STOP: BOZEO_HOME .* existing home/g)?.length, 1, alias);
     }
   } finally {
     done();
@@ -236,6 +236,10 @@ test(
       ]) {
         assert.match(reload.out, new RegExp(`cleared: .*\\b${name}\\b`), name);
       }
+      const restart = envShell(dir, "bozeo_restart_instance");
+      assert.equal(restart.code, 0, restart.out);
+      assert.match(restart.calls, /args: daemon restart --home .* --port 6790/);
+      assert.doesNotMatch(restart.calls, /leaked/);
     } finally {
       done();
     }

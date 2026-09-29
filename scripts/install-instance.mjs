@@ -92,7 +92,10 @@ function placementProblems({ src, repo, home, port }, protect) {
   const isolated = protect.homes.length > 0 || protect.ports.length > 0;
   // With anything to protect this is an isolated instance: the default home and port belong to
   // the desktop app and to any later Paseo, even when nothing uses them yet.
-  const guarded = isolated ? [...protect.homes, path.join(userHome, ".paseo")] : [];
+  const guarded = [];
+  for (const candidate of isolated ? [...protect.homes, path.join(userHome, ".paseo")] : []) {
+    if (!guarded.some((known) => samePath(known, candidate))) guarded.push(candidate);
+  }
   for (const existing of guarded) {
     if (isSameOrInside(home, existing) || isSameOrInside(existing, home)) {
       problems.push(`BOZEO_HOME ${home} is, contains or is inside the existing home ${existing}`);
