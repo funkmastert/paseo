@@ -5,6 +5,7 @@ import type { AccountFailoverAgentSummary } from "./agent-manager.js";
 import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   getMigratedToFromLabels,
+  isAccountDeadFor,
   isLimitShapedError,
   parseResetTimeHint,
   planAccountFailoverSweep,
@@ -251,6 +252,37 @@ describe("planAccountFailoverSweep", () => {
     });
 
     expect([...result.deadProviderIds]).toEqual(["claude-personal"]);
+  });
+
+  it("makes an account at its Opus weekly cap dead for an Opus agent, not for a Sonnet agent", () => {
+    const opusCapped: ProviderUsage = {
+      ...usage("claude-personal", []),
+      windows: [
+        { id: "five_hour", label: "Session", usedPct: 20 },
+        { id: "weekly", label: "Weekly", usedPct: 30 },
+        { id: "weekly_model_opus", label: "Weekly · Opus", usedPct: 100 },
+      ],
+    };
+    const opus = agent({
+      id: "opus",
+      provider: "claude-personal",
+      lastError: "ECONNRESET",
+      model: "claude-opus-5-5",
+    });
+    const sonnet = agent({
+      id: "sonnet",
+      provider: "claude-personal",
+      lastError: "ECONNRESET",
+      model: "claude-sonnet-5",
+    });
+
+    const result = plan({ agents: [opus, sonnet], usage: [opusCapped] });
+
+    // Not dead for everyone: an Opus cap does not stop a Sonnet worker.
+    expect(result.deadProviderIds.size).toBe(0);
+    expect(ids(result.candidates)).toEqual(["opus"]);
+    expect(isAccountDeadFor(result, opus)).toBe(true);
+    expect(isAccountDeadFor(result, sonnet)).toBe(false);
   });
 
   it("never makes an idle agent without its own limit failure a candidate, but takes one in error", () => {

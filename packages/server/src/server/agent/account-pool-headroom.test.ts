@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
-import { headroomByProvider, saturatedProviderIds } from "./account-pool-headroom.js";
+import {
+  headroomByProvider,
+  saturatedProviderIds,
+  windowLimitsModel,
+} from "./account-pool-headroom.js";
 
 const NOW_MS = Date.parse("2026-09-22T12:00:00Z");
 const hours = (n: number) => new Date(NOW_MS + n * 60 * 60 * 1000).toISOString();
@@ -38,6 +42,55 @@ describe("saturatedProviderIds", () => {
   it("names nothing when usage could not be read", () => {
     expect(saturatedProviderIds(null).size).toBe(0);
   });
+
+  it("counts a model's weekly window only for an agent on that model", () => {
+    const usage = [
+      provider("opus-saturated", [
+        { id: "five_hour", usedPct: 10 },
+        { id: "weekly", usedPct: 40 },
+        { id: "weekly_model_opus", usedPct: 95 },
+      ]),
+      provider("surface-saturated", [
+        { id: "weekly", usedPct: 40 },
+        { id: "weekly_surface_code", usedPct: 92 },
+      ]),
+    ];
+
+    expect([...saturatedProviderIds(usage, "claude-opus-5-5")].sort()).toEqual([
+      "opus-saturated",
+      "surface-saturated",
+    ]);
+    expect([...saturatedProviderIds(usage, "claude-sonnet-5")]).toEqual(["surface-saturated"]);
+    // A model the daemon cannot place in a family, or no model at all: every window counts.
+    expect([...saturatedProviderIds(usage, "default")].sort()).toEqual([
+      "opus-saturated",
+      "surface-saturated",
+    ]);
+    expect([...saturatedProviderIds(usage)].sort()).toEqual([
+      "opus-saturated",
+      "surface-saturated",
+    ]);
+  });
+});
+
+describe("windowLimitsModel", () => {
+  it("binds account-wide and surface windows to every model", () => {
+    for (const id of ["five_hour", "weekly", "weekly_surface_code", "window-0"]) {
+      expect(windowLimitsModel(id, "claude-sonnet-5")).toBe(true);
+    }
+  });
+
+  it("binds a model window to its own family, whatever shape the id carries", () => {
+    expect(windowLimitsModel("weekly_model_opus", "claude-opus-5-5")).toBe(true);
+    expect(windowLimitsModel("weekly_model_claude-opus-4-1", "opus")).toBe(true);
+    expect(windowLimitsModel("weekly_model_opus", "claude-sonnet-5")).toBe(false);
+    expect(windowLimitsModel("weekly_model_omelette", "claude-opus-5-5")).toBe(false);
+  });
+
+  it("binds a model window to an agent whose family it cannot tell", () => {
+    expect(windowLimitsModel("weekly_model_opus", undefined)).toBe(true);
+    expect(windowLimitsModel("weekly_model_opus", "default")).toBe(true);
+  });
 });
 
 describe("headroomByProvider", () => {
@@ -52,6 +105,17 @@ describe("headroomByProvider", () => {
       NOW_MS,
     );
     expect(scores.get("worker-a")).toBe(2);
+  });
+
+  it("scores an agent's account on the windows that limit its model", () => {
+    const usage = [
+      provider("worker-a", [
+        { id: "weekly", usedPct: 40 },
+        { id: "weekly_model_opus", usedPct: 97 },
+      ]),
+    ];
+    expect(headroomByProvider(usage, NOW_MS, "claude-sonnet-5").get("worker-a")).toBe(60);
+    expect(headroomByProvider(usage, NOW_MS, "claude-opus-5-5").get("worker-a")).toBe(3);
   });
 
   it("ranks 20% left resetting in an hour above 30% left resetting on Friday", () => {

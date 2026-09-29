@@ -14,6 +14,7 @@ import {
   getMigratedToFromLabels,
   HANDOFF_FROM_LABEL,
   isLimitShapedError,
+  isStuckTurn,
   parseResetTimeHint,
 } from "./account-failover-detector.js";
 import {
@@ -119,7 +120,21 @@ export type AccountFailoverOutcome =
    * over from an earlier handoff. Retired like an adopted predecessor, never moved, never retried.
    */
   | { kind: "duplicate"; oldAgentId: string; holderId: string; holderProviderId: string }
-  | { kind: "no-target"; oldAgentId: string };
+  | { kind: "no-target"; oldAgentId: string }
+  /**
+   * The agent changed after the sweep planned it, so nothing was done. The next sweep plans from
+   * its state then. Never an import: the agent may be live, and importing its session would make
+   * a second live agent on one conversation.
+   */
+  | { kind: "skipped"; agentId: string; reason: AccountFailoverSkipReason };
+
+/**
+ * - `busy`: a turn started (a parent's message, a finish report, Tyler).
+ * - `moved`: something else moved or retired it; that move is the rescue.
+ * - `recovered`: it is no longer stuck.
+ * - `unloaded`: it left the daemon.
+ */
+export type AccountFailoverSkipReason = "busy" | "moved" | "recovered" | "unloaded";
 
 const MOVED_TITLE_PREFIX = /^\[MOVED [^\]]*\]\s*/;
 
@@ -348,6 +363,39 @@ export function buildMoveResumePrompt(input: {
 }
 
 /**
+ * Why a planned rescue must not run now, read from the agent as it is rather than as the sweep
+ * planned it. The live daemon moves a planned agent 15 to 60 seconds after planning it (the
+ * resume pace holds each migration slot), which is time enough for a turn to start or for
+ * someone else to move it.
+ */
+function staleRescueReason(
+  planned: AccountFailoverAgentSummary,
+  current: AccountFailoverAgentSummary | null,
+): AccountFailoverSkipReason | null {
+  if (!current) return "unloaded";
+  if (current.provider !== planned.provider || getMigratedToFromLabels(current.labels)) {
+    return "moved";
+  }
+  if (current.busy || current.lifecycle === "running" || current.lifecycle === "initializing") {
+    return "busy";
+  }
+  if (!isStuckTurn(current)) return "recovered";
+  return null;
+}
+
+/**
+ * The move refusals that mean the agent changed since the plan: a turn started (`agent_busy`),
+ * or another mover already put it on the target (`same_provider`). Neither is an import case.
+ */
+function skipReasonForRefusal(
+  refusal: AgentProviderMoveError | null,
+): AccountFailoverSkipReason | null {
+  if (refusal?.code === "agent_busy") return "busy";
+  if (refusal?.code === "same_provider") return "moved";
+  return null;
+}
+
+/**
  * The preferred path: change the account under the agent instead of handing the conversation to a
  * new one. Returns null when the move cannot be used and the import path has to take over — a
  * target that still holds this conversation's retired handle is the routine case, since that
@@ -376,6 +424,10 @@ async function moveStuckAgentInPlace(input: {
     });
     if (duplicate) {
       return duplicate;
+    }
+    const skip = skipReasonForRefusal(refusal);
+    if (skip) {
+      return { kind: "skipped", agentId: agent.id, reason: skip };
     }
     logger.info(
       {
@@ -636,6 +688,8 @@ export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<Id
  *   retired in favour of that record and nothing moves (`findLiveSessionHolder`).
  * - Children go to a worker first and collapse onto the leader account; roots go to the leader
  *   account first and to the worker with the most budget when it is out.
+ * - An agent that changed since the sweep planned it is skipped (`staleRescueReason`), and so is
+ *   one whose move is refused as busy or already there. The next sweep decides again.
  *
  * Throws when the import itself fails; restoration and the resume prompt are best-effort.
  */
@@ -643,6 +697,10 @@ export async function migrateStuckAgent(
   input: MigrateStuckAgentInput,
 ): Promise<AccountFailoverOutcome> {
   const { agent, agentManager, agentStorage, logger } = input;
+  const stale = staleRescueReason(agent, agentManager.getAccountFailoverSummary(agent.id));
+  if (stale) {
+    return { kind: "skipped", agentId: agent.id, reason: stale };
+  }
   const predecessor = await agentStorage.get(agent.id);
   if (!predecessor) {
     throw new Error(`Agent ${agent.id} has no stored record`);
