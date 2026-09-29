@@ -1856,7 +1856,7 @@ describe("DaemonConfigStore reload", () => {
   test("invalid JSON and invalid schema apply nothing", () => {
     const { paseoHome, store } = createReloadableStore();
     writeFileSync(path.join(paseoHome, "config.json"), "{ nope\n");
-    expect(() => store.reload()).toThrow("Invalid JSON");
+    expect(() => store.reload()).toThrow("config.json is not valid JSON at line 1, column 3");
     expect(store.get().browserTools.enabled).toBe(false);
 
     writeConfig(paseoHome, { daemon: { browserTools: { enabled: "yes" } } });

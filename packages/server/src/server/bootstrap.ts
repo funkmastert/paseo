@@ -302,6 +302,7 @@ import {
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
 import { configureGitProcessPolicy } from "../utils/run-git-command.js";
+import { configureChildEnvStrip } from "./paseo-env.js";
 import { setProcessPriorityPolicy } from "../utils/process-priority.js";
 import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
@@ -576,6 +577,8 @@ export interface PaseoDaemonConfig {
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
   providerCatalogRefreshTimeoutMs?: number;
   autoPinSessions?: boolean;
+  /** `agents.childEnv.strip`; absent means `DEFAULT_CHILD_ENV_STRIP`. */
+  childEnvStrip?: string[];
   metadataGeneration?: {
     providers?: Array<{
       provider: string;
@@ -1359,6 +1362,7 @@ export async function createPaseoDaemon(
   // First, before anything can spawn (docs/jev.md, "Key").
   const jevStartup = captureDaemonJevKey(config);
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
+  configureChildEnvStrip(config.childEnvStrip);
   const logger = rootLogger.child({ module: "bootstrap" });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
   await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
