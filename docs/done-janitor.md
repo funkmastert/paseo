@@ -1,6 +1,6 @@
 # Done janitor
 
-Nothing else in the daemon removes finished work. Archiving an agent does not archive its workspace, and archiving the workspace is the only thing that deletes its worktree, so every finished task leaves a worktree behind: about 3 GB each once `node_modules` and build output are in it. `AgentDoneJanitor` (`packages/server/src/server/agent-done-janitor.ts`) does two things. It archives agents that are **dead** (closed or errored, untouched for days, not pinned) without asking anyone, and it finds idle **live** agents that are definitely finished, asks each one, and archives it on a strict yes. Either way it then deletes the worktree if nothing in it exists anywhere else. Last, it removes [empty projects](#empty-projects) whose directory is gone.
+Nothing else in the daemon removes finished work. Archiving an agent does not archive its workspace, and archiving the workspace is the only thing that deletes its worktree, so every finished task leaves a sidebar row and a worktree behind: about 3 GB each once `node_modules` and build output are in it. `AgentDoneJanitor` (`packages/server/src/server/agent-done-janitor.ts`) does three things. It archives agents that are **dead** (closed or errored, untouched for days, not pinned) without asking anyone, and it finds idle **live** agents that are definitely finished, asks each one, and archives it on a strict yes. Either way it then deletes the worktree if nothing in it exists anywhere else. It archives [idle workspaces](#idle-workspaces) of every kind, the ones no agent pass reaches. Last, it removes [empty projects](#empty-projects).
 
 The rule for dead agents is Tyler's: a dead session archives itself unless it is pinned.
 
@@ -23,6 +23,7 @@ Off by default. Config lives under `agents.doneJanitor` and is live-toggleable l
 | `deadQuietHours`          | `72`    | How long a dead agent and its whole tree must be untouched                          |
 | `maxDeadArchivesPerSweep` | `10`    | Dead trees archived per sweep. Worktree deletions still spend `maxArchivesPerSweep` |
 | `askFinished`             | `true`  | False never asks a live agent anything; only the dead pass runs                     |
+| `workspaceSweep`          | on      | The [idle-workspace sweep](#idle-workspaces) and its project rule, with their keys  |
 
 `agents.*` sections are strict: a daemon built before this key existed rejects the whole config file, and every agent MCP request fails with it. Add the key only once the running daemon has this build.
 
@@ -136,7 +137,7 @@ Only after the agent is archived, through archive-by-scope, and only when all of
 
 - It is a `worktree` workspace marked Paseo-owned, and its directory is inside the Paseo worktrees root. A `local_checkout` or `directory` workspace is never a candidate.
 - It is not pinned.
-- It overlaps neither its primary checkout nor any other active workspace's directory.
+- It does not overlap its primary checkout, and no other active workspace sits at or inside it. A workspace in a directory above it does not count: a self-heal fixer's workspace in the home directory once kept every worktree.
 - No unarchived agent belongs to it or runs anywhere under it. No terminal is open in it.
 - It passes the git gate (`done-janitor-worktree.ts`), which refuses on any git failure:
   - the directory is the root of a **linked** worktree — its git dir differs from the common dir, so a primary checkout is refused wherever it lives;
@@ -152,21 +153,67 @@ Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each wo
 
 The size is sampled with `du` immediately before the deletion.
 
+## Idle workspaces
+
+The passes above reach only Paseo-owned worktrees, and only through their agents. Everything else stayed in the sidebar until someone archived it by hand: external worktrees (`~/mobile-worktrees`, `~/bn-worktrees`), local checkouts, `directory` workspaces, dirty Paseo worktrees, and a workspace per [self-heal fixer](remediation.md#the-remediation-agent). The idle-workspace sweep archives them. `agent/workspace-sweep-detector.ts` decides; the janitor reads the facts and acts, after the orphan pass.
+
+A workspace is archived when all of these hold:
+
+- **Not pinned**, and no agent in it carries `paseo.keep`.
+- **Nothing in it is at work.** No agent is running, initializing, mid-turn, waiting on a permission, running provider subagents, or cut off by a daemon stop. No schedule or heartbeat targets one. No agent in it leads a live subagent anywhere: that is an orchestrator whose fleet is still loaded. No terminal is open and no script runs.
+- **It is idle past its threshold**, measured from the newest of the record's `createdAt` and `updatedAt`, its unarchived agents' last activity, HEAD's commit time, and the directory's own mtime. Never the git index: `git status` rewrites it. A timestamp that does not parse reads as just now, and a workspace with no signal at all is active.
+
+| Rule    | Which workspaces                                     | Idle after                              |
+| ------- | ---------------------------------------------------- | --------------------------------------- |
+| `fixer` | Every agent it ever held carries `paseo.remediation` | 10 minutes after its last fixer stopped |
+| `idle`  | An unarchived agent in it, or a git checkout         | `idleHours`, 72h                        |
+| `empty` | Neither                                              | `emptyIdleHours`, 24h                   |
+
+72 hours outlasts a weekend, like the quiet period above. An idle agent does not keep its workspace past that: asking it is the question path's job, and its answer is activity that restarts the clock. A workspace with no agent and no git holds nothing but its record, and a day keeps it for someone who made it to start work tomorrow.
+
+A fixer's workspace ignores its directory, since fixers run in the home directory, whose mtime moves all day. The ten minutes let the ladder read the finished fixer's report first; archived sooner, the ladder reads the fixer as "archived before it reported". A NOT_FIXED fixer goes with its workspace, and the push opens it from the archive. A standing self-heal workspace would group the fixers under one row, but that row stays between fixers; a workspace per fixer shows each one while it works and leaves nothing after.
+
+### The directory
+
+The archive goes through archive-by-scope, the path of a person's **Archive workspace**, which archives the workspace's agents and terminals with it. It deletes a directory only for a Paseo-owned worktree: the record says so, or an older record's path lies under the Paseo worktrees root.
+
+- **External worktrees, local checkouts and directories** keep their directory, dirty or not. Only the record is archived.
+- **A Paseo-owned worktree** goes through the conflict and snapshot-failure checks and the [git gate](#reclaiming-the-worktree):
+  - clean and pushed: snapshotted like every deletion, then archived with its directory;
+  - dirty or unpushed: [snapshotted](work-snapshots.md), and archived with its directory only when the snapshot holds all of it. The snapshot leaves out untracked files over its size cap and every ignored file, so one of those outside build output (`node_modules`, `dist`, `build`, `Pods`, `.gradle`, `.godot`, `__pycache__` and the rest listed in the detector) keeps the worktree. A `.env` or an ignored raw asset is the case this exists for. The snapshot is taken whatever the outcome;
+  - gone: the record is archived;
+  - anything else the gate refuses, a lock or a merge in progress: kept.
+- With `reclaimWorkspaces` off, no Paseo-owned worktree is archived.
+
+Each archive is decided again on freshly read state. A sweep archives at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. A dry run takes no snapshot.
+
+| Key (`agents.doneJanitor.workspaceSweep`) | Default | Meaning                                                                               |
+| ----------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
+| `enabled`                                 | `true`  | Runs whenever the janitor is `enabled`. False also stops the idle-project rule        |
+| `dryRun`                                  | `false` | Report only. The janitor's own `dryRun` makes it dry too                              |
+| `idleHours`                               | `72`    | The `idle` rule's threshold                                                           |
+| `emptyIdleHours`                          | `24`    | The `empty` rule's threshold                                                          |
+| `maxArchivesPerSweep`                     | `10`    | Workspaces archived per sweep                                                         |
+| `projectGraceHours`                       | `24`    | How long a project with no active workspace stays ([Empty projects](#empty-projects)) |
+| `maxProjectRemovalsPerSweep`              | `10`    | Projects that rule removes per sweep                                                  |
+
+Scheduled runs need nothing more. A `new-agent` schedule archives its run's workspace when the run ends unless `archiveOnFinish` is false (`schedule/service.ts`); a run that keeps its workspace, or whose archive failed, is an ordinary idle workspace here.
+
 ## Empty projects
 
-Deleting a worktree leaves its project on the sidebar with no workspaces. A project stays there until someone removes it by hand, and one whose directory no longer exists is clutter, not a place to start work. Each sweep, after everything above, the janitor removes a project only when **all** of these hold:
+A project with no workspace left stays on the sidebar until someone removes it. Each sweep, after the workspaces, two rules remove one, record only, through the same two steps as a person's removal (`removeProjectRecord`: the registry, then the custom icon). Every connected session subscribes to the project registry, so each sidebar drops the project when the record goes. Neither rule touches an archived project or a remote-keyed one (`projectKey` or `projectId` starting with `remote:`), and neither looks at a remote project's root.
 
-- **It has no workspace at all.** A workspace record of any state carrying its `projectId` spares it, archived ones included: they are history someone may still open. Archiving a workspace keeps its record, so the rule reaches only projects whose workspace records were deleted outright.
+**No active workspace for `projectGraceHours`.** Part of the idle-workspace sweep, so `workspaceSweep.enabled` and its `dryRun` govern it. The grace runs from the newest of the project's `createdAt` and `updatedAt` and each of its workspaces' `createdAt`, `updatedAt` and `archivedAt`, so it starts when the last workspace went. It keeps a project someone just opened or just emptied, and a project a daily schedule enters: each run archives its workspace and leaves the project empty for hours, never for a day. At most `maxProjectRemovalsPerSweep` go per sweep.
+
+**No workspace at all, and a root that is gone.** This one needs no grace beyond an hour, and runs whenever the janitor is `enabled`:
+
+- **It has no workspace at all.** A workspace record of any state carrying its `projectId` spares it, archived ones included.
 - **Its root is gone.** `stat` fails with `ENOENT` and nothing else does. `EACCES`, `ENOTDIR` on a parent, a timeout or an empty or relative path say nothing about whether the directory exists, so they spare it. So does an absent volume: a root under `/Volumes/<name>`, `/media/<user>/<name>`, `/mnt/<name>` or a Windows drive root is only gone if that volume root exists, checked with one `stat` decided from the path (`volumeRootOf`, no mount table). An unplugged drive is reported as a `kept-project` line naming the volume. A root on the system volume needs only its own `ENOENT`.
-- **It is not remote-keyed.** A project whose `projectKey` or `projectId` starts with `remote:` is never looked at, its root included.
-- **It is not archived.** An archived project is not on the sidebar, so it is not the clutter this rule is for.
 - **It is at least an hour old**, by the newer of `createdAt` and `updatedAt`. Someone adding a project, or a worktree being created for one, has no workspace for a moment.
 
-The removal is decided against freshly read state: the project, its workspaces and its root are read again immediately before each removal, and a project that changed is kept and reported as `kept-project`. The registry has no conditional remove, so a workspace created in the few milliseconds after that check still loses its project record. Adding the project again restores it; its custom name and icon do not come back.
+It removes at most 50 per sweep, outside `maxArchivesPerSweep`, and runs first; a project it reported is not reported again by the grace rule.
 
-It removes through the same two steps as a person's project removal (`removeProjectRecord`: the registry, then the custom icon). Every connected session subscribes to the project registry, so each sidebar drops the project when the record goes, with no reload and nothing the janitor sends.
-
-A sweep removes at most 50. Removing a record is cheap and reversible, so it does not spend `maxArchivesPerSweep`; the cap limits the damage if the rule is ever wrong at scale. Any more wait for the next sweep. There is no config key for the rule or its cap. The rule runs whenever the janitor is `enabled`, and `dryRun` reports `would-remove-project` instead of removing.
+Both decide each removal against freshly read state: the project and its workspaces are read again immediately before the removal, and a project that changed is kept and reported as `kept-project`. The registry has no conditional remove, so a workspace created in the few milliseconds after that check still loses its project record. Adding the project again restores it; its custom name and icon do not come back.
 
 ## What you see
 
@@ -181,6 +228,16 @@ Each report line is logged to `daemon.log` when it changes, never every sweep. G
 {"action":"would-remove-project","projectId":"prj_3f…","path":"~/.paseo/worktrees/…/wt4-feature","reason":"it has no workspaces and its directory no longer exists","dryRun":true,"msg":"Done janitor (dry run)"}
 ```
 
+for idle workspaces and projects, where `kept-idle-workspace` appears only for one that is idle and was spared:
+
+```
+{"action":"would-archive-workspace","workspaceId":"wks_06fe…","title":"iOS: stale-deals sender","path":"~/mobile-worktrees/stale-deals-csm-ios","reason":"idle for 12d; record only, its directory stays","dryRun":true,…}
+{"action":"would-archive-workspace","workspaceId":"wks_79ff…","title":"Remediate disk-falling condition","path":"~","reason":"a self-heal fixer's workspace, and every fixer in it is finished; record only, its directory stays","dryRun":true,…}
+{"action":"would-delete","workspaceId":"wks_6290…","path":"~/.paseo/worktrees/…/qa-tests-silent-drop","reason":"idle for 5d; qa/silent-drop has 3 commit(s) neither merged into main nor pushed to any remote, backed up first by a snapshot","dryRun":true,…}
+{"action":"kept-idle-workspace","workspaceId":"wks_17e5…","path":"~/.paseo/worktrees/…/r7b-attack-visuals","reason":"idle for 7d; 224 ignored file(s) outside build output that no snapshot covers (docs/style/assets/raw/effect-burst-arcane.png, …)","dryRun":true,…}
+{"action":"would-remove-project","projectId":"prj_9c…","path":"~/bn-worktrees/csm-required-actions","reason":"it has had no active workspace for 3d","dryRun":true,…}
+```
+
 and for live agents:
 
 ```
@@ -191,13 +248,13 @@ and for live agents:
 {"action":"cannot-ask","agentId":"b2…","reason":"account claude-b is at its usage cap","dryRun":true,…}
 ```
 
-`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived, deleted or removed something sends one push at level `record`, ledger only — "Archived 1 finished agent, archived 4 dead sessions, deleted 2 worktrees, freeing 5.8 GB and removed 25 empty projects. Kept …: …" — and a sweep that only checked sends nothing. A live sweep logs `removed-project` lines with the project id, root path and reason, once each; a removal that failed or lost a race is a `kept-project` line, and `tick()` reports the count as `removedProjectCount`. A kept worktree does not raise the level: it is snapshotted, and the work-at-risk sweep's judge decides whether Tyler hears about it. `snapshotted` lines name each snapshot's ref and offsite copy.
+`not-done` lines are not logged; `tick()` returns them in its report. A live sweep that archived, deleted or removed something sends one push at level `record`, ledger only — "Archived 1 finished agent, archived 4 dead sessions, deleted 2 worktrees, freeing 5.8 GB, archived 6 idle workspaces and removed 25 empty projects. Kept …: …" — and a sweep that only checked sends nothing. A Paseo-owned worktree the idle-workspace sweep deletes counts as a deleted worktree; one whose record alone goes counts as an idle workspace. A live sweep logs `removed-project` lines with the project id, root path and reason, once each; a removal that failed or lost a race is a `kept-project` line, and `tick()` reports the count as `removedProjectCount`. A kept worktree does not raise the level: it is snapshotted, and the work-at-risk sweep's judge decides whether Tyler hears about it. `snapshotted` lines name each snapshot's ref and offsite copy.
 
 ## Not automated
 
 - **Squash-merged branches whose remote branch is gone.** Their commits are unreachable from anything that survives, so they are kept and reported; delete them by hand after checking.
-- **Ignored files.** Treated as build output. A worktree holding the only copy of a file matched by `.gitignore` loses it.
+- **Ignored files in a clean worktree.** Treated as build output. A clean, pushed worktree holding the only copy of a file matched by `.gitignore` loses it. A dirty one is kept instead ([Idle workspaces](#the-directory)) and stays until someone backs the file up or deletes it.
 - **Background shells and `Monitor` watches inside a Claude process.** The daemon cannot see them. The quiet period and the question are the only defence: an agent waiting on one should answer `NOT_DONE`.
 - **Dead subagents of a live leader.** The dead pass judges whole trees from the root, so a live idle leader keeps every dead child until it answers the question and is archived. The subagents track's **Archive finished** row clears them by hand.
 - **Subagents on their own.** A subagent is archived with its root. One in another workspace, or open in a tab, is detached instead ([agent-lifecycle.md](agent-lifecycle.md#relationships)), becomes a root, and is asked on its own later.
-- **Agents with no workspace, or whose workspace is not a worktree.** Archived, never reclaimed.
+- **Directories other than Paseo-owned worktrees.** The idle-workspace sweep archives their records; nothing deletes the directory.
