@@ -230,6 +230,10 @@ const RELOADABLE_PATHS = [
   // check, so a change never needs a restart. It has no PERSISTED_TO_MUTABLE_PATH entry on
   // purpose; that only stops reload() from listing it as applied.
   "agents.tokenAudit",
+  // Same shape as agents.tokenAudit: JevService reads it through its own 5-second cache
+  // (jev/config.ts), so a change never needs a restart. No PERSISTED_TO_MUTABLE_PATH entry: it
+  // is not part of the mutable config broadcast to clients (docs/jev.md, "Config").
+  "agents.jev",
   "worktrees.diskSweeper",
   // Deliberately NOT listed: the running McpGateway is constructed once in bootstrap.ts
   // and never observes config changes (its class doc calls live reconfiguration "wired

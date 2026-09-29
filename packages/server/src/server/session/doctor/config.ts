@@ -1,3 +1,4 @@
+import { jevConfigIssues, jevConfigSection } from "../../jev/config.js";
 import { finding, type DoctorCheck } from "./context.js";
 
 /**
@@ -48,6 +49,22 @@ export const configCheck: DoctorCheck = {
             ].join("\n"),
             why: "The next daemon start (or `paseo daemon reload`) refuses this file, and a restart then leaves no daemon running.",
             fix: `Remove or correct the key(s) above in ${ctx.paseoHome}/config.json. A key from a newer build belongs there only once the daemon has that build.`,
+          },
+        ),
+      );
+    }
+    const jevIssues = jevConfigIssues(jevConfigSection(ctx.rawConfig));
+    if (jevIssues.length > 0) {
+      out.push(
+        finding(
+          "config.jev",
+          "config",
+          "warn",
+          "agents.jev does not match the schema; JEV is off",
+          {
+            detail: jevIssues.join("\n"),
+            why: "The file still loads, but JEV reads a section it cannot trust as switched off, so every feature keeps today's behaviour.",
+            fix: `Correct agents.jev in ${ctx.paseoHome}/config.json (docs/jev.md, "Config").`,
           },
         ),
       );

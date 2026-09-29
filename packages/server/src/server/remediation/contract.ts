@@ -21,7 +21,13 @@ export type RemediationConditionKind =
   | "stalled-agent"
   | "work-at-risk"
   | "account-pool-exhausted"
-  | "token-audit";
+  | "token-audit"
+  /**
+   * The stall judgment's loop watch (docs/jev.md, Feature 10), reported for a running agent that
+   * is not a stall candidate: remedy `none`, no escalation, level `notice`, grace 0. A person gets
+   * it in the digest; nothing interrupts the agent on the loop watch's say-so.
+   */
+  | "looping-agent";
 
 /** What rung 1 can do about the condition right now. */
 export type RemedyState =
@@ -67,6 +73,13 @@ export interface RemediationEscalationRequest {
    * an advisory episode, so the ladder never archives the agent or waits for the condition to clear.
    */
   advice?: boolean;
+  /**
+   * Set by the stall judgment (docs/jev.md, Feature 10) when its answer was `blocked_missing_info`
+   * or `waiting_on_human`. The ladder is the one place that decides: it skips the agent for this
+   * observation only when the escalation will push (`condition.notify` true and the level `notice`
+   * or higher), the same rule that governs a `needs_person` remediation triage (Feature 3a).
+   */
+  personFirst?: { reason: string; confidence: number };
 }
 
 export interface RemediationObservation {

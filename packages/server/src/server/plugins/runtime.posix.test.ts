@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentStreamEvent } from "../agent/agent-sdk-types.js";
 import { PluginAgentClientRegistry } from "../agent/plugin-provider.js";
 import { isPluginUnresponsive } from "./lifecycle/index.js";
-import { PluginRuntime } from "./runtime.js";
+import { pluginChildEnv, PluginRuntime } from "./runtime.js";
 import type { PluginSessionSocket } from "./session-socket.js";
 
 const temporaryDirectories: string[] = [];
@@ -206,6 +206,21 @@ afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
   );
+});
+
+describe("plugin child env", () => {
+  it("keeps ELECTRON_RUN_AS_NODE but drops the JEV key", () => {
+    const env = pluginChildEnv({
+      ELECTRON_RUN_AS_NODE: "1",
+      PASEO_NODE_ENV: "production",
+      PATH: "/usr/bin",
+      PASEO_JEV_API_KEY: "fake-jev-key-for-a-plugin-child-test",
+    });
+    expect(env.ELECTRON_RUN_AS_NODE).toBe("1");
+    expect(env.PASEO_NODE_ENV).toBe("production");
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.PASEO_JEV_API_KEY).toBeUndefined();
+  });
 });
 
 /** Resolves with a rejected promise's reason, so a test can inspect the error it failed with. */

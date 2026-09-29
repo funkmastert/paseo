@@ -36,6 +36,9 @@ const ObservationSchema = z.object({
       budgetTokens: z.number().optional(),
       timeoutMinutes: z.number().optional(),
       advice: z.boolean().optional(),
+      // The stall judgment's steer toward a person over an agent (docs/jev.md, Feature 10).
+      // Optional so a state written before this field existed still loads.
+      personFirst: z.object({ reason: z.string(), confidence: z.number() }).optional(),
     })
     .optional(),
   link: z.object({ agentId: z.string().optional(), workspaceId: z.string().optional() }).optional(),
@@ -56,6 +59,22 @@ const EpisodeSchema = z.object({
   fixedGraceUntil: z.string().optional(),
   fixedLine: z.string().optional(),
   escalatedAt: z.string().optional(),
+  // The remediation triage's answer for this episode (docs/jev.md, Feature 3a), asked once per
+  // episode. Optional so a state written before this field existed still loads.
+  jevTriage: z
+    .object({
+      at: z.string(),
+      callId: z.string(),
+      outcome: z.string(),
+      route: z.string().optional(),
+      confidence: z.number().optional(),
+      evidenceCurrent: z.number().optional(),
+      action: z.string(),
+      applied: z.boolean(),
+    })
+    .optional(),
+  // Set by a `clearing_on_its_own` triage: rung 2 is held until this time, once (Feature 3a).
+  jevDeferredUntil: z.string().optional(),
 });
 
 const LadderStateSchema = z.object({

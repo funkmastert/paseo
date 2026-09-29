@@ -6,6 +6,7 @@ import { accountBudgetCheck, accountConfigCheck, accountLoginCheck } from "./acc
 import { buildCheck } from "./build.js";
 import { configCheck } from "./config.js";
 import { diskCheck } from "./disk.js";
+import { readRawConfig } from "./facts.js";
 import { mcpGatewayCheck } from "./mcp-gateway.js";
 import { pluginCheck } from "./plugins.js";
 import { DOCTOR_CHECKS, runDoctorChecks } from "./runner.js";
@@ -388,7 +389,33 @@ describe("config keys", () => {
     writeFileSync(path.join(fx.paseoHome, "config.json"), "{ nope");
     const broken = await configCheck.run(makeContext(fx), 0);
     expect(broken[0]?.status).toBe("fail");
-    expect(broken[0]?.detail).toMatch(/Invalid JSON/);
+    expect(broken[0]?.detail).toMatch(/config\.json is not valid JSON at line 1, column 3/);
+  });
+
+  it("warns that JEV is off when agents.jev does not match, while the file itself is accepted", async () => {
+    const fx = makeFixture();
+    writeConfig(fx, { version: 1, agents: { jev: { enabled: "false", maxConcurent: 4 } } });
+    const results = await configCheck.run(makeContext(fx), 0);
+    expect(results.find((f) => f.id === "config.keys")?.status).toBe("ok");
+    const jev = results.find((f) => f.id === "config.jev");
+    expect(jev?.status).toBe("warn");
+    expect(jev?.detail).toContain("agents.jev.enabled");
+    expect(jev?.detail).toContain("maxConcurent");
+  });
+
+  it("never quotes a broken config.json's text", () => {
+    const fx = makeFixture();
+    const secret = "SK9QZXWVUTS8RQPONM7LKJIHG6FEDCBA5ZYXWV";
+    writeFileSync(
+      path.join(fx.paseoHome, "config.json"),
+      `{\n  "providers": { "x": { "env": { "KEY": "${secret}" oops } } }\n}\n`,
+    );
+    const { rawConfig, rawConfigError } = readRawConfig(fx.paseoHome);
+    expect(rawConfig).toBeNull();
+    expect(rawConfigError).toMatch(/config\.json is not valid JSON at line 2, column \d+/);
+    for (let index = 0; index + 6 <= secret.length; index += 1) {
+      expect(rawConfigError).not.toContain(secret.slice(index, index + 6));
+    }
   });
 });
 

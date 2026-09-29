@@ -80,6 +80,22 @@ export type McpGatewayTokenFile = z.infer<typeof McpGatewayTokenFileSchema>;
 
 const TOKENS_RELATIVE_PATH = path.join("mcp-gateway", "tokens.json");
 const EMPTY_TOKEN_FILE: McpGatewayTokenFile = { version: 1, servers: {} };
+/** JEV's redactor skips values under 8 characters (docs/jev.md, "Redaction"). */
+const MIN_SECRET_VALUE_LENGTH = 8;
+
+function collectStringLeaves(value: unknown, into: string[]): void {
+  if (typeof value === "string") {
+    if (value.length >= MIN_SECRET_VALUE_LENGTH) into.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) collectStringLeaves(entry, into);
+    return;
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const entry of Object.values(value)) collectStringLeaves(entry, into);
+  }
+}
 
 /**
  * Private 0600 file store for MCP gateway credentials (KTD4), keyed by server
@@ -213,6 +229,31 @@ export class McpGatewayTokenStore {
 
   saveStaticHeaders(serverName: string, headers: Record<string, string>): void {
     this.setRecord(serverName, { auth: "static", headers });
+  }
+
+  /**
+   * Every string leaf of the stored credentials, 8 characters or more, under `tokens`,
+   * `clientCredentials`, `codeVerifier`, `extraHeaders`, `headers` and `env`, across every server.
+   * Feeds the JEV redactor's exact-value set (docs/jev.md, "Redaction"); never throws.
+   */
+  listSecretValues(): string[] {
+    try {
+      const values: string[] = [];
+      for (const record of Object.values(this.readAll().servers)) {
+        if (record.auth === "oauth") {
+          collectStringLeaves(record.tokens, values);
+          collectStringLeaves(record.clientCredentials, values);
+          collectStringLeaves(record.codeVerifier, values);
+          collectStringLeaves(record.extraHeaders, values);
+        } else {
+          collectStringLeaves(record.headers, values);
+          collectStringLeaves(record.env, values);
+        }
+      }
+      return values;
+    } catch {
+      return [];
+    }
   }
 
   deleteServer(serverName: string): void {

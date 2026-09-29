@@ -108,9 +108,15 @@ export interface JevEgressScope {
   baseCwd?: string;
   /**
    * Agents whose prompt, conversation or timeline is in the state. The service adds their cwds,
-   * every ancestor's cwd, and every descendant's cwd (live, or archived in the last 24 h).
+   * every ancestor's cwd, and every descendant's cwd (live, or archived in the last 24 h). An id
+   * the daemon has no record of excludes the call: its cwd cannot be checked.
    */
   agentIds?: string[];
+  /**
+   * The caller could not name what the state is about, e.g. a `jev.decide` RPC that carried no
+   * scope. The call is excluded and the ledger records it.
+   */
+  missing?: true;
 }
 
 export interface JevSubject {
@@ -132,7 +138,21 @@ export interface JevDecideInput {
   /** Clamped to `agents.jev.<feature>.timeoutMs`. Covers the queue, every retry and the body. */
   deadlineMs?: number;
   signal?: AbortSignal;
+  /**
+   * `agentTools` only: the id of the tool call this JEV call belongs to, so
+   * `agentTools.maxConcurrentPerCall` (2) bounds one `ask_jev_files` while other agents' calls
+   * use the lane's remaining slots. Absent: the call is its own group.
+   */
+  callGroup?: string;
 }
+
+/**
+ * How `agentTools` states are shaped, so the audit keeps paths and hashes, never file content
+ * (docs/jev.md, "Audit"): a single-file tool's content is `state.content`; a multi-file state's
+ * contents are the values of `state.files`, keyed by path. The audit replaces each with
+ * `{ sha256, bytes }` and keeps every other field like a `control` state.
+ */
+export const JEV_AGENT_TOOLS_CONTENT_FIELDS = { single: "content", multi: "files" } as const;
 
 export type JevCost =
   | { usd: number; source: "reported" | "estimated" | "fake" }

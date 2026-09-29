@@ -241,4 +241,60 @@ describe("McpGatewayTokenStore", () => {
 
     expect(store.getOAuthTokens("github")).toEqual({ access_token: "at-1", token_type: "Bearer" });
   });
+
+  test("listSecretValues collects string leaves 8 characters or more across oauth and static servers", () => {
+    const paseoHome = createTempHome();
+    const store = new McpGatewayTokenStore(paseoHome);
+    store.saveOAuthTokens("github", {
+      access_token: "access-token-value",
+      token_type: "Bearer",
+      refresh_token: "refresh-token-value",
+    });
+    store.saveCodeVerifier("github", "code-verifier-value");
+    store.saveOAuthExtraHeaders("zeeq", { "x-zeeq-prompts-repo": "wonderlydotcom/mobile" });
+    store.saveStaticHeaders("slack", { Authorization: "Bearer static-secret-value" });
+
+    // clientCredentials is hand-written (a pre-registered OAuth app), never through a store
+    // method — matching how the class's own tests seed it.
+    const filePath = path.join(paseoHome, TOKENS_RELATIVE_PATH);
+    const file = JSON.parse(readFileSync(filePath, "utf8"));
+    file.servers.notion = {
+      auth: "oauth",
+      clientCredentials: { clientId: "notion-client-id", clientSecret: "notion-client-secret" },
+    };
+    writeFileSync(filePath, JSON.stringify(file));
+
+    const values = new McpGatewayTokenStore(paseoHome).listSecretValues();
+    expect(values).toContain("access-token-value");
+    expect(values).toContain("refresh-token-value");
+    expect(values).toContain("code-verifier-value");
+    expect(values).toContain("wonderlydotcom/mobile");
+    expect(values).toContain("Bearer static-secret-value");
+    expect(values).toContain("notion-client-secret");
+  });
+
+  test("listSecretValues skips values shorter than 8 characters", () => {
+    const paseoHome = createTempHome();
+    const store = new McpGatewayTokenStore(paseoHome);
+    store.saveOAuthTokens("github", { access_token: "short", token_type: "Bearer" });
+
+    const values = store.listSecretValues();
+    expect(values).not.toContain("short");
+    expect(values).not.toContain("Bearer");
+  });
+
+  test("listSecretValues answers an empty list when no server has been authorized", () => {
+    expect(new McpGatewayTokenStore(createTempHome()).listSecretValues()).toEqual([]);
+  });
+
+  test("listSecretValues never throws, even against a malformed token file", () => {
+    const paseoHome = createTempHome();
+    const filePath = path.join(paseoHome, TOKENS_RELATIVE_PATH);
+    mkdirSync(path.dirname(filePath), { recursive: true });
+    writeFileSync(filePath, "{ not valid json", { mode: 0o600 });
+
+    const store = new McpGatewayTokenStore(paseoHome);
+    expect(() => store.listSecretValues()).not.toThrow();
+    expect(store.listSecretValues()).toEqual([]);
+  });
 });
