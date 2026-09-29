@@ -982,6 +982,12 @@ function toTimeoutError(error: unknown, label: string, timeoutMs: number): Error
 const DEFAULT_RECONNECT_BASE_DELAY_MS = 1500;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
+// JEV calls are made from plugin hooks with a 30-second budget, and every JEV answer is optional:
+// a caller that forgets a timeout must fail open well inside that budget, not after 60 s.
+const JEV_DEFAULT_DEADLINE_MS = 1_500; // spawnHint's default deadline, the only feature served
+const JEV_DECIDE_TIMEOUT_MARGIN_MS = 500;
+const JEV_MAX_RPC_TIMEOUT_MS = 20_000;
+const JEV_DEFAULT_RPC_TIMEOUT_MS = 10_000;
 const PUSH_TOKEN_REVOCATION_TIMEOUT_MS = 2_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_LIVENESS_TIMEOUT_MS = 5000;
@@ -5236,7 +5242,8 @@ export class DaemonClient {
 
   /**
    * Feature 2's client-facing RPC (docs/jev.md, "RPCs"): only `feature: "spawnHint"` is served.
-   * The default timeout (60s) is too long for a plugin's 30-second hook budget; callers pass one.
+   * The default timeout is the caller's deadline plus a margin, capped under a plugin hook's
+   * 30-second budget.
    */
   async jevDecide(
     input: {
@@ -5250,21 +5257,24 @@ export class DaemonClient {
     options?: { requestId?: string; timeout?: number },
   ): Promise<JevDecidePayload> {
     // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
-    // unknown request type with nothing, so an ungated call would only time out.
+    // unknown request type with an `unknown_schema` rpc_error.
+    const deadlineMs = Math.max(0, input.deadlineMs ?? JEV_DEFAULT_DEADLINE_MS);
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
-      timeout: options?.timeout,
+      timeout:
+        options?.timeout ??
+        Math.min(deadlineMs + JEV_DECIDE_TIMEOUT_MARGIN_MS, JEV_MAX_RPC_TIMEOUT_MS),
       message: { type: "jev.decide.request", ...input },
     });
   }
 
-  /** `JevStatus` from `contract.ts`. The default timeout (60s) is too long for a plugin hook. */
+  /** `JevStatus` from `contract.ts`. Defaults to a timeout under a plugin hook's budget. */
   async jevStatus(options?: { requestId?: string; timeout?: number }): Promise<JevStatusPayload> {
     // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
-    // unknown request type with nothing, so an ungated call would only time out.
+    // unknown request type with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
-      timeout: options?.timeout,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
       message: { type: "jev.status.request" },
     });
   }
@@ -5275,10 +5285,10 @@ export class DaemonClient {
     options?: { requestId?: string; timeout?: number },
   ): Promise<JevScopeCheckPayload> {
     // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
-    // unknown request type with nothing, so an ungated call would only time out.
+    // unknown request type with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
-      timeout: options?.timeout,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
       message: { type: "jev.scope.check.request", ...input },
     });
   }
@@ -5289,7 +5299,7 @@ export class DaemonClient {
     options?: { requestId?: string; timeout?: number },
   ): Promise<JevDecisionsListPayload> {
     // COMPAT(jevPaseoApi): callers gate on `server_info.features.jev`; an older daemon answers an
-    // unknown request type with nothing, so an ungated call would only time out.
+    // unknown request type with an `unknown_schema` rpc_error.
     return this.sendNamespacedCorrelatedSessionRequest({
       requestId: options?.requestId,
       timeout: options?.timeout,

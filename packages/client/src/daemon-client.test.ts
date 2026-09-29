@@ -1215,6 +1215,98 @@ test("defaults session RPC waiters to sixty seconds", async () => {
   await expect(responsePromise).rejects.toThrow("Timeout waiting for message (60000ms)");
 });
 
+async function connectJevClient(): Promise<{
+  client: DaemonClient;
+  mock: ReturnType<typeof createMockTransport>;
+}> {
+  const mock = createMockTransport();
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory: () => mock.transport,
+  });
+  clients.push(client);
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+  return { client, mock };
+}
+
+function settledFlag(promise: Promise<unknown>): () => boolean {
+  let settled = false;
+  void promise.then(
+    () => {
+      settled = true;
+      return undefined;
+    },
+    () => {
+      settled = true;
+      return undefined;
+    },
+  );
+  return () => settled;
+}
+
+const JEV_SPAWN_HINT_INPUT = {
+  feature: "spawnHint",
+  callSite: "test",
+  state: {},
+  questions: { hard: { type: "noul" as const, instructions: "Is it hard?" } },
+};
+
+test("jevDecide defaults its timeout to the caller's deadline plus a margin, not the 60 s RPC default", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const responsePromise = client.jevDecide({ ...JEV_SPAWN_HINT_INPUT, deadlineMs: 1_500 });
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow("Timeout waiting for message (2000ms)");
+
+  await vi.advanceTimersByTimeAsync(1_999);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await rejection;
+});
+
+test("jevDecide without a deadline times out on spawnHint's default deadline plus the margin", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const rejection = expect(client.jevDecide(JEV_SPAWN_HINT_INPUT)).rejects.toThrow(
+    "Timeout waiting for message (2000ms)",
+  );
+  await vi.advanceTimersByTimeAsync(2_000);
+  await rejection;
+});
+
+test("jevDecide never waits past the plugin hook budget, whatever the deadline", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const rejection = expect(
+    client.jevDecide({ ...JEV_SPAWN_HINT_INPUT, deadlineMs: 600_000 }),
+  ).rejects.toThrow("Timeout waiting for message (20000ms)");
+  await vi.advanceTimersByTimeAsync(20_000);
+  await rejection;
+});
+
+test("jev status and scope check default to a timeout under the plugin hook budget", async () => {
+  useHeartbeatClock();
+  const { client } = await connectJevClient();
+
+  const status = expect(client.jevStatus()).rejects.toThrow(
+    "Timeout waiting for message (10000ms)",
+  );
+  const scope = expect(client.jevScopeCheck({ cwd: "/tmp/x" })).rejects.toThrow(
+    "Timeout waiting for message (10000ms)",
+  );
+  await vi.advanceTimersByTimeAsync(10_000);
+  await status;
+  await scope;
+});
+
 test("honors explicit fetchAgent timeout below the session RPC default", async () => {
   useHeartbeatClock();
   const logger = createMockLogger();
