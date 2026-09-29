@@ -542,7 +542,10 @@ interface AgentManagerRescueTimeouts {
   interruptSessionMs?: number;
 }
 
-/** Who asked for a turn to stop. Logged, never persisted, never on the wire. */
+/**
+ * Who asked for a turn to stop. Logged and passed to operator-signal listeners; never persisted,
+ * never on the wire.
+ */
 export type AgentCancelReason =
   | "user"
   | "reload"
@@ -557,6 +560,24 @@ export type AgentCancelReason =
   /** The remediation ladder, cancelling a timed-out or over-budget escalation agent. */
   | "remediation"
   | "unspecified";
+
+/**
+ * What only the daemon can see about who acted on an agent: a person at an app client (one that
+ * sends heartbeats, so not the CLI or an MCP tool) sending a message or answering a request, and
+ * a turn that ended by cancellation. The away auto-reply (docs/jev.md, "Feature 14") reads these,
+ * because a prompt from another agent looks the same as Tyler's in the timeline, and a cancelled
+ * turn looks like a finished one. Live-only; a listener persists what it needs.
+ */
+export type AgentOperatorSignal =
+  | { kind: "human-prompt"; agentId: string; at: Date; clientMessageId: string | null }
+  | {
+      kind: "human-permission-response";
+      agentId: string;
+      at: Date;
+      requestId: string;
+      response: AgentPermissionResponse;
+    }
+  | { kind: "turn-canceled"; agentId: string; at: Date; reason: AgentCancelReason | "provider" };
 
 interface ProviderEnabledFlag {
   enabled: boolean;
@@ -720,6 +741,11 @@ interface ManagedAgentBase {
    * it describes one turn, not the agent.
    */
   turnCanceled?: boolean;
+  /**
+   * Who asked for the current turn to stop, from `cancelAgentRunNow` until the cancel lands at
+   * the `running` -> `idle` edge. A cancel the provider raised itself has none. Live-only.
+   */
+  pendingCancelReason?: AgentCancelReason;
   /**
    * Set when the done janitor's question turn starts (`startQuietTurnIfIdle`), and cleared when
    * another sender joins or replaces that turn. Consumed at the next edge out of `running`, so
@@ -1220,6 +1246,7 @@ export class AgentManager {
   private readonly foregroundMutationTails = new Map<string, Promise<void>>();
   private readonly runs = new AgentRunState();
   private readonly subscribers = new Set<SubscriptionRecord>();
+  private readonly operatorSignalListeners = new Set<(signal: AgentOperatorSignal) => void>();
   private readonly idFactory: () => string;
   private readonly registry?: AgentStorage;
   private readonly durableTimelineStore?: AgentTimelineStore;
@@ -1966,6 +1993,44 @@ export class AgentManager {
       agent.pendingReplacement ||
       Boolean(this.runs.getPendingRun(agent.id))
     );
+  }
+
+  /** Listens for `AgentOperatorSignal`s. Returns the unsubscribe. */
+  subscribeOperatorSignals(listener: (signal: AgentOperatorSignal) => void): () => void {
+    this.operatorSignalListeners.add(listener);
+    return () => {
+      this.operatorSignalListeners.delete(listener);
+    };
+  }
+
+  /** A person at an app client sent this agent a message. Called by the session. */
+  recordHumanPrompt(agentId: string, clientMessageId: string | null): void {
+    this.emitOperatorSignal({ kind: "human-prompt", agentId, at: new Date(), clientMessageId });
+  }
+
+  /** A person at an app client answered one of this agent's requests. Called by the session. */
+  recordHumanPermissionResponse(
+    agentId: string,
+    requestId: string,
+    response: AgentPermissionResponse,
+  ): void {
+    this.emitOperatorSignal({
+      kind: "human-permission-response",
+      agentId,
+      at: new Date(),
+      requestId,
+      response,
+    });
+  }
+
+  private emitOperatorSignal(signal: AgentOperatorSignal): void {
+    for (const listener of this.operatorSignalListeners) {
+      try {
+        listener(signal);
+      } catch (error) {
+        this.logger.warn({ err: error, kind: signal.kind }, "Operator signal listener failed");
+      }
+    }
   }
 
   /**
@@ -4782,6 +4847,7 @@ export class AgentManager {
     if (!run) {
       return { status: "not_running" };
     }
+    agent.pendingCancelReason = cancelReason;
 
     // A cancel is the one turn outcome that leaves no trace of itself: it clears lastError and
     // lands idle, so afterwards nothing says the turn was stopped, let alone by what. Four
@@ -6775,6 +6841,11 @@ export class AgentManager {
     // finish — which would lose real signal, the one failure worse than the noise.
     const canceled = agent.turnCanceled === true;
     agent.turnCanceled = false;
+    if (canceled) {
+      const reason = agent.pendingCancelReason ?? "provider";
+      agent.pendingCancelReason = undefined;
+      this.emitOperatorSignal({ kind: "turn-canceled", agentId: agent.id, at: new Date(), reason });
+    }
 
     // Skip attention tracking for internal agents
     if (agent.internal) {
