@@ -135,11 +135,34 @@ describe("classifyWorkspace", () => {
     expect(verdict.kind).toBe("active");
   });
 
-  test("an archived agent's timestamps are not activity: archiving it is not use", () => {
+  test("an archived agent's last activity is activity: archiving it does not age the workspace", () => {
     const verdict = classify({
-      agents: [agent({ archived: true, lastActivityAtMs: NOW - HOUR })],
+      workspace: workspace({ createdAt: ago(120 * HOUR), updatedAt: ago(120 * HOUR) }),
+      agents: [agent({ archived: true, lastActivityAtMs: NOW - 25 * HOUR })],
     });
-    expect(verdict).toMatchObject({ kind: "idle" });
+    expect(verdict).toEqual({ kind: "active", reason: "active 25h ago; idle after 3d" });
+  });
+
+  test("an agent's archive time is activity: the clock runs from when it went", () => {
+    const verdict = classify({
+      agents: [
+        agent({ archived: true, lastActivityAtMs: NOW - 100 * HOUR, archivedAtMs: NOW - HOUR }),
+      ],
+    });
+    expect(verdict).toEqual({ kind: "active", reason: "active 1h ago; idle after 3d" });
+  });
+
+  test("a workspace whose agents were all archived long ago is idle from the last archive", () => {
+    const verdict = classify({
+      agents: [
+        agent({
+          archived: true,
+          lastActivityAtMs: NOW - 120 * HOUR,
+          archivedAtMs: NOW - 90 * HOUR,
+        }),
+      ],
+    });
+    expect(verdict).toMatchObject({ kind: "idle", idleForMs: 90 * HOUR });
   });
 
   test("before its directory is read, a workspace whose record is recent is already active", () => {

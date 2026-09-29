@@ -139,6 +139,7 @@ export type WorkspaceSweepVerdict =
  *   It goes once they settle, whatever its directory does: a fixer's directory is the home
  *   directory, whose mtime moves all day.
  * - `idle`: it has an unarchived agent or is a git checkout, and nothing moved for `idleMs`.
+ *   An archived agent's last activity and its archive time both count as movement.
  * - `empty`: neither, and nothing moved for `emptyIdleMs`.
  */
 export function classifyWorkspace(
@@ -159,10 +160,12 @@ export function classifyWorkspace(
   }
   if (isFixerWorkspace(facts.agents)) return classifyFixer(facts.agents, unarchived, nowMs);
 
+  // Every agent it ever held, archived ones included, and the moment each was archived: an
+  // archive is the last thing that happened to the workspace, not proof that it is abandoned.
   const recordActivity = [
     parseStamp(facts.workspace.createdAt),
     parseStamp(facts.workspace.updatedAt),
-    ...unarchived.map((agent) => agent.lastActivityAtMs),
+    ...facts.agents.flatMap((agent) => [agent.lastActivityAtMs, agent.archivedAtMs ?? null]),
   ];
   const { signals } = facts;
   if (signals === null) {

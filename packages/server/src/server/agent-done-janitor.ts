@@ -237,6 +237,12 @@ type IdleWorkspacePlan =
   | { kind: "archive"; deletesDirectory: boolean; detail: string }
   | { kind: "keep"; reason: string };
 
+interface AskCandidate {
+  root: DoneJanitorAgentView;
+  plan: WorkspacePlan;
+  quietForMs: number;
+}
+
 interface IdleWorkspaceCandidate {
   workspace: DoneJanitorWorkspace;
   verdict: Extract<WorkspaceSweepVerdict, { kind: "idle" }>;
@@ -358,40 +364,20 @@ export class AgentDoneJanitor {
     let views = await this.loadViews();
     let workspaces = await this.deps.listWorkspaces();
 
+    // Workspaces whose agents this sweep archives or asks, or in a dry run would: the idle sweep
+    // leaves them to a later sweep, so a directory never goes in the run that archived its agents.
+    const touchedWorkspaceIds = new Set<string>();
     // Dead agents first: they are archived without being asked, and they are not the ones the
     // question budget is for.
     const dead = config.archiveDead
-      ? await this.sweepDeadAgents(report, views, workspaces, config, nowMs)
+      ? await this.sweepDeadAgents(report, views, workspaces, config, nowMs, touchedWorkspaceIds)
       : { archivedAgentCount: 0, deletedWorkspaceIds: new Set<string>() };
     if (dead.archivedAgentCount > 0) {
       views = await this.loadViews();
       workspaces = await this.deps.listWorkspaces();
     }
 
-    const askable: Array<{ root: DoneJanitorAgentView; plan: WorkspacePlan; quietForMs: number }> =
-      [];
-    for (const root of config.askFinished ? listRootCandidates(views) : []) {
-      // Asking a closed agent resumes it at cache-cold prices. With the dead pass on, a closed
-      // agent is the dead pass's to archive or spare, never the question's.
-      if (config.archiveDead && !root.live) continue;
-      const verdict = await this.evaluateRoot(root, views, workspaces, config, nowMs);
-      if (verdict.kind !== "ask") {
-        report.entries.push({
-          ...describeAgent(root),
-          action: verdict.kind,
-          reason: verdict.reason,
-        });
-        continue;
-      }
-      askable.push({ root, plan: verdict.plan, quietForMs: verdict.quietForMs });
-    }
-
-    // Most disk per question first, then the longest quiet: asking costs a turn.
-    askable.sort(
-      (a, b) =>
-        Number(b.plan.kind === "reclaim") - Number(a.plan.kind === "reclaim") ||
-        b.quietForMs - a.quietForMs,
-    );
+    const askable = await this.listAskable(report, views, workspaces, config, nowMs);
     const budget = Math.min(config.maxQuestionsPerSweep, config.maxArchivesPerSweep);
     const reclaimedWorkspaceIds = new Set<string>(dead.deletedWorkspaceIds);
     let archivedCount = 0;
@@ -404,6 +390,10 @@ export class AgentDoneJanitor {
           reason: "eligible, but this sweep's question budget is spent; next sweep",
         });
         continue;
+      }
+      // The question is activity whatever the answer; a DONE archives the tree.
+      for (const view of [root, ...listDescendants(root.id, views)]) {
+        if (view.workspaceId) touchedWorkspaceIds.add(view.workspaceId);
       }
       if (config.dryRun) {
         this.reportDryRunCandidate(report, candidate, views);
@@ -434,7 +424,9 @@ export class AgentDoneJanitor {
 
     // Every idle workspace the passes above left, whatever its kind; then projects left empty.
     const workspaceSweep = resolveWorkspaceSweepConfig(raw);
-    if (workspaceSweep.enabled) await this.sweepIdleWorkspaces(report, config, workspaceSweep);
+    if (workspaceSweep.enabled) {
+      await this.sweepIdleWorkspaces(report, config, workspaceSweep, touchedWorkspaceIds);
+    }
 
     await this.sweepEmptyProjects(report, config);
     if (workspaceSweep.enabled) await this.sweepIdleProjects(report, workspaceSweep);
@@ -445,15 +437,51 @@ export class AgentDoneJanitor {
   }
 
   /**
+   * The roots the question may go to, most disk per question first, then the longest quiet:
+   * asking costs a turn. Every root it passes over is reported with the reason.
+   */
+  private async listAskable(
+    report: DoneJanitorSweepReport,
+    views: readonly DoneJanitorAgentView[],
+    workspaces: readonly DoneJanitorWorkspace[],
+    config: ResolvedDoneJanitorConfig,
+    nowMs: number,
+  ): Promise<AskCandidate[]> {
+    const askable: AskCandidate[] = [];
+    for (const root of config.askFinished ? listRootCandidates(views) : []) {
+      // Asking a closed agent resumes it at cache-cold prices. With the dead pass on, a closed
+      // agent is the dead pass's to archive or spare, never the question's.
+      if (config.archiveDead && !root.live) continue;
+      const verdict = await this.evaluateRoot(root, views, workspaces, config, nowMs);
+      if (verdict.kind !== "ask") {
+        report.entries.push({
+          ...describeAgent(root),
+          action: verdict.kind,
+          reason: verdict.reason,
+        });
+        continue;
+      }
+      askable.push({ root, plan: verdict.plan, quietForMs: verdict.quietForMs });
+    }
+    return askable.sort(
+      (a, b) =>
+        Number(b.plan.kind === "reclaim") - Number(a.plan.kind === "reclaim") ||
+        b.quietForMs - a.quietForMs,
+    );
+  }
+
+  /**
    * Archives workspace records nothing uses any more (docs/done-janitor.md, "Idle workspaces"):
    * the classifier in agent/workspace-sweep-detector.ts picks them, a Paseo-owned worktree's
    * directory goes only when its work is safe, and each archive is decided on fresh state.
-   * A worktree an earlier pass already plans to delete this sweep is left to that pass.
+   * A worktree an earlier pass already plans to delete this sweep is left to that pass, and a
+   * workspace whose agents an earlier pass archived or asked this sweep waits for a later one.
    */
   private async sweepIdleWorkspaces(
     report: DoneJanitorSweepReport,
     config: ResolvedDoneJanitorConfig,
     sweep: ResolvedWorkspaceSweepConfig,
+    touchedWorkspaceIds: ReadonlySet<string>,
   ): Promise<void> {
     try {
       const views = await this.loadViews();
@@ -474,7 +502,9 @@ export class AgentDoneJanitor {
       const candidates: IdleWorkspaceCandidate[] = [];
       for (const workspace of workspaces) {
         if (workspace.archivedAt || archivedProjectIds.has(workspace.projectId)) continue;
-        if (planned.has(workspace.workspaceId)) continue;
+        if (planned.has(workspace.workspaceId) || touchedWorkspaceIds.has(workspace.workspaceId)) {
+          continue;
+        }
         const verdict = await this.classifyForSweep(workspace, views, sweep, nowMs);
         if (verdict.kind === "idle") candidates.push({ workspace, verdict });
       }
@@ -895,6 +925,7 @@ export class AgentDoneJanitor {
     workspaces: readonly DoneJanitorWorkspace[],
     config: ResolvedDoneJanitorConfig,
     nowMs: number,
+    touchedWorkspaceIds: Set<string>,
   ): Promise<{ archivedAgentCount: number; deletedWorkspaceIds: Set<string> }> {
     const eligible = this.listDeadRoots(report, views, config, nowMs);
     const archivedRoots: DoneJanitorAgentView[] = [];
@@ -919,6 +950,9 @@ export class AgentDoneJanitor {
       }
       archivedRoots.push(root);
       archivedAgentCount += tree.length;
+      for (const view of tree) {
+        if (view.workspaceId) touchedWorkspaceIds.add(view.workspaceId);
+      }
     }
 
     const deletedWorkspaceIds = await this.reclaimDeadWorkspaces(
@@ -1084,7 +1118,7 @@ export class AgentDoneJanitor {
 
   private reportDryRunCandidate(
     report: DoneJanitorSweepReport,
-    candidate: { root: DoneJanitorAgentView; plan: WorkspacePlan; quietForMs: number },
+    candidate: AskCandidate,
     views: readonly DoneJanitorAgentView[],
   ): void {
     const { root, plan } = candidate;
@@ -1192,6 +1226,7 @@ export class AgentDoneJanitor {
       if (agents.length === 0 || agents.some((view) => !view.archived)) continue;
       const newestMs = Math.max(
         ...agents.map((view) => view.lastActivityAtMs ?? Number.POSITIVE_INFINITY),
+        ...agents.map((view) => view.archivedAtMs ?? Number.NEGATIVE_INFINITY),
         parseMs(workspace.updatedAt),
         parseMs(workspace.createdAt),
       );
@@ -1731,6 +1766,7 @@ export function buildAgentViews(
     views.push({
       id: record.id,
       title: record.title ?? null,
+      archivedAtMs: record.archivedAt ? parseMs(record.archivedAt) : null,
       provider: record.provider,
       workspaceId: record.workspaceId,
       cwd: record.cwd,

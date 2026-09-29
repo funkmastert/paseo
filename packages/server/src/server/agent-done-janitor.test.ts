@@ -1912,6 +1912,83 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
     );
   });
 
+  describe("agents archived this sweep", () => {
+    const FIVE_DAYS_AGO = new Date(NOW - 120 * HOUR).toISOString();
+    const DIRTY: WorktreeDeletionSafety = {
+      safe: false,
+      reason: "it has 1 uncommitted or untracked file(s)",
+      atRisk: "dirty",
+    };
+
+    test("the dead pass archives a 24h-quiet agent; its dirty worktree is not deleted in the same sweep", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, askFinished: false, deadQuietHours: 24 },
+        stored: [record({ updatedAt: new Date(NOW - 25 * HOUR).toISOString() })],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archived).toEqual(["agent-1"]);
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(report?.entries).not.toContainEqual(expect.objectContaining({ action: "deleted" }));
+    });
+
+    test("an agent that answered DONE a minute ago does not take its dirty worktree with it", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, archiveDead: false },
+        live: [liveSummary({})],
+        stored: [record()],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archived).toEqual(["agent-1"]);
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+
+    test("a dry run reports the same: the would-be archive keeps the worktree this sweep", async () => {
+      const h = sweepHarness({
+        config: { enabled: true, askFinished: false, deadQuietHours: 24, dryRun: true },
+        stored: [record({ updatedAt: new Date(NOW - 25 * HOUR).toISOString() })],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-archive", agentId: "agent-1" }),
+      );
+      expect(report?.entries).not.toContainEqual(
+        expect.objectContaining({ action: "would-delete" }),
+      );
+    });
+
+    test("an agent archived long ago still dates the workspace from its archive", async () => {
+      const h = sweepHarness({
+        stored: [
+          record({
+            updatedAt: new Date(NOW - 200 * HOUR).toISOString(),
+            archivedAt: new Date(NOW - 30 * HOUR).toISOString(),
+          }),
+        ],
+        workspaces: [workspace({ createdAt: FIVE_DAYS_AGO, updatedAt: FIVE_DAYS_AGO })],
+        safety: DIRTY,
+        snapshot: snapshotted,
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+    });
+  });
+
   describe("Paseo-owned worktrees, whose directory the archive deletes", () => {
     test("clean and pushed: snapshotted, archived and its directory deleted", async () => {
       const h = sweepHarness({ stored: [record()], workspaces: [workspace()] });

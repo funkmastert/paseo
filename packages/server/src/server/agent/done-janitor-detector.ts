@@ -42,6 +42,11 @@ export interface DoneJanitorAgentView {
   runningProviderSubagentCount: number;
   /** Null when no activity timestamp parses. */
   lastActivityAtMs: number | null;
+  /**
+   * When it was archived; absent or null when it is not. An archive time that does not parse
+   * reads as just now, which only ever delays.
+   */
+  archivedAtMs?: number | null;
   labels: Record<string, string>;
   hasSession: boolean;
   /** A schedule or heartbeat that is not completed still targets it. */
