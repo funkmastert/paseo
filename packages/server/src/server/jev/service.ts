@@ -57,8 +57,13 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   notificationTriage: "control",
   compactionTiming: "control",
   stallJudgment: "control",
+  awayReply: "control",
   agentTools: "agentTools",
+  askJev: "interactive",
 };
+
+/** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
+const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev"]);
 
 const JEV_FEATURES = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
 
@@ -251,13 +256,21 @@ function laneLimits(config: ResolvedJevConfig): JevLaneLimits {
   return {
     control: config.maxConcurrent,
     agentTools: config.agentTools.maxConcurrent,
+    interactive: config.askJev.maxConcurrent,
     perGroup: config.agentTools.maxConcurrentPerCall,
     requestsPerSecond: config.maxRequestsPerSecond,
   };
 }
 
 function laneCapUsd(config: ResolvedJevConfig, lane: JevLane): number {
-  return lane === "control" ? config.maxUsdPerDay : config.agentTools.maxUsdPerDay;
+  switch (lane) {
+    case "control":
+      return config.maxUsdPerDay;
+    case "agentTools":
+      return config.agentTools.maxUsdPerDay;
+    case "interactive":
+      return config.askJev.maxUsdPerDay;
+  }
 }
 
 function usdForTokens(tokens: number, config: ResolvedJevConfig): number {
@@ -277,14 +290,19 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   const sleep = options.sleep ?? defaultSleep;
   const redact = options.redact ?? redactJevRequest;
   const jevDir = path.join(options.paseoHome, "jev");
-  const configReader =
-    options.configReader ??
-    createJevConfigReader({ paseoHome: options.paseoHome, homeDir, logger });
   const keyResolver = createJevKeyResolver({
     captured: options.capturedKey,
     logger,
     platform: options.platform,
   });
+  const configReader =
+    options.configReader ??
+    createJevConfigReader({
+      paseoHome: options.paseoHome,
+      homeDir,
+      logger,
+      resolveKey: (envFile) => keyResolver.resolve(envFile).key,
+    });
   const scopeChecker =
     options.scopeChecker ??
     new JevEgressScopeChecker({
@@ -907,7 +925,8 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       ([id, answer]) => `${id}: ${verdictLine(answer)}`,
     );
     const shadow =
-      ctx.input.feature !== "agentTools" && featureConfig(ctx.config, ctx.input.feature).shadow;
+      !JEV_FEATURES_WITHOUT_SHADOW.has(ctx.input.feature) &&
+      featureConfig(ctx.config, ctx.input.feature).shadow;
     return { kind: shadow ? "shadow" : "answered", callId: ctx.callId, answers, meta };
   }
 
@@ -986,7 +1005,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
           feature,
           {
             enabled: Boolean(config?.enabled && own?.enabled),
-            shadow: feature === "agentTools" ? false : (own?.shadow ?? true),
+            shadow: JEV_FEATURES_WITHOUT_SHADOW.has(feature) ? false : (own?.shadow ?? true),
           },
         ];
       }),
@@ -996,9 +1015,14 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
       reason,
       keyPresent: keyPresent(snap),
       provider: fixedTransport?.provider ?? config?.provider ?? "openrouter",
+      providerInferred: config?.providerInferred ?? false,
       model: config?.model ?? "",
       features,
-      lanes: { control: laneStatus("control"), agentTools: laneStatus("agentTools") },
+      lanes: {
+        control: laneStatus("control"),
+        agentTools: laneStatus("agentTools"),
+        interactive: laneStatus("interactive"),
+      },
       spawnHint: {
         applyHard: config?.spawnHint.applyHard ?? false,
         applyRole: config?.spawnHint.applyRole ?? false,

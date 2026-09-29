@@ -1292,6 +1292,31 @@ test("jevDecide never waits past the plugin hook budget, whatever the deadline",
   await rejection;
 });
 
+test("jevAsk sends its deadline and waits for it plus a margin", async () => {
+  useHeartbeatClock();
+  const { client, mock } = await connectJevClient();
+
+  const responsePromise = client.jevAsk({
+    context: "npm run build exits 2",
+    question: { type: "noul", instructions: "Is the build broken?" },
+  });
+  const settled = settledFlag(responsePromise);
+  const rejection = expect(responsePromise).rejects.toThrow(
+    "Timeout waiting for message (17000ms)",
+  );
+
+  const askFrame = mock.sent
+    .map((raw) => assertStr(raw))
+    .find((raw) => raw.includes('"jev.ask.request"'));
+  expect(askFrame).toBeDefined();
+  expect(askFrame).toContain('"deadlineMs":15000');
+
+  await vi.advanceTimersByTimeAsync(16_999);
+  expect(settled()).toBe(false);
+  await vi.advanceTimersByTimeAsync(1);
+  await rejection;
+});
+
 test("jev status and scope check default to a timeout under the plugin hook budget", async () => {
   useHeartbeatClock();
   const { client } = await connectJevClient();

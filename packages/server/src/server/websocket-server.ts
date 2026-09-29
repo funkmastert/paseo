@@ -100,6 +100,7 @@ import {
   normalizeClientRestartRpcReason,
 } from "./lifecycle-reasons.js";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
+import type { EffectiveAvailability } from "./notify-policy/availability.js";
 import type { BrowserAutomationExecuteResponse } from "@getpaseo/protocol/browser-automation/rpc-schemas";
 import {
   BrowserAutomationHostCapabilitySchema,
@@ -1007,6 +1008,11 @@ export class VoiceAssistantWebSocketServer {
     return this.usageHistoryStore;
   }
 
+  /** Tyler's availability mode now (docs/notification-policy.md), read by the away auto-reply. */
+  public getAvailabilityMode(): EffectiveAvailability["mode"] {
+    return this.pushNotifications.policy.getStatus().effectiveAvailability.mode;
+  }
+
   public listSessions(): Session[] {
     return Array.from(
       new Set(
@@ -1740,6 +1746,8 @@ export class VoiceAssistantWebSocketServer {
         agentContextUsage: true,
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
         jev: true,
+        // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
+        jevAsk: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

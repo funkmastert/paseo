@@ -85,14 +85,18 @@ export type JevFeatureId =
   | "notificationTriage"
   | "agentTools"
   | "compactionTiming"
-  | "stallJudgment";
+  | "stallJudgment"
+  /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
+  | "awayReply"
+  /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
+  | "askJev";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
- * the features that steer the daemon. `agentTools` is its own lane; every other feature is
- * `control`.
+ * the features that steer the daemon. `agentTools` is its own lane, a person's questions from the
+ * app (`askJev`) are `interactive`, and every other feature is `control`.
  */
-export type JevLane = "control" | "agentTools";
+export type JevLane = "control" | "agentTools" | "interactive";
 
 /**
  * What a call's state is about, for the D7 exclusion (docs/jev.md, "The D7 exclusion"). Required
@@ -283,6 +287,8 @@ export interface JevStatus {
   /** Whether a key is present. Never the value, a prefix, the last characters or a hash. */
   keyPresent: boolean;
   provider: "openrouter" | "typesafe" | "fake";
+  /** True when `provider` was read off the key's prefix rather than `agents.jev.provider`. */
+  providerInferred: boolean;
   model: string;
   features: Record<JevFeatureId, JevFeatureStatus>;
   lanes: Record<JevLane, JevLaneStatus>;

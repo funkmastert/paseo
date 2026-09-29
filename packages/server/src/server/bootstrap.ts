@@ -331,6 +331,7 @@ import { exportSecretKey } from "@getpaseo/relay/e2ee";
 import { buildJevBudgetExhaustedNotificationPayload } from "@getpaseo/protocol/jev-notification";
 import { resolveJevAgentCwds } from "./jev/agent-cwds.js";
 import type { JevService, JevTransport } from "./jev/contract.js";
+import { createAwayReplyJob, type AwayReplyJob } from "./away-reply/job.js";
 import { createFakeJevTransport } from "./jev/fake.js";
 import { captureJevKeyFromEnv } from "./jev/key.js";
 import { collectJevSecretValues, isSecretEnvName } from "./jev/secret-sources.js";
@@ -1550,6 +1551,7 @@ export async function createPaseoDaemon(
   let remediationLadder: RemediationLadder | null = null;
   let tokenAuditJob: TokenAuditJob | null = null;
   let agentStallSweep: AgentStallSweep | null = null;
+  let awayReplyJob: AwayReplyJob | null = null;
   let workSnapshotSweep: AgentWorkSnapshotSweep | null = null;
   let daemonVitals: DaemonVitals | null = null;
   // Assigned once projectRegistry/workspaceRegistry exist, below. Constructed ahead of wsServer
@@ -3224,6 +3226,35 @@ export async function createPaseoDaemon(
             agentStallSweep = stallSweep;
             stallSweep.start();
             daemonConfigStore.onChange(() => stallSweep.reportMode());
+            // Feature 14 (docs/jev.md): answers a leader that has waited on Tyler past the
+            // threshold while he is away. Needs the JEV key like every JEV feature; without one
+            // it does nothing. Starts in dry run (D6).
+            const presenceServer = wsServer;
+            awayReplyJob = createAwayReplyJob({
+              agentManager,
+              agentStorage,
+              workspaceRegistry,
+              jev,
+              readPresence: () => ({
+                clients: presenceServer.listSessions().flatMap((session) => {
+                  const activity = session.getClientActivity();
+                  return activity
+                    ? [
+                        {
+                          focusedAgentId: activity.focusedAgentId,
+                          appVisible: activity.appVisible,
+                          lastActivityAtMs: activity.lastActivityAt.getTime(),
+                        },
+                      ]
+                    : [];
+                }),
+                availability: presenceServer.getAvailabilityMode(),
+              }),
+              paseoHome: config.paseoHome,
+              homeDir: homedir(),
+              logger,
+            });
+            awayReplyJob.start();
             workSnapshotSweep = new AgentWorkSnapshotSweep({
               dependencies: {
                 listAgents: async () =>
@@ -3331,6 +3362,7 @@ export async function createPaseoDaemon(
     remediationLadder?.stop();
     tokenAuditJob?.stop();
     agentStallSweep?.stop();
+    awayReplyJob?.stop();
     workSnapshotSweep?.stop();
     worktreeDiskMonitor?.stop();
   };

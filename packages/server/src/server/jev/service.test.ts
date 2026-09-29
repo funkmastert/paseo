@@ -15,7 +15,12 @@ import type {
   JevWireRequest,
 } from "./contract.js";
 import { createFakeJevTransport, type FakeJevTransport } from "./fake.js";
-import { createJevService, type JevServiceOptions, type JevServiceRuntime } from "./service.js";
+import {
+  createJevService,
+  JEV_FEATURE_LANES,
+  type JevServiceOptions,
+  type JevServiceRuntime,
+} from "./service.js";
 
 const FAKE_KEY = "fake-jev-key-for-tests-0123456789abcdef";
 const SENTINEL = "SENTINEL-STATE-TEXT-7f3a";
@@ -112,6 +117,19 @@ function agentTools(home: string, overrides: Partial<JevDecideInput> = {}): JevD
     subject: { callerAgentId: "agent-1" },
     ...overrides,
   });
+}
+
+function awayReply(home: string, overrides: Partial<JevDecideInput> = {}): JevDecideInput {
+  return spawnHint(home, {
+    feature: "awayReply",
+    callSite: "away-reply.job",
+    subject: { agentId: "leader-1" },
+    ...overrides,
+  });
+}
+
+function askJev(home: string, overrides: Partial<JevDecideInput> = {}): JevDecideInput {
+  return spawnHint(home, { feature: "askJev", callSite: "app.ask-jev", ...overrides });
 }
 
 /** A transport that must never be called: every egress test asserts on it. */
@@ -329,6 +347,46 @@ describe("JevService: lanes, budgets and circuits", () => {
     expect(hint.kind).toBe("shadow");
     transport.release();
     expect((await held).kind).toBe("answered");
+  });
+
+  it("an away-reply decision and an Ask JEV question never share a lane's slots", async () => {
+    expect(JEV_FEATURE_LANES.awayReply).toBe("control");
+    expect(JEV_FEATURE_LANES.askJev).toBe("interactive");
+    const oneSlotEach = { maxConcurrent: 1, askJev: { maxConcurrent: 1 } };
+
+    const control = makeHarness({ config: oneSlotEach });
+    control.transport.setBehavior([{ kind: "hold" }, { kind: "answer" }]);
+    const heldReply = control.service.decide(awayReply(control.home));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((await control.service.decide(askJev(control.home))).kind).toBe("answered");
+    control.transport.release();
+    expect((await heldReply).kind).toBe("shadow");
+
+    const interactive = makeHarness({ config: oneSlotEach });
+    interactive.transport.setBehavior([{ kind: "hold" }, { kind: "answer" }]);
+    const heldAsk = interactive.service.decide(askJev(interactive.home));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect((await interactive.service.decide(awayReply(interactive.home))).kind).toBe("shadow");
+    interactive.transport.release();
+    expect((await heldAsk).kind).toBe("answered");
+  });
+
+  it("an away-reply decision and an Ask JEV question never share a lane's spend cap", async () => {
+    const control = makeHarness({ config: { maxUsdPerDay: 0.000_000_1 } });
+    expect(kindAndReason(await control.service.decide(awayReply(control.home)))).toBe(
+      "unavailable:daily-budget",
+    );
+    expect((await control.service.decide(askJev(control.home))).kind).toBe("answered");
+    expect(control.notices).toEqual([{ lane: "control" }]);
+    expect(control.service.status().lanes.interactive.exhausted).toBe(false);
+
+    const interactive = makeHarness({ config: { askJev: { maxUsdPerDay: 0.000_000_1 } } });
+    expect(kindAndReason(await interactive.service.decide(askJev(interactive.home)))).toBe(
+      "unavailable:daily-budget",
+    );
+    expect((await interactive.service.decide(awayReply(interactive.home))).kind).toBe("shadow");
+    expect(interactive.notices).toEqual([{ lane: "interactive" }]);
+    expect(interactive.service.status().lanes.control.exhausted).toBe(false);
   });
 
   it("a request whose deadline passes in the queue is saturated and leaves the circuit closed", async () => {
@@ -738,7 +796,60 @@ describe("JevService: ledger, audit, status", () => {
     expect(status.features.spawnHint.shadow).toBe(true);
     expect(status.features.stallJudgment.shadow).toBe(true);
     expect(status.features.agentTools.shadow).toBe(false);
-    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control"]);
+    expect(status.features.askJev.shadow).toBe(false);
+    expect(status.features.awayReply.shadow).toBe(true);
+    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control", "interactive"]);
+    const everyFeature = Object.keys(JEV_FEATURE_LANES).sort();
+    expect(everyFeature).toEqual([
+      "agentTools",
+      "askJev",
+      "awayReply",
+      "compactionTiming",
+      "notificationTriage",
+      "remediationTriage",
+      "spawnHint",
+      "stallJudgment",
+    ]);
+    expect(Object.keys(status.features).sort()).toEqual(everyFeature);
+    expect(Object.keys(status.todayByFeature).sort()).toEqual(everyFeature);
+    expect([...new Set(Object.values(JEV_FEATURE_LANES))].sort()).toEqual(
+      Object.keys(status.lanes).sort(),
+    );
+  });
+
+  it("infers the provider from the key's prefix through the real config reader, never leaking the key", async () => {
+    // Unlike makeHarness, this builds the service with no injected configReader, so it exercises
+    // the real createJevConfigReader + keyResolver wiring that provider inference depends on.
+    const root = mkdtempSync(path.join(os.tmpdir(), "jev-service-infer-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const homeDir = path.join(root, "home");
+    const paseoHome = path.join(root, "paseo-home");
+    mkdirSync(homeDir, { recursive: true });
+    mkdirSync(paseoHome, { recursive: true });
+    let logText = "";
+    const logger = pino(
+      { level: "trace" },
+      new Writable({
+        write(chunk, _encoding, callback) {
+          logText += chunk.toString();
+          callback();
+        },
+      }),
+    );
+    const service = createJevService({
+      paseoHome,
+      logger,
+      homeDir,
+      platform: "darwin",
+      capturedKey: { present: true, value: () => "apikey_typesafe-fake-key-do-not-use" },
+      sleep: async () => undefined,
+      random: () => 0,
+    });
+    const status = service.status();
+    expect(status.provider).toBe("typesafe");
+    expect(status.providerInferred).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("apikey_typesafe-fake-key-do-not-use");
+    expect(logText).not.toContain("apikey_typesafe-fake-key-do-not-use");
   });
 
   it("attaches a spawn hint to the agent whose paseo.jev-call names it", async () => {

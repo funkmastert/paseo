@@ -788,6 +788,33 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    // Feature 14. Dry run by default (D6); `dryRun: false` lets it act. The resolver clamps
+    // `destructiveThreshold` to 0.05; the schema keeps 0.5 so a config written earlier stays valid.
+    awayReply: z
+      .object({
+        enabled: z.boolean().optional(),
+        dryRun: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        thresholdMinutes: z.number().positive().optional(),
+        maxRepliesPerAgentPerDay: z.number().int().positive().optional(),
+        maxRepliesPerDay: z.number().int().positive().optional(),
+        destructiveThreshold: z.number().positive().max(0.5).optional(),
+        approveReadOnlyPermissions: z.boolean().optional(),
+        skipPinnedWorkspaces: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    askJev: z
+      .object({
+        enabled: z.boolean().optional(),
+        // askJev has no shadow mode, like agentTools; the key is accepted and ignored.
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        maxConcurrent: z.number().optional(),
+        maxUsdPerDay: z.number().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

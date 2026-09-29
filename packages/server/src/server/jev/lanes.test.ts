@@ -119,7 +119,26 @@ describe("JevLanes", () => {
     vi.useRealTimers();
   });
 
-  const limits: JevLaneLimits = { control: 4, agentTools: 1, perGroup: 2, requestsPerSecond: 10 };
+  const limits: JevLaneLimits = {
+    control: 4,
+    agentTools: 1,
+    interactive: 1,
+    perGroup: 2,
+    requestsPerSecond: 10,
+  };
+
+  test("a full control lane leaves an interactive acquisition immediate", async () => {
+    const lanes = new JevLanes();
+    const oneEach: JevLaneLimits = { ...limits, control: 1, interactive: 1 };
+
+    const held = await lanes.acquireSlot("control", { deadlineAt: 100_000, limits: oneEach });
+    expect(held.ok).toBe(true);
+
+    const asked = await lanes.acquireSlot("interactive", { deadlineAt: 100_000, limits: oneEach });
+    expect(asked.ok).toBe(true);
+    expect(lanes.inFlight("interactive")).toBe(1);
+    expect(lanes.circuits.interactive.state(Date.now())).toBe("closed");
+  });
 
   test("a full agentTools lane leaves control acquisitions immediate", async () => {
     const lanes = new JevLanes();
@@ -136,6 +155,7 @@ describe("JevLanes", () => {
     const groupLimits: JevLaneLimits = {
       control: 4,
       agentTools: 4,
+      interactive: 4,
       perGroup: 2,
       requestsPerSecond: 10,
     };
@@ -185,6 +205,7 @@ describe("JevLanes", () => {
     const tightLimits: JevLaneLimits = {
       control: 1,
       agentTools: 1,
+      interactive: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };
@@ -205,6 +226,7 @@ describe("JevLanes", () => {
     const rateLimits: JevLaneLimits = {
       control: 4,
       agentTools: 4,
+      interactive: 4,
       perGroup: 4,
       requestsPerSecond: 1,
     };
@@ -238,11 +260,50 @@ describe("JevLanes", () => {
     expect(await toolPromise).toEqual({ ok: true });
   });
 
+  test("takeRateToken serves a waiting interactive request before a waiting agentTools one", async () => {
+    const lanes = new JevLanes();
+    const rateLimits: JevLaneLimits = {
+      control: 4,
+      agentTools: 4,
+      interactive: 4,
+      perGroup: 4,
+      requestsPerSecond: 1,
+    };
+
+    const initial = await lanes.takeRateToken("control", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    expect(initial.ok).toBe(true);
+
+    const toolPromise = lanes.takeRateToken("agentTools", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const toolFlag = settledFlag(toolPromise);
+    await Promise.resolve();
+
+    const askPromise = lanes.takeRateToken("interactive", {
+      deadlineAt: 100_000,
+      limits: rateLimits,
+    });
+    const askFlag = settledFlag(askPromise);
+    await Promise.resolve();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(askFlag.settled).toBe(true);
+    expect(toolFlag.settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await toolPromise).toEqual({ ok: true });
+  });
+
   test("aborting a queued acquireSlot resolves it as aborted", async () => {
     const lanes = new JevLanes();
     const tightLimits: JevLaneLimits = {
       control: 1,
       agentTools: 1,
+      interactive: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };
@@ -264,6 +325,7 @@ describe("JevLanes", () => {
     const tightLimits: JevLaneLimits = {
       control: 1,
       agentTools: 1,
+      interactive: 1,
       perGroup: 1,
       requestsPerSecond: 10,
     };

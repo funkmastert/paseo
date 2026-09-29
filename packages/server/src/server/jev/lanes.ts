@@ -3,6 +3,7 @@ import type { JevLane } from "./contract.js";
 export interface JevLaneLimits {
   control: number;
   agentTools: number;
+  interactive: number;
   perGroup: number;
   requestsPerSecond: number;
 }
@@ -151,7 +152,10 @@ interface RateWaiter {
   onAbort?: () => void;
 }
 
-/** Daemon-wide token bucket. `control` waiters are always served before `agentTools` ones. */
+/**
+ * Daemon-wide token bucket. `control` and `interactive` waiters are always served before
+ * `agentTools` ones: a person waiting on an answer does not queue behind agents' tool calls.
+ */
 class RateLimiter {
   private configured = false;
   private ratePerSecond = 0;
@@ -177,7 +181,7 @@ class RateLimiter {
     if (this.now() >= deadlineAt) return Promise.resolve({ ok: false, reason: "saturated" });
 
     return new Promise((resolve) => {
-      const queue = lane === "control" ? this.controlQueue : this.toolQueue;
+      const queue = lane === "agentTools" ? this.toolQueue : this.controlQueue;
       const waiter = {} as RateWaiter;
       waiter.settle = (result) => {
         this.removeWaiter(queue, waiter);
@@ -268,8 +272,16 @@ export class JevLanes {
 
   constructor(options?: { now?: () => number }) {
     this.now = options?.now ?? Date.now;
-    this.circuits = { control: new JevCircuit(), agentTools: new JevCircuit() };
-    this.laneSemaphores = { control: new Semaphore(), agentTools: new Semaphore() };
+    this.circuits = {
+      control: new JevCircuit(),
+      agentTools: new JevCircuit(),
+      interactive: new JevCircuit(),
+    };
+    this.laneSemaphores = {
+      control: new Semaphore(),
+      agentTools: new Semaphore(),
+      interactive: new Semaphore(),
+    };
     this.rateLimiter = new RateLimiter(this.now);
   }
 
@@ -317,9 +329,8 @@ export class JevLanes {
       };
     }
 
-    const laneCapacity = lane === "control" ? options.limits.control : options.limits.agentTools;
     const laneResult = await this.laneSemaphores[lane].acquire(
-      laneCapacity,
+      options.limits[lane],
       options.deadlineAt,
       this.now,
       options.signal,
@@ -337,7 +348,10 @@ export class JevLanes {
     };
   }
 
-  /** Daemon-wide token bucket at `limits.requestsPerSecond` (at most 15). `control` is served first. */
+  /**
+   * Daemon-wide token bucket at `limits.requestsPerSecond` (at most 15). `control` and
+   * `interactive` are served first.
+   */
   takeRateToken(
     lane: JevLane,
     options: { deadlineAt: number; limits: JevLaneLimits; signal?: AbortSignal },

@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { Logger } from "pino";
 
+import { resolveAwayReplyConfig, type ResolvedAwayReplyConfig } from "../away-reply/config.js";
 import { AgentJevSchema } from "../persisted-config.js";
 import { readRawConfig } from "../session/doctor/facts.js";
 
@@ -20,6 +21,8 @@ export interface ResolvedJevFeatureConfig {
 export interface ResolvedJevConfig {
   enabled: boolean;
   provider: "openrouter" | "typesafe";
+  /** True when `provider` came from the key's prefix, not from `agents.jev.provider`. */
+  providerInferred: boolean;
   model: string;
   endpointUrl: string;
   /** Absolute, `~` expanded against `homeDir`. */
@@ -53,6 +56,16 @@ export interface ResolvedJevConfig {
     cutPoint: boolean;
   };
   stallJudgment: ResolvedJevFeatureConfig & { loopWatch: boolean };
+  /** Feature 14. Dry run by default (D6); `dryRun` is its `shadow`. */
+  awayReply: ResolvedAwayReplyConfig;
+  /** Feature 15, the `interactive` lane. No shadow mode: a person asked, so they get the answer. */
+  askJev: {
+    enabled: boolean;
+    shadow: false;
+    timeoutMs: number;
+    maxConcurrent: number;
+    maxUsdPerDay: number;
+  };
 }
 
 export const JEV_PROVIDER_DEFAULTS: Record<
@@ -90,6 +103,9 @@ const MIN_REQUESTS_PER_SECOND = 1;
 const DEFAULT_REQUESTS_PER_SECOND = 10;
 const ALLOWED_ENDPOINT_HOSTS = new Set(["openrouter.ai", "api.typesafe.ai"]);
 const DEFAULT_ENV_FILE = "~/.config/paseo/jev.env";
+/** A person is waiting on the answer, and a slow call holds an `interactive` slot. */
+export const JEV_ASK_MAX_TIMEOUT_MS = 30_000;
+const JEV_ASK_MIN_TIMEOUT_MS = 1_000;
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -129,8 +145,35 @@ function expandHome(value: string, homeDir: string): string {
   return path.resolve(value);
 }
 
-function resolveProvider(value: unknown): "openrouter" | "typesafe" {
-  return value === "typesafe" ? "typesafe" : "openrouter";
+/** A key prefix that identifies its provider unambiguously, when `agents.jev.provider` is unset. */
+const JEV_KEY_PREFIX_PROVIDERS: ReadonlyArray<{
+  prefix: string;
+  provider: "typesafe" | "openrouter";
+}> = [
+  { prefix: "apikey_", provider: "typesafe" },
+  { prefix: "sk-or-", provider: "openrouter" },
+];
+
+/**
+ * `agents.jev.provider` always wins. Unset, the provider is read off the key's prefix
+ * (docs/jev.md, "Key"); no key, or a prefix that names neither provider, keeps today's default.
+ */
+export function resolveJevProvider(
+  explicitValue: unknown,
+  key: string | null,
+): { provider: "openrouter" | "typesafe"; inferred: boolean } {
+  if (explicitValue === "typesafe" || explicitValue === "openrouter") {
+    return { provider: explicitValue, inferred: false };
+  }
+  if (typeof key === "string") {
+    const match = JEV_KEY_PREFIX_PROVIDERS.find(({ prefix }) => key.startsWith(prefix));
+    if (match) return { provider: match.provider, inferred: true };
+  }
+  return { provider: "openrouter", inferred: false };
+}
+
+function resolveEnvFile(section: Record<string, unknown>, homeDir: string): string {
+  return expandHome(nonEmptyString(section["envFile"], DEFAULT_ENV_FILE), homeDir);
 }
 
 /**
@@ -193,6 +236,8 @@ export function jevConfigSection(rawConfig: Record<string, unknown> | null): unk
 
 export interface ResolveJevConfigOptions {
   homeDir: string;
+  /** The resolved key, if any — read only to infer `provider` when it is unset. Never logged. */
+  key?: string | null;
   /** Called, with no argument, whenever `endpointUrl` is set but rejected. */
   onRejectedEndpoint?: () => void;
 }
@@ -202,20 +247,25 @@ export function resolveJevConfig(
   options: ResolveJevConfigOptions,
 ): ResolvedJevConfig {
   const section = record(raw);
-  const provider = resolveProvider(section["provider"]);
+  const { provider, inferred: providerInferred } = resolveJevProvider(
+    section["provider"],
+    options.key ?? null,
+  );
   const providerDefaults = JEV_PROVIDER_DEFAULTS[provider];
   const audit = record(section["audit"]);
   const spawnHint = record(section["spawnHint"]);
   const agentTools = record(section["agentTools"]);
   const compactionTiming = record(section["compactionTiming"]);
   const stallJudgment = record(section["stallJudgment"]);
+  const askJev = record(section["askJev"]);
 
   return {
     enabled: bool(section["enabled"], true),
     provider,
+    providerInferred,
     model: nonEmptyString(section["model"], providerDefaults.model),
     endpointUrl: resolveEndpointUrl(section["endpointUrl"], provider, options.onRejectedEndpoint),
-    envFile: expandHome(nonEmptyString(section["envFile"], DEFAULT_ENV_FILE), options.homeDir),
+    envFile: resolveEnvFile(section, options.homeDir),
     maxConcurrent: Math.floor(positiveNumber(section["maxConcurrent"], 4)),
     maxRequestsPerSecond: Math.floor(
       numberInRange(
@@ -277,6 +327,16 @@ export function resolveJevConfig(
       ...resolveFeature(stallJudgment, { enabled: true, shadow: true, timeoutMs: 5000 }),
       loopWatch: bool(stallJudgment["loopWatch"], true),
     },
+    awayReply: resolveAwayReplyConfig(section["awayReply"]),
+    askJev: {
+      enabled: bool(askJev["enabled"], true),
+      shadow: false,
+      timeoutMs: Math.floor(
+        numberInRange(askJev["timeoutMs"], 15_000, JEV_ASK_MIN_TIMEOUT_MS, JEV_ASK_MAX_TIMEOUT_MS),
+      ),
+      maxConcurrent: Math.floor(positiveNumber(askJev["maxConcurrent"], 2)),
+      maxUsdPerDay: positiveNumber(askJev["maxUsdPerDay"], 0.25),
+    },
   };
 }
 
@@ -292,6 +352,8 @@ export interface JevConfigReaderOptions {
   ttlMs?: number;
   now?: () => number;
   readRaw?: typeof readRawConfig;
+  /** Looks up the key for a resolved `envFile`, so `provider` can be inferred from it. Default: no key. */
+  resolveKey?: (envFile: string) => string | null;
 }
 
 const DEFAULT_TTL_MS = 5_000;
@@ -344,9 +406,13 @@ export function createJevConfigReader(options: JevConfigReaderOptions): JevConfi
       return { ok: false, reason: "config-unreadable" };
     }
     loggedIssues = null;
-    const rawEndpoint = record(section)["endpointUrl"];
+    const sectionRecord = record(section);
+    const envFile = resolveEnvFile(sectionRecord, options.homeDir);
+    const key = options.resolveKey ? options.resolveKey(envFile) : null;
+    const rawEndpoint = sectionRecord["endpointUrl"];
     const config = resolveJevConfig(section, {
       homeDir: options.homeDir,
+      key,
       onRejectedEndpoint: () => logRejectedEndpointOnce(rawEndpoint),
     });
     return { ok: true, config };
