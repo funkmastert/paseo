@@ -317,6 +317,20 @@ import { DaemonExecutions } from "./hub/daemon-executions.js";
 import { PluginService } from "./plugins/index.js";
 import { ManagedPluginSources } from "./plugins/managed-source.js";
 import { withTimeout } from "../utils/promise-timeout.js";
+import { exportSecretKey } from "@getpaseo/relay/e2ee";
+import { buildJevBudgetExhaustedNotificationPayload } from "@getpaseo/protocol/jev-notification";
+import { resolveJevAgentCwds } from "./jev/agent-cwds.js";
+import type { JevService, JevTransport } from "./jev/contract.js";
+import { createFakeJevTransport } from "./jev/fake.js";
+import { captureJevKeyFromEnv } from "./jev/key.js";
+import { collectJevSecretValues } from "./jev/secret-sources.js";
+import { isSecretName } from "./jev/redact.js";
+import {
+  createJevService,
+  type JevBudgetExhaustedEvent,
+  type JevServiceRuntime,
+} from "./jev/service.js";
+import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
 const ADMISSION_QUEUE_FLUSH_TIMEOUT_MS = 5_000;
@@ -681,6 +695,8 @@ export interface PaseoDaemonConfig {
   log?: PersistedConfig["log"];
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
   pushNotificationSender?: PushNotificationSender;
+  /** Test overrides for JEV (docs/jev.md, "The fake"): the fake transport, never a live one. */
+  jevOverrides?: { transport?: JevTransport };
   managedProcesses?: ManagedProcessRegistry;
   configReload?: {
     env: NodeJS.ProcessEnv;
@@ -701,6 +717,8 @@ export interface PaseoDaemon {
   browserToolsBroker: BrowserToolsBroker;
   mcpGateway: McpGateway;
   getMcpGatewayAuthToken(): string;
+  /** The JEV client (docs/jev.md); tests read its ledger and decisions through it. */
+  jev: JevServiceRuntime;
   start(): Promise<void>;
   stop(): Promise<void>;
   getListenTarget(): ListenTarget | null;
@@ -886,6 +904,8 @@ function createRemediationLadder(input: {
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   serverId: string;
   logger: Logger;
+  /** Feature 3a builds `triageEscalation` from it (docs/jev.md). */
+  jev: JevService;
 }): RemediationLadder {
   const { agentManager, agentStorage, logger } = input;
   return new RemediationLadder({
@@ -1041,6 +1061,8 @@ function createAgentStallSweep(input: {
   snapshotter: WorktreeSnapshotter;
   logger: Logger;
   paceResume: PaceResume;
+  /** Feature 10 builds `judgeStall` from it (docs/jev.md). */
+  jev: JevService;
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
   return new AgentStallSweep({
@@ -1240,11 +1262,37 @@ export function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): Mut
   return initialConfig;
 }
 
+/**
+ * Agents, terminals and the plugin worker inherit process.env, so the JEV key is read once, kept
+ * in a closure and removed, from the config's reload snapshot too. The secret-shaped names are
+ * kept only so the redactor can match their values exactly.
+ */
+function captureDaemonJevKey(config: PaseoDaemonConfig): {
+  capturedKey: ReturnType<typeof captureJevKeyFromEnv>;
+  secretEnv: Record<string, string | undefined>;
+} {
+  const secretEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => isSecretName(name)),
+  );
+  return {
+    capturedKey: captureJevKeyFromEnv(process.env, [config.configReload?.env]),
+    secretEnv,
+  };
+}
+
+/** Tests inject a transport; `PASEO_JEV_BACKEND=fake` picks the fake on a scratch daemon. */
+function resolveJevTransportOverride(config: PaseoDaemonConfig): JevTransport | undefined {
+  if (config.jevOverrides?.transport) return config.jevOverrides.transport;
+  return process.env.PASEO_JEV_BACKEND === "fake" ? createFakeJevTransport() : undefined;
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  // First, before anything can spawn (docs/jev.md, "Key").
+  const jevStartup = captureDaemonJevKey(config);
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
@@ -1324,6 +1372,51 @@ export async function createPaseoDaemon(
   // the two surfaces protect different things (the daemon's own agent-control MCP vs. brokered
   // external accounts), so leaking one must never grant the other.
   const mcpGatewayAuthToken = randomUUID();
+
+  // The one JEV client (docs/jev.md). Every call site gets it from here; nothing it answers is
+  // needed for the daemon to run, and with no key every feature keeps today's behaviour.
+  const jevGatewayTokens = new McpGatewayTokenStore(config.paseoHome);
+  const jev = createJevService({
+    paseoHome: config.paseoHome,
+    logger,
+    capturedKey: jevStartup.capturedKey,
+    transport: resolveJevTransportOverride(config),
+    resolveAgentCwds: async (agentIds) => {
+      const stored = await agentStorage.list();
+      const live = agentManager.listAgents();
+      const placements = new Map(
+        stored.map((record) => [
+          record.id,
+          { id: record.id, cwd: record.cwd, labels: record.labels, archivedAt: record.archivedAt },
+        ]),
+      );
+      for (const agent of live) {
+        placements.set(agent.id, {
+          id: agent.id,
+          cwd: agent.cwd,
+          labels: agent.labels,
+          archivedAt: placements.get(agent.id)?.archivedAt ?? null,
+        });
+      }
+      return resolveJevAgentCwds(agentIds, [...placements.values()], Date.now());
+    },
+    readSecretValues: (jevKey) =>
+      collectJevSecretValues(
+        {
+          startupEnv: jevStartup.secretEnv,
+          runTokens: [agentMcpAuthToken, mcpGatewayAuthToken],
+          daemonSecrets: () => [
+            exportSecretKey(daemonKeyPair.keyPair.secretKey),
+            config.auth?.password,
+          ],
+          gatewayTokens: () => jevGatewayTokens.listSecretValues(),
+          rawConfig: () => readRawConfig(config.paseoHome).rawConfig,
+        },
+        jevKey,
+      ),
+    readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+  });
+  await jev.start();
 
   const listenTarget = parseListenString(config.listen);
 
@@ -2704,8 +2797,29 @@ export async function createPaseoDaemon(
                   }
                 : undefined,
               restartRecovery,
+              jev,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
+            const jevPushSender = wsServer.getPushNotificationSender();
+            jev.setBudgetNoticeSender((event: JevBudgetExhaustedEvent) => {
+              void jevPushSender
+                .send(
+                  buildJevBudgetExhaustedNotificationPayload({
+                    serverId,
+                    lane: event.lane,
+                    laneLabel: event.lane === "control" ? "Daemon features" : "Agent tools",
+                    topFeature: event.topFeature,
+                    resetsAtLocal: event.resetsAt.toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    }),
+                  }),
+                  { level: "notice", dedupeKey: `jev-budget:${event.lane}` },
+                )
+                .catch((error: unknown) => {
+                  logger.warn({ err: error }, "Failed to send the JEV budget notice");
+                });
+            });
             await pluginRuntime.start();
             wsServer.beginAcceptingConnections();
             worktreeDiskMonitor?.start();
@@ -2939,6 +3053,7 @@ export async function createPaseoDaemon(
               daemonConfigStore,
               serverId,
               logger,
+              jev,
             });
             remediationSink.attach(remediationLadder);
             // The weekly token audit: seven deterministic checks, no model. Only a new RED or a
@@ -2983,6 +3098,7 @@ export async function createPaseoDaemon(
               snapshotter: worktreeSnapshotter,
               logger,
               paceResume: (resume, fn) => resumePacer.run(resume, fn),
+              jev,
             });
             agentStallSweep = stallSweep;
             stallSweep.start();
@@ -3138,6 +3254,10 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
+    // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
+    await jev.stop().catch((error: unknown) => {
+      logger.warn({ err: error }, "Failed to flush the JEV ledger");
+    });
     await mcpGateway.stop().catch(() => undefined);
     await scheduleService.stop().catch(() => undefined);
     await relayRuntime?.stop().catch(() => undefined);
@@ -3177,6 +3297,7 @@ export async function createPaseoDaemon(
     // injection (U3) will need to build brokered `mcpServers` entries.
     mcpGateway,
     getMcpGatewayAuthToken: () => mcpGatewayAuthToken,
+    jev,
     start,
     stop,
     getListenTarget: () => boundListenTarget,

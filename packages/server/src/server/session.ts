@@ -193,6 +193,8 @@ import {
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
+import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
+import type { JevService } from "./jev/contract.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
 import { AgentConfigSession } from "./session/agent-config/agent-config-session.js";
 import { ProjectConfigSession } from "./session/project-config/project-config-session.js";
@@ -565,6 +567,7 @@ export interface SessionOptions {
   providerUsageService: ProviderUsageService;
   usageHistory?: UsageHistoryStore;
   contextUsage?: AgentContextUsageService;
+  jev?: JevService | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
   serviceProxy?: ServiceProxySubsystem;
@@ -823,6 +826,7 @@ export class Session {
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
+  private readonly jevSession: JevSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
   private readonly projectConfigSession: ProjectConfigSession;
@@ -877,6 +881,7 @@ export class Session {
       providerUsageService,
       usageHistory,
       contextUsage,
+      jev,
       serviceProxy,
       scriptRuntimeStore,
       workspaceSetupSnapshots,
@@ -1044,6 +1049,11 @@ export class Session {
           logger: this.sessionLogger,
         });
       },
+      logger: this.sessionLogger,
+    });
+    this.jevSession = createJevSession({
+      host: { emit: (msg) => this.emit(msg) },
+      service: jev,
       logger: this.sessionLogger,
     });
     this.agentConfigSession = new AgentConfigSession({
@@ -2221,9 +2231,13 @@ export class Session {
     );
   }
 
-  /** Usage reads: the accounts' usage history and an agent's context breakdown. */
+  /** Usage reads: the accounts' usage history, an agent's context breakdown, and JEV. */
   private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
-    return this.dispatchUsageHistoryMessage(msg) ?? this.dispatchContextUsageMessage(msg);
+    return (
+      this.dispatchUsageHistoryMessage(msg) ??
+      this.dispatchContextUsageMessage(msg) ??
+      this.dispatchJevMessage(msg)
+    );
   }
 
   private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -2236,6 +2250,22 @@ export class Session {
   private dispatchUsageHistoryMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     if (msg.type !== "usage.history.get.request" || !this.usageHistorySession) return undefined;
     return this.usageHistorySession.handleGetRequest(msg);
+  }
+
+  private dispatchJevMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (!this.jevSession) return undefined;
+    switch (msg.type) {
+      case "jev.decide.request":
+        return this.jevSession.handleDecide(msg);
+      case "jev.status.request":
+        return this.jevSession.handleStatus(msg);
+      case "jev.scope.check.request":
+        return this.jevSession.handleScopeCheck(msg);
+      case "jev.decisions.list.request":
+        return this.jevSession.handleDecisionsList(msg);
+      default:
+        return undefined;
+    }
   }
 
   private dispatchOrchestrationSkillsMessage(

@@ -93,6 +93,7 @@ import { deriveClaudeProviderEntries } from "../services/quota-fetcher/manifest.
 import { ProviderUsageService } from "../services/quota-fetcher/service.js";
 import { UsageHistoryStore } from "./usage-history/usage-history-store.js";
 import { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
+import type { JevService } from "./jev/contract.js";
 import { getProcessMemoryDiagnostics, getProcessUptimeSeconds } from "./process-diagnostics.js";
 import {
   CLIENT_SHUTDOWN_RPC_REASON,
@@ -615,6 +616,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly directorySync = new DirectorySyncService();
   private readonly pluginRuntime: SessionOptions["pluginRuntime"];
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
+  private readonly jev: JevService | null | undefined;
 
   constructor(
     server: HTTPServer,
@@ -667,6 +669,7 @@ export class VoiceAssistantWebSocketServer {
       requestSample?: (workspaceId: string, cwd: string) => void;
     } = {},
     restartRecovery?: RestartRecoveryService,
+    jev?: JevService | null,
   ) {
     this.logger = logger.child({ module: "websocket-server" });
     this.workspaceSetupRuntime = workspaceSetupRuntime;
@@ -683,6 +686,7 @@ export class VoiceAssistantWebSocketServer {
     this.hubRelationships = hubRelationships ?? null;
     this.pluginRuntime = pluginRuntime;
     this.orchestrationSkills = orchestrationSkills;
+    this.jev = jev;
     this.agentManager = agentManager;
     this.agentStorage = agentStorage;
     this.agentRequests = new AgentRequests(join(paseoHome, "agent-requests"));
@@ -1507,6 +1511,7 @@ export class VoiceAssistantWebSocketServer {
       providerUsageService: this.providerUsageService,
       usageHistory: this.usageHistoryStore,
       contextUsage: this.contextUsageService,
+      jev: this.jev,
       hubExecutionAgents: options.hubExecutionAgents,
       hubRelationships: options.hubRelationships,
       serviceProxy: this.serviceProxy ?? undefined,
@@ -1729,6 +1734,8 @@ export class VoiceAssistantWebSocketServer {
         usageHistory: true,
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: true,
+        // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
+        jev: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.
