@@ -2,12 +2,13 @@ import { describe, expect, test } from "vitest";
 
 import type { DoneJanitorProject, DoneJanitorWorkspace } from "../agent-done-janitor.js";
 import type { DoneJanitorAgentView } from "./done-janitor-detector.js";
+import type { WorktreeCoverage } from "../done-janitor-worktree.js";
 import {
   archiveDeletesDirectory,
+  checkDeletionInvariant,
   classifyWorkspace,
-  describeUncoveredWork,
   idleProjectVerdict,
-  isBuildOutputPath,
+  isRegenerablePath,
   resolveWorkspaceSweepConfig,
   type WorkspaceActivitySignals,
   type WorkspaceSweepFacts,
@@ -98,8 +99,7 @@ describe("classifyWorkspace", () => {
     const recent = classify({
       workspace: workspace({ updatedAt: ago(71 * HOUR) }),
     });
-    expect(recent).toMatchObject({ kind: "active" });
-    expect(recent.reason).toContain("2d 23h");
+    expect(recent).toMatchObject({ kind: "active", reason: expect.stringContaining("2d 23h") });
   });
 
   test("a workspace with no usable activity signal counts as active", () => {
@@ -338,8 +338,11 @@ describe("classifyWorkspace", () => {
 
     test("is idle the moment its fixer is finished, however fresh its directory", () => {
       const verdict = classify({ workspace: home, agents: [fixer()], signals: busyHome });
-      expect(verdict).toMatchObject({ kind: "idle", rule: "fixer" });
-      expect(verdict.reason).toContain("self-heal");
+      expect(verdict).toMatchObject({
+        kind: "idle",
+        rule: "fixer",
+        reason: expect.stringContaining("self-heal"),
+      });
     });
 
     test("is idle when the ladder already archived its fixer", () => {
@@ -366,8 +369,7 @@ describe("classifyWorkspace", () => {
         agents: [fixer({ lifecycle: "idle", live: true, lastActivityAtMs: NOW - 2 * 60_000 })],
         signals: busyHome,
       });
-      expect(verdict.kind).toBe("active");
-      expect(verdict.reason).toContain("settle");
+      expect(verdict).toMatchObject({ kind: "active", reason: expect.stringContaining("settle") });
     });
 
     test("is an ordinary workspace once someone starts their own agent in it", () => {
@@ -431,76 +433,103 @@ describe("archiveDeletesDirectory", () => {
   });
 });
 
-const NO_GAPS = { ignored: [], nestedRepositories: [] };
+describe("checkDeletionInvariant", () => {
+  function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
+    return {
+      commit: "abc",
+      changed: [],
+      untracked: [],
+      ignored: [],
+      gitlinks: [],
+      unbackedCommits: 0,
+      ...overrides,
+    };
+  }
 
-describe("describeUncoveredWork", () => {
-  const snapshotted = {
-    kind: "snapshotted" as const,
-    worktreePath: "/w",
-    ref: "refs/backup/2026-09-29/w",
-    commit: "abc",
-    dirtyFiles: 2,
-    unpushedCommits: 1,
-    skippedFiles: [],
-    offsite: { kind: "bundled" as const, path: "/b" },
-  };
-
-  test("a snapshot with nothing left out and only build output ignored covers everything", () => {
+  test("a clean, pushed tree with only regenerable ignored paths holds", () => {
     expect(
-      describeUncoveredWork({
-        snapshot: snapshotted,
-        gaps: {
-          ignored: ["node_modules/", "packages/app/dist/", ".DS_Store"],
-          nestedRepositories: [],
-        },
-      }),
-    ).toBeNull();
+      checkDeletionInvariant(
+        coverage({ ignored: ["node_modules/", "packages/app/dist/", ".DS_Store"] }),
+        "head",
+      ),
+    ).toEqual({
+      holds: true,
+      detail:
+        "holds: every file is tracked and pushed; ignored only regenerable (node_modules/, packages/app/dist/, .DS_Store)",
+    });
   });
 
-  test("an ignored file outside build output is not covered", () => {
-    expect(
-      describeUncoveredWork({
-        snapshot: snapshotted,
-        gaps: { ignored: [".env", "node_modules/"], nestedRepositories: [] },
-      }),
-    ).toBe("1 ignored file(s) outside build output that no snapshot covers (.env)");
+  test.each([
+    ["an evidence log", "docs/playtest/evidence/core/run-1.log"],
+    ["a data directory", "Clone/.data/"],
+    ["local Xcode settings", "apps/mobile/ios/.xcode.env.local"],
+    ["an env file", ".env"],
+    ["Firebase config", "apps/mobile/android/app/google-services.json"],
+    ["tool results", "Clone/tools/queen-safety/results/"],
+  ])("%s that is ignored keeps the worktree, whatever else holds", (_name, entry) => {
+    for (const basis of ["plan", "head", "snapshot"] as const) {
+      expect(
+        checkDeletionInvariant(coverage({ ignored: ["node_modules/", entry] }), basis),
+      ).toEqual({
+        holds: false,
+        reason: `1 ignored path(s) that are not regenerable and no backup holds (${entry})`,
+      });
+    }
   });
 
-  test("an untracked file left out of the snapshot for its size is not covered", () => {
-    expect(
-      describeUncoveredWork({
-        snapshot: { ...snapshotted, skippedFiles: ["data/big.bin"] },
-        gaps: NO_GAPS,
-      }),
-    ).toBe("1 untracked file(s) too large for the snapshot (data/big.bin)");
+  test("a listing git could not make holds nothing", () => {
+    expect(checkDeletionInvariant(null, "snapshot")).toEqual({
+      holds: false,
+      reason: "git could not list its files",
+    });
   });
 
-  test("a failed snapshot covers nothing", () => {
-    expect(
-      describeUncoveredWork({
-        snapshot: { kind: "failed", worktreePath: "/w", error: "disk full" },
-        gaps: NO_GAPS,
-      }),
-    ).toBe("its work is at risk and could not be snapshotted: disk full");
-  });
-
-  test("a listing that failed covers nothing", () => {
-    expect(describeUncoveredWork({ snapshot: snapshotted, gaps: null })).toBe(
-      "its untracked and ignored files could not be listed",
+  test("a submodule or a nested repository keeps it: a backup holds only a pointer", () => {
+    expect(checkDeletionInvariant(coverage({ gitlinks: ["vendor/tool"] }), "snapshot")).toEqual({
+      holds: false,
+      reason:
+        "1 submodule(s) or nested repositor(ies) a backup holds only as a pointer (vendor/tool)",
+    });
+    expect(checkDeletionInvariant(coverage({ untracked: ["vendor/other/"] }), "plan").holds).toBe(
+      false,
     );
   });
 
-  test("an untracked nested repository is not covered: the snapshot holds only a pointer to it", () => {
+  test("planning against HEAD names what the snapshot will have to hold", () => {
     expect(
-      describeUncoveredWork({
-        snapshot: snapshotted,
-        gaps: { ignored: [], nestedRepositories: ["vendor/tool/"] },
-      }),
-    ).toBe("1 untracked nested repositor(ies) a snapshot holds only as a pointer (vendor/tool/)");
+      checkDeletionInvariant(
+        coverage({ changed: ["a.ts"], untracked: ["b.ts"], unbackedCommits: 2 }),
+        "plan",
+      ),
+    ).toEqual({
+      holds: true,
+      detail:
+        "holds once a verified snapshot backs up 2 changed or untracked file(s) and 2 unpushed commit(s)",
+    });
+  });
+
+  test("a file not in the snapshot keeps it: written since, or left out by the snapshot's own rules", () => {
+    expect(
+      checkDeletionInvariant(coverage({ untracked: ["src/credentials-form.ts"] }), "snapshot"),
+    ).toEqual({
+      holds: false,
+      reason: "1 file(s) not in the snapshot, changed since or left out (src/credentials-form.ts)",
+    });
+    expect(checkDeletionInvariant(coverage({ changed: ["README.md"] }), "snapshot").holds).toBe(
+      false,
+    );
+  });
+
+  test("with no snapshot, anything that differs from HEAD or is not pushed keeps it", () => {
+    expect(checkDeletionInvariant(coverage({ changed: ["README.md"] }), "head").holds).toBe(false);
+    expect(checkDeletionInvariant(coverage({ unbackedCommits: 1 }), "head")).toEqual({
+      holds: false,
+      reason: "1 commit(s) reachable from HEAD are neither pushed nor in pushed HEAD",
+    });
   });
 });
 
-describe("isBuildOutputPath", () => {
+describe("isRegenerablePath", () => {
   test.each([
     ["node_modules/", true],
     ["packages/server/dist/", true],
@@ -509,12 +538,25 @@ describe("isBuildOutputPath", () => {
     ["tools/__pycache__/", true],
     ["a/b/c.pyc", true],
     [".DS_Store", true],
+    ["packages/app/tsc-out/", true],
+    ["test-results/", true],
+    ["tsconfig.tsbuildinfo", true],
+    ["ios/Packages/.build/", true],
+    [".swiftpm/", true],
+    [".yarn/cache/", true],
+    [".yarn/install-state.gz", true],
+    [".yarn/", false],
+    [".yarn/releases/yarn.cjs", false],
     [".env", false],
     ["notes/", false],
     ["game/content/party.gd.uid", false],
     ["distribution.md", false],
+    ["Clone/.data/", false],
+    ["src-tauri/binaries/", false],
+    ["results/", false],
+    ["install-state.gz", false],
   ])("%s → %s", (entry, expected) => {
-    expect(isBuildOutputPath(entry)).toBe(expected);
+    expect(isRegenerablePath(entry)).toBe(expected);
   });
 });
 
@@ -541,6 +583,7 @@ describe("resolveWorkspaceSweepConfig", () => {
       resolveWorkspaceSweepConfig({
         workspaceSweep: {
           enabled: false,
+          dryRun: false,
           idleHours: 96,
           emptyIdleHours: 12,
           maxArchivesPerSweep: 3,

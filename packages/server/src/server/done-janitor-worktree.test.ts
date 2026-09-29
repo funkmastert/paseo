@@ -1,14 +1,28 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  truncateSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
+import { GitWorktreeSnapshotter } from "./agent/worktree-snapshot.js";
 import {
   checkWorktreeDeletionSafety,
-  readSnapshotGaps,
   readWorkspaceActivitySignals,
+  readWorktreeCoverage,
+  verifyWorktreeBackup,
 } from "./done-janitor-worktree.js";
+import type { WorktreeSnapshotResult } from "./remediation/contract.js";
+import type { RunGitCommand } from "../utils/run-git-command.js";
 
 // Real repositories under a temp dir: the gate is only as good as its reading of real git
 // output, so nothing here is faked.
@@ -322,39 +336,203 @@ describe("readWorkspaceActivitySignals", () => {
   });
 });
 
-describe("readSnapshotGaps", () => {
-  test("lists ignored files, and a wholly ignored directory as one entry", async () => {
-    const worktree = addWorktree("ignored-list", "feature");
+function snapshotter(maxUntrackedFileBytes = 1024 * 1024): GitWorktreeSnapshotter {
+  return new GitWorktreeSnapshotter({
+    readConfig: () => ({
+      personalOwners: [],
+      bundleDir: join(root, "bundles"),
+      maxUntrackedFileBytes,
+    }),
+    paseoHome: join(root, "paseo-home"),
+    logger: pino({ level: "silent" }),
+  });
+}
+
+async function snapshot(
+  worktree: string,
+  maxUntrackedFileBytes?: number,
+): Promise<Extract<WorktreeSnapshotResult, { kind: "snapshotted" }>> {
+  const result = await snapshotter(maxUntrackedFileBytes).snapshot({
+    cwd: worktree,
+    reason: "test",
+  });
+  if (result.kind !== "snapshotted") throw new Error(`expected a snapshot, got ${result.kind}`);
+  return result;
+}
+
+describe("readWorktreeCoverage", () => {
+  test("a clean, pushed worktree differs from HEAD in nothing", async () => {
+    const worktree = addWorktree("clean", "feature");
+    git(worktree, "push", "-q", "origin", "feature");
+
+    expect(await readWorktreeCoverage({ worktreePath: worktree, commit: null })).toEqual({
+      commit: git(worktree, "rev-parse", "HEAD").trim(),
+      changed: [],
+      untracked: [],
+      ignored: [],
+      gitlinks: [],
+      unbackedCommits: 0,
+    });
+  });
+
+  test("against HEAD: changed, untracked, ignored and unpushed work are all listed", async () => {
+    const worktree = addWorktree("busy", "feature");
     commit(worktree, ".gitignore", "node_modules/\n.env\n");
+    writeFileSync(join(worktree, "README.md"), "edited\n");
+    writeFileSync(join(worktree, "notes.txt"), "untracked\n");
+    writeFileSync(join(worktree, ".env"), "SECRET=1\n");
     mkdirSync(join(worktree, "node_modules", "x"), { recursive: true });
     writeFileSync(join(worktree, "node_modules", "x", "index.js"), "1\n");
-    writeFileSync(join(worktree, ".env"), "SECRET=1\n");
-    writeFileSync(join(worktree, "notes.txt"), "untracked, not ignored\n");
+    mkdirSync(join(worktree, "empty-ignored-parent", "node_modules"), { recursive: true });
 
-    expect(await readSnapshotGaps(worktree)).toEqual({
+    expect(await readWorktreeCoverage({ worktreePath: worktree, commit: null })).toMatchObject({
+      changed: ["README.md"],
+      untracked: ["notes.txt"],
       ignored: [".env", "node_modules/"],
-      nestedRepositories: [],
+      gitlinks: [],
+      unbackedCommits: 1,
     });
   });
 
-  test("names an untracked nested repository, not an untracked directory", async () => {
-    const worktree = addWorktree("nested", "feature");
-    mkdirSync(join(worktree, "vendor", "tool"), { recursive: true });
-    git(join(worktree, "vendor", "tool"), "init", "-q");
-    writeFileSync(join(worktree, "vendor", "tool", "f.txt"), "only here\n");
+  test("against a snapshot of that state, nothing differs and no commit is unbacked", async () => {
+    const worktree = addWorktree("snapshotted", "feature");
+    commit(worktree, "work.txt", "committed, unpushed\n");
+    writeFileSync(join(worktree, "README.md"), "edited\n");
     mkdirSync(join(worktree, "drafts"));
     writeFileSync(join(worktree, "drafts", "a.txt"), "draft\n");
+    const taken = await snapshot(worktree);
 
-    expect(await readSnapshotGaps(worktree)).toEqual({
+    expect(await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit })).toEqual({
+      commit: taken.commit,
+      changed: [],
+      untracked: [],
       ignored: [],
-      nestedRepositories: ["vendor/tool/"],
+      gitlinks: [],
+      unbackedCommits: 0,
     });
   });
 
-  test("a directory git cannot read lists nothing, which is not the same as none", async () => {
-    const plain = join(root, "plain-ignored");
-    mkdirSync(plain);
+  test("a file written or changed after the snapshot is listed against it", async () => {
+    const worktree = addWorktree("after", "feature");
+    writeFileSync(join(worktree, "notes.txt"), "before\n");
+    const taken = await snapshot(worktree);
+    writeFileSync(join(worktree, "notes.txt"), "after\n");
+    writeFileSync(join(worktree, "new.txt"), "new\n");
 
-    expect(await readSnapshotGaps(plain)).toBeNull();
+    expect(
+      await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit }),
+    ).toMatchObject({ changed: ["notes.txt"], untracked: ["new.txt"] });
+  });
+
+  test("a file the snapshotter left out is listed, whatever its rule was", async () => {
+    // The size cap here; the secret filter (1c82709a9) drops files the same silent way.
+    const worktree = addWorktree("left-out", "feature");
+    writeFileSync(join(worktree, "small.txt"), "kept\n");
+    writeFileSync(join(worktree, "big.bin"), "x".repeat(64));
+    const taken = await snapshot(worktree, 16);
+
+    expect(
+      await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit }),
+    ).toMatchObject({ changed: [], untracked: ["big.bin"] });
+  });
+
+  test("a nested repository the snapshot added is a gitlink: a pointer, not its files", async () => {
+    const worktree = addWorktree("nested", "feature");
+    const nested = join(worktree, "vendor", "tool");
+    mkdirSync(nested, { recursive: true });
+    git(nested, "init", "-q");
+    commit(nested, "f.txt", "only here\n");
+
+    const head = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+    expect(head?.untracked).toEqual(["vendor/tool/"]);
+    const taken = await snapshot(worktree);
+    const against = await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit });
+    expect(against?.gitlinks).toEqual(["vendor/tool"]);
+  });
+
+  test("a directory git cannot read, and output cut off at the runner's cap, read as unknown", async () => {
+    const plain = join(root, "plain");
+    mkdirSync(plain);
+    expect(await readWorktreeCoverage({ worktreePath: plain, commit: null })).toBeNull();
+
+    const worktree = addWorktree("truncated", "feature");
+    const truncating: RunGitCommand = async (args) => ({
+      stdout: args[0] === "rev-parse" ? "abc\n" : "",
+      stderr: "",
+      truncated: args[0] === "ls-files",
+      exitCode: 0,
+      signal: null,
+    });
+    expect(
+      await readWorktreeCoverage({ worktreePath: worktree, commit: null, runGit: truncating }),
+    ).toBeNull();
+  });
+
+  test("never writes the worktree's own index", async () => {
+    const worktree = addWorktree("index", "feature");
+    writeFileSync(join(worktree, "notes.txt"), "untracked\n");
+    const before = git(worktree, "ls-files", "--stage");
+    const taken = await snapshot(worktree);
+
+    await readWorktreeCoverage({ worktreePath: worktree, commit: taken.commit });
+
+    expect(git(worktree, "ls-files", "--stage")).toBe(before);
+  });
+});
+
+describe("verifyWorktreeBackup", () => {
+  async function bundled(name: string) {
+    const worktree = addWorktree(name, name);
+    writeFileSync(join(worktree, "notes.txt"), "work\n");
+    const taken = await snapshot(worktree);
+    if (taken.offsite.kind !== "bundled") throw new Error("expected a bundle");
+    return { worktree, taken, bundle: taken.offsite.path };
+  }
+
+  function verify(
+    worktree: string,
+    taken: Extract<WorktreeSnapshotResult, { kind: "snapshotted" }>,
+  ) {
+    return verifyWorktreeBackup({
+      worktreePath: worktree,
+      ref: taken.ref,
+      commit: taken.commit,
+      offsite: taken.offsite,
+    });
+  }
+
+  test("a snapshot with its ref and a sound bundle verifies", async () => {
+    const { worktree, taken } = await bundled("sound");
+    expect(await verify(worktree, taken)).toBeNull();
+  });
+
+  test("a missing, empty or corrupt bundle does not", async () => {
+    const { worktree, taken, bundle } = await bundled("bad-bundle");
+    writeFileSync(bundle, "# v2 git bundle\nnot a bundle\n");
+    expect(await verify(worktree, taken)).toBe(`its bundle ${bundle} fails git bundle verify`);
+    truncateSync(bundle, 0);
+    expect(await verify(worktree, taken)).toBe(`its bundle ${bundle} is empty`);
+    unlinkSync(bundle);
+    expect(await verify(worktree, taken)).toBe(`its bundle ${bundle} is missing`);
+  });
+
+  test("a bundle of some other snapshot does not", async () => {
+    const { worktree, taken } = await bundled("other");
+    const other = await bundled("other-2");
+    expect(await verify(worktree, { ...taken, offsite: other.taken.offsite })).toBe(
+      `its bundle ${(other.taken.offsite as { path: string }).path} does not hold the snapshot ${taken.commit}`,
+    );
+  });
+
+  test("a missing ref, or a snapshot with no copy outside the repository, does not", async () => {
+    const { worktree, taken } = await bundled("no-ref");
+    expect(
+      await verify(worktree, {
+        ...taken,
+        offsite: { kind: "none", reason: "bundle failed: disk full" },
+      }),
+    ).toBe("the snapshot has no copy outside the repository (bundle failed: disk full)");
+    git(worktree, "update-ref", "-d", taken.ref);
+    expect(await verify(worktree, taken)).toBe(`its backup ref ${taken.ref} does not exist`);
   });
 });

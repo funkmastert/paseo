@@ -28,18 +28,18 @@ import {
 } from "./agent/done-janitor-detector.js";
 import {
   archiveDeletesDirectory,
+  checkDeletionInvariant,
   classifyWorkspace,
-  describeUncoveredWork,
   idleProjectVerdict,
   resolveWorkspaceSweepConfig,
   type DoneJanitorWorkspaceSweepConfig,
   type IdleProjectVerdict,
   type ResolvedWorkspaceSweepConfig,
-  type SnapshotGaps,
   type WorkspaceActivitySignals,
+  type WorkspaceSweepRule,
   type WorkspaceSweepVerdict,
 } from "./agent/workspace-sweep-detector.js";
-import type { WorktreeDeletionSafety } from "./done-janitor-worktree.js";
+import type { WorktreeCoverage, WorktreeDeletionSafety } from "./done-janitor-worktree.js";
 import type { PushNotificationSender } from "./push/index.js";
 import type {
   WorktreeSnapshotOffsite,
@@ -48,6 +48,7 @@ import type {
 } from "./remediation/contract.js";
 import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
 import { isProtectivePin } from "./workspace-auto-pin.js";
+import type { ProcessScan } from "./worktree-process-scan.js";
 import { isRealpathInsideRoot } from "../utils/path.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 30 * 60_000;
@@ -179,6 +180,8 @@ export interface DoneJanitorDependencies {
   listWorkspaces(): Promise<DoneJanitorWorkspace[]>;
   /** Agents a schedule or heartbeat that is not completed still targets. */
   listScheduledAgentIds(): Promise<ReadonlySet<string>>;
+  /** The `cwd` of every schedule that is not completed and starts a new agent. */
+  listScheduledCwds(): Promise<readonly string[]>;
   getProviderHealth(provider: string): Promise<ProviderHealth>;
   askAgent(input: { agentId: string; prompt: string; timeoutMs: number }): Promise<AskAgentResult>;
   archiveAgent(agentId: string): Promise<void>;
@@ -200,8 +203,18 @@ export interface DoneJanitorDependencies {
   countRunningScripts(workspaceId: string): Promise<number>;
   /** HEAD's commit time and the directory's own mtime; never the git index. */
   readActivitySignals(directory: string): Promise<WorkspaceActivitySignals>;
-  /** What a snapshot of the worktree cannot hold; null when git cannot list it. */
-  readSnapshotGaps(worktreePath: string): Promise<SnapshotGaps | null>;
+  /** Every file in the worktree read against `commit`, HEAD when null; null when git cannot. */
+  readWorktreeCoverage(input: {
+    worktreePath: string;
+    commit: string | null;
+  }): Promise<WorktreeCoverage | null>;
+  /** Null when the snapshot is a backup a deletion may rely on; otherwise why it is not. */
+  verifyBackup(input: {
+    worktreePath: string;
+    snapshot: SnapshottedWorktree;
+  }): Promise<string | null>;
+  /** Processes with their cwd, their executable or a file open inside the directory. */
+  listProcessesInside(directory: string): Promise<ProcessScan>;
   /**
    * Snapshots a worktree's uncommitted and unpushed work under `refs/backup/` without touching
    * it (docs/work-snapshots.md). Called before a dead agent is archived and before any worktree
@@ -228,14 +241,27 @@ export interface AgentDoneJanitorOptions {
   now?: () => number;
 }
 
+type SnapshottedWorktree = Extract<WorktreeSnapshotResult, { kind: "snapshotted" }>;
+
 type WorkspacePlan =
-  | { kind: "reclaim"; workspace: DoneJanitorWorkspace; path: string; branch: string | null }
+  | {
+      kind: "reclaim";
+      workspace: DoneJanitorWorkspace;
+      path: string;
+      branch: string | null;
+      /** The deletion invariant as read before the snapshot. */
+      invariant: string;
+    }
   | { kind: "keep"; workspace: DoneJanitorWorkspace | null; reason: string };
 
 /** What the idle-workspace sweep does with one idle workspace. */
 type IdleWorkspacePlan =
-  | { kind: "archive"; deletesDirectory: boolean; detail: string }
+  | { kind: "archive"; deletesDirectory: false; detail: string }
+  | { kind: "archive"; deletesDirectory: true; detail: string; invariant: string }
   | { kind: "keep"; reason: string };
+
+/** Whether a worktree's directory may go: the deletion invariant's verdict, or why not. */
+type DeletionCheck = { ok: true; invariant: string } | { ok: false; reason: string };
 
 interface AskCandidate {
   root: DoneJanitorAgentView;
@@ -275,6 +301,12 @@ export interface DoneJanitorReportEntry {
   path?: string;
   bytes?: number;
   reason: string;
+  /** The idle-workspace rule that picked it. */
+  rule?: WorkspaceSweepRule;
+  /** How long it has been idle, apart from `reason` so the line is logged once, not hourly. */
+  idleFor?: string;
+  /** The deletion invariant's verdict, on every line that deletes or would delete a directory. */
+  invariant?: string;
   /** Set when this line's pass ran dry while the sweep did not: the workspace sweep's own dryRun. */
   dryRun?: boolean;
 }
@@ -557,7 +589,11 @@ export class AgentDoneJanitor {
     return classifyWorkspace({ ...facts, signals }, sweep, nowMs);
   }
 
-  /** Archives one idle workspace, or reports why not. True when it spent the sweep's budget. */
+  /**
+   * Archives one idle workspace, or reports why not. True when it spent the sweep's budget: any
+   * attempt does, whatever the last checks then decide, so a dry run and a live run take the same
+   * candidates and a live run never goes past what the dry run listed.
+   */
   private async archiveIdleWorkspace(
     report: DoneJanitorSweepReport,
     candidate: IdleWorkspaceCandidate,
@@ -574,17 +610,23 @@ export class AgentDoneJanitor {
         workspace.kind === "worktree" && (await this.deps.isPaseoOwnedWorktreePath(path)),
     });
     const plan: IdleWorkspacePlan = deletesDirectory
-      ? await this.planIdleWorktree(report, { workspace, path, views, workspaces, config, sweep })
+      ? await this.planIdleWorktree({ workspace, path, views, workspaces, config })
       : { kind: "archive", deletesDirectory: false, detail: "record only, its directory stays" };
     if (plan.kind === "keep") {
       // The reason alone, no idle time: it would change the line, and re-log it, every hour.
       report.entries.push(describeIdleWorkspace(workspace, "kept-idle-workspace", plan.reason));
       return false;
     }
-    const reason = `${verdict.reason}; ${plan.detail}`;
+    const reason = `${describeIdleRule(verdict, sweep)}; ${plan.detail}`;
+    const facts = { rule: verdict.rule, idleFor: formatDuration(verdict.idleForMs) };
     if (sweep.dryRun) {
       const action = plan.deletesDirectory ? "would-delete" : "would-archive-workspace";
-      report.entries.push({ ...describeIdleWorkspace(workspace, action, reason), dryRun: true });
+      report.entries.push({
+        ...describeIdleWorkspace(workspace, action, reason),
+        ...facts,
+        ...(plan.deletesDirectory ? { invariant: plan.invariant } : {}),
+        dryRun: true,
+      });
       return true;
     }
 
@@ -600,9 +642,24 @@ export class AgentDoneJanitor {
           ),
         );
       }
-      return false;
+      return true;
     }
-    const bytes = plan.deletesDirectory ? await this.deps.measureBytes(path) : undefined;
+    let bytes: number | undefined;
+    let invariant: string | undefined;
+    if (plan.deletesDirectory) {
+      // `du` first: the last check has to be the last thing before the archive.
+      bytes = await this.deps.measureBytes(path);
+      const check = await this.confirmDeletion(
+        report,
+        path,
+        `done janitor, before archiving idle workspace ${workspace.workspaceId}`,
+      );
+      if (!check.ok) {
+        report.entries.push(describeIdleWorkspace(workspace, "kept-idle-workspace", check.reason));
+        return true;
+      }
+      invariant = check.invariant;
+    }
     let removedDirectory: boolean;
     try {
       ({ removedDirectory } = await this.deps.archiveWorkspace(workspace.workspaceId));
@@ -618,27 +675,38 @@ export class AgentDoneJanitor {
           `archive failed: ${error instanceof Error ? error.message : String(error)}`,
         ),
       );
-      return false;
+      return true;
     }
+    const done = { ...facts, ...(invariant ? { invariant } : {}) };
     if (plan.deletesDirectory && removedDirectory) {
-      report.entries.push({ ...describeIdleWorkspace(workspace, "deleted", reason), bytes });
+      report.entries.push({
+        ...describeIdleWorkspace(workspace, "deleted", reason),
+        ...done,
+        bytes,
+      });
     } else if (plan.deletesDirectory) {
-      report.entries.push(
-        describeIdleWorkspace(
+      report.entries.push({
+        ...describeIdleWorkspace(
           workspace,
           "archived-workspace",
           `${reason}; the record is archived, but the directory was not removed (see daemon log)`,
         ),
-      );
+        ...done,
+      });
     } else {
-      report.entries.push(describeIdleWorkspace(workspace, "archived-workspace", reason));
+      report.entries.push({
+        ...describeIdleWorkspace(workspace, "archived-workspace", reason),
+        ...done,
+      });
     }
     this.options.logger.info(
       {
         workspaceId: workspace.workspaceId,
         path,
         rule: verdict.rule,
+        idleFor: facts.idleFor,
         removedDirectory,
+        invariant,
         reason,
       },
       "Done janitor: archived an idle workspace",
@@ -647,23 +715,19 @@ export class AgentDoneJanitor {
   }
 
   /**
-   * Whether a Paseo-owned worktree's directory may go with its record. Clean and pushed: yes,
-   * after the same snapshot every deletion takes. Dirty or unpushed: only once a snapshot of that
-   * exact state exists and nothing it cannot hold — an ignored file outside build output, an
-   * untracked file over its size cap — is in the tree. Anything else keeps it.
+   * Whether a Paseo-owned worktree's directory may go with its record, decided on what can be
+   * read without writing: the same in a dry run and a live one. A live run then confirms it right
+   * before the archive (`confirmDeletion`). Clean and pushed, or dirty or unpushed work a snapshot
+   * can hold, may go; the deletion invariant decides the rest.
    */
-  private async planIdleWorktree(
-    report: DoneJanitorSweepReport,
-    input: {
-      workspace: DoneJanitorWorkspace;
-      path: string;
-      views: readonly DoneJanitorAgentView[];
-      workspaces: readonly DoneJanitorWorkspace[];
-      config: ResolvedDoneJanitorConfig;
-      sweep: ResolvedWorkspaceSweepConfig;
-    },
-  ): Promise<IdleWorkspacePlan> {
-    const { workspace, path, views, workspaces, config, sweep } = input;
+  private async planIdleWorktree(input: {
+    workspace: DoneJanitorWorkspace;
+    path: string;
+    views: readonly DoneJanitorAgentView[];
+    workspaces: readonly DoneJanitorWorkspace[];
+    config: ResolvedDoneJanitorConfig;
+  }): Promise<IdleWorkspacePlan> {
+    const { workspace, path, views, workspaces, config } = input;
     const keep = (reason: string): IdleWorkspacePlan => ({ kind: "keep", reason });
     if (!config.reclaimWorkspaces) {
       return keep("workspace reclamation is off, and archiving it would delete its directory");
@@ -673,49 +737,112 @@ export class AgentDoneJanitor {
     );
     const conflict = directoryConflict(workspace, path, workspaces, views, inWorkspace);
     if (conflict) return keep(conflict);
-    for (const [failedPath, error] of this.snapshotFailures) {
-      if (overlaps(path, failedPath)) {
-        return keep(`its work is at risk and could not be snapshotted: ${error}`);
-      }
-    }
+    const failed = this.snapshotFailureAt(path);
+    if (failed) return keep(failed);
     const safety = await this.deps.checkWorktree({
       worktreePath: path,
       baseBranch: workspace.baseBranch,
     });
-    const snapshotReason = `done janitor, before archiving idle workspace ${workspace.workspaceId}`;
-    if (safety.safe) {
-      // The gate counts a commit on the local base branch as safe; the snapshot keeps a copy.
-      if (!sweep.dryRun) {
-        const error = await this.snapshot(report, path, snapshotReason);
-        if (error) return keep(`its work is at risk and could not be snapshotted: ${error}`);
-      }
-      const branch = safety.branch
-        ? `branch ${safety.branch} is merged or pushed`
-        : "HEAD is merged or pushed";
-      return { kind: "archive", deletesDirectory: true, detail: `clean tree and ${branch}` };
-    }
-    if (safety.gone) {
+    if (!safety.safe && safety.gone) {
       return { kind: "archive", deletesDirectory: false, detail: "its directory is gone" };
     }
-    if (!safety.atRisk) return keep(safety.reason);
+    if (!safety.safe && !safety.atRisk) return keep(safety.reason);
+    const preview = await this.previewDeletion(path);
+    if (!preview.ok) return keep(preview.reason);
+    return {
+      kind: "archive",
+      deletesDirectory: true,
+      detail: safety.safe ? describeCleanTree(safety.branch) : safety.reason,
+      invariant: preview.invariant,
+    };
+  }
 
-    const gaps = await this.deps.readSnapshotGaps(path);
-    if (sweep.dryRun) {
-      const uncovered = describeUncoveredWork({ snapshot: null, gaps });
-      if (uncovered) return keep(uncovered);
+  /**
+   * What keeps a worktree's directory and can be read without writing anything: a schedule that
+   * starts agents in it, a process inside it, and the deletion invariant read against HEAD. Both
+   * a dry run and a live run plan with it, so a dry run lists every deletion a live run could make.
+   */
+  private async previewDeletion(path: string): Promise<DeletionCheck> {
+    const occupied = await this.occupiedReason(path);
+    if (occupied) return { ok: false, reason: occupied };
+    const coverage = await this.deps.readWorktreeCoverage({ worktreePath: path, commit: null });
+    const invariant = checkDeletionInvariant(coverage, "plan");
+    return invariant.holds
+      ? { ok: true, invariant: invariant.detail }
+      : { ok: false, reason: invariant.reason };
+  }
+
+  /**
+   * The last step of a live deletion, after `du` and right before the archive: the read-only
+   * checks again, then a snapshot, its backup verified, and the deletion invariant read against
+   * the snapshot itself. A file written since the plan, or one the snapshot left out for any
+   * reason — its size cap, its secret filter, a rule added later — is not in the snapshot, so it
+   * keeps the worktree until a later sweep snapshots it again.
+   */
+  private async confirmDeletion(
+    report: DoneJanitorSweepReport,
+    path: string,
+    reason: string,
+  ): Promise<DeletionCheck> {
+    const occupied = await this.occupiedReason(path);
+    if (occupied) return { ok: false, reason: occupied };
+    const snapshot = await this.takeSnapshot(report, path, reason);
+    if (snapshot.kind === "failed") {
       return {
-        kind: "archive",
-        deletesDirectory: true,
-        detail: `${safety.reason}, backed up first by a snapshot`,
+        ok: false,
+        reason: `its work is at risk and could not be snapshotted: ${snapshot.error}`,
       };
     }
-    // Taken whether or not the directory then goes: it saves what it can either way.
-    const snapshot = await this.takeSnapshot(report, path, snapshotReason);
-    const uncovered = describeUncoveredWork({ snapshot, gaps });
-    if (uncovered) return keep(uncovered);
-    const backup =
-      snapshot.kind === "snapshotted" ? `backed up at ${snapshot.ref}` : "nothing left at risk";
-    return { kind: "archive", deletesDirectory: true, detail: `${safety.reason}, ${backup}` };
+    if (snapshot.kind === "nothing-at-risk") {
+      const coverage = await this.deps.readWorktreeCoverage({ worktreePath: path, commit: null });
+      const invariant = checkDeletionInvariant(coverage, "head");
+      return invariant.holds
+        ? { ok: true, invariant: invariant.detail }
+        : { ok: false, reason: invariant.reason };
+    }
+    const omitted = describeSnapshotOmissions(snapshot);
+    if (omitted) return { ok: false, reason: omitted };
+    const unverified = await this.deps.verifyBackup({ worktreePath: path, snapshot });
+    if (unverified) return { ok: false, reason: `its backup is not verified: ${unverified}` };
+    const coverage = await this.deps.readWorktreeCoverage({
+      worktreePath: path,
+      commit: snapshot.commit,
+    });
+    const invariant = checkDeletionInvariant(coverage, "snapshot");
+    return invariant.holds
+      ? {
+          ok: true,
+          invariant: `${invariant.detail}; backed up at ${snapshot.ref}, ${describeOffsite(snapshot.offsite)}`,
+        }
+      : { ok: false, reason: invariant.reason };
+  }
+
+  /**
+   * Something that will use the directory again, or is using it now: a schedule that starts
+   * agents in it, or any process with its cwd, its executable or a file open inside it. Null when
+   * nothing is. A process scan that fails is a reason too.
+   */
+  private async occupiedReason(path: string): Promise<string | null> {
+    const schedules = (await this.deps.listScheduledCwds()).filter((cwd) =>
+      isRealpathInsideRoot(path, cwd),
+    );
+    if (schedules.length > 0) return `${schedules.length} schedule(s) start agents in it`;
+    const scan = await this.deps.listProcessesInside(path);
+    if (scan.kind === "failed") return `the processes inside it could not be listed: ${scan.error}`;
+    const [first] = scan.processes;
+    if (!first) return null;
+    const others = scan.processes.length > 1 ? ` and ${scan.processes.length - 1} more` : "";
+    return `a process runs inside it: ${first.command} (pid ${first.pid})${others}`;
+  }
+
+  /** The reason a failed snapshot at or around `path` this sweep keeps it; null when none did. */
+  private snapshotFailureAt(path: string): string | null {
+    for (const [failedPath, error] of this.snapshotFailures) {
+      if (overlaps(path, failedPath)) {
+        return `its work is at risk and could not be snapshotted: ${error}`;
+      }
+    }
+    return null;
   }
 
   /**
@@ -1073,12 +1200,11 @@ export class AgentDoneJanitor {
           path: plan.path,
           reason: "its agents are archived, but this sweep's deletion budget is spent; next sweep",
         });
-      } else if (config.dryRun) {
-        report.entries.push(this.describePlan(plan, true, why));
+      } else {
+        // Spent on the attempt, as in a dry run, so a live sweep never deletes past its dry run.
         if (plan.kind === "reclaim") deletions += 1;
-      } else if (await this.reclaim(report, plan, why)) {
-        deletedWorkspaceIds.add(workspaceId);
-        deletions += 1;
+        if (config.dryRun) report.entries.push(this.describePlan(plan, true, why));
+        else if (await this.reclaim(report, plan, why)) deletedWorkspaceIds.add(workspaceId);
       }
     }
     return deletedWorkspaceIds;
@@ -1273,11 +1399,8 @@ export class AgentDoneJanitor {
     if (!(await this.deps.isPaseoOwnedWorktreePath(path))) {
       return keep("its directory is outside the Paseo worktrees root");
     }
-    for (const [failedPath, error] of this.snapshotFailures) {
-      if (overlaps(path, failedPath)) {
-        return keep(`its work is at risk and could not be snapshotted: ${error}`);
-      }
-    }
+    const failed = this.snapshotFailureAt(path);
+    if (failed) return keep(failed);
     const conflict = directoryConflict(workspace, path, workspaces, views, archivingIds);
     if (conflict) return keep(conflict);
     const terminals = await this.deps.countTerminals(workspaceId);
@@ -1287,7 +1410,15 @@ export class AgentDoneJanitor {
       baseBranch: workspace.baseBranch,
     });
     if (!safety.safe) return keep(safety.reason);
-    return { kind: "reclaim", workspace, path, branch: safety.branch };
+    const preview = await this.previewDeletion(path);
+    if (!preview.ok) return keep(preview.reason);
+    return {
+      kind: "reclaim",
+      workspace,
+      path,
+      branch: safety.branch,
+      invariant: preview.invariant,
+    };
   }
 
   private describePlan(plan: WorkspacePlan, dryRun: boolean, why?: string): DoneJanitorReportEntry {
@@ -1299,14 +1430,12 @@ export class AgentDoneJanitor {
         reason: plan.reason,
       };
     }
-    const branch = plan.branch
-      ? `branch ${plan.branch} is merged or pushed`
-      : "HEAD is merged or pushed";
     return {
       action: dryRun ? "would-delete" : "deleted",
       workspaceId: plan.workspace.workspaceId,
       path: plan.path,
-      reason: `${why ? `${why}; ` : ""}clean tree and ${branch}`,
+      reason: `${why ? `${why}; ` : ""}${describeCleanTree(plan.branch)}`,
+      invariant: plan.invariant,
     };
   }
 
@@ -1328,26 +1457,30 @@ export class AgentDoneJanitor {
       );
       return false;
     }
-    // The git gate passed, but it counts a commit on the local base branch as safe; the snapshot
-    // keeps a copy anyway, and a failure keeps the worktree.
-    const snapshotError = await this.snapshot(
+    // `du` first: the last check has to be the last thing before the archive. The git gate
+    // passed, but it counts a commit on the local base branch as safe; the snapshot keeps a copy.
+    const bytes = await this.deps.measureBytes(plan.path);
+    const check = await this.confirmDeletion(
       report,
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
     );
-    if (snapshotError) {
+    if (!check.ok) {
       report.entries.push({
         action: "kept-workspace",
         workspaceId: plan.workspace.workspaceId,
         path: plan.path,
-        reason: `its work is at risk and could not be snapshotted: ${snapshotError}`,
+        reason: check.reason,
       });
       return false;
     }
-    const bytes = await this.deps.measureBytes(plan.path);
     try {
       const result = await this.deps.reclaimWorkspace(plan.workspace.workspaceId);
-      const entry = { ...this.describePlan(plan, false, why), bytes };
+      const entry = {
+        ...this.describePlan(plan, false, why),
+        invariant: check.invariant,
+        bytes,
+      };
       if (!result.removedDirectory) {
         entry.action = "kept-workspace";
         entry.reason = "archived the workspace, but the directory was not removed (see daemon log)";
@@ -1361,6 +1494,7 @@ export class AgentDoneJanitor {
           branch: plan.branch,
           bytes,
           removedDirectory: result.removedDirectory,
+          invariant: check.invariant,
           reason: why,
         },
         "Done janitor: reclaimed a workspace",
@@ -1437,7 +1571,7 @@ export class AgentDoneJanitor {
       const subject = entry.agentId ?? entry.workspaceId ?? entry.projectId ?? entry.path ?? "";
       const key = `${subject}:${entry.action.replace(/^would-/, "")}`;
       seen.add(key);
-      const line = `${entry.action}:${entry.reason}`;
+      const line = `${entry.action}:${entry.reason}:${entry.invariant ?? ""}`;
       if (this.lastLogged.get(key) === line) continue;
       this.lastLogged.set(key, line);
       if (entry.action === "not-done") continue;
@@ -1512,6 +1646,46 @@ function describeIdleWorkspace(
     path: workspace.worktreeRoot ?? workspace.cwd,
     reason,
   };
+}
+
+/** The rule that made a workspace idle, without its idle time: that is `idleFor`. */
+function describeIdleRule(
+  verdict: Extract<WorkspaceSweepVerdict, { kind: "idle" }>,
+  sweep: ResolvedWorkspaceSweepConfig,
+): string {
+  switch (verdict.rule) {
+    case "fixer":
+      return verdict.reason;
+    case "idle":
+      return `idle past ${formatDuration(sweep.idleMs)}`;
+    case "empty":
+      return `no agents and no git checkout, idle past ${formatDuration(sweep.emptyIdleMs)}`;
+  }
+}
+
+function describeCleanTree(branch: string | null): string {
+  return `clean tree and ${branch ? `branch ${branch} is merged or pushed` : "HEAD is merged or pushed"}`;
+}
+
+/**
+ * The untracked files a snapshot reports it left out: over its size cap, or, once the snapshot
+ * reports them, possible secrets. Null when it reports none. The coverage read after it would
+ * find them too; this names why.
+ */
+function describeSnapshotOmissions(snapshot: SnapshottedWorktree): string | null {
+  const secrets = snapshot.possibleSecrets ?? [];
+  const parts = [
+    snapshot.skippedFiles.length > 0
+      ? `${snapshot.skippedFiles.length} over its size cap (${listSome(snapshot.skippedFiles)})`
+      : null,
+    secrets.length > 0 ? `${secrets.length} possible secret(s) (${listSome(secrets)})` : null,
+  ].filter((part): part is string => part !== null);
+  return parts.length > 0 ? `the snapshot left out untracked files: ${parts.join(", ")}` : null;
+}
+
+function listSome(items: readonly string[]): string {
+  const shown = items.slice(0, 3).join(", ");
+  return items.length > 3 ? `${shown}, …` : shown;
 }
 
 function describeIdleProject(

@@ -331,7 +331,7 @@ test("the idle-workspace sweep archives every idle kind, and deletes a dirty wor
       expect.objectContaining({
         action: "kept-idle-workspace",
         workspaceId: secret.workspaceId,
-        reason: expect.stringContaining("1 ignored file(s) outside build output"),
+        reason: expect.stringContaining("1 ignored path(s) that are not regenerable"),
       }),
     ]),
   );
@@ -343,7 +343,11 @@ test("the idle-workspace sweep archives every idle kind, and deletes a dirty wor
 
   // The dirty worktree is gone, and its unsaved file lives on in the backup ref.
   expect(live?.entries).toContainEqual(
-    expect.objectContaining({ action: "deleted", workspaceId: dirty.workspaceId }),
+    expect.objectContaining({
+      action: "deleted",
+      workspaceId: dirty.workspaceId,
+      invariant: expect.stringContaining("holds: every file is in the verified snapshot"),
+    }),
   );
   expect(existsSync(dirty.dir)).toBe(false);
   const refs = execFileSync("git", ["for-each-ref", "--format=%(refname)", "refs/backup/"], {

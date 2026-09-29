@@ -252,9 +252,11 @@ import {
 } from "./daemon-vitals/daemon-vitals.js";
 import {
   checkWorktreeDeletionSafety,
-  readSnapshotGaps,
   readWorkspaceActivitySignals,
+  readWorktreeCoverage,
+  verifyWorktreeBackup,
 } from "./done-janitor-worktree.js";
+import { listProcessesInside } from "./worktree-process-scan.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import type { RemediationConfig } from "./remediation/config.js";
@@ -1000,6 +1002,12 @@ function createDoneJanitor(input: {
               : [],
           ),
         ),
+      listScheduledCwds: async () =>
+        (await input.scheduleService.list()).flatMap((schedule) =>
+          schedule.target.type === "new-agent" && schedule.status !== "completed"
+            ? [schedule.target.config.cwd]
+            : [],
+        ),
       getProviderHealth: (provider) =>
         readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider }),
       askAgent: (ask) => askAgentWhetherDone({ agentManager, agentStorage, logger }, ask),
@@ -1038,7 +1046,15 @@ function createDoneJanitor(input: {
           .listForWorkspace(workspaceId)
           .filter((entry) => entry.lifecycle === "running").length,
       readActivitySignals: (directory) => readWorkspaceActivitySignals(directory),
-      readSnapshotGaps: (worktreePath) => readSnapshotGaps(worktreePath),
+      readWorktreeCoverage: (read) => readWorktreeCoverage(read),
+      verifyBackup: ({ worktreePath, snapshot }) =>
+        verifyWorktreeBackup({
+          worktreePath,
+          ref: snapshot.ref,
+          commit: snapshot.commit,
+          offsite: snapshot.offsite,
+        }),
+      listProcessesInside: (directory) => listProcessesInside(directory),
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,

@@ -162,6 +162,12 @@ export type WorktreeSnapshotResult =
       unpushedCommits: number;
       /** Untracked files over the size cap, left out of the snapshot. */
       skippedFiles: readonly string[];
+      /**
+       * Untracked files left out because they look like secrets, for a snapshotter that filters
+       * them. Absent reads as none. The done janitor keeps a worktree when this is non-empty, and
+       * reads every worktree against the snapshot before deleting it whatever this says.
+       */
+      possibleSecrets?: readonly string[];
       offsite: WorktreeSnapshotOffsite;
     }
   | { kind: "failed"; worktreePath: string | null; error: string };
