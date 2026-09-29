@@ -125,11 +125,12 @@ import { assertPluginTimelineDataSize } from "./agent/agent-timeline-content.js"
 import { parsePluginClientId } from "./plugins/plugin-session-identity.js";
 import {
   projectTimelineRows,
+  selectItemsByProjectedLimit,
   selectProjectedTimelinePage,
   type TimelineProjectionEntry,
   type TimelineProjectionMode,
 } from "./agent/timeline-projection.js";
-import { buildAgentForkContextAttachment } from "./agent/activity-curator.js";
+import { buildAgentForkContextAttachment, curateAgentActivity } from "./agent/activity-curator.js";
 import { buildAgentPrompt } from "./agent/prompt-attachments.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
 import {
@@ -302,6 +303,8 @@ type ProviderSubagentManagerEvent = Extract<
 // TODO: Remove once all app store clients are on >=0.1.45 and understand arbitrary provider strings.
 // Clients before 0.1.45 validate providers with z.enum(["claude", "codex", "opencode"]) and reject
 // the entire session message if they encounter an unknown provider.
+/** Projected timeline entries read for an agent attached to `jev.ask`; the session clips the text. */
+const JEV_ASK_AGENT_TIMELINE_ITEMS = 40;
 const LEGACY_PROVIDER_IDS = new Set(["claude", "codex", "opencode"]);
 const MIN_VERSION_ALL_PROVIDERS = "0.1.45";
 const MIN_VERSION_EXPLICIT_WORKSPACE_RECOVERY = "0.1.105";
@@ -1056,6 +1059,19 @@ export class Session {
       host: { emit: (msg) => this.emit(msg) },
       service: jev,
       logger: this.sessionLogger,
+      readAgentThread: (agentId) => {
+        const agent = this.agentManager.getAgent(agentId);
+        if (!agent) return null;
+        const recent = selectItemsByProjectedLimit({
+          items: this.agentManager.getTimeline(agentId),
+          direction: "tail",
+          limit: JEV_ASK_AGENT_TIMELINE_ITEMS,
+        });
+        return {
+          title: agent.config.title ?? null,
+          activity: curateAgentActivity(recent.items),
+        };
+      },
     });
     this.agentConfigSession = new AgentConfigSession({
       host: {
@@ -2264,6 +2280,8 @@ export class Session {
         return this.jevSession.handleScopeCheck(msg);
       case "jev.decisions.list.request":
         return this.jevSession.handleDecisionsList(msg);
+      case "jev.ask.request":
+        return this.jevSession.handleAsk(msg);
       default:
         return undefined;
     }

@@ -1736,6 +1736,8 @@ export class VoiceAssistantWebSocketServer {
         agentContextUsage: true,
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
         jev: true,
+        // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
+        jevAsk: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.

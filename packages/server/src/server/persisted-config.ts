@@ -788,6 +788,15 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    askJev: z
+      .object({
+        enabled: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        maxConcurrent: z.number().optional(),
+        maxUsdPerDay: z.number().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

@@ -42,8 +42,9 @@ const BASE_STATUS: JevStatus = {
     agentTools: { enabled: true, shadow: false },
     compactionTiming: FEATURE_STATUS,
     stallJudgment: FEATURE_STATUS,
+    askJev: { enabled: true, shadow: false },
   },
-  lanes: { control: LANE_STATUS, agentTools: LANE_STATUS },
+  lanes: { control: LANE_STATUS, agentTools: LANE_STATUS, interactive: LANE_STATUS },
   spawnHint: { applyHard: false, applyRole: false },
   agentTools: { assignShare: 0.5 },
   todayByFeature: {
@@ -53,6 +54,7 @@ const BASE_STATUS: JevStatus = {
     agentTools: SPEND_TOTALS,
     compactionTiming: SPEND_TOTALS,
     stallJudgment: SPEND_TOTALS,
+    askJev: SPEND_TOTALS,
   },
   last7Days: [],
 };

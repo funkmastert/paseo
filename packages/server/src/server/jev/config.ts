@@ -53,6 +53,14 @@ export interface ResolvedJevConfig {
     cutPoint: boolean;
   };
   stallJudgment: ResolvedJevFeatureConfig & { loopWatch: boolean };
+  /** Feature 15, the `interactive` lane. No shadow mode: a person asked, so they get the answer. */
+  askJev: {
+    enabled: boolean;
+    shadow: false;
+    timeoutMs: number;
+    maxConcurrent: number;
+    maxUsdPerDay: number;
+  };
 }
 
 export const JEV_PROVIDER_DEFAULTS: Record<
@@ -90,6 +98,9 @@ const MIN_REQUESTS_PER_SECOND = 1;
 const DEFAULT_REQUESTS_PER_SECOND = 10;
 const ALLOWED_ENDPOINT_HOSTS = new Set(["openrouter.ai", "api.typesafe.ai"]);
 const DEFAULT_ENV_FILE = "~/.config/paseo/jev.env";
+/** A person is waiting on the answer, and a slow call holds an `interactive` slot. */
+export const JEV_ASK_MAX_TIMEOUT_MS = 30_000;
+const JEV_ASK_MIN_TIMEOUT_MS = 1_000;
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -209,6 +220,7 @@ export function resolveJevConfig(
   const agentTools = record(section["agentTools"]);
   const compactionTiming = record(section["compactionTiming"]);
   const stallJudgment = record(section["stallJudgment"]);
+  const askJev = record(section["askJev"]);
 
   return {
     enabled: bool(section["enabled"], true),
@@ -276,6 +288,15 @@ export function resolveJevConfig(
     stallJudgment: {
       ...resolveFeature(stallJudgment, { enabled: true, shadow: true, timeoutMs: 5000 }),
       loopWatch: bool(stallJudgment["loopWatch"], true),
+    },
+    askJev: {
+      enabled: bool(askJev["enabled"], true),
+      shadow: false,
+      timeoutMs: Math.floor(
+        numberInRange(askJev["timeoutMs"], 15_000, JEV_ASK_MIN_TIMEOUT_MS, JEV_ASK_MAX_TIMEOUT_MS),
+      ),
+      maxConcurrent: Math.floor(positiveNumber(askJev["maxConcurrent"], 2)),
+      maxUsdPerDay: positiveNumber(askJev["maxUsdPerDay"], 0.25),
     },
   };
 }

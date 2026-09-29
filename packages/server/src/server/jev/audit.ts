@@ -34,6 +34,11 @@ export interface JevAuditLine {
   feature: JevFeatureId;
   lane: JevLane;
   callSite: string;
+  /**
+   * `person` for the `interactive` lane: a question asked over `jev.ask`, which no daemon code
+   * calls. Everything else the daemon asked on its own.
+   */
+  initiator: "person" | "daemon";
   model: string;
   outcome: "answered" | "shadow" | "failed";
   reason: string | null;
@@ -121,6 +126,7 @@ export function buildJevAuditLine(input: BuildJevAuditLineInput): JevAuditLine {
     feature: input.ledger.feature,
     lane: input.lane,
     callSite: input.ledger.callSite,
+    initiator: input.lane === "interactive" ? "person" : "daemon",
     model: input.ledger.model,
     outcome: input.ledger.outcome,
     reason: input.ledger.reason,

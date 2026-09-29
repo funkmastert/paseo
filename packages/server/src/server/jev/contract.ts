@@ -85,14 +85,16 @@ export type JevFeatureId =
   | "notificationTriage"
   | "agentTools"
   | "compactionTiming"
-  | "stallJudgment";
+  | "stallJudgment"
+  /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
+  | "askJev";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
- * the features that steer the daemon. `agentTools` is its own lane; every other feature is
- * `control`.
+ * the features that steer the daemon. `agentTools` is its own lane, a person's questions from the
+ * app (`askJev`) are `interactive`, and every other feature is `control`.
  */
-export type JevLane = "control" | "agentTools";
+export type JevLane = "control" | "agentTools" | "interactive";
 
 /**
  * What a call's state is about, for the D7 exclusion (docs/jev.md, "The D7 exclusion"). Required

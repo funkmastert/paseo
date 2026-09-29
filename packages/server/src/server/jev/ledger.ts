@@ -23,8 +23,9 @@ const KNOWN_FEATURES = new Set<JevFeatureId>([
   "agentTools",
   "compactionTiming",
   "stallJudgment",
+  "askJev",
 ]);
-const KNOWN_LANES = new Set<JevLane>(["control", "agentTools"]);
+const KNOWN_LANES = new Set<JevLane>(["control", "agentTools", "interactive"]);
 
 function isJevFeatureId(value: string): value is JevFeatureId {
   return KNOWN_FEATURES.has(value as JevFeatureId);
@@ -294,13 +295,11 @@ export class JevLedger {
     const today = new Date(this.now());
     for (let offset = 6; offset >= 0; offset -= 1) {
       const day = localDay(addLocalDays(today, -offset));
-      const record = this.days.get(day);
-      const control = record?.byLane.control;
-      const agentTools = record?.byLane.agentTools;
+      const lanes = Object.values(this.days.get(day)?.byLane ?? {});
       result.push({
         day,
-        calls: (control?.calls ?? 0) + (agentTools?.calls ?? 0),
-        usd: (control?.usd ?? 0) + (agentTools?.usd ?? 0),
+        calls: lanes.reduce((sum, totals) => sum + (totals?.calls ?? 0), 0),
+        usd: lanes.reduce((sum, totals) => sum + (totals?.usd ?? 0), 0),
       });
     }
     return result;

@@ -73,6 +73,69 @@ describe("jev.decide", () => {
   });
 });
 
+describe("jev.ask", () => {
+  test("routes a request with each question type through the session inbound union", () => {
+    for (const question of [
+      { type: "noul", instructions: "Is the build broken?" },
+      { type: "choice", instructions: "Which area?", criteria: { parser: "Parsing", other: null } },
+      { type: "score", instructions: "How risky?", criteria: ["Low", "Medium", "High"] },
+    ]) {
+      const parsed = SessionInboundMessageSchema.parse({
+        type: "jev.ask.request",
+        requestId: "req-1",
+        context: "npm run build exits 2",
+        question,
+        agentId: "agent-1",
+        deadlineMs: 15_000,
+      });
+      expect(parsed.type).toBe("jev.ask.request");
+    }
+  });
+
+  test("routes an answered outcome and a refusal through the session outbound union", () => {
+    const answered = {
+      type: "jev.ask.response",
+      payload: {
+        requestId: "req-1",
+        callId: "call-1",
+        outcome: "answered",
+        reason: null,
+        answer: { type: "noul", noul: 0.82 },
+        model: "typesafe/jev-1.13",
+        elapsedMs: 312,
+        cost: { usd: 0.0001, source: "reported" },
+        redactions: 1,
+      },
+    };
+    const refused = {
+      type: "jev.ask.response",
+      payload: {
+        requestId: "req-2",
+        callId: "call-2",
+        outcome: "unavailable",
+        reason: "excluded",
+        answer: null,
+        model: null,
+        elapsedMs: 3,
+        cost: null,
+        redactions: 0,
+      },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(answered)).toEqual(answered);
+    expect(SessionOutboundMessageSchema.parse(refused)).toEqual(refused);
+  });
+
+  test("advertises the capability on server_info", () => {
+    const parsed = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { jev: true, jevAsk: true },
+    });
+    expect(parsed.features?.jevAsk).toBe(true);
+  });
+});
+
 describe("jev.status", () => {
   const status = {
     available: true,

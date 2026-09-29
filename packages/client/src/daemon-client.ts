@@ -169,7 +169,7 @@ import {
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
 import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
-import type { JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
+import type { JevQuestion, JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
   BrowserAutomationExecuteResponse,
@@ -505,6 +505,10 @@ export type JevScopeCheckPayload = Extract<
 export type JevDecisionsListPayload = Extract<
   SessionOutboundMessage,
   { type: "jev.decisions.list.response" }
+>["payload"];
+export type JevAskPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.ask.response" }
 >["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
@@ -988,6 +992,10 @@ const JEV_DEFAULT_DEADLINE_MS = 1_500; // spawnHint's default deadline, the only
 const JEV_DECIDE_TIMEOUT_MARGIN_MS = 500;
 const JEV_MAX_RPC_TIMEOUT_MS = 20_000;
 const JEV_DEFAULT_RPC_TIMEOUT_MS = 10_000;
+// `jev.ask` has a person waiting, not a hook budget: the daemon's own ceiling is 30 s
+// (`agents.jev.askJev.timeoutMs`), and the reply needs a moment past the deadline to arrive.
+const JEV_ASK_DEFAULT_DEADLINE_MS = 15_000;
+const JEV_ASK_TIMEOUT_MARGIN_MS = 2_000;
 const PUSH_TOKEN_REVOCATION_TIMEOUT_MS = 2_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_LIVENESS_TIMEOUT_MS = 5000;
@@ -5265,6 +5273,30 @@ export class DaemonClient {
         options?.timeout ??
         Math.min(deadlineMs + JEV_DECIDE_TIMEOUT_MARGIN_MS, JEV_MAX_RPC_TIMEOUT_MS),
       message: { type: "jev.decide.request", ...input },
+    });
+  }
+
+  /**
+   * Feature 15 (docs/jev.md, "Feature 15: Ask JEV"): a person's own question. The daemon sends it
+   * through the same JEV service as every feature, on the `interactive` lane. The default timeout
+   * is the deadline plus a margin.
+   */
+  async jevAsk(
+    input: {
+      context: string;
+      question: JevQuestion;
+      agentId?: string;
+      deadlineMs?: number;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevAskPayload> {
+    // COMPAT(jevAsk): callers gate on `server_info.features.jevAsk`; an older daemon answers an
+    // unknown request type with an `unknown_schema` rpc_error.
+    const deadlineMs = Math.max(0, input.deadlineMs ?? JEV_ASK_DEFAULT_DEADLINE_MS);
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? deadlineMs + JEV_ASK_TIMEOUT_MARGIN_MS,
+      message: { type: "jev.ask.request", ...input, deadlineMs },
     });
   }
 

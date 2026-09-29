@@ -208,6 +208,51 @@ export const JevDecisionsListResponseSchema = z.object({
   }),
 });
 
+// jev.ask
+
+// Feature 15 (docs/jev.md, "Feature 15: Ask JEV"): a person's own question from the app. It runs
+// through the same `JevService.decide` as every other feature, on its own `interactive` lane.
+// COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29. Gated on
+// `server_info.features.jevAsk`.
+export const JevAskRequestSchema = z.object({
+  type: z.literal("jev.ask.request"),
+  requestId: z.string(),
+  /** What the person pasted. Empty when the question stands alone. */
+  context: z.string(),
+  question: JevQuestionSchema,
+  /**
+   * Adds this agent's recent activity to the state. The daemon reads it; the agent, its ancestors
+   * and its descendants are then in the D7 scope.
+   */
+  agentId: z.string().optional(),
+  deadlineMs: z.number().optional(),
+});
+
+export const JevAskCostSchema = z.object({
+  usd: z.number().nullable(),
+  // "reported" | "estimated" | "fake" | "unknown"
+  source: z.string(),
+});
+
+export const JevAskResponseSchema = z.object({
+  type: z.literal("jev.ask.response"),
+  payload: z.object({
+    requestId: z.string(),
+    callId: z.string(),
+    // "answered" | "unavailable" | "failed"
+    outcome: z.string(),
+    // A `JevUnavailableReason` or `JevFailureReason` from the daemon's contract; null when answered.
+    reason: z.string().nullable(),
+    answer: JevAnswerSchema.nullable(),
+    model: z.string().nullable(),
+    elapsedMs: z.number(),
+    /** Null when nothing was sent. */
+    cost: JevAskCostSchema.nullable(),
+    /** How many values redaction replaced before sending. */
+    redactions: z.number(),
+  }),
+});
+
 export type JevInstructions = z.infer<typeof JevInstructionsSchema>;
 export type JevNoulQuestion = z.infer<typeof JevNoulQuestionSchema>;
 export type JevChoiceQuestion = z.infer<typeof JevChoiceQuestionSchema>;
@@ -233,3 +278,6 @@ export type JevScopeCheckResponse = z.infer<typeof JevScopeCheckResponseSchema>;
 export type JevDecisionRecord = z.infer<typeof JevDecisionRecordSchema>;
 export type JevDecisionsListRequest = z.infer<typeof JevDecisionsListRequestSchema>;
 export type JevDecisionsListResponse = z.infer<typeof JevDecisionsListResponseSchema>;
+export type JevAskRequest = z.infer<typeof JevAskRequestSchema>;
+export type JevAskResponse = z.infer<typeof JevAskResponseSchema>;
+export type JevAskCost = z.infer<typeof JevAskCostSchema>;

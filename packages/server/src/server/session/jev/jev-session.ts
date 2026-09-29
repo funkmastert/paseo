@@ -3,6 +3,7 @@ import type {
   JevAnswer,
   JevDecisionRecord,
   JevOutcome,
+  JevQuestion,
   JevQuestions,
   JevService,
   JevState,
@@ -12,11 +13,31 @@ interface JevSessionLogger {
   warn: (obj: object, msg?: string) => void;
 }
 
+/** An agent's recent activity, for `jev.ask` with an `agentId`. Null when the agent is not loaded. */
+export interface JevAskAgentThread {
+  title: string | null;
+  activity: string;
+}
+
 export interface JevSessionOptions {
   host: { emit: (message: SessionOutboundMessage) => void };
   service: JevService;
   logger: JevSessionLogger;
+  /**
+   * Reads a loaded agent's recent activity. Never loads one: resuming an agent from storage starts
+   * its provider, which a question must not do.
+   */
+  readAgentThread?: (agentId: string) => JevAskAgentThread | null;
 }
+
+/** The question id sent for `jev.ask`. JEV never sees ids; it reads the instructions. */
+export const JEV_ASK_QUESTION_ID = "answer";
+/** The tail of an attached agent's activity that goes in the state. */
+export const JEV_ASK_AGENT_ACTIVITY_CHARS = 8_000;
+/** The decision list's question label is clipped like a row title. */
+const JEV_ASK_DECISION_QUESTION_CHARS = 120;
+
+type JevAskPayload = Extract<SessionOutboundMessage, { type: "jev.ask.response" }>["payload"];
 
 /** The status shape reported when `service.status()` itself throws: unavailable, nothing known. */
 const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
@@ -32,6 +53,7 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
     agentTools: { enabled: false, shadow: false },
     compactionTiming: { enabled: false, shadow: true },
     stallJudgment: { enabled: false, shadow: true },
+    askJev: { enabled: false, shadow: false },
   },
   lanes: {
     control: {
@@ -50,6 +72,21 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       resetsAt: new Date(0).toISOString(),
     },
     agentTools: {
+      today: {
+        calls: 0,
+        answered: 0,
+        failed: 0,
+        unavailable: 0,
+        inputTokens: 0,
+        usd: 0,
+        usdSource: "none",
+      },
+      maxUsdPerDay: 0,
+      exhausted: false,
+      circuit: "closed",
+      resetsAt: new Date(0).toISOString(),
+    },
+    interactive: {
       today: {
         calls: 0,
         answered: 0,
@@ -122,6 +159,15 @@ const UNAVAILABLE_STATUS: ReturnType<JevService["status"]> = {
       usd: 0,
       usdSource: "none",
     },
+    askJev: {
+      calls: 0,
+      answered: 0,
+      failed: 0,
+      unavailable: 0,
+      inputTokens: 0,
+      usd: 0,
+      usdSource: "none",
+    },
   },
   last7Days: [],
 };
@@ -156,7 +202,89 @@ function taskClassConfidence(answers: Record<string, JevAnswer>): number | null 
   return answer.type === "choice" || answer.type === "score" ? answer.confidence : null;
 }
 
-/** Serves `jev.decide`, `jev.status`, `jev.scope.check` and `jev.decisions.list` (docs/jev.md, "RPCs"). */
+/** The question text a person typed, from a question's `instructions`. */
+function questionLabel(question: JevQuestion): string {
+  const text =
+    typeof question.instructions === "string"
+      ? question.instructions
+      : JSON.stringify(question.instructions);
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > JEV_ASK_DECISION_QUESTION_CHARS
+    ? `${oneLine.slice(0, JEV_ASK_DECISION_QUESTION_CHARS - 1)}…`
+    : oneLine;
+}
+
+function clipTail(text: string, maxChars: number): string {
+  return text.length > maxChars ? `…${text.slice(text.length - maxChars)}` : text;
+}
+
+function refusedAskPayload(
+  requestId: string,
+  reason: string,
+  startedAt: number,
+): Omit<JevAskPayload, "requestId"> {
+  return {
+    callId: `rejected:${requestId}`,
+    outcome: "failed",
+    reason,
+    answer: null,
+    model: null,
+    elapsedMs: Date.now() - startedAt,
+    cost: null,
+    redactions: 0,
+  };
+}
+
+/** The wire payload for an outcome. Cost and model only when something was sent. */
+function askPayloadFor(outcome: JevOutcome, startedAt: number): Omit<JevAskPayload, "requestId"> {
+  switch (outcome.kind) {
+    case "answered":
+    case "shadow": {
+      const answer = outcome.answers[JEV_ASK_QUESTION_ID] ?? null;
+      return {
+        callId: outcome.callId,
+        outcome: answer ? "answered" : "failed",
+        reason: answer ? null : "contract",
+        answer,
+        model: outcome.meta.model,
+        elapsedMs: outcome.meta.elapsedMs,
+        cost: outcome.meta.cost,
+        redactions: outcome.meta.redactions,
+      };
+    }
+    case "unavailable":
+      return {
+        callId: outcome.callId,
+        outcome: "unavailable",
+        reason: outcome.reason,
+        answer: null,
+        model: null,
+        elapsedMs: Date.now() - startedAt,
+        cost: null,
+        redactions: 0,
+      };
+    case "failed": {
+      // A failure after sending still cost something; one that stopped before sending did not.
+      const meta = outcome.meta;
+      const sent = meta !== null && meta.attempts > 0;
+      return {
+        callId: outcome.callId,
+        outcome: "failed",
+        reason: outcome.reason,
+        answer: null,
+        model: sent ? meta.model : null,
+        elapsedMs: meta?.elapsedMs ?? Date.now() - startedAt,
+        cost: sent ? meta.cost : null,
+        redactions: meta?.redactions ?? 0,
+      };
+    }
+  }
+}
+
+/**
+ * Serves `jev.decide`, `jev.status`, `jev.scope.check`, `jev.decisions.list` (docs/jev.md, "RPCs")
+ * and `jev.ask` (docs/jev.md, "Feature 15: Ask JEV").
+ */
 export class JevSession {
   private readonly options: JevSessionOptions;
 
@@ -262,6 +390,78 @@ export class JevSession {
         model: null,
         elapsedMs: Date.now() - startedAt,
       });
+    }
+  }
+
+  /**
+   * A person's own question (feature 15). It goes through `service.decide` like every other
+   * feature, on the `interactive` lane, so the scope check, redaction, caps, ledger and audit all
+   * apply. Nothing here sends anything itself.
+   */
+  async handleAsk(msg: Extract<SessionInboundMessage, { type: "jev.ask.request" }>): Promise<void> {
+    const { host, service } = this.options;
+    const startedAt = Date.now();
+    const respond = (payload: Omit<JevAskPayload, "requestId">) =>
+      host.emit({ type: "jev.ask.response", payload: { requestId: msg.requestId, ...payload } });
+
+    try {
+      const state = this.askState(msg);
+      if (!state) {
+        respond(refusedAskPayload(msg.requestId, "agent-unavailable", startedAt));
+        return;
+      }
+      const question = msg.question as JevQuestion;
+      const outcome = await service.decide({
+        feature: "askJev",
+        callSite: "app.ask-jev",
+        state,
+        questions: { [JEV_ASK_QUESTION_ID]: question },
+        // Pasted text has no path to check; the text scan covers it. An attached agent brings its
+        // own cwd, its ancestors' and its descendants'.
+        scope: { cwds: [], agentIds: msg.agentId ? [msg.agentId] : [] },
+        subject: msg.agentId ? { agentId: msg.agentId } : undefined,
+        deadlineMs: msg.deadlineMs,
+      });
+      const payload = askPayloadFor(outcome, startedAt);
+      if (msg.agentId && payload.answer) {
+        service.decisions.record({
+          agentId: msg.agentId,
+          callId: outcome.callId,
+          feature: "askJev",
+          question: questionLabel(question),
+          verdict: formatAnswer(payload.answer),
+          confidence: payload.answer.type === "noul" ? null : payload.answer.confidence,
+          action: "asked by a person in the app",
+          applied: true,
+        });
+      }
+      respond(payload);
+    } catch {
+      // Never log the context or the question: they are the person's own text.
+      respond(refusedAskPayload(msg.requestId, "invalid-request", startedAt));
+    }
+  }
+
+  /** The state to send, or null when the attached agent is not loaded here. A local read only. */
+  private askState(
+    msg: Extract<SessionInboundMessage, { type: "jev.ask.request" }>,
+  ): JevState | null {
+    const state: Record<string, unknown> = { context: msg.context };
+    if (!msg.agentId) return state;
+    const thread = this.readAgentThread(msg.agentId);
+    if (!thread) return null;
+    state["agent"] = {
+      title: thread.title ?? "",
+      recent_activity: clipTail(thread.activity, JEV_ASK_AGENT_ACTIVITY_CHARS),
+    };
+    return state;
+  }
+
+  private readAgentThread(agentId: string): JevAskAgentThread | null {
+    try {
+      return this.options.readAgentThread?.(agentId) ?? null;
+    } catch {
+      return null;
     }
   }
 
