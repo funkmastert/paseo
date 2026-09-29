@@ -252,7 +252,7 @@ import {
 } from "./daemon-vitals/daemon-vitals.js";
 import {
   checkWorktreeDeletionSafety,
-  listIgnoredEntries,
+  readSnapshotGaps,
   readWorkspaceActivitySignals,
 } from "./done-janitor-worktree.js";
 import { AgentRefocus, type RefocusConfig } from "./agent/agent-refocus.js";
@@ -1038,7 +1038,7 @@ function createDoneJanitor(input: {
           .listForWorkspace(workspaceId)
           .filter((entry) => entry.lifecycle === "running").length,
       readActivitySignals: (directory) => readWorkspaceActivitySignals(directory),
-      listIgnoredEntries: (worktreePath) => listIgnoredEntries(worktreePath),
+      readSnapshotGaps: (worktreePath) => readSnapshotGaps(worktreePath),
       snapshotWorktree: (request) => input.worktreeSnapshotter.snapshot(request),
       listProjects: () => input.projectRegistry.list(),
       probeProjectRoot,

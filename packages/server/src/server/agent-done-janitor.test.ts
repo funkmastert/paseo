@@ -115,6 +115,7 @@ function harness(input: {
   /** The directory's activity; absent: nothing readable (no git, no directory). */
   signals?: (directory: string) => WorkspaceActivitySignals;
   ignored?: (worktreePath: string) => string[] | null;
+  nestedRepositories?: string[];
   runningScripts?: number;
 }): Harness {
   let now = NOW;
@@ -202,7 +203,12 @@ function harness(input: {
     countRunningScripts: async () => input.runningScripts ?? 0,
     readActivitySignals: async (directory) =>
       input.signals?.(directory) ?? { headCommitMs: null, directoryMtimeMs: null },
-    listIgnoredEntries: async (worktreePath) => (input.ignored ? input.ignored(worktreePath) : []),
+    readSnapshotGaps: async (worktreePath) => {
+      const ignored = input.ignored ? input.ignored(worktreePath) : [];
+      return ignored === null
+        ? null
+        : { ignored, nestedRepositories: input.nestedRepositories ?? [] };
+    },
     snapshotWorktree: async ({ cwd }) => {
       events.push(`snapshot:${cwd}`);
       return input.snapshot?.(cwd) ?? { kind: "nothing-at-risk", worktreePath: cwd };
@@ -1946,7 +1952,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
         expect.objectContaining({
           action: "kept-idle-workspace",
           workspaceId: "ws-1",
-          reason: "idle for 4d; its work is at risk and could not be snapshotted: disk full",
+          reason: "its work is at risk and could not be snapshotted: disk full",
         }),
       );
     });
@@ -1971,10 +1977,27 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(report?.entries).toContainEqual(
         expect.objectContaining({
           action: "kept-idle-workspace",
-          reason:
-            "idle for 4d; 1 ignored file(s) outside build output that no snapshot covers (.env)",
+          reason: "1 ignored file(s) outside build output that no snapshot covers (.env)",
         }),
       );
+    });
+
+    test("dirty with an untracked nested repository: kept", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        safety: {
+          safe: false,
+          reason: "it has 1 uncommitted or untracked file(s)",
+          atRisk: "dirty",
+        },
+        snapshot: snapshotted,
+        nestedRepositories: ["vendor/tool/"],
+      });
+
+      await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
     });
 
     test("unpushed with a backup of that exact state: archived after the snapshot", async () => {
@@ -2018,7 +2041,7 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
       expect(report?.entries).toContainEqual(
         expect.objectContaining({
           action: "kept-idle-workspace",
-          reason: "idle for 4d; it is locked with git worktree lock",
+          reason: "it is locked with git worktree lock",
         }),
       );
     });

@@ -212,17 +212,29 @@ export async function readWorkspaceActivitySignals(
 }
 
 /**
- * Every ignored path in the worktree, a wholly ignored directory as one `dir/` entry, so
- * `node_modules` costs one line. Null when git cannot list them: that is not the same as none.
+ * What a work snapshot cannot hold: every ignored path, a wholly ignored directory as one `dir/`
+ * entry so `node_modules` costs one line, and every untracked nested repository, which git lists
+ * as `dir/` where an ordinary untracked directory is listed file by file. Null when git cannot
+ * list them: that is not the same as none.
  */
-export async function listIgnoredEntries(
+export async function readSnapshotGaps(
   worktreePath: string,
   runGit: RunGitCommand = runGitCommand,
-): Promise<string[] | null> {
+): Promise<{ ignored: string[]; nestedRepositories: string[] } | null> {
   if (!existsSync(worktreePath)) return null;
-  const listing = await createReadOnlyGit(
-    worktreePath,
-    runGit,
-  )(["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"]);
-  return listing === null ? null : listing.split("\0").filter(Boolean);
+  const git = createReadOnlyGit(worktreePath, runGit);
+  const ignored = await git([
+    "ls-files",
+    "-z",
+    "--others",
+    "--ignored",
+    "--exclude-standard",
+    "--directory",
+  ]);
+  const untracked = await git(["ls-files", "-z", "--others", "--exclude-standard"]);
+  if (ignored === null || untracked === null) return null;
+  return {
+    ignored: ignored.split("\0").filter(Boolean),
+    nestedRepositories: untracked.split("\0").filter((entry) => entry.endsWith("/")),
+  };
 }

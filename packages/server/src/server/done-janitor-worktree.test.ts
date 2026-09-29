@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   checkWorktreeDeletionSafety,
-  listIgnoredEntries,
+  readSnapshotGaps,
   readWorkspaceActivitySignals,
 } from "./done-janitor-worktree.js";
 
@@ -322,7 +322,7 @@ describe("readWorkspaceActivitySignals", () => {
   });
 });
 
-describe("listIgnoredEntries", () => {
+describe("readSnapshotGaps", () => {
   test("lists ignored files, and a wholly ignored directory as one entry", async () => {
     const worktree = addWorktree("ignored-list", "feature");
     commit(worktree, ".gitignore", "node_modules/\n.env\n");
@@ -331,13 +331,30 @@ describe("listIgnoredEntries", () => {
     writeFileSync(join(worktree, ".env"), "SECRET=1\n");
     writeFileSync(join(worktree, "notes.txt"), "untracked, not ignored\n");
 
-    expect((await listIgnoredEntries(worktree))?.sort()).toEqual([".env", "node_modules/"]);
+    expect(await readSnapshotGaps(worktree)).toEqual({
+      ignored: [".env", "node_modules/"],
+      nestedRepositories: [],
+    });
+  });
+
+  test("names an untracked nested repository, not an untracked directory", async () => {
+    const worktree = addWorktree("nested", "feature");
+    mkdirSync(join(worktree, "vendor", "tool"), { recursive: true });
+    git(join(worktree, "vendor", "tool"), "init", "-q");
+    writeFileSync(join(worktree, "vendor", "tool", "f.txt"), "only here\n");
+    mkdirSync(join(worktree, "drafts"));
+    writeFileSync(join(worktree, "drafts", "a.txt"), "draft\n");
+
+    expect(await readSnapshotGaps(worktree)).toEqual({
+      ignored: [],
+      nestedRepositories: ["vendor/tool/"],
+    });
   });
 
   test("a directory git cannot read lists nothing, which is not the same as none", async () => {
     const plain = join(root, "plain-ignored");
     mkdirSync(plain);
 
-    expect(await listIgnoredEntries(plain)).toBeNull();
+    expect(await readSnapshotGaps(plain)).toBeNull();
   });
 });

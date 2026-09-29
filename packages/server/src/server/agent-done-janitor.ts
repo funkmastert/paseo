@@ -35,6 +35,7 @@ import {
   type DoneJanitorWorkspaceSweepConfig,
   type IdleProjectVerdict,
   type ResolvedWorkspaceSweepConfig,
+  type SnapshotGaps,
   type WorkspaceActivitySignals,
   type WorkspaceSweepVerdict,
 } from "./agent/workspace-sweep-detector.js";
@@ -199,8 +200,8 @@ export interface DoneJanitorDependencies {
   countRunningScripts(workspaceId: string): Promise<number>;
   /** HEAD's commit time and the directory's own mtime; never the git index. */
   readActivitySignals(directory: string): Promise<WorkspaceActivitySignals>;
-  /** Ignored paths in a worktree, a wholly ignored directory as one `dir/`; null when unreadable. */
-  listIgnoredEntries(worktreePath: string): Promise<string[] | null>;
+  /** What a snapshot of the worktree cannot hold; null when git cannot list it. */
+  readSnapshotGaps(worktreePath: string): Promise<SnapshotGaps | null>;
   /**
    * Snapshots a worktree's uncommitted and unpushed work under `refs/backup/` without touching
    * it (docs/work-snapshots.md). Called before a dead agent is archived and before any worktree
@@ -546,13 +547,8 @@ export class AgentDoneJanitor {
       ? await this.planIdleWorktree(report, { workspace, path, views, workspaces, config, sweep })
       : { kind: "archive", deletesDirectory: false, detail: "record only, its directory stays" };
     if (plan.kind === "keep") {
-      report.entries.push(
-        describeIdleWorkspace(
-          workspace,
-          "kept-idle-workspace",
-          `${verdict.reason}; ${plan.reason}`,
-        ),
-      );
+      // The reason alone, no idle time: it would change the line, and re-log it, every hour.
+      report.entries.push(describeIdleWorkspace(workspace, "kept-idle-workspace", plan.reason));
       return false;
     }
     const reason = `${verdict.reason}; ${plan.detail}`;
@@ -673,9 +669,9 @@ export class AgentDoneJanitor {
     }
     if (!safety.atRisk) return keep(safety.reason);
 
-    const ignoredEntries = await this.deps.listIgnoredEntries(path);
+    const gaps = await this.deps.readSnapshotGaps(path);
     if (sweep.dryRun) {
-      const uncovered = describeUncoveredWork({ snapshot: null, ignoredEntries });
+      const uncovered = describeUncoveredWork({ snapshot: null, gaps });
       if (uncovered) return keep(uncovered);
       return {
         kind: "archive",
@@ -685,7 +681,7 @@ export class AgentDoneJanitor {
     }
     // Taken whether or not the directory then goes: it saves what it can either way.
     const snapshot = await this.takeSnapshot(report, path, snapshotReason);
-    const uncovered = describeUncoveredWork({ snapshot, ignoredEntries });
+    const uncovered = describeUncoveredWork({ snapshot, gaps });
     if (uncovered) return keep(uncovered);
     const backup =
       snapshot.kind === "snapshotted" ? `backed up at ${snapshot.ref}` : "nothing left at risk";

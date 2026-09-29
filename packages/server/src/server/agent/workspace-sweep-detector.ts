@@ -277,21 +277,31 @@ export function archiveDeletesDirectory(input: {
   workspace: Pick<DoneJanitorWorkspace, "kind" | "isPaseoOwnedWorktree">;
   pathInsidePaseoWorktrees: boolean;
 }): boolean {
-  if (input.workspace.kind !== "worktree") return false;
-  return input.workspace.isPaseoOwnedWorktree || input.pathInsidePaseoWorktrees;
+  // The flag first, whatever the kind: archive-by-scope reads it before the kind.
+  if (input.workspace.isPaseoOwnedWorktree) return true;
+  return input.workspace.kind === "worktree" && input.pathInsidePaseoWorktrees;
+}
+
+/** What a worktree holds that a snapshot cannot: see `describeUncoveredWork`. */
+export interface SnapshotGaps {
+  /** `git ls-files --others --ignored --exclude-standard --directory` entries. */
+  ignored: readonly string[];
+  /** Untracked directories that are git repositories of their own, as `dir/`. */
+  nestedRepositories: readonly string[];
 }
 
 /**
  * Why a snapshot does not back up everything a dirty or unpushed worktree holds; null when it
  * does. The snapshot (worktree-snapshot.ts) covers HEAD, tracked changes and untracked files up
  * to its size cap. It never covers ignored files, so any ignored file outside build output is
- * work that would be lost with the directory.
+ * work that would be lost with the directory, and it stores an untracked nested repository as a
+ * pointer to a commit, not its files.
  */
 export function describeUncoveredWork(input: {
-  /** Null in a dry run, which takes no snapshot: only the ignored files are judged. */
+  /** Null in a dry run, which takes no snapshot: only the gaps are judged. */
   snapshot: WorktreeSnapshotResult | null;
-  /** `git ls-files --others --ignored --exclude-standard --directory` entries; null when it failed. */
-  ignoredEntries: readonly string[] | null;
+  /** Null when git could not list them. */
+  gaps: SnapshotGaps | null;
 }): string | null {
   const { snapshot } = input;
   if (snapshot?.kind === "failed") {
@@ -300,8 +310,12 @@ export function describeUncoveredWork(input: {
   if (snapshot?.kind === "snapshotted" && snapshot.skippedFiles.length > 0) {
     return `${snapshot.skippedFiles.length} untracked file(s) too large for the snapshot (${listSome(snapshot.skippedFiles)})`;
   }
-  if (input.ignoredEntries === null) return "its ignored files could not be listed";
-  const uncovered = input.ignoredEntries.filter((entry) => !isBuildOutputPath(entry));
+  if (input.gaps === null) return "its untracked and ignored files could not be listed";
+  const { nestedRepositories } = input.gaps;
+  if (nestedRepositories.length > 0) {
+    return `${nestedRepositories.length} untracked nested repositor(ies) a snapshot holds only as a pointer (${listSome(nestedRepositories)})`;
+  }
+  const uncovered = input.gaps.ignored.filter((entry) => !isBuildOutputPath(entry));
   if (uncovered.length > 0) {
     return `${uncovered.length} ignored file(s) outside build output that no snapshot covers (${listSome(uncovered)})`;
   }
