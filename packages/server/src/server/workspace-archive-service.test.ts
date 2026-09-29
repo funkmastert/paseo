@@ -21,6 +21,7 @@ import type { AgentStorage, StoredAgentRecord } from "./agent/agent-storage.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import {
   ArchiveDirectoryMismatchError,
+  ArchiveRefusedError,
   archiveByScope,
   type ActiveWorkspaceRef,
   type ArchiveDependencies,
@@ -227,6 +228,75 @@ describe("archiveByScope", () => {
       removedDirectory: true,
     });
     expect(existsSync(worktree.worktreePath)).toBe(false);
+  });
+
+  describe("a caller's recheck (the done janitor's last look)", () => {
+    async function recheckFixture(slug: string) {
+      const { tempDir, repoDir } = createGitRepo();
+      const paseoHome = path.join(tempDir, ".paseo");
+      const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, slug);
+      const record: ActiveWorkspaceRef = {
+        workspaceId: `ws-${slug}`,
+        cwd: worktree.worktreePath,
+        kind: "worktree",
+      };
+      const deps = createArchiveDeps({ paseoHome, activeWorkspaces: [record] });
+      return { worktree, record, deps };
+    }
+
+    test("runs before the records and again right before the directory; passing, it deletes", async () => {
+      const { worktree, record, deps } = await recheckFixture("recheck-pass");
+      const stages: string[] = [];
+
+      const result = await archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: record.workspaceId },
+        requestId: "req-recheck-pass",
+        recheck: async (stage) => {
+          stages.push(`${stage}:${(await deps.listActiveWorkspaces()).length} active`);
+          return null;
+        },
+      });
+
+      expect(stages).toEqual(["archive:1 active", "delete:0 active"]);
+      expect(result.removedDirectory).toBe(true);
+      expect(existsSync(worktree.worktreePath)).toBe(false);
+    });
+
+    test("a refusal before the records touches nothing", async () => {
+      const { worktree, record, deps } = await recheckFixture("recheck-archive");
+
+      const archived = archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: record.workspaceId },
+        requestId: "req-recheck-archive",
+        recheck: async (stage) => (stage === "archive" ? "agent late in it is not archived" : null),
+      });
+
+      await expect(archived).rejects.toThrow(
+        new ArchiveRefusedError("agent late in it is not archived"),
+      );
+      expect(await deps.listActiveWorkspaces()).toEqual([record]);
+      expect(deps.markWorkspaceArchiving).not.toHaveBeenCalled();
+      expect(deps.killTerminalsForWorkspace).not.toHaveBeenCalled();
+      expect(existsSync(worktree.worktreePath)).toBe(true);
+    });
+
+    test("a refusal before the directory keeps it, archives the records and says why", async () => {
+      const { worktree, record, deps } = await recheckFixture("recheck-delete");
+
+      const result = await archiveByScope(deps, {
+        scope: { kind: "workspace", workspaceId: record.workspaceId },
+        requestId: "req-recheck-delete",
+        recheck: async (stage) => (stage === "delete" ? "agent late runs inside it" : null),
+      });
+
+      assertArchiveResult(result, {
+        archivedWorkspaceIds: [record.workspaceId],
+        removedDirectory: false,
+      });
+      expect(result.deletedDirectory).toBeNull();
+      expect(result.keptDirectoryReason).toBe("agent late runs inside it");
+      expect(existsSync(worktree.worktreePath)).toBe(true);
+    });
   });
 
   test("workspace scope runs teardown while keeping a directory referenced by a sibling", async () => {

@@ -49,6 +49,11 @@ import type {
   WorktreeSnapshotRequest,
   WorktreeSnapshotResult,
 } from "./remediation/contract.js";
+import {
+  ArchiveRefusedError,
+  type ArchiveRecheck,
+  type ArchiveRecheckStage,
+} from "./workspace-archive-service.js";
 import type { PersistedProjectRecord, PersistedWorkspaceRecord } from "./workspace-registry.js";
 import { isProtectivePin } from "./workspace-auto-pin.js";
 import type { ProcessScan } from "./worktree-process-scan.js";
@@ -200,9 +205,15 @@ export interface DoneJanitorDependencies {
   /**
    * Archives the workspace record and deletes its worktree: archive-by-scope, the same path a
    * person's archive takes. `directory` is the one the checks read; the archive throws, touching
-   * nothing, when it would delete another.
+   * nothing, when it would delete another. `recheck` runs inside it before the records and again
+   * before the directory: a refusal before the records throws `ArchiveRefusedError`, and one
+   * before the directory keeps it and returns the reason.
    */
-  reclaimWorkspace(workspaceId: string, directory: string): Promise<{ removedDirectory: boolean }>;
+  reclaimWorkspace(
+    workspaceId: string,
+    directory: string,
+    recheck: ArchiveRecheck,
+  ): Promise<{ removedDirectory: boolean; keptDirectoryReason?: string }>;
   /**
    * The directory archive-by-scope deletes with this workspace, resolved the way it resolves it
    * (`resolveArchiveDirectory`, workspace-archive-service.ts); null when it deletes none. For an
@@ -274,8 +285,12 @@ type WorkspacePlan =
       branch: string | null;
       /** The deletion invariant as read before the snapshot. */
       invariant: string;
+      /** The newest activity the plan saw (`newestActivity`); anything newer stops the reclaim. */
+      activityMs: number;
     }
   | { kind: "keep"; workspace: DoneJanitorWorkspace | null; reason: string };
+
+type ReclaimPlan = Extract<WorkspacePlan, { kind: "reclaim" }>;
 
 /**
  * What the idle-workspace sweep does with one idle workspace. `directory` is the one its archive
@@ -1504,6 +1519,7 @@ export class AgentDoneJanitor {
       path,
       branch: safety.branch,
       invariant: preview.invariant,
+      activityMs: newestActivity(workspace, path, views).atMs,
     };
   }
 
@@ -1532,17 +1548,19 @@ export class AgentDoneJanitor {
   ): Promise<boolean> {
     const { logger } = this.options;
     if (plan.kind === "keep") {
+      // Logged by `logReport`, once while the reason holds.
       report.entries.push(this.describePlan(plan, false));
-      logger.info(
-        {
-          workspaceId: plan.workspace?.workspaceId,
-          path: plan.workspace?.worktreeRoot,
-          reason: plan.reason,
-        },
-        "Done janitor: kept a workspace",
-      );
       return false;
     }
+    const kept = (reason: string): false => {
+      report.entries.push({
+        action: "kept-workspace",
+        workspaceId: plan.workspace.workspaceId,
+        path: plan.path,
+        reason,
+      });
+      return false;
+    };
     // `du` first: the last check has to be the last thing before the archive. The git gate
     // passed, but it counts a commit on the local base branch as safe; the snapshot keeps a copy.
     const bytes = await this.deps.measureBytes(plan.path);
@@ -1551,17 +1569,18 @@ export class AgentDoneJanitor {
       plan.path,
       `done janitor, before deleting workspace ${plan.workspace.workspaceId}`,
     );
-    if (!check.ok) {
-      report.entries.push({
-        action: "kept-workspace",
-        workspaceId: plan.workspace.workspaceId,
-        path: plan.path,
-        reason: check.reason,
-      });
-      return false;
-    }
+    if (!check.ok) return kept(check.reason);
+    // The plan is minutes old now. Look again here, and archive-by-scope looks again inside,
+    // right before the records and right before the directory.
+    const recheck: ArchiveRecheck = (stage) => this.reclaimBlocker(plan, stage);
+    const changed = await recheck("archive");
+    if (changed) return kept(`planned for deletion, but since then ${changed}`);
     try {
-      const result = await this.deps.reclaimWorkspace(plan.workspace.workspaceId, plan.path);
+      const result = await this.deps.reclaimWorkspace(
+        plan.workspace.workspaceId,
+        plan.path,
+        recheck,
+      );
       const entry = {
         ...this.describePlan(plan, false, why),
         invariant: check.invariant,
@@ -1569,7 +1588,9 @@ export class AgentDoneJanitor {
       };
       if (!result.removedDirectory) {
         entry.action = "kept-workspace";
-        entry.reason = "archived the workspace, but the directory was not removed (see daemon log)";
+        entry.reason = result.keptDirectoryReason
+          ? `archived the workspace, but kept its directory: ${result.keptDirectoryReason}`
+          : "archived the workspace, but the directory was not removed (see daemon log)";
         delete entry.bytes;
       }
       report.entries.push(entry);
@@ -1587,18 +1608,59 @@ export class AgentDoneJanitor {
       );
       return result.removedDirectory;
     } catch (error) {
+      if (error instanceof ArchiveRefusedError) {
+        return kept(`planned for deletion, but since then ${error.reason}`);
+      }
       logger.warn(
         { err: error, workspaceId: plan.workspace.workspaceId, path: plan.path },
         "Done janitor: workspace reclaim failed",
       );
-      report.entries.push({
-        action: "kept-workspace",
-        workspaceId: plan.workspace.workspaceId,
-        path: plan.path,
-        reason: `reclaim failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-      return false;
+      return kept(`reclaim failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+
+  /**
+   * Why a planned deletion must not take its next step, read now; null to go ahead. Before the
+   * archive nothing may have moved in since the plan: an agent not archived, or at work, in it or
+   * under its directory; another workspace there; an open terminal or a running script; any
+   * activity newer than the plan saw. Before the delete the archive has just archived the
+   * workspace and its agents, so only what arrived since counts: a process inside it, a
+   * schedule, an agent or workspace there.
+   */
+  private async reclaimBlocker(
+    plan: ReclaimPlan,
+    stage: ArchiveRecheckStage,
+  ): Promise<string | null> {
+    const { workspace, path } = plan;
+    const workspaceId = workspace.workspaceId;
+    if (stage === "delete") {
+      // The slow scan first, so the reads below are the last thing before the delete.
+      const occupied = await this.occupiedReason(path);
+      if (occupied) return occupied;
+    } else {
+      const terminals = await this.deps.countTerminals(workspaceId);
+      if (terminals > 0) return `it has ${terminals} open terminal(s)`;
+      const scripts = await this.deps.countRunningScripts(workspaceId);
+      if (scripts > 0) return `${scripts} script(s) run in it`;
+    }
+    const [views, workspaces] = await Promise.all([this.loadViews(), this.deps.listWorkspaces()]);
+    const fresh = workspaces.find((candidate) => candidate.workspaceId === workspaceId);
+    if (stage === "archive") {
+      if (!fresh || fresh.archivedAt) return "the workspace was archived by someone else";
+      if (isProtectivePin(fresh)) return "its workspace was pinned";
+    }
+    const conflict = directoryConflict(fresh ?? workspace, path, workspaces, views, new Set());
+    if (conflict) return conflict;
+    // Straight from the runtimes: a view of an archived record never says it is at work.
+    for (const agent of this.deps.listLiveAgents()) {
+      const inWorkspace = agent.workspaceId === workspaceId;
+      if (!inWorkspace && !isRealpathInsideRoot(path, agent.cwd)) continue;
+      const work = describeWork(agent);
+      if (work) return `agent ${agent.id} ${inWorkspace ? "in it" : "inside it"} ${work}`;
+    }
+    if (stage === "delete" || !fresh) return null;
+    const newest = newestActivity(fresh, path, views);
+    return newest.atMs > plan.activityMs ? newest.source : null;
   }
 
   /**
@@ -1990,6 +2052,40 @@ function directoryConflict(
     if (view.workspaceId === workspace.workspaceId) return `agent ${view.id} in it is not archived`;
     if (isRealpathInsideRoot(path, view.cwd)) return `agent ${view.id} runs inside it`;
   }
+  return null;
+}
+
+/**
+ * The newest activity the daemon holds for a workspace: its record, and every agent in it or
+ * under its directory, archived ones included (an archive stamps the record). The source names
+ * it for a report line.
+ */
+function newestActivity(
+  workspace: DoneJanitorWorkspace,
+  path: string,
+  views: readonly DoneJanitorAgentView[],
+): { atMs: number; source: string } {
+  let newest = { atMs: parseMs(workspace.updatedAt), source: "its workspace record changed" };
+  for (const view of views) {
+    const inWorkspace = view.workspaceId === workspace.workspaceId;
+    if (!inWorkspace && !isRealpathInsideRoot(path, view.cwd)) continue;
+    if (view.lastActivityAtMs !== null && view.lastActivityAtMs > newest.atMs) {
+      newest = {
+        atMs: view.lastActivityAtMs,
+        source: `agent ${view.id} ${inWorkspace ? "in it" : "inside it"} was active`,
+      };
+    }
+  }
+  return newest;
+}
+
+/** What a live agent is doing that keeps a directory, or null when it is doing nothing. */
+function describeWork(agent: DoneJanitorAgentSummary): string | null {
+  if (agent.lifecycle === "running" || agent.lifecycle === "initializing") {
+    return `is ${agent.lifecycle}`;
+  }
+  if (agent.busy) return "has a turn in flight";
+  if (agent.pendingPermissionCount > 0) return "is waiting on a permission";
   return null;
 }
 
