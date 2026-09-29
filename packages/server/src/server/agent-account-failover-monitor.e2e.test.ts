@@ -1243,6 +1243,82 @@ describe("AccountFailoverMonitor (e2e)", () => {
     await endHeldTurn(harness, busy);
   }, 60_000);
 
+  test("moves a capped child under a memory hold; its resume waits in line and runs on the new account", async () => {
+    // Child admission's memory brake meets the move: the move goes ahead, and the resume it sends
+    // is a child turn, so it waits for the hold like any other and is not read as a failed resume.
+    const admission = harness.daemon.agentManager.getChildAdmission();
+    if (!admission) throw new Error("child admission is not wired");
+    const handoffs = (provider: PoolProvider) =>
+      harness.prompts[provider].filter((prompt) => prompt.includes("Account handoff"));
+    const child = await createChild(harness, { provider: "claude-personal", title: "Held child" });
+    await converse(harness, child, "HELD-MARKER");
+    await failOnLimit(harness, child);
+    const agentsBefore = agentCount(harness);
+    admission.setHold("memory-pressure", true, "memory-pressure: test");
+
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(admission.holdsTurnFor(child)).toBe(true);
+    expect(managed(harness, child).lifecycle).toBe("running");
+    expect(handoffs("claude-backup")).toEqual([]);
+    const pushesAfterMove = failoverPushes(harness).length;
+
+    // Under the hold the child is pending, not stuck: a second sweep does nothing.
+    await harness.sweep();
+    expect(providerOf(harness, child)).toBe("claude-backup");
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(failoverPushes(harness)).toHaveLength(pushesAfterMove);
+
+    admission.setHold("memory-pressure", false);
+
+    await expect.poll(() => handoffs("claude-backup").length, { timeout: 10_000 }).toBe(1);
+    expect(handoffs("claude-backup")[0]).toContain(`You are the same agent (${child})`);
+    expect(handoffs("claude-personal")).toEqual([]);
+    await expect.poll(() => managed(harness, child).lifecycle, { timeout: 10_000 }).toBe("idle");
+    expect(assistantText(harness, child)).toContain("HELD-MARKER");
+
+    // The resume landed once: no retry follows.
+    await harness.sweep();
+    expect(handoffs("claude-backup")).toHaveLength(1);
+    expect(failoverPushes(harness)).toHaveLength(pushesAfterMove);
+  }, 60_000);
+
+  test("skips a planned rescue whose child got a turn queued behind a memory hold, and keeps the held prompt", async () => {
+    const admission = harness.daemon.agentManager.getChildAdmission();
+    if (!admission) throw new Error("child admission is not wired");
+    const child = await createChild(harness, {
+      provider: "claude-personal",
+      title: "Queued by the move",
+    });
+    await failOnLimit(harness, child);
+    const agentsBefore = agentCount(harness);
+    admission.setHold("memory-pressure", true, "memory-pressure: test");
+    harness.duringNextSweep(async () => {
+      await harness.client.sendMessage(child, "respond with exactly: QUEUED-MARKER");
+      await expect.poll(() => admission.holdsTurnFor(child), { timeout: 10_000 }).toBe(true);
+    });
+
+    await harness.sweep();
+
+    expect(providerOf(harness, child)).toBe("claude-personal");
+    expect(managed(harness, child).lifecycle).toBe("running");
+    expect(admission.holdsTurnFor(child)).toBe(true);
+    expect(agentCount(harness)).toBe(agentsBefore);
+    expect(successorOf(harness, child)).toBeUndefined();
+    const records = await harness.daemon.agentStorage.list();
+    expect(records.filter((record) => record.labels[HANDOFF_FROM_LABEL] === child)).toEqual([]);
+    expect(failoverPushes(harness)).toEqual([]);
+
+    // Released, the held prompt runs where the agent is.
+    admission.setHold("memory-pressure", false);
+    await expect
+      .poll(() => harness.daemon.agentManager.getLastAssistantMessage(child), { timeout: 10_000 })
+      .toBe("QUEUED-MARKER");
+    expect(providerOf(harness, child)).toBe("claude-personal");
+  }, 60_000);
+
   test("counts an Opus weekly cap against Opus agents only", async () => {
     // D1b-07: a model's weekly window stops that model, not the account. The Sonnet agent keeps
     // its account; the Opus agent moves, and not onto an account whose Opus window is at 95%.
