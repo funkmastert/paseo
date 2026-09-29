@@ -2,22 +2,25 @@
 
 Agents get as much power as they can use. The catastrophe gate takes away exactly two things: rewriting or deleting `main` on a remote, and wiping a disk, a volume or a home directory. Everything else runs. A false positive costs more than a miss here, because a gate that blocks ordinary work teaches agents to route around it.
 
-The rules are pure code in `packages/server/src/server/agent/catastrophe-gate.ts`, over the shell walker in `agent/shell-commands.ts`. No model, no network call, no threshold. The only I/O is one `git rev-parse --abbrev-ref HEAD`, and only for a force push that names no ref or names `HEAD`.
+The rules are pure code in `packages/server/src/server/agent/catastrophe-gate.ts`, over the shell walker in `agent/shell-commands.ts`. No model, no network call, no threshold. The only I/O is one local git lookup, and only for a force push whose target depends on the repository: `git rev-parse --abbrev-ref HEAD` for a push that names no ref or names `HEAD`, and `git rev-parse --verify refs/heads/main` for a push that carries every branch.
 
 ## What it blocks
 
-| Rule                    | Blocks                                                                                                                                                                             |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `force-push-main`       | `git push` with `--force`, `-f`, `--force-with-lease`, `--force-if-includes` or `--mirror`, or a `+` refspec, whose destination is `main` (`main`, `HEAD:main`, `refs/heads/main`) |
-|                         | the same with no refspec, or with `HEAD`, while `main` is checked out where the push runs (`git -C` and `cd` are followed)                                                         |
-| `delete-main`           | `git push --delete main`, `-d main`, `:main`                                                                                                                                       |
-| `rm-disk-root`          | recursive `rm` of `/`, `/*`, the home directory (`~`, `$HOME`, `~/*`), `/Users`, `/Users/<name>`, `/System`, `/Volumes`, `/Volumes/<name>`, `/System/Volumes/Data`                 |
-| `find-delete-disk-root` | `find <one of those roots> -delete` or `-exec rm`, with no narrowing test                                                                                                          |
-| `diskutil-erase`        | `diskutil eraseDisk`, `eraseVolume`, `zeroDisk`, `randomDisk`, `secureErase`, `reformat`, `partitionDisk`, `apfs deleteContainer`, `apfs eraseVolume`                              |
-| `raw-disk-write`        | `dd of=/dev/disk*` or `/dev/rdisk*` (and Linux block devices), and a `>` redirection onto one                                                                                      |
-| `format-disk`           | `mkfs*` and `newfs*` over a `/dev` disk device                                                                                                                                     |
+| Rule                    | Blocks                                                                                                                                                                                                                                       |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `force-push-main`       | `git push` with `--force`, `-f`, `--force-with-lease` or `--force-if-includes`, or a `+` refspec, whose destination is `main` (`main`, `HEAD:main`, `refs/heads/main`)                                                                       |
+|                         | the same with no refspec, or with `HEAD`, while `main` is checked out where the push runs (`git -C` and `cd` are followed)                                                                                                                   |
+|                         | `--mirror`; `--all` or `--branches` with force; `:` with force; a forced pattern refspec that lands on `main` (`refs/heads/*:refs/heads/*`, `refs/*:refs/*`) — from any branch, when the repository has the branch it would push onto `main` |
+| `delete-main`           | `git push --delete main`, `-d main`, `:main`                                                                                                                                                                                                 |
+| `rm-disk-root`          | recursive `rm` of `/`, `/*`, the home directory (`~`, `$HOME`, `~/*`), `/Users`, `/Users/<name>`, `/System`, `/Volumes`, `/Volumes/<name>`, `/System/Volumes/Data`; on Windows, a drive root (`/c`, `C:/`) too                               |
+| `find-delete-disk-root` | `find <one of those roots> -delete` or `-exec rm`, with no narrowing test                                                                                                                                                                    |
+| `diskutil-erase`        | `diskutil eraseDisk`, `eraseVolume`, `zeroDisk`, `randomDisk`, `secureErase`, `reformat`, `partitionDisk`, `apfs deleteContainer`, `apfs eraseVolume`                                                                                        |
+| `raw-disk-write`        | `dd of=/dev/disk*` or `/dev/rdisk*` (and Linux block devices), and a `>` redirection onto one                                                                                                                                                |
+| `format-disk`           | `mkfs*` and `newfs*` over a `/dev` disk device                                                                                                                                                                                               |
 
 Only `main`. `master` and every other branch are ordinary. Path matching is case-insensitive, because APFS is.
+
+On Windows, Claude Code runs Bash through Git Bash, and the gate reads paths the way Git Bash does: `C:\Users\x`, `C:/Users/x` and `/c/Users/x` are one place, `\` separates, and `$USERPROFILE` is the home directory. So `/c/Users/<name>` is a home directory and `/c` is a disk. The daemon's own `C:\…` cwd and home are converted the same way, and git lookups run in the Windows path.
 
 The walker reads the command the way a shell would: it splits `&&`, `||`, `;`, `|` and newlines, runs `$(…)`, backticks, `bash -c`, `sh -c`, `eval`, heredocs and `echo … | sh` as the commands they are, peels `sudo`, `env`, `xargs`, `nice`, `time`, `nohup`, `timeout` and `command`, and tracks `cd` and plain assignments within the line. `cd / && rm -rf *` is `rm -rf /*`. Words inside quotes are arguments, so `echo "git push -f origin main"` runs nothing and passes.
 
@@ -29,6 +32,7 @@ The walker reads the command the way a shell would: it splits `&&`, `||`, `;`, `
 - **What rm refuses anyway.** An operand ending in `.` or `..` deletes nothing, so `rm -rf ..` passes.
 - **RAM disks and images.** `diskutil eraseVolume HFS+ RAMDisk $(hdiutil attach -nomount ram://…)` has an unresolvable device and passes; `mkfs.ext4 disk.img` formats a file.
 - **Dry runs.** `git push -n --force origin main` pushes nothing.
+- **Pushes of every branch that leave main alone.** `git push --all` and `git push origin :` without force only fast-forward `main`. `--mirror` or a forced `--all` from a repository with no `main` branch carries no `main`.
 
 ## Where it runs
 
@@ -58,17 +62,21 @@ grep -E '"msg":"Catastrophe gate blocked (a command|terminal input)"' "$PASEO_HO
 
 `agents.catastropheGate.enabled` in `config.json`. Absent means on. It is read on every call, so `false` followed by a config reload reaches running agents without restarting them. The daemon logs a `"Monitor mode"` line with `monitor: "catastrophe-gate"` at boot and whenever it changes.
 
+The key needs a daemon built from adc4e7001 (the gate's merge) or later. An older daemon rejects a `config.json` that has it: new connections, config reloads and the next boot all fail. Write it only once the running daemon has the gate, and delete it before you roll back to `/Applications/Bozeo.prev.app` or any other build older than adc4e7001.
+
 ## Known gaps
 
 - **Values it cannot see:** unknown environment variables, command substitution output, `xargs` input, loop variables, `cd -` and `popd`, `sudo -D` and `env -C`.
 - **Code in other languages or files:** a script file, `python -c`, `node -e`, a Makefile or npm script, a git alias (`git pf`).
-- **Push config:** `remote.<name>.push` refspecs, `push.default=upstream` mapping a feature branch onto main, and `--all`/`--branches` with force while a feature branch is checked out.
+- **Push config:** `remote.<name>.push` refspecs, `push.default=upstream` mapping a feature branch onto main, and `push.default=matching` with force.
+- **The remote's side:** `--mirror` or `--prune` from a repository with no `main` deletes the remote's `main`, and the gate never looks at the remote.
 - **Other ways to move a ref:** `gh api` or `curl` against the forge's refs API, GitHub MCP tools, `tea`.
 - **Other routes to a shell:** `paseo terminal send-keys` arrives as terminal input over the WebSocket, the same path as a person typing in the app, so it is not gated. `start_workspace_script` runs scripts from `paseo.json`, which an agent can edit. Terminal lines are checked from the terminal's starting cwd; a `cd` typed on an earlier line is not carried over.
 - **Other providers:** Codex, OpenCode, Copilot and the ACP providers, Pi and OMP.
 - **Parser limits:** globs other than a trailing `*` (`/U*`), brace expansion, `find` expressions whose `-o` changes what `-delete` applies to, `case` patterns inside a subshell.
+- **Windows:** PowerShell and `cmd` syntax (the gate reads POSIX shell, so a PowerShell terminal driven through `send_terminal_keys` is read as bash), and a program spelled with `.exe` (`rm.exe`, `git.exe`).
 - **Known false positives, all rare:**
-  - `git push --mirror <remote>` from a clone with `main` checked out (a repo migration).
+  - `git push --mirror <remote>` or `git push -f --all <remote>` into an empty remote from a repository that has `main` (a repo migration). The gate cannot see that the remote is empty. `git push --all` and `git push --tags` need no force there and pass.
   - A catastrophic line typed as text into a non-shell program through `send_terminal_keys`.
   - Setting up a RAM disk in two calls: `hdiutil attach -nomount ram://…`, then `diskutil eraseVolume`/`newfs_hfs` on the printed `/dev/diskN` in a separate command. The single-line form (`diskutil eraseVolume HFS+ RAMDisk $(hdiutil attach -nomount ram://…)`) passes; telling the two apart needs the disk's actual type, which the gate does not look up.
   - `rm -rf /Users/Shared`, a sibling directory such as `/Users/<home>.old`, or a mounted DMG under `/Volumes/<name>`. `rm-disk-root` protects any single path segment directly under `/Users` or `/Volumes`, not only real home directories and real volumes.
