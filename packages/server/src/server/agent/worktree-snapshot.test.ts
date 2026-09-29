@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +17,7 @@ import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { WorktreeSnapshotResult } from "../remediation/contract.js";
+import { lookupGitHubRepoVisibility, type RepoVisibility } from "./github-repo-visibility.js";
 import { GitWorktreeSnapshotter, formatSnapshotDate } from "./worktree-snapshot.js";
 
 // Real repositories under a temp dir. The snapshot's whole promise is that it never writes the
@@ -56,7 +58,12 @@ function hash(path: string): string {
 }
 
 function snapshotter(
-  overrides: { personalOwners?: string[]; maxUntrackedFileBytes?: number; now?: () => number } = {},
+  overrides: {
+    personalOwners?: string[];
+    maxUntrackedFileBytes?: number;
+    now?: () => number;
+    lookupRepoVisibility?: (owner: string, repo: string) => Promise<RepoVisibility>;
+  } = {},
 ): GitWorktreeSnapshotter {
   return new GitWorktreeSnapshotter({
     readConfig: () => ({
@@ -67,7 +74,30 @@ function snapshotter(
     paseoHome: join(root, "paseo-home"),
     logger: pino({ level: "silent" }),
     now: overrides.now ?? (() => NOW),
+    // Never the network: tests say what GitHub would answer.
+    lookupRepoVisibility: overrides.lookupRepoVisibility ?? (async () => "private"),
   });
+}
+
+// Fake tokens assembled at runtime, so no secret scanner flags this file.
+const FAKE_TOKENS = [
+  ["a Notion token", "ntn_" + "x".repeat(46)],
+  ["an Anthropic key", ["sk", "ant", "api03"].join("-") + "-" + "y".repeat(40)],
+  ["a GitHub token", ["ghp", "z".repeat(36)].join("_")],
+  ["a private key", ["-----BEGIN", "OPENSSH", "PRIVATE", "KEY-----"].join(" ")],
+] as const;
+
+function writeRepoFile(name: string, content: string, mode = 0o644): void {
+  writeFileSync(join(repo, name), content);
+  chmodSync(join(repo, name), mode);
+}
+
+function snapshotFiles(ref: string): string[] {
+  return git(repo, "ls-tree", "-r", "--name-only", ref).split("\n");
+}
+
+function snapshotMessage(ref: string): string {
+  return git(repo, "log", "-1", "--format=%B", ref);
 }
 
 function expectSnapshotted(
@@ -390,5 +420,229 @@ describe("GitWorktreeSnapshotter", () => {
       atRisk: true,
     });
     expect(backupRefs(repo)).toEqual([]);
+  });
+});
+
+describe("GitWorktreeSnapshotter leaves likely secrets out of the untracked set", () => {
+  async function localSnapshot() {
+    return expectSnapshotted(
+      await snapshotter().snapshot({ cwd: repo, reason: "test", offsite: false }),
+    );
+  }
+
+  test("an owner-only file is left out, named in the message, and left on disk untouched", async () => {
+    writeRepoFile("notes.txt", "private notes\n", 0o600);
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+    expect(snapshotFiles(result.ref)).not.toContain("notes.txt");
+    expect(snapshotMessage(result.ref)).toContain(
+      "Not snapshotted: possible secret (left on disk): notes.txt",
+    );
+    expect(readFileSync(join(repo, "notes.txt"), "utf8")).toBe("private notes\n");
+    expect(statSync(join(repo, "notes.txt")).mode & 0o777).toBe(0o600);
+    // The size-cap list stays the size-cap list.
+    expect(result.skippedFiles).toEqual([]);
+  });
+
+  test(".env and .env.* are left out; .env.example, .env.sample and .env.template are kept", async () => {
+    writeRepoFile(".env", "A=1\n");
+    writeRepoFile(".env.local", "A=1\n");
+    writeRepoFile(".env.example", "A=\n");
+    writeRepoFile(".env.sample", "A=\n");
+    writeRepoFile(".env.template", "A=\n");
+
+    const result = await localSnapshot();
+
+    const files = snapshotFiles(result.ref);
+    expect(files).not.toContain(".env");
+    expect(files).not.toContain(".env.local");
+    expect(files).toEqual(expect.arrayContaining([".env.example", ".env.sample", ".env.template"]));
+    expect(snapshotMessage(result.ref)).toContain(
+      "Not snapshotted: possible secret (left on disk): .env, .env.local",
+    );
+  });
+
+  test.each([
+    ".notion-secret",
+    "client_secret.json",
+    "aws-credentials",
+    "server.pem",
+    "tls.key",
+    "cert.p12",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "release.keystore",
+  ])("a readable file named %s is left out", async (name) => {
+    writeRepoFile(name, "nothing secret-looking inside\n");
+    writeRepoFile("ordinary.txt", "ordinary\n");
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).not.toContain(name);
+    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+    expect(snapshotMessage(result.ref)).toContain(name);
+  });
+
+  test.each(FAKE_TOKENS)(
+    "an ordinary file holding %s is left out, and the token never reaches the message",
+    async (_label, token) => {
+      mkdirSync(join(repo, "config"));
+      writeRepoFile("config/settings.json", `{\n  "key": "${token}"\n}\n`);
+      writeRepoFile("ordinary.txt", "ordinary\n");
+
+      const result = await localSnapshot();
+
+      expect(snapshotFiles(result.ref)).not.toContain("config/settings.json");
+      expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+      const message = snapshotMessage(result.ref);
+      expect(message).toContain("config/settings.json");
+      expect(message).not.toContain(token);
+    },
+  );
+
+  test("an ordinary file is kept, including one whose words only look like a token prefix", async () => {
+    writeRepoFile(
+      "plan.md",
+      `Run task-${"a".repeat(30)} next; see the disk-${"b".repeat(30)} log.\n`,
+    );
+
+    const result = await localSnapshot();
+
+    expect(snapshotFiles(result.ref)).toContain("plan.md");
+    expect(snapshotMessage(result.ref)).not.toContain("possible secret");
+  });
+});
+
+describe("GitWorktreeSnapshotter pushes only to a repository GitHub says is private", () => {
+  test("a public personal repository is bundled, never pushed", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: async () => "public" }).snapshot({
+        cwd: repo,
+        reason: "test",
+      }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+  });
+
+  test("a private personal repository is pushed, after asking about owner and repository", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => "private");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: lookup }).snapshot({ cwd: repo, reason: "test" }),
+    );
+    expect(result.offsite.kind).toBe("pushed");
+    expect(lookup).toHaveBeenCalledWith("funkmastert", "x");
+  });
+
+  test("an unknown visibility is bundled", async () => {
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: async () => "unknown" }).snapshot({
+        cwd: repo,
+        reason: "test",
+      }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(git(remote, "for-each-ref", "--format=%(refname)")).toBe("refs/heads/main");
+  });
+
+  test("a company origin is never looked up", async () => {
+    const url = "https://github.com/wonderlydotcom/x.git";
+    git(repo, "remote", "set-url", "origin", url);
+    git(repo, "config", `url.${remote}.insteadOf`, url);
+    writeFileSync(join(repo, "README.md"), "edited\n");
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => "private");
+    const result = expectSnapshotted(
+      await snapshotter({ lookupRepoVisibility: lookup }).snapshot({ cwd: repo, reason: "test" }),
+    );
+    expect(result.offsite.kind).toBe("bundled");
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test("an answer is cached per repository for an hour; an unknown one is not cached", async () => {
+    let now = NOW;
+    const answers: RepoVisibility[] = ["unknown", "private", "public"];
+    const lookup = vi.fn(async (): Promise<RepoVisibility> => answers.shift() ?? "public");
+    const instance = snapshotter({ now: () => now, lookupRepoVisibility: lookup });
+    const snapshotEdit = async (content: string) => {
+      writeFileSync(join(repo, "README.md"), content);
+      return expectSnapshotted(await instance.snapshot({ cwd: repo, reason: "test" }));
+    };
+
+    expect((await snapshotEdit("one\n")).offsite.kind).toBe("bundled");
+    expect((await snapshotEdit("two\n")).offsite.kind).toBe("pushed");
+    now += 30 * 60_000;
+    expect((await snapshotEdit("three\n")).offsite.kind).toBe("pushed");
+    expect(lookup).toHaveBeenCalledTimes(2);
+
+    now += 31 * 60_000;
+    expect((await snapshotEdit("four\n")).offsite.kind).toBe("bundled");
+    expect(lookup).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("lookupGitHubRepoVisibility", () => {
+  const notCalled = async (): Promise<Response> => {
+    throw new Error("fetch should not be called");
+  };
+
+  test("gh answers first", async () => {
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh: async () => "true\n", fetch: notCalled }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh: async () => "false\n", fetch: notCalled }),
+    ).resolves.toBe("public");
+  });
+
+  test.each([
+    ["gh is missing", async () => null],
+    [
+      "gh fails",
+      async () => {
+        throw new Error("gh: not logged in");
+      },
+    ],
+  ] as const)("when %s, the anonymous API decides", async (_label, runGh) => {
+    const respond = (status: number, body: unknown) => async () =>
+      new Response(JSON.stringify(body), { status });
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(404, {}) }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, { private: false }) }),
+    ).resolves.toBe("public");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, { private: true }) }),
+    ).resolves.toBe("private");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(403, {}) }),
+    ).resolves.toBe("unknown");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", { runGh, fetch: respond(200, {}) }),
+    ).resolves.toBe("unknown");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r", {
+        runGh,
+        fetch: async () => {
+          throw new Error("timeout");
+        },
+      }),
+    ).resolves.toBe("unknown");
+  });
+
+  test("an owner or repository name GitHub could not have is unknown without asking", async () => {
+    const runGh = vi.fn(async () => "false\n");
+    await expect(
+      lookupGitHubRepoVisibility("o", "r/../../x", { runGh, fetch: notCalled }),
+    ).resolves.toBe("unknown");
+    expect(runGh).not.toHaveBeenCalled();
   });
 });
