@@ -6,7 +6,7 @@ The build is split into tracks; ownership, merge order and the verified list of 
 
 ## Decisions
 
-Settled by Tyler and the orchestrator on 2026-09-28 (`~/bozeo-ops/jev-build-state.md`). Every track builds to these.
+Settled by Tyler and the orchestrator on 2026-09-28, D10 on 2026-09-29 (`~/bozeo-ops/jev-build-STATE.md`). Every track builds to these.
 
 | #   | Decision                                                                                           | Consequence in this design                                                                                                                                                                   |
 | --- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -18,6 +18,7 @@ Settled by Tyler and the orchestrator on 2026-09-28 (`~/bozeo-ops/jev-build-stat
 | D6  | Shadow first.                                                                                      | Every feature with a shadow mode defaults to `shadow: true` in code. Agents cannot edit `config.json`, so the code default is the lever.                                                     |
 | D7  | Wonderly company code never goes to JEV by default. Pending Tyler's confirmation; default is safe. | `excludeCwds`, `excludeRemotes` and `excludeTextMarkers` ship with the company defaults, enforced inside `decide` for every feature, fail-closed. See [The D7 exclusion](#the-d7-exclusion). |
 | D8  | Agent tools ship with the cost log and are switched off if they do not pay.                        | A randomized hold-out arm (`agentTools.assignShare`) and a pre-registered kill rule. See [Features 4–6](#features-46-agent-tools).                                                           |
+| D10 | Feature 14 replies for Tyler. It acts, but never merges a PR or suggests anything destructive.     | `awayReply` is live by default, not shadow; `dryRun` is its shadow switch. It still needs the key (D5) and the D7 scope. See [Feature 14](#feature-14-away-auto-reply).                      |
 
 ## Rules
 
@@ -48,6 +49,7 @@ Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Ever
 | 9 Compaction timing   | A leader's user messages since its last compaction, clipped; daemon envelopes; the last restore note; its last reply, clipped; the names of tools it used. The cut point also sends up to 60 user turns of 120 characters each inside the question                                    |
 | 10 Stall judgment     | The agent's title; the first 800 characters of its assignment; its last 25 timeline rows, clipped: tool inputs including full Bash command lines, error text, assistant text and reasoning text. The loop watch sends this for running agents that are not stalled, up to 8 per sweep |
 | 11 UI                 | Nothing                                                                                                                                                                                                                                                                               |
+| 14 Away auto-reply    | A waiting leader's last message, last 4,000 characters (2,000 with a request pending), which can quote code and diffs; its listed options; a pending question and its options; a pending plan, 4,000 characters; a pending tool call's name and input, 1,000 characters               |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -121,10 +123,10 @@ The key's variable is `PASEO_JEV_API_KEY`, for both providers (D5). The provider
 
 Features run in two lanes, so agent tools can neither starve nor bankrupt the features that steer the daemon:
 
-| Lane         | Features                                                                                    | Concurrency                                            | Spend cap per day                                                  |
-| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
-| `control`    | `spawnHint`, `remediationTriage`, `notificationTriage`, `compactionTiming`, `stallJudgment` | `maxConcurrent`, default 4                             | `maxUsdPerDay`, default $1.00                                      |
-| `agentTools` | features 4–6                                                                                | `agentTools.maxConcurrent`, default 4; 2 per tool call | `agentTools.maxUsdPerDay`, default $0.50; $0.05 per agent per hour |
+| Lane         | Features                                     | Concurrency                                            | Spend cap per day                                                  |
+| ------------ | -------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `control`    | Every other feature: 2, 3a, 3b, 9, 10 and 14 | `maxConcurrent`, default 4                             | `maxUsdPerDay`, default $1.00                                      |
+| `agentTools` | features 4–6                                 | `agentTools.maxConcurrent`, default 4; 2 per tool call | `agentTools.maxUsdPerDay`, default $0.50; $0.05 per agent per hour |
 
 The lanes have separate slots; neither can borrow the other's. An `agentTools` call waits for its tool call's group slot (`callGroup` on `JevDecideInput`) before it takes a lane slot, so a call queued on its group's cap never holds lane capacity another agent could use. A daemon-wide rate limiter, one token per attempt, (`maxRequestsPerSecond`, default 10, at most 15; TypeSafe publishes 1,200 per minute) serves `control` first.
 
@@ -138,6 +140,7 @@ Each call site has a deadline that covers the queue, every retry and the respons
 | `agentTools`         | 8,000 ms per JEV call | The agent is waiting on its own tool call                                                       |
 | `compactionTiming`   | 5,000 ms              | Off the agent's path; the monitor sweeps every 60 s                                             |
 | `stallJudgment`      | 5,000 ms              | The sweep is serialized and runs every 5 minutes                                                |
+| `awayReply`          | 5,000 ms              | Off every agent's path; the sweep is serialized, runs every 5 minutes, and asks at most 3 times |
 
 - **Saturated.** A call whose deadline passes while it waits for a lane slot or a rate token returns `unavailable: saturated`. Nothing was sent, and it never counts toward a circuit.
 - **Retries.** 429, 502, 503 and 529 are retried with backoff `250 ms × 2^attempt` plus up to 20% jitter, at least `Retry-After`, at most 3 attempts, and never past the deadline. Each attempt is charged in the ledger.
@@ -218,12 +221,19 @@ The full types are in `jev/contract.ts`. Only `answered` may change behaviour. W
 | `compactionTiming.cutPoint`                           | `true`                    | Ask where the live work starts before `/compact`                              |
 | `stallJudgment.enabled`, `.shadow`, `.timeoutMs`      | `true`, `true`, `5000`    | Feature 10                                                                    |
 | `stallJudgment.loopWatch`                             | `true`                    | Watch running agents for loops                                                |
+| `awayReply.enabled`, `.dryRun`, `.timeoutMs`          | `true`, `false`, `5000`   | Feature 14. Live by default (D10); `dryRun` is its shadow                     |
+| `awayReply.thresholdMinutes`                          | `60`                      | How long a leader must wait on Tyler before the job looks at it               |
+| `awayReply.maxRepliesPerAgentPerDay`                  | `3`                       | Replies per leader per local day                                              |
+| `awayReply.maxRepliesPerDay`                          | `12`                      | Replies across all leaders per local day                                      |
+| `awayReply.destructiveThreshold`                      | `0.2`                     | A destructive-intent answer at or over this sends nothing; at most 0.5        |
+| `awayReply.approveReadOnlyPermissions`                | `true`                    | Approve a tool permission that code and JEV both judge read-only              |
+| `awayReply.skipPinnedWorkspaces`                      | `false`                   | Leave every agent in a pinned workspace alone                                 |
 
-`agentTools` has no shadow mode, so it is live the moment a key exists, and it is the largest egress. With the D7 exclusion in place that is acceptable under D1 and D8, and half of the eligible agents are the control arm.
+`agentTools` has no shadow mode, so it is live the moment a key exists, and it is the largest egress. With the D7 exclusion in place that is acceptable under D1 and D8, and half of the eligible agents are the control arm. `awayReply` is live too (D10), and it acts: set `dryRun` to read its decisions first.
 
 Confidence floors are code constants, listed per feature below. They are thresholds, and code owns thresholds.
 
-The foundation track creates this whole schema, including every feature's keys, so no feature track edits `persisted-config.ts`.
+The foundation track created the schema with every feature's keys; feature 14 added `awayReply` after it. `agents.*` is strict, so a daemon older than a key rejects the whole config file: nothing writes these keys by default, and you add one only once the running daemon has the build that knows it.
 
 ### The D7 exclusion
 
@@ -264,6 +274,7 @@ An excluded call sends nothing and audits nothing. The ledger records it with th
 | 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                            |
 | 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                      |
 | 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                 |
+| 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                    |
 
 The plugin decides the `paseo.jev-tools` label before the agent exists, so it asks `jev.scope.check` with the new agent's cwd and parent; an excluded agent never gets the tools.
 
@@ -1037,6 +1048,175 @@ Decisions stay out of the timeline ([Decision store](#decision-store)), so no ti
 - The app: `account-budget-strip.browser.test.tsx` with a `jev` row in the fixture; a test for the decisions section with a fixture list, an empty list and an old daemon.
 - Verify: `npx vitest run packages/server/src/services/quota-fetcher/providers/jev.test.ts --bail=1`.
 
+## Feature 14: away auto-reply
+
+Tyler's ask (D10): when a leader has waited on him for more than an hour, JEV judges whether the thread needs him, and a reply goes out on his behalf. It never merges a pull request or suggests anything destructive. JEV only picks from closed sets; code writes the reply from fixed templates. `AwayReplyJob` (`packages/server/src/server/away-reply/job.ts`) sweeps every 5 minutes. It is live by default and does nothing without the key.
+
+### Who is waiting
+
+A leader is a root agent (`leaderSkipReason`, `away-reply/detect.ts`). The job skips an agent that:
+
+- has a `paseo.parent-agent-id`, or is internal;
+- carries `paseo.remediation`, `paseo.remediation-key`, `paseo.schedule-id`, `paseo.schedule-run` or `paseo.account-failover.migrated-to`;
+- is archived;
+- carries `paseo.away-reply` with any value, the per-agent opt-out, set with `update_agent` like `paseo.keep`;
+- sits in a pinned workspace while `skipPinnedWorkspaces` is on;
+- has a running child or running provider subagents, because then it is waiting on them, not on Tyler.
+
+`detectWaiting` counts a leader as waiting in two cases:
+
+- **Its turn ended on its own words.** It is idle, nothing is in flight (the done janitor's `busy`), and the newest message in its timeline is its own. A `<paseo-system>` envelope or Tyler's message after it means it is not waiting.
+- **It has exactly one pending request**: a `question` (AskUserQuestion), a `plan` approval (ExitPlanMode) or a `tool` permission. The kinds are `AgentPermissionRequestKind` (`agent/agent-sdk-types.ts:545`); Claude assigns them in `resolvePermissionKind` (`agent/providers/claude/agent.ts:1100`), and the manager keeps them in `pendingPermissions` (`agent-manager.ts:6365`). Several pending requests, or a `mode` request, are left alone.
+
+The wait starts at the newest timeline row: the turn's end, or the moment the agent asked, since a blocked turn writes nothing after its request. It must pass `thresholdMinutes`. A restart restarts every clock: the wait counts from the later of its start and the daemon's boot, because a relaunch says nothing about whether Tyler is away.
+
+### State and questions
+
+One call per episode, on the `control` lane. The state, with absent fields left out:
+
+```json
+{
+  "waiting_on": "the end of its turn: its last message is the newest in the thread",
+  "last_message": "<the leader's last message, last 4000 characters; 2000 when a request is pending>",
+  "question": "<a pending question's text>",
+  "options": { "A": "<option text>", "B": "<option text>" },
+  "recommended_option": "B",
+  "plan": "<a pending plan, first 4000 characters>",
+  "request": "<a pending tool call: name and input, first 1000 characters>"
+}
+```
+
+`options` are the leader's own, read by code (`away-reply/options.ts`): "Option A" headings, then the last A), B)… list, then the last 1., 2.… list, two to nine of them; for a question, its options by position. `recommended_option` is the one option marked "(recommended)", or named in "I recommend option B" or "I'd go with B"; with two marked, there is none.
+
+```json
+{
+  "needs_reply": {
+    "type": "noul",
+    "instructions": "Does the agent that wrote `last_message` need an answer, a decision or a go-ahead from the person before it can continue?",
+    "criteria": {
+      "true": "It asks a question, offers options to choose from, asks for approval, or says it is waiting for the person",
+      "false": "It reports status or finished work, or it is waiting on something other than the person: CI, another agent, a timer"
+    }
+  },
+  "wait_kind": {
+    "type": "choice",
+    "instructions": "The agent is waiting on `waiting_on`. What does it need from the person?",
+    "criteria": {
+      "choose_option": "To pick one of the options it listed",
+      "approve_plan": "A go-ahead to carry on with the plan or next step it described",
+      "open_question": "Information only the person has, asked as an open question rather than a pick among listed options",
+      "blocked_on_person": "Something only the person can do: log in, provide or rotate a credential, pay, answer a permission prompt, or a physical action",
+      "fyi": "Nothing: it is reporting status or results",
+      "other": "None of these"
+    }
+  },
+  "option": {
+    "type": "choice",
+    "instructions": "Which of `options` is the best next step for the agent's work? `recommended_option`, when present, is the option the agent itself recommended.",
+    "criteria": {
+      "A": "<option A's text>",
+      "B": "<option B's text>",
+      "none": "None of the options is clearly the best next step, or choosing needs information the agent does not have"
+    }
+  },
+  "destructive": {
+    "type": "noul",
+    "instructions": "Would acting on the best answer to the agent merge a pull request, or take a destructive, irreversible or outward-facing action?",
+    "criteria": {
+      "true": "Merging or approving a merge, deleting or overwriting data, force-pushing, deploying, releasing or publishing, spending money, changing credentials, restarting shared services, or sending messages to other people",
+      "false": "Only local, reversible work: reading, editing files on its own branch, running tests or builds, planning"
+    }
+  }
+}
+```
+
+`option` is asked only when the leader listed two or more. A tool permission gets two questions instead: `read_only` ("Is the tool call in `request` read-only or fully reversible?") and `destructive`, led by "Would allowing the tool call in `request`".
+
+### The reply
+
+`mapAwayReplyAnswers` (`away-reply/decision.ts`) maps the answers to one reply from the fixed set, or none, checking the rows in order. Anything not listed is no reply.
+
+| Answers                                                                                        | Reply                                                              |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `destructive` ≥ `destructiveThreshold` (0.2)                                                   | None                                                               |
+| `needs_reply` < 0.6, or `wait_kind` confidence < 0.6                                           | None                                                               |
+| `wait_kind` is `fyi`, `open_question` or `other`                                               | None                                                               |
+| `wait_kind` is `blocked_on_person`                                                             | None; a finished turn gets its attention flag raised               |
+| `choose_option`, the leader recommended X, and `option` is X at ≥ 0.6                          | "Go with your recommendation, option X"                            |
+| `choose_option`, the leader recommended X, and `option` is anything else                       | None                                                               |
+| `choose_option`, no recommendation, and `option` is one of the leader's options at ≥ 0.7       | "Go with option X"                                                 |
+| `choose_option` and `option` is `none`, below its floor, or not one of the leader's options    | None                                                               |
+| `approve_plan` on a finished turn or a plan approval                                           | "Keep going with the plan you described"                           |
+| `approve_plan` on a question                                                                   | As `choose_option`: a question is answered with one of its options |
+| Tool permission: code's allowlist passes, `read_only` ≥ 0.9, `destructive` below the threshold | The permission is allowed                                          |
+
+Every reply is one line: the marker, the templated sentence, the guard.
+
+```
+[Auto-reply on Tyler's behalf — away >1h, JEV] Go with option B ("wait for the ready event first."). Do not merge any PR, and do not take any destructive, irreversible or outward-facing action on the strength of this reply; leave those for Tyler.
+```
+
+The option's text is the leader's own, one line, at most 120 characters. For a question, which has no ids, the reply names the option by its label.
+
+### Delivery
+
+- **A finished turn:** `agentManager.startTurnIfIdle` (`agent-manager.ts:1959`). It checks that the agent is idle, not busy and has no pending permission, and starts the turn in the same synchronous stretch, so the reply can never steer into or replace a running turn. Null means something else owns the agent, and nothing is sent. `sendPromptToAgent` is the wrong tool: its steer mode acts on a running turn.
+- **A question:** `respondToAgentPermission` (`agent/permission-response.ts:22`), which the app's `agent_permission_response` also calls (`session.ts:2684`), with `updatedInput: { ...request.input, answers: { [header]: reply } }`. That is the shape the question card sends (`app/src/components/question-form-card-core.ts:104`).
+- **A plan approval:** the same path, with the primary allow action (`implement`) and `updatedInput.plan` set to the plan plus the marked note. Claude echoes an edited plan back to the model as "Approved Plan (edited by user)", so the leader reads the marker and the guard. A plan request with no `input.plan` string has nowhere to carry the marker and gets no reply.
+- **A tool permission:** the same path, `{ behavior: "allow" }`. An allow carries no text, so the mark is the label, the log line and the decision record.
+
+The JEV call can take 5 seconds. Before sending, the job re-reads the agent and its timeline, and sends only if the episode is unchanged and the leader still passes every skip rule. A retryable refusal that sent nothing (a saturated lane, an open circuit, a spent budget) is asked again next sweep; any other outcome spends the episode's one evaluation.
+
+### Tool permissions
+
+A leader in `bypassPermissions` never asks, so this path matters only for leaders in a stricter mode. The job allows a request only when both agree that it is read-only:
+
+- **Code** (`isReadOnlyPermission`, `away-reply/safety.ts`) accepts `Read`, `Glob`, `Grep`, `LS` and `NotebookRead`, or a `Bash` command that is one program from a short allowlist (`ls`, `cat`, `rg`, `grep`, `find` without `-delete` or `-exec`, `git status`, `git log`, `git diff`, `git show` and similar) with no shell syntax at all: no `;`, `&`, `|`, redirection, `$`, backquotes or subshells. It rejects web tools, which send text off the machine, and MCP tools. Code runs before the call, so a write never reaches JEV.
+- **JEV** answers `read_only` at 0.9 or more, and `destructive` below the threshold.
+
+Anything else stays pending, which is today's behaviour. JEV cannot turn a code "no" into a yes. `approveReadOnlyPermissions: false` turns the path off.
+
+### Hard rules
+
+These live in code, not in JEV (`away-reply/job.ts`, `away-reply/safety.ts`). Each is pinned by a test in `away-reply/job.test.ts` unless noted.
+
+- **The deterministic exclusion.** Before any call, code scans the leader's whole last message, the question and its options, the plan and the tool request. It scans again on the option the reply is about to name (`decision.test.ts`). A mention of any of these sends nothing: merging or approval to merge; force push; delete, remove, wipe, drop, `reset --hard`, kill; credentials, secrets, passwords, API keys and access tokens, rotating or revoking, logging in; deploy, release, publish, tagging, shipping to production; payments and purchases; relaunching or restarting the daemon or Bozeo; messages to other people (Slack, email, comments, opening a pull request or issue, `git push`). `safety.test.ts` lists the phrases. Bare "tokens" does not count, because this fleet talks about token spend all day; access, API, OAuth, GitHub and similar tokens do. A credentials or payment hit on a finished turn raises the attention flag.
+- **JEV's destructive-intent answer** at or over `destructiveThreshold` sends nothing. Config can lower the threshold, never raise it past 0.5.
+- **Fail open means do nothing.** No key, a switch off, an exclusion, a timeout, an HTTP error, a malformed answer or low confidence all send nothing, which is today's behaviour.
+- **One evaluation and at most one reply per episode.** The `paseo.auto-replied-at` label marks the episode answered across a restart.
+- **Two in a row at most.** After two auto-replies with no message from Tyler in between (`paseo.auto-reply-streak`, reset when Tyler writes), the job stops for that leader. This is a code constant, not config.
+- **Daily caps**, per leader (`maxRepliesPerAgentPerDay`, 3) and across all leaders (`maxRepliesPerDay`, 12), counted in memory; the streak label bounds what a restart can reset.
+- **Never into a running turn**, as above.
+- **D7.** An excluded leader is skipped before any state is built; the service scans the body again, so a leader in a safe directory that talks about company code is excluded too.
+
+### Visibility
+
+- The marker opens every reply, so Tyler and the leader both see it is not him.
+- One `away-reply` log line per episode JEV was asked about, and one per skip: agent, kind, minutes waited, action, reason code, the option's id, the outcome, the call id, and the verdicts (`wait_kind choose_option 0.85`). It never carries the thread's text.
+- A decision note, feature `awayReply`, in the decision store behind `jev.decisions.list`, applied only when a reply went out.
+- Labels `paseo.auto-replied-at` and `paseo.auto-reply-streak` on the leader.
+- No push. For `blocked_on_person` on a finished turn, the job raises the existing unread flag through `markAgentUnread` (`agent-manager.ts:3542`), which sends no push. The leader's own next finish is reported like any finish ([notification-policy.md](notification-policy.md)).
+
+### Config
+
+See the `awayReply.*` rows in [Config](#config). `dryRun: true` makes the call, logs and records what would have been sent, and sends and writes nothing.
+
+### Cost, cache, latency
+
+- About 1,500 to 3,000 input tokens per episode, around $0.0001, and at most 3 calls per sweep.
+- A reply is a user turn at the tail of the leader's context, like Tyler replying at the same moment. After an hour idle, the 1-hour prompt cache has mostly expired, so that turn pays a cache write either way. Labels never reach the prompt.
+- Nothing on an agent's path.
+- **Pays if** the replies it sends are ones Tyler would have sent, and they save the hours a leader would otherwise sit idle. **Measured by** reading the decision notes and the log with `dryRun` on, then a week live: count replies that Tyler reversed or that a leader answered with confusion.
+
+### Tests and verification
+
+- `away-reply/detect.test.ts`: each waiting kind, and every skip.
+- `away-reply/options.test.ts` and `away-reply/safety.test.ts`: option and recommendation parsing; every exclusion category; the read-only allowlist.
+- `away-reply/decision.test.ts`: every row of the reply table; option X only from the leader's own options; the second exclusion pass; the marker and the guard on every template.
+- `away-reply/job.test.ts`, against the fake: the threshold and the restart clock; a "should I merge PR #12?" thread blocked with no call made; the destructive answer; recommended and option-X replies; FYI; one reply per episode, across a restart; the two-in-a-row stop; both caps; no turn into a running agent, including one that starts while JEV decides; JEV errors, a timeout and no key; the dry run; D7 by cwd and by text; a question, a plan and a permission answered through the permission path; the attention flag; one log line with no state in it.
+- `away-reply/config.test.ts`: defaults, the threshold ceiling, the strict schema.
+- Verify: `npx vitest run packages/server/src/server/away-reply`.
+
 ## Testing
 
 - Every track tests against the fake. No test makes a live call or reads a real key. A test process with `OPENROUTER_API_KEY` set, as CI's is, still uses the fake: the service reads only `PASEO_JEV_API_KEY`, and refuses a live transport under Vitest.
@@ -1050,7 +1230,7 @@ Decisions stay out of the timeline ([Decision store](#decision-store)), so no ti
   - a throwing redactor answers `failed: redaction`; a PEM block and an `export NAME=value` line inside a state string are redacted; the MCP bearer token inside a process command line is redacted by exact value;
   - a daemon started with `PASEO_JEV_API_KEY` set spawns an agent and a terminal that do not see it;
   - a full `agentTools` lane leaves a spawn hint answered; a queue expiry answers `saturated` and leaves the circuit closed; a spent lane sends one `jev_budget_exhausted` push.
-- Live verification waits for Tyler's key and the pre-live checks in [What leaves the machine](#what-leaves-the-machine). The code defaults are shadow (D6): run a day, read the audit and the ledger, compare each feature's "would have" against what happened, and move floors only on that evidence. TypeSafe publishes no calibration figures, independent measurements put its expected calibration error between 0.13 and 0.25, and it is weakest on "does anything apply" questions, so the floors above are starting points.
+- Live verification waits for Tyler's key and the pre-live checks in [What leaves the machine](#what-leaves-the-machine). The code defaults are shadow (D6), except `agentTools` and `awayReply` (D10), which act the moment a key exists; set `awayReply.dryRun` for the first day. Run a day, read the audit and the ledger, compare each feature's "would have" against what happened, and move floors only on that evidence. TypeSafe publishes no calibration figures, independent measurements put its expected calibration error between 0.13 and 0.25, and it is weakest on "does anything apply" questions, so the floors above are starting points.
 
 ## Deferred
 
@@ -1061,6 +1241,8 @@ Each item is out of v1 on purpose, with the reason.
 - **Read deny rules in user-level Claude settings files.** The daemon honours `denyRead` and the deny rules in the agent's stored config; rules only in `~/.claude/settings.json` are not loaded by the daemon.
 - **Routing a loop verdict through the existing nudge.** It would let the loop watch save tokens, and a nudge is D1-compatible, but it acts on running agents on a JEV answer; revisit after the shadow data.
 - **Decisions interleaved in the agent's stream, and kept across restarts.** The popover list serves the need without touching the timeline; the ledger totals and the audit already survive a restart.
+- **A fleet-wide "Tyler is back" signal for feature 14.** The rule is per leader, as Tyler asked: a leader he has not answered in an hour gets a reply even while he talks to another. Revisit if replies land on threads he was leaving on purpose.
+- **Feature 14's daily caps across restarts.** They are counted in memory. The streak label already limits a restart to two replies per leader until Tyler writes.
 - **A per-request zero-retention field on OpenRouter.** Whether one exists is UNKNOWN until a key exists; it is a pre-live check, and the transport sends it if it does.
 
 ## Reference implementation
