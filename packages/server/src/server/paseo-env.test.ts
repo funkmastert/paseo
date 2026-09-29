@@ -5,6 +5,7 @@ import {
   createExternalProcessEnv,
   createPaseoInternalEnv,
   resolvePaseoNodeEnv,
+  SECRET_ENV_KEYS,
 } from "./paseo-env.js";
 
 describe("paseo env contract", () => {
@@ -109,6 +110,21 @@ describe("paseo env contract", () => {
     });
 
     expect(env[ELECTRON_RUN_AS_NODE]).toBeUndefined();
+  });
+
+  test("strips PASEO_JEV_API_KEY from the internal daemon child env", () => {
+    const env = createPaseoInternalEnv({ ...baseEnv, PASEO_JEV_API_KEY: "fake-jev-key" });
+    expect(env.PASEO_JEV_API_KEY).toBeUndefined();
+    expect(env.PATH).toBe("/usr/bin");
+  });
+
+  test("strips PASEO_JEV_API_KEY from the external process env", () => {
+    const env = createExternalProcessEnv({ ...baseEnv, PASEO_JEV_API_KEY: "fake-jev-key" });
+    expect(env.PASEO_JEV_API_KEY).toBeUndefined();
+  });
+
+  test("SECRET_ENV_KEYS names PASEO_JEV_API_KEY", () => {
+    expect(SECRET_ENV_KEYS).toContain("PASEO_JEV_API_KEY");
   });
 
   test("does not use user NODE_ENV as Paseo runtime mode", () => {

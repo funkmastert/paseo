@@ -681,6 +681,88 @@ const AgentTokenAuditSchema = z
   })
   .strict();
 
+// `agents.jev`: JEV, the hosted decision model between deterministic code and an LLM agent
+// (docs/jev.md). Read through its own 5-second cache (`jev/config.ts`), not the mutable config;
+// a malformed value there falls back to its default, so this schema only rejects a shape that
+// isn't close at all.
+const AgentJevFeatureSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    shadow: z.boolean().optional(),
+    timeoutMs: z.number().positive().optional(),
+  })
+  .strict();
+
+const AgentJevSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    provider: z.enum(["openrouter", "typesafe"]).optional(),
+    model: z.string().min(1).optional(),
+    endpointUrl: z.string().min(1).optional(),
+    envFile: z.string().min(1).optional(),
+    maxConcurrent: z.number().int().positive().optional(),
+    maxRequestsPerSecond: z.number().positive().max(15).optional(),
+    maxUsdPerDay: z.number().positive().optional(),
+    inputUsdPerMillion: z.number().positive().optional(),
+    excludeCwds: z.array(z.string()).optional(),
+    excludeRemotes: z.array(z.string()).optional(),
+    excludeTextMarkers: z.array(z.string()).optional(),
+    audit: z
+      .object({
+        enabled: z.boolean().optional(),
+        maxBytes: z.number().int().positive().optional(),
+        retainDays: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    spawnHint: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        applyHard: z.boolean().optional(),
+        applyRole: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    remediationTriage: AgentJevFeatureSchema.optional(),
+    notificationTriage: AgentJevFeatureSchema.optional(),
+    agentTools: z
+      .object({
+        enabled: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        maxConcurrent: z.number().int().positive().optional(),
+        maxConcurrentPerCall: z.number().int().positive().optional(),
+        maxUsdPerDay: z.number().positive().optional(),
+        maxUsdPerAgentPerHour: z.number().positive().optional(),
+        assignShare: z.number().min(0).max(1).optional(),
+      })
+      .strict()
+      .optional(),
+    compactionTiming: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        considerAtTokens: z.number().int().positive().optional(),
+        ceilingTokens: z.number().int().positive().optional(),
+        maxDeferrals: z.number().int().positive().optional(),
+        cutPoint: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+    stallJudgment: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().positive().optional(),
+        loopWatch: z.boolean().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 const BUILTIN_PROVIDER_IDS = ["claude", "codex", "copilot", "opencode", "pi", "omp"] as const;
 
 function isLegacyProviderEntry(value: unknown): boolean {
@@ -846,6 +928,7 @@ export const PersistedConfigSchema = z
         restartRecovery: AgentRestartRecoverySchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
         providerUsage: AgentProviderUsageSchema.optional(),
+        jev: AgentJevSchema.optional(),
         skills: z.object({ selection: AgentSkillSelectionSchema.optional() }).strict().optional(),
       })
       .strict()

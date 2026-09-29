@@ -17,6 +17,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import type { PluginLogEntry } from "@getpaseo/protocol/messages";
 import { compilePlugin } from "./compiler.js";
+import { createPaseoInternalEnv } from "../paseo-env.js";
 import { readPluginManifest } from "./manifest.js";
 import type { PluginRequirements } from "@getpaseo/protocol/messages";
 import { assertPluginCompatibility } from "@getpaseo/protocol/plugin-requirements";
@@ -204,11 +205,24 @@ function resolveWorkerExecArgv(): string[] {
   ];
 }
 
+// `createExternalProcessEnv` (docs/jev.md's documented choice) also strips
+// ELECTRON_RUN_AS_NODE, PASEO_NODE_ENV and ESBUILD_BINARY_PATH. Under the desktop app
+// `process.execPath` is the Electron binary and this daemon process itself runs with
+// ELECTRON_RUN_AS_NODE=1 (packages/desktop/src/daemon/node-entrypoint-launcher.ts:32); a
+// fork() with that key dropped launches a full Electron app instead of a node worker.
+// `createPaseoInternalEnv` keeps it and every other runtime-control variable, and still
+// drops the JEV key. Exported, and the base env overridable, so a test can check it with a
+// fake env object instead of forking a real subprocess or setting the real process env.
+export function pluginChildEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return createPaseoInternalEnv(baseEnv);
+}
+
 function spawnPluginChild(): PluginChild {
   return fork(fileURLToPath(resolveWorkerUrl()), [], {
     execArgv: resolveWorkerExecArgv(),
     serialization: "advanced",
     stdio: ["ignore", "pipe", "pipe", "ipc"],
+    env: pluginChildEnv(),
   }) as PluginChild;
 }
 

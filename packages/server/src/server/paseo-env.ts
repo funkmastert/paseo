@@ -10,12 +10,27 @@ const RUNTIME_CONTROL_ENV_KEYS = [
   "ESBUILD_BINARY_PATH",
 ] as const;
 
+/**
+ * Names that must never leave the daemon process, in any child's environment (docs/jev.md,
+ * "Key"). Stripped everywhere `RUNTIME_CONTROL_ENV_KEYS` is, and also from the internal env an
+ * in-process worker gets, which keeps every other variable.
+ */
+export const SECRET_ENV_KEYS = ["PASEO_JEV_API_KEY"] as const;
+
 export type PaseoNodeEnv = "development" | "production" | "test";
 export type ProcessEnvRecord = Record<string, string | undefined>;
 export type ExternalProcessEnv = NodeJS.ProcessEnv & Record<string, string>;
 
+function stripSecretKeys(env: ProcessEnvRecord): void {
+  for (const key of SECRET_ENV_KEYS) {
+    delete env[key];
+  }
+}
+
 function buildInternalProcessEnv<T extends ProcessEnvRecord>(baseEnv: T): T {
-  return { ...baseEnv };
+  const sanitized = { ...baseEnv };
+  stripSecretKeys(sanitized);
+  return sanitized;
 }
 
 function buildExternalProcessEnv(
@@ -26,6 +41,7 @@ function buildExternalProcessEnv(
   for (const key of RUNTIME_CONTROL_ENV_KEYS) {
     delete sanitized[key];
   }
+  stripSecretKeys(sanitized);
   for (const [key, value] of Object.entries(sanitized)) {
     if (value === undefined) {
       delete sanitized[key];
