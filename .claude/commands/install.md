@@ -98,12 +98,17 @@ pick one:
 
 Carry whichever `PASEO_HOME`/`PASEO_HOST` this choice implies into every later
 step — export both and pass them explicitly to every command from here on. In
-isolated mode, don't rely on `--port` alone: the CLI resolves an unspecified
-host by reading `listen` from the config at `PASEO_HOME`, and falls back to
-`127.0.0.1:6767` when that key isn't set — the exact way a read-only command
-in isolated mode can silently reach a real, unrelated daemon. Set `PASEO_HOST`
-for every command, and confirm `paseo daemon status` reports the isolated
-home and port _before_ running anything else, plugin commands especially.
+isolated mode, don't rely on `--port` alone: `paseo daemon status` picks its
+probe target from the _home's own_ recorded state (its PID file once running,
+else `daemon.listen` in that home's `config.json`, which defaults to
+`127.0.0.1:6767` until something sets it) — it does not read `PASEO_HOST` at
+all, so a pre-start status check can report a real, unrelated daemon as
+"reachable" even while correctly showing this home's own daemon as `stopped`.
+Other commands (`plugin ls`, `doctor`, …) do read `PASEO_HOST`/`--host`, so
+setting it still matters — just don't trust `daemon status` to prove
+isolation until _after_ Step 6 starts the daemon with an explicit `--home`
+and `--port`: only then does its PID file carry the isolated port, and
+`daemon status --home <dir>` reporting that same `Listen` is real proof.
 
 If both checks came back clear, continue with the defaults.
 
@@ -180,18 +185,23 @@ applies to the current shell.
 
 ### 6. Start the daemon
 
-Skip this step entirely if Step 2's answer was "Verify only." Otherwise, using
-whatever `PASEO_HOME`/`PASEO_HOST` Step 2 settled on:
+Skip this step entirely if Step 2's answer was "Verify only." Otherwise, in
+isolated mode pass `--home`/`--port` explicitly on both commands rather than
+leaning on env vars for this specific check — see Step 2's note on why
+`daemon status` needs that to prove anything:
 
 ```bash
-paseo daemon start
-paseo daemon status
+paseo daemon start --home "$PASEO_HOME" --port <port>   # omit both for the defaults
+paseo daemon status --home "$PASEO_HOME"
 ```
 
-Confirm the status output shows the daemon running and `Claude  available
-(daemon)`. If Claude shows `not found (daemon)`, stop and point at
-docs/install.md's troubleshooting entry for it (the daemon's `PATH` doesn't
-have `claude`) rather than continuing to plugin setup.
+Confirm the status output shows `Local Daemon running`, `Listen` matching the
+port just requested, and `Claude  available (daemon)`. If Claude shows `not
+found (daemon)`, stop and point at docs/install.md's troubleshooting entry
+for it (the daemon's `PATH` doesn't have `claude`) rather than continuing to
+plugin setup. Once this confirms the isolated daemon is up, `PASEO_HOME`/
+`PASEO_HOST` exported from Step 2 correctly reach it for every command from
+here on — `daemon status` was the one exception.
 
 ### 7. Configure the account pool
 
