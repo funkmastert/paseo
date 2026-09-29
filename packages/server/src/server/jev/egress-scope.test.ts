@@ -26,6 +26,9 @@ const COMPANY: JevExclusionConfig = {
   excludeTextMarkers: ["wonderlydotcom", "git.wonderly.info", "wonderly"],
 };
 const NOTHING: JevExclusionConfig = { excludeCwds: [], excludeRemotes: [], excludeTextMarkers: [] };
+const REMOTES_ONLY: JevExclusionConfig = { ...COMPANY, excludeCwds: [], excludeTextMarkers: [] };
+const MARKERS_ONLY: JevExclusionConfig = { ...COMPANY, excludeCwds: [], excludeRemotes: [] };
+const ROOTS_ONLY: JevExclusionConfig = { ...COMPANY, excludeRemotes: [], excludeTextMarkers: [] };
 const NOT_EXCLUDED = { excluded: false };
 
 const GIT_ENV: NodeJS.ProcessEnv = {
@@ -73,12 +76,27 @@ function excludedBy(signal: string) {
   return { excluded: true, signal };
 }
 
-/** A git whose one repository is `top`, with `remoteOutput` as its `git config` answer. */
+/** A git whose one repository is `top`, with `remoteOutput` as its `git remote -v` answer. */
 function fakeGit(top: string, remoteOutput: JevGitResult) {
   return async (args: string[]): Promise<JevGitResult> =>
     args.includes("rev-parse")
       ? { exitCode: 0, stdout: `${top}\n.git\n`, stderr: "" }
       : remoteOutput;
+}
+
+/** `git remote -v` as git prints it for one remote with one URL. */
+function remoteList(url: string, name = "origin"): JevGitResult {
+  return { exitCode: 0, stdout: `${name}\t${url} (fetch)\n${name}\t${url} (push)\n`, stderr: "" };
+}
+
+const NOT_A_REPOSITORY: JevGitResult = {
+  exitCode: 128,
+  stdout: "",
+  stderr: "fatal: not a git repository (or any of the parent directories): .git",
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 beforeEach(() => {
@@ -189,6 +207,30 @@ describe("check: paths", () => {
     expect(await checker().check({ cwds: [dir("safe")] }, config)).toEqual(excludedBy("error"));
   });
 
+  test("on darwin a /System/Volumes/Data path matches the root under /Users it firmlinks to", async () => {
+    const root = dir("home", "backend-net");
+    const viaDataVolume = `/System/Volumes/Data${join(root, "app")}`;
+    const config = { ...NOTHING, excludeCwds: [root] };
+    const runGit = async () => NOT_A_REPOSITORY;
+
+    expect(
+      await checker({ platform: "darwin", runGit }).check({ cwds: [viaDataVolume] }, config),
+    ).toEqual(excludedBy("cwd:0"));
+    expect(
+      await checker({ platform: "linux", runGit }).check({ cwds: [viaDataVolume] }, config),
+    ).toEqual(NOT_EXCLUDED);
+  });
+
+  test("on darwin a root spelled through /System/Volumes/Data matches the /Users path", async () => {
+    const root = dir("home", "backend-net");
+    const config = { ...NOTHING, excludeCwds: [`/System/Volumes/Data${root}`] };
+    const runGit = async () => NOT_A_REPOSITORY;
+
+    expect(
+      await checker({ platform: "darwin", runGit }).check({ cwds: [join(root, "app")] }, config),
+    ).toEqual(excludedBy("cwd:0"));
+  });
+
   test("a changed config is not answered from the roots cache", async () => {
     const check = checker();
     const scope = { cwds: ["~/b/x"] };
@@ -239,15 +281,108 @@ describe("check: git", () => {
     ["git@github.com:WonderlyDotCom/x.git", "remote:0"],
     ["https://user:token@GitHub.com/wonderlydotcom/x/", "remote:0"],
     ["ssh://git@git.wonderly.info:2222/team/mobile.git", "remote:1"],
+    // An SSH host alias hides the host, not the owner: the owner part matches on any host.
+    ["git@github-work:wonderlydotcom/mobile.git", "remote:0"],
+    ["ssh://git@work-alias/WonderlyDotCom/mobile.git", "remote:0"],
     ["https://github.com/wonderlydotcomx/y.git", null],
     ["git@github.com:someone/wonderlydotcom.git", null],
-  ])("remote %s answers %s", async (url, signal) => {
+    ["git@github-work:someone/mobile.git", null],
+  ])("remote %s answers %s against excludeRemotes alone", async (url, signal) => {
     const top = dir("outside", "repo");
-    const runGit = fakeGit(top, { exitCode: 0, stdout: `remote.origin.url ${url}\n`, stderr: "" });
+    const runGit = fakeGit(top, remoteList(url));
 
-    const verdict = await checker({ runGit }).check({ cwds: [top] }, COMPANY);
+    const verdict = await checker({ runGit }).check({ cwds: [top] }, REMOTES_ONLY);
 
     expect(verdict).toEqual(signal === null ? NOT_EXCLUDED : excludedBy(signal));
+  });
+
+  test.each<[string, string | null]>([
+    ["git@github.com:someone/wonderlydotcom.git", "remote-marker:0"],
+    ["git@gitea-alias:team/wonderly-app.git", "remote-marker:2"],
+    ["https://git.wonderly.info/team/x.git", "remote-marker:1"],
+    ["git@github-work:someone/mobile.git", null],
+  ])("remote %s answers %s against the text markers", async (url, signal) => {
+    const top = dir("outside", "repo");
+    const runGit = fakeGit(top, remoteList(url));
+
+    const verdict = await checker({ runGit }).check({ cwds: [top] }, MARKERS_ONLY);
+
+    expect(verdict).toEqual(signal === null ? NOT_EXCLUDED : excludedBy(signal));
+  });
+
+  test("a clone outside the roots whose origin uses an SSH host alias is excluded", async () => {
+    const clone = makeRepo(join(dir("outside"), "alias-clone"));
+    git(clone, "remote", "add", "origin", "git@github-work:wonderlydotcom/mobile.git");
+    const check = checker();
+
+    expect(await check.check({ cwds: [clone] }, REMOTES_ONLY)).toEqual(excludedBy("remote:0"));
+    expect(await check.check({ cwds: [clone] }, MARKERS_ONLY)).toEqual(
+      excludedBy("remote-marker:0"),
+    );
+  });
+
+  test("a url.insteadOf remote is resolved the way git resolves it, from repo or global config", async () => {
+    const local = makeRepo(join(dir("outside"), "insteadof-clone"));
+    git(local, "config", "url.git@github.com:wonderlydotcom/.insteadOf", "wl:");
+    git(local, "remote", "add", "origin", "wl:mobile.git");
+
+    const global = makeRepo(join(dir("outside"), "global-insteadof-clone"));
+    git(global, "remote", "add", "origin", "corp:mobile.git");
+    const globalConfig = join(tmp, "gitconfig");
+    writeFileSync(globalConfig, '[url "https://git.wonderly.info/team/"]\n\tinsteadOf = corp:\n');
+    vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig);
+
+    const check = checker();
+    expect(await check.check({ cwds: [local] }, REMOTES_ONLY)).toEqual(excludedBy("remote:0"));
+    expect(await check.check({ cwds: [global] }, REMOTES_ONLY)).toEqual(excludedBy("remote:1"));
+  });
+
+  test("a push URL counts: pushurl and pushInsteadOf are resolved too", async () => {
+    const pushurl = makeRepo(join(dir("outside"), "pushurl"));
+    git(pushurl, "remote", "add", "origin", "https://github.com/someone/else.git");
+    git(pushurl, "config", "remote.origin.pushurl", "git@github.com:wonderlydotcom/x.git");
+
+    const pushInsteadOf = makeRepo(join(dir("outside"), "push-insteadof"));
+    git(
+      pushInsteadOf,
+      "config",
+      "url.git@github.com:wonderlydotcom/.pushInsteadOf",
+      "https://mirror.example/",
+    );
+    git(pushInsteadOf, "remote", "add", "origin", "https://mirror.example/x.git");
+
+    const check = checker();
+    expect(await check.check({ cwds: [pushurl] }, REMOTES_ONLY)).toEqual(excludedBy("remote:0"));
+    expect(await check.check({ cwds: [pushInsteadOf] }, REMOTES_ONLY)).toEqual(
+      excludedBy("remote:0"),
+    );
+  });
+
+  test("a clone of a repository under a root, cloned by path to outside, is excluded by its remote", async () => {
+    const repo = makeRepo(join(home, "backend-net"));
+    const clone = join(dir("outside"), "path-clone");
+    git(tmp, "clone", "-q", repo, clone);
+
+    expect(await checker().check({ cwds: [clone] }, ROOTS_ONLY)).toEqual(
+      excludedBy("remote-cwd:2"),
+    );
+  });
+
+  test("a relative path remote resolves against the repository's top level", async () => {
+    makeRepo(join(home, "backend-net"));
+    const top = dir("home", "scratch", "copy");
+    const runGit = fakeGit(top, remoteList("../../backend-net"));
+
+    expect(await checker({ runGit }).check({ cwds: [top] }, ROOTS_ONLY)).toEqual(
+      excludedBy("remote-cwd:2"),
+    );
+  });
+
+  test("a remote list git prints in a shape the checker cannot read is excluded", async () => {
+    const top = dir("outside", "repo");
+    const runGit = fakeGit(top, { exitCode: 0, stdout: "origin git@x:y.git\n", stderr: "" });
+
+    expect(await checker({ runGit }).check({ cwds: [top] }, COMPANY)).toEqual(excludedBy("error"));
   });
 
   test.each<[string, JevGitResult, JevGitResult]>([
@@ -269,7 +404,7 @@ describe("check: git", () => {
     [
       "reading the remotes fails",
       { exitCode: 0, stdout: "TOP\n.git\n", stderr: "" },
-      { exitCode: 3, stdout: "", stderr: "error: invalid config file" },
+      { exitCode: 128, stdout: "", stderr: "fatal: bad config line 1" },
     ],
   ])("excludes when %s", async (_case, revParse, config) => {
     const top = dir("outside", "repo");
@@ -365,6 +500,144 @@ describe("check: scope and agents", () => {
   });
 });
 
+describe("check: deadline and abort", () => {
+  test("each git gets only the time left before the deadline", async () => {
+    const top = dir("outside", "repo");
+    let now = 1_000_000;
+    const timeouts: number[] = [];
+    const check = checker({
+      now: () => now,
+      runGit: async (args, options) => {
+        timeouts.push(options.timeoutMs);
+        if (args.includes("rev-parse")) {
+          now += 1_000;
+          return { exitCode: 0, stdout: `${top}\n.git\n`, stderr: "" };
+        }
+        now += options.timeoutMs;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      },
+    });
+
+    const verdict = await check.check({ cwds: [top] }, COMPANY, { deadlineAt: now + 1_500 });
+
+    expect(timeouts).toEqual([1_500, 500]);
+    expect(verdict).toEqual(excludedBy("deadline"));
+  });
+
+  test("no git is spawned once the deadline has passed", async () => {
+    const top = dir("outside", "repo");
+    let now = 1_000_000;
+    const calls: string[][] = [];
+    const check = checker({
+      now: () => now,
+      runGit: async (args) => {
+        calls.push(args);
+        now += 2_000;
+        return { exitCode: 0, stdout: `${top}\n.git\n`, stderr: "" };
+      },
+    });
+
+    const verdict = await check.check({ cwds: [top] }, COMPANY, { deadlineAt: now + 1_500 });
+
+    expect(calls).toHaveLength(1);
+    expect(verdict).toEqual(excludedBy("deadline"));
+  });
+
+  test("a slow git with a 1.5 s deadline answers near 1.5 s, not 4 s", async () => {
+    const top = dir("outside", "repo");
+    // Each call takes 2 s, the old per-call timeout, unless its timeout kills it sooner.
+    const runGit = async (
+      args: string[],
+      options: { timeoutMs: number },
+    ): Promise<JevGitResult> => {
+      await sleep(Math.min(2_000, options.timeoutMs));
+      if (options.timeoutMs < 2_000)
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true };
+      return args.includes("rev-parse")
+        ? { exitCode: 0, stdout: `${top}\n.git\n`, stderr: "" }
+        : remoteList("https://github.com/someone/else.git");
+    };
+    const started = Date.now();
+
+    const verdict = await checker({ runGit }).check({ cwds: [top] }, COMPANY, {
+      deadlineAt: started + 1_500,
+    });
+
+    const elapsed = Date.now() - started;
+    expect(verdict).toEqual(excludedBy("deadline"));
+    expect(elapsed).toBeGreaterThanOrEqual(1_400);
+    expect(elapsed).toBeLessThan(1_900);
+  });
+
+  test("a slow step that is not git still answers by the deadline", async () => {
+    const check = checker({ resolveAgentCwds: () => new Promise<string[]>(() => {}) });
+    const started = Date.now();
+
+    const verdict = await check.check({ cwds: [], agentIds: ["leader"] }, COMPANY, {
+      deadlineAt: started + 100,
+    });
+
+    expect(verdict).toEqual(excludedBy("deadline"));
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("an abort stops the check at once and hands git the signal", async () => {
+    const top = dir("outside", "repo");
+    const controller = new AbortController();
+    const signals: (AbortSignal | undefined)[] = [];
+    const runGit = async (
+      _args: string[],
+      options: { timeoutMs: number; signal?: AbortSignal },
+    ) => {
+      signals.push(options.signal);
+      await sleep(2_000);
+      return { exitCode: 0, stdout: `${top}\n.git\n`, stderr: "" };
+    };
+    setTimeout(() => controller.abort(), 50);
+    const started = Date.now();
+
+    const verdict = await checker({ runGit }).check({ cwds: [top] }, COMPANY, {
+      signal: controller.signal,
+    });
+
+    expect(verdict).toEqual(excludedBy("aborted"));
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(signals).toEqual([controller.signal]);
+  });
+
+  test("an already aborted signal, a spent deadline or a deadline that is not a number spawns no git", async () => {
+    const top = dir("outside", "repo");
+    const calls: string[][] = [];
+    const check = checker({
+      runGit: async (args) => {
+        calls.push(args);
+        return NOT_A_REPOSITORY;
+      },
+    });
+
+    expect(await check.check({ cwds: [top] }, COMPANY, { signal: AbortSignal.abort() })).toEqual(
+      excludedBy("aborted"),
+    );
+    expect(await check.check({ cwds: [top] }, COMPANY, { deadlineAt: Date.now() - 1 })).toEqual(
+      excludedBy("deadline"),
+    );
+    expect(await check.check({ cwds: [top] }, COMPANY, { deadlineAt: Number.NaN })).toEqual(
+      excludedBy("deadline"),
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("the real git runs normally inside a generous deadline and a live signal", async () => {
+    const clone = makeRepo(join(dir("outside"), "clone"));
+    git(clone, "remote", "add", "origin", "git@github-work:wonderlydotcom/mobile.git");
+    const options = { deadlineAt: Date.now() + 10_000, signal: new AbortController().signal };
+
+    expect(await checker().check({ cwds: [clone] }, REMOTES_ONLY, options)).toEqual(
+      excludedBy("remote:0"),
+    );
+  });
+});
+
 describe("scanText", () => {
   function body(state: unknown, criteriaTrue = "yes"): string {
     return JSON.stringify({
@@ -419,6 +692,67 @@ describe("scanText", () => {
     expect(check.scanText(body("git@github.com:WonderlyDotCom/x.git"), config)).toEqual(
       excludedBy("text-remote:0"),
     );
+  });
+
+  describe("path spellings in shell text", () => {
+    const TYLER = "/Users/tyler";
+    // Markers and remotes off, so each hit names the root it came from.
+    const ROOTS = { ...COMPANY, excludeRemotes: [], excludeTextMarkers: [] };
+
+    test.each<[string, string]>([
+      ["cd $HOME/backend-net && git log -p", "text-root:2"],
+      ["cd ${HOME}/mobile-worktrees/app && ./gradlew test", "text-root:0"],
+      ["git -C ../backend-net diff", "text-root:2"],
+      ["ls /Users/$USER/ts-monorepo/apps/web", "text-root:4"],
+      ["ls /Users/${USER}/bn-worktrees/x", "text-root:3"],
+      ["cat ~/bn-worktrees/x/README.md", "text-root:3"],
+      ["cat ~tyler/wonderly-orchestration/plan.md", "text-root:5"],
+      ["cd ts-monorepo-2 && pnpm test", "text-root:4"],
+      ["cd .paseo/worktrees/1rlfnz6g/fix-login", "text-root:1"],
+      ["cd /System/Volumes/Data/Users/tyler/backend-net", "text-root:2"],
+    ])("%s is excluded as %s", (command, signal) => {
+      const check = checker({ homeDir: TYLER, platform: "darwin" });
+
+      expect(check.scanText(body(command), ROOTS)).toEqual(excludedBy(signal));
+    });
+
+    test.each<[string, string]>([
+      ["cd %USERPROFILE%\\code\\x", "win32"],
+      ["cd $env:USERPROFILE\\code", "win32"],
+      ["dir C:\\Users\\%USERNAME%\\code", "win32"],
+      ["cd $HOME/code", "win32"],
+      ["cat ~tyler/code/x", "darwin"],
+      ["cat /Users/${USER}/code/x", "darwin"],
+    ])("%s names the generic root ~/code on %s", (command, platform) => {
+      const homeDir = platform === "win32" ? "C:\\Users\\Tyler" : TYLER;
+      const check = checker({ homeDir, platform: platform as NodeJS.Platform });
+      const config = { ...NOTHING, excludeCwds: ["~/code"] };
+
+      expect(check.scanText(body(command), config)).toEqual(excludedBy("text-root:0"));
+    });
+
+    test("a generic root name is not a needle, but every spelling of its path is", () => {
+      const config = { ...NOTHING, excludeCwds: ["~/code", "~/src/app", "~/.config", "~/work/*"] };
+      const check = checker({ homeDir: TYLER });
+
+      expect(check.scanText(body("cd ../code && git -C app diff"), config)).toEqual(NOT_EXCLUDED);
+      expect(check.scanText(body("vim webpack.config.js; cd work"), config)).toEqual(NOT_EXCLUDED);
+      expect(check.scanText(body("cd $HOME/code/x"), config)).toEqual(excludedBy("text-root:0"));
+      expect(check.scanText(body("cd ${HOME}/src/app"), config)).toEqual(excludedBy("text-root:1"));
+      expect(check.scanText(body("cat /Users/$USER/.config/x"), config)).toEqual(
+        excludedBy("text-root:2"),
+      );
+      expect(check.scanText(body("ls $HOME/work/a"), config)).toEqual(excludedBy("text-root:3"));
+    });
+
+    test("an absolute root outside home is matched by its path and a distinctive name", () => {
+      const config = { ...NOTHING, excludeCwds: ["/opt/acme-billing", "/opt/company"] };
+      const check = checker({ homeDir: TYLER });
+
+      expect(check.scanText(body("cd ../acme-billing"), config)).toEqual(excludedBy("text-root:0"));
+      expect(check.scanText(body("ls /opt/company/x"), config)).toEqual(excludedBy("text-root:1"));
+      expect(check.scanText(body("the company picnic"), config)).toEqual(NOT_EXCLUDED);
+    });
   });
 
   test("safe text is not excluded", () => {

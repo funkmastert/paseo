@@ -12,6 +12,9 @@ import type { JevEgressScope } from "./contract.js";
 const GIT_TIMEOUT_MS = 2_000;
 const ROOTS_TTL_MS = 5_000;
 const GIT_TTL_MS = 5 * 60_000;
+// macOS reaches `/Users` and every other firmlinked directory under the data volume too, and
+// realpath keeps whichever spelling it is given. Folded, as darwin paths compare.
+const DATA_VOLUME = "/system/volumes/data";
 // A git hook or a parent git process sets these; inherited, they point every `-C` at one repository.
 const INHERITED_GIT_VARIABLES = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE"];
 
@@ -21,8 +24,23 @@ export interface JevExclusionConfig {
   excludeTextMarkers: string[];
 }
 
-/** `signal` names the rule that matched (`cwd:2`, `remote:0`), never a path or text: the ledger keeps it. */
+/**
+ * `signal` names the rule that matched (`cwd:2`, `remote:0`), never a path or text: the ledger keeps
+ * it. `deadline` and `aborted` mean the check stopped before it could answer.
+ */
 export type JevScopeVerdict = { excluded: false } | { excluded: true; signal: string };
+
+export interface JevScopeCheckOptions {
+  /** Epoch ms. Git gets only the time left, none starts after it, and the check answers `deadline` by then. */
+  deadlineAt?: number;
+  /** Aborting answers `aborted` at once and kills a running git. */
+  signal?: AbortSignal;
+}
+
+export interface JevGitOptions {
+  timeoutMs: number;
+  signal?: AbortSignal;
+}
 
 export interface JevGitResult {
   exitCode: number | null;
@@ -36,9 +54,9 @@ export interface EgressScopeDependencies {
   /** Paths compare case-insensitively on darwin and win32. */
   platform: NodeJS.Platform;
   realpath?: (p: string) => Promise<string>;
-  /** Argv, never a shell. */
-  runGit?: (args: string[], options: { timeoutMs: number }) => Promise<JevGitResult>;
-  /** Every cwd for these agents: own, ancestors, descendants (live or archived within 24 h). Throws or returns null for an unknown id. */
+  /** Argv, never a shell. Honours `timeoutMs` and `signal` by killing git. */
+  runGit?: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
+  /** Every cwd for these agents: own, ancestors, descendants (`resolveJevAgentCwds`). Throws or returns null for an unknown id. */
   resolveAgentCwds?: (agentIds: string[]) => Promise<string[] | null>;
   now?: () => number;
 }
@@ -66,6 +84,18 @@ interface RootPattern {
 interface RemoteEntry {
   index: number;
   value: string;
+  /** `wonderlydotcom/` of `github.com/wonderlydotcom/`, matched on any host; null for a bare host. */
+  ownerPath: string | null;
+}
+
+interface MarkerEntry {
+  index: number;
+  value: string;
+}
+
+interface CheckBudget {
+  deadlineAt: number | undefined;
+  signal: AbortSignal | undefined;
 }
 
 interface TextNeedle {
@@ -93,15 +123,20 @@ function excluded(signal: string): JevScopeVerdict {
   return { excluded: true, signal };
 }
 
+/** Thrown inside a check whose deadline passed or whose signal aborted; the verdict names which. */
+class JevScopeCheckStopped extends Error {
+  constructor(readonly reason: "deadline" | "aborted") {
+    super(`jev scope check stopped: ${reason}`);
+    this.name = "JevScopeCheckStopped";
+  }
+}
+
 export class JevEgressScopeChecker {
   private readonly homeDir: string;
   private readonly foldsCase: boolean;
   private readonly platform: NodeJS.Platform;
   private readonly realpath: (p: string) => Promise<string>;
-  private readonly runGit: (
-    args: string[],
-    options: { timeoutMs: number },
-  ) => Promise<JevGitResult>;
+  private readonly runGit: (args: string[], options: JevGitOptions) => Promise<JevGitResult>;
   private readonly resolveAgentCwds: EgressScopeDependencies["resolveAgentCwds"];
   private readonly now: () => number;
   private roots: CachedRoots | null = null;
@@ -120,11 +155,16 @@ export class JevEgressScopeChecker {
   }
 
   /** Never throws. Any error inside answers `{ excluded: true, signal: "error" }`. */
-  async check(scope: JevEgressScope, config: JevExclusionConfig): Promise<JevScopeVerdict> {
+  async check(
+    scope: JevEgressScope,
+    config: JevExclusionConfig,
+    options: JevScopeCheckOptions = {},
+  ): Promise<JevScopeVerdict> {
+    const budget: CheckBudget = { deadlineAt: options.deadlineAt, signal: options.signal };
     try {
-      return await this.checkScope(scope, config);
-    } catch {
-      return excluded("error");
+      return await this.withinBudget(this.checkScope(scope, config, budget), budget);
+    } catch (error) {
+      return error instanceof JevScopeCheckStopped ? excluded(error.reason) : excluded("error");
     }
   }
 
@@ -146,9 +186,61 @@ export class JevEgressScopeChecker {
     }
   }
 
+  /**
+   * The check's answer, or `JevScopeCheckStopped` when the deadline or the signal comes first. The
+   * work left behind starts no git (`git` checks the budget first) and its answer is dropped.
+   */
+  private async withinBudget<T>(work: Promise<T>, budget: CheckBudget): Promise<T> {
+    const { deadlineAt, signal } = budget;
+    if (deadlineAt === undefined && signal === undefined) return work;
+    work.catch(() => {});
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<never>((_resolve, reject) => {
+      if (deadlineAt !== undefined) {
+        const remaining = Math.max(0, deadlineAt - this.now());
+        timer = setTimeout(() => reject(new JevScopeCheckStopped("deadline")), remaining);
+      }
+      if (signal) {
+        onAbort = () => reject(new JevScopeCheckStopped("aborted"));
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+    try {
+      return await Promise.race([work, stopped]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /**
+   * The time the next git may take: the budget's remainder, at most the git timeout and at least
+   * 1 ms (`execFile` reads a 0 timeout as none). Throws once the signal aborted or the deadline
+   * passed, and for a deadline that is not a number.
+   */
+  private gitTimeoutMs(budget: CheckBudget): number {
+    if (budget.signal?.aborted) throw new JevScopeCheckStopped("aborted");
+    if (budget.deadlineAt === undefined) return GIT_TIMEOUT_MS;
+    const remaining = budget.deadlineAt - this.now();
+    if (!(remaining > 0)) throw new JevScopeCheckStopped("deadline");
+    return Math.min(GIT_TIMEOUT_MS, Math.ceil(remaining));
+  }
+
+  /** Git bounded by the budget. None starts once the budget is spent. */
+  private async git(args: string[], budget: CheckBudget): Promise<JevGitResult> {
+    const timeoutMs = this.gitTimeoutMs(budget);
+    const result = await this.runGit(args, { timeoutMs, signal: budget.signal });
+    // Throws when the deadline or the signal cut git short, so the answer names why, not a git error.
+    this.gitTimeoutMs(budget);
+    return result;
+  }
+
   private async checkScope(
     scope: JevEgressScope,
     config: JevExclusionConfig,
+    budget: CheckBudget,
   ): Promise<JevScopeVerdict> {
     if (scope.missing) return excluded("missing");
 
@@ -180,13 +272,18 @@ export class JevEgressScopeChecker {
     }
 
     const remotes = config.excludeRemotes
-      .map((entry, index) => ({ index, value: normalizeRemoteEntry(entry) }))
+      .map((entry, index) => remoteEntry(entry, index))
       .filter((entry) => entry.value !== "");
-    if (roots.length === 0 && remotes.length === 0) return NOT_EXCLUDED;
+    const markers = config.excludeTextMarkers
+      .map((marker, index) => ({ index, value: foldText(marker) }))
+      .filter((entry) => entry.value.trim() !== "");
+    if (roots.length === 0 && remotes.length === 0 && markers.length === 0) return NOT_EXCLUDED;
 
     const directories = unique(await Promise.all(resolved.map(gitDirectoryOf)));
     const verdicts = await Promise.all(
-      directories.map((directory) => this.gitSignal(directory, roots, remotes)),
+      directories.map((directory) =>
+        this.gitSignal(directory, { roots, remotes, markers }, budget),
+      ),
     );
     return verdicts.find((verdict) => verdict !== null) ?? NOT_EXCLUDED;
   }
@@ -264,7 +361,10 @@ export class JevEgressScopeChecker {
 
   /** The shape `isSameOrDescendantPath` compares, folded where the filesystem ignores case. */
   private comparable(p: string): string {
-    return this.fold(p.replace(/\\/g, "/").replace(/\/$/, ""));
+    const folded = this.fold(p.replace(/\\/g, "/").replace(/\/$/, ""));
+    if (this.platform !== "darwin") return folded;
+    if (folded === DATA_VOLUME) return "";
+    return folded.startsWith(`${DATA_VOLUME}/`) ? folded.slice(DATA_VOLUME.length) : folded;
   }
 
   private fold(value: string): string {
@@ -273,25 +373,58 @@ export class JevEgressScopeChecker {
 
   private async gitSignal(
     directory: string,
-    roots: ExclusionRoot[],
-    remotes: RemoteEntry[],
+    rules: { roots: ExclusionRoot[]; remotes: RemoteEntry[]; markers: MarkerEntry[] },
+    budget: CheckBudget,
   ): Promise<JevScopeVerdict | null> {
-    const repository = await this.repositoryAt(directory);
+    const repository = await this.repositoryAt(directory, budget);
     if (repository === null) return null;
     // A worktree of a repository under a root shares its common directory, wherever it lives.
-    const root = roots.find((r) => repository.commonDirForms.some((f) => this.isUnderRoot(f, r)));
+    const root = rules.roots.find((r) =>
+      repository.commonDirForms.some((f) => this.isUnderRoot(f, r)),
+    );
     if (root) return excluded(`common-dir:${root.index}`);
-    if (remotes.length === 0) return null;
-    const urls = await this.remoteUrlsAt(repository.topLevel);
-    const remote = remotes.find((entry) => urls.some((url) => url.includes(entry.value)));
-    return remote ? excluded(`remote:${remote.index}`) : null;
+    const urls = await this.remoteUrlsAt(repository.topLevel, budget);
+    return this.remoteSignal(urls, repository.topLevel, rules);
   }
 
-  private repositoryAt(directory: string): Promise<GitRepository | null> {
+  /**
+   * An `excludeRemotes` entry on its own host, or its owner path on any host (an SSH host alias
+   * such as `github-work` renames the host, never the owner); a local path remote under a root; or
+   * any text marker in the URL.
+   */
+  private async remoteSignal(
+    urls: string[],
+    topLevel: string,
+    rules: { roots: ExclusionRoot[]; remotes: RemoteEntry[]; markers: MarkerEntry[] },
+  ): Promise<JevScopeVerdict | null> {
+    const normalized = urls.map(normalizeRemoteUrl);
+    const remote = rules.remotes.find((entry) =>
+      normalized.some((url) => url.includes(entry.value) || matchesOwnerPath(url, entry)),
+    );
+    if (remote) return excluded(`remote:${remote.index}`);
+
+    for (const url of urls) {
+      const local = localRemotePath(url);
+      if (local === null) continue;
+      const absolute = this.absolutePath(local, topLevel);
+      if (absolute === null) throw new Error("a local remote did not resolve");
+      const { lexical, real } = await this.resolvePath(absolute);
+      const root = rules.roots.find(
+        (r) => this.isUnderRoot(lexical, r) || this.isUnderRoot(real, r),
+      );
+      if (root) return excluded(`remote-cwd:${root.index}`);
+    }
+
+    const forms = [...normalized, ...urls.map(foldText)];
+    const marker = rules.markers.find((entry) => forms.some((form) => form.includes(entry.value)));
+    return marker ? excluded(`remote-marker:${marker.index}`) : null;
+  }
+
+  private repositoryAt(directory: string, budget: CheckBudget): Promise<GitRepository | null> {
     return this.cached(this.repositories, directory, async () => {
-      const result = await this.runGit(
+      const result = await this.git(
         ["-C", directory, "rev-parse", "--show-toplevel", "--git-common-dir"],
-        { timeoutMs: GIT_TIMEOUT_MS },
+        budget,
       );
       if (isNotARepository(result)) return null;
       if (!succeeded(result)) throw new Error("git rev-parse failed");
@@ -303,18 +436,15 @@ export class JevEgressScopeChecker {
     });
   }
 
-  private remoteUrlsAt(topLevel: string): Promise<string[]> {
+  /**
+   * Every URL git would fetch from or push to, as git resolves it: `remote -v` applies `insteadOf`
+   * and `pushInsteadOf` and lists push URLs. It reads config only and never touches the network.
+   */
+  private remoteUrlsAt(topLevel: string, budget: CheckBudget): Promise<string[]> {
     return this.cached(this.remoteUrls, topLevel, async () => {
-      const result = await this.runGit(
-        ["-C", topLevel, "config", "--get-regexp", "^remote\\..*\\.url$"],
-        { timeoutMs: GIT_TIMEOUT_MS },
-      );
-      const hasNoRemotes = result.exitCode === 1 && !result.timedOut && result.stdout.trim() === "";
-      if (hasNoRemotes) return [];
-      if (!succeeded(result)) throw new Error("git config failed");
-      const lines = result.stdout.split(/\r?\n/).filter((line) => line.trim() !== "");
-      // Each line is `remote.<name>.url <url>`.
-      return lines.map((line) => normalizeRemoteUrl(line.replace(/^\S+\s+/, "")));
+      const result = await this.git(["-C", topLevel, "remote", "-v"], budget);
+      if (!succeeded(result)) throw new Error("git remote failed");
+      return parseRemoteList(result.stdout);
     });
   }
 
@@ -356,17 +486,51 @@ export class JevEgressScopeChecker {
     });
   }
 
-  /** A root as text: its `~/…` form and its absolute form; a `*` root by its prefix. */
+  /**
+   * A root as text: its absolute path, each way a shell or redaction spells it under home, and its
+   * name when that is distinctive (`git -C ../backend-net`). A `*` root by its prefix.
+   */
   private rootTextForms(entry: string): string[] {
     const base = entry.replace(/[\\/]*\*?[\\/]*$/, "");
     if (base === "") return [];
     const absolute = this.expandHome(base);
-    if (absolute !== base) return [base, absolute];
-    if (!path.isAbsolute(base)) throw new Error("an excludeCwds entry is not absolute");
-    // Redaction rewrites the home prefix to `~`, so a root under home also appears in that form.
-    if (!isSameOrDescendantPath(this.homeDir.toLowerCase(), base.toLowerCase())) return [base];
-    const belowHome = base.slice(this.homeDir.length).replace(/^[\\/]+/, "");
-    return [base, belowHome === "" ? "~" : `~/${belowHome}`];
+    if (absolute === base && !path.isAbsolute(base)) {
+      throw new Error("an excludeCwds entry is not absolute");
+    }
+    const name = rootName(entry);
+    return unique([
+      base,
+      absolute,
+      ...this.homeSpellings(absolute),
+      ...(isDistinctiveName(name) ? [name] : []),
+    ]);
+  }
+
+  /**
+   * A path under home as text can spell it: `~/x` (redaction writes this), `~user/x`, `$HOME/x`,
+   * `${HOME}/x`, `/Users/$USER/x`, and the cmd and PowerShell forms. Empty outside home.
+   */
+  private homeSpellings(absolute: string): string[] {
+    const home = toForwardSlashes(this.homeDir).replace(/\/$/, "");
+    const target = toForwardSlashes(absolute);
+    if (!isSameOrDescendantPath(home.toLowerCase(), target.toLowerCase())) return [];
+    const below = target.slice(home.length).replace(/^\/+/, "");
+    const cut = home.lastIndexOf("/");
+    const parent = home.slice(0, cut);
+    const user = home.slice(cut + 1);
+    const homes = [
+      "~",
+      `~${user}`,
+      "$HOME",
+      "${HOME}",
+      `${parent}/$USER`,
+      `${parent}/\${USER}`,
+      "%USERPROFILE%",
+      "$env:USERPROFILE",
+      `${parent}/%USERNAME%`,
+      `${parent}/$env:USERNAME`,
+    ];
+    return homes.map((spelling) => (below === "" ? spelling : `${spelling}/${below}`));
   }
 }
 
@@ -376,6 +540,24 @@ function parseRootPattern(entry: string): RootPattern {
   if (!trimmed.endsWith("*")) return { base: entry, namePrefix: null };
   const namePrefix = path.basename(trimmed).slice(0, -1).normalize("NFC");
   return { base: path.dirname(trimmed), namePrefix };
+}
+
+/** The name a root is known by: `backend-net`, or `ts-monorepo` for `~/ts-monorepo*`. */
+function rootName(entry: string): string {
+  const { base, namePrefix } = parseRootPattern(entry);
+  if (namePrefix !== null) return namePrefix;
+  return toForwardSlashes(base).replace(/\/+$/, "").split("/").pop() ?? "";
+}
+
+/**
+ * Whether a root's name is specific enough to search for on its own: at least 6 characters after
+ * any leading dots, with a letter and a digit, `-`, `_` or `.`. `backend-net`, `ts-monorepo` and
+ * `1rlfnz6g` are; a plain word (`code`, `app`, `work`, `Documents`, `.config`) would match ordinary
+ * text, so only its path spellings count.
+ */
+function isDistinctiveName(name: string): boolean {
+  const bare = name.replace(/^\.+/, "");
+  return bare.length >= 6 && /\p{L}/u.test(bare) && /[0-9._-]/.test(bare);
 }
 
 function isNotFound(error: unknown): boolean {
@@ -426,6 +608,53 @@ function normalizeRemoteEntry(entry: string): string {
   return normalizeRemoteLocation(entry).replace(/\.git$/, "");
 }
 
+function remoteEntry(entry: string, index: number): RemoteEntry {
+  const value = normalizeRemoteEntry(entry);
+  const slash = value.indexOf("/");
+  const ownerPath = slash > 0 ? value.slice(slash + 1) : "";
+  return { index, value, ownerPath: ownerPath === "" ? null : ownerPath };
+}
+
+/** `github-work/wonderlydotcom/mobile/` starts its path with `wonderlydotcom/`. */
+function matchesOwnerPath(normalizedUrl: string, entry: RemoteEntry): boolean {
+  if (entry.ownerPath === null) return false;
+  return normalizedUrl.slice(normalizedUrl.indexOf("/") + 1).startsWith(entry.ownerPath);
+}
+
+/**
+ * Each line of `git remote -v` is `<name>\t<url> (fetch)` or `(push)`; a remote with no URL prints
+ * `<name>\t`. Any other line fails the check.
+ */
+function parseRemoteList(stdout: string): string[] {
+  const urls: string[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.trim() === "" || /^[^\t]+\t$/.test(line)) continue;
+    const match = /^[^\t]+\t(.+) \((?:fetch|push)\)$/.exec(line);
+    if (!match) throw new Error("git remote printed a line it could not read");
+    urls.push(match[1]);
+  }
+  return unique(urls);
+}
+
+/**
+ * The path of a remote that is a local repository, or null for a network URL. Git's rule: a
+ * `scheme://` URL is remote unless it is `file://`; otherwise a colon before any slash is scp-style
+ * SSH, except a drive letter.
+ */
+function localRemotePath(url: string): string | null {
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
+  if (scheme) {
+    if (scheme[1].toLowerCase() !== "file") return null;
+    const rest = url.slice(scheme[0].length);
+    // `file:///x` is `/x`; `file://host/x` names a host first.
+    return rest.startsWith("/") ? rest : rest.slice(Math.max(0, rest.indexOf("/")));
+  }
+  if (/^[a-z]:[\\/]/i.test(url)) return url;
+  const colon = url.indexOf(":");
+  const slash = url.search(/[\\/]/);
+  return colon === -1 || (slash !== -1 && slash < colon) ? url : null;
+}
+
 /** A remote entry as text: `host/org/`, and `host:org/` as it appears in `git@host:org/repo`. */
 function remoteTextForms(entry: string): string[] {
   const normalized = normalizeRemoteEntry(entry);
@@ -453,19 +682,24 @@ function gitEnvironment(): NodeJS.ProcessEnv {
   return env;
 }
 
-function runGitProcess(args: string[], options: { timeoutMs: number }): Promise<JevGitResult> {
+function runGitProcess(args: string[], options: JevGitOptions): Promise<JevGitResult> {
   return new Promise((resolve) => {
     execFile(
       "git",
       args,
-      { timeout: options.timeoutMs, env: gitEnvironment(), windowsHide: true },
+      {
+        timeout: options.timeoutMs,
+        signal: options.signal,
+        env: gitEnvironment(),
+        windowsHide: true,
+      },
       (error, stdout, stderr) => {
         if (error === null) {
           resolve({ exitCode: 0, stdout, stderr });
           return;
         }
-        // A timeout kill or a spawn failure has no exit code; a git that ran and failed does.
-        const timedOut = error.killed === true;
+        // A timeout or abort kill, or a spawn failure, has no exit code; a git that ran and failed does.
+        const timedOut = error.killed === true || options.signal?.aborted === true;
         const exitCode = typeof error.code === "number" && !timedOut ? error.code : null;
         resolve({ exitCode, stdout, stderr, timedOut });
       },

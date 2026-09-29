@@ -9,14 +9,15 @@ export interface JevAgentPlacement {
   archivedAt?: string | null;
 }
 
-/** An agent archived longer ago than this no longer counts as a descendant. */
+/** An agent archived longer ago than this no longer counts as a descendant, unless one below it does. */
 export const JEV_ARCHIVED_DESCENDANT_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Every cwd whose content can reach a call about `agentIds` (docs/jev.md, "The scope"): each
  * agent's own cwd, every ancestor's, and every descendant's, live or archived in the last 24 hours.
- * Null when any id is unknown, so the call is excluded rather than checked against less than its
- * whole tree.
+ * An older archived descendant still counts while any agent below it counts: it spawned that agent
+ * and wrote its prompt. Null when any id is unknown, so the call is excluded rather than checked
+ * against less than its whole tree.
  */
 export function resolveJevAgentCwds(
   agentIds: readonly string[],
@@ -44,20 +45,35 @@ export function resolveJevAgentCwds(
       const parentId = getParentAgentIdFromLabels(cursor.labels);
       cursor = parentId ? byId.get(parentId) : undefined;
     }
-    const queue = [...(children.get(own.id) ?? [])];
-    while (queue.length > 0) {
-      const child = queue.shift()!;
-      if (seen.has(child.id)) continue;
-      seen.add(child.id);
-      if (child.archivedAt) {
-        const archivedAt = Date.parse(child.archivedAt);
-        if (Number.isFinite(archivedAt) && now - archivedAt > JEV_ARCHIVED_DESCENDANT_WINDOW_MS) {
-          continue;
-        }
-      }
-      cwds.add(child.cwd);
-      queue.push(...(children.get(child.id) ?? []));
-    }
+    addDescendantCwds(own.id, { children, seen, now, cwds });
   }
   return [...cwds];
+}
+
+interface DescendantWalk {
+  children: ReadonlyMap<string, readonly JevAgentPlacement[]>;
+  seen: Set<string>;
+  now: number;
+  cwds: Set<string>;
+}
+
+/** Adds the cwds of `parentId`'s descendants that count, and answers whether any did. */
+function addDescendantCwds(parentId: string, walk: DescendantWalk): boolean {
+  let counted = false;
+  for (const child of walk.children.get(parentId) ?? []) {
+    if (walk.seen.has(child.id)) continue;
+    walk.seen.add(child.id);
+    const belowCounts = addDescendantCwds(child.id, walk);
+    if (belowCounts || !isArchivedBeforeWindow(child, walk.now)) {
+      walk.cwds.add(child.cwd);
+      counted = true;
+    }
+  }
+  return counted;
+}
+
+function isArchivedBeforeWindow(placement: JevAgentPlacement, now: number): boolean {
+  if (!placement.archivedAt) return false;
+  const archivedAt = Date.parse(placement.archivedAt);
+  return Number.isFinite(archivedAt) && now - archivedAt > JEV_ARCHIVED_DESCENDANT_WINDOW_MS;
 }
