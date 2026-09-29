@@ -111,6 +111,8 @@ export interface BuildProviderRegistryOptions {
   providerOverrides?: Record<string, ProviderOverride>;
   /** The device cap's launch gate (docs/device-leases.md). Absent means no cap is enforced. */
   deviceLaunchGate?: DeviceLaunchGate;
+  /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
+  isCatastropheGateEnabled?: () => boolean;
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
   isDev?: boolean;
@@ -120,7 +122,11 @@ export interface BuildProviderRegistryOptions {
 
 interface ProviderClientFactoryOptions extends Pick<
   BuildProviderRegistryOptions,
-  "workspaceGitService" | "managedProcesses" | "ompRuntime" | "deviceLaunchGate"
+  | "workspaceGitService"
+  | "managedProcesses"
+  | "ompRuntime"
+  | "deviceLaunchGate"
+  | "isCatastropheGateEnabled"
 > {
   openCodeBridge?: OpenCodeBridge;
   providerParams?: unknown;
@@ -204,6 +210,7 @@ const PROVIDER_CLIENT_FACTORIES: Record<string, ProviderClientFactory> = {
       providerParams: options?.providerParams,
       configDir: runtimeSettings?.env?.CLAUDE_CONFIG_DIR,
       deviceLaunchGate: options?.deviceLaunchGate,
+      isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
     }),
   codex: (logger, runtimeSettings, options) =>
     new CodexAppServerAgentClient(logger, runtimeSettings, {
@@ -751,6 +758,7 @@ function buildResolvedBuiltinProviders(
     | "ompRuntime"
     | "openCodeBridge"
     | "deviceLaunchGate"
+    | "isCatastropheGateEnabled"
   >,
   isDev: boolean,
 ): Map<string, ResolvedProvider> {
@@ -784,6 +792,7 @@ function buildResolvedBuiltinProviders(
           ompRuntime: options.ompRuntime,
           openCodeBridge: options.openCodeBridge,
           deviceLaunchGate: options.deviceLaunchGate,
+          isCatastropheGateEnabled: options.isCatastropheGateEnabled,
           providerParams: override?.params,
         }),
       contract: PROVIDER_CONTRACTS[definition.id] ?? UNSUPPORTED_PROVIDER_CONTRACT,
@@ -798,7 +807,7 @@ function addDerivedProviders(
   providerOverrides: Record<string, ProviderOverride>,
   options: Pick<
     BuildProviderRegistryOptions,
-    "managedProcesses" | "openCodeBridge" | "deviceLaunchGate"
+    "managedProcesses" | "openCodeBridge" | "deviceLaunchGate" | "isCatastropheGateEnabled"
   >,
 ): void {
   for (const [providerId, override] of Object.entries(providerOverrides)) {
@@ -901,6 +910,7 @@ function addDerivedProviders(
           // A derived Claude provider (a second account) runs on the same machine and against
           // the same devices, so it is gated identically.
           deviceLaunchGate: options.deviceLaunchGate,
+          isCatastropheGateEnabled: options.isCatastropheGateEnabled,
           providerParams,
           customProvider: {
             id: providerId,
@@ -928,6 +938,7 @@ export function buildProviderRegistry(
       ompRuntime: options?.ompRuntime,
       openCodeBridge: options?.openCodeBridge,
       deviceLaunchGate: options?.deviceLaunchGate,
+      isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
     },
     options?.isDev === true,
   );
@@ -935,6 +946,7 @@ export function buildProviderRegistry(
     managedProcesses: options?.managedProcesses,
     openCodeBridge: options?.openCodeBridge,
     deviceLaunchGate: options?.deviceLaunchGate,
+    isCatastropheGateEnabled: options?.isCatastropheGateEnabled,
   });
 
   return Object.fromEntries(

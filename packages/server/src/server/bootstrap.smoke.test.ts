@@ -367,6 +367,7 @@ describe("paseo daemon bootstrap", () => {
         doneJanitor: { enabled: true, dryRun: true, quietHours: 6 },
         admission: { maxConcurrentChildTurns: 6, bulkResumesPerMinute: 3 },
         refocus: { enabled: true, dryRun: true, growthTokens: 250_000 },
+        catastropheGate: { enabled: false },
         remediation: {
           escalation: { enabled: true, maxPerDay: 3 },
           notify: { enabled: false },
@@ -425,6 +426,7 @@ describe("paseo daemon bootstrap", () => {
       expect(booted.doneJanitor).toEqual(bootPersisted.agents.doneJanitor);
       expect(booted.admission).toEqual(bootPersisted.agents.admission);
       expect(booted.refocus).toEqual(bootPersisted.agents.refocus);
+      expect(booted.catastropheGate).toEqual(bootPersisted.agents.catastropheGate);
       // Startup-only: it reaches the running service, not the mutable config.
       expect((await client.getRestartRecoveryPlan()).mode).toBe("off");
       expect(booted.remediation).toEqual(bootPersisted.agents.remediation);
@@ -436,6 +438,7 @@ describe("paseo daemon bootstrap", () => {
         "spend-governor": { enabled: true, dryRun: true },
         "account-pressure": { enabled: false, dryRun: undefined },
         refocus: { enabled: true, dryRun: true },
+        "catastrophe-gate": { enabled: false, dryRun: undefined },
         "remediation-escalation": { enabled: true, dryRun: undefined },
         "remediation-notify": { enabled: false, dryRun: undefined },
         "model-divergence": { enabled: true, dryRun: undefined },
@@ -469,6 +472,7 @@ describe("paseo daemon bootstrap", () => {
           doneJanitor: { enabled: true, dryRun: false, quietHours: 6 },
           admission: { enabled: false },
           refocus: { enabled: true, dryRun: false, growthTokens: 250_000 },
+          catastropheGate: { enabled: true },
           remediation: {
             escalation: { enabled: false },
             notify: { enabled: true },
@@ -486,6 +490,7 @@ describe("paseo daemon bootstrap", () => {
         "agents.admission",
         "agents.artifactJanitor",
         "agents.budgetPacing",
+        "agents.catastropheGate",
         "agents.contextMeter",
         "agents.deviceLeases",
         "agents.doneJanitor",
@@ -519,6 +524,7 @@ describe("paseo daemon bootstrap", () => {
       expect(reloaded.doneJanitor).toEqual(reloadedPersisted.agents.doneJanitor);
       expect(reloaded.admission).toEqual(reloadedPersisted.agents.admission);
       expect(reloaded.refocus).toEqual(reloadedPersisted.agents.refocus);
+      expect(reloaded.catastropheGate).toEqual(reloadedPersisted.agents.catastropheGate);
       expect(reloaded.remediation).toEqual(reloadedPersisted.agents.remediation);
       // The ladder re-reads its config on every poll; drive one instead of waiting a minute.
       await daemon.getRemediationLadder()?.tick();
@@ -527,6 +533,7 @@ describe("paseo daemon bootstrap", () => {
         "device-cap": { enabled: false, dryRun: false },
         "spend-governor": { enabled: true, dryRun: false },
         refocus: { enabled: true, dryRun: false },
+        "catastrophe-gate": { enabled: true },
         "leader-compaction": { enabled: true, dryRun: false },
         "remediation-escalation": { enabled: false },
         "remediation-notify": { enabled: true },

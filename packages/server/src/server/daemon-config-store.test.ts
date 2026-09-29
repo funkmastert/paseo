@@ -1244,6 +1244,32 @@ describe("DaemonConfigStore", () => {
     });
   });
 
+  test("patch turns the catastrophe gate off live and persists it", () => {
+    const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
+    tempDirs.push(paseoHome);
+    writeFileSync(path.join(paseoHome, "config.json"), `${JSON.stringify({ version: 1 })}\n`);
+
+    const store = new DaemonConfigStore(
+      paseoHome,
+      {
+        mcp: { injectIntoAgents: false },
+        browserTools: { enabled: false },
+        providers: {},
+        autoArchiveAfterMerge: false,
+        enableTerminalAgentHooks: false,
+        appendSystemPrompt: "",
+      },
+      undefined,
+    );
+    // Absent means on.
+    expect(store.get().catastropheGate).toBeUndefined();
+
+    const next = store.patch({ catastropheGate: { enabled: false } });
+
+    expect(next.catastropheGate).toEqual({ enabled: false });
+    expect(loadPersistedConfig(paseoHome).agents?.catastropheGate).toEqual({ enabled: false });
+  });
+
   test("patch live-toggles accountFailover.enabled without disturbing its other fields", () => {
     const paseoHome = mkdtempSync(path.join(tmpdir(), "paseo-daemon-config-store-"));
     tempDirs.push(paseoHome);

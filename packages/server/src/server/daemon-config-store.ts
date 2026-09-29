@@ -35,6 +35,7 @@ interface SupportedMutableConfigPatch {
   doneJanitor?: MutableDaemonConfig["doneJanitor"];
   admission?: MutableDaemonConfig["admission"];
   refocus?: MutableDaemonConfig["refocus"];
+  catastropheGate?: MutableDaemonConfig["catastropheGate"];
   remediation?: MutableDaemonConfig["remediation"];
   diskSweeper?: MutableDaemonConfig["diskSweeper"];
   // Unlike diskSweeper/tokenBurnMonitor, config and patch differ here: a per-server patch
@@ -221,6 +222,7 @@ const RELOADABLE_PATHS = [
   "agents.doneJanitor",
   "agents.admission",
   "agents.refocus",
+  "agents.catastropheGate",
   "agents.remediation",
   "agents.skills.selection",
   // Live, but not through the mutable config: the token audit job re-reads config.json on every
@@ -269,6 +271,7 @@ const PERSISTED_TO_MUTABLE_PATH = new Map<string, string>([
   ["agents.doneJanitor", "doneJanitor"],
   ["agents.admission", "admission"],
   ["agents.refocus", "refocus"],
+  ["agents.catastropheGate", "catastropheGate"],
   ["agents.remediation", "remediation"],
   ["agents.skills.selection", "skills.selection"],
   ["worktrees.diskSweeper", "diskSweeper"],
@@ -408,6 +411,12 @@ function pickRefocusPatch(
   return refocus === undefined ? {} : { refocus };
 }
 
+function pickCatastropheGatePatch(
+  catastropheGate: MutableDaemonConfigPatch["catastropheGate"],
+): Pick<SupportedMutableConfigPatch, "catastropheGate"> {
+  return catastropheGate === undefined ? {} : { catastropheGate };
+}
+
 function pickRemediationPatch(
   remediation: MutableDaemonConfigPatch["remediation"],
 ): Pick<SupportedMutableConfigPatch, "remediation"> {
@@ -450,6 +459,7 @@ function pickSupportedPatchFields(patch: MutableDaemonConfigPatch): SupportedMut
     ...pickDoneJanitorPatch(patch.doneJanitor),
     ...pickAdmissionPatch(patch.admission),
     ...pickRefocusPatch(patch.refocus),
+    ...pickCatastropheGatePatch(patch.catastropheGate),
     ...pickRemediationPatch(patch.remediation),
     ...pickDiskSweeperPatch(patch.diskSweeper),
     ...pickMcpGatewayPatch(patch.mcpGateway),
@@ -1039,6 +1049,19 @@ function mergeRefocusForPersist(
   return { ...persisted, ...patch } as PersistedRefocus;
 }
 
+type PersistedCatastropheGate = NonNullable<PersistedConfig["agents"]>["catastropheGate"];
+
+// Flat, like refocus: one scalar, so a shallow merge keeps the rest.
+function mergeCatastropheGateForPersist(
+  persisted: PersistedCatastropheGate,
+  patch: SupportedMutableConfigPatch["catastropheGate"],
+): PersistedCatastropheGate {
+  if (patch === undefined) {
+    return persisted;
+  }
+  return { ...persisted, ...patch } as PersistedCatastropheGate;
+}
+
 type PersistedDiskSweeper = NonNullable<PersistedConfig["worktrees"]>["diskSweeper"];
 
 function mergeDiskSweeperForPersist(
@@ -1106,6 +1129,7 @@ function touchesAgentConfig(
     patch.doneJanitor !== undefined ||
     patch.admission !== undefined ||
     patch.refocus !== undefined ||
+    patch.catastropheGate !== undefined ||
     patch.remediation !== undefined ||
     patch.skills !== undefined ||
     removeProviders.length > 0
@@ -1126,6 +1150,11 @@ function mergeProcessPolicySectionsForPersist(
   if (processPriority !== undefined) next["processPriority"] = processPriority;
   const admission = mergeAdmissionForPersist(persistedAgents?.admission, patch.admission);
   if (admission !== undefined) next["admission"] = admission;
+  const catastropheGate = mergeCatastropheGateForPersist(
+    persistedAgents?.catastropheGate,
+    patch.catastropheGate,
+  );
+  if (catastropheGate !== undefined) next["catastropheGate"] = catastropheGate;
 }
 
 // The agents.* monitor sections, one merge each. Split out of mergeMutableAgentPatch so a new

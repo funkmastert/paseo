@@ -118,6 +118,8 @@ export interface ProviderSnapshotManagerOptions {
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   managedProcesses?: ManagedProcessRegistry;
   deviceLaunchGate?: DeviceLaunchGate;
+  /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
+  isCatastropheGateEnabled?: () => boolean;
   isDev?: boolean;
   extraClients?: Partial<Record<AgentProvider, AgentClient>>;
   refreshTimeoutMs?: number;
@@ -248,6 +250,7 @@ export class ProviderSnapshotManager {
   private readonly workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   private readonly managedProcesses?: ManagedProcessRegistry;
   private readonly deviceLaunchGate?: DeviceLaunchGate;
+  private readonly isCatastropheGateEnabled?: () => boolean;
   private readonly openCodeBridge?: OpenCodeBridge;
   private readonly isDev: boolean;
   private readonly extraClients: Partial<Record<AgentProvider, AgentClient>>;
@@ -267,6 +270,7 @@ export class ProviderSnapshotManager {
     this.workspaceGitService = options.workspaceGitService;
     this.managedProcesses = options.managedProcesses;
     this.deviceLaunchGate = options.deviceLaunchGate;
+    this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
     this.openCodeBridge = options.openCodeBridge;
     this.isDev = options.isDev === true;
     this.extraClients = options.extraClients ?? {};
@@ -696,6 +700,7 @@ export class ProviderSnapshotManager {
       managedProcesses: this.managedProcesses,
       openCodeBridge: this.openCodeBridge,
       deviceLaunchGate: this.deviceLaunchGate,
+      isCatastropheGateEnabled: this.isCatastropheGateEnabled,
       isDev: this.isDev,
     });
 
