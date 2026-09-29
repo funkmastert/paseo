@@ -44,7 +44,7 @@ Nothing else spares it. In particular an unread attention flag does not: a faile
 
 **An idle live agent is never dead.** A leader waiting on its children or on Tyler looks the same as a forgotten one from outside, and archiving it costs far more than leaving it. Only the agent can say which, and that is the question below. With `archiveDead` on, the question is asked only of live agents: a closed agent is archived or spared by the dead pass and never resumed to be asked.
 
-**Three days is not arbitrary, and a restart resets it.** A daemon restart closes every agent, so `closed` alone proves nothing about a session Tyler still means to come back to, and closing writes a fresh timestamp. Waiting 72 hours from the restart outlasts a weekend (about 64 hours). Unarchiving an agent resets the clock the same way, so an agent Tyler restores to read is archived again three days later unless he pins it.
+**A restart does not reset the clock.** The wait runs from the agent's own newest activity, and closing an agent keeps the timestamps it had. A daemon restart closes every agent, so `closed` alone proves nothing about a session Tyler still means to come back to, yet the first sweep after boot, about 30 minutes in, archives every unpinned agent that was already quiet for `deadQuietHours` before the restart. An earlier `NOT_DONE` does not spare it either: the answer is activity, and the clock runs from it. The default of 72 hours outlasts a weekend (about 64 hours); a shorter `deadQuietHours` does not. Unarchiving an agent stamps its record, so an agent Tyler restores to read is archived again `deadQuietHours` later unless he pins it.
 
 **The tree decides.** Archive cascades, so one live, pinned or recently touched descendant spares the whole tree, and a dead leader is never archived out from under a working child. The other direction is not handled: dead children of a live leader stay until the leader goes ([Not automated](#not-automated)).
 
@@ -123,9 +123,11 @@ Reply with exactly one word and use no tools: DONE if finished, NOT_DONE otherwi
 If you are unsure, or are waiting on anything or anyone, reply NOT_DONE.
 ```
 
-Only the whole reply, trimmed, equal to `DONE` (one trailing period allowed) counts, and only if the turn made no tool call. `Done`, `DONE, but…`, a question back, markdown, silence, a permission request and a failed turn are all "not done". The answer is read from the question's own turn: the last assistant message would credit an agent that said nothing with whatever it said last time. A permission request or a timeout cancels the turn the janitor started. After a `DONE`, the tree is re-checked against fresh state before the archive, so an agent someone prompted in the meantime is left alone.
+Only the whole reply, trimmed, equal to `DONE` (one trailing period allowed) counts, and only if the turn made no tool call. `Done`, `DONE, but…`, a question back, markdown, silence, a permission request and a failed turn are all "not done". The answer is read from the question's own turn: the last assistant message would credit an agent that said nothing with whatever it said last time. A permission request or a timeout cancels that turn. After a `DONE`, the tree is re-checked against fresh state before the archive, so an agent someone prompted in the meantime is left alone.
 
-The question turn is quiet (`AgentManager.markQuietTurn`): its finish raises no `finished` flag, sends no push and does not refresh the title. An error on it still flags.
+The question is a turn of its own, started only on an idle agent (`AgentManager.startQuietTurnIfIdle`, the check-and-start [leader compaction](leader-compaction.md) uses). The candidates were read at the start of the sweep, minutes earlier, so an agent someone started meanwhile is never steered into: it is reported `cannot-ask`, nothing is remembered, and a later sweep that finds it idle and still quiet asks. The turn is quiet from the moment it starts, never before: its finish raises no `finished` flag, sends no push and does not refresh the title. An error on it still flags, and so does a permission request.
+
+The janitor cancels its own turn and no other. A message someone steers into the question's turn, or a turn that replaces it, makes it theirs: it is no longer quiet, the janitor never cancels it, and the agent is reported `cannot-ask`.
 
 Asking costs a turn, and resuming a closed agent re-reads its whole context at cache-cold prices. So the janitor asks only agents that passed every check, one per sweep by default, most reclaimable disk first, and each at most once per quiet period: the answer is itself activity. Each consecutive "not done" doubles the wait before the next question, up to 8×. The backoff lives in memory; a restart resets it, never the quiet period.
 
@@ -138,7 +140,7 @@ Only after the agent is archived, through archive-by-scope, and only when all of
 - It is a `worktree` workspace marked Paseo-owned, and its directory is inside the Paseo worktrees root. A `local_checkout` or `directory` workspace is never a candidate.
 - It is not pinned.
 - It does not overlap its primary checkout, and no other active workspace sits at or inside it. A workspace in a directory above it does not count: a self-heal fixer's workspace in the home directory once kept every worktree.
-- No unarchived agent belongs to it or runs anywhere under it. No terminal is open in it.
+- No unarchived agent belongs to it or runs anywhere under it. No terminal is open in it and no script runs in it.
 - It passes the git gate (`done-janitor-worktree.ts`), which refuses on any git failure:
   - the directory is the root of a **linked** worktree — its git dir differs from the common dir, so a primary checkout is refused wherever it lives;
   - it is not locked with `git worktree lock`, and no merge, rebase, cherry-pick, revert or bisect is half done;
@@ -152,6 +154,15 @@ Dead agents follow the same rules with one difference: nobody said the work was 
 A workspace whose agents were all archived earlier — by a person, or by a sweep whose reclaim failed — is reclaimed on the same terms once it has been quiet for `quietHours`, without asking anyone. A workspace that never had an agent is never touched: it may be one someone created a minute ago.
 
 Every worktree is [snapshotted](work-snapshots.md) twice on the way out: each worktree of a dead tree before the tree is archived, and each worktree as the last check before it is deleted. The second matters because the gate counts a commit on the local base branch as safe while the snapshot counts only remotes. A snapshot that fails keeps that worktree for the sweep, reported as `its work is at risk and could not be snapshotted: …`. A dry run takes no snapshot.
+
+### The last look
+
+A plan is minutes old by the time it is carried out: the snapshot and `du` take minutes, and a question earlier in the sweep can wait ten. So each deletion is decided again on state read at that moment, three times. The janitor looks right before it calls archive-by-scope, and hands archive-by-scope the same check as `recheck` (`workspace-archive-service.ts`), which runs it after resolving what it will archive and before touching anything, and again right before it deletes the directory.
+
+- **Before the records**, it refuses, touching nothing, on: an unarchived agent in the workspace or under its directory; a live agent there that is running, initializing, mid-turn or waiting on a permission, read from the runtimes so that an archived agent running again counts; another active workspace there; an open terminal; a running script; a pin; or activity newer than the plan saw, from the workspace record or any agent's newest timestamp. The line reads `planned for deletion, but since then …`.
+- **Before the directory**, the workspace and its agents have just been archived by this archive, so it refuses only on what arrived since: a process inside (the `lsof` scan), a schedule, or an agent or workspace there. The records stay archived and the directory stays, reported as `archived the workspace, but kept its directory: …`.
+
+What remains is the time from each look's last read to the step it guards. Before the records, that is archive-by-scope stopping setup scripts and telling clients the workspace is archiving, a few milliseconds; an agent started then is archived with the workspace. Before the directory, it is the git calls inside `deletePaseoWorktree` ahead of `git worktree remove --force`; the `lsof` scan, the slowest read, runs first so the agent reads come last. The worktree's teardown commands run between the two looks, so an agent started during them keeps its directory but has had the teardown run in it. Nothing in the daemon stops an agent starting in a workspace that is being archived, so neither window closes entirely.
 
 ### The deletion invariant
 
@@ -214,7 +225,7 @@ The janitor checks the directory archive-by-scope deletes ([the deletion invaria
   - anything else the gate refuses, a lock or a merge in progress: kept.
 - With `reclaimWorkspaces` off, no Paseo-owned worktree is archived.
 
-Each archive is decided again on freshly read state. A sweep attempts at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. An attempt spends the budget whatever the last checks decide, in a dry run and a live one alike, so a live run deletes only directories the dry run listed as `would-delete`. It may keep more: a snapshot that fails or leaves a file out, a backup that does not verify, or a file or process that appeared between the plan and the delete.
+Each archive is decided again on freshly read state. One that deletes a directory gets [the last look](#the-last-look) as well, with one difference before the records: the workspace has to classify as idle still, since this sweep archives the idle agents in it. A sweep attempts at most `maxArchivesPerSweep`, fixers first and then the longest idle; the rest wait. An attempt spends the budget whatever the last checks decide, in a dry run and a live one alike, so a live run deletes only directories the dry run listed as `would-delete`. It may keep more: a snapshot that fails or leaves a file out, a backup that does not verify, or a file, process or agent that appeared between the plan and the delete.
 
 | Key (`agents.doneJanitor.workspaceSweep`) | Default | Meaning                                                                               |
 | ----------------------------------------- | ------- | ------------------------------------------------------------------------------------- |
@@ -304,3 +315,4 @@ and for live agents:
 - **Dead subagents of a live leader.** The dead pass judges whole trees from the root, so a live idle leader keeps every dead child until it answers the question and is archived. The subagents track's **Archive finished** row clears them by hand.
 - **Subagents on their own.** A subagent is archived with its root. One in another workspace, or open in a tab, is detached instead ([agent-lifecycle.md](agent-lifecycle.md#relationships)), becomes a root, and is asked on its own later.
 - **Directories other than Paseo-owned worktrees.** The idle-workspace sweep archives their records; nothing deletes the directory.
+- **A directory its archive kept.** When the last look refuses the delete, or the delete fails, the workspace is archived and its directory stays. No pass looks at an archived workspace, so it stays until someone deletes it.

@@ -169,6 +169,7 @@ import {
   killTerminalsForWorkspace,
   resolveArchiveDirectory,
   type ActiveWorkspaceRef,
+  type ArchiveRecheck,
   type ArchiveResult,
 } from "./workspace-archive-service.js";
 import { setupAutoArchiveOnMerge } from "./auto-archive-on-merge/index.js";
@@ -981,7 +982,7 @@ function createDoneJanitor(input: {
   archiveWorkspaceById: (
     workspaceId: string,
     requestId: string,
-    options?: { keepDirectory?: boolean; expectedDirectory?: string },
+    options?: { keepDirectory?: boolean; expectedDirectory?: string; recheck?: ArchiveRecheck },
   ) => Promise<ArchiveResult>;
   wsServer: Pick<
     VoiceAssistantWebSocketServer,
@@ -1038,22 +1039,34 @@ function createDoneJanitor(input: {
       checkWorktree: (check) => checkWorktreeDeletionSafety(check),
       measureBytes: (worktreePath) =>
         sampleDirectorySizeBytes(worktreePath, { timeoutMs: 120_000 }),
-      reclaimWorkspace: async (workspaceId, directory) => {
+      reclaimWorkspace: async (workspaceId, directory, recheck) => {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor", {
           expectedDirectory: directory,
+          recheck,
         });
-        return { removedDirectory: result.removedDirectory };
+        return {
+          removedDirectory: result.removedDirectory,
+          ...(result.keptDirectoryReason
+            ? { keptDirectoryReason: result.keptDirectoryReason }
+            : {}),
+        };
       },
       resolveArchiveDirectory: (workspace) =>
         resolveArchiveDirectory(workspace, {
           paseoHome: input.config.paseoHome,
           paseoWorktreesBaseRoot: input.config.worktreesRoot,
         }),
-      archiveWorkspace: async (workspaceId, directory) => {
+      archiveWorkspace: async (workspaceId, directory, recheck) => {
         const result = await input.archiveWorkspaceById(workspaceId, "done-janitor-idle", {
           expectedDirectory: directory,
+          recheck,
         });
-        return { removedDirectory: result.removedDirectory };
+        return {
+          removedDirectory: result.removedDirectory,
+          ...(result.keptDirectoryReason
+            ? { keptDirectoryReason: result.keptDirectoryReason }
+            : {}),
+        };
       },
       archiveWorkspaceRecord: async (workspaceId) => {
         await input.archiveWorkspaceById(workspaceId, "done-janitor-idle-record", {
@@ -2173,7 +2186,7 @@ export async function createPaseoDaemon(
   const archiveWorkspaceByIdExternal = (
     workspaceId: string,
     requestId: string,
-    options: { keepDirectory?: boolean; expectedDirectory?: string } = {},
+    options: { keepDirectory?: boolean; expectedDirectory?: string; recheck?: ArchiveRecheck } = {},
   ) =>
     archiveByScope(
       {
@@ -2202,6 +2215,7 @@ export async function createPaseoDaemon(
         requestId,
         keepDirectory: options.keepDirectory,
         expectedDirectory: options.expectedDirectory,
+        recheck: options.recheck,
       },
     );
   const hubAgentLifecycle = new CreateAgentLifecycleDispatch({

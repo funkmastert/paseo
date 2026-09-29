@@ -1,10 +1,11 @@
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import pino from "pino";
+import pino, { type Logger } from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { AgentManager, type DoneJanitorAgentSummary } from "./agent/agent-manager.js";
+import type { AgentStreamEvent } from "./agent/agent-sdk-types.js";
 import { AgentStorage, type StoredAgentRecord } from "./agent/agent-storage.js";
 import { createTestAgentClient } from "./test-utils/fake-agent-client.js";
 import {
@@ -26,6 +27,7 @@ import type { ProcessScan } from "./worktree-process-scan.js";
 import type { WorkspaceActivitySignals } from "./agent/workspace-sweep-detector.js";
 import type { PushPayload } from "./push/index.js";
 import type { WorktreeSnapshotResult } from "./remediation/contract.js";
+import { ArchiveRefusedError, type ArchiveRecheckStage } from "./workspace-archive-service.js";
 
 const HOUR = 60 * 60_000;
 const NOW = Date.parse("2026-09-21T12:00:00.000Z");
@@ -86,6 +88,13 @@ function coverage(overrides: Partial<WorktreeCoverage> = {}): WorktreeCoverage {
   };
 }
 
+/** What a hook may change mid-sweep: the records the next read is served from. */
+interface HarnessState {
+  stored: StoredAgentRecord[];
+  workspaces: DoneJanitorWorkspace[];
+  now: () => number;
+}
+
 interface Harness {
   janitor: AgentDoneJanitor;
   asked: string[];
@@ -144,6 +153,15 @@ function harness(input: {
   processes?: (directory: string) => ProcessScan;
   scheduledCwds?: string[];
   runningScripts?: number;
+  /** Open terminals per read; overrides `terminals`. */
+  countTerminals?: (workspaceId: string) => number;
+  /** Running scripts per read; overrides `runningScripts`. */
+  countRunningScripts?: (workspaceId: string) => number;
+  /** Runs once, at the first `du`: after a reclaim's plan and before its archive. */
+  whileMeasuring?: (state: HarnessState) => void;
+  /** Runs inside a deleting archive-by-scope, before its re-check at each stage. */
+  duringArchive?: (stage: ArchiveRecheckStage, state: HarnessState) => void;
+  logger?: Logger;
   /** The directory archive-by-scope would delete; absent: its resolution, by path shape. */
   resolveArchiveDirectory?: (workspace: DoneJanitorWorkspace) => string | null;
 }): Harness {
@@ -163,7 +181,9 @@ function harness(input: {
   let listCalls = 0;
   let listProjectCalls = 0;
   let probeCalls = 0;
+  let measured = false;
   const config = input.config;
+  const state: HarnessState = { stored, workspaces, now: () => now };
   /** Archive-by-scope's record half: the workspace and every agent in it. */
   const archiveWorkspaceRecords = (workspaceId: string, event: string): void => {
     archivedWorkspaces.push(workspaceId);
@@ -211,19 +231,39 @@ function harness(input: {
         if (cascades) stored[index] = { ...candidate, archivedAt, updatedAt: archivedAt };
       }
     },
-    countTerminals: async () => input.terminals ?? 0,
+    countTerminals: async (workspaceId) =>
+      input.countTerminals?.(workspaceId) ?? input.terminals ?? 0,
     isPaseoOwnedWorktreePath: async (path) => path.startsWith("/home/t/.paseo/worktrees/"),
     checkWorktree: async ({ worktreePath }) =>
       input.checkWorktree?.(worktreePath) ??
       input.safety ?? { safe: true, branch: "feature", head: "abc" },
-    measureBytes: async () => 3 * GB,
-    reclaimWorkspace: async (workspaceId, directory) => {
-      reclaimed.push(workspaceId);
+    measureBytes: async () => {
+      if (!measured) input.whileMeasuring?.(state);
+      measured = true;
+      return 3 * GB;
+    },
+    // Archive-by-scope's order: the re-check, the records (agents with them), the re-check, the
+    // directory. A refusal before the records touches nothing; one before the directory keeps it.
+    reclaimWorkspace: async (workspaceId, directory, recheck) => {
       expectedDirectories.push(directory);
+      input.duringArchive?.("archive", state);
+      const refused = await recheck("archive");
+      if (refused) throw new ArchiveRefusedError(refused);
+      reclaimed.push(workspaceId);
       events.push(`reclaim:${workspaceId}`);
+      const archivedAt = new Date(now).toISOString();
       const index = workspaces.findIndex((candidate) => candidate.workspaceId === workspaceId);
-      workspaces[index] = { ...workspaces[index], archivedAt: new Date(now).toISOString() };
-      return { removedDirectory: true };
+      workspaces[index] = { ...workspaces[index], archivedAt };
+      for (const [agentIndex, candidate] of stored.entries()) {
+        if (candidate.workspaceId === workspaceId && !candidate.archivedAt) {
+          stored[agentIndex] = { ...candidate, archivedAt, updatedAt: archivedAt };
+        }
+      }
+      input.duringArchive?.("delete", state);
+      const kept = await recheck("delete");
+      return kept
+        ? { removedDirectory: false, keptDirectoryReason: kept }
+        : { removedDirectory: true };
     },
     resolveArchiveDirectory: async (candidate) => {
       if (input.resolveArchiveDirectory) return input.resolveArchiveDirectory(candidate);
@@ -237,15 +277,23 @@ function harness(input: {
       );
       return owned?.[0] ?? null;
     },
-    archiveWorkspace: async (workspaceId, directory) => {
+    archiveWorkspace: async (workspaceId, directory, recheck) => {
       expectedDirectories.push(directory);
+      input.duringArchive?.("archive", state);
+      const refused = await recheck("archive");
+      if (refused) throw new ArchiveRefusedError(refused);
       archiveWorkspaceRecords(workspaceId, `archive-workspace:${workspaceId}`);
-      return { removedDirectory: true };
+      input.duringArchive?.("delete", state);
+      const kept = await recheck("delete");
+      return kept
+        ? { removedDirectory: false, keptDirectoryReason: kept }
+        : { removedDirectory: true };
     },
     archiveWorkspaceRecord: async (workspaceId) => {
       archiveWorkspaceRecords(workspaceId, `archive-record:${workspaceId}`);
     },
-    countRunningScripts: async () => input.runningScripts ?? 0,
+    countRunningScripts: async (workspaceId) =>
+      input.countRunningScripts?.(workspaceId) ?? input.runningScripts ?? 0,
     readActivitySignals: async (directory) =>
       input.signals?.(directory) ?? { headCommitMs: null, directoryMtimeMs: null },
     readWorktreeCoverage: async ({ worktreePath, commit }) => {
@@ -292,7 +340,7 @@ function harness(input: {
     }),
     serverId: "server-1",
     readDaemonConfig: () => ({ doneJanitor: config }),
-    logger: pino({ level: "silent" }),
+    logger: input.logger ?? pino({ level: "silent" }),
     now: () => now,
   });
   return {
@@ -1043,6 +1091,18 @@ describe("AgentDoneJanitor dead pass", () => {
     );
   });
 
+  test("a running script keeps the worktree; the agent is still archived", async () => {
+    const h = harness({ config: DEAD_ON, runningScripts: 1 });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "kept-workspace", reason: "1 script(s) run in it" }),
+    );
+  });
+
   test("reclaimWorkspaces off archives the agent and keeps every worktree", async () => {
     const h = harness({ config: { ...DEAD_ON, reclaimWorkspaces: false } });
 
@@ -1269,7 +1329,306 @@ describe("AgentDoneJanitor dead pass", () => {
   });
 });
 
+describe("AgentDoneJanitor reclaims on what is true at the reclaim, not at the plan", () => {
+  const JUST_NOW = new Date(NOW).toISOString();
+  // Every pass that deletes a worktree plans it, then snapshots and measures it for minutes.
+  const PASSES = [
+    { pass: "the question", config: ON, stored: () => [record()] },
+    { pass: "the dead pass", config: DEAD_ON, stored: () => [record()] },
+    {
+      pass: "the orphan pass",
+      config: ON,
+      stored: () => [record({ archivedAt: FOUR_DAYS_AGO })],
+    },
+  ];
+
+  /** Someone starts an agent in the worktree: its record, and a runtime at work. */
+  function startAgent(
+    state: HarnessState,
+    live: DoneJanitorAgentSummary[],
+    overrides: Partial<StoredAgentRecord> = {},
+  ): void {
+    const started = record({ id: "late", title: "Started meanwhile", updatedAt: JUST_NOW });
+    state.stored.push({ ...started, ...overrides });
+    live.push(
+      liveSummary({
+        id: "late",
+        workspaceId: overrides.workspaceId ?? "ws-1",
+        cwd: overrides.cwd ?? started.cwd,
+        lifecycle: "running",
+        busy: true,
+        lastActivityAt: JUST_NOW,
+      }),
+    );
+  }
+
+  test.each(PASSES)(
+    "$pass: an agent that starts between the plan and the reclaim keeps the workspace and is not archived",
+    async ({ config, stored }) => {
+      const live: DoneJanitorAgentSummary[] = [];
+      const h = harness({
+        config,
+        stored: stored(),
+        live,
+        whileMeasuring: (state) => startAgent(state, live),
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.reclaimed).toEqual([]);
+      expect(h.stored.find((agent) => agent.id === "late")?.archivedAt).toBeFalsy();
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-workspace",
+          workspaceId: "ws-1",
+          reason: "planned for deletion, but since then agent late in it is not archived",
+        }),
+      );
+      expect(report?.entries.filter((entry) => entry.action === "deleted")).toEqual([]);
+    },
+  );
+
+  test("an archived agent that is running again keeps the workspace", async () => {
+    const live: DoneJanitorAgentSummary[] = [];
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      live,
+      whileMeasuring: () => {
+        live.push(liveSummary({ lifecycle: "running", busy: true, lastActivityAt: JUST_NOW }));
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "planned for deletion, but since then agent agent-1 in it is running",
+      }),
+    );
+  });
+
+  test("a terminal opened between the plan and the reclaim keeps the workspace", async () => {
+    let terminals = 0;
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      countTerminals: () => terminals,
+      whileMeasuring: () => {
+        terminals = 1;
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "planned for deletion, but since then it has 1 open terminal(s)",
+      }),
+    );
+  });
+
+  test("a script started between the plan and the reclaim keeps the workspace", async () => {
+    let scripts = 0;
+    const h = harness({
+      config: DEAD_ON,
+      countRunningScripts: () => scripts,
+      whileMeasuring: () => {
+        scripts = 1;
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.archived).toEqual(["agent-1"]);
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "planned for deletion, but since then 1 script(s) run in it",
+      }),
+    );
+  });
+
+  test("activity newer than the plan keeps the workspace", async () => {
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      whileMeasuring: (state) => {
+        state.stored[0] = { ...state.stored[0], lastActivityAt: JUST_NOW };
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        reason: "planned for deletion, but since then agent agent-1 in it was active",
+      }),
+    );
+  });
+
+  test("an agent that starts inside the archive, after the janitor's last look, stops it before anything is touched", async () => {
+    const live: DoneJanitorAgentSummary[] = [];
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      live,
+      duringArchive: (stage, state) => {
+        if (stage === "archive") startAgent(state, live);
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.reclaimed).toEqual([]);
+    expect(h.stored.find((agent) => agent.id === "late")?.archivedAt).toBeFalsy();
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "planned for deletion, but since then agent late in it is not archived",
+      }),
+    );
+  });
+
+  test("an agent that starts in the directory after the archive took the records keeps the directory", async () => {
+    const live: DoneJanitorAgentSummary[] = [];
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      live,
+      duringArchive: (stage, state) => {
+        if (stage === "delete") startAgent(state, live, { workspaceId: "ws-new" });
+      },
+    });
+
+    const report = await h.janitor.tick();
+
+    expect(h.stored.find((agent) => agent.id === "late")?.archivedAt).toBeFalsy();
+    expect(report?.entries.filter((entry) => entry.action === "deleted")).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({
+        action: "kept-workspace",
+        workspaceId: "ws-1",
+        reason: "archived the workspace, but kept its directory: agent late runs inside it",
+      }),
+    );
+  });
+
+  test("a kept workspace is logged once while its reason holds, not every sweep", async () => {
+    const lines: { workspaceId?: string }[] = [];
+    const logger = pino(
+      { level: "info" },
+      { write: (line: string) => lines.push(JSON.parse(line) as { workspaceId?: string }) },
+    );
+    const h = harness({
+      config: ON,
+      stored: [record({ archivedAt: FOUR_DAYS_AGO })],
+      safety: { safe: false, reason: "it has 2 uncommitted or untracked file(s)" },
+      logger,
+    });
+
+    await h.janitor.tick();
+    await h.janitor.tick();
+
+    expect(lines.filter((line) => line.workspaceId === "ws-1")).toHaveLength(1);
+  });
+});
+
+/** An agent on the fake provider, idle after one finished turn, with its finishes recorded. */
+async function askFixture() {
+  const logger = pino({ level: "silent" });
+  const workdir = mkdtempSync(join(tmpdir(), "done-janitor-ask-"));
+  const agentStorage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const finishedTurns: string[] = [];
+  const agentManager = new AgentManager({
+    clients: { claude: createTestAgentClient("claude") },
+    registry: agentStorage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+  });
+  const agent = await agentManager.createAgent(
+    { provider: "claude", cwd: workdir, title: "Asked" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  await agentManager.runAgent(agent.id, "say 'state saved'");
+  await agentManager.flush();
+  await agentManager.clearAgentAttention(agent.id);
+  attentionReasons.length = 0;
+  finishedTurns.length = 0;
+  return { logger, agentStorage, agentManager, agentId: agent.id, attentionReasons, finishedTurns };
+}
+
+async function drain(stream: AsyncGenerator<AgentStreamEvent>): Promise<AgentStreamEvent[]> {
+  const events: AgentStreamEvent[] = [];
+  for await (const event of stream) events.push(event);
+  return events;
+}
+
 describe("askAgentWhetherDone against a real AgentManager", () => {
+  test("never joins a turn someone else started, and leaves it running", async () => {
+    const f = await askFixture();
+    // Someone else's turn, held on a permission until they answer it.
+    const theirs = drain(f.agentManager.streamAgent(f.agentId, "rm -f permission.txt"));
+    const waiting = await f.agentManager.waitForAgentEvent(f.agentId, { waitForActive: true });
+    if (!waiting.permission) throw new Error("expected their turn to wait on a permission");
+
+    const result = await askAgentWhetherDone(
+      { agentManager: f.agentManager, agentStorage: f.agentStorage, logger: f.logger },
+      { agentId: f.agentId, prompt: "Are you finished?", timeoutMs: 30_000 },
+    );
+
+    expect(result).toEqual({ kind: "busy" });
+    expect(f.agentManager.getPendingPermissions(f.agentId)).toHaveLength(1);
+    await f.agentManager.respondToPermission(f.agentId, waiting.permission.id, {
+      behavior: "allow",
+    });
+    const types = (await theirs).map((event) => event.type);
+    expect(types).toContain("turn_completed");
+    expect(types).not.toContain("turn_canceled");
+    await f.agentManager.flush();
+    // The question never started, so nothing silenced the end of theirs.
+    expect(f.finishedTurns).toEqual([f.agentId]);
+  });
+
+  test.each([
+    { ending: "a permission", prompt: "rm -f permission.txt", timeoutMs: 30_000 },
+    { ending: "a timeout", prompt: "hold the turn open", timeoutMs: 200 },
+  ])(
+    "cancels its own question's turn on $ending, quietly, and the next finish still flags",
+    async ({ ending, prompt, timeoutMs }) => {
+      const f = await askFixture();
+
+      const result = await askAgentWhetherDone(
+        { agentManager: f.agentManager, agentStorage: f.agentStorage, logger: f.logger },
+        { agentId: f.agentId, prompt, timeoutMs },
+      );
+      await f.agentManager.flush();
+
+      expect(result).toEqual({ kind: ending === "a permission" ? "permission" : "timeout" });
+      expect(f.agentManager.getAgent(f.agentId)?.lifecycle).toBe("idle");
+      expect(f.agentManager.getPendingPermissions(f.agentId)).toEqual([]);
+      // The question's end is not the agent finishing. (A permission request still flags as one.)
+      expect(f.finishedTurns).toEqual([]);
+      expect(f.attentionReasons).not.toContain("finished");
+
+      await f.agentManager.runAgent(f.agentId, "say hello");
+      await f.agentManager.flush();
+      expect(f.finishedTurns).toEqual([f.agentId]);
+    },
+  );
+
   test("reads the answer from the question's own turn and raises no finish", async () => {
     const logger = pino({ level: "silent" });
     const workdir = mkdtempSync(join(tmpdir(), "done-janitor-ask-"));
@@ -2066,6 +2425,76 @@ describe("AgentDoneJanitor idle-workspace sweep", () => {
   });
 
   describe("Paseo-owned worktrees, whose directory the archive deletes", () => {
+    test("an agent that starts while the worktree is measured keeps it, and is not archived", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        whileMeasuring: (state) => {
+          state.stored[0] = { ...state.stored[0], lastStatus: "running" };
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.stored[0]?.archivedAt).toBeFalsy();
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          workspaceId: "ws-1",
+          reason: "it was idle, but then agent agent-1 is running",
+        }),
+      );
+    });
+
+    test("an agent that starts inside the archive, after the janitor's last look, stops it before anything is touched", async () => {
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        duringArchive: (stage, state) => {
+          if (stage === "archive") state.stored[0] = { ...state.stored[0], lastStatus: "running" };
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual([]);
+      expect(h.stored[0]?.archivedAt).toBeFalsy();
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "kept-idle-workspace",
+          reason: "it was idle, but then agent agent-1 is running",
+        }),
+      );
+    });
+
+    test("an agent that starts in the directory after the archive took the records keeps the directory", async () => {
+      const live: DoneJanitorAgentSummary[] = [];
+      const h = sweepHarness({
+        stored: [record()],
+        workspaces: [workspace()],
+        live,
+        duringArchive: (stage, state) => {
+          if (stage !== "delete") return;
+          state.stored.push(record({ id: "late", workspaceId: "ws-new" }));
+          live.push(liveSummary({ id: "late", workspaceId: "ws-new", lifecycle: "running" }));
+        },
+      });
+
+      const report = await h.janitor.tick();
+
+      expect(h.archivedWorkspaces).toEqual(["ws-1"]);
+      expect(report?.entries).not.toContainEqual(expect.objectContaining({ action: "deleted" }));
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({
+          action: "archived-workspace",
+          workspaceId: "ws-1",
+          reason:
+            "idle past 3d; clean tree and branch feature is merged or pushed; archived the workspace, but kept its directory: agent late runs inside it",
+        }),
+      );
+    });
+
     test("clean and pushed: snapshotted, archived and its directory deleted", async () => {
       const h = sweepHarness({ stored: [record()], workspaces: [workspace()] });
 

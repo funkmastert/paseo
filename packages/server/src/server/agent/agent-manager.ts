@@ -505,6 +505,17 @@ export type IdleTurnOutcome =
   | { status: "canceled" }
   | { status: "failed"; error: string };
 
+/** A turn {@link AgentManager.startQuietTurnIfIdle} started. Its handle touches that turn only. */
+export interface QuietIdleTurn {
+  /** Settles when the turn ends, however it ends. */
+  outcome: Promise<IdleTurnOutcome>;
+  /**
+   * Cancels this turn and nothing else. Resolves false, having done nothing, once the turn has
+   * ended, been replaced, or been joined by a message another sender steered into it.
+   */
+  cancel(reason: AgentCancelReason): Promise<boolean>;
+}
+
 /**
  * Lean per-agent view for AgentStallSweep: the done janitor's view plus the three things a stall
  * needs that it does not carry. See agent/stall-detector.ts.
@@ -710,10 +721,11 @@ interface ManagedAgentBase {
    */
   turnCanceled?: boolean;
   /**
-   * Set by `markQuietTurn` before the done janitor asks an idle agent whether it is finished.
-   * Consumed at the next edge out of `running`, so the answer to that question raises no
-   * `finished` attention, sends no push and does not refresh the title: the janitor asking is not
-   * the agent finishing work. An error on that turn still flags. Live-only, never persisted.
+   * Set when the done janitor's question turn starts (`startQuietTurnIfIdle`), and cleared when
+   * another sender joins or replaces that turn. Consumed at the next edge out of `running`, so
+   * the answer to that question raises no `finished` attention, sends no push and does not
+   * refresh the title: the janitor asking is not the agent finishing work. An error on that turn
+   * still flags. Live-only, never persisted.
    */
   quietTurn?: boolean;
   persistence: AgentPersistenceHandle | null;
@@ -1238,6 +1250,10 @@ export class AgentManager {
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
   private readonly admittedTurns = new WeakMap<AsyncGenerator<AgentStreamEvent>, AdmittedTurn>();
+  /** Streams whose turn is the done janitor's question: quiet once the turn starts. */
+  private readonly quietStreams = new WeakSet<AsyncGenerator<AgentStreamEvent>>();
+  /** Each agent's quiet turn, by run token, until it ends or another sender takes it over. */
+  private readonly quietRunTokens = new Map<string, string>();
   private promptQueue: PromptQueue | null = null;
   private promptDispatchInterceptor: PromptDispatchInterceptor | null = null;
   private paseoToolsEnabled = true;
@@ -1961,6 +1977,42 @@ export class AgentManager {
    * run in one synchronous stretch, so nothing can begin a turn in between.
    */
   startTurnIfIdle(agentId: string, prompt: AgentPromptInput): Promise<IdleTurnOutcome> | null {
+    return this.startIdleTurn(agentId, prompt)?.outcome ?? null;
+  }
+
+  /**
+   * `startTurnIfIdle` for the done janitor's question: the turn is quiet, so its end raises no
+   * `finished` flag, sends no push and does not refresh the title. Quiet from the moment the
+   * turn starts and not before, so a question that never starts silences nothing. A message
+   * another sender steers into it, or a turn that replaces it, is theirs, and ends as theirs.
+   */
+  startQuietTurnIfIdle(agentId: string, prompt: AgentPromptInput): QuietIdleTurn | null {
+    const started = this.startIdleTurn(agentId, prompt, { quiet: true });
+    if (!started) return null;
+    const { token, outcome } = started;
+    this.quietRunTokens.set(agentId, token);
+    void outcome.finally(() => {
+      if (this.quietRunTokens.get(agentId) === token) this.quietRunTokens.delete(agentId);
+    });
+    return {
+      outcome,
+      cancel: (reason) =>
+        this.runForegroundMutation(agentId, async () => {
+          // Checked and interrupted in one synchronous stretch: nothing can take the agent over
+          // in between.
+          if (this.quietRunTokens.get(agentId) !== token) return false;
+          if (this.runs.getRun(agentId)?.token !== token) return false;
+          await this.cancelAgentRunUnlocked(agentId, reason);
+          return true;
+        }),
+    };
+  }
+
+  private startIdleTurn(
+    agentId: string,
+    prompt: AgentPromptInput,
+    options?: { quiet?: boolean },
+  ): { token: string; outcome: Promise<IdleTurnOutcome> } | null {
     const agent = this.agents.get(agentId);
     if (
       !agent ||
@@ -1972,7 +2024,31 @@ export class AgentManager {
       return null;
     }
     const events = this.streamAgent(agentId, prompt);
-    return this.collectIdleTurnOutcome(events);
+    // The run exists from here: `streamAgent` creates it synchronously, so the agent is claimed.
+    const token = this.runs.getPendingRun(agentId)?.token;
+    if (!token) throw new Error(`Agent ${agentId} has no run after starting one`);
+    if (options?.quiet) this.quietStreams.add(events);
+    return { token, outcome: this.collectIdleTurnOutcome(events) };
+  }
+
+  /**
+   * Called as a turn starts. A quiet stream's turn is quiet from here, consumed at its edge out of
+   * `running`; one that never started, or that another sender took over first, set nothing.
+   */
+  private markQuietOnStart(
+    agent: ManagedAgent,
+    stream: AsyncGenerator<AgentStreamEvent>,
+    token: string,
+  ): void {
+    if (this.quietStreams.has(stream) && this.quietRunTokens.get(agent.id) === token) {
+      agent.quietTurn = true;
+    }
+  }
+
+  /** A quiet turn another sender joined or replaced is theirs: it ends as theirs, uncancelled. */
+  private releaseQuietTurn(agent: ManagedAgent): void {
+    this.quietRunTokens.delete(agent.id);
+    agent.quietTurn = false;
   }
 
   private async collectIdleTurnOutcome(
@@ -2020,17 +2096,6 @@ export class AgentManager {
         .join(""),
       itemTypes: rows.map((row) => row.item.type),
     };
-  }
-
-  /**
-   * Marks the next turn of a loaded agent as the done janitor's question, so its finish is not
-   * reported as the agent finishing. Returns false when the agent is not loaded.
-   */
-  markQuietTurn(agentId: string): boolean {
-    const agent = this.agents.get(agentId);
-    if (!agent) return false;
-    agent.quietTurn = true;
-    return true;
   }
 
   getAccountFailoverSummary(agentId: string): AccountFailoverAgentSummary | null {
@@ -3995,6 +4060,7 @@ export class AgentManager {
       agent.activeForegroundTurnId = turnId;
       this.openActiveTurn(agent, turnId, turnStartedAt);
       agent.lifecycle = "running";
+      this.markQuietOnStart(agent, stream, pendingRun.token);
       // Lifecycle now counts this turn, so the admitted-but-starting mark can go.
       this.childAdmission?.settleStart(agentId);
       this.touchUpdatedAt(agent);
@@ -4286,6 +4352,7 @@ export class AgentManager {
     }
 
     const agent = this.requireSessionAgent(agentId);
+    this.releaseQuietTurn(agent);
     agent.pendingReplacement = true;
     agent.lifecycle = "running";
     this.touchUpdatedAt(agent);
@@ -4440,6 +4507,7 @@ export class AgentManager {
         expectedTurnId,
       });
       if (admission.status === "accepted") {
+        this.releaseQuietTurn(agent);
         await this.recordAcceptedSteer(agent, prompt, options?.clientMessageId, expectedTurnId);
       }
       return admission;
@@ -4667,18 +4735,26 @@ export class AgentManager {
     agentId: string,
     cancelReason: AgentCancelReason = "unspecified",
   ): Promise<AgentRunCancellationResult> {
-    return this.runForegroundMutation(agentId, async () => {
-      if (this.childAdmission?.drop(agentId, "canceled")) {
-        // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
-        await this.runs.getRun(agentId)?.settledPromise;
-        return { status: "settled" };
-      }
-      const result = await this.cancelAgentRunNow(agentId, cancelReason);
-      if (cancelReason === "account-capped" && result.status === "settled") {
-        await this.recordAccountCappedCancel(agentId);
-      }
-      return result;
-    });
+    return this.runForegroundMutation(agentId, () =>
+      this.cancelAgentRunUnlocked(agentId, cancelReason),
+    );
+  }
+
+  /** `cancelAgentRun`'s body, for a caller already inside the agent's foreground mutation. */
+  private async cancelAgentRunUnlocked(
+    agentId: string,
+    cancelReason: AgentCancelReason,
+  ): Promise<AgentRunCancellationResult> {
+    if (this.childAdmission?.drop(agentId, "canceled")) {
+      // A queued turn never started, so there is nothing to interrupt. streamAgent settles it.
+      await this.runs.getRun(agentId)?.settledPromise;
+      return { status: "settled" };
+    }
+    const result = await this.cancelAgentRunNow(agentId, cancelReason);
+    if (cancelReason === "account-capped" && result.status === "settled") {
+      await this.recordAccountCappedCancel(agentId);
+    }
+    return result;
   }
 
   /**

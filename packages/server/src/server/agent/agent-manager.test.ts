@@ -7373,8 +7373,9 @@ test("the done janitor's question raises no finish, and does not silence the nex
   // What the agent said before the question must never be read as its answer.
   await manager.appendTimelineItem(agent.id, { type: "assistant_message", text: "DONE" });
   const cursor = manager.getTimelineCursor(agent.id);
-  expect(manager.markQuietTurn(agent.id)).toBe(true);
-  await manager.runAgent(agent.id, "are you done?");
+  const question = manager.startQuietTurnIfIdle(agent.id, "are you done?");
+  if (!question) throw new Error("expected the idle agent to take the question");
+  expect((await question.outcome).status).toBe("completed");
   await manager.flush();
 
   expect(manager.getAgent(agent.id)?.attention.requiresAttention).toBe(false);
@@ -7392,6 +7393,96 @@ test("the done janitor's question raises no finish, and does not silence the nex
   expect(attentionReasons).toEqual(["finished"]);
   expect(finishedTurns).toEqual([agent.id]);
 });
+
+describe("a quiet idle turn", () => {
+  async function quietTurnFixture() {
+    const session = new SteeringTestSession({ provider: "codex", cwd: process.cwd() });
+    const client = new (class extends TestAgentClient {
+      override async createSession(): Promise<AgentSession> {
+        return session;
+      }
+    })();
+    const finishedTurns: string[] = [];
+    const manager = new AgentManager({
+      clients: { codex: client },
+      logger,
+      onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+    });
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-quiet-idle-turn-"));
+    const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+      workspaceId: undefined,
+    });
+    return { session, manager, agentId: agent.id, finishedTurns };
+  }
+
+  test("is not started on a busy agent, and marks nothing", async () => {
+    const { manager, agentId } = await quietTurnFixture();
+    void drainStream(manager.streamAgent(agentId, "theirs"));
+    await manager.waitForAgentRunStart(agentId);
+
+    expect(manager.startQuietTurnIfIdle(agentId, "are you done?")).toBeNull();
+    expect(manager.getAgent(agentId)?.quietTurn).toBeFalsy();
+  });
+
+  test("its handle does not cancel the turn that replaced it, and that turn's finish flags", async () => {
+    const { session, manager, agentId, finishedTurns } = await quietTurnFixture();
+    const question = manager.startQuietTurnIfIdle(agentId, "are you done?");
+    if (!question) throw new Error("expected the idle agent to take the question");
+    await manager.waitForAgentRunStart(agentId);
+
+    void drainStream(await manager.replaceAgentRun(agentId, "theirs"));
+    await manager.waitForAgentRunStart(agentId);
+    expect((await question.outcome).status).toBe("canceled");
+    const interruptsBefore = session.interruptCount;
+
+    expect(await question.cancel("done-janitor")).toBe(false);
+    expect(session.interruptCount).toBe(interruptsBefore);
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("running");
+
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-2" });
+    await manager.flush();
+    expect(finishedTurns).toEqual([agentId]);
+  });
+
+  test("a message steered into it makes it the sender's turn too: not cancelled, not quiet", async () => {
+    const { session, manager, agentId, finishedTurns } = await quietTurnFixture();
+    const question = manager.startQuietTurnIfIdle(agentId, "are you done?");
+    if (!question) throw new Error("expected the idle agent to take the question");
+    await manager.waitForAgentRunStart(agentId);
+
+    const steered = await manager.steerIntoActiveTurn(agentId, "also, fix the test", {
+      clientMessageId: "theirs",
+    });
+    expect(steered.status).toBe("steered");
+
+    expect(await question.cancel("done-janitor")).toBe(false);
+    expect(session.interruptCount).toBe(0);
+    session.pushEvent({ type: "turn_completed", provider: "codex", turnId: "active-turn-1" });
+    expect((await question.outcome).status).toBe("completed");
+    await manager.flush();
+    expect(finishedTurns).toEqual([agentId]);
+  });
+
+  test("its handle cancels its own turn, quietly", async () => {
+    const { session, manager, agentId, finishedTurns } = await quietTurnFixture();
+    const question = manager.startQuietTurnIfIdle(agentId, "are you done?");
+    if (!question) throw new Error("expected the idle agent to take the question");
+    await manager.waitForAgentRunStart(agentId);
+
+    expect(await question.cancel("done-janitor")).toBe(true);
+    expect((await question.outcome).status).toBe("canceled");
+    await manager.flush();
+    expect(session.interruptCount).toBe(1);
+    expect(manager.getAgent(agentId)?.lifecycle).toBe("idle");
+    expect(finishedTurns).toEqual([]);
+  });
+});
+
+async function drainStream(stream: AsyncGenerator<AgentStreamEvent>): Promise<void> {
+  for await (const _event of stream) {
+    // Events reach subscribers; the test reads the manager.
+  }
+}
 
 test("a delegated agent finishing raises no attention: its parent already has the result", async () => {
   // 27 of 34 outstanding attention flags on one live daemon were finished subagents. Nothing

@@ -73,7 +73,15 @@ export interface ArchiveResult {
   removedDirectory: boolean;
   /** The directory it deleted, canonical (`canonicalizePath`); null when it deleted none. */
   deletedDirectory: string | null;
+  /** Why the caller's `recheck` kept the directory after the records were archived. */
+  keptDirectoryReason?: string;
 }
+
+/** The step a `recheck` runs right before: archiving the records, or deleting the directory. */
+export type ArchiveRecheckStage = "archive" | "delete";
+
+/** Why the archive must not take its next step now; null to go ahead. */
+export type ArchiveRecheck = (stage: ArchiveRecheckStage) => Promise<string | null>;
 
 export interface ArchiveByScopeRequest {
   scope: ArchiveScope;
@@ -89,6 +97,23 @@ export interface ArchiveByScopeRequest {
    * touches anything. Ignored with `keepDirectory`, which deletes nothing.
    */
   expectedDirectory?: string;
+  /**
+   * The caller's last look, on state read at that moment: once after the target resolves and
+   * before anything is touched, and once right before the directory is deleted. A reason refuses
+   * the step. Before the records it throws `ArchiveRefusedError` having touched nothing; before
+   * the directory the records stay archived and the directory stays, with the reason in the
+   * result. The done janitor's plan is minutes old by the time it archives
+   * (docs/done-janitor.md, "Reclaiming the worktree").
+   */
+  recheck?: ArchiveRecheck;
+}
+
+/** The caller's `recheck` refused the archive before it touched anything. */
+export class ArchiveRefusedError extends Error {
+  constructor(public readonly reason: string) {
+    super(reason);
+    this.name = "ArchiveRefusedError";
+  }
 }
 
 export class ArchiveDirectoryMismatchError extends Error {
@@ -165,6 +190,9 @@ async function archiveByScopeWithPriority(
       throw new ArchiveDirectoryMismatchError(request.expectedDirectory, directory);
     }
   }
+  // Last, before the first step with an effect: every await after it widens the window.
+  const refused = await request.recheck?.("archive");
+  if (refused) throw new ArchiveRefusedError(refused);
   const targetWorkspaceIds = target.workspaceIds;
 
   await stopWorkspaceSetups(dependencies, target.setupWorkspaceIds, request.requestId);
@@ -174,6 +202,7 @@ async function archiveByScopeWithPriority(
   }
 
   let deletedDirectory: string | null = null;
+  let keptDirectoryReason: string | undefined;
 
   try {
     if (targetWorkspaceIds.length > 0) {
@@ -201,12 +230,12 @@ async function archiveByScopeWithPriority(
     }
 
     if (target.backing !== null && !request.keepDirectory) {
-      deletedDirectory = await maybeRemoveDirectory(
+      ({ deletedDirectory, keptDirectoryReason } = await maybeRemoveDirectory(
         dependencies,
         request,
         target,
         archivedWorkspaceIds,
-      );
+      ));
     }
 
     return {
@@ -214,6 +243,7 @@ async function archiveByScopeWithPriority(
       archivedWorkspaceIds,
       removedDirectory: deletedDirectory !== null,
       deletedDirectory,
+      ...(keptDirectoryReason ? { keptDirectoryReason } : {}),
     };
   } finally {
     if (targetWorkspaceIds.length > 0) {
@@ -401,13 +431,14 @@ async function archiveTargetRecords(
 
 async function maybeRemoveDirectory(
   dependencies: ArchiveDependencies,
-  request: Pick<ArchiveByScopeRequest, "requestId">,
+  request: Pick<ArchiveByScopeRequest, "requestId" | "recheck">,
   target: ArchiveTarget,
   archivedWorkspaceIds: string[],
-): Promise<string | null> {
+): Promise<{ deletedDirectory: string | null; keptDirectoryReason?: string }> {
+  const kept = { deletedDirectory: null };
   const backing = target.backing;
   if (!backing?.isPaseoOwnedWorktree) {
-    return null;
+    return kept;
   }
 
   // Archive-time sample: freshens the disk-usage indicator right as the workspace goes idle,
@@ -443,7 +474,7 @@ async function maybeRemoveDirectory(
         { err: error, targetPath: backing.path, requestId: request.requestId },
         "Worktree teardown failed during archive; workspace already archived",
       );
-      return null;
+      return kept;
     }
     throw error;
   }
@@ -457,7 +488,17 @@ async function maybeRemoveDirectory(
       dependencies,
     ))
   ) {
-    return null;
+    return kept;
+  }
+
+  // Right before the one step nothing undoes.
+  const keptDirectoryReason = await request.recheck?.("delete");
+  if (keptDirectoryReason) {
+    dependencies.sessionLogger?.info(
+      { targetPath: backing.path, requestId: request.requestId, reason: keptDirectoryReason },
+      "Archive kept the worktree directory: the caller's recheck refused the delete",
+    );
+    return { deletedDirectory: null, keptDirectoryReason };
   }
 
   try {
@@ -470,13 +511,13 @@ async function maybeRemoveDirectory(
       worktreesBaseRoot: dependencies.paseoWorktreesBaseRoot,
     });
     dependencies.github.invalidate({ cwd: backing.path });
-    return deleted;
+    return { deletedDirectory: deleted };
   } catch (error) {
     dependencies.sessionLogger?.warn(
       { err: error, targetPath: backing.path, requestId: request.requestId },
       "Worktree disk removal failed during archive; workspace already archived",
     );
-    return null;
+    return kept;
   }
 }
 
