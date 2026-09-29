@@ -22,7 +22,7 @@ describe("JevCircuit", () => {
   test("starts closed", () => {
     const circuit = new JevCircuit();
     expect(circuit.state(0)).toBe("closed");
-    expect(circuit.tryPass(0)).toBe(true);
+    expect(circuit.tryPass(0)).toBe("pass");
   });
 
   test("opens after 5 consecutive failures", () => {
@@ -31,7 +31,7 @@ describe("JevCircuit", () => {
     expect(circuit.state(0)).toBe("closed");
     circuit.recordFailure(0);
     expect(circuit.state(0)).toBe("open");
-    expect(circuit.tryPass(0)).toBe(false);
+    expect(circuit.tryPass(0)).toBe("refused");
   });
 
   test("a success in between resets the failure count", () => {
@@ -48,22 +48,64 @@ describe("JevCircuit", () => {
     expect(circuit.state(59_999)).toBe("open");
     expect(circuit.state(60_000)).toBe("half-open");
 
-    expect(circuit.tryPass(60_000)).toBe(true);
-    expect(circuit.tryPass(60_000)).toBe(false);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    expect(circuit.tryPass(60_000)).toBe("refused");
 
     circuit.recordSuccess();
     expect(circuit.state(60_000)).toBe("closed");
-    expect(circuit.tryPass(60_000)).toBe(true);
+    expect(circuit.tryPass(60_000)).toBe("pass");
   });
 
   test("a failed probe reopens the circuit for another openMs", () => {
     const circuit = new JevCircuit({ openMs: 60_000 });
     for (let i = 0; i < 5; i++) circuit.recordFailure(0);
-    expect(circuit.tryPass(60_000)).toBe(true);
-    circuit.recordFailure(60_000);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    circuit.recordFailure(60_000, { probe: true });
     expect(circuit.state(60_000)).toBe("open");
     expect(circuit.state(119_999)).toBe("open");
     expect(circuit.state(120_000)).toBe("half-open");
+  });
+
+  test("each failed probe doubles the open window, up to maxOpenMs, and a success resets it", () => {
+    const circuit = new JevCircuit({ openMs: 60_000, maxOpenMs: 600_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    let at = 0;
+    const windows: number[] = [];
+    for (let probe = 0; probe < 6; probe += 1) {
+      let opensAt = at;
+      while (circuit.state(opensAt) !== "half-open") opensAt += 1_000;
+      windows.push(opensAt - at);
+      at = opensAt;
+      expect(circuit.tryPass(at)).toBe("probe");
+      circuit.recordFailure(at, { probe: true });
+    }
+    expect(windows).toEqual([60_000, 60_000, 120_000, 240_000, 480_000, 600_000]);
+
+    at += 600_000;
+    expect(circuit.tryPass(at)).toBe("probe");
+    circuit.recordSuccess();
+    for (let i = 0; i < 5; i++) circuit.recordFailure(at);
+    expect(circuit.state(at + 59_999)).toBe("open");
+    expect(circuit.state(at + 60_000)).toBe("half-open");
+  });
+
+  test("a probe that never reports is replaced once its open window passes", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    expect(circuit.tryPass(119_999)).toBe("refused");
+    expect(circuit.tryPass(120_000)).toBe("probe");
+  });
+
+  test("a failure from a call that was not the probe does not settle the probe", () => {
+    const circuit = new JevCircuit({ openMs: 60_000 });
+    for (let i = 0; i < 5; i++) circuit.recordFailure(0);
+    expect(circuit.tryPass(60_000)).toBe("probe");
+    circuit.recordFailure(60_001);
+    expect(circuit.state(60_001)).toBe("half-open");
+    expect(circuit.tryPass(60_002)).toBe("refused");
+    circuit.recordSuccess();
+    expect(circuit.state(60_002)).toBe("closed");
   });
 });
 

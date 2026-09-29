@@ -368,6 +368,353 @@ describe("JevService: lanes, budgets and circuits", () => {
   });
 });
 
+/** A scope checker that passes everything, so a test can drive thousands of calls without git. */
+const OPEN_SCOPE: NonNullable<JevServiceOptions["scopeChecker"]> = {
+  check: async () => ({ excluded: false }),
+  scanText: () => ({ excluded: false }),
+};
+
+describe("JevService: a half-open probe always resolves the circuit", () => {
+  function simulatedClock() {
+    const clock = { t: Date.parse("2026-09-29T12:00:00Z") };
+    return {
+      clock,
+      extra: {
+        now: () => clock.t,
+        sleep: async (ms: number) => {
+          clock.t += ms;
+        },
+        scopeChecker: OPEN_SCOPE,
+      } satisfies Partial<JevServiceOptions>,
+    };
+  }
+
+  async function openTheCircuit(service: JevServiceRuntime, home: string): Promise<void> {
+    for (let i = 0; i < 5; i += 1) await service.decide(spawnHint(home));
+    expect(service.status().lanes.control.circuit).toBe("open");
+  }
+
+  it("a 503 on the probe is retried as the same probe, and its answer closes the circuit", async () => {
+    const { clock, extra } = simulatedClock();
+    const { service, home, transport } = makeHarness({ extra });
+    transport.setBehavior([
+      ...Array.from({ length: 5 }, () => ({ kind: "network" as const })),
+      { kind: "http", status: 503 },
+      { kind: "answer" },
+    ]);
+    await openTheCircuit(service, home);
+    clock.t += 61_000;
+
+    const probe = await service.decide(spawnHint(home));
+    expect(probe.kind).toBe("shadow");
+    if (probe.kind === "shadow") expect(probe.meta.attempts).toBe(2);
+    expect(service.status().lanes.control.circuit).toBe("closed");
+    expect((await service.decide(spawnHint(home))).kind).toBe("shadow");
+  });
+
+  it("a jittered retry backoff under a fractional clock still sends the retry", async () => {
+    const { extra } = simulatedClock();
+    const { service, home, transport } = makeHarness({ extra: { ...extra, random: () => 0.37 } });
+    transport.setBehavior([{ kind: "http", status: 503 }, { kind: "answer" }]);
+    const outcome = await service.decide(spawnHint(home));
+    expect(outcome.kind).toBe("shadow");
+    if (outcome.kind === "shadow") expect(outcome.meta.attempts).toBe(2);
+  });
+
+  it("over 24 h of 503s the lane keeps probing at a capped backoff, and closes once JEV answers", async () => {
+    const { clock, extra } = simulatedClock();
+    const sentAt: number[] = [];
+    const fake = createFakeJevTransport();
+    const transport: JevTransport = {
+      provider: "fake",
+      send: (request, options) => {
+        sentAt.push(clock.t);
+        return fake.send(request, options);
+      },
+    };
+    const { service, home } = makeHarness({ transport, fake, extra });
+    fake.setBehavior({ kind: "network" });
+    await openTheCircuit(service, home);
+
+    fake.setBehavior({ kind: "http", status: 503 });
+    const start = clock.t;
+    const probeStarts: number[] = [];
+    while (clock.t - start < 24 * 3_600_000) {
+      clock.t += 30_000;
+      const before = sentAt.length;
+      const outcome = await service.decide(spawnHint(home));
+      if (sentAt.length > before) probeStarts.push(sentAt[before]);
+      else expect(kindAndReason(outcome)).toBe("unavailable:circuit-open");
+    }
+    const gaps = probeStarts.slice(1).map((at, index) => at - probeStarts[index]);
+    expect(probeStarts.length).toBeGreaterThan(100);
+    expect(Math.max(...gaps)).toBeLessThanOrEqual(10 * 60_000 + 30_000);
+
+    fake.setBehavior({ kind: "answer" });
+    let recoveredAfterMs: number | null = null;
+    const recoveryStart = clock.t;
+    while (recoveredAfterMs === null && clock.t - recoveryStart <= 11 * 60_000) {
+      clock.t += 30_000;
+      if ((await service.decide(spawnHint(home))).kind === "shadow") {
+        recoveredAfterMs = clock.t - recoveryStart;
+      }
+    }
+    expect(recoveredAfterMs).not.toBeNull();
+    expect(service.status().lanes.control.circuit).toBe("closed");
+  });
+
+  it("a probe the caller aborts during the retry backoff still settles the circuit", async () => {
+    const { clock, extra } = simulatedClock();
+    const controller = new AbortController();
+    const { service, home, transport } = makeHarness({
+      extra: {
+        ...extra,
+        sleep: async (ms: number) => {
+          clock.t += ms;
+          controller.abort();
+        },
+      },
+    });
+    transport.setBehavior([
+      ...Array.from({ length: 5 }, () => ({ kind: "network" as const })),
+      { kind: "http", status: 503 },
+      { kind: "answer" },
+    ]);
+    await openTheCircuit(service, home);
+    clock.t += 61_000;
+
+    const probe = await service.decide(spawnHint(home, { signal: controller.signal }));
+    expect(kindAndReason(probe)).toBe("failed:aborted");
+    expect(service.status().lanes.control.circuit).toBe("open");
+    clock.t += 61_000;
+    expect((await service.decide(spawnHint(home))).kind).toBe("shadow");
+    expect(service.status().lanes.control.circuit).toBe("closed");
+  });
+});
+
+describe("JevService: spend is reserved before a call is sent", () => {
+  const REPORTED_QUESTIONS: JevQuestions = {
+    q: { type: "choice", instructions: "Which?", criteria: { a: "A", b: "B" } },
+  };
+
+  /** A transport that reports a cost for every call, like OpenRouter's `usage.cost`. */
+  function costReportingTransport(usd: number): JevTransport & { sends: number } {
+    const transport = {
+      provider: "openrouter" as const,
+      sends: 0,
+      async send(): Promise<JevTransportResponse> {
+        transport.sends += 1;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          status: 200,
+          retryAfterMs: null,
+          body: {
+            model: "jev-test",
+            answers: {
+              q: {
+                type: "choice",
+                choice: "a",
+                probabilities: { a: 0.9, b: 0.1 },
+                confidence: 0.9,
+              },
+            },
+            usage: { input_tokens: 10, output_tokens: 0, cost: usd },
+          },
+        };
+      },
+    };
+    return transport;
+  }
+
+  function toolsCall(home: string, index: number, subject?: JevDecideInput["subject"]) {
+    return agentTools(home, {
+      questions: REPORTED_QUESTIONS,
+      callGroup: `group-${index}`,
+      subject,
+      state: "s",
+    });
+  }
+
+  it("40 concurrent calls from one agent spend no more than its hourly cap", async () => {
+    const transport = costReportingTransport(0.01);
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    const outcomes = await Promise.all(
+      Array.from({ length: 40 }, (_, index) =>
+        service.decide(toolsCall(home, index, { callerAgentId: "agent-A" })),
+      ),
+    );
+    expect(service.status().lanes.agentTools.today.usd).toBeLessThanOrEqual(0.05 + 1e-9);
+    expect(transport.sends).toBeLessThanOrEqual(5);
+    expect(outcomes.filter((o) => kindAndReason(o) === "unavailable:agent-budget").length).toBe(
+      40 - transport.sends,
+    );
+  });
+
+  it("200 concurrent control calls spend no more than the lane's daily cap", async () => {
+    const transport = costReportingTransport(0.05);
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    const triage = () =>
+      service.decide(
+        spawnHint(home, {
+          feature: "remediationTriage",
+          questions: REPORTED_QUESTIONS,
+          state: "s",
+        }),
+      );
+    await Promise.all(Array.from({ length: 200 }, triage));
+    expect(service.status().lanes.control.today.usd).toBeLessThanOrEqual(1 + 1e-9);
+    expect(transport.sends).toBeLessThanOrEqual(20);
+    expect(transport.sends).toBeGreaterThanOrEqual(15);
+    // Refusals while calls were in flight leave the lane open; once they settle, it is spent.
+    expect(kindAndReason(await triage())).toBe("unavailable:daily-budget");
+    expect(service.status().lanes.control.exhausted).toBe(true);
+    expect(transport.sends).toBeLessThanOrEqual(20);
+  });
+
+  it("agentTools calls that name no agent share one unattributed hourly cap", async () => {
+    const transport = costReportingTransport(0.03);
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    expect((await service.decide(toolsCall(home, 1, {}))).kind).toBe("answered");
+    expect(kindAndReason(await service.decide(toolsCall(home, 2, {})))).toBe(
+      "unavailable:agent-budget",
+    );
+    expect(transport.sends).toBe(1);
+    expect((await service.decide(toolsCall(home, 3, { callerAgentId: "agent-B" }))).kind).toBe(
+      "answered",
+    );
+  });
+
+  it("a call whose send fails releases its reservation instead of holding it", async () => {
+    let sends = 0;
+    const script: Array<"answer" | "network"> = [
+      "answer",
+      "network",
+      "network",
+      "network",
+      "network",
+      "answer",
+      "answer",
+      "answer",
+    ];
+    const transport: JevTransport = {
+      provider: "openrouter",
+      async send(): Promise<JevTransportResponse> {
+        const step = script[Math.min(sends, script.length - 1)];
+        sends += 1;
+        if (step === "network") throw new Error("jev: request failed");
+        return {
+          status: 200,
+          retryAfterMs: null,
+          body: {
+            model: "jev-test",
+            answers: {
+              q: {
+                type: "choice",
+                choice: "a",
+                probabilities: { a: 0.9, b: 0.1 },
+                confidence: 0.9,
+              },
+            },
+            usage: { input_tokens: 10, output_tokens: 0, cost: 0.01 },
+          },
+        };
+      },
+    };
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    const kinds: string[] = [];
+    for (let index = 0; index < script.length; index += 1) {
+      kinds.push(
+        kindAndReason(await service.decide(toolsCall(home, index, { callerAgentId: "agent-C" }))),
+      );
+    }
+    expect(kinds).toEqual([
+      "answered",
+      "failed:network",
+      "failed:network",
+      "failed:network",
+      "failed:network",
+      "answered",
+      "answered",
+      "answered",
+    ]);
+  });
+});
+
+describe("JevService: the deadline covers the scope check", () => {
+  it("a scope check slower than the deadline answers saturated at the deadline and sends nothing", async () => {
+    const transport = forbiddenTransport();
+    const seen: Array<{ deadlineAt?: number; signal?: AbortSignal } | undefined> = [];
+    const slowScope: NonNullable<JevServiceOptions["scopeChecker"]> = {
+      check: (_scope, _config, options) => {
+        seen.push(options);
+        return new Promise((resolve) => setTimeout(() => resolve({ excluded: false }), 4_000));
+      },
+      scanText: () => ({ excluded: false }),
+    };
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: slowScope },
+    });
+    const startedAt = Date.now();
+    const outcome = await service.decide(spawnHint(home, { deadlineMs: 300 }));
+    const elapsed = Date.now() - startedAt;
+    expect(kindAndReason(outcome)).toBe("unavailable:saturated");
+    expect(elapsed).toBeLessThan(1_500);
+    expect(transport.calls).toBe(0);
+    expect(seen[0]?.deadlineAt).toBeGreaterThanOrEqual(startedAt + 300);
+    expect(seen[0]?.deadlineAt).toBeLessThanOrEqual(startedAt + 400);
+    expect(service.status().lanes.control.circuit).toBe("closed");
+  });
+
+  it("a scope checker that stops at the deadline itself answers saturated, not excluded", async () => {
+    const stopsAtDeadline: NonNullable<JevServiceOptions["scopeChecker"]> = {
+      check: async () => ({ excluded: true, signal: "deadline" }),
+      scanText: () => ({ excluded: false }),
+    };
+    const { service, home } = makeHarness({
+      transport: forbiddenTransport(),
+      key: FAKE_KEY,
+      extra: { scopeChecker: stopsAtDeadline },
+    });
+    expect(kindAndReason(await service.decide(spawnHint(home)))).toBe("unavailable:saturated");
+  });
+
+  it("an abort during the scope check answers aborted at once", async () => {
+    const controller = new AbortController();
+    const slowScope: NonNullable<JevServiceOptions["scopeChecker"]> = {
+      check: () => new Promise((resolve) => setTimeout(() => resolve({ excluded: false }), 4_000)),
+      scanText: () => ({ excluded: false }),
+    };
+    const { service, home } = makeHarness({
+      transport: forbiddenTransport(),
+      key: FAKE_KEY,
+      extra: { scopeChecker: slowScope },
+    });
+    setTimeout(() => controller.abort(), 20);
+    const startedAt = Date.now();
+    const outcome = await service.decide(spawnHint(home, { signal: controller.signal }));
+    expect(kindAndReason(outcome)).toBe("failed:aborted");
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+});
+
 describe("JevService: ledger, audit, status", () => {
   it("writes the audit file 0600 in a 0700 directory, one line per sent call", async () => {
     const { service, home, paseoHome } = makeHarness();
