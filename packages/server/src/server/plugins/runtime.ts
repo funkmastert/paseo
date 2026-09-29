@@ -1,5 +1,9 @@
 import type { PluginBeforeRequests, PluginLifecycleEvents } from "@getpaseo/plugin/server";
-import { validateBeforeRequest, validateBeforeResult } from "./lifecycle/index.js";
+import {
+  PluginUnresponsiveError,
+  validateBeforeRequest,
+  validateBeforeResult,
+} from "./lifecycle/index.js";
 import { fork } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
@@ -551,13 +555,14 @@ export class PluginRuntime {
         if (message.type === "hook") {
           void send(child, { type: "hook.cancel", requestId }).catch(() => {});
         }
-        reject(new Error(`Plugin RPC timed out: ${pluginId}.${message.type}`));
+        reject(new PluginUnresponsiveError(`Plugin RPC timed out: ${pluginId}.${message.type}`));
       }, REQUEST_TIMEOUT_MS);
       loaded.pending.set(requestId, { resolve, reject, timeout });
       void send(child, message).catch((error) => {
         clearTimeout(timeout);
         loaded.pending.delete(requestId);
-        reject(error);
+        // The request never reached the plugin (its IPC channel is closed), so it did not answer.
+        reject(new PluginUnresponsiveError(describeError(error), { cause: error }));
       });
     });
   }
@@ -1074,7 +1079,7 @@ export class PluginRuntime {
   private rejectPending(loaded: LoadedPlugin, message: string): void {
     for (const invocation of loaded.pending.values()) {
       clearTimeout(invocation.timeout);
-      invocation.reject(new Error(message));
+      invocation.reject(new PluginUnresponsiveError(message));
     }
     loaded.pending.clear();
   }
