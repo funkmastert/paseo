@@ -43,18 +43,18 @@ Run Paseo or Bozeo, not both at once: they share `~/.paseo` and port 6767 ([deta
 
 ## Install
 
-There are no releases yet, so you build the desktop app from source. If the [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download it instead. [docs/install.md](docs/install.md) has every step, the Windows differences and troubleshooting.
+There are no releases yet, so you build the desktop app from source. If the [Releases page](https://github.com/funkmastert/paseo/releases) lists one when you read this, download it instead. [docs/install.md](docs/install.md) has every step, the Windows differences and troubleshooting. Or run `/install` in Claude Code to be walked through it.
 
 You need Git, Node.js 22, and [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in. On Windows, run these commands in Git Bash.
 
 ```bash
 git clone --branch multi-account-orchestrator https://github.com/funkmastert/paseo.git
 cd paseo
-npm ci
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 npm ci
 npm run build:desktop -- --publish never
 ```
 
-Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream.
+Clone with `--branch multi-account-orchestrator`. The repo's default branch, `main`, is an unmodified copy of upstream. The two variables on `npm ci` stop its hook installer from replacing your global git hooks ([why](docs/install.md#build)).
 
 The installer lands in `packages/desktop/release/`: a `.dmg` on macOS, a `Paseo-Setup-<version>-<arch>.exe` on Windows. Then set up the account pool with the plugin's [operator setup](plugins/claude-account-pool/README.md#operator-setup), as [docs/install.md](docs/install.md#set-up-the-account-pool) describes.
 
