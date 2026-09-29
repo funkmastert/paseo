@@ -25,7 +25,13 @@ import {
   markBuildDaemonHandled,
   type ProcessSignaller,
 } from "./agent/build-daemon-reaper.js";
-import { evaluateMemoryBrake, type MemoryBrakeState } from "./agent/memory-brake.js";
+import {
+  describePressure,
+  evaluateMemoryBrake,
+  MEMORY_HOLD_NOTICE_MS,
+  MEMORY_HOLD_TRICKLE_AFTER_MS,
+  type MemoryBrakeState,
+} from "./agent/memory-brake.js";
 import {
   describeProcess,
   formatMemoryConsumers,
@@ -125,6 +131,8 @@ const MAX_EPISODE_ATTEMPTS = 20;
 
 // A critical-pressure push is announced once per spell; the key also rides the policy's cooldown.
 const MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY = "resource-monitor:memory-pressure-critical";
+// The same for a memory hold that has outlasted MEMORY_HOLD_NOTICE_MS with children waiting.
+const MEMORY_HOLD_NOTICE_DEDUPE_KEY = "resource-monitor:memory-hold-long";
 
 const ORPHAN_DAEMONS_KEY = "orphan-build-daemons";
 const SYSTEM_MEMORY_KEY = "system-memory";
@@ -226,6 +234,7 @@ interface AgentResourceMonitorLogger {
 export interface AgentResourceMonitorOptions {
   agentManager: Pick<
     AgentManager,
+    | "getChildAdmission"
     | "listAgentsForResourceMonitor"
     | "getResourceMonitorState"
     | "setResourceMonitorState"
@@ -451,6 +460,43 @@ function buildMemoryPressureCriticalPayload(serverId: string, systemMemory: Syst
   };
 }
 
+/**
+ * Pushed once per memory hold that has lasted MEMORY_HOLD_NOTICE_MS with a child waiting. The
+ * ladder hears the hold only while its swap alarm is open, and warn from a full compressor with
+ * little swap never opens it, so without this a hold could last all day and nobody would know.
+ */
+function buildMemoryHoldNoticePayload(input: {
+  serverId: string;
+  systemMemory: SystemMemorySample | undefined;
+  heldForMs: number;
+  waiting: number | undefined;
+}) {
+  const { systemMemory } = input;
+  const level = systemMemory?.memoryPressureLevel;
+  const pressure =
+    level === undefined
+      ? "memory pressure has not been readable"
+      : `memory pressure is ${describePressure(level)} (${level})`;
+  const swap = systemMemory
+    ? `, swap ${formatBytes(systemMemory.swapUsedBytes)} of ${formatBytes(systemMemory.swapTotalBytes)}`
+    : "";
+  const waiting =
+    input.waiting === undefined
+      ? "New child-agent turns are waiting"
+      : `${input.waiting} child-agent ${input.waiting === 1 ? "turn is" : "turns are"} waiting`;
+  const trickleMinutes = MEMORY_HOLD_TRICKLE_AFTER_MS / 60_000;
+  return {
+    title: "Child agents are waiting on memory",
+    body:
+      `New child-agent turns have been held for ${Math.round(input.heldForMs / 60_000)} min: ` +
+      `${pressure}${swap}. ${waiting}; running turns are untouched. Once it has held ` +
+      `${trickleMinutes} min with swap not growing, one starts per minute. To start them all ` +
+      "now, set agents.admission.enabled to false in config.json (this also lifts the " +
+      "child-turn cap; it applies without a restart).",
+    data: { serverId: input.serverId, reason: "resource_system_memory" as const },
+  };
+}
+
 function computeSwapUsedRatio(systemMemory: SystemMemorySample): number {
   return systemMemory.swapTotalBytes > 0
     ? systemMemory.swapUsedBytes / systemMemory.swapTotalBytes
@@ -611,10 +657,14 @@ export class AgentResourceMonitor {
   /** Which conditions hold child admission now; holdChildAdmission hears their union. */
   private cpuHoldsAdmission = false;
   private memoryHoldsAdmission = false;
+  /** Why each condition holding admission holds it, in the order they started. */
+  private readonly admissionHoldReasons = new Map<"cpu" | "memory", string>();
   /** The memory brake's state between sweeps (agent/memory-brake.ts). */
   private memoryBrake: MemoryBrakeState | undefined;
   /** Whether this critical-pressure spell has been pushed. */
   private memoryCriticalAlerted = false;
+  /** Whether this memory hold has been pushed for lasting MEMORY_HOLD_NOTICE_MS. */
+  private memoryHoldNoticed = false;
   /** The last process sample that worked. A failed sample reuses it for evidence, never to act. */
   private lastProcessSample: AttributedProcessSample | undefined;
   private saturationState: SaturationState | undefined;
@@ -672,6 +722,7 @@ export class AgentResourceMonitor {
     this.releaseAdmission("resource monitor stopped");
     this.memoryBrake = undefined;
     this.memoryCriticalAlerted = false;
+    this.memoryHoldNoticed = false;
   }
 
   async tick(): Promise<void> {
@@ -1014,7 +1065,7 @@ export class AgentResourceMonitor {
 
   /**
    * Sets one condition's hold. Returns whether that condition's hold changed; holdChildAdmission
-   * hears only changes to the union, so a release while the other condition holds releases nothing.
+   * hears changes to the union, so a release while the other condition holds releases nothing.
    */
   private setAdmissionHold(source: "cpu" | "memory", held: boolean, reason: string): boolean {
     if (!this.holdChildAdmission) return false;
@@ -1023,6 +1074,8 @@ export class AgentResourceMonitor {
     const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
     if (source === "cpu") this.cpuHoldsAdmission = held;
     else this.memoryHoldsAdmission = held;
+    if (held) this.admissionHoldReasons.set(source, reason);
+    else this.admissionHoldReasons.delete(source);
     this.applyAdmissionHold(wasHeld, reason, source);
     return true;
   }
@@ -1031,6 +1084,7 @@ export class AgentResourceMonitor {
     const wasHeld = this.cpuHoldsAdmission || this.memoryHoldsAdmission;
     this.cpuHoldsAdmission = false;
     this.memoryHoldsAdmission = false;
+    this.admissionHoldReasons.clear();
     this.applyAdmissionHold(wasHeld, reason);
   }
 
@@ -1042,6 +1096,9 @@ export class AgentResourceMonitor {
           { source, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
           "Child admission stays held",
         );
+        // What holds it changed, so admission hears the conditions that hold it now: bootstrap
+        // wires both to one source, and its queue lines would otherwise name the first one.
+        this.callHoldChildAdmission(true, [...this.admissionHoldReasons.values()].join("; "));
       }
       return;
     }
@@ -1049,6 +1106,10 @@ export class AgentResourceMonitor {
       { held, reason, cpu: this.cpuHoldsAdmission, memory: this.memoryHoldsAdmission },
       held ? "Holding child admission" : "Releasing child admission",
     );
+    this.callHoldChildAdmission(held, reason);
+  }
+
+  private callHoldChildAdmission(held: boolean, reason: string): void {
     try {
       this.holdChildAdmission?.(held, reason);
     } catch (error) {
@@ -1067,7 +1128,7 @@ export class AgentResourceMonitor {
     systemMemory: SystemMemorySample | undefined,
     nowMs: number,
   ): Promise<RemedyAttempt[]> {
-    const result = evaluateMemoryBrake(systemMemory, this.memoryBrake);
+    const result = evaluateMemoryBrake(systemMemory, this.memoryBrake, nowMs);
     this.memoryBrake = result.next;
     const attempts: RemedyAttempt[] = [];
     if (result.transition !== "none") {
@@ -1099,7 +1160,64 @@ export class AgentResourceMonitor {
         dedupeKey: MEMORY_PRESSURE_CRITICAL_DEDUPE_KEY,
       });
     }
+    attempts.push(...(await this.handleLongMemoryHold(result, systemMemory, nowMs)));
     return attempts;
+  }
+
+  /**
+   * A memory hold that goes on: warn from a full compressor can last hours with little swap, and
+   * then nothing else says children are stalled. Pushes once when it has held
+   * MEMORY_HOLD_NOTICE_MS with a child waiting, and once it has been settled for
+   * MEMORY_HOLD_TRICKLE_AFTER_MS lets one queued child through per sweep, unless CPU saturation
+   * holds admission too.
+   */
+  private async handleLongMemoryHold(
+    result: ReturnType<typeof evaluateMemoryBrake>,
+    systemMemory: SystemMemorySample | undefined,
+    nowMs: number,
+  ): Promise<RemedyAttempt[]> {
+    if (!this.memoryHoldsAdmission) {
+      this.memoryHoldNoticed = false;
+      return [];
+    }
+    const admission = this.agentManager.getChildAdmission();
+    const waiting = admission?.queueLength();
+    if (!this.memoryHoldNoticed && result.heldForMs >= MEMORY_HOLD_NOTICE_MS && waiting !== 0) {
+      this.memoryHoldNoticed = true;
+      this.logger.warn(
+        {
+          heldForMs: result.heldForMs,
+          waiting,
+          memoryPressureLevel: systemMemory?.memoryPressureLevel,
+        },
+        "Memory hold has lasted with children waiting",
+      );
+      await this.sendPush(
+        buildMemoryHoldNoticePayload({
+          serverId: this.serverId,
+          systemMemory,
+          heldForMs: result.heldForMs,
+          waiting,
+        }),
+        { level: "notice", dedupeKey: MEMORY_HOLD_NOTICE_DEDUPE_KEY },
+      );
+    }
+    if (!result.trickle || this.cpuHoldsAdmission || !admission) return [];
+    const minutes = Math.round(result.heldForMs / 60_000);
+    const agentId = admission.admitNextWhileHeld(
+      `trickle: memory held ${minutes} min with swap not growing`,
+    );
+    if (!agentId) return [];
+    return [
+      {
+        remedy: "admission-hold",
+        outcome: "acted",
+        detail:
+          `Let one queued child turn through (${agentId}): memory has held admission for ` +
+          `${minutes} min without turning critical or swap growing`,
+        at: new Date(nowMs).toISOString(),
+      },
+    ];
   }
 
   /**
@@ -1621,6 +1739,7 @@ export class AgentResourceMonitor {
     this.releaseAdmission("resource monitor turned off");
     this.memoryBrake = undefined;
     this.memoryCriticalAlerted = false;
+    this.memoryHoldNoticed = false;
     if (this.saturationEpisode) {
       const attempts = this.saturationEpisode;
       this.saturationEpisode = null;

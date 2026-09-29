@@ -155,6 +155,11 @@ export interface ChildAdmissionControllerOptions {
 
 // The drain after a hold never goes slower than this, whatever bulkResumesPerMinute says.
 const MIN_DRAIN_PER_MINUTE = 0.001;
+/**
+ * Nor faster than one resource-monitor sweep (DEFAULT_SWEEP_INTERVAL_MS): the memory brake reads
+ * once a sweep, so a faster drain starts turns it has not seen the effect of.
+ */
+const MIN_DRAIN_INTERVAL_MS = 60_000;
 
 export class ChildAdmissionController {
   private readonly queue: QueueEntry[] = [];
@@ -173,10 +178,12 @@ export class ChildAdmissionController {
   private persistTail: Promise<void> = Promise.resolve();
   private persistenceFrozen = false;
   /**
-   * Set when the last hold ends with children waiting. Until the line is empty it drains one turn
-   * per `bulkResumesPerMinute` interval instead of filling every free slot at once.
+   * Set when the last hold ends with children waiting: the `queuedAt` of the newest of them. That
+   * backlog drains one turn per interval instead of filling every free slot at once; a child
+   * queued after it is admitted as a slot frees, the way it would be with no hold. Null when no
+   * drain is under way.
    */
-  private pacedDrain = false;
+  private pacedThroughQueuedAt: string | null = null;
   private lastPacedAdmitMs: number | null = null;
   private drainTimer: unknown = null;
   private readonly logger: Logger;
@@ -212,15 +219,15 @@ export class ChildAdmissionController {
     }
     // This child is about to run or wait, so its parent is from now on waiting on a child.
     const occupied = this.occupiedSlots(input.agentId, input.parentAgentId);
+    const queuedAt = input.queuedAt ?? this.now().toISOString();
     if (
       this.holds.size === 0 &&
-      this.queue.length === 0 &&
+      this.nothingAheadOf(queuedAt) &&
       occupied < settings.maxConcurrentChildTurns
     ) {
       this.starting.add(input.agentId);
       return { status: "admitted" };
     }
-    const queuedAt = input.queuedAt ?? this.now().toISOString();
     let resolve!: (outcome: AdmissionOutcome) => void;
     const result = new Promise<AdmissionOutcome>((r) => {
       resolve = r;
@@ -243,7 +250,7 @@ export class ChildAdmissionController {
         queueLength: this.queue.length,
         occupied,
         cap: settings.maxConcurrentChildTurns,
-        holds: [...this.holds.keys()],
+        holds: this.holdReasons(),
       },
       "Child turn queued",
     );
@@ -336,15 +343,25 @@ export class ChildAdmissionController {
    */
   setHold(source: string, held: boolean, reason?: string): void {
     const wasHeld = this.holds.has(source);
-    if (held === wasHeld) return;
+    if (held === wasHeld) {
+      // Still held, for a different reason: what holds it changed (the resource monitor's CPU
+      // and memory conditions share one source), and the queue lines should say what it is now.
+      if (held && reason !== undefined && reason !== this.holds.get(source)) {
+        this.holds.set(source, reason);
+        this.logger.info({ source, reason }, "Child admission hold reason changed");
+      }
+      return;
+    }
     if (held) this.holds.set(source, reason ?? source);
     else this.holds.delete(source);
     this.logger.info(
-      { source, held, reason, holds: [...this.holds.keys()], queueLength: this.queue.length },
+      { source, held, reason, holds: this.holdReasons(), queueLength: this.queue.length },
       held ? "Child admission held" : "Child admission hold released",
     );
     if (held) return;
-    if (this.holds.size === 0 && this.queue.length > 0) this.pacedDrain = true;
+    if (this.holds.size === 0 && this.queue.length > 0) {
+      this.pacedThroughQueuedAt = this.queue.at(-1)!.queuedAt;
+    }
     this.pump();
   }
 
@@ -353,8 +370,26 @@ export class ChildAdmissionController {
   }
 
   /**
-   * Admits queued children FIFO while slots are free, or one per pacing interval while the line
-   * drains after a hold. Cheap when the queue is empty.
+   * Admits the oldest waiting child while admission is held, if a slot is free. The caller
+   * vouches that one more turn is safe: the resource monitor's trickle under a long memory hold,
+   * once a sweep. Returns the admitted child, or null.
+   */
+  admitNextWhileHeld(why: string): string | null {
+    const settings = this.settings();
+    if (!settings.enabled || this.queue.length === 0) return null;
+    if (this.occupiedSlots() >= settings.maxConcurrentChildTurns) return null;
+    const entry = this.queue.shift()!;
+    this.admit(entry, why);
+    // A release right after it waits a full interval before the drain's first turn.
+    this.lastPacedAdmitMs = this.now().getTime();
+    this.persist();
+    return entry.agentId;
+  }
+
+  /**
+   * Admits queued children FIFO while slots are free. While the backlog a hold left drains, that
+   * backlog goes one per pacing interval and later children fill the free slots behind it. Cheap
+   * when the queue is empty.
    */
   pump(): void {
     if (this.queue.length === 0) {
@@ -369,36 +404,64 @@ export class ChildAdmissionController {
       return;
     }
     if (this.holds.size > 0) return;
-    if (this.pacedDrain) {
-      this.pumpPaced(settings);
-      return;
+    if (this.pacedThroughQueuedAt !== null && !this.isBacklog(this.queue[0]!)) {
+      this.endPacedDrain();
     }
-    let admitted = false;
-    while (this.queue.length > 0 && this.occupiedSlots() < settings.maxConcurrentChildTurns) {
-      this.admit(this.queue.shift()!, "slot free");
+    let admitted = this.pacedThroughQueuedAt !== null && this.pumpPaced(settings);
+    // Everything past the backlog is admitted as it would be with no hold.
+    while (this.occupiedSlots() < settings.maxConcurrentChildTurns) {
+      const index = this.queue.findIndex((entry) => !this.isBacklog(entry));
+      if (index < 0) break;
+      const [entry] = this.queue.splice(index, 1);
+      this.admit(entry!, "slot free");
       admitted = true;
     }
+    if (this.queue.length === 0) this.endPacedDrain();
     if (admitted) this.persist();
   }
 
   /**
-   * The first turn goes at once, then one per interval, and never past the cap: a turn ending
+   * The backlog's head goes at once, then one per interval, and never past the cap: a turn ending
    * pumps again. A hold set in between stops the drain where it is (`pump` returns early).
+   * Returns whether it admitted one.
    */
-  private pumpPaced(settings: ChildAdmissionSettings): void {
-    const intervalMs = 60_000 / Math.max(settings.bulkResumesPerMinute, MIN_DRAIN_PER_MINUTE);
+  private pumpPaced(settings: ChildAdmissionSettings): boolean {
+    const intervalMs = Math.max(
+      60_000 / Math.max(settings.bulkResumesPerMinute, MIN_DRAIN_PER_MINUTE),
+      MIN_DRAIN_INTERVAL_MS,
+    );
     const nowMs = this.now().getTime();
     const dueAtMs = this.lastPacedAdmitMs === null ? nowMs : this.lastPacedAdmitMs + intervalMs;
     if (nowMs < dueAtMs) {
       this.scheduleDrain(dueAtMs - nowMs);
-      return;
+      return false;
     }
-    if (this.occupiedSlots() >= settings.maxConcurrentChildTurns) return;
+    if (this.occupiedSlots() >= settings.maxConcurrentChildTurns) return false;
     this.admit(this.queue.shift()!, "paced after a hold");
     this.lastPacedAdmitMs = nowMs;
-    this.persist();
-    if (this.queue.length === 0) this.endPacedDrain();
-    else this.scheduleDrain(intervalMs);
+    const next = this.queue[0];
+    if (next && this.isBacklog(next)) this.scheduleDrain(intervalMs);
+    else this.endPacedDrain();
+    return true;
+  }
+
+  /** In the line a hold left behind, which drains paced. */
+  private isBacklog(entry: HeldTurn): boolean {
+    return this.pacedThroughQueuedAt !== null && entry.queuedAt <= this.pacedThroughQueuedAt;
+  }
+
+  /**
+   * Whether a child asking now at `queuedAt` has nobody in line ahead of it. During a drain the
+   * backlog is not ahead of a later child: it is paced, and the later child fills a free slot.
+   */
+  private nothingAheadOf(queuedAt: string): boolean {
+    if (this.queue.length === 0) return true;
+    if (this.pacedThroughQueuedAt === null || queuedAt <= this.pacedThroughQueuedAt) return false;
+    return this.queue.every((entry) => this.isBacklog(entry));
+  }
+
+  private holdReasons(): string[] {
+    return [...this.holds.values()];
   }
 
   private scheduleDrain(delayMs: number): void {
@@ -413,7 +476,7 @@ export class ChildAdmissionController {
   }
 
   private endPacedDrain(): void {
-    this.pacedDrain = false;
+    this.pacedThroughQueuedAt = null;
     this.lastPacedAdmitMs = null;
     if (this.drainTimer !== null) this.clearTimer(this.drainTimer);
     this.drainTimer = null;

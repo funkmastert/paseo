@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   evaluateMemoryBrake,
   MEMORY_BRAKE_RELEASE_SWEEPS,
+  MEMORY_HOLD_TRICKLE_AFTER_MS,
   type MemoryBrakeState,
 } from "./memory-brake.js";
 import type { SystemMemorySample } from "./process-sampler.js";
@@ -23,20 +24,37 @@ function memory(
   };
 }
 
-/** Runs the brake over a series of sweeps, the way the monitor keeps its state between them. */
+const SWEEP_MS = 60_000;
+
+/**
+ * Runs the brake over a series of sweeps a minute apart, the way the monitor keeps its state
+ * between them.
+ */
 function run(samples: ReadonlyArray<SystemMemorySample | undefined>) {
   let state: MemoryBrakeState | undefined;
   const held: boolean[] = [];
   const transitions: string[] = [];
   const critical: boolean[] = [];
+  const heldForMinutes: number[] = [];
+  const trickle: boolean[] = [];
+  let nowMs = 1_000_000;
   for (const sample of samples) {
-    const result = evaluateMemoryBrake(sample, state);
+    const result = evaluateMemoryBrake(sample, state, nowMs);
     state = result.next;
     held.push(result.next.held);
     transitions.push(result.transition);
     critical.push(result.critical);
+    heldForMinutes.push(result.heldForMs / 60_000);
+    trickle.push(result.trickle);
+    nowMs += SWEEP_MS;
   }
-  return { held, transitions, critical, state };
+  return { held, transitions, critical, heldForMinutes, trickle, state };
+}
+
+const TRICKLE_SWEEPS = MEMORY_HOLD_TRICKLE_AFTER_MS / SWEEP_MS;
+
+function repeat<T>(value: T, count: number): T[] {
+  return Array.from({ length: count }, () => value);
 }
 
 describe("evaluateMemoryBrake", () => {
@@ -115,5 +133,59 @@ describe("evaluateMemoryBrake", () => {
       ...Array.from({ length: MEMORY_BRAKE_RELEASE_SWEEPS - 1 }, () => memory(1, 20)),
     ]);
     expect(held.every(Boolean)).toBe(true);
+  });
+});
+
+describe("a long hold", () => {
+  test("says how long it has held, from the sweep it started", () => {
+    const { heldForMinutes } = run([memory(1, 0), memory(2, 0), memory(2, 0), memory(2, 0)]);
+    expect(heldForMinutes).toEqual([0, 0, 1, 2]);
+  });
+
+  test(`at warn with swap not growing, trickles once it has held ${TRICKLE_SWEEPS} minutes`, () => {
+    const { trickle, held } = run(repeat(memory(2, 5), TRICKLE_SWEEPS + 3));
+    expect(held.every(Boolean)).toBe(true);
+    expect(trickle.slice(0, TRICKLE_SWEEPS)).toEqual(repeat(false, TRICKLE_SWEEPS));
+    expect(trickle.slice(TRICKLE_SWEEPS)).toEqual([true, true, true]);
+  });
+
+  test("swap growing a gibibyte, or pressure turning critical, starts the wait over", () => {
+    for (const bad of [memory(2, 7), memory(4, 5)]) {
+      const { trickle } = run([
+        ...repeat(memory(2, 5), TRICKLE_SWEEPS + 1),
+        bad,
+        ...repeat({ ...bad, memoryPressureLevel: 2 }, TRICKLE_SWEEPS),
+      ]);
+      expect(trickle[TRICKLE_SWEEPS]).toBe(true);
+      // The bad sweep and the half hour after it are a full hold again.
+      expect(trickle.slice(TRICKLE_SWEEPS + 1, 2 * TRICKLE_SWEEPS + 1).some(Boolean)).toBe(false);
+      expect(trickle.at(-1)).toBe(true);
+    }
+  });
+
+  test("a sweep with no reading never trickles and starts the wait over", () => {
+    const { trickle } = run([
+      ...repeat(memory(2, 5), TRICKLE_SWEEPS + 1),
+      undefined,
+      ...repeat(memory(2, 5), 2),
+    ]);
+    expect(trickle.slice(TRICKLE_SWEEPS)).toEqual([true, false, false, false]);
+  });
+
+  test("nothing trickles, and nothing has held, while the brake is off", () => {
+    const { trickle, heldForMinutes } = run(repeat(memory(1, 5), TRICKLE_SWEEPS + 2));
+    expect(trickle.some(Boolean)).toBe(false);
+    expect(heldForMinutes.every((minutes) => minutes === 0)).toBe(true);
+  });
+
+  test("a release ends the hold's clock, and the next hold starts a new one", () => {
+    const { heldForMinutes } = run([
+      memory(2, 5),
+      memory(2, 5),
+      ...repeat(memory(1, 5), MEMORY_BRAKE_RELEASE_SWEEPS),
+      memory(2, 5),
+    ]);
+    expect(heldForMinutes.at(-2)).toBe(0);
+    expect(heldForMinutes.at(-1)).toBe(0);
   });
 });
