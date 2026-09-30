@@ -2,7 +2,7 @@
 
 An agent can sit in `running` for hours with nothing happening. Four agents once did that for 20 hours: their Claude account hit its weekly limit, the account was re-authed later, and nothing woke them. The turn never failed, so nothing that watches for failures saw them. `AgentStallSweep` (`packages/server/src/server/agent-stall-sweep.ts`) finds agents like these and does what a person would: save the worktree, then send one prompt telling the agent to resume.
 
-It covers only an agent stuck in `running` on a daemon that is up. An agent cut off by a daemon stop is restart recovery's, and a scheduled wake is the heartbeat's.
+It covers an agent stuck in `running` on a daemon that is up, and one [idle agent waiting on background work](#idle-agents-waiting-on-background-work) that nothing will wake. An agent cut off by a daemon stop is restart recovery's, and a scheduled wake is the heartbeat's.
 
 ## What counts as a stall
 
@@ -26,6 +26,34 @@ When the agent's account is usable (`readProviderHealth`, the done janitor's che
 
 One nudge per stall episode. The episode stays open until the agent does something after the nudge; the nudge's own prompt row and turn start, in the two minutes after it, do not count.
 
+## The judgment
+
+With a JEV key, the sweep asks JEV once per episode, right before the nudge, what the agent's recent activity shows: progressing, looping, blocked on missing information, or waiting on a person ([Feature 10](jev.md#feature-10-stall-judgment) has the question, the floors and what is sent). Code turns the answer into one of the things the sweep already does:
+
+- **Progressing, with a tool call still running:** one more `stallMinutes` before the nudge, once per episode. The observation's grace grows by the same time, so the ladder's recheck still starts at the nudge.
+- **Looping:** the nudge names the repeated step and asks for a different approach.
+- **Blocked on missing information, or waiting on a person:** the nudge asks the agent to name what it lacks, or to end its turn with the question, and the observation carries `escalation.personFirst`. The ladder decides whether that sends the episode to a person instead of an agent.
+
+A judgment never cancels, interrupts or blocks an agent. It is shadow by default, so the sweep nudges exactly as it would without JEV and records what it would have done. A capped account's handoff is never judged, and a dry-run or disabled sweep asks nothing.
+
+## The loop watch
+
+The time-based rule cannot see an agent that keeps running while it goes in circles. For a running agent that is not a stall candidate, code looks for a repeat in its last 12 tool calls: one tool with the same input 4 or more times, or one error text 3 or more times. Waiting on purpose does not count: `paseo wait`, `gh run watch`, `sleep`, `wait_for_agent`, and reading a background shell's output. Only a repeat is sent to JEV. Two `looping` answers in a row put `looping-agent:<agentId>` on the ladder as a `notice` for the digest; after a `progressing` answer the same repeat is left alone for 30 minutes. The episode closes when the repeat stops. Nothing interrupts the agent.
+
+Each agent gets at most 3 JEV calls an hour across the judgment and the loop watch, and the loop watch asks at most 8 agents a sweep, so a looping agent cannot spend the `control` lane's budget.
+
+## Idle agents waiting on background work
+
+An agent that ends its turn saying it is waiting on work it started in the background (a shell, a subagent, a workflow, CI) is idle, and nothing wakes an idle agent when that work ends. Three agents sat like that on 2026-09-29. The sweep resumes one when all of these hold:
+
+- it has been idle and quiet for 10 minutes, with no pending permission and no janitor question;
+- its last message, the newest thing in its timeline, says it is waiting on background work (`background-wait.ts`); a question, or a wait on a person, does not count;
+- no provider subagent is running for it, and no Paseo child it started is running: that child's finish report wakes it;
+- no live shell is left under its process tree, so the command it waits on has ended or never existed;
+- its last turn did not fail. A limit failure is [account failover](account-failover.md)'s, and a prompt row would re-date it.
+
+It gets one prompt, in a `<paseo-system>` envelope, quoting the sentence it ended on and telling it to check the result and continue. The prompt steers rather than interrupts, and it is paced like a nudge. One prompt per final message, at most 3 per agent a day, out of the same `maxNudgesPerSweep` budget after the stalls. This rule is code only: it makes no JEV call, and runs with JEV off. A dry-run sweep reports it; a disabled one leaves it alone.
+
 ## The handoff to account failover
 
 When the account is at its cap (or otherwise unusable), a nudge would fail the same way, and moving agents between accounts is [account failover](account-failover.md)'s job. Failover moves only an agent whose last turn failed with a limit-shaped `lastError`, and a turn stuck in `running` never fails. So after `deadAccountStallMinutes` with no progress the sweep cancels the turn with the `account-capped` cancel reason. That cancel leaves a limit-shaped `lastError` naming the account and a system-error timeline row. The row matters: failover dates a failure by the newest row, and without one a turn stuck for 20 hours would date its failure 20 hours back, past failover's five-hour window. Failover moves the agent on its next sweep. The sweep never moves an agent itself.
@@ -37,7 +65,8 @@ Every stall is reported to the remediation ladder ([remediation.md](remediation.
 ## What it never does
 
 - Act on an agent waiting on a permission, answering the done janitor, queued for admission, or with a busy process tree.
-- Nudge an agent twice in one episode.
+- Nudge an agent twice in one episode, or resume an idle agent twice for the same last message.
+- Cancel, interrupt or hold back an agent on a JEV answer, or act on a shadow answer.
 - Move an agent to another account.
 - Write to the agent's worktree, index or HEAD.
 - Act when `ps` fails.
@@ -57,4 +86,6 @@ Every stall is reported to the remediation ladder ([remediation.md](remediation.
 | `maxNudgesPerSweep`       | `4`     | Nudges and handoffs per sweep, longest stalled first; the rest wait a sweep                           |
 | `snapshot`                | `true`  | Snapshot the worktree before acting                                                                   |
 
-`grep '"monitor":"stalled-agent-sweep"' daemon.log` shows the mode the sweep last resolved.
+The judgment and the loop watch are switched under `agents.jev.stallJudgment` ([Config](jev.md#config)); their thresholds and the background-wait rule's are code constants in `agent/stall-judgment.ts` and `agent/background-wait.ts`.
+
+`grep '"monitor":"stalled-agent-sweep"' daemon.log` shows the mode the sweep last resolved. `$PASEO_HOME/jev/stall-judgments.jsonl` holds every judgment, loop report and background-wait resume with its outcome ([Feature 10](jev.md#measuring-feature-10)).

@@ -965,16 +965,16 @@ No verdict, or not `answered`: the monitor starts at `prepareAtTokens`, exactly 
 
 ## Feature 10: stall judgment
 
-The stalled-agent sweep ([stalled-agents.md](stalled-agents.md)) stays the only stall system. JEV adds one judgment about what the agent's recent activity shows: progressing, looping, blocked on missing information, or waiting on a person. It changes the nudge's wording, can ask the ladder to send the episode to a person instead of an agent, and allows one extra wait for a command that is still running. It also watches running agents for loops the time-based rule cannot see.
+The stalled-agent sweep ([stalled-agents.md](stalled-agents.md)) stays the only stall system. JEV adds one judgment about what the agent's recent activity shows: progressing, looping, blocked on missing information, or waiting on a person. It changes the nudge's wording, can ask the ladder to send the episode to a person instead of an agent, and allows one extra wait for a command that is still running. It also watches running agents for loops the time-based rule cannot see. The code-only rule that resumes an idle agent waiting on background work sits in the same sweep ([stalled-agents.md](stalled-agents.md#idle-agents-waiting-on-background-work)) and makes no JEV call.
 
 ### Seam
 
-- `StallSweepDependencies` (`agent-stall-sweep.ts:60-70`) gains `readRecentActivity(agentId, limit)` and an optional `judgeStall(input)`. Both are wired inside `createAgentStallSweep` (`bootstrap.ts:1023-1071`), which the foundation gives a `jev` input; `readRecentActivity` wraps `agentManager.fetchTimeline(id, { direction: "tail", limit })`.
-- In `handleCandidate` (`:320-348`), on the live branch before `act` (`:341-344`), ask once per episode; the episode records the judgment.
-- `act` builds the nudge prompt at `:436-443`; `buildStallNudgePrompt` (`:606-618`) takes an optional judgment line.
-- `buildStallObservation` (`:624-677`) keeps `escalation` and adds `escalation.personFirst: { reason, confidence }` when the judgment is `blocked_missing_info` or `waiting_on_human`. The ladder decides whether to honour it ([Feature 3a](#feature-3a-remediation-triage)): it skips the agent only when the escalation will push.
-- The loop watch runs in `sweep` (`:192-247`) over running agents that are not stall candidates.
-- New code lives in `packages/server/src/server/agent/stall-judgment.ts`: questions, the state builder, the pure decision function and the loop prefilter.
+- `StallSweepDependencies` (`agent-stall-sweep.ts`) gains optional `readRecentActivity(agentId, limit)`, `readAssignment(agentId)` and `judgeStall`, a `StallJudge` object (`isActive`, `loopWatchEnabled`, `judge`, `record`) built by `createJevStallJudge` in `agent/stall-judgment.ts`. `readRecentActivity` wraps `agentManager.fetchTimeline(id, { direction: "tail", limit })`; `readAssignment` takes the first user message from `fetchTimeline(id, { direction: "after", limit: 50 })`. With them absent the sweep is today's. They are wired inside `createAgentStallSweep` (`bootstrap.ts`), which also takes `paseoHome`, so its call site gained one line.
+- `judgeCandidate`, called from `handleCandidate` on the live branch once the nudge budget allows and before `act`, asks once per episode, and only for a usable account: a capped account's handoff belongs to failover. The episode records the judgment whatever came back.
+- `buildStallNudgePrompt` takes an optional `judgmentLine`, appended as the last paragraph.
+- `buildStallObservation` keeps `escalation` and adds `escalation.personFirst: { reason, confidence }` for an applied `blocked_missing_info` or `waiting_on_human`. The ladder decides whether to honour it ([Feature 3a](#feature-3a-remediation-triage)): it skips the agent only when the escalation will push.
+- The loop watch runs in `sweep` after the candidates, over running agents that are not stall candidates.
+- `agent/stall-judgment.ts` holds the question, the state builder, the pure decision function, the loop prefilter, the per-agent hourly cap and the judge. `agent/stall-judgment-log.ts` writes the [measurement file](#measuring-feature-10).
 
 ### State and question
 
@@ -990,7 +990,7 @@ The stalled-agent sweep ([stalled-agents.md](stalled-agents.md)) stays the only 
 }
 ```
 
-`recent` is the last 25 timeline rows, oldest first: tool calls as name, input summary and status; assistant and reasoning text clipped; errors clipped.
+`recent` is the last 25 entries, oldest first, projected from the last 400 timeline rows: a tool call's status rows collapse into one line and adjacent assistant chunks into one message. Tool calls show name, an input summary of up to 200 characters (a shell command, a file path, a query, a URL) and status; assistant and reasoning text and error rows are clipped to 160 characters. User messages are not in `recent`; the assignment is its own field.
 
 ```json
 {
@@ -1012,34 +1012,57 @@ The stalled-agent sweep ([stalled-agents.md](stalled-agents.md)) stays the only 
 
 | Answer                           | Action                                                                                                                                                                         |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `progressing` at ≥ 0.85          | Hold once for another `stallMinutes`, only when the newest timeline row is a tool call still running; then act as today even if JEV says the same                              |
+| `progressing` at ≥ 0.85          | Hold once for another `stallMinutes`, only when the newest timeline entry is a tool call still running; then act as today even if JEV would say the same                       |
 | `looping` at ≥ 0.75              | Nudge as today; the prompt adds "You appear to be repeating: <the repeated step>. Try a different approach, or say what blocks you."                                           |
 | `blocked_missing_info` at ≥ 0.75 | Nudge as today; the prompt asks it to name what it is missing; the observation carries `personFirst`, so after the recheck grace the ladder goes to a person when it will push |
 | `waiting_on_human` at ≥ 0.75     | Nudge as today (the interrupt frees a command stuck on input); the prompt says to end the turn with the question instead of waiting inside it; `personFirst`, as above         |
 | Anything else                    | Today's behaviour                                                                                                                                                              |
 
-A candidate already shows no timeline, token or CPU activity (`agent-stall-sweep.ts:638`), so a long build rarely becomes one. The `progressing` row needs the running-tool check and a higher floor, or it mostly delays a real recovery by 30 minutes.
+A candidate already shows no timeline, token or CPU activity, so a long build rarely becomes one. The `progressing` row needs the running-tool check and a higher floor, or it mostly delays a real recovery by 30 minutes.
+
+During a hold the sweep still reports the stall every sweep, and adds the hold's length to the observation's `graceMs`. The ladder dates its grace from the episode's first observation, so without that its rung 2 would start at the nudge instead of `recheckMinutes` after it. An agent that moves during the hold closes the episode as any activity does.
+
+The repeated step in the `looping` line comes from the loop prefilter over the same rows; with no repeat found, the line says "the same step".
 
 ### The loop watch
 
-For a running agent that is not a stall candidate, a prefilter in code: in its last 12 tool calls, one tool with the same input (first 200 characters of its JSON) appears 4 or more times, or one error text appears 3 or more times. Known pollers are skipped: `paseo wait`, `gh run watch`, `sleep`, and the Paseo wait tools. Only then ask the same question. After a `progressing` answer, the agent is not asked again for 30 minutes unless the repeated input changes.
+For a running agent that is not a stall candidate, has no open stall episode, no pending permission, no janitor question and no admission wait, a prefilter in code: in its last 12 tool calls, one tool with the same input (first 200 characters of its JSON, never its output) appears 4 or more times, or one error text appears 3 or more times. Known pollers are skipped: `paseo wait`, `gh run watch`, `sleep`, the Paseo wait tools (`wait_for_agent`, `wait_for_agent_start`), and `BashOutput` and `TaskOutput`, which read a background shell. Only then ask the same question. After a `progressing` answer, at any confidence, the same repeat is not asked about again for 30 minutes; a new repeat is asked about at once.
 
-`looping` at ≥ 0.80 on two consecutive sweeps reports `looping-agent:<agentId>` to the ladder: kind `looping-agent` (added to `RemediationConditionKind` by the foundation), remedy `none`, no escalation, level `notice`, grace 0. The ladder records it and a person gets it in the digest. The episode closes when the prefilter stops matching. Nothing interrupts a running agent on the loop watch's say-so.
+`looping` at ≥ 0.80 on two consecutive sweeps reports `looping-agent:<agentId>` to the ladder: kind `looping-agent`, remedy `none`, no escalation, level `notice`, grace 0. The ladder records it and a person gets it in the digest. While it is open the ladder hears it every sweep and JEV is not asked again. It closes when the prefilter stops matching, when the repeat changes, or when the agent leaves `running`. In shadow, the two answers only record a `loop-reported` line with `applied: false`. Nothing interrupts a running agent on the loop watch's say-so.
 
 ### Fail open
 
-Not `answered`: today's nudge, today's observation. The sweep is serialized, so each judgment is bounded by its 5-second deadline, and at most `maxNudgesPerSweep` (4, `remediation/config.ts:91`) candidates plus 8 loop-watch agents are judged per sweep: at most 60 seconds of a 5-minute sweep.
+Not `answered`: today's nudge, today's observation, word for word. The judge asks `checkScope` before building any state, so an excluded agent sends nothing, and any throw inside it answers no judgment. The sweep is serialized, so each judgment is bounded by its 5-second deadline, and at most `maxNudgesPerSweep` (4) candidates plus 8 loop-watch agents are judged per sweep: at most 60 seconds of a 5-minute sweep.
+
+**The per-agent cap.** The `control` lane has no per-agent budget, and the loop watch could ask about a looping agent every sweep. So each agent gets at most 3 calls per rolling hour across both branches (`MAX_JUDGMENTS_PER_AGENT_PER_HOUR`), counted in memory. Past it the judge sends nothing and answers `agent-hourly-cap`.
 
 ### Cost, cache, latency
 
-- Under 2,500 input tokens per judgment. No cache effect beyond the existing nudge, which appends at the tail; after 30–50 idle minutes the 1-hour cache TTL is mostly spent anyway. Nothing on an agent's path.
-- **Pays if** the agents it routes to a person would have ended NOT FIXED. The loop watch saves nothing by itself: it only writes to the digest. **Measured by** shadow: stalled-agent episodes that started a remediation agent and ended NOT FIXED, against JEV's label for them.
+- Under 2,500 input tokens per judgment, about $0.0001 at list price. The cap bounds the loop watch at 8 agents × 3 calls an hour, about $0.06 a day. No cache effect beyond the existing nudge, which appends at the tail; after 30–50 idle minutes the 1-hour cache TTL is mostly spent anyway. Nothing on an agent's path.
+- **Pays if** the agents it routes to a person would have ended NOT FIXED. The loop watch saves nothing by itself: it only writes to the digest, so it has to earn its cost on its own line of the measurement.
+
+### Measuring feature 10
+
+`$PASEO_HOME/jev/stall-judgments.jsonl` (0600, one rotation at 2 MB, 30 days) records each branch separately, because the ledger's daily totals are per feature, not per call site. No timeline text: labels, confidences, reasons, times, and the clipped repeated step or wait sentence.
+
+| Line              | What it holds                                                                                                                                                                                        |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `judgment`        | `branch` (`candidate` or `loop-watch`), the episode key, `callId`, the label and confidence, `applied`, what code did and what an applied answer would have done, `costUsd`, or why nothing was sent |
+| `episode-closed`  | Every candidate episode: whether it was nudged or handed off, minutes from that to the close, `pastRecheck` (still stalled a full recheck later, so the ladder went to rung 2), the hold, the label  |
+| `loop-reported`   | A loop watch report, applied or shadow, with the repeated step                                                                                                                                       |
+| `loop-closed`     | Why it closed and how long it was open                                                                                                                                                               |
+| `background-wait` | The code-only rule: resumed, would-resume, capped, skipped or failed. No JEV cost; the baseline                                                                                                      |
+
+- **The escalation branch** pays if the episodes JEV labels `blocked_missing_info` or `waiting_on_human` are the ones with `pastRecheck` whose remediation agent ended NOT FIXED. Join `episodeKey` and time with the ladder's record in `daemon.log`.
+- **The hold** pays if held episodes mostly close during the hold; each one that does not cost a `stallMinutes` delay.
+- **The loop watch** costs the sum of `costUsd` over `branch: loop-watch`. It pays only if a person acts on its digest reports; if not, turn it off with `stallJudgment.loopWatch: false`.
 
 ### Tests and verification
 
-- `stall-judgment.test.ts`: the state builder on fixture timelines; the loop prefilter's positive and negative cases, including each known poller; the decision function for every row, including the running-tool condition and the hold-only-once rule; the 30-minute quiet period after `progressing`.
-- `agent-stall-sweep.test.ts`: a scripted `progressing` with a running tool holds one sweep then nudges, and without one nudges at once; `blocked_missing_info` sends an observation with `personFirst`; the loop watch reports only after two sweeps; with `judgeStall` absent or failing, every existing test passes unchanged.
-- Verify: `npx vitest run packages/server/src/server/agent/stall-judgment.test.ts --bail=1`.
+- `agent/stall-judgment.test.ts`: the state builder on fixture timelines; the loop prefilter's positive and negative cases, including each known poller; the decision function for every row, including the running-tool condition and the hold-only-once rule; the judge over the fake: shadow default, answered, D7 exclusion with no send, each failure, the switches, the hourly cap, redaction of a command line, the decision store.
+- `agent-stall-sweep.judgment.test.ts`: a scripted `progressing` with a running tool holds one window then nudges, and without one nudges at once; the hold's grace; `blocked_missing_info` and `waiting_on_human` send `personFirst`; every non-`answered` outcome gives today's prompt word for word; the loop watch reports only after two sweeps, closes when the repeat stops, keeps quiet after `progressing`, respects the cap and the 8-agent limit; the background-wait rule's conditions and caps. `agent-stall-sweep.test.ts` and `agent-stall-sweep.nudge.test.ts` pass unchanged.
+- `agent/background-wait.test.ts`, `agent/stall-judgment-log.test.ts`: the wait phrases and the process check; the measurement file.
+- Verify: `npx vitest run src/server/agent/stall-judgment.test.ts src/server/agent-stall-sweep.judgment.test.ts --bail=1` from `packages/server`.
 
 ## Feature 11: UI
 
