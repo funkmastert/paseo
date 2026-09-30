@@ -1902,6 +1902,8 @@ export const ja: TranslationResources = {
       accountLeadersHere: "リーダー {{count}}",
       accountWorkersHere: "ワーカー {{count}}",
       accountBalanceLeft: "残り {{amount}}",
+      accountDetailsShow: "さらに {{count}} 件を表示",
+      accountDetailsHide: "表示を減らす",
       staleTitle: "更新されていません",
       staleLastSynced: "最終同期 {{time}}",
       staleNeverSynced: "まだ同期していません",
@@ -2083,6 +2085,11 @@ export const ja: TranslationResources = {
     memoryFileWarning: "{{path}}は{{tokens}}トークンで、{{limit}}を超えています。",
     reReadAdvice:
       "このセッションは毎ターン約{{tokens}}トークンを読み直しています。短い引き継ぎで新しいセッションを始める方が安上がりです。",
+    jevTitle: "JEV の判断",
+    jevShadow: "シャドー",
+    jevDryRun: "ドライラン",
+    jevNotApplied: "未適用",
+    jevOlder: "ほか {{count}} 件",
   },
   review: {
     comment: {

@@ -1893,6 +1893,8 @@ export const en = {
       accountLeadersHere: "Leaders {{count}}",
       accountWorkersHere: "Workers {{count}}",
       accountBalanceLeft: "{{amount}} left",
+      accountDetailsShow: "Show {{count}} more",
+      accountDetailsHide: "Show less",
       staleTitle: "Not updating",
       staleLastSynced: "Last synced {{time}}",
       staleNeverSynced: "Not synced yet",
@@ -2071,6 +2073,11 @@ export const en = {
     memoryFileWarning: "{{path}} is {{tokens}} tokens, over {{limit}}.",
     reReadAdvice:
       "This session re-reads ~{{tokens}} tokens every turn. A fresh session with a short handoff is cheaper.",
+    jevTitle: "JEV decisions",
+    jevShadow: "Shadow",
+    jevDryRun: "Dry run",
+    jevNotApplied: "Not applied",
+    jevOlder: "{{count}} older",
   },
   review: {
     comment: {

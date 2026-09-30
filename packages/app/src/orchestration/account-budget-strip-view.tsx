@@ -1,8 +1,9 @@
-import { Fragment, useMemo } from "react";
+import { Fragment, useCallback, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
+import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useCompactTimeAgo } from "@/hooks/use-compact-time-ago";
 import { formatPct, formatResetLabel } from "@/provider-usage/format";
@@ -13,6 +14,7 @@ import {
   selectAccountWorstWindow,
   type AccountBalanceViewModel,
   type AccountBudgetRowViewModel,
+  type AccountDetailViewModel,
   type AccountPoolRole,
   type AccountUsageCount,
   type WorstBudgetWindow,
@@ -147,6 +149,63 @@ function AccountBalance({ balance }: { balance: AccountBalanceViewModel }) {
   );
 }
 
+/** A provider's own line beside its figures. The value wraps: it can say what a feature did today. */
+function AccountDetail({ detail }: { detail: AccountDetailViewModel }) {
+  return (
+    <View style={styles.detail} testID={`orchestration-account-detail-${detail.id}`}>
+      <Text style={styles.detailLabel} numberOfLines={1}>
+        {detail.label}
+      </Text>
+      <Text style={[styles.detailValue, balanceToneStyle(detail.tone)]} numberOfLines={3}>
+        {detail.value}
+      </Text>
+    </View>
+  );
+}
+
+function isAlert(detail: AccountDetailViewModel): boolean {
+  return detail.tone === "warning" || detail.tone === "danger";
+}
+
+/**
+ * A phone has room for the figures, not a feature list: a warning stays in view, and the rest
+ * (JEV's features and what each did today) opens on a tap.
+ */
+function CompactDetails({
+  providerId,
+  details,
+}: {
+  providerId: string;
+  details: AccountDetailViewModel[];
+}) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const toggle = useCallback(() => setOpen((value) => !value), []);
+  const alerts = details.filter(isAlert);
+  const rest = details.filter((detail) => !isAlert(detail));
+  return (
+    <>
+      {alerts.map((detail) => (
+        <AccountDetail key={detail.id} detail={detail} />
+      ))}
+      {open ? rest.map((detail) => <AccountDetail key={detail.id} detail={detail} />) : null}
+      {rest.length > 0 ? (
+        <Button
+          variant="ghost"
+          size="xs"
+          onPress={toggle}
+          style={styles.detailsToggle}
+          testID={`orchestration-account-details-toggle-${providerId}`}
+        >
+          {open
+            ? t("panels.orchestration.accountDetailsHide")
+            : t("panels.orchestration.accountDetailsShow", { count: rest.length })}
+        </Button>
+      ) : null}
+    </>
+  );
+}
+
 function balanceToneStyle(tone: AccountBalanceViewModel["tone"]) {
   if (tone === "warning") return styles.balanceWarning;
   if (tone === "danger") return styles.balanceDanger;
@@ -187,6 +246,9 @@ function AccountBudgetBody({
           <ProviderUsageWindowBar key={window.id} window={window} />
         ))}
         {balances}
+        {row.details.map((detail) => (
+          <AccountDetail key={detail.id} detail={detail} />
+        ))}
       </View>
     );
   }
@@ -204,7 +266,12 @@ function AccountBudgetBody({
           ) : null}
         </View>
       ) : null}
-      {balances.length > 0 ? <View style={styles.bars}>{balances}</View> : null}
+      {balances.length > 0 || row.details.length > 0 ? (
+        <View style={styles.bars}>
+          {balances}
+          <CompactDetails providerId={row.providerId} details={row.details} />
+        </View>
+      ) : null}
     </>
   );
 }
@@ -352,6 +419,29 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
     fontSize: theme.fontSize.sm,
     fontWeight: theme.fontWeight.medium,
+  },
+  detail: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    gap: theme.spacing[3],
+  },
+  detailLabel: {
+    flexShrink: 0,
+    maxWidth: "45%",
+    color: theme.colors.foregroundMuted,
+    fontSize: theme.fontSize.sm,
+  },
+  detailValue: {
+    flexShrink: 1,
+    color: theme.colors.foreground,
+    fontSize: theme.fontSize.sm,
+    textAlign: "right",
+  },
+  // The toggle sits on the rows' leading rail, not centred under them.
+  detailsToggle: {
+    alignSelf: "flex-start",
+    marginLeft: -theme.spacing[2],
   },
   balanceWarning: {
     color: theme.colors.statusWarning,

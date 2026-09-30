@@ -1862,6 +1862,8 @@ export const zhCN: TranslationResources = {
       accountLeadersHere: "负责人 {{count}}",
       accountWorkersHere: "工作者 {{count}}",
       accountBalanceLeft: "剩余 {{amount}}",
+      accountDetailsShow: "再显示 {{count}} 项",
+      accountDetailsHide: "收起",
       staleTitle: "未在更新",
       staleLastSynced: "上次同步 {{time}}",
       staleNeverSynced: "尚未同步",
@@ -2038,6 +2040,11 @@ export const zhCN: TranslationResources = {
     memoryTotalWarning: "记忆文件占用 {{tokens}} tokens，超过 {{limit}} 的建议上限。",
     memoryFileWarning: "{{path}} 为 {{tokens}} tokens，超过 {{limit}}。",
     reReadAdvice: "此会话每轮都会重新读取约 {{tokens}} tokens。新开会话并附上简短交接更省钱。",
+    jevTitle: "JEV 决策",
+    jevShadow: "影子模式",
+    jevDryRun: "试运行",
+    jevNotApplied: "未应用",
+    jevOlder: "更早的 {{count}} 条",
   },
   review: {
     comment: {

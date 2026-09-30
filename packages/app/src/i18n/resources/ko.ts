@@ -1893,6 +1893,8 @@ export const ko: TranslationResources = {
       accountLeadersHere: "리더 {{count}}",
       accountWorkersHere: "워커 {{count}}",
       accountBalanceLeft: "{{amount}} 남음",
+      accountDetailsShow: "{{count}}개 더 보기",
+      accountDetailsHide: "간단히 보기",
       staleTitle: "업데이트되지 않음",
       staleLastSynced: "마지막 동기화 {{time}}",
       staleNeverSynced: "아직 동기화되지 않음",
@@ -2074,6 +2076,11 @@ export const ko: TranslationResources = {
     memoryFileWarning: "{{path}}은(는) {{tokens}} 토큰으로 {{limit}}을(를) 넘습니다.",
     reReadAdvice:
       "이 세션은 매 턴 약 {{tokens}} 토큰을 다시 읽습니다. 짧은 인수인계와 함께 새 세션을 시작하는 편이 더 저렴합니다.",
+    jevTitle: "JEV 판단",
+    jevShadow: "섀도",
+    jevDryRun: "드라이 런",
+    jevNotApplied: "적용 안 됨",
+    jevOlder: "이전 {{count}}건",
   },
   review: {
     comment: {
