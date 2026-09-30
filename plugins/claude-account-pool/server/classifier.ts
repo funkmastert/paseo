@@ -2,6 +2,7 @@ import {
   AGENT_TYPE_LABEL,
   POOL_FAMILY,
   TASK_CLASS_LABEL,
+  TASK_CLASS_IDS,
   LEADER_ROLE_ID,
   classModels,
   type RoleModelPolicy,
@@ -47,6 +48,7 @@ import {
   type TaskClassSource,
 } from "./role-resolve";
 import { echoed } from "./echo";
+import type { SpawnHint, SpawnHintAnswers } from "./jev-hint";
 import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scope";
 
 /**
@@ -67,14 +69,20 @@ import { decideMcp, type McpDecision, type McpGatewaySnapshot } from "./mcp-scop
  *
  * ## Determinism
  *
- * No clock, no randomness, no I/O, no LLM. Everything time-dependent or
- * remote is an argument: the policy document, the model catalog, pool health,
- * the caller's inherited denials, and `nowMs`. Same `ClassifierInput` +
- * `ClassifierWorld` in, same `AgentDecision` out, forever — which is what
- * makes a decision replayable from a log line and testable without a daemon.
- * An LLM classifier was evaluated and rejected on arithmetic: this runs on
- * every create, and a model call there would add latency and cost to the one
- * code path that must add neither.
+ * No clock, no randomness, no I/O. Everything time-dependent or remote is an
+ * argument: the policy document, the model catalog, pool health, the
+ * caller's inherited denials, JEV's spawn hint, the draw that splits the JEV
+ * tools' arms, and `nowMs`. Same `ClassifierInput` + `ClassifierWorld` in,
+ * same `AgentDecision` out, forever — which is what makes a decision
+ * replayable from a log line and testable without a daemon.
+ *
+ * An LLM call on every create was evaluated and rejected on arithmetic: it
+ * would add latency and cost to the one code path that must add neither.
+ * JEV is narrower (docs/jev.md, "Feature 2"; D3). The role hook makes one
+ * typed, bounded call BEFORE this runs, and only for an unlabelled create
+ * whose class would change its model or thinking (server/jev-hint.ts). The
+ * answer arrives as `jevHint`, data like pool health. A slow, failed or
+ * shadowed call leaves the decision exactly what it was without JEV.
  *
  * ## Explicit beats inferred
  *
@@ -118,6 +126,14 @@ export interface ClassifierInput {
   requestedThinkingOptionId?: string;
   /** `config.outputStyle` as requested, when the caller set one. */
   requestedOutputStyle?: string;
+  /**
+   * JEV's spawn hint (server/jev-hint.ts), fetched by the role hook before
+   * this runs. Absent, or any status but `answered`, is today's decision; a
+   * `shadow` answer is recorded as `wouldBe` and changes nothing. The preview
+   * and the classifier tool never fetch one: they pass `decided-at-create`
+   * when the create would ask, so the reason says so.
+   */
+  jevHint?: SpawnHint;
 }
 
 /**
@@ -150,6 +166,24 @@ interface ClassifierWorldBase {
    * which fails open: every server, as before scoping existed.
    */
   mcpGateway?: McpGatewaySnapshot;
+  /**
+   * Whether this create may carry the JEV agent tools (docs/jev.md,
+   * "Features 4–6"). Omitted means not evaluated: the decision has no
+   * `jevTools` and no label is written.
+   */
+  jevToolsAvailable?: JevToolsWorld;
+}
+
+/** What the role hook knows about the JEV agent tools at create. Data, like pool health. */
+export interface JevToolsWorld {
+  /** `agents.jev.agentTools` could send a call now, per the last `jev.status` poll. */
+  active: boolean;
+  /** `jev.scope.check` for the new agent's cwd and parent. `unknown` when it did not answer in time. */
+  scope: "ok" | "excluded" | "unknown";
+  /** `agentTools.assignShare`: the share of eligible creates in the `on` arm. */
+  assignShare: number;
+  /** A number in [0, 1) drawn once for this create. Below `assignShare` is the `on` arm. */
+  draw: number;
 }
 
 /**
@@ -180,6 +214,8 @@ export type RoleSource =
   | "classified-vocabulary"
   /** Tier 3: a built-in seed keyword matched the title/prompt text. */
   | "classified-seed"
+  /** Tier 3: JEV's spawn hint named the role (`spawnHint.applyRole`). A guess: never evidence for tools (D2). */
+  | "classified-jev"
   /** Tier 4: nothing to classify, so the worker default. */
   | "default";
 
@@ -399,6 +435,41 @@ export interface OutputStyleDecision {
   reason: string;
 }
 
+/**
+ * What JEV's spawn hint did to this create, for the decision log and the
+ * labels. Present whenever the input carried a hint.
+ */
+export interface JevHintDecision {
+  status: SpawnHint["status"];
+  /** Set when a call was made: `jev.decisions.list` attaches the decision through `paseo.jev-call`. */
+  callId?: string;
+  /** Why no answer arrived (`unavailable`, `failed`) or why none was asked for (`not-needed`). */
+  reason?: string;
+  answers?: SpawnHintAnswers;
+  /** Whether JEV changed this create's class or role. */
+  applied: boolean;
+  /**
+   * The create as it would be if every answer past its floor applied,
+   * whatever shadow mode and the apply switches say. Present for every answer,
+   * so a shadow day counts how many creates JEV would move down and up.
+   * `move` compares the class with the one resolved without JEV.
+   */
+  wouldBe?: {
+    taskClass: TaskClassId | null;
+    /** Present when the role was asked. */
+    role?: string;
+    /** The model that class and role would run, spelled like `ModelDecision.model`. */
+    model: string | null;
+    move: "down" | "up" | "none";
+  };
+}
+
+/** The D8 arm for the JEV agent tools, or null when the create is not eligible. */
+export interface JevToolsDecision {
+  arm: "on" | "control" | null;
+  reason: string;
+}
+
 export interface AgentDecision {
   role: RoleDecision;
   taskClass: TaskClassDecision;
@@ -409,6 +480,10 @@ export interface AgentDecision {
   outputStyle: OutputStyleDecision;
   /** Which MCP gateway servers and connectors it is spawned with. See server/mcp-scope.ts. */
   mcp: McpDecision;
+  /** Present when the input carried a spawn hint. */
+  jev?: JevHintDecision;
+  /** Present when the world carried `jevToolsAvailable`. */
+  jevTools?: JevToolsDecision;
 }
 
 /** The read-only floor a child falls to when its parent's restrictions are unknowable. */
@@ -425,8 +500,19 @@ const INHERITANCE_FLOOR: ToolProfile = { kind: "read-only" };
  * containing "check" classifies as `reviewer` exactly as readily as a real
  * review task does — so they may pick a model but not take tools away, unless
  * the operator opted in via `enforceToolsOnClassifiedRoles`.
+ *
+ * A role JEV guessed is never evidence, whatever the flag says (D2): model
+ * tier is not capability, and a hosted model's reading of a prompt must not
+ * be able to take a tool away.
  */
-function toolProfileIsEvidenceBased(tier: ResolveRoleTier | undefined, policy: RoleModelPolicy): boolean {
+function toolProfileIsEvidenceBased(
+  tier: ResolveRoleTier | undefined,
+  source: RoleSource,
+  policy: RoleModelPolicy,
+): boolean {
+  if (source === "classified-jev") {
+    return false;
+  }
   if (tier === undefined || tier === 1 || tier === 2) {
     return true;
   }
@@ -444,6 +530,7 @@ function roleSourceFor(tier: ResolveRoleTier, match: ClassificationMatch | undef
   if (tier === 4) return "default";
   if (match === "vocabulary") return "classified-vocabulary";
   if (match === "seed") return "classified-seed";
+  if (match === "jev") return "classified-jev";
   return "default";
 }
 
@@ -464,6 +551,8 @@ function describeRole(decision: Omit<RoleDecision, "reason">, input: ClassifierI
       return `${name}, guessed from the title/prompt: one of its own configured names or aliases appears in the text. A guess picks a model but never removes a tool.${ignored}`;
     case "classified-seed":
       return `${name}, guessed from the title/prompt by a built-in seed keyword. A guess picks a model but never removes a tool.${ignored}`;
+    case "classified-jev":
+      return `${name}, guessed from the title/prompt by JEV's spawn hint. It picks the model only: tools and MCP servers are what the role guessed without JEV gets.${ignored}`;
     case "default":
       return decision.tier === 3
         ? `${name}, the default: the title/prompt matched no role vocabulary and no seed keyword.${ignored}`
@@ -481,6 +570,8 @@ function describeTaskClass(decision: Omit<TaskClassDecision, "reason">): string 
       return `${decision.taskClass}, declared by the caller's ${TASK_CLASS_LABEL} label.`;
     case "classified":
       return `${decision.taskClass}, guessed from keywords in the title/prompt.${ignored}`;
+    case "jev":
+      return `${decision.taskClass}, from JEV's spawn hint: no label declared a class and its answers cleared the floors.${ignored}`;
     case "default":
       return `none — nothing declared or recognized one, so the role's standard pool decides.${ignored}`;
   }
@@ -1171,12 +1262,100 @@ function decideOutputStyle(
   };
 }
 
+/** Cheaper to dearer, for `wouldBe.move`. No class is the standard pool. */
+function classRank(taskClass: TaskClassId | undefined): number {
+  return taskClass === undefined ? TASK_CLASS_IDS.indexOf("standard") : TASK_CLASS_IDS.indexOf(taskClass);
+}
+
+/** The hint when it carries answers, else undefined: every other status is today's decision. */
+function answeredHint(hint: SpawnHint | undefined): Extract<SpawnHint, { status: "answered" | "shadow" }> | undefined {
+  return hint?.status === "answered" || hint?.status === "shadow" ? hint : undefined;
+}
+
+/**
+ * The sentence the task-class reason gains from a hint that did not decide
+ * it: what it would have done, or that the create decides it.
+ */
+function hintNote(
+  hint: SpawnHint | undefined,
+  applied: TaskClassId | undefined,
+  wouldBe: TaskClassId | undefined,
+): string {
+  if (hint?.status === "decided-at-create") {
+    return ` Decided at create: nothing declares a class, so the create asks JEV, which may change its class${hint.role ? " or role" : ""}; this preview does not ask.`;
+  }
+  const answered = answeredHint(hint);
+  if (!answered || wouldBe === applied) {
+    return "";
+  }
+  const why =
+    answered.status === "shadow"
+      ? "shadow mode records it without applying it"
+      : "spawnHint.applyHard is off, so a raise is recorded, not applied";
+  return ` JEV's answer would make it ${wouldBe ?? "standard"}; ${why}.`;
+}
+
+/**
+ * The JEV agent tools' arm. Eligible when the feature could send now, the
+ * decided tool profile keeps `Read`, and the D7 check passed; the draw then
+ * picks the arm, so both arms are agents the classifier treated alike.
+ */
+function decideJevTools(world: ClassifierWorld, tools: ToolDecision): JevToolsDecision | undefined {
+  const jevTools = world.jevToolsAvailable;
+  if (!jevTools) {
+    return undefined;
+  }
+  if (!jevTools.active) {
+    return { arm: null, reason: "No JEV tools: agents.jev.agentTools cannot send a call on this host right now." };
+  }
+  if (tools.deniedTools.includes("Read")) {
+    return { arm: null, reason: "No JEV tools: this agent may not Read, and the tools read files." };
+  }
+  if (jevTools.scope !== "ok") {
+    return {
+      arm: null,
+      reason:
+        jevTools.scope === "excluded"
+          ? "No JEV tools: this agent's cwd or parent is company code, which is never sent to JEV."
+          : "No JEV tools: the company-code check did not answer in time, so nothing is sent.",
+    };
+  }
+  return jevTools.draw < jevTools.assignShare
+    ? { arm: "on", reason: "JEV tools on: eligible, and drawn into the on arm." }
+    : { arm: "control", reason: "JEV tools withheld: eligible, and drawn into the control arm, which measures them." };
+}
+
+/** A child's role decision from its resolution. */
+function childRoleDecision(
+  resolution: ReturnType<typeof resolveRole>,
+  input: ClassifierInput,
+  policy: RoleModelPolicy,
+): RoleDecision {
+  const source = roleSourceFor(resolution.tier, resolution.match);
+  const partial = {
+    role: resolution.role,
+    source,
+    tier: resolution.tier,
+    evidenceBased: toolProfileIsEvidenceBased(resolution.tier, source, policy),
+    ...(resolution.unknownDeclaredValue !== undefined ? { unknownDeclaredValue: resolution.unknownDeclaredValue } : {}),
+  };
+  return { ...partial, reason: describeRole(partial, input) };
+}
+
 /**
  * Classify one `agent.create`. The only entry point; see the file header for
  * the properties it guarantees.
  */
 export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): AgentDecision {
   const hasCaller = input.callerAgentId !== undefined && input.callerAgentId !== "";
+  const textInput = { labels: input.labels, title: input.title, initialPrompt: input.initialPrompt };
+
+  // A shadow answer applies nothing; an answered one applies a mechanical move always, and a raise
+  // or a role only with its switch on (docs/jev.md, "Thresholds and precedence").
+  const hint = answeredHint(input.jevHint);
+  const live = hint?.status === "answered";
+  const proposedRole = hint?.proposal.roleId;
+  const proposedClass = hint?.proposal.taskClass;
 
   // A create with no caller is the leader unless its labels say otherwise. One that declares a
   // non-leader role (a daemon job's worker) is configured, and placed, like the child it says it
@@ -1186,23 +1365,20 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const asChild = hasCaller || placesRootAsChild(world.policy, input.labels);
 
   let roleDecision: RoleDecision;
+  // The role whose tool profile and MCP servers the agent gets. A role JEV named picks the model
+  // only; tools and servers stay what the role resolved without JEV gets, so JEV neither removes
+  // a tool (D2) nor cancels an operator's `enforceToolsOnClassifiedRoles`.
+  let jevlessRole: RoleDecision | undefined;
   if (hasCaller) {
-    const resolution = resolveRole(world.policy, {
-      labels: input.labels,
-      title: input.title,
-      initialPrompt: input.initialPrompt,
-    });
-    const source = roleSourceFor(resolution.tier, resolution.match);
-    const partial = {
-      role: resolution.role,
-      source,
-      tier: resolution.tier,
-      evidenceBased: toolProfileIsEvidenceBased(resolution.tier, world.policy),
-      ...(resolution.unknownDeclaredValue !== undefined
-        ? { unknownDeclaredValue: resolution.unknownDeclaredValue }
-        : {}),
-    };
-    roleDecision = { ...partial, reason: describeRole(partial, input) };
+    const resolution = resolveRole(
+      world.policy,
+      textInput,
+      hint && proposedRole !== undefined ? { roleId: proposedRole, apply: live && hint.applyRole } : undefined,
+    );
+    roleDecision = childRoleDecision(resolution, input, world.policy);
+    if (resolution.match === "jev") {
+      jevlessRole = childRoleDecision(resolveRole(world.policy, textInput), input, world.policy);
+    }
   } else if (declaredRootRole) {
     const partial = {
       role: declaredRootRole.role,
@@ -1220,15 +1396,19 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     };
     roleDecision = { ...partial, reason: describeRole(partial, input) };
   }
+  const toolRole = jevlessRole ?? roleDecision;
 
   // Orthogonal to the role, and resolved for every create including a root
   // one: a role picks WHO runs the work, a task class picks HOW MUCH MODEL
   // it is worth. It only ever influences model selection — never tools.
-  const classResolution = resolveTaskClass({
-    labels: input.labels,
-    title: input.title,
-    initialPrompt: input.initialPrompt,
-  });
+  const classResolution = resolveTaskClass(
+    textInput,
+    hint ? { proposed: proposedClass, applyMechanical: live, applyHard: live && hint.applyHard } : undefined,
+  );
+  // What JEV would make it with every switch on, for `wouldBe`.
+  const wouldBeClass = hint
+    ? resolveTaskClass(textInput, { proposed: proposedClass, applyMechanical: true, applyHard: true }).taskClass
+    : classResolution.taskClass;
   const classPartial = {
     taskClass: classResolution.taskClass,
     source: classResolution.source,
@@ -1236,18 +1416,79 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
       ? { unknownDeclaredValue: classResolution.unknownDeclaredValue }
       : {}),
   };
-  const taskClass: TaskClassDecision = { ...classPartial, reason: describeTaskClass(classPartial) };
+  const taskClass: TaskClassDecision = {
+    ...classPartial,
+    reason: describeTaskClass(classPartial) + hintNote(input.jevHint, classResolution.taskClass, wouldBeClass),
+  };
 
   const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
-  const tools = decideTools(world, roleDecision, hasCaller);
+  const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
   const mcp = decideMcp(
     { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },
     world.mcpGateway,
-    roleDecision.role,
+    toolRole.role,
   );
+  const jevTools = decideJevTools(world, tools);
 
-  return { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle, mcp };
+  const decision: AgentDecision = { role: roleDecision, taskClass, model, tools, account, thinking, outputStyle, mcp };
+  if (input.jevHint) {
+    decision.jev = decideJevRecord(input, world, input.jevHint, {
+      hasCaller,
+      role: roleDecision,
+      taskClass: classResolution.taskClass,
+      source: classResolution.source,
+      wouldBeClass,
+    });
+  }
+  if (jevTools) {
+    decision.jevTools = jevTools;
+  }
+  return decision;
+}
+
+/** The `jev` part of a decision: what the hint said, whether it applied, and what it would have done. */
+function decideJevRecord(
+  input: ClassifierInput,
+  world: ClassifierWorld,
+  jevHint: SpawnHint,
+  resolved: {
+    hasCaller: boolean;
+    role: RoleDecision;
+    taskClass: TaskClassId | undefined;
+    source: TaskClassSource;
+    wouldBeClass: TaskClassId | undefined;
+  },
+): JevHintDecision {
+  const hint = answeredHint(jevHint);
+  if (!hint) {
+    return {
+      status: jevHint.status,
+      ...("callId" in jevHint && jevHint.callId !== undefined ? { callId: jevHint.callId } : {}),
+      ...("reason" in jevHint ? { reason: jevHint.reason } : {}),
+      applied: false,
+    };
+  }
+  const textInput = { labels: input.labels, title: input.title, initialPrompt: input.initialPrompt };
+  const baselineClass = resolveTaskClass(textInput).taskClass;
+  const wouldBeRole =
+    resolved.hasCaller && hint.proposal.roleId !== undefined
+      ? resolveRole(world.policy, textInput, { roleId: hint.proposal.roleId, apply: true }).role
+      : resolved.role.role;
+  const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass);
+  const rankDelta = classRank(resolved.wouldBeClass) - classRank(baselineClass);
+  return {
+    status: hint.status,
+    callId: hint.callId,
+    answers: hint.answers,
+    applied: resolved.source === "jev" || resolved.role.source === "classified-jev",
+    wouldBe: {
+      taskClass: resolved.wouldBeClass ?? null,
+      ...(hint.answers.role !== undefined ? { role: wouldBeRole.id } : {}),
+      model: wouldBeModel.model ?? null,
+      move: rankDelta < 0 ? "down" : rankDelta > 0 ? "up" : "none",
+    },
+  };
 }

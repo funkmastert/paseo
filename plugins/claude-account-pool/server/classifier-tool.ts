@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describeDecision } from "./decision-summary";
 import { classifyAgent, type ClassifierInput, type ClassifierWorld } from "./classifier";
+import { spawnHintPreview, type SpawnHintAvailability } from "./jev-hint";
 
 /**
  * The classifier, reachable by an agent BEFORE it spawns anything, as an MCP
@@ -131,6 +132,12 @@ export interface ClassifierToolServerOptions {
    * the live caches rather than whatever they held when the socket opened.
    */
   world: () => ClassifierWorld;
+  /**
+   * JEV's spawn-hint switches from the last status poll. The tool never asks
+   * JEV (a question must not spend); it says "decided at create" where a live
+   * create would ask and could act on the answer.
+   */
+  spawnHintAvailability?: () => SpawnHintAvailability | undefined;
   /** Overrides the socket path. Tests use this; production takes the default temp dir. */
   socketPath?: string;
 }
@@ -218,6 +225,7 @@ export function queryToInput(query: ClassifierToolQuery): ClassifierInput {
 export function handleMcpMessage(
   message: JsonRpcMessage,
   world: () => ClassifierWorld,
+  spawnHintAvailability?: () => SpawnHintAvailability | undefined,
 ): Record<string, unknown> | undefined {
   const { id, method, params } = message;
   const result = (value: unknown) => ({ jsonrpc: "2.0", id, result: value });
@@ -238,7 +246,10 @@ export function handleMcpMessage(
         return { jsonrpc: "2.0", id, error: { code: -32602, message: `unknown tool "${String(params?.name)}"` } };
       }
       try {
-        const decision = classifyAgent(queryToInput((params.arguments ?? {}) as ClassifierToolQuery), world());
+        const input = queryToInput((params.arguments ?? {}) as ClassifierToolQuery);
+        const current = world();
+        const preview = spawnHintPreview(input, current, spawnHintAvailability?.());
+        const decision = classifyAgent(preview ? { ...input, jevHint: preview } : input, current);
         return result({ content: [{ type: "text", text: describeDecision(decision) }] });
       } catch (error) {
         return result({
@@ -282,7 +293,7 @@ export function startClassifierToolServer(options: ClassifierToolServerOptions):
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         newline = buffer.indexOf("\n");
-        const reply = handleLine(line, options.world);
+        const reply = handleLine(line, options.world, options.spawnHintAvailability);
         if (reply) {
           socket.write(`${JSON.stringify(reply)}\n`);
         }
@@ -308,7 +319,11 @@ export function startClassifierToolServer(options: ClassifierToolServerOptions):
   };
 }
 
-function handleLine(line: string, world: () => ClassifierWorld): Record<string, unknown> | undefined {
+function handleLine(
+  line: string,
+  world: () => ClassifierWorld,
+  spawnHintAvailability?: () => SpawnHintAvailability | undefined,
+): Record<string, unknown> | undefined {
   if (line.trim().length === 0) {
     return undefined;
   }
@@ -318,5 +333,5 @@ function handleLine(line: string, world: () => ClassifierWorld): Record<string, 
   } catch {
     return undefined; // No id to answer on; dropping it is all MCP allows.
   }
-  return handleMcpMessage(message, world);
+  return handleMcpMessage(message, world, spawnHintAvailability);
 }
