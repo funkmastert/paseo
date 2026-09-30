@@ -947,6 +947,7 @@ function createRemediationLadder(input: {
   const { agentManager, agentStorage, logger } = input;
   const ladderLogger = logger.child({ module: "remediation-ladder" });
   const remediationDir = path.join(input.config.paseoHome, "remediation");
+  const jevDir = path.join(input.config.paseoHome, "jev");
   return new RemediationLadder({
     dependencies: {
       createAgent: async (request) => {
@@ -994,7 +995,7 @@ function createRemediationLadder(input: {
       triageEscalation: createEscalationTriage(input.jev),
       recordTriage: createRemediationTriageRecorder({
         jev: input.jev,
-        filePath: path.join(remediationDir, "triage.jsonl"),
+        filePath: path.join(jevDir, "remediation-triage.jsonl"),
         logger: ladderLogger,
       }),
     },

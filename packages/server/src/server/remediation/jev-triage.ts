@@ -1,8 +1,7 @@
-import { promises as fs } from "node:fs";
-import path from "node:path";
 import type { Logger } from "pino";
 
 import type { JevEgressScope, JevOutcome, JevQuestions, JevService } from "../jev/contract.js";
+import { createJsonlAppender } from "../jsonl-appender.js";
 import { levelAtLeast, type NotifyLevel } from "../notify-policy/levels.js";
 import type { RemediationObservation } from "./contract.js";
 import { MAX_EVIDENCE_CHARS } from "./escalation.js";
@@ -314,28 +313,12 @@ export function createRemediationTriageRecorder(options: {
   filePath: string;
   logger: Logger;
 }): (event: RemediationTriageEvent) => void {
-  const { filePath, logger } = options;
-  const isWindows = process.platform === "win32";
-  let chain: Promise<void> = Promise.resolve();
-  let size: number | null = null;
-
-  async function append(event: RemediationTriageEvent): Promise<void> {
-    const text = `${JSON.stringify({ v: 1, ...event })}\n`;
-    const bytes = Buffer.byteLength(text, "utf8");
-    if (size === null) {
-      await fs.mkdir(path.dirname(filePath), { recursive: true });
-      size = (await fs.stat(filePath).catch(() => null))?.size ?? 0;
-    }
-    if (size + bytes > TRIAGE_FILE_MAX_BYTES) {
-      await fs.rename(filePath, `${filePath}.1`).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") throw error;
-      });
-      size = 0;
-    }
-    await fs.appendFile(filePath, text, isWindows ? {} : { mode: 0o600 });
-    size += bytes;
-  }
-
+  const { logger } = options;
+  const file = createJsonlAppender({
+    filePath: options.filePath,
+    maxBytes: TRIAGE_FILE_MAX_BYTES,
+    logger,
+  });
   return (event) => {
     try {
       logger.info({ remediationTriage: event }, "remediation-triage");
@@ -354,11 +337,7 @@ export function createRemediationTriageRecorder(options: {
     } catch {
       // Recording never breaks the ladder.
     }
-    chain = chain.then(() =>
-      append(event).catch((error: unknown) => {
-        logger.warn({ err: error }, "remediation-triage: append failed");
-      }),
-    );
+    file.append({ v: 1, ...event });
   };
 }
 
