@@ -55,12 +55,17 @@ const agentTab: WorkspaceTabDescriptor = {
   target: { kind: "agent", agentId: "agent-a" },
 };
 
-function buildContent(tab: WorkspaceTabDescriptor = agentTab, host: "main" | "explorer" = "main") {
+function buildContent(
+  tab: WorkspaceTabDescriptor = agentTab,
+  host: "main" | "explorer" = "main",
+  readOnly?: boolean,
+) {
   return buildWorkspacePaneContentModel({
     tab,
     normalizedServerId: "server-a",
     normalizedWorkspaceId: "workspace-a",
     host,
+    readOnly,
     onOpenTab: vi.fn(),
     onOpenPreferredTarget: vi.fn(),
     onOpenTargetToSide: vi.fn(),
@@ -141,6 +146,32 @@ describe("WorkspacePaneContent", () => {
     });
 
     expect(snapshots[0]?.paneContextValue.host).toBe("explorer");
+  });
+
+  it("threads readOnly through to its content, defaulting to undefined", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <WorkspacePaneContent
+          content={buildContent(agentTab, "main", true)}
+          isPaneFocused
+          isWorkspaceFocused
+        />,
+      );
+    });
+
+    expect(snapshots[0]?.paneContextValue.readOnly).toBe(true);
+
+    act(() => {
+      root?.render(
+        <WorkspacePaneContent content={buildContent()} isPaneFocused isWorkspaceFocused />,
+      );
+    });
+
+    expect(snapshots[1]?.paneContextValue.readOnly).toBeUndefined();
   });
 
   it("keeps pane content mounted when a draft tab is retargeted in place", () => {

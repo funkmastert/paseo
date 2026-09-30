@@ -359,6 +359,7 @@ export const zhCN: TranslationResources = {
       next: "下一步",
       answerPlaceholder: "输入你的回答...",
       otherPlaceholder: "其他...",
+      answerInConversation: "在完整对话中回答",
     },
     todo: {
       title: "任务",
