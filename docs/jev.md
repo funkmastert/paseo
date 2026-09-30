@@ -526,15 +526,18 @@ Before the ladder starts a remediation agent (up to 2M tokens), JEV judges wheth
 
 ### Seam
 
-`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts:304-380`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker (`:311-342`) — and before the request is built (`:344`), call a new optional dependency:
+`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker — and before the request is built, `routeElsewhere` runs. It honours `escalation.personFirst` first, then asks the optional dependency, once per episode:
 
 ```ts
 triageEscalation?(input: { episodeKey: string; observation: RemediationObservation }): Promise<EscalationTriage>;
+recordTriage?(event: RemediationTriageEvent): void;
 ```
 
-It is added to `RemediationLadderDependencies` (`ladder.ts:58-65`) and wired inside the ladder factory in `bootstrap.ts:864-935`, which the foundation gives a `jev` input. The episode records the result so JEV is asked once per episode: `EpisodeSchema` (`ladder-state.ts:44-59`) gains optional `jevTriage` and `jevDeferredUntil` (added by the foundation). `evaluate` (`ladder.ts:250-302`) returns early while `jevDeferredUntil` is in the future, next to the grace check at `:280-283`.
+`EscalationTriage` is what JEV said (outcome, route, confidence, `evidence_current`, cost), not what to do: the ladder turns it into an action with the pure `decideTriageAction` (`remediation/jev-triage.ts`), because only the ladder knows whether the escalation will push. Bootstrap builds both dependencies from `jev` in the ladder factory, with `readNotifyPostFloor` reading the notify policy's `minPostLevel` off the daemon's push sender.
 
-Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized (`ladder.ts:107, 162-164`), so a 5-second triage delays every queued observation, disk-critical included.
+The episode records the answer in `jevTriage` (`action` is what the answer maps to, `applied` whether the ladder acted on it) and a deferral in `jevDeferredUntil`, so a restart neither asks again nor forgets the hold. `evaluate` returns early while `jevDeferredUntil` is in the future, next to the grace check, unless the observation has since turned `urgent`.
+
+Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized, so a 5-second triage delays every queued observation, disk-critical included. The ladder bounds the call itself at 8 seconds, past the service's deadline, so a triage that never settles cannot hold the queue.
 
 ### State and questions
 
@@ -572,34 +575,43 @@ Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observa
 }
 ```
 
+The scope is `agentIds: [observation.link.agentId]`, whose cwd tree includes its workspace's, plus `escalation.cwd`. A workspace link with no agent cannot be resolved by the ladder, so it is sent as `missing` and excluded. The work-at-risk sweep's key is plain `work-at-risk`, not `work-at-risk:<path>`; its worktree paths are in the evidence, so it and every other machine-wide observation rely on the text scan.
+
 ### Thresholds
 
-| Answer                                                                         | Action                                                                                                                       |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `needs_person` at confidence ≥ 0.80, and the escalation will push              | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                           |
-| `needs_person` at confidence ≥ 0.80, and the escalation would only be recorded | The agent starts as today                                                                                                    |
-| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40       | Defer rung 2 once, by the condition's grace window or 10 minutes, whichever is longer. After that the agent starts as today. |
-| Anything else                                                                  | The agent starts as today                                                                                                    |
+| Answer                                                                   | Action                                                                                                                       |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `needs_person` at confidence ≥ 0.80, and the escalation will push        | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                           |
+| `needs_person` at confidence ≥ 0.80, and the escalation will not push    | The agent starts as today                                                                                                    |
+| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40 | Defer rung 2 once, by the condition's grace window or 10 minutes, whichever is longer. After that the agent starts as today. |
+| Anything else, including a missing `evidence_current`                    | The agent starts as today                                                                                                    |
 
-**"Will push"** means `condition.notify` is true and the level `escalate` would send at, `observation.level ?? "alert"`, is `notice` or higher. This rule exists because rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set (`ladder.ts:255`), so after a skip no agent ever starts for that episode, and `escalate` sends at `record` when `condition.notify` is false (`ladder.ts:502-507`). Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
+**"Will push"** means `condition.notify` is true (the notify rung and `conditions.<kind>.notify`), and the level `escalate` sends at, `observation.level ?? "alert"`, is at least `notice` and at least the notify policy's `minPostLevel`, below which a push is only logged. A post floor the ladder cannot read counts as `urgent`, so the rule never passes on a guess. Rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set, and `escalate` sends at `record` when `condition.notify` is false. Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
 
-The same rule governs `escalation.personFirst`, a field the foundation adds to `RemediationObservation` for [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push. The ladder is the one place that decides.
+**When a person will not be told, the fixer runs.** The alternative, pushing anyway when notify is off for the condition, was rejected: notify off is the operator's decision, and a JEV answer, which condition evidence can steer, must neither create pushes he turned off nor drop a fix. So the worst answer a steered triage can produce is a push Tyler would have received anyway, naming the skip, with no agent; everywhere else it starts the agent. A repeat inside the notify policy's dedupe hour folds into the push he already has for that key.
+
+The same rule governs `escalation.personFirst` from [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push, and asks JEV nothing then. The ladder is the one place that decides.
 
 A deferred episode that clears on its own closes as resolved, as any episode does.
 
 ### Fail open
 
-Not `answered`: the agent starts as today. The call is bounded by the 5-second deadline and made once per episode.
+Not `answered`: the agent starts as today. So do a triage that throws, one the ladder's 8-second bound cuts off, and a missing dependency. The call is bounded by the 5-second deadline and made once per episode; shadow is the default and records the would-be action in `jevTriage` with `applied: false`.
 
 ### Cost, cache, latency
 
 - Under 3,000 input tokens per episode. No cache effect: no agent context is touched, and a skipped remediation agent is a whole context not built. Up to 5 seconds added to rung 2, once.
-- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`~/.paseo/remediation/state.json`, `daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`. **Measured by** a week of shadow: per episode, JEV's route against the actual outcome (FIXED, NOT FIXED, or cleared within the grace) and the agent's measured spend; count skipped-and-useless agents against false `needs_person`.
+- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`.
+- **Measured by** `$PASEO_HOME/jev/remediation-triage.jsonl` (0600, one rotation at 1 MB), joined on `episode` (`<key>@<openedAt>`). A `triage` line carries JEV's reading, its cost, `willPush` and the decision; `agent-ended` carries the agent's result, cause, `agentTotalTokens` and model; `closed` carries how long after the triage the condition cleared and whether a deferral was holding. Episodes that ran an agent untriaged get the last two as well, so the file holds the typical agent's cost too.
+  - Shadow: a `triage` with `decision.wouldBe: "person"` whose `agent-ended` says `not-fixed` is a skipped-and-useless agent, worth its `agentTotalTokens`; one that says `fixed` is a false `needs_person`. A would-be deferral cannot be judged in shadow, because the agent ran; judge it live, where a `closed` line with `duringDeferral: true` is an agent avoided.
+  - Live: every `person` or `defer` episode with no `agent-ended` line is an agent avoided, worth the median `agentTotalTokens` of the `agent-ended` lines at that agent's model price.
+  - Against: the sum of `triage.costUsd`, which the ledger's daily `remediationTriage` totals in `$PASEO_HOME/jev/ledger.json` confirm.
+  - Each `triage` about a linked agent also lands in the decision store, so feature 11 shows it on that agent.
 
 ### Tests and verification
 
-- `remediation/jev-triage.test.ts`: the decision function for each row of the table; `urgent` and advisory observations never triaged.
-- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with notify off, or a `record` level, starts the agent; `personFirst` follows the same two cases; `clearing_on_its_own` defers once and then creates; a second observation in the same episode does not ask again; `triageEscalation` absent or failing behaves exactly like today; the fields survive a state reload.
+- `remediation/jev-triage.test.ts`: the decision function for each row of the table, shadow and every non-`answered` outcome; `willEscalationPush` against the notify rung, the level and the post floor; `urgent`, advisory and agentless observations never triaged; the state and the 8 KB cut; the scope, including an unresolvable workspace link; over the fake, answered, shadow by default, an unknown agent and a company path in the evidence sending nothing, timeout and contract failures, and steered evidence; the recorder's lines, decision note and rotation.
+- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with the notify rung off, the condition's notify off, a level under the post floor, or an unreadable floor starts the agent; `personFirst` follows the same two cases and asks JEV nothing when it skips; `clearing_on_its_own` defers once and then creates; an observation that turns `urgent` is not held; a second observation in the same episode does not ask again; the fields survive a restart; a shadow answer, a throwing triage and a hung one start the agent; the measurement lines, including an untriaged agent's end; the remediation agent is created unattended.
 - Verify: `npx vitest run packages/server/src/server/remediation/ladder.test.ts --bail=1`.
 
 ## Feature 3b: finish triage
@@ -608,22 +620,27 @@ A root agent's finish pushes an `alert` today. JEV reads the final message and c
 
 ### Seam
 
-`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts:2620-2704`). The final message is already fetched at `:2644`. At `:2661-2666`:
+`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts`). The final message is already fetched there. It calls `sendAttentionPush` (`packages/server/src/server/attention-push-triage.ts`) without awaiting it:
 
-- Keep `attentionPushLevel` (`agent-attention-policy.ts:90-95`) as the base level.
-- The in-app messages (`:2668` onward) must not wait for JEV. The push moves into a detached async step: if the base is `alert` and the reason is `finished`, triage, then send; otherwise send at the base level at once.
-- The step is written so no throw can lose the push: `let level = base; try { level = await triage() } catch {} finally { send(level) }`. A throw in the state builder, in JEV or in the level function sends the `alert`.
-- The logic lives in a new `packages/server/src/server/attention-push-triage.ts`: the vetoes, the question, the state builder and a pure `finishedPushLevel(base, answers)`.
+- `attentionPushLevel` (`agent-attention-policy.ts`) stays the base level.
+- Every path that does not triage — not a finish, not an `alert`, no JEV, JEV inactive, a veto, shadow — sends before the function's first `await`, so the in-app messages that follow go out in the same order as before.
+- A live triage sends from a `finally`: `let level = base; try { level = finishedPushLevel(base, await triage, postFloor) } catch {} finally { send(level) }`. A throw in the facts, the state, JEV or the level function sends the `alert`, and the push step bounds the call itself at 5 seconds.
+- **Shadow sends at once.** The `alert` goes out before JEV is asked, and the answer only feeds the record, so shadow neither delays nor changes a push.
+- The scope is `agentIds: [the finishing agent]`.
 
-The finished edge itself (`agent-manager.ts:6673-6691`) does not change.
+The finished edge itself (`agent-manager.ts`, `checkAndSetAttention`) does not change.
 
 ### Vetoes
 
 The final message is the agent's own text, shaped by whatever it read, and a `notice` is held for the digest: 30 minutes when available, 2 hours in focus, all of it while away ([notification-policy.md](notification-policy.md)). Code checks these before asking, and any one keeps the `alert` without a call:
 
-- the last 400 characters contain `?`, a pull request or issue URL, or `error`, `fail`, `couldn't`, `cannot`, `blocked`, `limit`, `denied` or `revert`;
+- the message is empty;
+- the agent has a pending permission;
 - the agent's last tool call failed;
-- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md)).
+- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md));
+- the last 400 characters contain `?`, a pull request or issue URL, or `error`, `fail`, `couldn't`, `cannot`, `can't`, `unable`, `blocked`, `limit`, `denied` or `revert`, or a way of asking without a question mark: `approve`, `approval`, `confirm`, `permission`, `should i`, `shall i`, `do you want`, `would you like`, `let me know`, `waiting for`, `waiting on`, `your call`, `decide`, `decision`.
+
+The vetoes, not JEV, guard the finishes that ask Tyler something. A final message written to steer JEV past them gets, at worst, the same push as a digest `notice`.
 
 ### State and question
 
@@ -649,22 +666,22 @@ The final message is the agent's own text, shaped by whatever it read, and a `no
 
 ### Thresholds
 
-`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`. Everything else sends the `alert`. A message with no text sends the `alert`.
+`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`, but only while the notify policy's `minPostLevel` is `notice` or lower: under a higher floor a notice is logged, not delivered, so the `alert` goes out. Everything else sends the `alert`.
 
 ### Fail open
 
-Not `answered`, or any error: the `alert` goes out as now, at most 3 seconds later.
+Not `answered`, any error, an unreadable fact or post floor, or no answer within 5 seconds: the `alert` goes out as now, at most 5 seconds later. In shadow it goes out at once.
 
 ### Cost, cache, latency
 
-- Under 1,500 input tokens per finish. No cache effect. The push is delayed by up to 3 seconds; the in-app notice is not delayed.
-- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention. **Measured by** the shadow share of root finishes rated `routine` ≥ 0.85, against whether Tyler messaged or opened that agent within 2 hours of the push.
+- Under 1,500 input tokens per finish. No cache effect. A live push is delayed by up to 3 seconds (5 at the push step's bound); a shadow push and the in-app notice are not delayed.
+- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention.
+- **Measured by** `$PASEO_HOME/jev/finish-triage.jsonl` (0600, one rotation at 2 MB). A `finish` line per root finish JEV could judge: vetoed with the veto, or asked with the outcome, choice, confidence, the level sent and the level a shadow answer would have sent. A `followup` line per answered finish: minutes until Tyler's first message to the agent from an app client (the `human-prompt` operator signal), or null after 2 hours. The share of finishes rated `routine` ≥ 0.85 whose followup is null is the attention saved; a `routine` followed by a message inside 2 hours is a miss. Opening the agent without writing is not visible to the daemon's push path, and pending followups do not survive a restart. `daemon.log` gets a `finish-triage` line too, but keeps only 30 MB. Each asked finish also lands in the decision store, with the action saying what was sent and why.
 
 ### Tests and verification
 
-- `attention-push-triage.test.ts`: each veto; `finishedPushLevel` for each option and the floor; a delegated child's `notice` and every non-`finished` reason are never sent to JEV.
-- A websocket-server test with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push.
-- Add the row to the sender inventory in [notification-policy.md](notification-policy.md#sender-inventory).
+- `attention-push-triage.test.ts`: each veto, and a question mark outside the last 400 characters; `finishedPushLevel` for each option, the floor, shadow, other outcomes, a base it must not raise and a post floor that would log the notice; over the fake, a live `routine` sending `notice` with its record, the scope and call site, shadow sending the `alert` before JEV answers, a timeout, a throw and a hang sending `alert`, unreadable facts and post floor, an excluded agent sending JEV nothing, a permission, an error, a child's `notice` and no JEV never asking, a steered message; the followups; `readFinishFacts`.
+- `websocket-server.notifications.test.ts`, with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push; shadow sends the `alert` without waiting.
 - Verify: `npx vitest run packages/server/src/server/attention-push-triage.test.ts --bail=1`.
 
 ## Features 4–6: agent tools
