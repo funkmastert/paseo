@@ -179,7 +179,7 @@ import { createConfiguredTerminalManager } from "../terminal/terminal-manager-fa
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
 import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
-import type { PushNotificationSender } from "./push/index.js";
+import type { PushNotifications, PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
 import { resolveDaemonVersion } from "./daemon-version.js";
 import type { AgentClient, AgentProvider } from "./agent/agent-sdk-types.js";
@@ -269,7 +269,11 @@ import {
   type WorktreeSnapshotter,
 } from "./remediation/contract.js";
 import { findEscalationAccountBlocker } from "./remediation/escalation.js";
-import { RemediationLadder } from "./remediation/ladder.js";
+import {
+  createEscalationTriage,
+  createRemediationTriageRecorder,
+} from "./remediation/jev-triage.js";
+import { RemediationLadder, remediationCreateAgentInput } from "./remediation/ladder.js";
 import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
@@ -941,20 +945,13 @@ function createRemediationLadder(input: {
   jev: JevService;
 }): RemediationLadder {
   const { agentManager, agentStorage, logger } = input;
+  const ladderLogger = logger.child({ module: "remediation-ladder" });
+  const remediationDir = path.join(input.config.paseoHome, "remediation");
+  const jevDir = path.join(input.config.paseoHome, "jev");
   return new RemediationLadder({
     dependencies: {
       createAgent: async (request) => {
-        const result = await input.createAgent({
-          kind: "mcp",
-          provider: request.provider,
-          title: request.title,
-          initialPrompt: request.prompt,
-          promptFailure: "throw",
-          cwd: request.cwd,
-          labels: request.labels,
-          background: true,
-          notifyOnFinish: false,
-        });
+        const result = await input.createAgent(remediationCreateAgentInput(request));
         if (!result.initialPromptStarted) {
           throw new Error(`agent ${result.snapshot.id} was created but its prompt did not start`);
         }
@@ -972,9 +969,14 @@ function createRemediationLadder(input: {
             status: "idle",
             finalText: await agentManager.getLastAssistantMessage(agentId),
             totalTokens: live.totalTokens,
+            model: live.config.model ?? null,
           };
         }
-        return { status: "running", totalTokens: live.totalTokens };
+        return {
+          status: "running",
+          totalTokens: live.totalTokens,
+          model: live.config.model ?? null,
+        };
       },
       cancelAgent: async (agentId) => {
         await agentManager.cancelAgentRun(agentId, "remediation");
@@ -989,12 +991,27 @@ function createRemediationLadder(input: {
           getHealth: (id) =>
             readProviderHealthNow({ agentManager, wsServer: input.wsServer, provider: id }),
         }),
+      // Feature 3a (docs/jev.md): JEV's triage before rung 2, and its measurement record.
+      triageEscalation: createEscalationTriage(input.jev),
+      recordTriage: createRemediationTriageRecorder({
+        jev: input.jev,
+        filePath: path.join(jevDir, "remediation-triage.jsonl"),
+        logger: ladderLogger,
+      }),
     },
     getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
+    // The daemon's own sender carries the notify policy. An injected test sender has none, and
+    // then no push counts as reaching a phone, so JEV never skips a fixer (feature 3a).
+    previewPush: (meta) => {
+      const sender: PushNotificationSender & Partial<Pick<PushNotifications, "policy">> =
+        input.wsServer.getPushNotificationSender();
+      if (!sender.policy) throw new Error("the push sender has no notify policy");
+      return sender.policy.previewDelivery(meta);
+    },
     serverId: input.serverId,
     readDaemonConfig: () => ({ remediation: input.daemonConfigStore.get().remediation }),
-    statePath: path.join(input.config.paseoHome, "remediation", "state.json"),
-    logger: logger.child({ module: "remediation-ladder" }),
+    statePath: path.join(remediationDir, "state.json"),
+    logger: ladderLogger,
   });
 }
 

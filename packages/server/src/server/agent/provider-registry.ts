@@ -666,14 +666,19 @@ function createRegistryEntry(
     ? profileModels.map((model) => mapModel(provider, model))
     : [];
 
+  // A runtime catalog may carry only ids and labels (Claude's does). The manifest supplies the
+  // visuals and `isUnattended`; without the flag, an unattended create (remediation agents, schedule
+  // runs) finds no unattended mode and starts in the provider's default one.
   const decorateModes = (modes: AgentMode[]): AgentMode[] =>
     modes.map((mode) => {
-      if (mode.icon && mode.colorTier) return mode;
       const definitionMode = resolved.definition.modes.find((d) => d.id === mode.id);
       if (!definitionMode) return mode;
+      const isUnattended = mode.isUnattended ?? definitionMode.isUnattended;
+      if (mode.icon && mode.colorTier && mode.isUnattended === isUnattended) return mode;
       return Object.assign({}, mode, {
         icon: mode.icon ?? definitionMode.icon,
         colorTier: mode.colorTier ?? definitionMode.colorTier,
+        ...(isUnattended !== undefined ? { isUnattended } : {}),
       });
     });
 

@@ -8,7 +8,7 @@ import type { NotifyLedgerEntry } from "@getpaseo/protocol/notify-policy/types";
 
 import { PushLedger } from "../push/ledger.js";
 import type { PushDelivery, PushDeliveryResult, PushPayload } from "../push/push-service.js";
-import { NotifyPolicy, type NotifyTransport } from "./notify-policy.js";
+import { NotifyPolicy, reachesPhoneNow, type NotifyTransport } from "./notify-policy.js";
 import { NotifyPolicySettingsStore } from "./settings.js";
 
 const MINUTE = 60 * 1000;
@@ -356,6 +356,55 @@ describe("NotifyPolicy", () => {
       await policy.submit(payload("Agent finished"), { level: "alert" });
       await policy.submit(payload("Agent finished"), { level: "alert" });
       expect(transport.sent).toHaveLength(2);
+    });
+  });
+
+  describe("previewDelivery", () => {
+    test("says what submit would do now, without recording or sending anything", async () => {
+      const { policy } = create();
+      expect(policy.previewDelivery({ level: "alert" })).toEqual({
+        outcome: "interrupt",
+        devices: 1,
+      });
+      expect(policy.previewDelivery({ level: "notice" })).toEqual({
+        outcome: "digest",
+        devices: 1,
+      });
+      expect(policy.previewDelivery({ level: "record" })).toEqual({ outcome: "log", devices: 1 });
+      await policy.updateSettings({ availability: { mode: "off", until: null } });
+      expect(policy.previewDelivery({ level: "alert" }).outcome).toBe("notify");
+      expect(transport.sent).toHaveLength(0);
+      expect(policy.listLedger()).toEqual([]);
+    });
+
+    test("reports a repeat the dedupe hour would fold, and leaves its count alone", async () => {
+      const { policy } = create();
+      const meta = { level: "alert", dedupeKey: "remediation:disk-low" } as const;
+      await policy.submit(payload("Disk low"), meta);
+      now += 30 * MINUTE;
+      expect(policy.previewDelivery(meta).outcome).toBe("suppressed");
+      expect(policy.previewDelivery({ ...meta, level: "urgent" }).outcome).toBe("interrupt");
+      expect(policy.listLedger()).toMatchObject([{ repeatCount: 0 }]);
+      now += 31 * MINUTE;
+      expect(policy.previewDelivery(meta).outcome).toBe("interrupt");
+    });
+
+    test("counts the registered devices a push would go to", () => {
+      const { policy } = create();
+      transport.tokens = [];
+      expect(policy.previewDelivery({ level: "alert" })).toEqual({
+        outcome: "interrupt",
+        devices: 0,
+      });
+    });
+
+    test("reachesPhoneNow is true only for a push sent now to at least one device", () => {
+      expect(reachesPhoneNow({ outcome: "interrupt", devices: 1 })).toBe(true);
+      expect(reachesPhoneNow({ outcome: "notify", devices: 2 })).toBe(true);
+      expect(reachesPhoneNow({ outcome: "interrupt", devices: 0 })).toBe(false);
+      for (const outcome of ["digest", "log", "suppressed"] as const) {
+        expect(reachesPhoneNow({ outcome, devices: 1 })).toBe(false);
+      }
     });
   });
 

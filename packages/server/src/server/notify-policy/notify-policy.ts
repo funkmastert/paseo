@@ -4,6 +4,7 @@ import type {
   NotifyAvailabilityMode,
   NotifyPolicySettings,
   NotifyLedgerEntry,
+  NotifyOutcome,
 } from "@getpaseo/protocol/notify-policy/types";
 
 import { PushLedger, toWireEntry, type LedgerRecord, type LedgerTicket } from "../push/ledger.js";
@@ -36,6 +37,21 @@ export interface NotifyPolicyOptions {
   settings: NotifyPolicySettingsStore;
   transport: NotifyTransport;
   now?: () => number;
+}
+
+/** What `submit` would do with a push right now. `devices`: the registered tokens it would go to. */
+export interface NotifyDeliveryPreview {
+  outcome: NotifyOutcome;
+  devices: number;
+}
+
+/**
+ * Whether a push with this preview reaches a phone now: pushed at once (loud or quiet) to at least
+ * one registered device. A digest may wait hours, a fold adds nothing new, and a log or a phone
+ * with no token reaches nobody.
+ */
+export function reachesPhoneNow(preview: NotifyDeliveryPreview): boolean {
+  return (preview.outcome === "interrupt" || preview.outcome === "notify") && preview.devices > 0;
 }
 
 export interface NotifyPolicyStatus {
@@ -99,6 +115,26 @@ export class NotifyPolicy {
     this.options.settings.update(patch);
     await this.tick();
     return this.getStatus();
+  }
+
+  /**
+   * What `submit` would do with a push at this level and dedupe key now, without recording,
+   * folding or sending anything. A caller that skips its own fallback because a person will be
+   * told asks this first.
+   */
+  previewDelivery(meta: { level: NotifyLevel; dedupeKey?: string }): NotifyDeliveryPreview {
+    const nowMs = this.now();
+    const devices = this.options.transport.activeTokens().length;
+    if (meta.dedupeKey && this.findFoldTarget(meta.dedupeKey, meta.level, nowMs)) {
+      return { outcome: "suppressed", devices };
+    }
+    const settings = this.options.settings.get();
+    const decision = decideDelivery({
+      level: meta.level,
+      settings,
+      availability: resolveAvailability(settings, nowMs),
+    });
+    return { outcome: decision.outcome, devices };
   }
 
   async submit(payload: PushPayload, meta: PushSendMeta = {}): Promise<void> {
@@ -233,13 +269,20 @@ export class NotifyPolicy {
 
   /** Counts a repeat against the earlier notification and reports whether it was one. */
   private foldIfRepeat(key: string, level: NotifyLevel, nowMs: number): boolean {
-    const prior = this.options.ledger.findLatestByDedupeKey(key);
-    if (!prior || nowMs - Date.parse(prior.at) >= DEDUPE_WINDOW_MS) return false;
-    // An escalation is news even when the situation is the same one.
-    if (levelRank(level) > levelRank(prior.level)) return false;
+    const prior = this.findFoldTarget(key, level, nowMs);
+    if (!prior) return false;
     this.options.ledger.foldRepeat(prior.id);
     this.logger.info({ dedupeKey: key, priorId: prior.id }, "Notification suppressed as a repeat");
     return true;
+  }
+
+  /** The earlier notification a push with this key and level would be folded into, if any. */
+  private findFoldTarget(key: string, level: NotifyLevel, nowMs: number): LedgerRecord | null {
+    const prior = this.options.ledger.findLatestByDedupeKey(key);
+    if (!prior || nowMs - Date.parse(prior.at) >= DEDUPE_WINDOW_MS) return null;
+    // An escalation is news even when the situation is the same one.
+    if (levelRank(level) > levelRank(prior.level)) return null;
+    return prior;
   }
 
   private async dispatch(record: LedgerRecord, delivery: PushDelivery): Promise<void> {

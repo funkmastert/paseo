@@ -71,9 +71,12 @@ const EpisodeSchema = z.object({
       evidenceCurrent: z.number().optional(),
       action: z.string(),
       applied: z.boolean(),
+      // The observation's level when triaged: a hold ends once the level rises past it.
+      level: z.string().optional(),
     })
     .optional(),
-  // Set by a `clearing_on_its_own` triage: rung 2 is held until this time, once (Feature 3a).
+  // Set by a `clearing_on_its_own` triage: rung 2 is held until this time, once (Feature 3a). The
+  // ladder also ends the hold MAX_DEFER_MS after `jevTriage.at`, so an older, longer one is capped.
   jevDeferredUntil: z.string().optional(),
 });
 

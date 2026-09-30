@@ -14,6 +14,9 @@ import { AgentStorage } from "../agent-storage.js";
 import { PluginHookHandlers, PluginUnresponsiveError } from "../../plugins/lifecycle/index.js";
 import type { PluginLifecycle } from "../../plugins/lifecycle/index.js";
 import type { CreatePaseoWorktreeWorkflowResult } from "../../worktree-session.js";
+import { ProviderSnapshotManager } from "../provider-snapshot-manager.js";
+import { createClaudeCatalogRuntimeSettings } from "../../test-utils/claude-catalog-runtime.js";
+import { remediationCreateAgentInput } from "../../remediation/ladder.js";
 import { createAgentCommand } from "./create.js";
 import type { ManagedAgent } from "../agent-manager.js";
 
@@ -916,6 +919,66 @@ test("a create still fails when a plugin's agent.create hook refuses it", async 
     ).rejects.toThrow("every Claude account is out of budget");
     expect(agentManager.listAgents()).toEqual([]);
   } finally {
+    await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
+  }
+});
+
+/** A snapshot manager on the production registry path, with Claude's own catalog. */
+function createClaudeCatalogSnapshotManager(dir: string): ProviderSnapshotManager {
+  return new ProviderSnapshotManager({
+    logger,
+    providerOverrides: {
+      codex: { enabled: false },
+      copilot: { enabled: false },
+      opencode: { enabled: false },
+      pi: { enabled: false },
+      omp: { enabled: false },
+    },
+    runtimeSettings: { claude: createClaudeCatalogRuntimeSettings(dir) },
+  });
+}
+
+test.each([
+  [
+    "a remediation agent (week review D1b-03)",
+    (cwd: string) =>
+      remediationCreateAgentInput({
+        provider: "claude",
+        title: "Remediation: orphaned build daemons",
+        prompt: "Find what keeps respawning the daemons and stop it.",
+        cwd,
+        labels: { "paseo.remediation": "orphan-build-daemons" },
+        unattended: true,
+      }),
+  ],
+  [
+    "a scheduled run with no mode",
+    (cwd: string) => ({
+      kind: "mcp" as const,
+      provider: "claude",
+      title: "Nightly sweep",
+      cwd,
+      unattended: true,
+      promptFailure: "return-error" as const,
+      background: true,
+      notifyOnFinish: false,
+    }),
+  ],
+])("mcp create starts %s in Claude's unattended mode", async (_label, buildInput) => {
+  const workdir = mkdtempSync(join(tmpdir(), "create-agent-test-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const agentManager = createRealAgentManager(storage);
+  const providerSnapshotManager = createClaudeCatalogSnapshotManager(workdir);
+
+  try {
+    const created = await createAgentCommand(
+      { agentManager, agentStorage: storage, logger, providerSnapshotManager },
+      { ...buildInput(workdir), workspaceId: "ws-create-test" },
+    );
+    expect(created.snapshot.config.modeId).toBe("bypassPermissions");
+    expect(agentManager.getAgent(created.snapshot.id)?.config.modeId).toBe("bypassPermissions");
+  } finally {
+    providerSnapshotManager.destroy();
     await removeRealAgentManagerWorkdir({ agentManager, storage, workdir });
   }
 });

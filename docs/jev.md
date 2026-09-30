@@ -287,19 +287,19 @@ An excluded call sends nothing and audits nothing. The ledger records it with th
 
 **Scope per feature**, the call-site obligation, checked in each track's tests:
 
-| Feature               | `scope`                                                                                                                                                                                                                                                 |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2                     | `cwds: [new agent's cwd]`, `agentIds: [parent]` for a child. Over the RPC the plugin sends `cwd` and `parentAgentId`; the daemon looks up the parent itself. A request with no scope answers `unavailable: excluded`.                                   |
-| 3a                    | `agentIds: [observation.link.agentId]`; the cwd of `observation.link.workspaceId`; the path in a `work-at-risk:<path>` key. Machine-wide observations rely on the text scan, so saturation evidence naming a Wonderly agent's cwd excludes that triage. |
-| 3b                    | `agentIds: [the finishing agent]`                                                                                                                                                                                                                       |
-| 4, 5                  | `agentIds: [caller]`, `files: [each candidate]`, `baseCwd: caller cwd`, checked per file: an excluded file is `skipped` with "company code is not sent to JEV" and the others proceed                                                                   |
-| 6 `ask_jev`           | `agentIds: [caller]`, `files`, `baseCwd`, `cwds: [the command's cwd]`. The text scan covers the command and its output.                                                                                                                                 |
-| 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                            |
-| 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                      |
-| 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                 |
-| 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                    |
-| 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                           |
-| 16                    | `agentIds: [the reading agent]`, `files: [the path]`, `baseCwd: its cwd`. The observer asks `checkScope` first and reads nothing from an excluded file; the read is counted as `excluded`                                                               |
+| Feature               | `scope`                                                                                                                                                                                                                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2                     | `cwds: [new agent's cwd]`, `agentIds: [parent]` for a child. Over the RPC the plugin sends `cwd` and `parentAgentId`; the daemon looks up the parent itself. A request with no scope answers `unavailable: excluded`.                                                                          |
+| 3a                    | `agentIds: [observation.link.agentId]` and `escalation.cwd`; a workspace link with no agent is excluded. Machine-wide observations, work-at-risk included (its key is plain `work-at-risk`), rely on the text scan, so saturation evidence naming a Wonderly agent's cwd excludes that triage. |
+| 3b                    | `agentIds: [the finishing agent]`                                                                                                                                                                                                                                                              |
+| 4, 5                  | `agentIds: [caller]`, `files: [each candidate]`, `baseCwd: caller cwd`, checked per file: an excluded file is `skipped` with "company code is not sent to JEV" and the others proceed                                                                                                          |
+| 6 `ask_jev`           | `agentIds: [caller]`, `files`, `baseCwd`, `cwds: [the command's cwd]`. The text scan covers the command and its output.                                                                                                                                                                        |
+| 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                                                                   |
+| 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                                                             |
+| 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                                                        |
+| 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                                                           |
+| 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                                                                  |
+| 16                    | `agentIds: [the reading agent]`, `files: [the path]`, `baseCwd: its cwd`. The observer asks `checkScope` first and reads nothing from an excluded file; the read is counted as `excluded`                                                                                                      |
 
 The plugin decides the `paseo.jev-tools` label before the agent exists, so it asks `jev.scope.check` with the new agent's cwd and parent; an excluded agent never gets the tools.
 
@@ -548,19 +548,22 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 ## Feature 3a: remediation triage
 
-Before the ladder starts a remediation agent (up to 2M tokens), JEV judges whether an agent is the right next step. It can send the episode to a person instead, but only when that person will actually be told, or give it one more grace window.
+Before the ladder starts a remediation agent (up to 2M tokens), JEV judges whether an agent is the right next step. It can send the episode to a person instead, but only when the push reaches a phone now, or hold the agent once while a live remedy acts.
 
 ### Seam
 
-`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts:304-380`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker (`:311-342`) — and before the request is built (`:344`), call a new optional dependency:
+`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker — and before the request is built, `routeElsewhere` runs. It honours `escalation.personFirst` first, then asks the optional dependency, once per episode:
 
 ```ts
 triageEscalation?(input: { episodeKey: string; observation: RemediationObservation }): Promise<EscalationTriage>;
+recordTriage?(event: RemediationTriageEvent): void;
 ```
 
-It is added to `RemediationLadderDependencies` (`ladder.ts:58-65`) and wired inside the ladder factory in `bootstrap.ts:864-935`, which the foundation gives a `jev` input. The episode records the result so JEV is asked once per episode: `EpisodeSchema` (`ladder-state.ts:44-59`) gains optional `jevTriage` and `jevDeferredUntil` (added by the foundation). `evaluate` (`ladder.ts:250-302`) returns early while `jevDeferredUntil` is in the future, next to the grace check at `:280-283`.
+`EscalationTriage` is what JEV said (outcome, route, confidence, `evidence_current`, cost), not what to do: the ladder turns it into an action with the pure `decideTriageAction` (`remediation/jev-triage.ts`), because only the ladder knows whether the escalation will push. Bootstrap builds both dependencies from `jev` in the ladder factory, with `previewPush` calling the notify policy's `previewDelivery` on the daemon's push sender.
 
-Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized (`ladder.ts:107, 162-164`), so a 5-second triage delays every queued observation, disk-critical included.
+The episode records the answer in `jevTriage` (`action` is what the answer maps to, `applied` whether the ladder acted on it, `level` the observation's level then) and a deferral in `jevDeferredUntil`, so a restart neither asks again nor forgets the hold. `evaluate` returns early while the hold lasts, next to the grace check. The hold ends at `jevDeferredUntil` or 15 minutes after the triage, whichever comes first, so a hold written by an older build is capped too, and it ends early when the observation's level rises past `jevTriage.level`. The 60-second poll starts the held agent once the hold ends: `evaluate` otherwise runs only on an active observation, and a monitor that went quiet would strand the episode.
+
+Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized, so a 5-second triage delays every queued observation, disk-critical included. The ladder bounds the call itself at 8 seconds, past the service's deadline, so a triage that never settles cannot hold the queue.
 
 ### State and questions
 
@@ -598,34 +601,44 @@ Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observa
 }
 ```
 
+The scope is `agentIds: [observation.link.agentId]`, whose cwd tree includes its workspace's, plus `escalation.cwd`. A workspace link with no agent cannot be resolved by the ladder, so it is sent as `missing` and excluded. The work-at-risk sweep's key is plain `work-at-risk`, not `work-at-risk:<path>`; its worktree paths are in the evidence, so it and every other machine-wide observation rely on the text scan.
+
 ### Thresholds
 
-| Answer                                                                         | Action                                                                                                                       |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `needs_person` at confidence ≥ 0.80, and the escalation will push              | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                           |
-| `needs_person` at confidence ≥ 0.80, and the escalation would only be recorded | The agent starts as today                                                                                                    |
-| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40       | Defer rung 2 once, by the condition's grace window or 10 minutes, whichever is longer. After that the agent starts as today. |
-| Anything else                                                                  | The agent starts as today                                                                                                    |
+| Answer                                                                                  | Action                                                                                                             |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `needs_person` at confidence ≥ 0.80, and the escalation will push                       | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                 |
+| `needs_person` at confidence ≥ 0.80, and the escalation will not push                   | The agent starts as today                                                                                          |
+| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40, remedy `live` | Hold rung 2 once, for the condition's grace window clamped to 10–15 minutes. After that the agent starts as today. |
+| `clearing_on_its_own` with any other remedy                                             | The agent starts as today                                                                                          |
+| Anything else, including a missing `evidence_current`                                   | The agent starts as today                                                                                          |
 
-**"Will push"** means `condition.notify` is true and the level `escalate` would send at, `observation.level ?? "alert"`, is `notice` or higher. This rule exists because rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set (`ladder.ts:255`), so after a skip no agent ever starts for that episode, and `escalate` sends at `record` when `condition.notify` is false (`ladder.ts:502-507`). Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
+**"Will push"** means `condition.notify` is true (the notify rung and `conditions.<kind>.notify`), the level `escalate` sends at, `observation.level ?? "alert"`, is at least `notice`, and the notify policy's `previewDelivery` for that level and the `remediation:<key>` dedupe key says `interrupt` or `notify` with at least one registered device. So a push that would fold into one from the last hour (a recurrence of a key already pushed), one held for a digest, one below `minPostLevel`, and one with no phone to go to all start the agent. A preview that is absent or throws counts as not reaching anyone, so the rule never passes on a guess. A failed Expo send is not predictable and is not covered. Rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set, and `escalate` sends at `record` when `condition.notify` is false. Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
 
-The same rule governs `escalation.personFirst`, a field the foundation adds to `RemediationObservation` for [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push. The ladder is the one place that decides.
+**When a person will not be told, the fixer runs.** The alternative, pushing anyway when notify is off for the condition, was rejected: notify off is the operator's decision, and a JEV answer, which condition evidence can steer, must neither create pushes he turned off nor drop a fix. So the worst answer a steered triage can produce is a push Tyler receives now, naming the skip, with no agent, or a hold of at most 15 minutes on a condition a live remedy is working on; everywhere else it starts the agent.
 
-A deferred episode that clears on its own closes as resolved, as any episode does.
+The same rule governs `escalation.personFirst` from [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push, and asks JEV nothing then. The ladder is the one place that decides, and it cannot tell a shadow judgment from an applied one, so the stall judgment sets `personFirst` only from an `answered` outcome.
+
+Only a `live` remedy is held. A condition nothing is acting on cannot clear by itself, and its monitor may close the episode for another reason: the work-at-risk sweep sends `active: false` on its next sweep whether or not a judge ran, so a hold there would lose both the judge and the push.
 
 ### Fail open
 
-Not `answered`: the agent starts as today. The call is bounded by the 5-second deadline and made once per episode.
+Not `answered`: the agent starts as today. So do a triage that throws, one the ladder's 8-second bound cuts off, and a missing dependency. The call is bounded by the 5-second deadline and made once per episode; shadow is the default and records the would-be action in `jevTriage` with `applied: false`.
 
 ### Cost, cache, latency
 
 - Under 3,000 input tokens per episode. No cache effect: no agent context is touched, and a skipped remediation agent is a whole context not built. Up to 5 seconds added to rung 2, once.
-- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`~/.paseo/remediation/state.json`, `daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`. **Measured by** a week of shadow: per episode, JEV's route against the actual outcome (FIXED, NOT FIXED, or cleared within the grace) and the agent's measured spend; count skipped-and-useless agents against false `needs_person`.
+- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`.
+- **Measured by** `$PASEO_HOME/jev/remediation-triage.jsonl` (0600, one rotation at 1 MB), joined on `episode` (`<key>@<openedAt>`). A `triage` line carries JEV's reading, its cost, `willPush` and the decision; `agent-ended` carries the agent's result, cause, `agentTotalTokens` and model; `closed` carries how long after the triage the condition cleared, whether a deferral was holding, and `clearedDuringHold`: closed inside the hold, remedy `live`, no agent run. Episodes that ran an agent untriaged get the last two as well, so the file holds the typical agent's cost too.
+  - Shadow: a `triage` with `decision.wouldBe: "person"` whose `agent-ended` says `not-fixed` is a skipped-and-useless agent, worth its `agentTotalTokens`; one that says `fixed` is a false `needs_person`. A would-be deferral cannot be judged in shadow, because the agent ran; judge it live.
+  - Live: a `person` episode with no `agent-ended` line is an agent avoided, and so is a `defer` episode whose `closed` line has `clearedDuringHold: true`. A `defer` whose hold ran out starts its agent and gets an `agent-ended` line. Each avoided agent is worth the median `agentTotalTokens` of the `agent-ended` lines at that agent's model price.
+  - Against: the sum of `triage.costUsd`, which the ledger's daily `remediationTriage` totals in `$PASEO_HOME/jev/ledger.json` confirm.
+  - Each `triage` about a linked agent also lands in the decision store, so feature 11 shows it on that agent.
 
 ### Tests and verification
 
-- `remediation/jev-triage.test.ts`: the decision function for each row of the table; `urgent` and advisory observations never triaged.
-- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with notify off, or a `record` level, starts the agent; `personFirst` follows the same two cases; `clearing_on_its_own` defers once and then creates; a second observation in the same episode does not ask again; `triageEscalation` absent or failing behaves exactly like today; the fields survive a state reload.
+- `remediation/jev-triage.test.ts`: the decision function for each row of the table, shadow and every non-`answered` outcome, no hold without a `live` remedy, the 10–15 minute clamp; `willEscalationPush` against the notify rung, the level, a fold, a digest, a log-only level, no phone and no preview; `urgent`, advisory and agentless observations never triaged; the state and the 8 KB cut; the scope, including an unresolvable workspace link; over the fake, answered, shadow by default, an unknown agent and a company path in the evidence sending nothing, timeout and contract failures, and steered evidence; the recorder's lines, decision note and rotation.
+- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with the notify rung off, the condition's notify off, a log-only level, a fold, no phone, a digest hold, or no or a throwing preview starts the agent, and a recurrence inside the dedupe hour starts it through a real `NotifyPolicy`; `personFirst` follows the same cases and asks JEV nothing when it skips; the work-at-risk sweep's observe-then-close sequence still runs its judge; `clearing_on_its_own` defers once and then creates, from the poll when the monitor went quiet; a hold is capped at 15 minutes, also when read from an older state file; an observation whose level rises is not held; a second observation in the same episode does not ask again; the fields survive a restart; a shadow answer, a throwing triage and a hung one start the agent; the measurement lines, including an untriaged agent's end; the remediation agent is created unattended.
 - Verify: `npx vitest run packages/server/src/server/remediation/ladder.test.ts --bail=1`.
 
 ## Feature 3b: finish triage
@@ -634,22 +647,32 @@ A root agent's finish pushes an `alert` today. JEV reads the final message and c
 
 ### Seam
 
-`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts:2620-2704`). The final message is already fetched at `:2644`. At `:2661-2666`:
+`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts`). The final message is already fetched there. It calls `sendAttentionPush` (`packages/server/src/server/attention-push-triage.ts`) without awaiting it:
 
-- Keep `attentionPushLevel` (`agent-attention-policy.ts:90-95`) as the base level.
-- The in-app messages (`:2668` onward) must not wait for JEV. The push moves into a detached async step: if the base is `alert` and the reason is `finished`, triage, then send; otherwise send at the base level at once.
-- The step is written so no throw can lose the push: `let level = base; try { level = await triage() } catch {} finally { send(level) }`. A throw in the state builder, in JEV or in the level function sends the `alert`.
-- The logic lives in a new `packages/server/src/server/attention-push-triage.ts`: the vetoes, the question, the state builder and a pure `finishedPushLevel(base, answers)`.
+- `attentionPushLevel` (`agent-attention-policy.ts`) stays the base level.
+- Every path that does not triage — not a finish, not an `alert`, no JEV, JEV inactive, a veto, shadow — sends before the function's first `await`, so the in-app messages that follow go out in the same order as before.
+- A live triage sends from a `finally`: `let level = base; try { level = finishedPushLevel(base, await triage, postFloor) } catch {} finally { send(level) }`. The push step bounds the call itself at 5 seconds.
+- `sendAttentionPush` sends exactly once and never rejects: a throw anywhere, the vetoes and the record included, sends the `alert` if nothing went out yet. The call site keeps a `.catch` anyway, because the daemon exits on an unhandled rejection (`daemon-worker.ts`).
+- **Shadow sends at once.** The `alert` goes out before JEV is asked, and the answer only feeds the record, so shadow neither delays nor changes a push.
+- The scope is `agentIds: [the finishing agent]`.
 
-The finished edge itself (`agent-manager.ts:6673-6691`) does not change.
+The finished edge itself (`agent-manager.ts`, `checkAndSetAttention`) does not change.
 
 ### Vetoes
 
 The final message is the agent's own text, shaped by whatever it read, and a `notice` is held for the digest: 30 minutes when available, 2 hours in focus, all of it while away ([notification-policy.md](notification-policy.md)). Code checks these before asking, and any one keeps the `alert` without a call:
 
-- the last 400 characters contain `?`, a pull request or issue URL, or `error`, `fail`, `couldn't`, `cannot`, `blocked`, `limit`, `denied` or `revert`;
+- Tyler's availability is `away` or `off`: a notice would wait up to 8 hours, long enough for the away auto-reply ([feature 14](#feature-14-away-auto-reply)) to answer the finish before he sees it;
+- the message is empty;
+- the agent has a pending permission;
 - the agent's last tool call failed;
-- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md)).
+- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md));
+- a `?` anywhere in the message, outside URLs and code;
+- in the last 1,500 characters, a pull request or issue URL, `PR #123`, `#1234`, or a veto word (`attention-push-triage.ts`): failure words (`error`, `fail`, `can't`, `blocker`, `timed out`, `won't`…), ways of asking without a question mark (`want me to`, `tell me`, `pick one`, `reply`, `say the word`, `awaiting`, `i'll wait`, `until you`, `your input`, `your review`, `shall i`, `your call`…), things only a person can do (`sign in`, `credentials`, `expired`), and a message addressed to the triage (`triage`, `needs no attention`).
+
+The text is folded first: curly apostrophes become `'`, and NFKC turns the full-width `？` into `?`. The new words match whole words only, so `pick` does not catch `picked`.
+
+The vetoes are a backstop. They catch the plain ways of asking, the adversarial review's 20 phrasings among them (the fixture in `attention-push-triage.test.ts`); JEV's `routine` floor of 0.85 is the main guard. A final message written to steer JEV past both gets, at worst, the same push as a digest `notice`, and never while Tyler is away or off.
 
 ### State and question
 
@@ -675,22 +698,22 @@ The final message is the agent's own text, shaped by whatever it read, and a `no
 
 ### Thresholds
 
-`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`. Everything else sends the `alert`. A message with no text sends the `alert`.
+`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`, but only while the notify policy's `minPostLevel` is `notice` or lower: under a higher floor a notice is logged, not delivered, so the `alert` goes out. Everything else sends the `alert`.
 
 ### Fail open
 
-Not `answered`, or any error: the `alert` goes out as now, at most 3 seconds later.
+Not `answered`, any error, an unreadable fact, post floor or availability, or no answer within 5 seconds: the `alert` goes out as now, at most 5 seconds later. In shadow it goes out at once.
 
 ### Cost, cache, latency
 
-- Under 1,500 input tokens per finish. No cache effect. The push is delayed by up to 3 seconds; the in-app notice is not delayed.
-- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention. **Measured by** the shadow share of root finishes rated `routine` ≥ 0.85, against whether Tyler messaged or opened that agent within 2 hours of the push.
+- Under 1,500 input tokens per finish. No cache effect. A live push is delayed by up to 3 seconds (5 at the push step's bound); a shadow push and the in-app notice are not delayed.
+- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention.
+- **Measured by** `$PASEO_HOME/jev/finish-triage.jsonl` (0600, one rotation at 2 MB). A `finish` line per root finish JEV could judge: vetoed with the veto, or asked with the outcome, choice, confidence, the level sent and the level a shadow answer would have sent. A `followup` line per answered finish, with `closedBy`: `message` with the minutes until Tyler's first message to the agent from an app client (the `human-prompt` operator signal), or `window` after 2 hours with none. `superseded` (the agent finished again first) and `evicted` (over 500 pending) are censored, and so is an answered finish with no followup line, which is what a restart leaves. The share of uncensored finishes rated `routine` ≥ 0.85 that closed by `window` is the attention saved; a `routine` closed by `message` is a miss. Judge go-live on shadow lines: once live, a lowered finish Tyler sees late makes "no message" self-fulfilling. Opening the agent without writing is not visible to the daemon's push path. `daemon.log` gets a `finish-triage` line too, but keeps only 30 MB. Each asked finish also lands in the decision store, with the action saying what was sent and why.
 
 ### Tests and verification
 
-- `attention-push-triage.test.ts`: each veto; `finishedPushLevel` for each option and the floor; a delegated child's `notice` and every non-`finished` reason are never sent to JEV.
-- A websocket-server test with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push.
-- Add the row to the sender inventory in [notification-policy.md](notification-policy.md#sender-inventory).
+- `attention-push-triage.test.ts`: each veto, a question mark anywhere but in URLs and code, the review's 20 phrasings, benign status messages passing; `finishedPushLevel` for each option, the floor, shadow, other outcomes, a base it must not raise and a post floor that would log the notice; over the fake, a live `routine` sending `notice` with its record, the scope and call site, shadow sending the `alert` before JEV answers, a timeout, a throw and a hang sending `alert`, unreadable facts and post floor, an excluded agent sending JEV nothing, a permission, an error, a child's `notice` and no JEV never asking, a steered message, `away` and `off` keeping the `alert` unasked, a throwing veto step and a throwing record each sending one push without rejecting; the followups, including superseded and evicted; `readFinishFacts`.
+- `websocket-server.notifications.test.ts`, with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push; away mode sends the `alert` without asking; shadow sends the `alert` without waiting.
 - Verify: `npx vitest run packages/server/src/server/attention-push-triage.test.ts --bail=1`.
 
 ## Features 4–6: agent tools
