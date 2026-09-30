@@ -1,3 +1,4 @@
+import type { NotifyAvailabilityMode } from "@getpaseo/protocol/notify-policy/types";
 import type { Logger } from "pino";
 
 import type { AgentManager, AgentOperatorSignal } from "./agent/agent-manager.js";
@@ -11,13 +12,15 @@ import { levelAtLeast, type NotifyLevel } from "./notify-policy/levels.js";
  * final message and can move a routine one to a `notice`, which the notify policy holds for the
  * digest. It only ever lowers an `alert` to a `notice`, never drops or raises a push, and never
  * sees a permission, an error or a delegated child's finish. In shadow it changes nothing and the
- * push is not delayed.
+ * push is not delayed. While Tyler is away or off it asks nothing: a notice would be held for
+ * hours, long enough for the away auto-reply (feature 14) to answer the finish first.
  */
 
 export const FINISH_TRIAGE_CALL_SITE = "attention.finish-triage";
 export const ROUTINE_FLOOR = 0.85;
 export const FINAL_MESSAGE_CHARS = 4000;
-export const VETO_TAIL_CHARS = 400;
+/** The veto words are read from this much of the message's end; a question mark from all of it. */
+export const VETO_TAIL_CHARS = 1_500;
 /** The push step's own bound, past the service's 3-second deadline: a hung triage still sends. */
 export const FINISH_TRIAGE_HARD_TIMEOUT_MS = 5_000;
 /** How long after a triaged finish a message from Tyler counts as him needing it. */
@@ -44,9 +47,8 @@ export const FINISH_TRIAGE_QUESTIONS: JevQuestions = {
 };
 
 /**
- * Words in the message's tail that keep the alert without asking. The doc's list, plus the ways
- * an agent asks for something without a question mark: the final message is the agent's own text,
- * shaped by whatever it read, so code, not JEV, guards the finishes that need Tyler.
+ * Words in the message's tail that keep the alert without asking, matched anywhere in a word:
+ * `fail` also catches `failed`. The doc's list, plus the ways an agent asks without a question mark.
  */
 const VETO_WORDS = [
   "error",
@@ -75,7 +77,86 @@ const VETO_WORDS = [
   "decision",
 ];
 
+/**
+ * Whole words and phrases, matched only at word boundaries so `pick` does not catch `picked`.
+ * They are the adversarial review's 20 ways of asking (finding 4, the fixture in the test file):
+ * offers, handoffs, sign-in and credential asks, stalls, and a message talking to the triage.
+ */
+const VETO_PHRASES = [
+  // Offers and asks for a choice.
+  "want me to",
+  "tell me",
+  "pick one",
+  "pick",
+  "choose",
+  "which option",
+  "reply",
+  "say the word",
+  "ping me",
+  "advise",
+  "prefer",
+  // Handing the next step to him.
+  "over to you",
+  "awaiting",
+  "i'll wait",
+  "until you",
+  "unless you",
+  "need you",
+  "needs your",
+  "your input",
+  "your review",
+  "go-ahead",
+  "sign-off",
+  "sign off",
+  // Something only a person can do.
+  "sign in",
+  "log in",
+  "re-auth",
+  "reauth",
+  "credentials",
+  "expired",
+  "rejected",
+  // It stopped short.
+  "blocker",
+  "timed out",
+  "stuck",
+  "paused",
+  "won't",
+  "hold on",
+  // A message addressed to whatever triages it.
+  "triage",
+  "needs no attention",
+  "no attention",
+  "ignore previous",
+  "ignore your",
+];
+
 const PULL_REQUEST_OR_ISSUE_URL = /https?:\/\/\S+\/(?:pulls?|issues|merge_requests)\/\d+/i;
+/** A pull request or issue named without a URL: `PR #4712`, `PR 4712`, `#4712`. */
+const PULL_REQUEST_OR_ISSUE_REF = /\bPR\s*#?\d+\b|(?:^|[^\w&])#\d{3,}\b/i;
+const URL = /https?:\/\/\S+/gi;
+const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
+const WORD_CHAR = /[a-z0-9]/;
+
+/**
+ * One spelling for what the vetoes read: curly and prime apostrophes as `'`, and the full-width
+ * question mark (and the rest of the full-width forms) folded by NFKC.
+ */
+function normalizeForVeto(text: string): string {
+  return text.normalize("NFKC").replace(/[\u2018\u2019\u201B\u2032\u02BC\uFF07]/g, "'");
+}
+
+function containsPhrase(lower: string, phrase: string): boolean {
+  let from = 0;
+  for (;;) {
+    const at = lower.indexOf(phrase, from);
+    if (at === -1) return false;
+    const before = at === 0 ? "" : lower[at - 1]!;
+    const after = lower[at + phrase.length] ?? "";
+    if (!WORD_CHAR.test(before) && !WORD_CHAR.test(after)) return true;
+    from = at + 1;
+  }
+}
 
 export interface FinishFacts {
   title: string | null;
@@ -85,20 +166,30 @@ export interface FinishFacts {
   pendingPermissionCount: number;
 }
 
-/** Why the alert is kept without a call, or null when JEV may be asked. */
+/**
+ * Why the alert is kept without a call, or null when JEV may be asked. A backstop, not the guard:
+ * it catches the plain ways of asking, and JEV's `routine` floor decides the rest.
+ */
 export function findFinishVeto(finalMessage: string | null, facts: FinishFacts): string | null {
-  const text = finalMessage?.trim() ?? "";
+  const text = normalizeForVeto(finalMessage?.trim() ?? "");
   if (text.length === 0) return "empty-message";
   if (facts.pendingPermissionCount > 0) return "pending-permission";
   if (facts.lastToolCallFailed) return "last-tool-call-failed";
   if (facts.owesChildReport) return "child-report-owed";
+  // A question anywhere counts; a `?` in a URL's query or in code is not one.
+  if (text.replace(CODE, " ").replace(URL, " ").includes("?")) return "question-mark";
   const tail = text.slice(-VETO_TAIL_CHARS);
-  if (tail.includes("?")) return "question-mark";
   if (PULL_REQUEST_OR_ISSUE_URL.test(tail)) return "pull-request-or-issue-url";
+  if (PULL_REQUEST_OR_ISSUE_REF.test(tail.replace(URL, " "))) return "pull-request-or-issue-ref";
   const lower = tail.toLowerCase();
-  const word = VETO_WORDS.find((candidate) => lower.includes(candidate));
+  const word =
+    VETO_WORDS.find((candidate) => lower.includes(candidate)) ??
+    VETO_PHRASES.find((candidate) => containsPhrase(lower, candidate));
   return word ? `word:${word}` : null;
 }
+
+/** Availability modes that hold a notice for hours: a finish is never lowered in these. */
+const HOLDING_AVAILABILITY: ReadonlySet<NotifyAvailabilityMode> = new Set(["away", "off"]);
 
 export function buildFinishTriageState(input: { title: string | null; finalMessage: string }) {
   return {
@@ -159,8 +250,15 @@ export type FinishTriageLine =
       at: string;
       agentId: string;
       callId: string | null;
-      /** Minutes from the push to Tyler's first message to the agent; null when none in 2 hours. */
+      /** Minutes from the push to Tyler's first message to the agent; null when none was seen. */
       messagedAfterMinutes: number | null;
+      /**
+       * `message`: he wrote to the agent. `window`: 2 hours passed without one. `superseded`: the
+       * agent finished again first, and `evicted`: the pending list overflowed; both are censored,
+       * not "no message". A restart drops pending entries without a line, so a triaged finish with
+       * no followup line is censored too.
+       */
+      closedBy: "message" | "window" | "superseded" | "evicted";
       sent: NotifyLevel;
       wouldBe: NotifyLevel;
       choice: string | null;
@@ -196,11 +294,18 @@ export class FinishFollowups {
 
   track(entry: PendingFollowup): void {
     this.sweep();
-    this.pending.delete(entry.agentId);
+    const previous = this.pending.get(entry.agentId);
+    if (previous) {
+      this.pending.delete(entry.agentId);
+      this.emit(previous, null, "superseded");
+    }
     this.pending.set(entry.agentId, entry);
     if (this.pending.size > MAX_PENDING_FOLLOWUPS) {
-      const oldest = this.pending.keys().next().value;
-      if (oldest !== undefined) this.pending.delete(oldest);
+      const [oldestId, oldest] = this.pending.entries().next().value ?? [];
+      if (oldestId !== undefined && oldest) {
+        this.pending.delete(oldestId);
+        this.emit(oldest, null, "evicted");
+      }
     }
   }
 
@@ -210,7 +315,7 @@ export class FinishFollowups {
     const entry = this.pending.get(signal.agentId);
     if (!entry) return;
     this.pending.delete(signal.agentId);
-    this.emit(entry, Math.round((signal.at.getTime() - entry.atMs) / 6_000) / 10);
+    this.emit(entry, Math.round((signal.at.getTime() - entry.atMs) / 6_000) / 10, "message");
   }
 
   /** Closes every entry past the window as "no message". */
@@ -219,17 +324,22 @@ export class FinishFollowups {
     for (const [agentId, entry] of this.pending) {
       if (nowMs - entry.atMs < FOLLOWUP_WINDOW_MS) continue;
       this.pending.delete(agentId);
-      this.emit(entry, null);
+      this.emit(entry, null, "window");
     }
   }
 
-  private emit(entry: PendingFollowup, messagedAfterMinutes: number | null): void {
+  private emit(
+    entry: PendingFollowup,
+    messagedAfterMinutes: number | null,
+    closedBy: Extract<FinishTriageLine, { type: "followup" }>["closedBy"],
+  ): void {
     this.write({
       type: "followup",
       at: new Date(this.now()).toISOString(),
       agentId: entry.agentId,
       callId: entry.callId,
       messagedAfterMinutes,
+      closedBy,
       sent: entry.sent,
       wouldBe: entry.wouldBe,
       choice: entry.choice,
@@ -249,6 +359,8 @@ export interface AttentionPushInput {
   readFacts: () => FinishFacts;
   /** The notify policy's `minPostLevel`. A throw keeps the alert. */
   readPostFloor: () => NotifyLevel;
+  /** Tyler's availability mode in force. `away` or `off`, or a throw, keeps the alert. */
+  readAvailability: () => NotifyAvailabilityMode;
   send: (level: NotifyLevel) => Promise<void>;
   record?: FinishTriageRecorder | null;
   logger: Logger;
@@ -262,34 +374,58 @@ export interface FinishTriageRecorder {
 }
 
 /**
- * Sends one attention push. Every path that does not triage sends before the first `await`, so
- * the caller's in-app messages never wait on JEV. A live triage sends from a `finally`: no throw
- * in the facts, the scope, the state, JEV or the level function can lose the push.
+ * Sends one attention push, exactly once, and never rejects. Every path that does not triage sends
+ * before the first `await`, so the caller's in-app messages never wait on JEV. A live triage sends
+ * from a `finally`. Any throw anywhere, the vetoes and the record included, sends the base level
+ * if nothing was sent yet: the caller detaches this promise, and the daemon exits on an unhandled
+ * rejection.
  */
 export async function sendAttentionPush(input: AttentionPushInput): Promise<void> {
-  const { base, jev, logger } = input;
-  const now = input.now ?? Date.now;
+  let sentOnce = false;
   const send = async (level: NotifyLevel): Promise<void> => {
+    if (sentOnce) return;
+    sentOnce = true;
     try {
       await input.send(level);
     } catch (error) {
-      logger.warn({ err: error, agentId: input.agentId }, "Failed to send push notification");
+      input.logger.warn({ err: error, agentId: input.agentId }, "Failed to send push notification");
     }
   };
+  try {
+    await triageAndSend(input, send);
+  } catch (error) {
+    input.logger.warn(
+      { err: error, agentId: input.agentId },
+      "Finish triage failed; sending as is",
+    );
+    await send(input.base);
+  }
+}
+
+async function triageAndSend(
+  input: AttentionPushInput,
+  send: (level: NotifyLevel) => Promise<void>,
+): Promise<void> {
+  const { base, jev } = input;
+  const now = input.now ?? Date.now;
   if (input.reason !== "finished" || base !== "alert" || !jev) return send(base);
 
   let facts: FinishFacts;
   let postFloor: NotifyLevel;
   let shadow: boolean;
+  let veto: string | null;
   try {
     if (!jev.isActive("notificationTriage")) return send(base);
     facts = input.readFacts();
     postFloor = input.readPostFloor();
     shadow = jev.status().features.notificationTriage.shadow;
+    const availability = input.readAvailability();
+    veto = HOLDING_AVAILABILITY.has(availability)
+      ? `availability:${availability}`
+      : findFinishVeto(input.finalMessage, facts);
   } catch {
     return send(base);
   }
-  const veto = findFinishVeto(input.finalMessage, facts);
   if (veto !== null || input.finalMessage === null) {
     const sending = send(base);
     recordFinish(input, {
@@ -374,6 +510,18 @@ function recordTriaged(
     shadow: boolean;
     at: number;
   },
+): void {
+  try {
+    recordTriagedUnguarded(input, result);
+  } catch (error) {
+    // The record never affects the push.
+    input.logger.warn({ err: error, agentId: input.agentId }, "Finish triage record failed");
+  }
+}
+
+function recordTriagedUnguarded(
+  input: AttentionPushInput,
+  result: Parameters<typeof recordTriaged>[1],
 ): void {
   const { outcome } = result;
   const { choice, confidence } =

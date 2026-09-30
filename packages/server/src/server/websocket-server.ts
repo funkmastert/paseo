@@ -2686,7 +2686,8 @@ export class VoiceAssistantWebSocketServer {
 
     if (plan.shouldPush) {
       // Feature 3b (docs/jev.md): a root's finish may go out as a digest notice after JEV reads
-      // it. Detached, so the in-app messages below never wait on JEV.
+      // it. Detached, so the in-app messages below never wait on JEV. It never rejects; the catch
+      // stays because the daemon exits on an unhandled rejection.
       const jev = this.jev;
       void sendAttentionPush({
         reason: params.reason,
@@ -2696,6 +2697,7 @@ export class VoiceAssistantWebSocketServer {
         jev,
         readFacts: () => readFinishFacts(this.agentManager, params.agentId),
         readPostFloor: () => this.pushNotifications.policy.getStatus().settings.minPostLevel,
+        readAvailability: () => this.getAvailabilityMode(),
         send: (level) => this.pushNotificationSender.send(notification, { level }),
         record: jev
           ? finishTriageRecorderFor({
@@ -2709,6 +2711,8 @@ export class VoiceAssistantWebSocketServer {
             })
           : null,
         logger: this.logger,
+      }).catch((error: unknown) => {
+        this.logger.warn({ err: error, agentId: params.agentId }, "Attention push failed");
       });
     }
 

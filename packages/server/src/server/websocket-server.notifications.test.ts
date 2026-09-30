@@ -12,7 +12,12 @@ import type { ScheduleService } from "./schedule/service.js";
 import type { CheckoutDiffManager } from "./checkout-diff-manager.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
-import type { PushNotificationSender, PushPayload, PushSendMeta } from "./push/index.js";
+import type {
+  PushNotificationSender,
+  PushNotifications,
+  PushPayload,
+  PushSendMeta,
+} from "./push/index.js";
 import type { WorkspaceAutoName } from "./workspace-auto-name.js";
 import type { JevService } from "./jev/contract.js";
 import { createTestJevService, type TestJevServiceOptions } from "./jev/fake.js";
@@ -501,6 +506,17 @@ describe("VoiceAssistantWebSocketServer finish triage (JEV feature 3b)", () => {
     await vi.waitFor(() => expect(jev.transport.held).toBe(1));
     jev.transport.release();
     await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["notice"]));
+  });
+
+  it("keeps the alert and asks JEV nothing while Tyler is away (review finding 5)", async () => {
+    const { server, pushNotifications, jev } = createTriagingServer({});
+    await asInternals<{ pushNotifications: PushNotifications }>(
+      server,
+    ).pushNotifications.policy.updateSettings({ availability: { mode: "away", until: null } });
+    const decide = vi.spyOn(jev, "decide");
+    await broadcastFinish(server);
+    await vi.waitFor(() => expect(pushNotifications.levels).toEqual(["alert"]));
+    expect(decide).not.toHaveBeenCalled();
   });
 
   it("in shadow sends the alert without waiting for JEV", async () => {
