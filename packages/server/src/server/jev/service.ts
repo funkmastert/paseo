@@ -58,12 +58,13 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   compactionTiming: "control",
   stallJudgment: "control",
   awayReply: "control",
+  titleRefresh: "control",
   agentTools: "agentTools",
   askJev: "interactive",
 };
 
 /** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
-const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev"]);
+const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev", "titleRefresh"]);
 
 const JEV_FEATURES = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
 

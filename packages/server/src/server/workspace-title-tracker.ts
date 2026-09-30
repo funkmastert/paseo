@@ -12,12 +12,22 @@ import {
   type StructuredGenerationDaemonConfig,
 } from "./agent/structured-generation-providers.js";
 import { buildMetadataPrompt } from "../utils/build-metadata-prompt.js";
+import type { JevService } from "./jev/contract.js";
 import type { WorkspaceGitService } from "./workspace-git-service.js";
 import {
   isAutoTitledWorkspace,
   type PersistedWorkspaceRecord,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
+import {
+  decideTitleRefresh,
+  type TitleRefreshCheckEvent,
+  type TitleRefreshCounters,
+} from "./workspace-title-refresh-jev.js";
+import {
+  TITLE_REFRESH_DEFAULTS,
+  type ResolvedWorkspaceTitleRefreshConfig,
+} from "./workspace-title-refresh-config.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
 const DEFAULT_REFRESH_INTERVAL_MINUTES = 30;
@@ -49,6 +59,16 @@ export interface WorkspaceTitleTrackerOptions {
   logger: WorkspaceTitleTrackerLogger;
   sweepIntervalMs?: number;
   now?: () => number;
+  /**
+   * Feature 17 (docs/jev.md). Absent: every check falls straight to the cadence fallback, exactly
+   * as if JEV had no key.
+   */
+  jev?: Pick<JevService, "decide"> | null;
+  readTitleRefreshConfig?: () => ResolvedWorkspaceTitleRefreshConfig;
+  recordTitleRefreshCheck?: (
+    event: Omit<TitleRefreshCheckEvent, "at">,
+    context: { agentId: string | null; currentTitle: string },
+  ) => void;
   deps?: {
     generateStructuredAgentResponseWithFallback?: typeof generateStructuredAgentResponseWithFallback;
   };
@@ -141,11 +161,22 @@ export class WorkspaceTitleTracker {
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
   private readonly generate: typeof generateStructuredAgentResponseWithFallback;
+  private readonly jev?: Pick<JevService, "decide"> | null;
+  private readonly readTitleRefreshConfig?: () => ResolvedWorkspaceTitleRefreshConfig;
+  private readonly recordTitleRefreshCheck?: (
+    event: Omit<TitleRefreshCheckEvent, "at">,
+    context: { agentId: string | null; currentTitle: string },
+  ) => void;
   // Same live-only shape as AgentTitleTracker's two maps: a fingerprint of what the
   // last name was generated from, and the pacing clock for the sweep. Evicted for
   // workspaces the registry no longer reports as active.
   private readonly lastGeneratedFromByWorkspaceId = new Map<string, string>();
   private readonly lastRefreshedAtByWorkspaceId = new Map<string, number>();
+  // Feature 17's own counters: new user turns and the clock since this workspace's title was
+  // last actually looked at (a JEV answer, a ceiling regeneration, or a cadence attempt) — reset
+  // on every look, not on every sweep tick. In memory only; a restart starts them over.
+  private readonly turnsSinceLastAttemptByWorkspaceId = new Map<string, number>();
+  private readonly lastAttemptAtByWorkspaceId = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: WorkspaceTitleTrackerOptions) {
@@ -161,6 +192,22 @@ export class WorkspaceTitleTracker {
     this.generate =
       options.deps?.generateStructuredAgentResponseWithFallback ??
       generateStructuredAgentResponseWithFallback;
+    this.jev = options.jev;
+    this.readTitleRefreshConfig = options.readTitleRefreshConfig;
+    this.recordTitleRefreshCheck = options.recordTitleRefreshCheck;
+  }
+
+  /**
+   * Feeds feature 17's per-workspace user-turn counter. Bootstrap calls this from the same
+   * `onAgentTurnFinished` hook that feeds `AgentTitleTracker`, so a workspace's counter only moves
+   * on a real user turn, never on the tracker's own periodic sweep.
+   */
+  recordAgentTurnFinished(params: { agentId: string; cwd: string }): void {
+    const agent = this.agentManager.getAgent(params.agentId);
+    const workspaceId = agent?.workspaceId;
+    if (!workspaceId) return;
+    const count = this.turnsSinceLastAttemptByWorkspaceId.get(workspaceId) ?? 0;
+    this.turnsSinceLastAttemptByWorkspaceId.set(workspaceId, count + 1);
   }
 
   start(): void {
@@ -290,6 +337,8 @@ export class WorkspaceTitleTracker {
   private evictWorkspaceState(workspaceId: string): void {
     this.lastGeneratedFromByWorkspaceId.delete(workspaceId);
     this.lastRefreshedAtByWorkspaceId.delete(workspaceId);
+    this.turnsSinceLastAttemptByWorkspaceId.delete(workspaceId);
+    this.lastAttemptAtByWorkspaceId.delete(workspaceId);
   }
 
   private fingerprint(
@@ -305,10 +354,87 @@ export class WorkspaceTitleTracker {
       .digest("hex");
   }
 
+  /**
+   * Feature 17's gate. Absent `jev`, or the feature's own switch off, is exactly today's
+   * behaviour: generate whenever the fingerprint changed, unchanged from before this feature
+   * existed. With JEV wired, a "still fits" answer skips the call (the saving); a stale answer,
+   * a D7-excluded workspace, or any other outcome generates, the last two through the same
+   * cadence gate JEV screens for otherwise.
+   */
+  private async shouldGenerate(candidate: WorkspaceActivity): Promise<boolean> {
+    if (!this.jev) return true;
+    const config = this.readTitleRefreshConfig?.() ?? TITLE_REFRESH_DEFAULTS;
+    if (!config.enabled) return true;
+
+    const workspaceId = candidate.workspace.workspaceId;
+    const nowMs = this.now();
+    const counters: TitleRefreshCounters = {
+      userTurnsSinceCheck: this.turnsSinceLastAttemptByWorkspaceId.get(workspaceId) ?? 0,
+      lastAttemptAtMs: this.lastAttemptAtByWorkspaceId.get(workspaceId) ?? null,
+    };
+    const decision = await decideTitleRefresh({
+      jev: this.jev,
+      config,
+      counters,
+      nowMs,
+      currentTitle: candidate.workspace.title ?? candidate.workspace.displayName,
+      branch: candidate.workspace.branch,
+      cwd: candidate.workspace.cwd,
+      agents: candidate.agents,
+    });
+
+    if (decision.action === "anchored") {
+      // First time this workspace was ever eligible: anchor the clock here rather than
+      // judging it against a "since forever" elapsed time, mirroring the outer sweep's own
+      // first-sight anchoring in `tick()`.
+      this.lastAttemptAtByWorkspaceId.set(workspaceId, nowMs);
+      return false;
+    }
+
+    this.recordTitleRefreshCheck?.(
+      {
+        workspaceId,
+        action: decision.action,
+        gatedByJev: decision.gatedByJev,
+        outcome: decision.outcome,
+        callId: decision.callId,
+        reason: decision.reason,
+        score: decision.score,
+        staleScoreThreshold: config.staleScoreThreshold,
+        generationCalled: decision.generate,
+        userTurnsSinceCheck: decision.userTurnsSinceCheck,
+        minutesSinceLastAttempt: decision.minutesSinceLastAttempt,
+      },
+      {
+        agentId: candidate.agents[0]?.id ?? null,
+        currentTitle: candidate.workspace.title ?? candidate.workspace.displayName,
+      },
+    );
+
+    if (!decision.generate) {
+      // Not stale, or the cadence fallback says it is too soon: leave the counters running so
+      // the next look (whenever the fingerprint next changes) measures from the same point,
+      // which is what lets the ceiling trip after enough consecutive "still fits" answers.
+      return false;
+    }
+
+    this.turnsSinceLastAttemptByWorkspaceId.set(workspaceId, 0);
+    this.lastAttemptAtByWorkspaceId.set(workspaceId, nowMs);
+    return true;
+  }
+
   private async attemptRefresh(candidate: WorkspaceActivity): Promise<void> {
     const { workspace } = candidate;
     const fingerprint = this.fingerprint(workspace.title, candidate.agents);
     if (this.lastGeneratedFromByWorkspaceId.get(workspace.workspaceId) === fingerprint) {
+      return;
+    }
+    // Record the fingerprint before deciding, so a workspace that JEV or the cadence gate
+    // decides not to touch this round is not re-considered every tick until something new
+    // happens to it (a new agent turn changes `fingerprint` again).
+    this.lastGeneratedFromByWorkspaceId.set(workspace.workspaceId, fingerprint);
+
+    if (!(await this.shouldGenerate(candidate))) {
       return;
     }
 

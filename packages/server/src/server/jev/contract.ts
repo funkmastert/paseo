@@ -89,7 +89,9 @@ export type JevFeatureId =
   /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
   | "awayReply"
   /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
-  | "askJev";
+  | "askJev"
+  /** Feature 17: whether a workspace's name still fits before spending a title regeneration. */
+  | "titleRefresh";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
