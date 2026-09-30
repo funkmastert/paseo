@@ -2005,6 +2005,19 @@ export const fr: TranslationResources = {
     },
     notRestorable: "Impossible de reprendre",
     error: "Échec de la récupération : {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo a quitté et arrêté le daemon",
+      update: "Le daemon a redémarré pour une mise à jour",
+      crashed: "Le daemon a planté",
+      power_loss: "Le Mac a redémarré ou a perdu l'alimentation",
+      cli_stop: "Arrêté depuis la ligne de commande",
+    },
+    age: "depuis {{when}}",
+    ranFor: "exécuté pendant {{duration}}",
+    keepRunningHint:
+      "Quitter Bozeo arrête le daemon : activez « Garder le daemon actif après fermeture » pour éviter cela.",
+    resumeModeHint:
+      "Bozeo peut reprendre seul les agents interrompus ainsi : réglez agents.restartRecovery.mode sur resume dans config.json.",
     expand: "Développer la récupération après redémarrage",
     collapse: "Réduire la récupération après redémarrage",
   },
