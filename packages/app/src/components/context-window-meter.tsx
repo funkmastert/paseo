@@ -7,6 +7,7 @@ import { FloatingScrollView } from "@/components/ui/floating";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { ContextUsageBreakdownSection } from "@/context-usage/context-usage-breakdown-section";
+import { JevDecisionsSection } from "@/jev/jev-decisions-section";
 import {
   resolveContextMeterThresholds,
   resolveContextMeterTone,
@@ -267,6 +268,7 @@ export function ContextWindowMeter({
               tone={tone}
               thresholds={thresholds}
             />
+            <JevDecisionsSection serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
             <AgentSpendSparkline serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
           </View>
         </FloatingScrollView>
