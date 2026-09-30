@@ -49,7 +49,7 @@ An agent that ends its turn saying it is waiting on work it started in the backg
 - it has been idle and quiet for 10 minutes, with no pending permission and no janitor question;
 - its last message, the newest thing in its timeline, says it is waiting on background work (`background-wait.ts`); a question, or a wait on a person, does not count;
 - no provider subagent is running for it, and no Paseo child it started is running: that child's finish report wakes it;
-- no live shell is left under its process tree, so the command it waits on has ended or never existed;
+- no live shell is left under its process tree, so the command it waits on has ended or never existed. A provider runs every command in a shell that lives until the command ends; a command detached from its shell (`nohup … &`) leaves the tree and reads as ended, which the prompt covers by telling the agent to wait in the foreground if the work is still running;
 - its last turn did not fail. A limit failure is [account failover](account-failover.md)'s, and a prompt row would re-date it.
 
 It gets one prompt, in a `<paseo-system>` envelope, quoting the sentence it ended on and telling it to check the result and continue. The prompt steers rather than interrupts, and it is paced like a nudge. One prompt per final message, at most 3 per agent a day, out of the same `maxNudgesPerSweep` budget after the stalls. This rule is code only: it makes no JEV call, and runs with JEV off. A dry-run sweep reports it; a disabled one leaves it alone.
