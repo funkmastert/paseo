@@ -2240,9 +2240,36 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
-      this.dispatchRestartRecoveryMessage(msg) ??
-      this.dispatchMiscMessage(msg);
+      this.dispatchRestartRecoveryOrDeviceOrMiscMessage(msg);
     if (promise) await promise;
+  }
+
+  private dispatchRestartRecoveryOrDeviceOrMiscMessage(
+    msg: SessionInboundMessage,
+  ): Promise<void> | undefined {
+    return (
+      this.dispatchRestartRecoveryMessage(msg) ??
+      this.dispatchDeviceActionMessage(msg) ??
+      this.dispatchMiscMessage(msg)
+    );
+  }
+
+  /** The Devices UI's three human actions on a device (docs/device-leases.md). */
+  private dispatchDeviceActionMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    switch (msg.type) {
+      case "device.lease.release.request":
+        return this.handleDeviceLeaseReleaseRequest(msg.deviceId, msg.requestId);
+      case "device.reserve.set.request":
+        return this.handleDeviceReserveSetRequest(msg.deviceId, msg.reserved, msg.requestId);
+      case "device.shutdown.request":
+        return this.handleDeviceShutdownRequest(
+          msg.deviceId,
+          msg.confirmMidTurnHolder,
+          msg.requestId,
+        );
+      default:
+        return undefined;
+    }
   }
 
   private dispatchWorkspaceLifecycleMessage(msg: SessionInboundMessage): Promise<void> | undefined {
@@ -3549,6 +3576,61 @@ export class Session {
         },
       });
     }
+  }
+
+  /** The Devices UI's "Release the lease" action (docs/device-leases.md). */
+  private async handleDeviceLeaseReleaseRequest(
+    deviceId: string,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info({ deviceId, requestId }, "session: device.lease.release.request");
+    const released = await this.agentManager.releaseDeviceLease(deviceId);
+    this.emit({
+      type: "device.lease.release.response",
+      payload: { requestId, deviceId, released },
+    });
+  }
+
+  /** "Reserve for me" / "Unreserve" from the Devices UI. */
+  private async handleDeviceReserveSetRequest(
+    deviceId: string,
+    reserved: boolean,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, reserved, requestId },
+      "session: device.reserve.set.request",
+    );
+    await this.agentManager.setDeviceReservation(deviceId, reserved);
+    this.emit({
+      type: "device.reserve.set.response",
+      payload: { requestId, deviceId, reserved },
+    });
+  }
+
+  /** "Shut down", an explicit human action — never reaping (docs/device-leases.md). */
+  private async handleDeviceShutdownRequest(
+    deviceId: string,
+    confirmMidTurnHolder: boolean | undefined,
+    requestId: string,
+  ): Promise<void> {
+    this.sessionLogger.info(
+      { deviceId, confirmMidTurnHolder, requestId },
+      "session: device.shutdown.request",
+    );
+    const result = await this.agentManager.shutdownDevice({
+      deviceId,
+      ...(confirmMidTurnHolder === undefined ? {} : { confirmMidTurnHolder }),
+    });
+    this.emit({
+      type: "device.shutdown.response",
+      payload: {
+        requestId,
+        deviceId,
+        status: result.status,
+        ...("message" in result && result.message ? { message: result.message } : {}),
+      },
+    });
   }
 
   private async handleProjectIconSetRequest(

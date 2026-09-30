@@ -1,5 +1,5 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
-import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { DeviceShutdownResult, DeviceStatusSnapshot } from "./device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
 import {
   describeHookAgent,
@@ -180,12 +180,21 @@ function submittedPromptText(prompt: AgentPromptInput): string {
 }
 
 /**
- * How the AgentManager reaches the device cap: read a snapshot, hear about changes. Narrow on
- * purpose — nothing here can acquire or release a slot.
+ * How the AgentManager reaches the device cap: read a snapshot, hear about changes, and the
+ * three actions the Devices UI takes on a device — release, reserve, shut down. Everything an
+ * agent itself does (checkout, checkin, the launch gate) goes through the MCP tools and the
+ * provider gate directly; this is only the human-initiated surface.
  */
 export interface DeviceLeaseStatusSource {
   getSnapshot(): Promise<DeviceStatusSnapshot>;
   subscribe(listener: () => void): () => void;
+  releaseLeaseForDevice(deviceId: string): Promise<boolean>;
+  reserveDevice(deviceId: string): Promise<void>;
+  unreserveDevice(deviceId: string): Promise<void>;
+  shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult>;
 }
 
 export class AgentManagerShuttingDownError extends Error {
@@ -1589,6 +1598,30 @@ export class AgentManager {
   /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
   onDeviceStatusChange(listener: () => void): () => void {
     return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Releases whoever's lease is bound to this device. False when nobody held it or the cap
+   * isn't wired. */
+  async releaseDeviceLease(deviceId: string): Promise<boolean> {
+    return (await this.deviceLeaseStatusSource?.releaseLeaseForDevice(deviceId)) ?? false;
+  }
+
+  async setDeviceReservation(deviceId: string, reserved: boolean): Promise<void> {
+    if (!this.deviceLeaseStatusSource) return;
+    if (reserved) await this.deviceLeaseStatusSource.reserveDevice(deviceId);
+    else await this.deviceLeaseStatusSource.unreserveDevice(deviceId);
+  }
+
+  async shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult> {
+    return (
+      (await this.deviceLeaseStatusSource?.shutdownDevice(input)) ?? {
+        status: "failed",
+        message: "The device cap is not wired up.",
+      }
+    );
   }
 
   /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */

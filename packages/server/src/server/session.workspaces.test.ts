@@ -8122,6 +8122,83 @@ test("project.rename.request stores customName and emits an updated workspace de
   });
 });
 
+test("device.lease.release.request round-trips through Session to AgentManager", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const releaseDeviceLease = vi.fn(async (deviceId: string) => deviceId === "UDID-1");
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { releaseDeviceLease },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.lease.release.request",
+    deviceId: "UDID-1",
+    requestId: "req-release-1",
+  });
+
+  expect(releaseDeviceLease).toHaveBeenCalledWith("UDID-1");
+  expect(findByType(emitted, "device.lease.release.response")?.payload).toEqual({
+    requestId: "req-release-1",
+    deviceId: "UDID-1",
+    released: true,
+  });
+});
+
+test("device.reserve.set.request round-trips through Session to AgentManager", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const setDeviceReservation = vi.fn(async () => undefined);
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { setDeviceReservation },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.reserve.set.request",
+    deviceId: "UDID-1",
+    reserved: true,
+    requestId: "req-reserve-1",
+  });
+
+  expect(setDeviceReservation).toHaveBeenCalledWith("UDID-1", true);
+  expect(findByType(emitted, "device.reserve.set.response")?.payload).toEqual({
+    requestId: "req-reserve-1",
+    deviceId: "UDID-1",
+    reserved: true,
+  });
+});
+
+test("device.shutdown.request round-trips through Session to AgentManager, including the needs-confirmation status", async () => {
+  const emitted: SessionOutboundMessage[] = [];
+  const shutdownDevice = vi.fn(async () => ({
+    status: "needs-confirmation" as const,
+    message: "agent-1 is mid-turn on this device.",
+  }));
+  const session = asTestSession(
+    createSessionForWorkspaceTests({
+      onMessage: (message) => emitted.push(message),
+      agentManager: { shutdownDevice },
+    }),
+  );
+
+  await session.handleMessage({
+    type: "device.shutdown.request",
+    deviceId: "UDID-1",
+    requestId: "req-shutdown-1",
+  });
+
+  expect(shutdownDevice).toHaveBeenCalledWith({ deviceId: "UDID-1" });
+  expect(findByType(emitted, "device.shutdown.response")?.payload).toEqual({
+    requestId: "req-shutdown-1",
+    deviceId: "UDID-1",
+    status: "needs-confirmation",
+    message: "agent-1 is mid-turn on this device.",
+  });
+});
+
 test("project.rename.request updates a project with no workspaces", async () => {
   const emitted: SessionOutboundMessage[] = [];
   const session = asTestSession(

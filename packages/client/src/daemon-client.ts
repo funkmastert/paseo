@@ -2810,6 +2810,47 @@ export class DaemonClient {
     return { customName: payload.customName };
   }
 
+  // COMPAT(deviceManagement): callers gate on server_info.features.deviceManagement; an older
+  // daemon answers these with an unknown_schema rpc_error. See docs/device-leases.md.
+
+  async releaseDeviceLease(deviceId: string, requestId?: string): Promise<boolean> {
+    const payload = await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "device.lease.release.request", deviceId },
+      responseType: "device.lease.release.response",
+    });
+    return payload.released;
+  }
+
+  async setDeviceReservation(
+    deviceId: string,
+    reserved: boolean,
+    requestId?: string,
+  ): Promise<void> {
+    await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: { type: "device.reserve.set.request", deviceId, reserved },
+      responseType: "device.reserve.set.response",
+    });
+  }
+
+  async shutdownDevice(
+    input: { deviceId: string; confirmMidTurnHolder?: boolean },
+    requestId?: string,
+  ) {
+    return await this.sendCorrelatedSessionRequest({
+      requestId,
+      message: {
+        type: "device.shutdown.request",
+        deviceId: input.deviceId,
+        ...(input.confirmMidTurnHolder === undefined
+          ? {}
+          : { confirmMidTurnHolder: input.confirmMidTurnHolder }),
+      },
+      responseType: "device.shutdown.response",
+    });
+  }
+
   async setProjectIcon(
     projectId: string,
     source: ProjectIconSource,

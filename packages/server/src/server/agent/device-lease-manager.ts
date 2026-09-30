@@ -665,6 +665,18 @@ export class DeviceLeaseManager {
     return released.length;
   }
 
+  /** The Devices UI's "Release the lease" action — keyed by device, not by agent, since Tyler
+   * is looking at a device row, not an agent. True when a lease was actually released. */
+  async releaseLeaseForDevice(deviceId: string): Promise<boolean> {
+    const lease = this.leases.find((entry) => entry.deviceId === deviceId);
+    if (!lease) return false;
+    this.leases = this.leases.filter((entry) => entry.id !== lease.id);
+    this.logRelease([{ lease, reason: "released" }]);
+    this.notify();
+    await this.drainWaiters();
+    return true;
+  }
+
   /** "Reserved for you": checkout and the gate never hand this device to an agent. Reserving a
    * device somebody already holds does not evict them — see `applyReservation`. */
   reserveDevice(deviceId: string): void {
