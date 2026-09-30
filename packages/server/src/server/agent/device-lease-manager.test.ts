@@ -83,6 +83,7 @@ function createManager(
   let leaseCounter = 0;
   const logger = { info: vi.fn(), warn: vi.fn() };
   const sendSystemMessageToAgent = vi.fn(async () => undefined);
+  const shutdownExec = vi.fn(async () => undefined);
   const manager = new DeviceLeaseManager({
     processSampler: {
       sampleProcesses: async () => state.rows,
@@ -96,6 +97,7 @@ function createManager(
       androidSerial: async () => undefined,
       iosSimulatorName: async () => undefined,
     },
+    shutdownRunner: { exec: shutdownExec },
     logger,
     now: () => state.nowMs,
     // An M3 Max: 3 total slots, 2 per platform.
@@ -108,7 +110,7 @@ function createManager(
     ...(options.drainIntervalMs === undefined ? {} : { drainIntervalMs: options.drainIntervalMs }),
     createLeaseId: () => `lease-${++leaseCounter}`,
   });
-  return { manager, state, logger, sendSystemMessageToAgent };
+  return { manager, state, logger, sendSystemMessageToAgent, shutdownExec };
 }
 
 describe("DeviceLeaseManager", () => {
@@ -897,5 +899,92 @@ describe("DeviceLeaseManager reuse", () => {
       deviceId: UDID_A,
       agentId: "agent-1",
     });
+  });
+});
+
+describe("DeviceLeaseManager shutdownDevice", () => {
+  test("shuts down an iOS simulator nobody holds", async () => {
+    const { manager, shutdownExec } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    expect(await manager.shutdownDevice({ deviceId: UDID_A })).toEqual({ status: "shut-down" });
+    expect(shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+  });
+
+  test("fails closed for Android when no adb serial can be resolved", async () => {
+    // createManager's identityLookup fake always resolves to undefined — the runner must never
+    // be asked to guess a serial, since `adb -s <wrong serial> emu kill` kills someone else's.
+    const { manager, shutdownExec } = createManager({
+      rows: [emulatorRow(1, 0, "yonderly_pixel")],
+    });
+
+    const result = await manager.shutdownDevice({ deviceId: "yonderly_pixel" });
+
+    expect(result).toMatchObject({ status: "failed" });
+    expect(shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("shuts down an Android emulator by its resolved serial", async () => {
+    const logger = { info: vi.fn(), warn: vi.fn() };
+    const exec = vi.fn(async () => undefined);
+    const manager = new DeviceLeaseManager({
+      processSampler: {
+        sampleProcesses: async () => [emulatorRow(1, 0, "yonderly_pixel")],
+        sampleSystemMemory: async () => HEALTHY_MEMORY,
+      },
+      readDaemonConfig: () => ({ deviceLeases: { enabled: true } }),
+      listAgents: () => [],
+      identityLookup: {
+        androidSerial: async () => "emulator-5554",
+        iosSimulatorName: async () => undefined,
+      },
+      shutdownRunner: { exec },
+      logger,
+      sampleMaxAgeMs: 0,
+    });
+
+    expect(await manager.shutdownDevice({ deviceId: "yonderly_pixel" })).toEqual({
+      status: "shut-down",
+    });
+    expect(exec).toHaveBeenCalledWith("adb", ["-s", "emulator-5554", "emu", "kill"]);
+  });
+
+  test("reports not-running for a device that isn't up", async () => {
+    const { manager } = createManager();
+
+    expect(await manager.shutdownDevice({ deviceId: UDID_A })).toEqual({ status: "not-running" });
+  });
+
+  test("refuses a mid-turn holder's device without a second confirmation", async () => {
+    const { manager, shutdownExec } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    const result = await manager.shutdownDevice({ deviceId: UDID_A });
+
+    expect(result.status).toBe("needs-confirmation");
+    expect(shutdownExec).not.toHaveBeenCalled();
+  });
+
+  test("a second confirmation shuts down a mid-turn holder's device anyway", async () => {
+    const { manager, shutdownExec } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    const result = await manager.shutdownDevice({
+      deviceId: UDID_A,
+      confirmMidTurnHolder: true,
+    });
+
+    expect(result).toEqual({ status: "shut-down" });
+    expect(shutdownExec).toHaveBeenCalledWith("xcrun", ["simctl", "shutdown", UDID_A]);
+  });
+
+  test("an idle (not mid-turn) holder needs no second confirmation", async () => {
+    const { manager, shutdownExec } = createManager({
+      rows: [simulatorRow(1, UDID_A)],
+      agents: [{ agentId: "agent-1", provider: "claude", isRunning: false }],
+    });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    expect(await manager.shutdownDevice({ deviceId: UDID_A })).toEqual({ status: "shut-down" });
+    expect(shutdownExec).toHaveBeenCalled();
   });
 });

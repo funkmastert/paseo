@@ -291,6 +291,7 @@ import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { createSaturationLedger } from "./agent/saturation-ledger.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
 import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
+import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import {
@@ -1858,11 +1859,16 @@ export async function createPaseoDaemon(
   let listDeviceLeaseAgents: () => readonly DeviceLeaseAgentSummary[] = () => [];
   let sendDeviceLeaseMessageToAgent: (agentId: string, body: string) => Promise<void> = async () =>
     undefined;
+  const deviceReservationStore = new DeviceReservationStore(
+    logger,
+    path.join(config.paseoHome, "device-reservations.json"),
+  );
   const deviceLeaseManager = new DeviceLeaseManager({
     processSampler,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
     listAgents: () => listDeviceLeaseAgents(),
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
+    reservations: deviceReservationStore,
     logger: logger.child({ module: "device-leases" }),
   });
   deviceLeaseManager.reportMode();

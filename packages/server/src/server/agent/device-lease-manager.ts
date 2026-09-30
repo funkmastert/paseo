@@ -44,6 +44,11 @@ import {
 import { readSystemHardware, type HardwareReader } from "./device-hardware.js";
 import { DeviceIdentityLookup } from "./device-identity-lookup.js";
 import {
+  defaultDeviceShutdownRunner,
+  runDeviceShutdown,
+  type DeviceShutdownRunner,
+} from "./device-shutdown.js";
+import {
   DEVICE_LAUNCH_ENFORCEMENT_TIERS,
   describeDeviceLaunchEnforcement,
   resolveDeviceLaunchEnforcement,
@@ -195,6 +200,12 @@ export type DeviceCheckoutResult =
   | { status: "queued"; platform: DevicePlatform; ahead: number; message: string }
   | { status: "unavailable"; platform: DevicePlatform; message: string };
 
+export type DeviceShutdownResult =
+  | { status: "shut-down" }
+  | { status: "not-running" }
+  | { status: "needs-confirmation"; message: string }
+  | { status: "failed"; message: string };
+
 export type DeviceLaunchGateDecision =
   | { decision: "allow" }
   | { decision: "deny"; message: string };
@@ -244,6 +255,8 @@ export interface DeviceLeaseManagerOptions {
   /** Enriches a bare device id with its adb serial / simulator name for response text. Defaults
    * to a real DeviceIdentityLookup; tests inject a fake runner through it instead. */
   identityLookup?: DeviceIdentityLookupLike;
+  /** Runs the actual shutdown command. Defaults to the real `xcrun`/`adb`; tests inject a fake. */
+  shutdownRunner?: DeviceShutdownRunner;
 }
 
 /** What the cap needs from a reservation store — DeviceReservationStore satisfies this. */
@@ -391,6 +404,7 @@ export class DeviceLeaseManager {
   private readonly createLeaseId: () => string;
   private readonly reservations: DeviceReservations;
   private readonly identityLookup: DeviceIdentityLookupLike;
+  private readonly shutdownRunner: DeviceShutdownRunner;
 
   private leases: DeviceLease[] = [];
   private waiters: QueuedWaiter[] = [];
@@ -421,6 +435,7 @@ export class DeviceLeaseManager {
     this.createLeaseId = options.createLeaseId ?? (() => randomUUID());
     this.reservations = options.reservations ?? new InMemoryDeviceReservations();
     this.identityLookup = options.identityLookup ?? new DeviceIdentityLookup();
+    this.shutdownRunner = options.shutdownRunner ?? defaultDeviceShutdownRunner;
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -664,6 +679,58 @@ export class DeviceLeaseManager {
 
   listReservedDeviceIds(): string[] {
     return [...this.reservations.reservedDeviceIds()];
+  }
+
+  /**
+   * A human, explicit shut-down from the Devices UI — never reaping (docs/device-leases.md#why-a-lease-does-not-own-disk-cleanup).
+   * Refuses a device a mid-turn agent holds unless `confirmMidTurnHolder` is set, so shutting
+   * down Tyler's own idle simulator is one tap but interrupting somebody's build is two.
+   */
+  async shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult> {
+    const sample = await this.ensureSample({ fresh: true });
+    const device = sample.devices.find((entry) => entry.deviceId === input.deviceId);
+    if (!device) return { status: "not-running" };
+
+    const lease = this.leases.find((entry) => entry.deviceId === device.deviceId);
+    const holder = lease
+      ? this.listAgents().find((agent) => agent.agentId === lease.agentId)
+      : undefined;
+    if (holder?.isRunning && !input.confirmMidTurnHolder) {
+      return {
+        status: "needs-confirmation",
+        message: `${holder.agentId} is mid-turn on this device. Shutting it down now will interrupt that turn. Confirm again to shut it down anyway.`,
+      };
+    }
+
+    try {
+      const serial =
+        device.platform === "android"
+          ? await this.identityLookup.androidSerial(device.deviceId)
+          : undefined;
+      await runDeviceShutdown(
+        { platform: device.platform, deviceId: device.deviceId, ...(serial ? { serial } : {}) },
+        this.shutdownRunner,
+      );
+    } catch (error) {
+      this.logger.warn(
+        { err: error, deviceId: device.deviceId, platform: device.platform },
+        "Device shutdown command failed",
+      );
+      return {
+        status: "failed",
+        message: error instanceof Error ? error.message : "The shutdown command failed.",
+      };
+    }
+
+    if (lease) {
+      this.leases = this.leases.filter((entry) => entry.id !== lease.id);
+      this.logRelease([{ lease, reason: "released" }]);
+    }
+    this.notify();
+    return { status: "shut-down" };
   }
 
   /**
