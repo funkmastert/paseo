@@ -3,12 +3,25 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentManager, WorkspaceTitleTrackerAgentSummary } from "./agent/agent-manager.js";
 import type { StructuredAgentGenerationWithFallbackOptions } from "./agent/agent-response-loop.js";
 import type { StructuredGenerationDaemonConfig } from "./agent/structured-generation-providers.js";
+import { createTestJevService, type TestJevServiceOptions } from "./jev/fake.js";
+import type { JevService } from "./jev/contract.js";
 import {
   createPersistedWorkspaceRecord,
   type PersistedWorkspaceRecord,
   type WorkspaceRegistry,
 } from "./workspace-registry.js";
+import {
+  TITLE_REFRESH_DEFAULTS,
+  type ResolvedWorkspaceTitleRefreshConfig,
+} from "./workspace-title-refresh-config.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+
+function createJevForTest(options: TestJevServiceOptions = {}) {
+  return createTestJevService({
+    ...options,
+    service: { resolveAgentCwds: async () => [], ...options.service },
+  });
+}
 
 const NOW = Date.parse("2026-09-22T12:00:00.000Z");
 const MINUTE = 60_000;
@@ -54,8 +67,10 @@ interface Harness {
   records: Map<string, PersistedWorkspaceRecord>;
   prompts: string[];
   emitted: string[];
+  titleRefreshEvents: unknown[];
   setNow(ms: number): void;
   setTitle(title: string): void;
+  recordTurn(agentId: string): void;
 }
 
 function createHarness(input: {
@@ -63,10 +78,13 @@ function createHarness(input: {
   agents?: WorkspaceTitleTrackerAgentSummary[];
   config?: StructuredGenerationDaemonConfig;
   onUpdate?: (records: Map<string, PersistedWorkspaceRecord>) => void;
+  jev?: Pick<JevService, "decide"> | null;
+  titleRefreshConfig?: Partial<ResolvedWorkspaceTitleRefreshConfig>;
 }): Harness {
   const records = new Map(input.workspaces.map((record) => [record.workspaceId, record]));
   const prompts: string[] = [];
   const emitted: string[] = [];
+  const titleRefreshEvents: unknown[] = [];
   let nowMs = NOW;
   let generatedTitle = "Multi-account orchestrator fork";
 
@@ -85,15 +103,31 @@ function createHarness(input: {
     },
   } as unknown as Pick<WorkspaceRegistry, "list" | "update">;
 
+  const agentsByWorkspace = new Map<string, string>();
+  for (const a of input.agents ?? []) {
+    if (a.workspaceId) agentsByWorkspace.set(a.id, a.workspaceId);
+  }
+
   const tracker = new WorkspaceTitleTracker({
     agentManager: {
       listAgentsForWorkspaceTitleTracker: () => input.agents ?? [],
+      getAgent: (id: string) => {
+        const workspaceId = agentsByWorkspace.get(id);
+        return workspaceId ? { workspaceId } : null;
+      },
     } as unknown as AgentManager,
     workspaceRegistry: registry,
     readDaemonConfig: () => input.config ?? {},
     emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
       emitted.push(workspaceId);
     },
+    jev: input.jev,
+    readTitleRefreshConfig: () => ({ ...TITLE_REFRESH_DEFAULTS, ...input.titleRefreshConfig }),
+    recordTitleRefreshCheck: input.jev
+      ? (event) => {
+          titleRefreshEvents.push(event);
+        }
+      : undefined,
     logger: createLogger(),
     now: () => nowMs,
     deps: {
@@ -111,6 +145,11 @@ function createHarness(input: {
     records,
     prompts,
     emitted,
+    titleRefreshEvents,
+    recordTurn: (agentId) => {
+      const workspaceId = agentsByWorkspace.get(agentId);
+      tracker.recordAgentTurnFinished({ agentId, cwd: workspaceId ?? "" });
+    },
     setNow: (ms) => {
       nowMs = ms;
     },
@@ -329,5 +368,64 @@ describe("WorkspaceTitleTracker", () => {
 
     expect(harness.prompts).toHaveLength(1);
     expect(harness.emitted).toEqual([]);
+  });
+
+  describe("feature 17: the JEV gate", () => {
+    test("JEV saying the title still fits skips the generation call", async () => {
+      const agents = [agent()];
+      const jev = createJevForTest({ answers: { fit: { type: "score", score: 0 } } });
+      const harness = createHarness({ workspaces: [workspace()], agents, jev });
+
+      // Two ticks to get past the outer sweep's own first-sight anchor, one more to get past
+      // feature 17's own first-look anchor, and a new agent turn plus a moved-on agent title to
+      // earn the third look (matching "an agent title moving on earns a second call" above).
+      await sweepPastFirstSight(harness);
+      harness.recordTurn(agents[0]!.id);
+      agents[0] = agent({
+        title: "Add workspace title tracking",
+        lastActivityAt: new Date(NOW + 62 * MINUTE).toISOString(),
+      });
+      harness.setNow(NOW + 62 * MINUTE);
+      await harness.tracker.tick();
+
+      expect(harness.prompts).toHaveLength(0);
+      expect(harness.titleRefreshEvents).toMatchObject([{ action: "jev-fits" }]);
+      expect(harness.records.get("wks_checkout")?.title).toBe(
+        "i ran into a situation where my agents",
+      );
+    });
+
+    test("JEV saying the title is stale lets the generation call through", async () => {
+      const agents = [agent()];
+      const jev = createJevForTest({ answers: { fit: { type: "score", score: 3 } } });
+      const harness = createHarness({ workspaces: [workspace()], agents, jev });
+
+      await sweepPastFirstSight(harness);
+      harness.recordTurn(agents[0]!.id);
+      agents[0] = agent({
+        title: "Add workspace title tracking",
+        lastActivityAt: new Date(NOW + 62 * MINUTE).toISOString(),
+      });
+      harness.setNow(NOW + 62 * MINUTE);
+      await harness.tracker.tick();
+
+      expect(harness.prompts).toHaveLength(1);
+      expect(harness.titleRefreshEvents).toMatchObject([{ action: "jev-stale" }]);
+    });
+
+    test("the JEV gate's own switch off is exactly today's behaviour", async () => {
+      const jev = createJevForTest({ answers: { fit: { type: "score", score: 0 } } });
+      const harness = createHarness({
+        workspaces: [workspace()],
+        agents: [agent()],
+        jev,
+        titleRefreshConfig: { enabled: false },
+      });
+
+      await sweepPastFirstSight(harness);
+
+      expect(harness.prompts).toHaveLength(1);
+      expect(harness.titleRefreshEvents).toEqual([]);
+    });
   });
 });
