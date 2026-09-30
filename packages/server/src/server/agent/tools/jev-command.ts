@@ -4,8 +4,9 @@ import type { CommandGate } from "../../jev/contract.js";
 import { createExternalProcessEnv } from "../../paseo-env.js";
 
 /**
- * `ask_jev`'s `command` (docs/jev.md, "The tools"). It runs only after the catastrophe gate says a
- * Bash call would run it, and never on Windows, where the gate cannot read the shell. Refusing
+ * `ask_jev`'s `command` (docs/jev.md, "The tools"). It runs only for an agent whose own Bash would
+ * run it unasked and unsandboxed, only after the catastrophe gate says a Bash call would run it,
+ * and never on Windows, where the gate cannot read the shell. Refusing
  * here costs the agent one retry in Bash, which is itself gated; running an unchecked command would
  * let a JEV tool do what Bash would not.
  */
@@ -20,6 +21,10 @@ export const JEV_COMMAND_BASH_DENIED_REASON =
   "your denied tools include Bash, so ask_jev does not run commands for you";
 export const JEV_COMMAND_GATE_ERROR_REASON =
   "the catastrophe gate could not check this command; run it with Bash";
+export const JEV_COMMAND_ATTENDED_REASON =
+  "your mode asks before running commands, and ask_jev cannot ask for you; run it with Bash";
+export const JEV_COMMAND_SANDBOXED_REASON =
+  "your Bash runs in a sandbox ask_jev cannot reproduce; run it with Bash";
 
 export interface JevCommandOutput {
   command: string;
@@ -38,6 +43,13 @@ export interface RunJevCommandInput {
   cwd: string;
   gate: CommandGate | null;
   bashDenied: boolean;
+  /**
+   * The caller's current mode runs commands without asking (`isUnattended`). The daemon cannot
+   * ask a person on the agent's behalf, so an attended agent's command is refused.
+   */
+  unattended: boolean;
+  /** The caller's Bash runs in a provider sandbox, which a daemon-run command would escape. */
+  sandboxed: boolean;
   platform?: NodeJS.Platform;
   /** Defaults to the daemon's environment; the JEV key and every secret name are stripped either way. */
   baseEnv?: NodeJS.ProcessEnv;
@@ -49,6 +61,8 @@ export async function runJevCommand(input: RunJevCommandInput): Promise<JevComma
   const platform = input.platform ?? process.platform;
   if (platform === "win32") return { kind: "refused", reason: JEV_COMMAND_WINDOWS_REASON };
   if (input.bashDenied) return { kind: "refused", reason: JEV_COMMAND_BASH_DENIED_REASON };
+  if (!input.unattended) return { kind: "refused", reason: JEV_COMMAND_ATTENDED_REASON };
+  if (input.sandboxed) return { kind: "refused", reason: JEV_COMMAND_SANDBOXED_REASON };
   if (!input.gate) return { kind: "refused", reason: JEV_COMMAND_NO_GATE_REASON };
   let verdict: Awaited<ReturnType<CommandGate>>;
   try {

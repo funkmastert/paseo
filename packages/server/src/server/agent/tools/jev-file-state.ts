@@ -613,13 +613,14 @@ function normalizeDenyPattern(raw: string, context: { cwd: string; homeDir: stri
 
 /**
  * Collects what the caller's configuration denies: `paseo.tools-denied`, and for Claude agents
- * `disallowedTools`, `settings.permissions.deny` and both `sandbox.filesystem.denyRead` lists.
+ * `disallowedTools`, `settings.permissions.deny`, both `sandbox.filesystem.denyRead` lists, and
+ * whether either sandbox is on.
  * Anything it cannot parse is ignored; the agent's own tools enforce those rules either way.
  */
 export function readCallerDenials(input: {
   toolsDeniedLabel: string | undefined;
   providerOptions: unknown;
-}): { read: JevReadDenials; bashDenied: boolean } {
+}): { read: JevReadDenials; bashDenied: boolean; sandboxed: boolean } {
   const toolRules = [
     ...(input.toolsDeniedLabel ?? "").split(","),
     ...stringArray(pick(input.providerOptions, ["disallowedTools"])),
@@ -644,7 +645,10 @@ export function readCallerDenials(input: {
     // A command-scoped Bash rule is refused whole: code cannot tell which commands it covers.
     if (rule === "Bash" || rule.startsWith("Bash(")) bashDenied = true;
   }
-  return { read: { all, patterns }, bashDenied };
+  const sandboxed =
+    pick(input.providerOptions, ["sandbox", "enabled"]) === true ||
+    pick(input.providerOptions, ["settings", "sandbox", "enabled"]) === true;
+  return { read: { all, patterns }, bashDenied, sandboxed };
 }
 
 function pick(value: unknown, keys: string[]): unknown {

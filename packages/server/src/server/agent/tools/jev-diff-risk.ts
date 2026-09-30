@@ -156,7 +156,11 @@ export async function collectDiff(input: {
   const numstat = await git([...common, "--numstat", "-z", range], { cwd });
   const excludes = SECRET_PATHSPEC_GLOBS.map((glob) => `:(exclude,glob)**/${glob}`);
   const patch = await git([...common, range, "--", ".", ...excludes], { cwd });
-  const log = await git(["log", "--no-color", "--format=%B%x00", `${baseSha}..HEAD`], { cwd });
+  // `log.showSignature` in a repository's config would run its `gpg.program`.
+  const log = await git(
+    ["log", "--no-color", "--no-show-signature", "--format=%B%x00", `${baseSha}..HEAD`],
+    { cwd },
+  );
   // Git killed for its buffer or its timeout: that diff is over the cap by any measure.
   const patchTooBig = patch.code === null;
   const failed = [nameStatus, numstat, log].some((result) => result.code !== 0);

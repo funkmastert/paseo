@@ -5,10 +5,12 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import type { CommandGate } from "../../jev/contract.js";
 import {
+  JEV_COMMAND_ATTENDED_REASON,
   JEV_COMMAND_BASH_DENIED_REASON,
   JEV_COMMAND_GATE_ERROR_REASON,
   JEV_COMMAND_NO_GATE_REASON,
   JEV_COMMAND_OUTPUT_CAP,
+  JEV_COMMAND_SANDBOXED_REASON,
   JEV_COMMAND_WINDOWS_REASON,
   runJevCommand,
 } from "./jev-command.js";
@@ -34,6 +36,8 @@ describe("refusals, before anything runs", () => {
       cwd,
       gate,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
       platform: "win32",
     });
     expect(result).toEqual({ kind: "refused", reason: JEV_COMMAND_WINDOWS_REASON });
@@ -41,12 +45,49 @@ describe("refusals, before anything runs", () => {
   });
 
   test("an agent whose denied tools include Bash", async () => {
-    const result = await runJevCommand({ command: "echo hi", cwd, gate: allow, bashDenied: true });
+    const result = await runJevCommand({
+      command: "echo hi",
+      cwd,
+      gate: allow,
+      bashDenied: true,
+      unattended: true,
+      sandboxed: false,
+    });
     expect(result).toEqual({ kind: "refused", reason: JEV_COMMAND_BASH_DENIED_REASON });
   });
 
+  test("an agent whose mode asks first, or whose Bash is sandboxed", async () => {
+    const gate = vi.fn(allow);
+    const attended = await runJevCommand({
+      command: "echo hi",
+      cwd,
+      gate,
+      bashDenied: false,
+      unattended: false,
+      sandboxed: false,
+    });
+    expect(attended).toEqual({ kind: "refused", reason: JEV_COMMAND_ATTENDED_REASON });
+    const sandboxed = await runJevCommand({
+      command: "echo hi",
+      cwd,
+      gate,
+      bashDenied: false,
+      unattended: true,
+      sandboxed: true,
+    });
+    expect(sandboxed).toEqual({ kind: "refused", reason: JEV_COMMAND_SANDBOXED_REASON });
+    expect(gate).not.toHaveBeenCalled();
+  });
+
   test("no gate wired", async () => {
-    const result = await runJevCommand({ command: "echo hi", cwd, gate: null, bashDenied: false });
+    const result = await runJevCommand({
+      command: "echo hi",
+      cwd,
+      gate: null,
+      bashDenied: false,
+      unattended: true,
+      sandboxed: false,
+    });
     expect(result).toEqual({ kind: "refused", reason: JEV_COMMAND_NO_GATE_REASON });
   });
 
@@ -58,6 +99,8 @@ describe("refusals, before anything runs", () => {
       cwd,
       gate,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
     });
     expect(result).toEqual({ kind: "refused", reason: "rule: rm-disk-root" });
     expect(existsSync(marker)).toBe(false);
@@ -71,14 +114,28 @@ describe("refusals, before anything runs", () => {
       throw new Error("boom");
     };
     for (const gate of [throwing, rejecting]) {
-      const result = await runJevCommand({ command: "echo hi", cwd, gate, bashDenied: false });
+      const result = await runJevCommand({
+        command: "echo hi",
+        cwd,
+        gate,
+        bashDenied: false,
+        unattended: true,
+        sandboxed: false,
+      });
       expect(result).toEqual({ kind: "refused", reason: JEV_COMMAND_GATE_ERROR_REASON });
     }
   });
 
   test("the gate sees the command and the cwd", async () => {
     const gate = vi.fn(allow);
-    await runJevCommand({ command: "true", cwd, gate, bashDenied: false });
+    await runJevCommand({
+      command: "true",
+      cwd,
+      gate,
+      bashDenied: false,
+      unattended: true,
+      sandboxed: false,
+    });
     expect(gate).toHaveBeenCalledWith({ command: "true", cwd });
   });
 });
@@ -90,6 +147,8 @@ describe("running", () => {
       cwd,
       gate: allow,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
     });
     expect(result.kind).toBe("ran");
     if (result.kind !== "ran") return;
@@ -104,6 +163,8 @@ describe("running", () => {
       cwd,
       gate: allow,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
       baseEnv: {
         PATH: process.env["PATH"],
         PASEO_JEV_API_KEY: "sk-or-sentinel-jev-key-000000",
@@ -123,6 +184,8 @@ describe("running", () => {
       cwd,
       gate: allow,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
       timeoutMs: 200,
     });
     if (result.kind !== "ran") throw new Error("did not run");
@@ -136,6 +199,8 @@ describe("running", () => {
       cwd,
       gate: allow,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
     });
     if (result.kind !== "ran") throw new Error("did not run");
     expect(result.output.stdout.startsWith("a".repeat(JEV_COMMAND_OUTPUT_CAP))).toBe(true);
@@ -149,6 +214,8 @@ describe("running", () => {
       cwd,
       gate: allow,
       bashDenied: false,
+      unattended: true,
+      sandboxed: false,
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 100);

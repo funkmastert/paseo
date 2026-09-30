@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -104,6 +104,50 @@ describe("collectDiff", () => {
       const result = await collectDiff({ cwd: repo, base });
       expect(result.ok, base).toBe(false);
     }
+  });
+
+  test("a repository's config cannot make the daemon run a program", async () => {
+    // A signed-looking commit plus log.showSignature makes `git log` run gpg.program.
+    const marker = path.join(repo, "..", `${path.basename(repo)}-ran`);
+    const program = path.join(repo, "..", `${path.basename(repo)}-gpg.sh`);
+    writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    write("src/app.ts", "export const app = 2;\n");
+    git("add", "-A");
+    const tree = git("write-tree").trim();
+    const parent = git("rev-parse", "HEAD").trim();
+    const body = [
+      `tree ${tree}`,
+      `parent ${parent}`,
+      "author t <t@example.com> 1700000000 +0000",
+      "committer t <t@example.com> 1700000000 +0000",
+      "gpgsig -----BEGIN PGP SIGNATURE-----",
+      " ",
+      " iQEzBAABCAAdFiEE",
+      " -----END PGP SIGNATURE-----",
+      "",
+      "signed-looking change",
+      "",
+    ].join("\n");
+    const commit = execFileSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], {
+      cwd: repo,
+      input: body,
+      encoding: "utf8",
+    }).trim();
+    git("update-ref", "refs/heads/feature", commit);
+    git("config", "log.showSignature", "true");
+    git("config", "gpg.program", program);
+    git("config", "diff.external", program);
+    try {
+      git("log", "-1");
+    } catch {
+      // gpg.program exits 1; only the marker matters.
+    }
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+    const diff = await collect();
+    expect(diff.commitMessage).toBe("signed-looking change");
+    expect(existsSync(marker)).toBe(false);
+    rmSync(program);
   });
 
   test("with no upstream and no origin/HEAD, it asks for a base", async () => {

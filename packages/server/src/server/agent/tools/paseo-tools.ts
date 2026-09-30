@@ -92,6 +92,7 @@ import {
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
 import { hasJevToolsLabel, registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
+import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
@@ -1326,6 +1327,12 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
               labels: agent.labels,
               providerOptions: agent.config?.providerOptions,
               contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+              unattended: isDefaultAgentCreateConfigUnattended({
+                modeId: agent.currentModeId,
+                config: agent.config,
+                features: agent.features,
+                availableModes: agent.availableModes ?? [],
+              }),
             };
           },
           logger: childLogger,

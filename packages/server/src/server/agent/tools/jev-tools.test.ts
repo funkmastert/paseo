@@ -86,6 +86,7 @@ interface SetupOptions {
   behavior?: JevFakeBehavior | JevFakeBehavior[];
   deps?: Partial<JevToolsDependencies>;
   providerOptions?: unknown;
+  modeId?: string;
   callerAgentId?: string | null;
   getAgent?: (id: string) => unknown;
 }
@@ -109,6 +110,11 @@ function setup(options: SetupOptions = {}) {
     labels: options.labels ?? { "paseo.jev-tools": "on" },
     config: { providerOptions: options.providerOptions },
     lastUsage: { contextWindowUsedTokens: 42_000 },
+    currentModeId: options.modeId ?? "bypassPermissions",
+    availableModes: [
+      { id: "default", label: "Always Ask" },
+      { id: "bypassPermissions", label: "Bypass", isUnattended: true },
+    ],
   };
   const useLog = new JevToolUseLog({
     dir: path.join(paseoHome, "jev"),
@@ -625,6 +631,26 @@ describe("feature 6a: ask_jev", () => {
     ).toMatch(/denied tools include Bash/);
     expect(sent(windows.jev)).toEqual([]);
     expect(sent(denied.jev)).toEqual([]);
+  });
+
+  test("command is refused for an agent whose mode asks first, or whose Bash is sandboxed", async () => {
+    const attended = setup({ modeId: "default" });
+    expect(
+      text(
+        await attended.catalog.executeTool("ask_jev", { questions_json: questions, command: "ls" }),
+      ),
+    ).toMatch(/your mode asks before running commands/);
+    const sandboxed = setup({ providerOptions: { sandbox: { enabled: true } } });
+    expect(
+      text(
+        await sandboxed.catalog.executeTool("ask_jev", {
+          questions_json: questions,
+          command: "ls",
+        }),
+      ),
+    ).toMatch(/runs in a sandbox/);
+    expect(sent(attended.jev)).toEqual([]);
+    expect(sent(sandboxed.jev)).toEqual([]);
   });
 
   test("the JEV key never reaches the command, so never reaches JEV", async () => {

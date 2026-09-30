@@ -96,6 +96,8 @@ export interface JevToolCaller {
   providerOptions?: unknown;
   /** The context the extra model step re-reads (`lastUsage.contextWindowUsedTokens`). */
   contextTokens: number | null;
+  /** The current mode runs tools without asking (`isDefaultAgentCreateConfigUnattended`). */
+  unattended: boolean;
 }
 
 type RegisterTool = (
@@ -1000,6 +1002,8 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       cwd: call.caller.cwd,
       gate: deps.commandGate,
       bashDenied: denials.bashDenied,
+      unattended: call.caller.unattended,
+      sandboxed: denials.sandboxed,
       platform,
       baseEnv: deps.commandBaseEnv,
       signal: call.signal,
