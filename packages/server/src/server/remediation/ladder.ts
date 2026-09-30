@@ -7,7 +7,9 @@ import {
 } from "@getpaseo/protocol/remediation-notification";
 import type { Logger } from "pino";
 
+import type { CreateAgentFromMcpInput } from "../agent/create-agent/create.js";
 import { MonitorModeLog } from "../monitor-mode-log.js";
+import type { NotifyLevel } from "../notify-policy/levels.js";
 import type { PushNotificationSender } from "../push/index.js";
 import {
   isNotifyRungEnabled,
@@ -25,6 +27,17 @@ import {
   parseRemediationReport,
 } from "./escalation.js";
 import {
+  decideTriageAction,
+  describePersonSkip,
+  erroredTriage,
+  formatConfidence,
+  shouldTriage,
+  willEscalationPush,
+  type EscalationTriage,
+  type RemediationAgentEndCause,
+  type RemediationTriageEvent,
+} from "./jev-triage.js";
+import {
   emptyLadderState,
   loadLadderState,
   saveLadderState,
@@ -34,6 +47,11 @@ import {
 
 const MINUTE_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = MINUTE_MS;
+/**
+ * The ladder's own bound on a triage, past the service's 5-second deadline. The ladder is
+ * serialized, so a triage that never settles must not hold every queued observation.
+ */
+const DEFAULT_TRIAGE_TIMEOUT_MS = 8_000;
 
 /** What rung 2 asks the create path for. The classifier decides model, thinking and account. */
 export interface RemediationAgentRequest {
@@ -42,6 +60,30 @@ export interface RemediationAgentRequest {
   prompt: string;
   cwd: string;
   labels: Record<string, string>;
+  /**
+   * Always true. No person watches a remediation agent, so a permission prompt would only run
+   * out its clock (week review D1b-03: 5 of 9 timed out on one). The create path turns it into
+   * the provider's unattended mode.
+   */
+  unattended: true;
+}
+
+/** The create-path input for a remediation agent: a root, background, unattended agent. */
+export function remediationCreateAgentInput(
+  request: RemediationAgentRequest,
+): CreateAgentFromMcpInput {
+  return {
+    kind: "mcp",
+    provider: request.provider,
+    title: request.title,
+    initialPrompt: request.prompt,
+    promptFailure: "throw",
+    cwd: request.cwd,
+    labels: request.labels,
+    unattended: request.unattended,
+    background: true,
+    notifyOnFinish: false,
+  };
 }
 
 /**
@@ -49,8 +91,8 @@ export interface RemediationAgentRequest {
  * is how a restart leaves one; the ladder keeps waiting on it until its timeout.
  */
 export type RemediationAgentView =
-  | { status: "running"; totalTokens?: number }
-  | { status: "idle"; finalText: string | null; totalTokens?: number }
+  | { status: "running"; totalTokens?: number; model?: string | null }
+  | { status: "idle"; finalText: string | null; totalTokens?: number; model?: string | null }
   | { status: "error"; error: string }
   | { status: "unloaded" }
   | { status: "gone" };
@@ -62,6 +104,16 @@ export interface RemediationLadderDependencies {
   archiveAgent(agentId: string): Promise<void>;
   /** Why no account can run an agent for this provider, or null when one can. */
   findAccountBlocker(provider: string): Promise<string | null>;
+  /**
+   * Feature 3a (docs/jev.md): JEV's view of whether an agent is the right next step, asked once
+   * per episode after every other gate passed. Absent, throwing or slow: the agent starts.
+   */
+  triageEscalation?(input: {
+    episodeKey: string;
+    observation: RemediationObservation;
+  }): Promise<EscalationTriage>;
+  /** The feature 3a measurement record. Never throws. */
+  recordTriage?(event: RemediationTriageEvent): void;
 }
 
 export interface RemediationLadderOptions {
@@ -74,6 +126,12 @@ export interface RemediationLadderOptions {
   logger: Logger;
   now?: () => number;
   pollIntervalMs?: number;
+  /**
+   * The notify policy's `minPostLevel`: below it a push is only logged. Read to decide whether a
+   * rung 3 push will reach a person. Absent: `notice`, the policy's default.
+   */
+  readNotifyPostFloor?: () => NotifyLevel;
+  triageTimeoutMs?: number;
 }
 
 interface ResolvedCondition {
@@ -99,6 +157,8 @@ export class RemediationLadder implements RemediationSink {
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly pollIntervalMs: number;
+  private readonly readNotifyPostFloor: () => NotifyLevel;
+  private readonly triageTimeoutMs: number;
   private readonly modeLog: MonitorModeLog;
   private state: LadderState | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -115,6 +175,8 @@ export class RemediationLadder implements RemediationSink {
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.readNotifyPostFloor = options.readNotifyPostFloor ?? (() => "notice");
+    this.triageTimeoutMs = options.triageTimeoutMs ?? DEFAULT_TRIAGE_TIMEOUT_MS;
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -220,6 +282,7 @@ export class RemediationLadder implements RemediationSink {
       if (!open) return;
       open.closedAt = new Date(nowMs).toISOString();
       open.observation = { ...open.observation, attempts: [...(observation.attempts ?? [])] };
+      this.recordClosed(open, nowMs);
       await this.record(open, "resolved", describeRemediationAttempts(observation.attempts ?? []));
       // An agent still running finishes; its report still counts (see pollAgents).
       if (!open.agent) state.episodes = state.episodes.filter((e) => e !== open);
@@ -281,6 +344,14 @@ export class RemediationLadder implements RemediationSink {
       ? Date.parse(episode.fixedGraceUntil)
       : Date.parse(episode.openedAt) + condition.graceMs;
     if (nowMs < graceUntil) return;
+    // A JEV deferral holds rung 2 once. An observation that turned urgent is not held.
+    if (
+      episode.jevDeferredUntil &&
+      nowMs < Date.parse(episode.jevDeferredUntil) &&
+      observation.level !== "urgent"
+    ) {
+      return;
+    }
 
     if (episode.fixedLine) {
       await this.escalate(
@@ -340,6 +411,7 @@ export class RemediationLadder implements RemediationSink {
       await this.escalate(episode, condition, `No agent could run: ${blocker}.`);
       return;
     }
+    if (await this.routeElsewhere(episode, observation, condition, nowMs)) return;
 
     const request: RemediationAgentRequest = {
       provider: escalation.provider,
@@ -358,6 +430,7 @@ export class RemediationLadder implements RemediationSink {
         "paseo.remediation-key": observation.key,
         "paseo.agent-type": "worker",
       },
+      unattended: true,
     };
     let agentId: string;
     try {
@@ -379,6 +452,159 @@ export class RemediationLadder implements RemediationSink {
     await this.record(episode, "agent_started", `Agent ${agentId} is on it.`);
   }
 
+  /**
+   * The last step before rung 2: a person-first steer, then JEV's triage (docs/jev.md, Feature
+   * 3a). True when the agent is not started now, because the episode went to a person or is held
+   * for one grace window. Both send it to a person only when the push will reach one; otherwise
+   * the agent starts, as it did before either existed.
+   */
+  private async routeElsewhere(
+    episode: LadderEpisode,
+    observation: RemediationObservation,
+    condition: ResolvedCondition,
+    nowMs: number,
+  ): Promise<boolean> {
+    const level = observation.level ?? "alert";
+    const willPush = willEscalationPush({
+      notify: condition.notify,
+      level,
+      postFloor: this.safePostFloor(),
+    });
+
+    const personFirst = observation.escalation?.personFirst;
+    if (personFirst) {
+      this.emitTriage({
+        type: "person-first",
+        at: new Date(nowMs).toISOString(),
+        episode: episodeId(episode),
+        key: episode.key,
+        kind: observation.kind,
+        willPush,
+        reason: personFirst.reason,
+        confidence: personFirst.confidence,
+        skipped: willPush,
+      });
+      if (willPush) {
+        await this.escalate(
+          episode,
+          condition,
+          `No agent started: the stall judgment says a person is needed (${personFirst.reason}, ${formatConfidence(personFirst.confidence)}).`,
+        );
+        return true;
+      }
+    }
+
+    if (!this.deps.triageEscalation || episode.jevTriage || !shouldTriage(observation)) {
+      return false;
+    }
+    const triage = await this.askTriage(episode, observation);
+    const decision = decideTriageAction(triage, { willPush, graceMs: condition.graceMs });
+    episode.jevTriage = {
+      at: new Date(nowMs).toISOString(),
+      callId: triage.callId ?? "",
+      outcome: triage.outcome,
+      ...(triage.route !== null ? { route: triage.route } : {}),
+      ...(triage.routeConfidence !== null ? { confidence: triage.routeConfidence } : {}),
+      ...(triage.evidenceCurrent !== null ? { evidenceCurrent: triage.evidenceCurrent } : {}),
+      action: decision.wouldBe,
+      applied: decision.applied,
+    };
+    this.emitTriage({
+      type: "triage",
+      at: new Date(nowMs).toISOString(),
+      episode: episodeId(episode),
+      key: episode.key,
+      kind: observation.kind,
+      level,
+      willPush,
+      linkedAgentId: observation.link?.agentId ?? null,
+      triage,
+      decision,
+    });
+    this.logger.info(
+      {
+        key: episode.key,
+        callId: triage.callId,
+        outcome: triage.outcome,
+        wouldBe: decision.wouldBe,
+        action: decision.action,
+      },
+      "Remediation ladder: triaged",
+    );
+
+    if (decision.action === "person") {
+      await this.escalate(episode, condition, describePersonSkip(triage));
+      return true;
+    }
+    if (decision.action === "defer") {
+      episode.jevDeferredUntil = new Date(nowMs + decision.deferMs).toISOString();
+      return true;
+    }
+    return false;
+  }
+
+  /** Never rejects and never outlasts `triageTimeoutMs`: an error or a timeout starts the agent. */
+  private async askTriage(
+    episode: LadderEpisode,
+    observation: RemediationObservation,
+  ): Promise<EscalationTriage> {
+    const triageEscalation = this.deps.triageEscalation;
+    if (!triageEscalation) return erroredTriage("absent");
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<EscalationTriage>((resolve) => {
+      timer = setTimeout(() => resolve(erroredTriage("timeout")), this.triageTimeoutMs);
+    });
+    try {
+      return await Promise.race([
+        triageEscalation({ episodeKey: episode.key, observation }).catch(() =>
+          erroredTriage("threw"),
+        ),
+        timeout,
+      ]);
+    } catch {
+      return erroredTriage("threw");
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private safePostFloor(): NotifyLevel {
+    try {
+      return this.readNotifyPostFloor();
+    } catch {
+      // Unknown floor: assume the strictest, so JEV never skips an agent on a guess.
+      return "urgent";
+    }
+  }
+
+  private emitTriage(event: RemediationTriageEvent): void {
+    try {
+      this.deps.recordTriage?.(event);
+    } catch (error) {
+      this.logger.warn({ err: error }, "Remediation ladder: triage record failed");
+    }
+  }
+
+  /** Measurement only: every episode that ran an agent or was triaged gets a `closed` line. */
+  private recordClosed(episode: LadderEpisode, nowMs: number): void {
+    if (!episode.jevTriage && !episode.lastAgentId) return;
+    const triageAt = episode.jevTriage ? Date.parse(episode.jevTriage.at) : null;
+    this.emitTriage({
+      type: "closed",
+      at: new Date(nowMs).toISOString(),
+      episode: episodeId(episode),
+      key: episode.key,
+      kind: episode.observation.kind,
+      minutesOpen: minutesBetween(Date.parse(episode.openedAt), nowMs),
+      minutesSinceTriage: triageAt === null ? null : minutesBetween(triageAt, nowMs),
+      duringDeferral:
+        episode.jevDeferredUntil !== undefined && nowMs < Date.parse(episode.jevDeferredUntil),
+      agentRan: episode.lastAgentId !== undefined,
+      escalated: episode.escalatedAt !== undefined,
+      ...triageJoin(episode),
+    });
+  }
+
   private async pollAgents(): Promise<void> {
     const state = await this.loadState();
     const config = this.readDaemonConfig().remediation;
@@ -398,6 +624,20 @@ export class RemediationLadder implements RemediationSink {
       if (outcome.kind === "pending") continue;
       changed = true;
       const agentId = episode.agent.id;
+      this.emitTriage({
+        type: "agent-ended",
+        at: new Date(nowMs).toISOString(),
+        episode: episodeId(episode),
+        key: episode.key,
+        kind: episode.observation.kind,
+        agentId,
+        result: outcome.kind,
+        cause: outcome.cause,
+        agentTotalTokens: outcome.totalTokens,
+        agentModel: outcome.model,
+        minutesRunning: minutesBetween(Date.parse(episode.agent.startedAt), nowMs),
+        ...triageJoin(episode),
+      });
       episode.agent = undefined;
 
       if (outcome.kind === "fixed") {
@@ -424,22 +664,33 @@ export class RemediationLadder implements RemediationSink {
     nowMs: number;
     /** An advisory agent: its report is a recommendation line and is never FIXED. */
     advice: boolean;
-  }): Promise<{ kind: "pending" } | { kind: "fixed" | "not-fixed"; line: string }> {
+  }): Promise<{ kind: "pending" } | AgentEnd> {
     const { agent, escalation, nowMs } = input;
     const view = await this.deps.inspectAgent(agent.id);
+    const measured = {
+      totalTokens: "totalTokens" in view ? (view.totalTokens ?? null) : null,
+      model: "model" in view ? (view.model ?? null) : null,
+    };
     if (view.status === "idle") {
       const report = input.advice
         ? parseAdviceReport(view.finalText)
         : parseRemediationReport(view.finalText);
-      return { kind: report.outcome, line: report.line };
+      return { kind: report.outcome, line: report.line, cause: "report", ...measured };
     }
     if (view.status === "error") {
-      return { kind: "not-fixed", line: `The remediation agent failed: ${view.error}` };
+      return {
+        kind: "not-fixed",
+        line: `The remediation agent failed: ${view.error}`,
+        cause: "error",
+        ...measured,
+      };
     }
     if (view.status === "gone") {
       return {
         kind: "not-fixed",
         line: "The remediation agent was archived or removed before it reported.",
+        cause: "gone",
+        ...measured,
       };
     }
     if (
@@ -451,6 +702,8 @@ export class RemediationLadder implements RemediationSink {
       return {
         kind: "not-fixed",
         line: `The remediation agent passed its token budget (${view.totalTokens.toLocaleString("en-US")} of ${escalation.budgetTokens.toLocaleString("en-US")}) and was cancelled.`,
+        cause: "budget",
+        ...measured,
       };
     }
     if (nowMs - Date.parse(agent.startedAt) >= escalation.timeoutMinutes * MINUTE_MS) {
@@ -458,6 +711,8 @@ export class RemediationLadder implements RemediationSink {
       return {
         kind: "not-fixed",
         line: `The remediation agent did not report within ${escalation.timeoutMinutes} minutes and was cancelled.`,
+        cause: "timeout",
+        ...measured,
       };
     }
     return { kind: "pending" };
@@ -546,6 +801,36 @@ export class RemediationLadder implements RemediationSink {
       this.logger.warn({ err: error }, "Remediation ladder: push failed");
     }
   }
+}
+
+interface AgentEnd {
+  kind: "fixed" | "not-fixed";
+  line: string;
+  cause: RemediationAgentEndCause;
+  totalTokens: number | null;
+  model: string | null;
+}
+
+/** Joins an episode's measurement lines: its key and when it opened. */
+function episodeId(episode: LadderEpisode): string {
+  return `${episode.key}@${episode.openedAt}`;
+}
+
+function minutesBetween(fromMs: number, toMs: number): number {
+  return Math.round(((toMs - fromMs) / MINUTE_MS) * 10) / 10;
+}
+
+function triageJoin(episode: LadderEpisode): {
+  triageCallId: string | null;
+  triageWouldBe: string | null;
+  triageApplied: boolean | null;
+} {
+  const triage = episode.jevTriage;
+  return {
+    triageCallId: triage?.callId || null,
+    triageWouldBe: triage?.action ?? null,
+    triageApplied: triage?.applied ?? null,
+  };
 }
 
 function toStoredObservation(observation: RemediationObservation): LadderEpisode["observation"] {
