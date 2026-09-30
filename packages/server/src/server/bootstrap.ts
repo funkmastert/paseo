@@ -278,7 +278,11 @@ import {
   AgentStallSweep,
   handOffStalledAgentToFailover,
   nudgeStalledAgent,
+  resumeIdleAgentWaitingOnBackground,
 } from "./agent-stall-sweep.js";
+import { createJevStallJudge, firstUserMessage } from "./agent/stall-judgment.js";
+import { StallJudgmentLog } from "./agent/stall-judgment-log.js";
+import { jevConfigSection, resolveJevConfig } from "./jev/config.js";
 import type { ProcessSampler } from "./agent/process-sampler.js";
 import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-remedies.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
@@ -1151,8 +1155,11 @@ function createAgentStallSweep(input: {
   paceResume: PaceResume;
   /** Feature 10 builds `judgeStall` from it (docs/jev.md). */
   jev: JevService;
+  /** Where `agents.jev` and the stall judgment's measurement file live. */
+  paseoHome: string;
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
+  const judgmentLog = new StallJudgmentLog({ dir: path.join(input.paseoHome, "jev"), logger });
   return new AgentStallSweep({
     dependencies: {
       listAgents: () => agentManager.listAgentsForStallSweep(),
@@ -1184,6 +1191,39 @@ function createAgentStallSweep(input: {
           nudge,
         ),
       handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
+      // Feature 10 (docs/jev.md) and the background-wait rule (docs/stalled-agents.md). Timeline
+      // reads only: a judgment is recorded in the decision store, never as a timeline row, which
+      // would re-date an account-failover failure.
+      readRecentActivity: (agentId, limit) => {
+        try {
+          return agentManager.fetchTimeline(agentId, { direction: "tail", limit }).rows;
+        } catch {
+          return null;
+        }
+      },
+      readAssignment: (agentId) => {
+        try {
+          return firstUserMessage(
+            agentManager.fetchTimeline(agentId, { direction: "after", limit: 50 }).rows,
+          );
+        } catch {
+          return null;
+        }
+      },
+      judgeStall: createJevStallJudge({
+        jev: input.jev,
+        readLoopWatch: () =>
+          resolveJevConfig(jevConfigSection(readRawConfig(input.paseoHome).rawConfig), {
+            homeDir: homedir(),
+          }).stallJudgment.loopWatch,
+      }),
+      readLastError: (agentId) => agentManager.getAgent(agentId)?.lastError,
+      resumeIdleAgent: (resume) =>
+        resumeIdleAgentWaitingOnBackground(
+          { agentManager, agentStorage, logger, paceResume: input.paceResume },
+          resume,
+        ),
+      recordMeasurement: (line) => judgmentLog.append(line),
     },
     sink: input.sink,
     readRemediationConfig: () => input.daemonConfigStore.get().remediation,
@@ -3222,6 +3262,7 @@ export async function createPaseoDaemon(
               logger,
               paceResume: (resume, fn) => resumePacer.run(resume, fn),
               jev,
+              paseoHome: config.paseoHome,
             });
             agentStallSweep = stallSweep;
             stallSweep.start();
