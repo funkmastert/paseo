@@ -218,6 +218,8 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
+import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
 import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
@@ -274,6 +276,7 @@ import {
   createRemediationTriageRecorder,
 } from "./remediation/jev-triage.js";
 import { RemediationLadder, remediationCreateAgentInput } from "./remediation/ladder.js";
+import { jevConfigSection } from "./jev/config.js";
 import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
@@ -2190,9 +2193,6 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
     logger,
   });
-  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
-  agentTitleTracker.start();
-
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
     workspaceRegistry,
@@ -2202,8 +2202,28 @@ export async function createPaseoDaemon(
     emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
       await emitWorkspaceUpdatesExternal([workspaceId]);
     },
+    // Feature 17 (docs/jev.md): gate a regeneration on whether JEV thinks the name still fits.
+    jev,
+    readTitleRefreshConfig: () =>
+      resolveWorkspaceTitleRefreshConfig(
+        (
+          jevConfigSection(readRawConfig(config.paseoHome).rawConfig) as
+            | Record<string, unknown>
+            | undefined
+        )?.["titleRefresh"],
+      ),
+    recordTitleRefreshCheck: createTitleRefreshRecorder({
+      jev,
+      filePath: path.join(config.paseoHome, "jev", "title-refresh.jsonl"),
+      logger,
+    }),
     logger,
   });
+  handleAgentTurnFinished = (params) => {
+    agentTitleTracker.scheduleRefresh(params);
+    workspaceTitleTracker.recordAgentTurnFinished(params);
+  };
+  agentTitleTracker.start();
   workspaceTitleTracker.start();
 
   // Auto pins last while their workspace is active (workspace-auto-pin.ts). Sessions report uses.
