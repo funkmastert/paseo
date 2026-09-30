@@ -145,6 +145,9 @@ import {
   type PaseoToolHostDependencies,
 } from "./agent/tools/paseo-tools.js";
 import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
+import type { JevToolsDependencies } from "./agent/tools/jev-tools.js";
+import { JevToolUseLog } from "./agent/tools/jev-tool-use-log.js";
+import { createCatastropheCommandGate } from "./jev/command-gate.js";
 import { createAgentProviderRuntime } from "./agent/provider-runtime.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
@@ -2498,6 +2501,16 @@ export async function createPaseoDaemon(
   );
   logger.info({ elapsed: elapsed() }, "Preparing voice and MCP runtime");
 
+  // The JEV agent tools (docs/jev.md, "Features 4–6"): one command gate and one D8 use log for the
+  // daemon. `ask_jev`'s command asks the catastrophe gate as a Bash call would, failing closed.
+  const jevToolsDependencies: JevToolsDependencies = {
+    jev,
+    commandGate: createCatastropheCommandGate({
+      isEnabled: () => daemonConfigStore.get().catastropheGate?.enabled !== false,
+    }),
+    paseoHome: config.paseoHome,
+    useLog: new JevToolUseLog({ dir: path.join(config.paseoHome, "jev"), logger }),
+  };
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2554,6 +2567,7 @@ export async function createPaseoDaemon(
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
     deviceLeaseManager,
+    jevTools: jevToolsDependencies,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),

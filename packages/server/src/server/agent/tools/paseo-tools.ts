@@ -91,6 +91,7 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { hasJevToolsLabel, registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
@@ -158,6 +159,8 @@ export interface PaseoToolHostDependencies {
   browserToolsBroker?: BrowserToolsBroker | null;
   /** The device cap (docs/device-leases.md). Absent means no checkout tools are offered. */
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
+  /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
+  jevTools?: JevToolsDependencies | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1301,6 +1304,39 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       // one that needs to know which it is (docs/device-leases.md).
       resolveCallerProvider: () => resolveCallerAgent()?.provider,
     });
+  }
+
+  // Only for callers labelled `paseo.jev-tools: on` at create, so a reload or resume lists the same
+  // tools. The labels are read without `resolveCallerAgent`, which throws for an agent missing from
+  // the manager: a failed lookup withholds the JEV tools, never the rest of the catalog.
+  if (options.jevTools && callerAgentId) {
+    const jevTools = options.jevTools;
+    try {
+      if (hasJevToolsLabel(agentManager.getAgent(callerAgentId)?.labels)) {
+        registerJevTools({
+          registerTool,
+          deps: jevTools,
+          callerAgentId,
+          readCallerAgent: () => {
+            const agent = agentManager.getAgent(callerAgentId);
+            if (!agent) return null;
+            return {
+              id: agent.id,
+              cwd: agent.cwd,
+              labels: agent.labels,
+              providerOptions: agent.config?.providerOptions,
+              contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,
+            };
+          },
+          logger: childLogger,
+        });
+      }
+    } catch (error) {
+      childLogger.warn(
+        { err: error, agentId: callerAgentId },
+        "JEV tools withheld: reading the caller failed",
+      );
+    }
   }
 
   registerCoordinationTools({
