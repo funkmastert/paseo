@@ -14,6 +14,7 @@ import {
   createRemediationTriageRecorder,
   decideTriageAction,
   erroredTriage,
+  MAX_DEFER_MS,
   MIN_DEFER_MS,
   remediationTriageScope,
   shouldTriage,
@@ -59,8 +60,8 @@ function answered(
 }
 
 describe("decideTriageAction, the threshold table", () => {
-  const push = { willPush: true, graceMs: 5 * MINUTE };
-  const noPush = { willPush: false, graceMs: 5 * MINUTE };
+  const push = { willPush: true, graceMs: 5 * MINUTE, remedy: "live" as const };
+  const noPush = { willPush: false, graceMs: 5 * MINUTE, remedy: "live" as const };
 
   it("sends needs_person at 0.80 or more to a person when the escalation will push", () => {
     expect(decideTriageAction(answered("needs_person", 0.8), push)).toMatchObject({
@@ -81,15 +82,30 @@ describe("decideTriageAction, the threshold table", () => {
     expect(decideTriageAction(answered("needs_person", 0.79), push).action).toBe("start-agent");
   });
 
-  it("defers clearing_on_its_own at 0.80 with evidence_current under 0.40, by the longer window", () => {
+  it("defers clearing_on_its_own at 0.80 with evidence_current under 0.40, by the grace window held between 10 and 15 minutes", () => {
     const short = decideTriageAction(answered("clearing_on_its_own", 0.8, 0.39), push);
     expect(short).toMatchObject({ action: "defer", deferMs: MIN_DEFER_MS });
-    const long = decideTriageAction(answered("clearing_on_its_own", 0.9, 0.1), {
-      willPush: false,
-      graceMs: 25 * MINUTE,
+    const middle = decideTriageAction(answered("clearing_on_its_own", 0.9, 0.1), {
+      ...noPush,
+      graceMs: 12 * MINUTE,
     });
-    expect(long).toMatchObject({ action: "defer", deferMs: 25 * MINUTE });
+    expect(middle).toMatchObject({ action: "defer", deferMs: 12 * MINUTE });
+    const long = decideTriageAction(answered("clearing_on_its_own", 0.9, 0.1), {
+      ...noPush,
+      graceMs: 60 * MINUTE,
+    });
+    expect(long).toMatchObject({ action: "defer", deferMs: MAX_DEFER_MS });
+    expect(MAX_DEFER_MS).toBe(15 * MINUTE);
   });
+
+  it.each(["none", "disabled", "dry-run"] as const)(
+    "never defers when the remedy is %s: nothing is acting, so it cannot clear by itself (review finding 1)",
+    (remedy) => {
+      expect(
+        decideTriageAction(answered("clearing_on_its_own", 0.99, 0.0), { ...push, remedy }),
+      ).toMatchObject({ wouldBe: "start-agent", action: "start-agent" });
+    },
+  );
 
   it("starts the agent for clearing_on_its_own when the evidence is current or unread", () => {
     expect(decideTriageAction(answered("clearing_on_its_own", 0.95, 0.4), push).action).toBe(
@@ -135,13 +151,32 @@ describe("decideTriageAction, the threshold table", () => {
 });
 
 describe("willEscalationPush", () => {
-  it("needs the notify rung, a level of notice or more, and a level at the policy's floor", () => {
-    expect(willEscalationPush({ notify: true, level: "alert", postFloor: "notice" })).toBe(true);
-    expect(willEscalationPush({ notify: true, level: "notice", postFloor: "notice" })).toBe(true);
-    expect(willEscalationPush({ notify: false, level: "urgent", postFloor: "notice" })).toBe(false);
-    expect(willEscalationPush({ notify: true, level: "notice", postFloor: "alert" })).toBe(false);
-    expect(willEscalationPush({ notify: true, level: "alert", postFloor: "urgent" })).toBe(false);
-    expect(willEscalationPush({ notify: true, level: "record", postFloor: "record" })).toBe(false);
+  const now = { outcome: "interrupt", devices: 1 } as const;
+
+  it("needs the notify rung, a level of notice or more, and a preview that reaches a phone now", () => {
+    expect(willEscalationPush({ notify: true, level: "alert", preview: now })).toBe(true);
+    expect(
+      willEscalationPush({
+        notify: true,
+        level: "alert",
+        preview: { outcome: "notify", devices: 1 },
+      }),
+    ).toBe(true);
+    expect(willEscalationPush({ notify: false, level: "urgent", preview: now })).toBe(false);
+    expect(willEscalationPush({ notify: true, level: "record", preview: now })).toBe(false);
+  });
+
+  it.each([
+    ["a fold into a push from the last hour", { outcome: "suppressed", devices: 1 }],
+    ["a digest hold", { outcome: "digest", devices: 1 }],
+    ["a log-only level", { outcome: "log", devices: 1 }],
+    ["no registered phone", { outcome: "interrupt", devices: 0 }],
+  ] as const)("is false for %s (review finding 6)", (_label, preview) => {
+    expect(willEscalationPush({ notify: true, level: "alert", preview })).toBe(false);
+  });
+
+  it("is false with no preview", () => {
+    expect(willEscalationPush({ notify: true, level: "alert", preview: null })).toBe(false);
   });
 });
 
@@ -227,7 +262,9 @@ describe("createEscalationTriage over the fake", () => {
       observation: observation(),
     });
     expect(triage).toMatchObject({ outcome: "shadow", route: "needs_person" });
-    expect(decideTriageAction(triage, { willPush: true, graceMs: 0 }).action).toBe("start-agent");
+    expect(decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" }).action).toBe(
+      "start-agent",
+    );
   });
 
   it("passes the observation's scope and the feature's call site", async () => {
@@ -285,7 +322,9 @@ describe("createEscalationTriage over the fake", () => {
         observation: observation(),
       });
       expect(triage.outcome).toBe("failed");
-      expect(decideTriageAction(triage, { willPush: true, graceMs: 0 }).action).toBe("start-agent");
+      expect(
+        decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" }).action,
+      ).toBe("start-agent");
     }
   });
 
@@ -311,8 +350,12 @@ describe("createEscalationTriage over the fake", () => {
       observation: steered,
     });
     expect(triage.route).toBe("needs_person");
-    expect(decideTriageAction(triage, { willPush: false, graceMs: 0 }).action).toBe("start-agent");
-    expect(decideTriageAction(triage, { willPush: true, graceMs: 0 }).action).toBe("person");
+    expect(decideTriageAction(triage, { willPush: false, graceMs: 0, remedy: "live" }).action).toBe(
+      "start-agent",
+    );
+    expect(decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" }).action).toBe(
+      "person",
+    );
   });
 });
 
@@ -337,9 +380,10 @@ describe("createRemediationTriageRecorder", () => {
       kind: "stalled-agent",
       level: "alert",
       willPush: true,
+      pushPreview: { outcome: "interrupt", devices: 1 },
       linkedAgentId,
       triage,
-      decision: decideTriageAction(triage, { willPush: true, graceMs: 0 }),
+      decision: decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" }),
     };
   }
 

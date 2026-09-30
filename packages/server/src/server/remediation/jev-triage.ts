@@ -3,25 +3,32 @@ import type { Logger } from "pino";
 import type { JevEgressScope, JevOutcome, JevQuestions, JevService } from "../jev/contract.js";
 import { createJsonlAppender } from "../jsonl-appender.js";
 import { levelAtLeast, type NotifyLevel } from "../notify-policy/levels.js";
-import type { RemediationObservation } from "./contract.js";
+import { reachesPhoneNow, type NotifyDeliveryPreview } from "../notify-policy/notify-policy.js";
+import type { RemediationObservation, RemedyState } from "./contract.js";
 import { MAX_EVIDENCE_CHARS } from "./escalation.js";
 
 /**
  * Feature 3a, remediation triage (docs/jev.md). Before the ladder starts a remediation agent, JEV
  * says whether an agent is the right next step. Code turns the answer into one of three actions;
- * the ladder applies it only when the outcome is `answered`, and only sends the episode to a
- * person when that person will be told (`willEscalationPush`). Anything else starts the agent.
+ * the ladder applies it only when the outcome is `answered`, only sends the episode to a person
+ * when that person will be told now (`willEscalationPush`), and only holds it while a live remedy
+ * is acting. Anything else starts the agent.
  */
 
 export const REMEDIATION_TRIAGE_CALL_SITE = "remediation.triage";
 
 /** `needs_person` at or over this sends the episode to a person, when the push will reach one. */
 export const NEEDS_PERSON_FLOOR = 0.8;
-/** `clearing_on_its_own` at or over this, with `evidence_current` under the ceiling, defers once. */
+/**
+ * `clearing_on_its_own` at or over this, with `evidence_current` under the ceiling, defers once,
+ * and only while a live remedy is acting on the condition.
+ */
 export const CLEARING_FLOOR = 0.8;
 export const EVIDENCE_CURRENT_CEILING = 0.4;
-/** A deferral lasts the condition's grace window or this, whichever is longer. */
+/** A deferral lasts the condition's grace window, but at least this long... */
 export const MIN_DEFER_MS = 10 * 60_000;
+/** ...and never longer than this, whatever the grace; the ladder enforces it on read too. */
+export const MAX_DEFER_MS = 15 * 60_000;
 
 export const REMEDIATION_TRIAGE_QUESTIONS: JevQuestions = {
   route: {
@@ -152,26 +159,33 @@ export interface TriageDecision {
 
 /**
  * The doc's threshold table. `willPush` is the ladder's: a `needs_person` answer never skips the
- * agent when the escalation would only be recorded, because rung 3 is final and nobody would fix
- * it or be told. A missing `evidence_current` never defers.
+ * agent unless the escalation reaches a phone now, because rung 3 is final and nobody would fix
+ * it or be told. A missing `evidence_current` never defers, and neither does a condition with no
+ * live remedy: nothing is acting on it, so it cannot clear by itself, and a monitor that stops
+ * observing (the work-at-risk sweep closes its episode on the next sweep, handed over or not)
+ * would close the held episode with no fixer and no push.
  */
 export function decideTriageAction(
   triage: EscalationTriage,
-  context: { willPush: boolean; graceMs: number },
+  context: { willPush: boolean; graceMs: number; remedy: RemedyState },
 ): TriageDecision {
-  const deferMs = Math.max(context.graceMs, MIN_DEFER_MS);
-  const wouldBe = mapRoute(triage, context.willPush);
+  const deferMs = Math.min(Math.max(context.graceMs, MIN_DEFER_MS), MAX_DEFER_MS);
+  const wouldBe = mapRoute(triage, context);
   const applied = triage.outcome === "answered";
   return { wouldBe, action: applied ? wouldBe : "start-agent", applied, deferMs };
 }
 
-function mapRoute(triage: EscalationTriage, willPush: boolean): TriageAction {
+function mapRoute(
+  triage: EscalationTriage,
+  { willPush, remedy }: { willPush: boolean; remedy: RemedyState },
+): TriageAction {
   if (triage.outcome !== "answered" && triage.outcome !== "shadow") return "start-agent";
   const confidence = triage.routeConfidence ?? 0;
   if (triage.route === "needs_person" && confidence >= NEEDS_PERSON_FLOOR) {
     return willPush ? "person" : "start-agent";
   }
   if (
+    remedy === "live" &&
     triage.route === "clearing_on_its_own" &&
     confidence >= CLEARING_FLOOR &&
     triage.evidenceCurrent !== null &&
@@ -183,20 +197,23 @@ function mapRoute(triage: EscalationTriage, willPush: boolean): TriageAction {
 }
 
 /**
- * Whether rung 3 would reach a person: the notify rung and the condition's own switch are on, and
- * the level `escalate` sends at is at least `notice` and at least the notify policy's post floor
- * (`minPostLevel`), below which a push is only logged. The same rule governs
+ * Whether rung 3 would reach a person now: the notify rung and the condition's own switch are on,
+ * the level `escalate` sends at is at least `notice`, and the notify policy's preview of that push
+ * (its level and `remediation:<key>` dedupe key) says it goes out at once to a registered phone.
+ * A fold into a push from the last hour, a digest hold, a log-only level and a phone with no token
+ * all fail, and so does a missing preview (`null`: absent or it threw). The same rule governs
  * `escalation.personFirst`.
  */
 export function willEscalationPush(input: {
   notify: boolean;
   level: NotifyLevel;
-  postFloor: NotifyLevel;
+  preview: NotifyDeliveryPreview | null;
 }): boolean {
   return (
     input.notify &&
     levelAtLeast(input.level, "notice") &&
-    levelAtLeast(input.level, input.postFloor)
+    input.preview !== null &&
+    reachesPhoneNow(input.preview)
   );
 }
 
@@ -249,6 +266,8 @@ export type RemediationTriageEvent =
       kind: string;
       level: NotifyLevel;
       willPush: boolean;
+      /** The notify policy's preview behind `willPush`; null when absent or unreadable. */
+      pushPreview: NotifyDeliveryPreview | null;
       linkedAgentId: string | null;
       triage: EscalationTriage;
       decision: TriageDecision;
@@ -260,6 +279,7 @@ export type RemediationTriageEvent =
       key: string;
       kind: string;
       willPush: boolean;
+      pushPreview: NotifyDeliveryPreview | null;
       reason: string;
       confidence: number;
       /** True when the agent was skipped; false when the escalation would not push. */
@@ -292,6 +312,12 @@ export type RemediationTriageEvent =
       minutesSinceTriage: number | null;
       /** Closed while a JEV deferral held rung 2. */
       duringDeferral: boolean;
+      /**
+       * Closed inside the hold by a monitor whose remedy was live, before any agent ran: the
+       * condition cleared on its own. The only close of a deferred episode that counts as an
+       * agent avoided.
+       */
+      clearedDuringHold: boolean;
       agentRan: boolean;
       escalated: boolean;
       triageCallId: string | null;
@@ -354,7 +380,7 @@ function describeAction(decision: TriageDecision): string {
   const words: Record<TriageAction, string> = {
     "start-agent": "remediation agent started",
     person: "no remediation agent; sent to a person",
-    defer: "remediation agent held for one grace window",
+    defer: "remediation agent held once, while the live remedy acts",
   };
   if (decision.applied) return words[decision.action];
   if (decision.wouldBe === "start-agent") return words["start-agent"];

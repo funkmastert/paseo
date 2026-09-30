@@ -9,7 +9,8 @@ import type { Logger } from "pino";
 
 import type { CreateAgentFromMcpInput } from "../agent/create-agent/create.js";
 import { MonitorModeLog } from "../monitor-mode-log.js";
-import type { NotifyLevel } from "../notify-policy/levels.js";
+import { levelRank, type NotifyLevel } from "../notify-policy/levels.js";
+import type { NotifyDeliveryPreview } from "../notify-policy/notify-policy.js";
 import type { PushNotificationSender } from "../push/index.js";
 import {
   isNotifyRungEnabled,
@@ -31,6 +32,7 @@ import {
   describePersonSkip,
   erroredTriage,
   formatConfidence,
+  MAX_DEFER_MS,
   shouldTriage,
   willEscalationPush,
   type EscalationTriage,
@@ -127,10 +129,11 @@ export interface RemediationLadderOptions {
   now?: () => number;
   pollIntervalMs?: number;
   /**
-   * The notify policy's `minPostLevel`: below it a push is only logged. Read to decide whether a
-   * rung 3 push will reach a person. Absent: `notice`, the policy's default.
+   * The notify policy's preview of a push (`NotifyPolicy.previewDelivery`): read to decide whether
+   * a rung 3 push would reach a phone now. Absent or throwing: it would not, so no answer ever
+   * skips the agent on a guess.
    */
-  readNotifyPostFloor?: () => NotifyLevel;
+  previewPush?: (meta: { level: NotifyLevel; dedupeKey: string }) => NotifyDeliveryPreview;
   triageTimeoutMs?: number;
 }
 
@@ -157,7 +160,9 @@ export class RemediationLadder implements RemediationSink {
   private readonly logger: Logger;
   private readonly now: () => number;
   private readonly pollIntervalMs: number;
-  private readonly readNotifyPostFloor: () => NotifyLevel;
+  private readonly previewPush:
+    | ((meta: { level: NotifyLevel; dedupeKey: string }) => NotifyDeliveryPreview)
+    | undefined;
   private readonly triageTimeoutMs: number;
   private readonly modeLog: MonitorModeLog;
   private state: LadderState | null = null;
@@ -175,7 +180,7 @@ export class RemediationLadder implements RemediationSink {
     this.logger = options.logger;
     this.now = options.now ?? Date.now;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-    this.readNotifyPostFloor = options.readNotifyPostFloor ?? (() => "notice");
+    this.previewPush = options.previewPush;
     this.triageTimeoutMs = options.triageTimeoutMs ?? DEFAULT_TRIAGE_TIMEOUT_MS;
     this.modeLog = new MonitorModeLog(options.logger);
   }
@@ -344,14 +349,7 @@ export class RemediationLadder implements RemediationSink {
       ? Date.parse(episode.fixedGraceUntil)
       : Date.parse(episode.openedAt) + condition.graceMs;
     if (nowMs < graceUntil) return;
-    // A JEV deferral holds rung 2 once. An observation that turned urgent is not held.
-    if (
-      episode.jevDeferredUntil &&
-      nowMs < Date.parse(episode.jevDeferredUntil) &&
-      observation.level !== "urgent"
-    ) {
-      return;
-    }
+    if (isHeld(episode, observation, nowMs)) return;
 
     if (episode.fixedLine) {
       await this.escalate(
@@ -455,8 +453,8 @@ export class RemediationLadder implements RemediationSink {
   /**
    * The last step before rung 2: a person-first steer, then JEV's triage (docs/jev.md, Feature
    * 3a). True when the agent is not started now, because the episode went to a person or is held
-   * for one grace window. Both send it to a person only when the push will reach one; otherwise
-   * the agent starts, as it did before either existed.
+   * once while its live remedy acts. Both send it to a person only when the push reaches a phone
+   * now; otherwise the agent starts, as it did before either existed.
    */
   private async routeElsewhere(
     episode: LadderEpisode,
@@ -465,11 +463,11 @@ export class RemediationLadder implements RemediationSink {
     nowMs: number,
   ): Promise<boolean> {
     const level = observation.level ?? "alert";
-    const willPush = willEscalationPush({
-      notify: condition.notify,
-      level,
-      postFloor: this.safePostFloor(),
-    });
+    // The push `escalate` would send, previewed with the same level and dedupe key.
+    const pushPreview = condition.notify
+      ? this.safePreview({ level, dedupeKey: remediationDedupeKey(episode) })
+      : null;
+    const willPush = willEscalationPush({ notify: condition.notify, level, preview: pushPreview });
 
     const personFirst = observation.escalation?.personFirst;
     if (personFirst) {
@@ -480,6 +478,7 @@ export class RemediationLadder implements RemediationSink {
         key: episode.key,
         kind: observation.kind,
         willPush,
+        pushPreview,
         reason: personFirst.reason,
         confidence: personFirst.confidence,
         skipped: willPush,
@@ -498,7 +497,11 @@ export class RemediationLadder implements RemediationSink {
       return false;
     }
     const triage = await this.askTriage(episode, observation);
-    const decision = decideTriageAction(triage, { willPush, graceMs: condition.graceMs });
+    const decision = decideTriageAction(triage, {
+      willPush,
+      graceMs: condition.graceMs,
+      remedy: observation.remedy,
+    });
     episode.jevTriage = {
       at: new Date(nowMs).toISOString(),
       callId: triage.callId ?? "",
@@ -508,6 +511,7 @@ export class RemediationLadder implements RemediationSink {
       ...(triage.evidenceCurrent !== null ? { evidenceCurrent: triage.evidenceCurrent } : {}),
       action: decision.wouldBe,
       applied: decision.applied,
+      level,
     };
     this.emitTriage({
       type: "triage",
@@ -517,6 +521,7 @@ export class RemediationLadder implements RemediationSink {
       kind: observation.kind,
       level,
       willPush,
+      pushPreview,
       linkedAgentId: observation.link?.agentId ?? null,
       triage,
       decision,
@@ -568,12 +573,17 @@ export class RemediationLadder implements RemediationSink {
     }
   }
 
-  private safePostFloor(): NotifyLevel {
+  private safePreview(meta: {
+    level: NotifyLevel;
+    dedupeKey: string;
+  }): NotifyDeliveryPreview | null {
+    if (!this.previewPush) return null;
     try {
-      return this.readNotifyPostFloor();
-    } catch {
-      // Unknown floor: assume the strictest, so JEV never skips an agent on a guess.
-      return "urgent";
+      return this.previewPush(meta);
+    } catch (error) {
+      // Unknown delivery: assume it reaches nobody, so JEV never skips an agent on a guess.
+      this.logger.warn({ err: error }, "Remediation ladder: push preview failed");
+      return null;
     }
   }
 
@@ -589,6 +599,8 @@ export class RemediationLadder implements RemediationSink {
   private recordClosed(episode: LadderEpisode, nowMs: number): void {
     if (!episode.jevTriage && !episode.lastAgentId) return;
     const triageAt = episode.jevTriage ? Date.parse(episode.jevTriage.at) : null;
+    const duringDeferral = episode.jevDeferredUntil !== undefined && nowMs < holdEndMs(episode);
+    const agentRan = episode.lastAgentId !== undefined;
     this.emitTriage({
       type: "closed",
       at: new Date(nowMs).toISOString(),
@@ -597,9 +609,9 @@ export class RemediationLadder implements RemediationSink {
       kind: episode.observation.kind,
       minutesOpen: minutesBetween(Date.parse(episode.openedAt), nowMs),
       minutesSinceTriage: triageAt === null ? null : minutesBetween(triageAt, nowMs),
-      duringDeferral:
-        episode.jevDeferredUntil !== undefined && nowMs < Date.parse(episode.jevDeferredUntil),
-      agentRan: episode.lastAgentId !== undefined,
+      duringDeferral,
+      clearedDuringHold: duringDeferral && episode.observation.remedy === "live" && !agentRan,
+      agentRan,
       escalated: episode.escalatedAt !== undefined,
       ...triageJoin(episode),
     });
@@ -654,6 +666,13 @@ export class RemediationLadder implements RemediationSink {
         await this.escalate(episode, condition, outcome.line);
       }
       if (episode.closedAt) state.episodes = state.episodes.filter((e) => e !== episode);
+    }
+    // A hold that lapsed while its monitor went quiet: evaluate would otherwise wait for an
+    // observation that may never come, and the fix the hold delayed would never start.
+    for (const episode of state.episodes) {
+      if (!isLapsedHold(episode, nowMs)) continue;
+      changed = true;
+      await this.evaluate(episode, config, nowMs);
     }
     if (changed) await this.save();
   }
@@ -757,7 +776,7 @@ export class RemediationLadder implements RemediationSink {
     await this.send(
       payload,
       condition.notify
-        ? { level: observation.level ?? "alert", dedupeKey: `remediation:${episode.key}` }
+        ? { level: observation.level ?? "alert", dedupeKey: remediationDedupeKey(episode) }
         : { level: "record" },
     );
   }
@@ -809,6 +828,47 @@ interface AgentEnd {
   cause: RemediationAgentEndCause;
   totalTokens: number | null;
   model: string | null;
+}
+
+/** The dedupe key rung 3 pushes under; the push preview asks about the same one. */
+function remediationDedupeKey(episode: LadderEpisode): string {
+  return `remediation:${episode.key}`;
+}
+
+/** When an episode's JEV hold ends: its deferral, capped at MAX_DEFER_MS after the triage. */
+function holdEndMs(episode: LadderEpisode): number {
+  const until = episode.jevDeferredUntil ? Date.parse(episode.jevDeferredUntil) : Number.NaN;
+  const triageAt = episode.jevTriage ? Date.parse(episode.jevTriage.at) : Number.NaN;
+  const ceiling = Number.isFinite(triageAt) ? triageAt + MAX_DEFER_MS : until;
+  const end = Math.min(until, ceiling);
+  return Number.isFinite(end) ? end : 0;
+}
+
+/** A JEV hold is on rung 2 until it ends, or until the observation's level rises past the triage's. */
+function isHeld(
+  episode: LadderEpisode,
+  observation: RemediationObservation,
+  nowMs: number,
+): boolean {
+  if (!episode.jevDeferredUntil || nowMs >= holdEndMs(episode)) return false;
+  const heldAt = readLevel(episode.jevTriage?.level) ?? "alert";
+  return levelRank(observation.level ?? "alert") <= levelRank(heldAt);
+}
+
+/** An open episode whose hold ran out before any agent started or anyone was told. */
+function isLapsedHold(episode: LadderEpisode, nowMs: number): boolean {
+  return (
+    episode.jevDeferredUntil !== undefined &&
+    !episode.closedAt &&
+    !episode.escalatedAt &&
+    !episode.agent &&
+    episode.lastAgentId === undefined &&
+    nowMs >= holdEndMs(episode)
+  );
+}
+
+function readLevel(value: string | undefined): NotifyLevel | null {
+  return value === "notice" || value === "alert" || value === "urgent" ? value : null;
 }
 
 /** Joins an episode's measurement lines: its key and when it opened. */

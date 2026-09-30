@@ -1000,12 +1000,13 @@ function createRemediationLadder(input: {
       }),
     },
     getPushNotificationSender: () => input.wsServer.getPushNotificationSender(),
-    // The daemon's own sender carries the notify policy; an injected test sender has none, and
-    // then the policy's default floor applies.
-    readNotifyPostFloor: () => {
+    // The daemon's own sender carries the notify policy. An injected test sender has none, and
+    // then no push counts as reaching a phone, so JEV never skips a fixer (feature 3a).
+    previewPush: (meta) => {
       const sender: PushNotificationSender & Partial<Pick<PushNotifications, "policy">> =
         input.wsServer.getPushNotificationSender();
-      return sender.policy?.getStatus().settings.minPostLevel ?? "notice";
+      if (!sender.policy) throw new Error("the push sender has no notify policy");
+      return sender.policy.previewDelivery(meta);
     },
     serverId: input.serverId,
     readDaemonConfig: () => ({ remediation: input.daemonConfigStore.get().remediation }),
