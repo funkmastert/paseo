@@ -1260,6 +1260,7 @@ export const ptBR: TranslationResources = {
         title: "Renomear workspace",
         submit: "Renomear",
         invalidBranchName: "Nome de branch inválido",
+        autoPlaceholder: "Nomear automaticamente",
       },
       toasts: {
         workspacePathUnavailable: "Caminho do workspace indisponível",

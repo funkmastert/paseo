@@ -1,17 +1,10 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { useMutation } from "@tanstack/react-query";
 import { AdaptiveRenameModal } from "@/components/rename-modal";
-import { getHostRuntimeStore } from "@/runtime/host-runtime";
+import { useWorkspaceRename, type RenamableWorkspace } from "@/hooks/use-workspace-rename";
 
-// The subset of a workspace the rename dialog needs. Narrower than SidebarWorkspaceEntry so the
-// command center can build one from the active route selection without a sidebar row.
-export interface RenamableWorkspace {
-  serverId: string;
-  workspaceId: string;
-  name: string;
-  title?: string | null;
-}
+// Re-exported for callers that imported it from here before it moved next to the shared mutation.
+export type { RenamableWorkspace };
 
 export interface WorkspaceRenameModalProps {
   visible: boolean;
@@ -36,23 +29,13 @@ export function WorkspaceRenameModal({
   testID,
 }: WorkspaceRenameModalProps) {
   const { t } = useTranslation();
-
-  const renameMutation = useMutation({
-    mutationFn: async (title: string) => {
-      const client = getHostRuntimeStore().getClient(workspace.serverId);
-      if (!client) {
-        throw new Error(t("sidebar.workspace.toasts.hostDisconnected"));
-      }
-      await client.setWorkspaceTitle(workspace.workspaceId, title.length === 0 ? null : title);
-    },
-  });
-  const renameAsync = renameMutation.mutateAsync;
+  const { rename } = useWorkspaceRename(workspace);
 
   const handleSubmit = useCallback(
     async (value: string) => {
-      await renameAsync(value.trim());
+      await rename(value);
     },
-    [renameAsync],
+    [rename],
   );
 
   return (

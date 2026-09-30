@@ -1235,6 +1235,7 @@ export const ar: TranslationResources = {
         title: "إعادة تسمية مساحة العمل",
         submit: "إعادة تسمية",
         invalidBranchName: "اسم الفرع غير صالح",
+        autoPlaceholder: "تسمية تلقائية",
       },
       toasts: {
         workspacePathUnavailable: "مسار Workspace غير متوفر",

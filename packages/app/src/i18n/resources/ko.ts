@@ -1242,6 +1242,7 @@ export const ko: TranslationResources = {
         title: "워크스페이스 이름 변경",
         submit: "이름 변경",
         invalidBranchName: "잘못된 브랜치 이름",
+        autoPlaceholder: "자동으로 이름 지정",
       },
       toasts: {
         workspacePathUnavailable: "워크스페이스 경로를 사용할 수 없습니다",

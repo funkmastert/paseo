@@ -1251,6 +1251,7 @@ export const ru: TranslationResources = {
         title: "Переименовать рабочее пространство",
         submit: "Переименовать",
         invalidBranchName: "Недопустимое имя ветки",
+        autoPlaceholder: "Называть автоматически",
       },
       toasts: {
         workspacePathUnavailable: "Путь к рабочему пространству недоступен",

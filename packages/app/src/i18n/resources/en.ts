@@ -1244,6 +1244,8 @@ export const en = {
         title: "Rename workspace",
         submit: "Rename",
         invalidBranchName: "Invalid branch name",
+        /** Inline edit's empty-value placeholder: clearing the name hands it back to Paseo. */
+        autoPlaceholder: "Name automatically",
       },
       toasts: {
         workspacePathUnavailable: "Workspace path not available",
