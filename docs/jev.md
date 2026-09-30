@@ -405,7 +405,9 @@ When a child create has no `paseo.task-class` label, the classifier asks JEV wha
 - `resolveRole` and `resolveTaskClass` (`role-resolve.ts`) take the hint as a tier.
 - New sources: `RoleSource` `"classified-jev"`, `TaskClassSource` `"jev"`.
 
-`server/jev-availability.ts` polls `jev.status` every 60 seconds, behind the `paseo.jev` guard and a 5-second bound, for whether the hint can send, `shadow`, `applyHard` and `applyRole`. A failed poll forgets the last answer, so a stale "on" never outlives the daemon that said it; until a poll answers, both apply switches read off. When the daemon has no `paseo.jev`, or the last poll says the hint cannot send (no key, switched off, lane spent or its circuit open), the hook passes no hint at all: no call, and the decision line gains nothing.
+`server/jev-availability.ts` polls `jev.status` every 60 seconds, behind the `paseo.jev` guard and a 5-second bound, for whether the hint can send, `shadow`, `applyHard` and `applyRole`, and whether the daemon serves the agent tools. The first poll starts with the plugin but is not part of its warm-up, so a slow one delays no create. A failed poll forgets the last answer, so a stale "on" never outlives the daemon that said it. The hook asks only when the last poll answered and said the hint can send. Until a poll answers, after one fails, when the daemon has no `paseo.jev`, and when the last poll says the hint cannot send (no key, switched off, lane spent or its circuit open), the hook passes no hint at all: no call, and the decision line gains nothing.
+
+The `paseo.jev` guard alone is not enough. Every plugin start forks the child from the app on disk, so between staging a build and relaunching, the child has `paseo.jev` while the running daemon rejects every `jev.*` request with `unknown_schema` and logs a warning for each. The poller reads that code as a daemon without JEV and asks again only after 10 minutes.
 
 `planSpawnHint` decides, from the classifier alone, whether an answer could change the create. `fetchSpawnHint` returns `{ status: "not-needed", reason }` without a call unless:
 
@@ -418,7 +420,7 @@ When a child create has no `paseo.task-class` label, the classifier asks JEV wha
 
 - It checks `typeof paseo.jev?.decide === "function"`, tagged `COMPAT(jevPaseoApi)`; absent, it returns `{ status: "unavailable", reason: "no-jev-api" }`.
 - It sends `deadlineMs: 1500`, which the daemon clamps to `spawnHint.timeoutMs`, passes `timeout: 1750` to the RPC, and races its own 2,000 ms timer (`plugin-timeout`).
-- An answer missing a question it asked, or of the wrong type, is `failed: contract`.
+- An answer missing a question it asked, or of the wrong type, is `failed: contract`. So is one whose `callId` is not a string of 1–200 characters, and it keeps no call id: the id becomes a label, and a label that is not a string makes the daemon refuse the create.
 - It wraps everything and maps any error to `{ status: "unavailable", reason: "error" }`. The hook also wraps the await, so the worst case adds 2 seconds to a create and fails none. The role hook's total stays under the plugin's 30-second budget (`packages/server/src/server/plugins/runtime.ts:33`): the warm-up and the refresh are each capped at 5 s (`index.server.ts`), and the hint runs alongside the refresh.
 
 `jevHint` is an input, like pool health, so the decision stays replayable from its log line. The `role-model-policy.explain` RPC and the `agent_model_policy` tool never ask; a preview must not spend. When the hint is live (not shadow) and a create would ask, they pass `{ status: "decided-at-create" }` and the task-class reason says the class is decided at create. In shadow mode they say nothing, since the create does what they show.
@@ -492,7 +494,7 @@ A JEV `standard` answer changes nothing: it never lifts a task off the mechanica
 
 Role, for a child at tiers 3–4 only, and only with `spawnHint.applyRole`: JEV's `role` at confidence ≥ 0.70 and not `other` replaces the keyword tier. Off, it is logged as `wouldBe`. A role can move cost up (`advisor`'s standard pool is Opus 5.5), which is why it waits for the shadow numbers.
 
-**Tools (D2).** `toolProfileIsEvidenceBased` (`classifier.ts:426-431`) returns `true` for tiers 3–4 whenever `policy.enforceToolsOnClassifiedRoles` is true. A `classified-jev` role returns `false` before that check, whatever the flag says. JEV can change the model a child runs; it can never take a tool away.
+**Tools (D2).** A role JEV names picks the model only. `classifyAgent` decides the tool profile and the role's MCP servers from the role resolved without JEV, under the keyword tier's own rule: `toolProfileIsEvidenceBased` returns `true` for tiers 3–4 whenever `policy.enforceToolsOnClassifiedRoles` is true. So JEV changes a child's tools in neither direction: it cannot take a tool away, and it cannot lift a profile the operator's flag enforces on a keyword guess, including when it names the same role the keywords did.
 
 Thinking follows the class through `policy.thinking.byTaskClass` (`classifier.ts:1027`), as it does now (D4).
 
@@ -501,9 +503,9 @@ Hub-triggered creates carry untrusted text. v1 never raises a class, so JEV cann
 ### Labels and the log
 
 - `paseo.task-class-source`: the `TaskClassSource` value, `declared`, `jev`, `classified` or `default`. Written with `paseo.jev-call` on a create JEV answered or shadowed, and on no other create, so an ordinary create still passes through the role hook unchanged.
-- `paseo.jev-call`: the `callId`, so `jev.decisions.list` can attach the decision to the new agent.
-- `paseo.jev-tools`: the D8 arm, `on` or `control`, for a create eligible for the agent tools ([Which agents get them](#which-agents-get-them)). No agent id exists before a create, so the arm is a `Math.random()` draw against `assignShare` made in the hook and passed to the classifier as data, not a hash of the agent's id. A create that already carries the label keeps it, so a handoff successor keeps its predecessor's tools and prompt cache. The scope check is bounded at 2 s and fails closed: unanswered is no tools.
-- The `classifier-decision` line (`decision-log.ts`) gains `jev: { status, callId?, reason?, taskClass?: { choice, confidence }, reasoning?: { score, confidence }, role?: { choice, confidence }, applied, wouldBe? }` whenever the hook passed a hint, and `jevTools` (the arm, or null when not eligible) whenever the tools were evaluated. `wouldBe` is on every answer, applied or shadowed: `{ taskClass, role?, model, move }`, the class, the role (when asked) and the model the create would run with every answer past its floor applied, and `move`, `down`, `up` or `none` against the class resolved without JEV.
+- `paseo.jev-call`: the `callId`, so `jev.decisions.list` can attach the decision to the new agent. A call that failed after sending (`failed: contract`, a timeout) gets no label; the ledger alone prices it.
+- `paseo.jev-tools`: the D8 arm, `on` or `control`, for a create eligible for the agent tools ([Which agents get them](#which-agents-get-them)). No create is labelled until the daemon serves the tools (`status.agentTools.served`), so no agent enters an arm with nothing behind it and gains seven tools mid-life, a cache break, when they ship. No agent id exists before a create, so the arm is a `Math.random()` draw against `assignShare` made in the hook and passed to the classifier as data. The hook owns the label whenever it evaluated the arm: it writes the drawn arm over any value the caller sent, and removes a caller's value from an ineligible create, so no caller picks its own arm. Nothing that carries an agent's labels forward (failover, resume, reload) runs the create hook, and a handoff agent is a new conversation with no cache to keep. The scope check is bounded at 2 s and fails closed: unanswered is no tools.
+- The `classifier-decision` line (`decision-log.ts`) gains `jev: { status, callId?, reason?, taskClass?: { choice, confidence }, reasoning?: { score, confidence }, role?: { choice, confidence }, applied, wouldBe? }` whenever the hook passed a hint, and `jevTools` (the arm the agent carries, read off its labels, or null when it carries none) whenever the arm was evaluated. `wouldBe` is on every answer, applied or shadowed: `{ taskClass, role?, model, move }`, the class, the role (when asked) and the model the create would run with every answer past its floor applied, and `move`, `down`, `up` or `none` against the class resolved without JEV.
 
 Labels never reach the Claude prompt (no `labels` in `providers/claude/agent.ts`), so they are cache-neutral.
 
@@ -520,11 +522,11 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 ### Tests and verification
 
-- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` never lifting the mechanical seed; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent or the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer failing `contract`; shadow logs `wouldBe` and changes nothing; the preview.
-- `classifier.test.ts`: a `classified-jev` role withholds tools with `enforceToolsOnClassifiedRoles` both off and on; `classified-jev` and the `jev` source reach the decision and the reasons; a non-answer is today's decision; the tools' arm and eligibility.
-- `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; an existing `paseo.jev-tools` is kept.
-- `jev-availability.test.ts`: reading a status, forgetting it on a failed poll, and the scope check failing closed.
-- `index.server.test.ts`: through both hooks, live, shadow, a daemon without JEV, a rejected call, and a root create.
+- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` never lifting the mechanical seed; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview.
+- `classifier.test.ts`: a `classified-jev` role leaves tools and MCP servers as the role resolved without JEV gets them, with `enforceToolsOnClassifiedRoles` both off and on, and never cancels the flag's enforcement of a keyword guess; `classified-jev` and the `jev` source reach the decision and the reasons; a non-answer is today's decision; the tools' arm and eligibility.
+- `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; the drawn arm replaces a caller's, an ineligible create loses a caller's, and an unevaluated arm leaves the labels alone.
+- `jev-availability.test.ts`: reading a status, forgetting it on a failed poll, the 10-minute pause on `unknown_schema`, no arm until the daemon serves the tools, and the scope check failing closed.
+- `index.server.test.ts`: through both hooks, live, shadow, a daemon without JEV, a daemon that rejects `jev.status` and a status that never answers (both byte-identical to no JEV, with no added latency), a rejected call, a root create, and the `paseo.jev-tools` gate.
 - Verify: `cd plugins/claude-account-pool && npx vitest run server/jev-hint.test.ts server/jev-availability.test.ts --bail=1`.
 
 ## Feature 3a: remediation triage
@@ -680,8 +682,9 @@ Seven tools on the daemon's existing Paseo MCP server, for agents the classifier
 
 ### Which agents get them
 
-- The classifier decides, at create. The plugin polls `jev.status` every 60 seconds, behind the same `paseo.jev` guard and a timeout. An agent is eligible when `agents.jev.agentTools` is active, its decided tool profile does not deny `Read`, and `jev.scope.check` answers `ok` for its cwd and parent.
-- Of the eligible creates, the share `agentTools.assignShare` (0.5) chosen by a hash of the new agent's id gets `paseo.jev-tools: on`; the rest get `paseo.jev-tools: control`. Both arms carry the label, so D8's comparison is between agents the classifier treated alike.
+- The classifier decides, at create. The plugin polls `jev.status` every 60 seconds, behind the same `paseo.jev` guard and a timeout. An agent is eligible when the daemon serves the tools, `agents.jev.agentTools` is active, its decided tool profile does not deny `Read`, and `jev.scope.check` answers `ok` for its cwd and parent.
+- A daemon that registers the tools reports `agentTools.served: true` in `jev.status` (an optional field on `JevStatusSchema`). Until one does, the plugin labels nothing, so the arms start when the tools do.
+- Of the eligible creates, the share `agentTools.assignShare` (0.5) gets `paseo.jev-tools: on` by a `Math.random()` draw in the role hook at create; the rest get `paseo.jev-tools: control`. Both arms carry the label, so D8's comparison is between agents the classifier treated alike. The hook overwrites a label the caller sent, so the arm is always the draw.
 - The daemon lists the tools for exactly the agents carrying `on`, whatever JEV's state at launch. So a reload or resume lists the same tools and keeps the prompt cache. When JEV is off at call time the tool answers with an error naming why ("JEV is off on this host: no key. Use Read or Bash."), and the agent does what it would have done without it.
 - Agents created without the label never gain the tools.
 

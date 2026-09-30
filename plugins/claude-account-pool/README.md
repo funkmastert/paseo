@@ -841,12 +841,18 @@ plugin does:
   JEV; a JEV `standard` never lifts a task off the mechanical seed.
 - **Shadow first.** `agents.jev.spawnHint.shadow` defaults on: the answer is
   logged and applies nothing.
-- **Never fails or slows a create.** The call starts beside the per-create
-  policy re-read, is bounded at 2 s on the plugin's side whatever the RPC
-  does, and any outcome but an answer (no JEV on the daemon, no key,
-  excluded company code, a timeout, a malformed answer) is today's classifier.
-- **A JEV role never removes a tool** (`classified-jev`), even with
-  `enforceToolsOnClassifiedRoles` on.
+- **Never fails or slows a create.** It asks only after a `jev.status` poll
+  has answered and said the hint can send; before the first answer, after a
+  failed poll, and on a daemon that rejects `jev.status` (a plugin child
+  started from a newer app than the running daemon) it asks nothing and the
+  decision line is today's. The first poll is not part of the warm-up, so a
+  slow one delays no create. The call starts beside the per-create policy
+  re-read, is bounded at 2 s on the plugin's side whatever the RPC does, and
+  any outcome but an answer (no key, excluded company code, a timeout, a
+  malformed answer) is today's classifier.
+- **A JEV role picks the model only** (`classified-jev`). Tools and MCP
+  servers are what the role guessed without JEV gets, so JEV neither removes
+  a tool nor lifts what `enforceToolsOnClassifiedRoles` enforces.
 - **Where to see it.** The `classifier-decision` line gains `jev` (the
   answers, `applied`, and `wouldBe`: the class, role and model with every
   answer applied, and whether that is a move `down` or `up`). A create JEV
@@ -854,10 +860,13 @@ plugin does:
   settings preview and `agent_model_policy` never ask; while the hint is live
   they say "decided at create" for an unlabelled value.
 
-The same poll (`jev.status`, every 60 s) decides the JEV agent tools: an
-eligible create (the feature on, `Read` not denied, the company-code check
+The same poll (`jev.status`, every 60 s) decides the JEV agent tools, once
+the daemon serves them (`agentTools.served`, which the tools track sets):
+an eligible create (the feature on, `Read` not denied, the company-code check
 passed) is labelled `paseo.jev-tools` `on` or `control`, by a draw against
-`agentTools.assignShare`, and a create that already carries the label keeps it.
+`agentTools.assignShare`. The drawn arm replaces any value the caller sent,
+and an ineligible create loses one, so no caller picks its own arm. Until the
+daemon serves the tools, nothing is labelled.
 
 #### A guess may pick a model. It may never remove a tool.
 
