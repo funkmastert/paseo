@@ -360,6 +360,7 @@ export const ko: TranslationResources = {
       next: "다음",
       answerPlaceholder: "답변을 입력하세요...",
       otherPlaceholder: "기타...",
+      answerInConversation: "전체 대화에서 답변하세요",
     },
     todo: {
       title: "작업",

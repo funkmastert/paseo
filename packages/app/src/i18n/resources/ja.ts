@@ -362,6 +362,7 @@ export const ja: TranslationResources = {
       next: "次へ",
       answerPlaceholder: "回答を入力...",
       otherPlaceholder: "その他...",
+      answerInConversation: "会話全体で回答してください",
     },
     todo: {
       title: "タスク",

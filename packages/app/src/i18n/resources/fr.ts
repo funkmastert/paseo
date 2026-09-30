@@ -363,6 +363,7 @@ export const fr: TranslationResources = {
       next: "Suivant",
       answerPlaceholder: "Tapez votre réponse...",
       otherPlaceholder: "Autre...",
+      answerInConversation: "Répondez dans la conversation complète",
     },
     todo: {
       title: "Tâches",

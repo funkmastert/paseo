@@ -362,6 +362,7 @@ export const ptBR: TranslationResources = {
       next: "Próximo",
       answerPlaceholder: "Digite sua resposta...",
       otherPlaceholder: "Outro...",
+      answerInConversation: "Responda na conversa completa",
     },
     todo: {
       title: "Tarefas",

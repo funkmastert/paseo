@@ -14,6 +14,8 @@ export interface PaneContextValue {
   target: WorkspaceTabTarget;
   state?: JsonValue;
   fileNavigationRevision?: number;
+  /** A glance surface (the pinned grid): no composer, no forking, questions still answer in place. */
+  readOnly?: boolean;
   openTab: (target: WorkspaceTabTarget) => void;
   openPreferredTarget: (target: WorkspaceTabTarget, source: OpenInSidePaneSource) => void;
   openTargetToSide?: (target: WorkspaceTabTarget) => void;

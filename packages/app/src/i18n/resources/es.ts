@@ -362,6 +362,7 @@ export const es: TranslationResources = {
       next: "Siguiente",
       answerPlaceholder: "Escribe tu respuesta...",
       otherPlaceholder: "Otro...",
+      answerInConversation: "Responde en la conversación completa",
     },
     todo: {
       title: "Tareas",
