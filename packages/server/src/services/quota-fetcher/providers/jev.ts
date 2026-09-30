@@ -84,6 +84,7 @@ export interface JevUsageFetcherOptions {
 export class JevUsageFetcher implements ProviderUsageFetcher {
   readonly providerId = PROVIDER_ID;
   readonly displayName = DISPLAY_NAME;
+  readonly live = true;
 
   private readonly readStatus: () => JevStatus | null;
   private readonly readDecisions: () => readonly JevDecisionRecord[];

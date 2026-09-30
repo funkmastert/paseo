@@ -8,6 +8,12 @@ export type ProviderApiFetch = typeof fetch;
 export interface ProviderUsageFetcher {
   readonly providerId: string;
   readonly displayName: string;
+  /**
+   * Answers from the daemon's own memory, so it is read on every list rather than served from the
+   * service's cache: a cache that holds network reads for five minutes would show a JEV lane that
+   * just ran out as still spending.
+   */
+  readonly live?: boolean;
   /** Null means the provider reports nothing at all (for example, it is switched off in config). */
   fetchUsage(): Promise<ProviderUsage | null>;
 }

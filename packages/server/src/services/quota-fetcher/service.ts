@@ -64,7 +64,7 @@ export class ProviderUsageService {
       this.cached &&
       nowMs - this.cached.fetchedAtMs < this.cacheTtlMs
     ) {
-      return this.cached.result;
+      return this.withLiveRows(this.cached.result);
     }
 
     if (this.inFlight) {
@@ -80,6 +80,30 @@ export class ProviderUsageService {
         this.inFlight = null;
       }
     }
+  }
+
+  /** The cached rows with every live fetcher's row read again, in the same place. */
+  private async withLiveRows(result: ProviderUsageListResult): Promise<ProviderUsageListResult> {
+    const live = this.fetchers.filter((fetcher) => fetcher.live);
+    if (live.length === 0) return result;
+    const fresh = new Map<string, ProviderUsage | null>();
+    await Promise.all(
+      live.map(async (fetcher) => {
+        try {
+          fresh.set(fetcher.providerId, await fetcher.fetchUsage());
+        } catch (err) {
+          this.logger.debug({ err, providerId: fetcher.providerId }, "Live usage read failed");
+        }
+      }),
+    );
+    const providers = result.providers.flatMap((provider): ProviderUsage[] => {
+      if (!fresh.has(provider.providerId)) return [provider];
+      const row = fresh.get(provider.providerId);
+      fresh.delete(provider.providerId);
+      return row ? [row] : [];
+    });
+    for (const row of fresh.values()) if (row) providers.push(row);
+    return { ...result, providers };
   }
 
   private async fetchFreshUsage(nowMs: number): Promise<ProviderUsageListResult> {
