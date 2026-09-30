@@ -85,6 +85,9 @@ const PROGRESS_STROKE_MAPPINGS: Record<ContextMeterTone, (theme: Theme) => { str
 // view has no intrinsic width to shrink-wrap to, so the content states one that fits a phone.
 const TOOLTIP_MAX_WIDTH = 320;
 const TOOLTIP_SCREEN_MARGIN = 32;
+// TooltipContent's horizontal padding and border, both sides. Its maxWidth includes them, so a
+// frame only as wide as the content clipped the content's last 18px.
+const TOOLTIP_FRAME_X = 18;
 const TOOLTIP_MAX_HEIGHT_RATIO = 0.7;
 
 function getMeterGeometry(showPercentage: boolean, glyphSize?: number) {
@@ -241,7 +244,13 @@ export function ContextWindowMeter({
           ) : null}
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8} maxWidth={TOOLTIP_MAX_WIDTH} interactive>
+      <TooltipContent
+        side="top"
+        align="center"
+        offset={8}
+        maxWidth={tooltipWidth + TOOLTIP_FRAME_X}
+        interactive
+      >
         <FloatingScrollView style={tooltipScrollStyle} showsVerticalScrollIndicator={false}>
           <View style={[styles.tooltipContent, { width: tooltipWidth }]}>
             <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>

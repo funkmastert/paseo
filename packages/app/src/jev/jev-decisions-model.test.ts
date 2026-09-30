@@ -107,6 +107,6 @@ describe("formatJevCost", () => {
   });
 
   it("says a fake call cost nothing because it was fake", () => {
-    expect(formatJevCost(0, "fake")).toBe("$0 (fake backend)");
+    expect(formatJevCost(0, "fake")).toBe("$0 (fake)");
   });
 });

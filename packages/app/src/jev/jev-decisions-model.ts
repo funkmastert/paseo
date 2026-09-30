@@ -55,7 +55,7 @@ function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisio
 /** JEV calls cost fractions of a cent, so the figure keeps the digits that carry it. */
 export function formatJevCost(usd: number | null, provider: string | null): string | null {
   if (usd === null || !Number.isFinite(usd)) return null;
-  if (provider === "fake") return "$0 (fake backend)";
+  if (provider === "fake") return "$0 (fake)";
   if (usd === 0) return "$0";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   return `$${usd.toFixed(3)}`;

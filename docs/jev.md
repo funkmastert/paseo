@@ -1059,14 +1059,14 @@ JEV appears as one more account row in the budget strip's "other" section, the s
 - A daemon on `PASEO_JEV_BACKEND=fake` shows "Fake backend" as the plan, so its $0 is not read as free JEV.
 - App: `PROVIDER_VENDORS` gains `jev: "TypeSafe"`, so the row reads "TypeSafe (JEV)". There is no JEV icon; the row uses the generic glyph. It shows no worker chip: no agent runs on JEV. The strip shows `details` for JEV only (`STRIP_DETAIL_PROVIDERS` in `account-budget-strip-model.ts`); every other provider's details stay on its usage card. USD balances under ten cents keep up to four places, so a day of JEV does not read "$0.00".
 - On a phone the warnings stay in view and the feature lines fold behind "Show 8 more".
-- The row inherits the strip's 75-second poll and the service's 5-minute cache, and carries its read time like every row.
+- The row inherits the strip's 75-second poll but not the service's 5-minute cache: the fetcher is `live`, so `ProviderUsageService` reads it again on every list and serves only the network rows from the cache. With the cache, a lane that had just run out read as still spending for up to five minutes.
 
 ### Decisions for an agent
 
 The context window meter's popover (`components/context-window-meter.tsx`, mounted by the composer) gets a JEV section below the context breakdown: `JevDecisionsSection` in `packages/app/src/jev/`. It lists the agent's decisions from `jev.decisions.list`, newest first, the eight newest and a count of the rest. Each shows the feature, a tag, when, the cost, the question, and the verdict followed by the action: what code did, or in shadow what it would have done. Feature 14's away-reply notes and feature 15's Ask JEV questions about the agent show here like every other feature's.
 
 - The tag is `Shadow` (`Dry run` for feature 14) when the note was not applied and the host's `jev.status` has the feature in shadow, `Not applied` for a live feature whose code kept today's behaviour, and nothing when applied. The hook reads `jev.status` beside the list for this; if that read fails the list still shows and every unapplied note reads `Not applied`.
-- Cost is the ledger's per-call figure, to four places under a cent; the fake backend reads "$0 (fake backend)".
+- Cost is the ledger's per-call figure, to four places under a cent; the fake backend reads "$0 (fake)".
 - It follows `useAgentContextUsage`: gated on `server_info.features.jev`, fetched while the popover is open, polled every 15 seconds. An older host is never asked. With no decisions the section is absent.
 
 Decisions stay out of the timeline ([Decision store](#decision-store)), so no timeline item, client capability or COMPAT shim is added, and neither `session.ts` nor `agent-manager.ts` changes for the UI.
