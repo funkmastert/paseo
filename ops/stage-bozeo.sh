@@ -49,4 +49,5 @@ echo "STAGED $(stat -f %Sm -t '%H:%M' /Applications/Bozeo.app/Contents/Resources
 nice -n 10 "$HEAVY" npm run build:daemon-web-ui
 ~/bozeo-ops/public-web/publish.sh "$B/packages/server/dist/server/web-ui"
 echo "PUBLISHED"
-afplay /System/Library/Sounds/Glass.aiff || true
+# Chime + "Verification ready for <leader session>" (the fleet rule every agent follows).
+node ~/bozeo-ops/announce-verification.mjs || afplay /System/Library/Sounds/Glass.aiff || true
