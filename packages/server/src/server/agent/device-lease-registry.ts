@@ -117,6 +117,67 @@ export function evaluateDeviceOccupancy(input: {
   };
 }
 
+/**
+ * Whether the guaranteed floor for a platform is still unfilled — nothing running, and nothing
+ * pending either, since a lease waiting to become a device is about to fill the floor itself.
+ * "The FIRST running device on each platform is always allowed" (docs/device-leases.md); this is
+ * the check that decides whether a grant IS that first one.
+ */
+export function isPlatformFloorUnfilled(input: {
+  platform: DevicePlatform;
+  runningDevices: readonly RunningDevice[];
+  leases: readonly DeviceLease[];
+}): boolean {
+  return evaluateDeviceOccupancy(input).byPlatform[input.platform] === 0;
+}
+
+/**
+ * Case-insensitive whole-token match of `needle` inside `haystack`, so a UDID or AVD name found
+ * inside a longer sentence counts but a name that is merely a substring of a longer word does
+ * not (`pixel` must not match `pixel_7a`).
+ */
+function containsWholeToken(haystack: string, needle: string): boolean {
+  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^0-9A-Za-z_-])${escaped}([^0-9A-Za-z_-]|$)`, "i").test(haystack);
+}
+
+/**
+ * Picks the device a checkout or launch should bind to, out of what is already running and
+ * unclaimed. "Prefer, in order: the device the caller names; a device matched by name in the
+ * reason text, only if unambiguous; otherwise the longest-idle one nobody holds" — named-device
+ * matching against an explicit `device` input lives in the caller, since only it knows whether
+ * the name was a running device at all; this only does the reason-text and longest-idle legs.
+ */
+export function selectReusableDevice(input: {
+  platform: DevicePlatform;
+  runningDevices: readonly RunningDevice[];
+  leases: readonly DeviceLease[];
+  reservedDeviceIds: ReadonlySet<string>;
+  reason?: string;
+}): RunningDevice | undefined {
+  const held = new Set(
+    input.leases
+      .filter((lease) => lease.deviceId !== undefined)
+      .map((lease) => lease.deviceId as string),
+  );
+  const candidates = input.runningDevices.filter(
+    (device) =>
+      device.platform === input.platform &&
+      !held.has(device.deviceId) &&
+      !input.reservedDeviceIds.has(device.deviceId),
+  );
+  if (candidates.length === 0) return undefined;
+
+  if (input.reason) {
+    const named = candidates.filter((device) =>
+      containsWholeToken(input.reason as string, device.deviceId),
+    );
+    if (named.length === 1) return named[0];
+  }
+
+  return candidates.slice().sort((a, b) => (b.uptimeSeconds ?? 0) - (a.uptimeSeconds ?? 0))[0];
+}
+
 export type DeviceSlotVerdict =
   | { available: true }
   | { available: false; scope: "total" | "platform"; occupancy: DeviceOccupancy };

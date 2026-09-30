@@ -3,7 +3,9 @@ import type { RunningDevice } from "./device-detection.js";
 import {
   evaluateDeviceOccupancy,
   evaluateDeviceSlot,
+  isPlatformFloorUnfilled,
   reconcileDeviceLeases,
+  selectReusableDevice,
   type DeviceLease,
 } from "./device-lease-registry.js";
 
@@ -232,5 +234,118 @@ describe("reconcileDeviceLeases", () => {
       { lease: expect.objectContaining({ id: "l1" }), reason: "expired" },
     ]);
     expect(result.unleasedDevices.map((entry) => entry.deviceId)).toEqual(["UDID-1"]);
+  });
+});
+
+describe("selectReusableDevice", () => {
+  const noneReserved = new Set<string>();
+
+  test("returns undefined when nothing of the platform is running", () => {
+    expect(
+      selectReusableDevice({
+        platform: "ios",
+        runningDevices: [device({ deviceId: "Pixel_7", platform: "android" })],
+        leases: [],
+        reservedDeviceIds: noneReserved,
+      }),
+    ).toBeUndefined();
+  });
+
+  test("never offers a device another lease already holds", () => {
+    const result = selectReusableDevice({
+      platform: "ios",
+      runningDevices: [device({ deviceId: "UDID-1" })],
+      leases: [lease({ id: "l1", agentId: "a1", deviceId: "UDID-1" })],
+      reservedDeviceIds: noneReserved,
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test("never offers a device reserved for Tyler", () => {
+    const result = selectReusableDevice({
+      platform: "ios",
+      runningDevices: [device({ deviceId: "UDID-1" })],
+      leases: [],
+      reservedDeviceIds: new Set(["UDID-1"]),
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test("prefers the device named in the reason text, when the match is unambiguous", () => {
+    const result = selectReusableDevice({
+      platform: "android",
+      runningDevices: [
+        device({ deviceId: "yonderly_pixel", platform: "android", uptimeSeconds: 100 }),
+        device({ deviceId: "other_avd", platform: "android", uptimeSeconds: 99_999 }),
+      ],
+      leases: [],
+      reservedDeviceIds: noneReserved,
+      reason: "continuing work on yonderly_pixel",
+    });
+
+    expect(result?.deviceId).toBe("yonderly_pixel");
+  });
+
+  test("ignores an ambiguous reason match and falls back to longest-idle", () => {
+    const result = selectReusableDevice({
+      platform: "android",
+      runningDevices: [
+        device({ deviceId: "pixel_a", platform: "android", uptimeSeconds: 100 }),
+        device({ deviceId: "pixel_b", platform: "android", uptimeSeconds: 99_999 }),
+      ],
+      leases: [],
+      reservedDeviceIds: noneReserved,
+      reason: "pixel device work",
+    });
+
+    expect(result?.deviceId).toBe("pixel_b");
+  });
+
+  test("otherwise picks the longest-idle unheld device", () => {
+    const result = selectReusableDevice({
+      platform: "ios",
+      runningDevices: [
+        device({ deviceId: "UDID-1", uptimeSeconds: 100 }),
+        device({ deviceId: "UDID-2", uptimeSeconds: 78_120 }),
+      ],
+      leases: [],
+      reservedDeviceIds: noneReserved,
+    });
+
+    expect(result?.deviceId).toBe("UDID-2");
+  });
+});
+
+describe("isPlatformFloorUnfilled", () => {
+  test("true when nothing of the platform is running or pending", () => {
+    expect(
+      isPlatformFloorUnfilled({
+        platform: "ios",
+        runningDevices: [device({ deviceId: "Pixel_7", platform: "android" })],
+        leases: [],
+      }),
+    ).toBe(true);
+  });
+
+  test("false once one device of the platform is running, held or not", () => {
+    expect(
+      isPlatformFloorUnfilled({
+        platform: "ios",
+        runningDevices: [device({ deviceId: "UDID-1" })],
+        leases: [],
+      }),
+    ).toBe(false);
+  });
+
+  test("false while a pending lease for the platform is waiting to become a device", () => {
+    expect(
+      isPlatformFloorUnfilled({
+        platform: "ios",
+        runningDevices: [],
+        leases: [lease({ id: "l1", agentId: "a1" })],
+      }),
+    ).toBe(false);
   });
 });
