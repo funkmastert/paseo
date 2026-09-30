@@ -559,7 +559,8 @@ describe("contribute (index.server)", () => {
         circuit: "closed",
         resetsAt: "2026-09-30T00:00:00.000Z",
       };
-      function jevStatus(shadow: boolean) {
+      /** `served`: the daemon carries the JEV agent tools (the tools track sets `agentTools.served`). */
+      function jevStatus(shadow: boolean, served = false) {
         return {
           available: true,
           reason: null,
@@ -569,7 +570,7 @@ describe("contribute (index.server)", () => {
           features: { spawnHint: { enabled: true, shadow }, agentTools: { enabled: true, shadow: false } },
           lanes: { control: LANE, agentTools: LANE, interactive: LANE },
           spawnHint: { applyHard: false, applyRole: false },
-          agentTools: { assignShare: 0.5 },
+          agentTools: { assignShare: 0.5, ...(served ? { served: true } : {}) },
           todayByFeature: {},
           last7Days: [],
         };
@@ -587,17 +588,44 @@ describe("contribute (index.server)", () => {
 
       function withJev(
         h: ReturnType<typeof harness>,
-        options: { shadow: boolean; decide: (...args: unknown[]) => Promise<unknown> },
+        options: {
+          shadow: boolean;
+          served?: boolean;
+          decide: (...args: unknown[]) => Promise<unknown>;
+          status?: (...args: unknown[]) => Promise<unknown>;
+        },
       ) {
         const decide = vi.fn(options.decide);
         const checkScope = vi.fn().mockResolvedValue("ok");
-        (h.live.paseo as unknown as { jev: unknown }).jev = {
-          decide,
-          status: vi.fn().mockResolvedValue(jevStatus(options.shadow)),
-          checkScope,
-        };
-        return { decide, checkScope };
+        const status = vi.fn(options.status ?? (async () => jevStatus(options.shadow, options.served)));
+        (h.live.paseo as unknown as { jev: unknown }).jev = { decide, status, checkScope };
+        return { decide, checkScope, status };
       }
+
+      /** Runs `creates` on a fresh plugin and returns every create and every decision line, verbatim. */
+      async function run(
+        creates: Record<string, unknown>[],
+        jev?: Omit<Parameters<typeof withJev>[1], "shadow"> & { shadow?: boolean },
+      ) {
+        const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+        const spies = jev ? withJev(h, { shadow: true, ...jev }) : undefined;
+        const created: unknown[] = [];
+        const elapsedMs: number[] = [];
+        for (const extra of creates) {
+          const started = Date.now();
+          created.push(await h.create("claude-sonnet-5", extra));
+          elapsedMs.push(Date.now() - started);
+        }
+        const logged = lines.mock.calls.map((call) => String(call[0])).filter((line) => line.startsWith("classifier-decision "));
+        lines.mockRestore();
+        h.done();
+        return { created, logged, elapsedMs, spies };
+      }
+
+      const unknownSchema = async () => {
+        throw Object.assign(new Error("Unknown request, try upgrading the daemon"), { code: "unknown_schema" });
+      };
 
       function answered(outcome: "answered" | "shadow") {
         return async () => ({
@@ -615,7 +643,7 @@ describe("contribute (index.server)", () => {
         const lines = vi.spyOn(console, "log").mockImplementation(() => {});
         const random = vi.spyOn(Math, "random").mockReturnValue(0.1);
         const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
-        const { decide, checkScope } = withJev(h, { shadow: false, decide: answered("answered") });
+        const { decide, checkScope } = withJev(h, { shadow: false, served: true, decide: answered("answered") });
 
         const created = await h.create("claude-sonnet-5", UNLABELLED_CHILD);
 
@@ -698,6 +726,53 @@ describe("contribute (index.server)", () => {
         expect(decisionLines(lines.mock.calls)[0]).toMatchObject({ jev: { status: "unavailable", reason: "error", applied: false } });
         lines.mockRestore();
         h.done();
+      });
+
+      it("a daemon that rejects jev.status (a plugin child newer than its daemon) is JEV absent: nothing asked, lines byte-identical", async () => {
+        const creates = [UNLABELLED_CHILD, { ...UNLABELLED_CHILD, labels: { "paseo.jev-tools": "on" } }, { initialPrompt: "Rename it." }];
+
+        const absent = await run(creates);
+        const mixed = await run(creates, { decide: answered("answered"), status: unknownSchema, served: true });
+
+        expect(mixed.spies?.decide).not.toHaveBeenCalled();
+        expect(mixed.spies?.checkScope).not.toHaveBeenCalled();
+        expect(mixed.logged).toEqual(absent.logged);
+        expect(JSON.stringify(mixed.created)).toBe(JSON.stringify(absent.created));
+        expect(mixed.logged.join("\n")).not.toContain('"jev');
+      });
+
+      it("a status poll that has not answered yet is JEV unavailable, and a slow one delays no create", async () => {
+        const creates = [UNLABELLED_CHILD, UNLABELLED_CHILD];
+
+        const absent = await run(creates);
+        const hanging = await run(creates, { decide: answered("answered"), status: () => new Promise(() => {}) });
+
+        expect(hanging.spies?.decide).not.toHaveBeenCalled();
+        expect(hanging.logged).toEqual(absent.logged);
+        // The warm-up's bound is 5 s and the hint's 2 s; a create that waited on either would show it.
+        expect(Math.max(...hanging.elapsedMs)).toBeLessThan(1_000);
+      });
+
+      describe("paseo.jev-tools", () => {
+        it("is not written while the daemon does not serve the JEV tools, though the feature is on", async () => {
+          const { created, logged, spies } = await run([UNLABELLED_CHILD], { decide: answered("shadow"), served: false });
+
+          expect((created[0] as { labels?: Record<string, string> }).labels?.["paseo.jev-tools"]).toBeUndefined();
+          expect(spies?.checkScope).not.toHaveBeenCalled();
+          expect(JSON.parse(logged[0].slice("classifier-decision ".length))).not.toHaveProperty("jevTools");
+        });
+
+        it("once served: the drawn arm replaces a caller's own, and the line records the label the agent keeps", async () => {
+          const random = vi.spyOn(Math, "random").mockReturnValue(0.9);
+          const { created, logged } = await run([{ ...UNLABELLED_CHILD, labels: { "paseo.jev-tools": "on" } }], {
+            decide: answered("shadow"),
+            served: true,
+          });
+          random.mockRestore();
+
+          expect((created[0] as { labels?: Record<string, string> }).labels?.["paseo.jev-tools"]).toBe("control");
+          expect(JSON.parse(logged[0].slice("classifier-decision ".length))).toMatchObject({ jevTools: "control" });
+        });
       });
 
       it("a root create never asks", async () => {

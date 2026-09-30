@@ -289,21 +289,23 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
   const implementation = child({ title: "retry loop", initialPrompt: "Implement the retry loop in the fetch helper." });
 
   for (const enforce of [false, true]) {
-    it(`a role JEV named withholds its tool profile with enforceToolsOnClassifiedRoles ${enforce ? "on" : "off"}`, () => {
+    it(`a role JEV named changes no tool, with enforceToolsOnClassifiedRoles ${enforce ? "on" : "off"}`, () => {
       const policy = { ...LIVE_POLICY, enforceToolsOnClassifiedRoles: enforce };
 
       const decision = classifyAgent({ ...implementation, jevHint: jevHint("reviewer") }, world({ policy }));
+      const without = classifyAgent(implementation, world({ policy }));
 
       expect(decision.role).toMatchObject({ source: "classified-jev", tier: 3, evidenceBased: false });
       expect(decision.role.role.id).toBe("reviewer");
+      // Tools and MCP servers are the keyword guess's (a worker); the model is the named role's.
+      expect(decision.tools).toEqual(without.tools);
+      expect(decision.mcp).toEqual(without.mcp);
       expect(decision.tools.deniedTools).toEqual([]);
-      expect(decision.tools.withheld?.profile.kind).toBe("read-only");
-      // The model is the named role's: that part of a guess is allowed.
       expect(decision.model.model).toBe("claude-sonnet-5");
     });
   }
 
-  it("the same flag on still enforces a keyword-guessed role, so the flag is what the JEV rule overrides", () => {
+  it("the same flag on still enforces a keyword-guessed role", () => {
     const policy = { ...LIVE_POLICY, enforceToolsOnClassifiedRoles: true };
 
     const decision = classifyAgent(child({ title: "review the output" }), world({ policy }));
@@ -311,6 +313,20 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
     expect(decision.role.source).toBe("classified-seed");
     expect(decision.tools.deniedTools).toContain("Write");
   });
+
+  for (const named of ["reviewer", "worker", "advisor"]) {
+    it(`a JEV role (${named}) never cancels the flag's enforcement of a keyword-guessed role`, () => {
+      const policy = { ...LIVE_POLICY, enforceToolsOnClassifiedRoles: true };
+      const review = child({ title: "review the output" });
+
+      const decision = classifyAgent({ ...review, jevHint: jevHint(named) }, world({ policy }));
+      const without = classifyAgent(review, world({ policy }));
+
+      expect(decision.role.role.id).toBe(named);
+      expect(decision.tools).toEqual(without.tools);
+      expect(decision.tools.deniedTools).toContain("Write");
+    });
+  }
 
   it("the JEV sources reach the decision and its reasons", () => {
     const decision = classifyAgent(

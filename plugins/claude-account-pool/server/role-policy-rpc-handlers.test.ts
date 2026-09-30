@@ -917,7 +917,7 @@ describe("explain — the thinking decision", () => {
         policyCache: fakePolicyCache(policy),
         catalogCache: fakeCatalogCache(catalog, thinking),
         poolCache,
-        jevAvailability: { get: () => ({ spawnHint: live, agentTools: { active: false, assignShare: 0 } }) },
+        jevAvailability: { get: () => ({ spawnHint: live, agentTools: { active: false, served: false, assignShare: 0 } }) },
       }),
     );
 

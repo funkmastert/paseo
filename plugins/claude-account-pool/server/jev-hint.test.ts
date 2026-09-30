@@ -337,6 +337,35 @@ describe("failing open", () => {
     expect(decide).not.toHaveBeenCalled();
   });
 
+  it("makes no call before a status poll has answered, or after one failed", async () => {
+    const { paseo, decide } = stubPaseo(async () => payload());
+
+    const hint = await fetchSpawnHint({ input: child(), cwd: "/w", world: world(), availability: undefined, paseo });
+
+    expect(hint).toEqual({ status: "unavailable", reason: "no-status" });
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it("reads an answer whose call id is not a short string as a broken contract, with no call id", async () => {
+    const mechanical = answers({ taskClass: ["mechanical", 0.9], reasoning: [0.2], role: ["worker", 0.9] });
+    for (const callId of [123, null, "", "x".repeat(201)]) {
+      const hint = await hintFor(child(), { callId: callId as string, answers: mechanical });
+
+      expect(hint).toEqual({ status: "failed", reason: "contract" });
+      expect(decideWith(child(), hint).jev).toEqual({ status: "failed", reason: "contract", applied: false });
+    }
+    const failed = await hintFor(child(), { outcome: "failed", reason: "timeout", callId: 7 as unknown as string });
+    expect(failed).toEqual({ status: "failed", reason: "timeout" });
+  });
+
+  it("reads a response that is not an object as a broken contract", async () => {
+    const { paseo } = stubPaseo(async () => null as unknown as DecidePayload);
+
+    const hint = await fetchSpawnHint({ input: child(), cwd: "/w", world: world(), availability: LIVE, paseo });
+
+    expect(hint).toEqual({ status: "failed", reason: "contract" });
+  });
+
   it("is unavailable when the RPC rejects", async () => {
     const { paseo } = stubPaseo(async () => {
       throw new Error("socket closed");

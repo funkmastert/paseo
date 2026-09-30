@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
 import {
   JEV_SCOPE_CHECK_TIMEOUT_MS,
+  UNKNOWN_RPC_BACKOFF_MS,
   createJevAvailability,
   jevToolsWorldFor,
   snapshotOf,
@@ -17,7 +18,10 @@ const LANE = {
   resetsAt: "2026-09-30T00:00:00.000Z",
 };
 
-/** A status as `jev.status` sends it: key present, every feature on, spawn hint in shadow. */
+/** `agentTools.served`, which only a daemon carrying the JEV agent tools sends. Not in the foundation's schema. */
+const SERVED = { assignShare: 0.5, served: true } as JevStatus["agentTools"];
+
+/** A status as `jev.status` sends it: key present, every feature on and the tools served, spawn hint in shadow. */
 function status(overrides: Partial<JevStatus> = {}): JevStatus {
   return {
     available: true,
@@ -32,7 +36,7 @@ function status(overrides: Partial<JevStatus> = {}): JevStatus {
     },
     lanes: { control: LANE, agentTools: LANE, interactive: LANE },
     spawnHint: { applyHard: false, applyRole: false },
-    agentTools: { assignShare: 0.5 },
+    agentTools: SERVED,
     todayByFeature: {},
     last7Days: [],
     ...overrides,
@@ -41,7 +45,7 @@ function status(overrides: Partial<JevStatus> = {}): JevStatus {
 
 const ON: JevAvailabilitySnapshot = {
   spawnHint: { active: true, reason: null, shadow: true, applyHard: false, applyRole: false },
-  agentTools: { active: true, assignShare: 0.5 },
+  agentTools: { active: true, served: true, assignShare: 0.5 },
 };
 
 afterEach(() => {
@@ -95,6 +99,43 @@ describe("createJevAvailability", () => {
     expect(availability.get()).toBeUndefined();
   });
 
+  it("reads a daemon without the JEV tools as not serving them, whatever agentTools.enabled says", () => {
+    expect(snapshotOf(status({ agentTools: { assignShare: 0.5 } })).agentTools).toEqual({
+      active: true,
+      served: false,
+      assignShare: 0.5,
+    });
+  });
+
+  it("stops asking for 10 minutes once the daemon does not know jev.status", async () => {
+    let nowMs = 1_000_000;
+    const statusFn = vi.fn(async (): Promise<JevStatus> => {
+      throw Object.assign(new Error("Unknown request, try upgrading the daemon"), { code: "unknown_schema" });
+    });
+    const availability = createJevAvailability({ jev: { status: statusFn } } as unknown as JevAvailabilityPaseo, {
+      ...noInterval,
+      now: () => nowMs,
+    });
+
+    expect(await availability.refresh()).toBeUndefined();
+    nowMs += UNKNOWN_RPC_BACKOFF_MS - 1;
+    expect(await availability.refresh()).toBeUndefined();
+    expect(statusFn).toHaveBeenCalledTimes(1);
+
+    nowMs += 1;
+    statusFn.mockResolvedValueOnce(status());
+    expect(await availability.refresh()).toEqual(ON);
+    expect(statusFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps polling every interval after an ordinary failure", async () => {
+    const statusFn = vi.fn().mockRejectedValueOnce(new Error("socket closed")).mockResolvedValueOnce(status());
+    const availability = createJevAvailability({ jev: { status: statusFn } } as unknown as JevAvailabilityPaseo, noInterval);
+
+    expect(await availability.refresh()).toBeUndefined();
+    expect(await availability.refresh()).toEqual(ON);
+  });
+
   it("reads the status, and forgets it when a poll fails", async () => {
     const statusFn = vi.fn().mockResolvedValueOnce(status()).mockRejectedValueOnce(new Error("closed"));
     const availability = createJevAvailability({ jev: { status: statusFn } } as unknown as JevAvailabilityPaseo, noInterval);
@@ -120,9 +161,17 @@ describe("jevToolsWorldFor", () => {
 
   it("asks nothing while the tools are off", async () => {
     const { paseo, checkScope } = paseoWith(async () => "ok");
-    const off = { ...ON, agentTools: { active: false, assignShare: 0.5 } };
+    const off = { ...ON, agentTools: { active: false, served: true, assignShare: 0.5 } };
 
     expect(await jevToolsWorldFor({ availability: off, paseo, cwd: "/w", callerAgentId: "p", draw: 0.3 })).toBeUndefined();
+    expect(checkScope).not.toHaveBeenCalled();
+  });
+
+  it("gives no arm until the daemon serves the tools, so no agent is labelled with nothing behind it", async () => {
+    const { paseo, checkScope } = paseoWith(async () => "ok");
+    const unserved = { ...ON, agentTools: { active: true, served: false, assignShare: 0.5 } };
+
+    expect(await jevToolsWorldFor({ availability: unserved, paseo, cwd: "/w", callerAgentId: "p", draw: 0 })).toBeUndefined();
     expect(checkScope).not.toHaveBeenCalled();
   });
 

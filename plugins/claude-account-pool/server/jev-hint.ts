@@ -348,7 +348,10 @@ export interface FetchSpawnHintOptions {
   cwd: string | undefined;
   /** The cached world; the check can start before the per-create policy refresh finishes. */
   world: ClassifierWorld;
-  /** Undefined before the first successful `jev.status` poll, or on a daemon without JEV. */
+  /**
+   * Undefined before the first successful `jev.status` poll, after one fails,
+   * or on a daemon without JEV. Undefined asks nothing.
+   */
   availability: SpawnHintAvailability | undefined;
   paseo: SpawnHintPaseo;
   /** Tests only. */
@@ -356,6 +359,13 @@ export interface FetchSpawnHintOptions {
 }
 
 const TIMED_OUT = Symbol("timed-out");
+
+/** The daemon's call ids are short opaque strings. */
+const MAX_CALL_ID_CHARS = 200;
+
+function readCallId(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_CALL_ID_CHARS ? value : undefined;
+}
 
 async function withinBound<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -388,8 +398,10 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
     if (typeof jev?.decide !== "function") {
       return { status: "unavailable", reason: "no-jev-api" };
     }
-    if (availability && !availability.active) {
-      return { status: "unavailable", reason: availability.reason ?? "inactive" };
+    // Only a poll that answered and said the hint can send lets a create ask. No answer yet, a
+    // failed poll, or a daemon that rejects `jev.status` is JEV unavailable, and asks nothing.
+    if (!availability?.active) {
+      return { status: "unavailable", reason: availability?.reason ?? "no-status" };
     }
     if (!options.cwd) {
       return { status: "unavailable", reason: "no-cwd" };
@@ -412,24 +424,35 @@ export async function fetchSpawnHint(options: FetchSpawnHintOptions): Promise<Sp
     if (response === TIMED_OUT) {
       return { status: "unavailable", reason: "plugin-timeout" };
     }
+    if (!isRecord(response)) {
+      return { status: "failed", reason: "contract" };
+    }
+    // The call id becomes a label, and a label that is not a string makes the daemon refuse the
+    // create. Anything else is a broken contract, read as no answer.
+    const callId = readCallId(response.callId);
     if (response.outcome === "answered" || response.outcome === "shadow") {
-      const answers = readSpawnHintAnswers(response.answers, plan);
-      if (!answers) {
-        return { status: "failed", reason: "contract", callId: response.callId };
+      const answers = callId === undefined ? null : readSpawnHintAnswers(response.answers, plan);
+      if (callId === undefined || !answers) {
+        return { status: "failed", reason: "contract", ...(callId !== undefined ? { callId } : {}) };
       }
       return {
         status: response.outcome,
-        callId: response.callId,
+        callId,
         answers,
         proposal: proposeFromAnswers(answers, world.policy),
-        applyHard: availability?.applyHard ?? false,
-        applyRole: availability?.applyRole ?? false,
+        applyHard: availability.applyHard,
+        applyRole: availability.applyRole,
       };
     }
     return {
       status: response.outcome === "unavailable" ? "unavailable" : "failed",
-      reason: response.reason ?? response.outcome,
-      callId: response.callId,
+      reason:
+        typeof response.reason === "string"
+          ? response.reason
+          : typeof response.outcome === "string"
+            ? response.outcome
+            : "contract",
+      ...(callId !== undefined ? { callId } : {}),
     };
   } catch {
     return { status: "unavailable", reason: "error" };

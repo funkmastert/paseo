@@ -552,7 +552,7 @@ function describeRole(decision: Omit<RoleDecision, "reason">, input: ClassifierI
     case "classified-seed":
       return `${name}, guessed from the title/prompt by a built-in seed keyword. A guess picks a model but never removes a tool.${ignored}`;
     case "classified-jev":
-      return `${name}, guessed from the title/prompt by JEV's spawn hint. A guess picks a model but never removes a tool.${ignored}`;
+      return `${name}, guessed from the title/prompt by JEV's spawn hint. It picks the model only: tools and MCP servers are what the role guessed without JEV gets.${ignored}`;
     case "default":
       return decision.tier === 3
         ? `${name}, the default: the title/prompt matched no role vocabulary and no seed keyword.${ignored}`
@@ -1325,6 +1325,23 @@ function decideJevTools(world: ClassifierWorld, tools: ToolDecision): JevToolsDe
     : { arm: "control", reason: "JEV tools withheld: eligible, and drawn into the control arm, which measures them." };
 }
 
+/** A child's role decision from its resolution. */
+function childRoleDecision(
+  resolution: ReturnType<typeof resolveRole>,
+  input: ClassifierInput,
+  policy: RoleModelPolicy,
+): RoleDecision {
+  const source = roleSourceFor(resolution.tier, resolution.match);
+  const partial = {
+    role: resolution.role,
+    source,
+    tier: resolution.tier,
+    evidenceBased: toolProfileIsEvidenceBased(resolution.tier, source, policy),
+    ...(resolution.unknownDeclaredValue !== undefined ? { unknownDeclaredValue: resolution.unknownDeclaredValue } : {}),
+  };
+  return { ...partial, reason: describeRole(partial, input) };
+}
+
 /**
  * Classify one `agent.create`. The only entry point; see the file header for
  * the properties it guarantees.
@@ -1348,23 +1365,20 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   const asChild = hasCaller || placesRootAsChild(world.policy, input.labels);
 
   let roleDecision: RoleDecision;
+  // The role whose tool profile and MCP servers the agent gets. A role JEV named picks the model
+  // only; tools and servers stay what the role resolved without JEV gets, so JEV neither removes
+  // a tool (D2) nor cancels an operator's `enforceToolsOnClassifiedRoles`.
+  let jevlessRole: RoleDecision | undefined;
   if (hasCaller) {
     const resolution = resolveRole(
       world.policy,
       textInput,
       hint && proposedRole !== undefined ? { roleId: proposedRole, apply: live && hint.applyRole } : undefined,
     );
-    const source = roleSourceFor(resolution.tier, resolution.match);
-    const partial = {
-      role: resolution.role,
-      source,
-      tier: resolution.tier,
-      evidenceBased: toolProfileIsEvidenceBased(resolution.tier, source, world.policy),
-      ...(resolution.unknownDeclaredValue !== undefined
-        ? { unknownDeclaredValue: resolution.unknownDeclaredValue }
-        : {}),
-    };
-    roleDecision = { ...partial, reason: describeRole(partial, input) };
+    roleDecision = childRoleDecision(resolution, input, world.policy);
+    if (resolution.match === "jev") {
+      jevlessRole = childRoleDecision(resolveRole(world.policy, textInput), input, world.policy);
+    }
   } else if (declaredRootRole) {
     const partial = {
       role: declaredRootRole.role,
@@ -1382,6 +1396,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     };
     roleDecision = { ...partial, reason: describeRole(partial, input) };
   }
+  const toolRole = jevlessRole ?? roleDecision;
 
   // Orthogonal to the role, and resolved for every create including a root
   // one: a role picks WHO runs the work, a task class picks HOW MUCH MODEL
@@ -1407,14 +1422,14 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
   };
 
   const model = decideModel(input, world, roleDecision.role, taskClass.taskClass);
-  const tools = decideTools(world, roleDecision, hasCaller);
+  const tools = decideTools(world, toolRole, hasCaller);
   const account = decideAccount(input, world, model, asChild, hasCaller);
   const thinking = decideThinking(input, world, model, taskClass.taskClass, roleDecision, asChild);
   const outputStyle = decideOutputStyle(input, world, model, hasCaller);
   const mcp = decideMcp(
     { hasCaller, labels: input.labels, title: input.title, initialPrompt: input.initialPrompt },
     world.mcpGateway,
-    roleDecision.role,
+    toolRole.role,
   );
   const jevTools = decideJevTools(world, tools);
 

@@ -620,9 +620,16 @@ function applyMcpDecision(
  *
  * `paseo.task-class-source` and `paseo.jev-call` go on a create JEV answered
  * or shadowed, so `jev.decisions.list` can attach the decision and say
- * whether it applied. `paseo.jev-tools` goes on a create eligible for the JEV
- * agent tools, naming its D8 arm; a create that already carries one keeps it,
- * so a handoff successor keeps its predecessor's tools and prompt cache.
+ * whether it applied.
+ *
+ * `paseo.jev-tools` is this hook's alone whenever the arm was evaluated: the
+ * drawn arm on an eligible create, and no label on an ineligible one, whatever
+ * the caller sent. A caller cannot pick its own D8 arm, and the label always
+ * matches the arm the decision line records. No path that carries an agent's
+ * labels forward (failover, resume, reload) runs this hook, and a fresh
+ * handoff agent is a new conversation with no cache to keep. When the arm
+ * was not evaluated (the daemon serves no JEV tools) the labels are left
+ * alone.
  */
 function applyJevLabels(
   request: PluginBeforeRequests["agent.create"],
@@ -635,18 +642,20 @@ function applyJevLabels(
   const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const extra: Record<string, string> = {};
   const jev = decision.jev;
-  if ((jev?.status === "answered" || jev?.status === "shadow") && jev.callId !== undefined) {
+  if ((jev?.status === "answered" || jev?.status === "shadow") && typeof jev.callId === "string") {
     extra[TASK_CLASS_SOURCE_LABEL] = decision.taskClass.source;
     extra[JEV_CALL_LABEL] = jev.callId;
   }
   const arm = decision.jevTools?.arm;
-  if (arm && base.labels?.[JEV_TOOLS_LABEL] === undefined) {
+  if (arm) {
     extra[JEV_TOOLS_LABEL] = arm;
   }
-  if (Object.keys(extra).length === 0) {
+  const dropCallerArm = decision.jevTools !== undefined && !arm && base.labels?.[JEV_TOOLS_LABEL] !== undefined;
+  if (Object.keys(extra).length === 0 && !dropCallerArm) {
     return routed;
   }
-  return { ...base, labels: { ...base.labels, ...extra } };
+  const { [JEV_TOOLS_LABEL]: _callerArm, ...kept } = base.labels ?? {};
+  return { ...base, labels: { ...(dropCallerArm ? kept : base.labels), ...extra } };
 }
 
 /** The classifier's input for a create, read structurally off the request. */

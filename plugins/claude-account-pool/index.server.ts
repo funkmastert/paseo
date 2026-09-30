@@ -105,7 +105,8 @@ export default function contribute(server: PluginServerContext) {
     catalogCache = createModelCatalogCache(paseo, () => catalogFamilies(startedPolicyCache.get()));
     recentAgentTypes = createRecentAgentTypes();
     parentProfiles = createParentToolProfiles(paseo);
-    // Polls `jev.status` every 60 s. On a daemon without JEV it stays empty and nothing JEV runs.
+    // Polls `jev.status` every 60 s. Until a poll answers, and on a daemon without JEV, it stays
+    // empty and nothing JEV runs.
     jevAvailability = createJevAvailability(paseo);
     const startedJevAvailability = jevAvailability;
 
@@ -278,8 +279,10 @@ export default function contribute(server: PluginServerContext) {
           startedUsagePoller.pollOnce().catch(() => undefined),
           // Before its first read every child keeps every MCP server.
           startedMcpGatewayCache.forceRefresh().catch(() => undefined),
-          startedJevAvailability.refresh().catch(() => undefined),
         ]).then(() => undefined);
+        // Not part of the warm-up: a slow first `jev.status` must not delay a create. A create
+        // before it answers runs as if JEV were absent.
+        void startedJevAvailability.refresh().catch(() => undefined);
         const timedOut = new Promise<void>((resolveTimeout) => {
           const timer = setTimeout(resolveTimeout, STARTUP_WARM_TIMEOUT_MS);
           // Never the reason the process stays alive.
@@ -320,8 +323,10 @@ export default function contribute(server: PluginServerContext) {
    * never throws; this wrapper catches anyway, and anything missing is
    * today's decision.
    *
-   * No hint at all when the daemon has no JEV or the last status said the
-   * spawn hint is off, so the decision line gains nothing while JEV is off.
+   * No hint at all unless the last `jev.status` poll answered and said the
+   * spawn hint can send. No poll yet, a failed one, or a daemon that rejects
+   * the request (a plugin child newer than its daemon) asks nothing, so the
+   * decision line gains nothing while JEV is off or absent.
    */
   async function jevInputsFor(
     request: PluginBeforeRequests["agent.create"],
@@ -333,8 +338,7 @@ export default function contribute(server: PluginServerContext) {
       }
       const availability = jevAvailability.get();
       const input = classifierInputFor(request);
-      const hintOff =
-        typeof paseo.jev?.decide !== "function" || (availability !== undefined && !availability.spawnHint.active);
+      const hintOff = typeof paseo.jev?.decide !== "function" || availability?.spawnHint.active !== true;
       const [jevHint, jevTools] = await Promise.all([
         hintOff
           ? undefined

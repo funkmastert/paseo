@@ -2427,16 +2427,33 @@ describe("JEV's labels", () => {
       expect(result?.labels).toEqual({ [JEV_TOOLS_LABEL]: "on" });
     });
 
-    it("keeps an arm the create already carries, so a successor keeps its predecessor's tools", () => {
-      const carried = request({
+    const carrying = (arm: string) =>
+      request({
         callerAgentId: "c1",
-        labels: { [AGENT_ROLE_LABEL]: "worker", [JEV_TOOLS_LABEL]: "control" },
+        labels: { [AGENT_ROLE_LABEL]: "worker", [JEV_TOOLS_LABEL]: arm },
         config: { provider: "claude", cwd: "/tmp/work" },
       });
 
-      const result = createRoleRouter(jevOptions())({ ...carried, jevTools: tools(0.1) }, fakeContext);
+    it("replaces an arm the caller set with the drawn one: a caller cannot pick its own arm", () => {
+      const router = createRoleRouter(jevOptions());
 
-      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBe("control");
+      expect(router({ ...carrying("control"), jevTools: tools(0.1) }, fakeContext)?.labels?.[JEV_TOOLS_LABEL]).toBe("on");
+      expect(router({ ...carrying("on"), jevTools: tools(0.9) }, fakeContext)?.labels?.[JEV_TOOLS_LABEL]).toBe("control");
+    });
+
+    it("removes an arm the caller set on an ineligible create", () => {
+      const result = createRoleRouter(jevOptions())(
+        { ...carrying("on"), jevTools: { active: true, scope: "excluded", assignShare: 1, draw: 0 } },
+        fakeContext,
+      );
+
+      expect(result?.labels).toEqual({ [AGENT_ROLE_LABEL]: "worker" });
+    });
+
+    it("leaves a caller's label alone when the arm was not evaluated (the daemon serves no JEV tools)", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(router(carrying("on"), fakeContext)?.labels?.[JEV_TOOLS_LABEL]).toBe("on");
     });
 
     it("writes nothing for an ineligible create", () => {

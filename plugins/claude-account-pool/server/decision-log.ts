@@ -1,3 +1,4 @@
+import { JEV_TOOLS_LABEL } from "../shared/role-policy-schema";
 import type { AgentDecision, JevHintDecision } from "./classifier";
 import { echoed } from "./echo";
 import { mcpScopeLabelValue } from "./mcp-scope";
@@ -198,6 +199,11 @@ function describeJev(jev: JevHintDecision): Record<string, unknown> {
   };
 }
 
+function keptArm(result: LoggedRequest | undefined): string | null {
+  const arm = result?.labels?.[JEV_TOOLS_LABEL];
+  return typeof arm === "string" ? echoed(arm) : null;
+}
+
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
   const { role, taskClass, model, thinking, outputStyle, mcp } = decision;
   return {
@@ -222,8 +228,9 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
     mcp: mcpScopeLabelValue(mcp) ?? "all",
     account: account(result),
     ...(decision.jev ? { jev: describeJev(decision.jev) } : {}),
-    // The D8 arm, or null when the create was not eligible. Absent when it was not evaluated.
-    ...(decision.jevTools ? { jevTools: decision.jevTools.arm } : {}),
+    // The D8 arm the agent carries, read off its labels, or null when it carries none (not
+    // eligible, or refused). Absent when the arm was not evaluated.
+    ...(decision.jevTools ? { jevTools: keptArm(result) } : {}),
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
     reasons: {
       role: role.reason,
