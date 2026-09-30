@@ -240,6 +240,7 @@ import {
   RestartRecoveryService,
   type RestartRecoveryConfig,
 } from "./agent/restart-recovery/service.js";
+import type { PreviousShutdownInfo } from "./daemon-vitals/shutdown-reason.js";
 import {
   AgentDoneJanitor,
   askAgentWhetherDone,
@@ -531,6 +532,11 @@ export interface PaseoDaemonConfig {
   listen: string;
   paseoHome: string;
   daemonVersion?: string;
+  /**
+   * The previous daemon's shutdown, mapped to a plain-language reason before the daemon object
+   * exists (`daemon-worker.ts`, docs/restart-recovery.md). Omit to read as `unknown`.
+   */
+  previousShutdownInfo?: PreviousShutdownInfo;
   desktopManaged?: boolean;
   worktreesRoot?: string;
   corsAllowedOrigins: string[];
@@ -2021,6 +2027,8 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "restart-recovery" }),
     isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
     paceResume: (resume, fn) => resumePacer.run(resume, fn),
+    readPreviousShutdown: async () =>
+      config.previousShutdownInfo ?? { reason: "unknown", at: null },
   });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
   // the records, so a restart still knows who is waiting to hear back. Recovery decides who was
