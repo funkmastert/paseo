@@ -669,7 +669,7 @@ Not `answered`, or any error: the `alert` goes out as now, at most 3 seconds lat
 
 ## Features 4–6: agent tools
 
-Seven tools on the daemon's existing Paseo MCP server, for agents the classifier marked at create. Code reads the files or runs the command, sends them to JEV, and returns typed answers; the content never enters the agent's context.
+Seven tools on the daemon's existing Paseo MCP server, for agents the classifier marked at create. Code reads the files or runs the command, sends them to JEV, and returns typed answers; the content never enters the agent's context. The pattern is levels 8–10 of disler/ten-levels-of-jev (MIT).
 
 ### Which agents get them
 
@@ -677,40 +677,43 @@ Seven tools on the daemon's existing Paseo MCP server, for agents the classifier
 - Of the eligible creates, the share `agentTools.assignShare` (0.5) chosen by a hash of the new agent's id gets `paseo.jev-tools: on`; the rest get `paseo.jev-tools: control`. Both arms carry the label, so D8's comparison is between agents the classifier treated alike.
 - The daemon lists the tools for exactly the agents carrying `on`, whatever JEV's state at launch. So a reload or resume lists the same tools and keeps the prompt cache. When JEV is off at call time the tool answers with an error naming why ("JEV is off on this host: no key. Use Read or Bash."), and the agent does what it would have done without it.
 - Agents created without the label never gain the tools.
+- The label is an ordinary label and the catalog is rebuilt per MCP request, so an agent that rewrites its own `paseo.jev-tools` with `update_agent` changes its own tool list and leaves its arm. Nothing stops that today; the D8 report reads the label as it is when the report runs.
 
 Fleet sessions receive `mcp__paseo__*` as deferred tools, so seven more tools add seven names to the deferred list; the first use pays a `ToolSearch` step.
 
 ### Seam
 
-- New `packages/server/src/server/agent/tools/jev-tools.ts`: `registerJevTools({ registerTool, jev, callerAgentId, readCallerAgent, commandGate, … })`, following `registerDeviceLeaseTools` (`agent/tools/device-lease-tools.ts:57`).
-- `agent/tools/paseo-tools.ts`: `PaseoToolHostDependencies` (`:112-166`) gains `jevTools`; call `registerJevTools` beside the device lease tools (`:1244-1253`) when `jevTools` is set, `callerAgentId` is set, and the caller's labels include `paseo.jev-tools: on`.
-- Read the caller without throwing: `agentManager.getAgent(id)?.labels` (`agent-manager.ts:2250`), falling back to the stored record. `resolveCallerAgent` (`paseo-tools.ts:650-659`) throws for an agent missing from the manager, which during catalog building would fail the whole Paseo catalog for that request. An absent agent gets no JEV tools.
-- `bootstrap.ts:2272-2339`, `createAgentToolHostDependencies`: pass `jevTools`, including the command gate adapter.
-- The tools reach the agent as `mcp__paseo__<name>` over `/mcp/agents` (`bootstrap.ts:2382`). No new MCP server and no new connection.
+- `agent/tools/jev-tools.ts`: `registerJevTools({ registerTool, deps, callerAgentId, readCallerAgent, logger })`, following `registerDeviceLeaseTools`. `deps` is `JevToolsDependencies`: the service, the command gate, `paseoHome` and the D8 use log, built once in bootstrap beside `createAgentToolHostDependencies` and passed as `jevTools`.
+- `agent/tools/paseo-tools.ts` registers them after the device lease tools when `jevTools` and `callerAgentId` are set and `agentManager.getAgent(callerAgentId)?.labels` carries `on`. `resolveCallerAgent` throws for an agent missing from the manager, so it is not used. There is no fallback to the stored record: the catalog is built synchronously and `AgentStorage` reads are async. An agent that calls tools is loaded in the manager. A missing agent, or a lookup that throws, gets no JEV tools and keeps the rest of the catalog.
+- Each call re-reads the caller (`cwd`, labels, `providerOptions`, `lastUsage.contextWindowUsedTokens`); a caller gone by then is refused.
+- The tools reach the agent as `mcp__paseo__<name>` over `/mcp/agents`. No new MCP server and no new connection.
 
 ### Reading files safely
 
-New `agent/tools/jev-file-state.ts`. A JEV tool never does what the agent's own tools may not, and never ships what a person would not want shipped.
+`agent/tools/jev-file-state.ts`. A JEV tool never does what the agent's own tools may not, and never ships what a person would not want shipped.
 
-- **Confinement.** Resolve against the caller agent's `cwd` (`resolvePathFromBase`, `path-utils.ts:22`), then `realpath` both, and refuse anything whose real path is outside the real `cwd` (`isSameOrDescendantPath`, `path-utils.ts:30`). Open with `O_NOFOLLOW`, `fstat` the handle, and compare its device and inode with the realpath's, so a swap between the check and the read is caught. On Windows use `realpath.native` (junctions) and compare case-insensitively.
-- **Refused cwds.** The file tools refuse outright when the real cwd is `$HOME`, an ancestor of it, or `/`.
-- **Denied roots,** whatever the cwd: `$PASEO_HOME`, `~/.config`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.claude*`, `~/.docker`, `~/.kube`, `~/Library`.
-- **Expansion.** Globs expand over `git ls-files --cached --others --exclude-standard` when `cwd` is in a git work tree. Outside git, walk the directory and skip every dot-directory plus `node_modules`, `dist`, `build` and `coverage`. A named path that `git check-ignore` reports as ignored is refused. Which glob matcher to use is UNKNOWN until the tools track checks `process.versions.node` in the packaged app: Electron 44 (`packages/desktop/package.json:41`) should carry Node 22 or later, which has `fs.promises.glob`.
-- **Skipped, with a reason the agent sees:** over 60,000 bytes; empty; a NUL byte in the first 8 KB; lock and binary extensions (the reference's list); excluded by D7; and secret-shaped names: `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.mobileprovision`, `*.tfvars`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `credentials*`, `.credentials*`, `hosts.yml`, `kubeconfig`, `config.json` under `.docker`, `google-services.json`, `GoogleService-Info.plist`, `local.properties`, `keystore.properties`. The agent can still `Read` any of them; the tool only declines to send them to a third party.
-- **The agent's own limits.** Refuse the file tools for an agent whose `paseo.tools-denied` label includes `Read`, and `command` for one whose denied tools include `Bash`. Honour the agent's `sandbox.filesystem.denyRead` (`providers/claude/options.ts:38`) and the Read deny rules in its stored settings.
-- **Diffs.** `ask_jev_diff_risk` passes the secret-name list to `git diff` as `:(exclude)` pathspecs.
+- **Confinement.** Resolve against the caller agent's `cwd` (`resolvePathFromBase`), then `realpath` both, and refuse anything whose real path is outside the real `cwd` (`isSameOrDescendantPath`, case-folded on darwin and win32). Pruning records the real path's device and inode; the read opens the real path with `O_NOFOLLOW`, `fstat`s the handle and refuses a file that is no longer the one checked. On Windows, where a volume can report 0 for both, the realpath check stands alone.
+- **Refused cwds.** The file tools and `ask_jev_diff_risk` refuse outright when the real cwd is `$HOME`, an ancestor of it, or `/`.
+- **Denied roots,** whatever the cwd, on the path as named and on its real path: `$PASEO_HOME`, `~/.config`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.claude*`, `~/.docker`, `~/.kube`, `~/Library`.
+- **Expansion.** Globs are relative to `cwd`; one that is absolute, starts with `~` or climbs with `..` is refused. They expand over `git ls-files --cached --others --exclude-standard` when `cwd` is in a git work tree, matched with `path.posix.matchesGlob`: the packaged app (Electron 44.2.0) runs Node 24.20.0, which has it without a warning. `*` does not match a leading dot. Outside git, walk the directory and skip every dot-directory plus `node_modules`, `dist`, `build` and `coverage`, stopping at 20,000 entries. A named path that `git check-ignore` reports as ignored is refused; when git cannot answer, every file in the batch is.
+- **Skipped, with a reason the agent sees:** over 60,000 bytes; empty; a NUL byte in the first 8 KB; lock and binary extensions (the reference's list, plus `package-lock.json`, `pnpm-lock.yaml`, `go.sum`); excluded by D7; and secret-shaped names: `.env`, `.env.*`, `*.env`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.p8`, `*.jks`, `*.keystore`, `*.mobileprovision`, `*.tfvars`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `credentials*`, `.credentials*`, `hosts.yml`, `kubeconfig`, `config.json` under `.docker`, `google-services.json`, `GoogleService-Info.plist`, `local.properties`, `keystore.properties`. The agent can still `Read` any of them; the tool only declines to send them to a third party.
+- **D7 per file.** Each file's scope (`agentIds: [caller]`, `files: [it]`, `baseCwd`) goes to `checkScope` before the file is read, and `decide` checks it again. An excluded file is skipped with "company code is not sent to JEV" and nothing is sent for it; the other files proceed.
+- **The state cap.** A file is measured again as its JSON state: escaping can push a 58 KB file past JEV's 60,000-byte state, and such a file is refused before sending, never cut.
+- **The agent's own limits.** The file tools are refused when `Read` is denied, and `command` when `Bash` is. The sources are the `paseo.tools-denied` label and, for Claude agents, `disallowedTools`, `settings.permissions.deny`, and both `sandbox.filesystem.denyRead` lists (`providers/claude/options.ts`). A bare `Read` (or `Read(**)`) denies every read; `Read(<pattern>)` and `denyRead` entries are honoured per path: `//abs` is absolute, `~/…` is under home, `/…` and `./…` are relative to the agent's cwd, and a bare name matches at any depth. A command-scoped `Bash(…)` rule refuses `command` whole, since code cannot tell which commands it covers.
+- **Diffs.** `ask_jev_diff_risk` passes the secret-name list to `git diff` as `:(exclude,glob)` pathspecs, and sends no diff that touches a denied root or one of the agent's read rules.
 
 ### Output size
 
-A tool result stays in the agent's context for the rest of the session, priced at about 14.5 times its size over its life (research 03). Every tool caps its result at about 8,000 characters (2K tokens) by default:
+A tool result stays in the agent's context for the rest of the session, priced at about 14.5 times its size over its life (research 03). Every tool caps its result at 8,000 characters (2K tokens) by default:
 
-- answers are compact: `{ choice, confidence }`, `{ noul }` or `{ score, confidence }`, no probability maps;
-- `ask_jev_files` returns the top 20 results, ranked in code by the first question (yes-probability for `noul`, confidence within each choice for `choice`, score for `score`), plus a count of the rest;
-- `include_probabilities: true` and `all: true` opt in to the full maps and the full list.
+- answers are compact: `{ choice, confidence }`, `{ noul }` or `{ score, confidence }`, numbers to 3 places, no probability maps;
+- `ask_jev_files` returns the top 20 results, ranked in code by the first question (yes-probability for `noul`; option order, then confidence, for `choice`; score for `score`), plus `more`, the count of the rest. When the answers do not fit, results are cut from the tail and a `note` says so;
+- skipped files are listed up to 20; past that the tool returns `{ shown, total, by_reason }`, so a 255-file pattern costs a few lines, not 255;
+- `include_probabilities: true` and `all: true` opt in to the full maps and the full list, under a ceiling of 24,000 characters; past it the smallest probabilities or the last results go, with a `note`.
 
 ### The tools
 
-Descriptions below are the text the agent sees. Each ends with the same guidance: **Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.**
+Descriptions below are the text the agent sees. Each ends with the same guidance: **Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.** Every refusal is `isError` with one line naming why.
 
 **`ask_jev_file_bool`** `(path, question, yes?, no?)` → `{ path, answer, noul }`. State `{ path, content }`. One `noul`, with `yes`/`no` as criteria. `answer` is `noul > 0.5`.
 
@@ -724,23 +727,22 @@ Descriptions below are the text the agent sees. Each ends with the same guidance
 
 > A position on a scale you define, about one file, without reading it. Levels are ordered low to high, 2 to 10 of them, each a described situation, not a degree. Returns { path, score, nearest, confidence }. Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.
 
-**`ask_jev_files`** `(paths_or_globs, questions_json, recursive?, top?, all?, include_probabilities?)` → `{ results: [{ path, answers }], skipped: [{ path, reason }], more, calls }`. Expand, prune (the rules above), cap at 120 files with "over the 120 file cap; narrow the pattern" for the rest, then one JEV call per file with every question, at most 2 in flight per tool call. The whole tool call has 60 seconds; files not reached are skipped with "out of time".
+**`ask_jev_files`** `(paths_or_globs, questions_json, recursive?, top?, all?, include_probabilities?)` → `{ results: [{ path, answers }], skipped, more, calls, note? }`. `questions_json` is the JSON text or the object itself; it is checked against the reference's request rules before any file is read. Expand, prune (the rules above), cap at 120 files with "over the 120 file cap; narrow the pattern" for the rest, then one JEV call per file with every question, at most 2 in flight per tool call: the tool call is one `callGroup`, so it holds at most 2 lane slots. The whole tool call has 60 seconds; files not reached are skipped with "out of time".
 
 > Ask the same typed questions of many files at once without reading any of them. Code expands globs and directories, drops ignored, binary, secret-shaped and oversized files, caps the list at 120, and makes one JEV call per file. Returns the top 20 { path, answers } ranked by your first question, the skipped files with reasons, and how many more there are; pass all or top for more. questions_json is a JSON object keyed by question id; each question is {"type":"noul","instructions":"Does `content` …?","criteria":{"true":"…","false":"…"}}, {"type":"choice","instructions":"Which … is `content`?","criteria":{"option":"when it applies","other":"none of the above"}} or {"type":"score","instructions":"How … is `content`?","criteria":["lowest situation","…","highest situation"]}. Ask everything you need in one block; it is one call per file either way. Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.
 
-**`pick_first_file`** `(question, candidates: [{ path, note? }], include_probabilities?)` → `{ path | null, confidence, probabilities? }`. State `{ question, files }`; one `choice` keyed by path, at most 254 paths plus `none: "No file in the list fits"`. `path` is null for `none` or confidence < 0.30.
+**`pick_first_file`** `(question, candidates: [{ path, note? }], include_probabilities?)` → `{ path | null, confidence, probabilities? }`. State `{ question, files }`; one `choice` keyed by path, at most 254 paths plus `none: "No file in the list fits"`. `path` is null for `none` or confidence < 0.30. No file is read; the paths are in the scope, so the D7 checks cover them.
 
 > After ask_jev_files, choose which file to open first for a goal. The pick is always one of your paths, or null when nothing fits. Pass a one-line note per path if you have one. Use Read to open the file it picks.
 
-**`ask_jev`** `(questions_json, state?, paths?, command?)` → `{ answers, state_summary, redacted, model }`. Level 10 of the reference. Code assembles one state: the agent's own `state` (8 KB cap, refused with "pass paths or command instead" above it) as the base, `files` keyed by path (up to 20, same rules), and `output: { command, exit_code, stdout, stderr }`. Over 60 KB the call is refused with the reference's split message naming the parts. `redacted` is how many values redaction replaced. `command`:
+**`ask_jev`** `(questions_json, state?, paths?, command?, include_probabilities?)` → `{ answers, state_summary, redacted, model }`. Level 10 of the reference. Code assembles one state: the agent's own `state` (8 KB cap, refused with "pass paths or command instead" above it; a JSON string becomes an object, text becomes `{ text }`, and a `files` or `output` field is refused because code fills those) as the base, `files` keyed by path (up to 20, same rules), and `output: { command, exit_code, stdout, stderr }`. Over 60 KB the call is refused with the reference's split message naming the parts. `redacted` is how many values redaction replaced. `command`:
 
-- goes through the catastrophe gate first (`CommandGate` in `jev/contract.ts`), and is refused with the gate's reason when it would be refused as a Bash call. The gate is async; a gate that throws or rejects refuses the command ("the catastrophe gate could not check this command; run it with Bash"). The Bash hook fails open on its own errors because refusing there blocks the agent; here refusing costs a retry in Bash, which is itself gated;
+- goes through the catastrophe gate first (`CommandGate` in `jev/contract.ts`, adapted by `createCatastropheCommandGate` in `jev/command-gate.ts`), and is refused with the gate's reason when it would be refused as a Bash call. The gate is async; a gate that throws or rejects refuses the command ("the catastrophe gate could not check this command; run it with Bash"). The Bash hook fails open on its own errors because refusing there blocks the agent; here refusing costs a retry in Bash, which is itself gated. With no gate wired, `command` is refused with "command needs the catastrophe gate; run it with Bash";
 - honours `agents.catastropheGate.enabled` the way the Bash hook does;
 - is refused when the agent's denied tools include `Bash`;
-- is refused on Windows ("command is not supported on Windows; run it with Bash"). The gate parses POSIX shell and resolves only POSIX cwds (`catastrophe-gate.ts:57`), and on Windows Claude's Bash tool runs Git Bash, not `cmd.exe`;
-- runs in the agent's `cwd` through `/bin/bash -c` on macOS and Linux, with the environment `createExternalProcessEnv(process.env)` builds, which has no JEV key, plus `CI=1`; 60-second timeout; stdout and stderr capped at 200,000 characters before the state budget applies.
-
-Until the catastrophe gate merges, `command` is refused with "command needs the catastrophe gate; run it with Bash", so there is never a window where `ask_jev` runs what Bash would not.
+- is refused on Windows ("command is not supported on Windows; run it with Bash"). The gate parses POSIX shell and resolves only POSIX cwds, and on Windows Claude's Bash tool runs Git Bash, not `cmd.exe`;
+- runs in the agent's `cwd` through `/bin/bash -c` in its own process group on macOS and Linux, with the environment `createExternalProcessEnv(process.env)` builds, which has no JEV key, plus `CI=1`; 60-second timeout, after which the group is killed; stdout and stderr capped at 200,000 characters before the state budget applies;
+- runs only once JEV is active, so a command is never run for a call that cannot be sent. Its output is redacted with the rest of the body inside `decide`, and the text scan covers it.
 
 > Ask JEV typed questions about one situation: files, a command's output, your own notes, or any mix. It answers in about half a second for a fraction of a cent, and each answer is a number you can branch on, not prose. Pass paths and code reads the files into files["path"]. Pass command and code runs it in your working directory and puts the result in output {command, exit_code, stdout, stderr}; the command goes through the same safety gate as Bash. Use state only for what only you can say, not for pasting content. One call judges one situation: up to 20 files and about 60 KB. Write questions against files["path"], output or your own field names; always give a choice an "other" option; describe situations, not degrees. Good uses: run the tests through command and classify the failure before choosing a fix; decide whether a request is clear enough to plan. Not for exact lookups, counting or math. Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.
 
@@ -762,9 +764,9 @@ The description also carries this test-failure recipe verbatim:
 }
 ```
 
-**`ask_jev_diff_risk`** `(base?)` → `{ risk, needs_full_review, forced_by, parts, reason }`. The level-3 code-review risk, with the threshold in code. It may only add review (D1): `needs_full_review: false` is never permission to skip the adversarial review that orchestrated builds require, and no merge gate may read it that way. The input is the diff and the commit messages, both written by the agent under review and both open to injected text, so a manipulated low score must not waive anything.
+**`ask_jev_diff_risk`** `(base?)` → `{ risk, needs_full_review, forced_by, parts, reason, diff }`. The level-3 code-review risk, with the threshold in code (`agent/tools/jev-diff-risk.ts`). It may only add review (D1): `needs_full_review: false` is never permission to skip the adversarial review that orchestrated builds require, and no merge gate may read it that way. The input is the diff and the commit messages, both written by the agent under review and both open to injected text, so a manipulated low score must not waive anything.
 
-Code runs `git diff <base>...HEAD` and `git log --format=%B <base>..HEAD` as argv (no shell, read-only, so no gate), with `base` defaulting to the upstream branch or `origin/HEAD`, and secret-shaped names excluded as pathspecs. State `{ diff, commit_message }`. Questions, from `level03/code-review-risk.ts`:
+Code runs `git diff <base>...HEAD` and `git log --format=%B <base>..HEAD` as argv (no shell, read-only, so no gate), with `--no-ext-diff --no-textconv --no-renames` and `core.fsmonitor=false`, so a repository's config cannot run a program in the daemon. `base` defaults to the upstream branch or `origin/HEAD`; a base that starts with `-` or holds whitespace is refused, and the rest is resolved to a commit with `rev-parse --verify --end-of-options`. Secret-shaped names are excluded as pathspecs. State `{ diff, commit_message }`; commit messages past 6,000 characters are cut with a visible marker. `diff` in the result is `{ base, files, lines, bytes }`. The audit keeps the diff and the commit messages like a command's output: they are git's output, not files read. Questions, from `level03/code-review-risk.ts`:
 
 ```json
 {
@@ -807,22 +809,27 @@ Code runs `git diff <base>...HEAD` and `git log --format=%B <base>..HEAD` as arg
 }
 ```
 
-`risk = 0.5·security + 0.2·complexity + 0.1·bad_practice + 0.2·(1 − commit_quality)`, each normalized to 0–1 by its top level. `needs_full_review` is true when `risk ≥ 0.5`, when `security_risk.score ≥ 1.5`, when JEV did not answer, or when a deterministic trigger fires, whatever JEV says. `forced_by` names the trigger:
+`risk = 0.5·security + 0.2·complexity + 0.1·bad_practice + 0.2·(1 − commit_quality)`, each normalized to 0–1 by its top level. `needs_full_review` is true when `risk ≥ 0.5`, when `security_risk.score ≥ 1.5`, when JEV did not answer, or when a deterministic trigger fires, whatever JEV says. Every trigger reads paths, sizes or the text itself, never an answer, so no text in the diff can turn one off. `forced_by` names the trigger:
 
 - a changed path matching `auth|secret|crypt|token|permission|password|session`;
-- `packages/protocol/**`, CI and workflow files, lockfiles, `persisted-config.ts`;
+- `packages/protocol/**`, CI and workflow files (`.github/workflows`, `.github/actions`, `.gitea/workflows`, GitLab, CircleCI, Buildkite, Jenkins, Azure), lockfiles, `persisted-config.ts`;
 - a deleted test file;
-- more than 20 files or more than 800 changed lines, or a diff over 60 KB.
+- a changed secret-shaped file, which the diff sent leaves out;
+- text that addresses the reviewer in the added lines or the commit messages: "ignore previous instructions", "skip the review", "no review needed", "you are a reviewer", "treat this as safe" and similar. Hostile text raises the answer. Identifiers such as `score = 0` do not count;
+- more than 20 files or more than 800 changed lines, or a diff over 60 KB, which is not sent;
+- a git failure, a refused cwd, or a changed file under a denied root or one of the agent's read rules, where nothing is sent.
+
+A diff with no changes answers `needs_full_review: false` without a call. The tool records its verdict in the decision store (`verdict: "risk 0.2"`, `action: "full review added"` or "no review added; the process's own review still applies"), so the agent's decision list shows it.
 
 > Score a branch's diff for risk before merge. Code runs git diff and git log itself; you pass only the base branch. Returns { risk 0..1, needs_full_review, forced_by, parts, reason }. It can only add review: needs_full_review false never means skip the review your process requires. Any failure, a large diff or a sensitive path answers needs_full_review: true. Use Read when you need the code itself.
 
 ### Limits
 
-The `agentTools` lane: 4 JEV calls in flight daemon-wide, 2 per tool call, $0.50 a day, and $0.05 per agent per hour, counted in dollars, not calls ([Lanes](#lanes-deadlines-retries-circuits)). Past a cap the tools answer with the reason and the local time it resets.
+The `agentTools` lane: 4 JEV calls in flight daemon-wide, 2 per tool call, $0.50 a day, and $0.05 per agent per hour, counted in dollars, not calls ([Lanes](#lanes-deadlines-retries-circuits)). The hourly bucket is the calling agent (`subject.callerAgentId`). Past the daily cap the tools answer with the reason and the local time it resets; past the hourly cap, that it frees up within the hour, since the window rolls. A saturated lane answers "JEV is busy" and never counts toward the lane's circuit. The daemon-wide rate limiter (`maxRequestsPerSecond`, 10) paces these calls behind `control` and `interactive`, so a 120-file `ask_jev_files` takes at least 12 seconds however fast JEV answers.
 
 ### Fail open
 
-Not `answered`: the tool returns `isError` with the reason in one line, and nothing else changes. For `ask_jev_files`, per file: that file is in `skipped` with the reason.
+Not `answered`: the tool returns `isError` with the reason in one line ending "Use Read or Bash.", and nothing else changes. The file tools, `pick_first_file` and `ask_jev` check `isActive` before reading a file or running a command, so an unavailable JEV costs no work. For `ask_jev_files`, per file: that file is in `skipped` with the reason. For `ask_jev_diff_risk`, not answering is an answer: `needs_full_review: true`.
 
 ### Cost, cache, latency
 
@@ -831,18 +838,25 @@ Not `answered`: the tool returns `isError` with the reason in one line, and noth
 - Tool results append at the tail, which is cache-neutral; their size is capped ([Output size](#output-size)).
 - 0.3–0.7 s per JEV call; `ask_jev_files` over 120 files at 2 in flight takes about 30 s.
 
-**Measurement (D8).** The tools track logs one `jev-tool-use` line per tool call: agent, arm, tool, JEV calls, result characters. `packages/server/scripts/jev-tools-ab.ts` joins those lines, the `paseo.jev-tools` arm label and the agents' transcripts, and reports per arm and task class: weighted spend per agent-hour, JEV tool calls, `ToolSearch` steps, JEV result tokens, Read and Bash-read tokens, and **regret reads** — a JEV file tool on path P followed by a Read or `cat` of P in the same session. **Kill rule, fixed before the first live call:** after 50 labelled agents, if the `on` arm's weighted spend per agent-hour within a task class is not lower than the `control` arm's beyond noise, set `agentTools.enabled: false`.
+**Measurement (D8).** Every tool call, refusals included, appends one record to `$PASEO_HOME/jev/tool-use.jsonl` (0600, rotated to `tool-use.1.jsonl` at 4 MB; `JevToolUseRecord` in `agent/tools/jev-tool-use-log.ts`) and logs the same record as a `jev-tool-use` line. The file exists because `daemon.log` does not keep 50 agents' worth of days. A record has the agent, arm, tool, outcome and reason, JEV calls and answers, JEV dollars and input tokens, the result's characters, and the two sides of the trade:
 
-- **4 `ask_jev_file_*`. Pays if** its calls land on files of 8K tokens or more that the agent then never reads; that needs about 11% of reads to be that large and a fifth of them never read afterwards. **Measured by** the regret-read rate. Over half of calls followed by a read of the same path: switch it off.
+- `readTokensAvoided`: what reading the same content with Read would have cost, for content whose answers the agent received: UTF-8 bytes ÷ 3.5 plus one token a line for Read's line numbers, over each file and a command's output;
+- `callerContextTokens`: the caller's context when it called (`lastUsage.contextWindowUsedTokens`), which the extra model step re-reads.
+
+For the regret join it keeps the absolute paths sent, the cwd and a SHA-256 of `ask_jev`'s command, never file content or command text. `packages/server/scripts/jev-tools-ab.ts` joins those records, the `paseo.jev-tools` arm label and the agents' transcripts, and reports per arm and task class: weighted spend per agent-hour, JEV tool calls, `ToolSearch` steps, JEV result tokens, Read and Bash-read tokens, net read tokens avoided, and **regret reads** — a JEV file tool on path P followed by a Read or `cat` of P in the same session, or an `ask_jev` command followed by the same command in Bash within 5 steps. **Kill rule, fixed before the first live call:** after 50 labelled agents, if the `on` arm's weighted spend per agent-hour within a task class is not lower than the `control` arm's beyond noise, set `agentTools.enabled: false`. Noise, fixed with the rule: in a task class with at least 2 agents per arm, the `on` arm is lower only when its mean is below `control`'s by more than one standard error of the difference; the tools stay on only when that holds in every judged class. Run it with `npx tsx packages/server/scripts/jev-tools-ab.ts [--paseo-home <dir>] [--since <ISO>] [--format json]`; it reads every `~/.claude*/projects` once and writes nothing.
+
+- **4 `ask_jev_file_*`. Pays if** its calls land on files of 8K tokens or more that the agent then never reads; that needs about 11% of reads to be that large and a fifth of them never read afterwards. **Measured by** the regret-read rate, and `readTokensAvoided` against `callerContextTokens` per call. Over half of calls followed by a read of the same path: switch it off.
 - **5 `ask_jev_files`, `pick_first_file`. Pays if,** with the output cap, one call replaces several grep and read steps. **Measured by** Read plus Bash-read tokens per task in the `on` arm against `control`, net of JEV result tokens, and against an `rg`-ranked baseline, which research 02 found JEV beats by about 8%.
 - **6a `ask_jev`. Pays if** classifying an output replaces reading it. Classifying a test failure rarely does: to fix the bug the agent needs the details. **Measured by** regret: an `ask_jev` with `command` followed by the same command in Bash within 5 steps.
-- **6b `ask_jev_diff_risk`.** Under add-only it saves nothing; it pays only if the reviews it adds, on branches with no review planned, find confirmed defects. **Measured by** shadow-scoring every diff that goes through adversarial review and correlating the score with that review's confirmed findings, and counting reviews it added. Critique A's alternative, "skip the full review below a risk score", is the only way this tool saves tokens and conflicts with add-only; it stays off unless Tyler decides otherwise.
+- **6b `ask_jev_diff_risk`.** Under add-only it saves nothing; it pays only if the reviews it adds, on branches with no review planned, find confirmed defects. **Measured by** shadow-scoring every diff that goes through adversarial review and correlating the score with that review's confirmed findings, and counting reviews it added; each record carries `diffRisk: { risk, needsFullReview, forcedBy }`. Critique A's alternative, "skip the full review below a risk score", is the only way this tool saves tokens and conflicts with add-only; it stays off unless Tyler decides otherwise.
 
 ### Tests and verification
 
-- `jev-file-state.test.ts` in a temporary git repo: outside-`cwd`, symlink and swapped-inode escapes refused; `$HOME` and `/` cwds refused; denied roots refused; ignored named paths refused; ignored, secret-shaped, binary, empty, oversized and D7-excluded files skipped with reasons; the 120 cap; `denyRead` honoured.
-- `jev-tools.test.ts` with the fake: each tool's compact shape and the opt-in flags; the output cap; `other` added; `pick_first_file` floor; `ask_jev` state assembly, the split message and the redaction count; `command` refused when the gate refuses, when the gate throws, when `Bash` is denied, on Windows, and when no gate is wired; the key absent from the command's environment; `ask_jev_diff_risk` weights, every deterministic trigger, and every fail-to-review path; tools absent without the label, with `control`, without a caller, and for an agent missing from the manager; the lane caps.
-- Verify: `npx vitest run packages/server/src/server/agent/tools/jev-tools.test.ts --bail=1`.
+- `jev-file-state.test.ts` in a temporary git repo under `~/.cache`: outside-`cwd`, symlink and swapped-inode escapes refused; `$HOME`, its ancestor and `/` cwds refused; denied roots, `~/.claude*` and `$PASEO_HOME` refused; ignored named paths refused; secret-shaped, binary, lock, empty and oversized files skipped with reasons; the cap; the agent's read rules; glob expansion over git and the walk outside it.
+- `jev-command.test.ts`: `command` refused on Windows, for an agent denied `Bash`, with no gate, when the gate refuses, throws or rejects; the key absent from the command's environment; the timeout and the output cap.
+- `jev-diff-risk.test.ts` in a temporary repository: the weights, every deterministic trigger, reviewer-steering text, a hostile commit message with the lowest scores, every fail-to-review path, secret files kept out of the diff, a base shaped like an option.
+- `jev-tools.test.ts` with the fake through the real Paseo catalog: each tool's compact shape and the opt-in flags; the output cap and the 120-file cap; `other` added; `pick_first_file` floor; 2 in flight per tool call; `ask_jev` state assembly, the split message and the redaction count; D7 per file; tools absent without the label, with `control`, without a caller, for an agent missing from the manager and when the lookup throws; the lane caps, and saturation leaving the circuit closed; the D8 record.
+- Verify: `npx vitest run packages/server/src/server/agent/tools/jev-{tools,file-state,command,diff-risk}.test.ts`.
 
 ## Feature 9: compaction timing
 
