@@ -788,20 +788,18 @@ part is on you.
 
 #### How an unlabelled task is classified, and what it honestly costs
 
-Deterministic keyword seeds over `lowercase(title + " " + initialPrompt)`.
-No LLM call, no network, no tokens: a handful of regex tests on a string the
-hook already has in hand, on a code path that runs once per `agent.create`.
+Deterministic keyword seeds over `lowercase(title + " " + initialPrompt)`,
+plus, on a child create whose class would change its model or thinking, one
+typed question to JEV (below). Everything else is a handful of regex tests on
+a string the hook already has in hand.
 
-An LLM classifier was rejected on its own arithmetic rather than on taste. It
-would spend tokens on **every spawn** to save tokens on **some** of them, and
-the saving is capped by how often a spawn would actually have been
-misclassified into a more expensive pool — while the cost is paid
-unconditionally, adds a network round trip to the create path (which the hook
-cannot fail or stall), and makes the model an agent gets depend on a second
-model's mood. For a feature whose justification is saving budget, a
-per-spawn spend with an unmeasured hit rate is the wrong trade. If that
-arithmetic ever gets measured and comes out the other way, the seam is
-`classifyTaskClass` in `server/role-resolve.ts` and nothing else has to move.
+An LLM call on every spawn was rejected on its own arithmetic: it would spend
+tokens on **every spawn** to save tokens on **some** of them, add a network
+round trip to a create path the hook cannot fail or stall, and make the model
+an agent gets depend on a second model's mood. JEV's spawn hint is the
+narrower version that arithmetic allows: one bounded call, only where an
+answer can change the create, and today's decision whenever it is slow,
+off, or unsure.
 
 What the seeds actually look for:
 
@@ -822,6 +820,45 @@ the clearly-risky off the everyday pool. If you want a class reliably, declare
 it. The guess is a convenience for callers that haven't been taught the label
 yet, not the mechanism.
 
+#### JEV's spawn hint
+
+When a child create has no `paseo.task-class`, the role hook asks JEV (a
+hosted decision model, through the daemon's `jev.decide` RPC) what class of
+work the prompt is, and, for a child whose role is only a keyword guess,
+which role. The design, what leaves the machine and the measurement are in
+the fork's [docs/jev.md](../../docs/jev.md#feature-2-spawn-hint); what this
+plugin does:
+
+- **When it asks.** Only when the three classes would give the role resolved
+  without JEV different models or thinking (`planSpawnHint`,
+  `server/jev-hint.ts`). A labelled create, one a risk keyword already made
+  `hard`, one with no text, and every root create never ask: a leader's class
+  cannot change what it runs.
+- **What applies.** The floors bias down. `mechanical` needs the class answer
+  at 0.65 or more **and** a reasoning score of 0.8 or less. `hard` (0.85 and
+  1.6) and a role (0.70) apply only with `agents.jev.spawnHint.applyHard` /
+  `.applyRole`, both off. A declared label and the hard risk keywords outrank
+  JEV; a JEV `standard` never lifts a task off the mechanical seed.
+- **Shadow first.** `agents.jev.spawnHint.shadow` defaults on: the answer is
+  logged and applies nothing.
+- **Never fails or slows a create.** The call starts beside the per-create
+  policy re-read, is bounded at 2 s on the plugin's side whatever the RPC
+  does, and any outcome but an answer (no JEV on the daemon, no key,
+  excluded company code, a timeout, a malformed answer) is today's classifier.
+- **A JEV role never removes a tool** (`classified-jev`), even with
+  `enforceToolsOnClassifiedRoles` on.
+- **Where to see it.** The `classifier-decision` line gains `jev` (the
+  answers, `applied`, and `wouldBe`: the class, role and model with every
+  answer applied, and whether that is a move `down` or `up`). A create JEV
+  answered carries `paseo.task-class-source` and `paseo.jev-call`. The
+  settings preview and `agent_model_policy` never ask; while the hint is live
+  they say "decided at create" for an unlabelled value.
+
+The same poll (`jev.status`, every 60 s) decides the JEV agent tools: an
+eligible create (the feature on, `Read` not denied, the company-code check
+passed) is labelled `paseo.jev-tools` `on` or `control`, by a draw against
+`agentTools.assignShare`, and a create that already carries the label keeps it.
+
 #### A guess may pick a model. It may never remove a tool.
 
 The same rule the role ladder follows, for the same reason. Task class feeds
@@ -840,7 +877,8 @@ equivalent for it — no escape hatch, because there's nothing to escape.
 
 - `role-model-policy.explain` accepts an optional `taskClass` (simulating
   the label) and returns `taskClass`, `taskClassSource`
-  (`declared` | `classified` | `default`), and `unknownDeclaredTaskClass`
+  (`declared` | `jev` | `classified` | `default`; a preview is never `jev`),
+  and `unknownDeclaredTaskClass`
   when a declared value wasn't recognized. `requestedModelOverride` is
   evaluated against the **resolved class's** pool, not always the standard
   one — so "why was my Opus request overridden?" has a one-step answer.
