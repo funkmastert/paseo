@@ -515,7 +515,7 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 - About 1,500–2,500 input tokens per call, $0.00006–$0.0001.
 - No cache effect: the model is chosen before the session exists.
-- Median about 0.3 s on an unlabelled child create, hidden behind the policy refresh; at most 2 s. Labelled creates and root creates pay nothing. In the 7 days to 2026-09-28, 115 of 416 child creates (28%) had no `paseo.task-class`, and 100 of those ran Sonnet 5.
+- Median about 0.3 s on an unlabelled child create that asks; at most 2 s. It runs beside the policy refresh, but that is a local config read, so it hides little of the call. Labelled creates, root creates and creates where no class would change the model pay nothing. While the agent tools are on, every create also waits for its `jev.scope.check`, bounded at 2 s, beside the same refresh. In the 7 days to 2026-09-28, 115 of 416 child creates (28%) had no `paseo.task-class`, and 100 of those ran Sonnet 5.
 - **Pays if** the mechanical moves save more than the upward moves would cost. **Measured by** the shadow day: join each line's `jev.callId` to the agent carrying it in `paseo.jev-call`; that agent's actual weighted spend × the price ratio of `wouldBe.model` to the model that ran gives a projected Δ$, mechanical savings minus hard and advisor increases, and `wouldBe.move` counts the moves each way. `applyHard` and `applyRole` stay off unless their projected Δ$ is positive. Once live, compare weighted spend per unlabelled child before and after, and count mechanical children that were re-spawned or escalated as the quality cost.
 
 ### Tests and verification
