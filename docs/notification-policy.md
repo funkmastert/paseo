@@ -19,7 +19,7 @@ A push with no level is a `notice` and is logged as undeclared. `push-callers.te
 
 **Rank by what happens if the person never reads it, after automation has had its turn.** A condition the daemon can fix is not the person's to read about. A monitor with an automatic remedy runs it and records what it did at `record`; it reports the condition to the [remediation ladder](remediation.md), which pushes only when the remedy and one bounded agent both failed or could not act, and picks that push's level from the observation. For everything with no remedy, ask what ignoring it costs: an agent's token rate spiking costs nothing, so it is a `notice`; a capped account stops every agent on it, so it is `urgent`. Ask both questions again for every new sender; "it felt important when I wrote it" is how the stream got flat.
 
-One sender moves its own level after the fact: a root agent's finish goes out as a `notice` instead of an `alert` when JEV rates the final message routine ([feature 3b](jev.md#feature-3b-finish-triage)). It only lowers `alert` to `notice`, and only while `minPostLevel` still posts a notice; permission pushes are never asked.
+One sender moves its own level after the fact: a root agent's finish goes out as a `notice` instead of an `alert` when JEV rates the final message routine ([feature 3b](jev.md#feature-3b-finish-triage)). It only lowers `alert` to `notice`, only while `minPostLevel` still posts a notice, and never while availability is `away` or `off`, where a notice would wait for hours; permission pushes are never asked.
 
 ## Two dials and one mode
 
