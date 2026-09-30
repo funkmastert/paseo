@@ -1979,6 +1979,35 @@ export const ar: TranslationResources = {
     },
     expand: "توسيع حالة الأجهزة",
     collapse: "طي حالة الأجهزة",
+    free: "مجاني — سيحصل عليه أول وكيل يطلبه",
+    reservedForYou: "محجوز لك",
+    runningFor: "يعمل منذ {{duration}}",
+    mode: {
+      off: "متوقف",
+      offDescription: "لا شيء يُحسب أو يُرفض.",
+      dryRun: "تشغيل تجريبي",
+      dryRunDescription: "عد فقط — لا شيء يُرفض.",
+      enforcing: "مُفعَّل",
+      enforcingDescription: "رفض تشغيل الأجهزة بعد تجاوز الحد.",
+    },
+    floorNote: "يُسمح دائمًا بجهاز Android واحد وجهاز iOS واحد؛ وما بعد ذلك يعتمد على الذاكرة.",
+    actions: {
+      menuLabel: "إجراءات الجهاز",
+      release: "تحرير الحجز",
+      reserve: "حجز لي",
+      unreserve: "إلغاء الحجز",
+      shutdown: "إيقاف التشغيل",
+    },
+    confirmShutdown: {
+      title: "إيقاف تشغيل هذا الجهاز؟",
+      message: "سيؤدي هذا إلى إيقاف تشغيل الجهاز. لن يتأثر أي شيء آخر على الجهاز.",
+      midTurnTitle: "هذا الجهاز قيد الاستخدام الآن",
+      midTurnMessage:
+        "{{agent}} يستخدم هذا الجهاز الآن. سيؤدي إيقاف التشغيل إلى مقاطعة تلك الجولة. إيقاف التشغيل على أي حال؟",
+      confirmLabel: "إيقاف التشغيل",
+    },
+    blocked_one: "{{count}} رفض حديث",
+    blocked_other: "{{count}} رفض حديث",
   },
   mcpStatus: {
     collapsedSummary: {

@@ -1998,6 +1998,35 @@ export const ja: TranslationResources = {
     },
     expand: "デバイス状態を展開",
     collapse: "デバイス状態を折りたたむ",
+    free: "空き — 最初にリクエストしたエージェントが使用します",
+    reservedForYou: "あなたのために予約済み",
+    runningFor: "{{duration}} 実行中",
+    mode: {
+      off: "オフ",
+      offDescription: "カウントも拒否も行われません。",
+      dryRun: "ドライラン",
+      dryRunDescription: "カウントのみ — 何も拒否されません。",
+      enforcing: "適用中",
+      enforcingDescription: "上限を超えるデバイス起動を拒否します。",
+    },
+    floorNote: "Android 1台、iOS 1台は常に許可されます。それ以降はメモリ次第です。",
+    actions: {
+      menuLabel: "デバイス操作",
+      release: "予約を解放",
+      reserve: "自分用に予約",
+      unreserve: "予約を解除",
+      shutdown: "シャットダウン",
+    },
+    confirmShutdown: {
+      title: "このデバイスをシャットダウンしますか？",
+      message: "デバイスがシャットダウンされます。マシン上の他の処理には影響しません。",
+      midTurnTitle: "このデバイスは現在使用中です",
+      midTurnMessage:
+        "{{agent}} が現在このデバイスを使用しています。シャットダウンするとそのターンが中断されます。それでもシャットダウンしますか？",
+      confirmLabel: "シャットダウン",
+    },
+    blocked_one: "最近の拒否 {{count}} 件",
+    blocked_other: "最近の拒否 {{count}} 件",
   },
   mcpStatus: {
     collapsedSummary: {

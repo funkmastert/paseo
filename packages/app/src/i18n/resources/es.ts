@@ -2025,6 +2025,35 @@ export const es: TranslationResources = {
     },
     expand: "Expandir estado de dispositivos",
     collapse: "Contraer estado de dispositivos",
+    free: "Libre — el próximo agente que lo pida lo obtiene",
+    reservedForYou: "Reservado para ti",
+    runningFor: "En ejecución desde hace {{duration}}",
+    mode: {
+      off: "Desactivado",
+      offDescription: "No se cuenta ni se rechaza nada.",
+      dryRun: "Simulación",
+      dryRunDescription: "Solo se cuenta — no se rechaza nada.",
+      enforcing: "Aplicando",
+      enforcingDescription: "Rechazando lanzamientos de dispositivos que superan el límite.",
+    },
+    floorNote: "Siempre se permite 1 Android y 1 iOS; el resto depende de la memoria.",
+    actions: {
+      menuLabel: "Acciones del dispositivo",
+      release: "Liberar la reserva",
+      reserve: "Reservar para mí",
+      unreserve: "Quitar reserva",
+      shutdown: "Apagar",
+    },
+    confirmShutdown: {
+      title: "¿Apagar este dispositivo?",
+      message: "Esto apaga el dispositivo. Nada más en la máquina se ve afectado.",
+      midTurnTitle: "Este dispositivo está en uso ahora",
+      midTurnMessage:
+        "{{agent}} está usando este dispositivo ahora mismo. Apagarlo interrumpirá ese turno. ¿Apagar de todos modos?",
+      confirmLabel: "Apagar",
+    },
+    blocked_one: "{{count}} rechazo reciente",
+    blocked_other: "{{count}} rechazos recientes",
   },
   mcpStatus: {
     collapsedSummary: {

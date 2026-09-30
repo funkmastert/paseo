@@ -1,8 +1,8 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { useShallow } from "zustand/shallow";
 import type { QueryKey } from "@tanstack/react-query";
 import type { DeviceStatusEntry, DeviceStatusUpdateMessage } from "@getpaseo/protocol/messages";
-import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 import { useSessionStore } from "@/stores/session-store";
 import { useReplicaQuery } from "@/data/query";
 import { useMcpStatusActiveServerId } from "@/mcp-status/use-mcp-status";
@@ -16,9 +16,50 @@ export function deviceStatusQueryKey(serverId: string | null): QueryKey {
 }
 
 export interface UseDeviceStatusResult {
+  serverId: string | null;
   /** False on a daemon with no device cap (no `server_info.features.deviceLeases`). */
   supportsDeviceStatus: boolean;
+  /** False on a daemon without the release/reserve/shutdown actions
+   * (no `server_info.features.deviceManagement`). The status readout above still works. */
+  supportsDeviceManagement: boolean;
   model: DeviceStatusStripModel;
+}
+
+/** The Devices panel's three human actions, gated on `server_info.features.deviceManagement`
+ * and silently no-op-ing without a connected client — the panel hides the actions itself. */
+export interface UseDeviceActionsResult {
+  releaseLease: (deviceId: string) => Promise<boolean>;
+  setReservation: (deviceId: string, reserved: boolean) => Promise<void>;
+  shutdown: (input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }) => Promise<{ status: string; message?: string }>;
+}
+
+export function useDeviceActions(serverId: string | null): UseDeviceActionsResult {
+  const client = useHostRuntimeClient(serverId ?? "");
+
+  const releaseLease = useCallback(
+    async (deviceId: string) => (client ? await client.releaseDeviceLease(deviceId) : false),
+    [client],
+  );
+  const setReservation = useCallback(
+    async (deviceId: string, reserved: boolean) => {
+      if (!client) return;
+      await client.setDeviceReservation(deviceId, reserved);
+    },
+    [client],
+  );
+  const shutdown = useCallback(
+    async (input: { deviceId: string; confirmMidTurnHolder?: boolean }) => {
+      if (!client) return { status: "failed", message: "Not connected to the daemon." };
+      const payload = await client.shutdownDevice(input);
+      return payload;
+    },
+    [client],
+  );
+
+  return { releaseLease, setReservation, shutdown };
 }
 
 /**
@@ -33,6 +74,10 @@ export function useDeviceStatus(): UseDeviceStatusResult {
   // COMPAT(deviceLeases): added in v0.8.1, remove gate after 2027-03-18.
   const supportsDeviceStatus = useSessionStore(
     (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.deviceLeases === true,
+  );
+  // COMPAT(deviceManagement): added in v0.8.x, remove gate after 2027-09-30.
+  const supportsDeviceManagement = useSessionStore(
+    (state) => state.sessions[serverId ?? ""]?.serverInfo?.features?.deviceManagement === true,
   );
 
   const statusQuery = useReplicaQuery<DeviceStatusPayload>({
@@ -61,5 +106,5 @@ export function useDeviceStatus(): UseDeviceStatusResult {
     [statusQuery.data, agentTitles],
   );
 
-  return { supportsDeviceStatus, model };
+  return { serverId: serverId ?? null, supportsDeviceStatus, supportsDeviceManagement, model };
 }

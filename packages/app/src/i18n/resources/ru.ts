@@ -2010,6 +2010,35 @@ export const ru: TranslationResources = {
     },
     expand: "Развернуть состояние устройств",
     collapse: "Свернуть состояние устройств",
+    free: "Свободно — достанется следующему агенту, который запросит",
+    reservedForYou: "Забронировано для вас",
+    runningFor: "Работает уже {{duration}}",
+    mode: {
+      off: "Выключено",
+      offDescription: "Ничего не учитывается и не отклоняется.",
+      dryRun: "Пробный запуск",
+      dryRunDescription: "Только учёт — ничего не отклоняется.",
+      enforcing: "Применяется",
+      enforcingDescription: "Отклоняются запуски устройств сверх лимита.",
+    },
+    floorNote: "1 Android и 1 iOS разрешены всегда; остальное зависит от памяти.",
+    actions: {
+      menuLabel: "Действия с устройством",
+      release: "Освободить бронь",
+      reserve: "Забронировать для себя",
+      unreserve: "Снять бронь",
+      shutdown: "Выключить",
+    },
+    confirmShutdown: {
+      title: "Выключить это устройство?",
+      message: "Это выключит устройство. Остальное на машине не пострадает.",
+      midTurnTitle: "Устройство сейчас используется",
+      midTurnMessage:
+        "{{agent}} сейчас использует это устройство. Выключение прервёт этот ход. Всё равно выключить?",
+      confirmLabel: "Выключить",
+    },
+    blocked_one: "{{count}} недавний отказ",
+    blocked_other: "{{count}} недавних отказов",
   },
   mcpStatus: {
     collapsedSummary: {

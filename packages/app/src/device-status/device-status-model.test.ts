@@ -48,10 +48,13 @@ describe("buildDeviceStatusStripModel", () => {
     expect(model.rows).toEqual([
       {
         key: "A0A912ED-C766-4778-957C-F9680C7309F3",
+        deviceId: "A0A912ED-C766-4778-957C-F9680C7309F3",
         platform: "ios",
         // A UDID is 36 characters of noise in a sidebar.
         label: "A0A912ED",
         holderKey: "heldBy",
+        reserved: false,
+        isRunning: true,
         agentId: "agent-1",
         agentLabel: "iOS review",
         heldForSeconds: 8040,
@@ -100,6 +103,58 @@ describe("buildDeviceStatusStripModel", () => {
 
     expect(model.rows[0]).toMatchObject({ holderKey: "starting", label: "", platform: "android" });
     expect(model.unleasedCount).toBe(0);
+  });
+
+  test("a reserved device carries `reserved` even while it still shows a holder", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 1,
+        devices: [
+          {
+            platform: "ios",
+            deviceId: "A0A912ED-C766-4778-957C-F9680C7309F3",
+            state: "running",
+            attribution: "lease",
+            agentId: "agent-1",
+            reserved: true,
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({ holderKey: "heldBy", reserved: true });
+  });
+
+  test("reports the mode: off, dry run, or enforcing", () => {
+    expect(buildDeviceStatusStripModel(payload({ enabled: false })).mode).toBe("off");
+    expect(buildDeviceStatusStripModel(payload({ enabled: true, dryRun: true })).mode).toBe(
+      "dryRun",
+    );
+    expect(buildDeviceStatusStripModel(payload({ enabled: true, dryRun: false })).mode).toBe(
+      "enforcing",
+    );
+  });
+
+  test("passes recent refusals through for the panel to render", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 0,
+        waiting: [{ agentId: "agent-3", platform: "ios", waitingForSeconds: 12 }],
+        blocked: [
+          {
+            agentId: "agent-2",
+            platform: "ios",
+            command: "xcrun simctl boot",
+            message: "no slot free",
+            dryRun: false,
+            at: "2026-09-30T12:00:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    expect(model.blocked).toHaveLength(1);
+    expect(model.blocked[0]).toMatchObject({ agentId: "agent-2", dryRun: false });
   });
 
   test("tone warns at the cap and flags going over it", () => {

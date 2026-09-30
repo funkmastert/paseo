@@ -9,6 +9,8 @@ export type DeviceStatusEnforcementTier = "observes" | "asks" | "refuses";
 
 export interface DeviceStatusRow {
   key: string;
+  /** Null only for a "starting" row — a checked-out slot with no device yet. */
+  deviceId: string | null;
   platform: "ios" | "android";
   /** The device's own name where there is one; never a lease id dressed up as a device. */
   label: string;
@@ -25,6 +27,20 @@ export interface DeviceStatusRow {
    * to refuse, which is worth seeing next to the device itself.
    */
   enforcement?: DeviceStatusEnforcementTier;
+  /** Tyler reserved this device. Independent of holderKey — a reserved device can still show a
+   * current holder; reserving doesn't evict one. */
+  reserved: boolean;
+  /** From the process scan, not the lease — a "starting" row is never running yet. */
+  isRunning: boolean;
+}
+
+/** "Enforcing", "Dry run", or the cap turned off entirely. What the Devices section's header
+ * reads, and what the dry-run switch reflects. */
+export type DeviceStatusMode = "off" | "dryRun" | "enforcing";
+
+function resolveMode(payload: DeviceStatusPayload | undefined): DeviceStatusMode {
+  if (!payload?.enabled) return "off";
+  return payload.dryRun ? "dryRun" : "enforcing";
 }
 
 export interface DeviceStatusStripModel {
@@ -32,11 +48,14 @@ export interface DeviceStatusStripModel {
   hasData: boolean;
   enabled: boolean;
   dryRun: boolean;
+  mode: DeviceStatusMode;
   used: number;
   totalSlots: number;
   tone: DeviceStatusTone;
   rows: DeviceStatusRow[];
   waiting: DeviceStatusPayload["waiting"];
+  /** Recent refusals (and, in dry run, what would have been refused or handed over). */
+  blocked: DeviceStatusPayload["blocked"];
   /** Devices running under nobody's lease. Called out because they are the cap's blind spot. */
   unleasedCount: number;
   /**
@@ -66,9 +85,12 @@ function toRow(
   const holderKey = resolveHolderKey(device);
   return {
     key: device.deviceId ?? `starting-${device.platform}-${index}`,
+    deviceId: device.deviceId,
     platform: device.platform,
     label: device.deviceId ? shortDeviceId(device.deviceId) : "",
     holderKey,
+    reserved: device.reserved ?? false,
+    isRunning: device.state === "running",
     ...(device.agentId ? { agentId: device.agentId } : {}),
     ...(device.agentId && agentLabels[device.agentId]
       ? { agentLabel: agentLabels[device.agentId] }
@@ -103,26 +125,33 @@ function resolveUnenforcedProviders(
   return unenforced;
 }
 
+function countUnleased(devices: readonly DeviceStatusEntry[]): number {
+  return devices.filter((device) => device.state === "running" && device.attribution === "none")
+    .length;
+}
+
 export function buildDeviceStatusStripModel(
   payload: DeviceStatusPayload | undefined,
   agentLabels: Record<string, string> = {},
 ): DeviceStatusStripModel {
   const devices = payload?.devices ?? [];
   const waiting = payload?.waiting ?? [];
+  const used = payload?.used ?? 0;
+  const totalSlots = payload?.totalSlots ?? 0;
   return {
     // A daemon with the cap off and nothing running has nothing to say; the strip disappears
     // rather than sitting there reporting zero.
     hasData: devices.length > 0 || waiting.length > 0,
     enabled: payload?.enabled ?? false,
     dryRun: payload?.dryRun ?? false,
-    used: payload?.used ?? 0,
-    totalSlots: payload?.totalSlots ?? 0,
-    tone: resolveTone(payload?.used ?? 0, payload?.totalSlots ?? 0),
+    mode: resolveMode(payload),
+    used,
+    totalSlots,
+    tone: resolveTone(used, totalSlots),
     rows: devices.map((device, index) => toRow(device, index, agentLabels)),
     waiting,
-    unleasedCount: devices.filter(
-      (device) => device.state === "running" && device.attribution === "none",
-    ).length,
+    blocked: payload?.blocked ?? [],
+    unleasedCount: countUnleased(devices),
     unenforcedProviders: resolveUnenforcedProviders(payload),
   };
 }

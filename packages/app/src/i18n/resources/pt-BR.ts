@@ -2011,6 +2011,35 @@ export const ptBR: TranslationResources = {
     },
     expand: "Expandir status dos dispositivos",
     collapse: "Recolher status dos dispositivos",
+    free: "Livre — o próximo agente que pedir vai usá-lo",
+    reservedForYou: "Reservado para você",
+    runningFor: "Em execução há {{duration}}",
+    mode: {
+      off: "Desativado",
+      offDescription: "Nada é contado ou recusado.",
+      dryRun: "Simulação",
+      dryRunDescription: "Apenas contagem — nada é recusado.",
+      enforcing: "Aplicando",
+      enforcingDescription: "Recusando lançamentos de dispositivos além do limite.",
+    },
+    floorNote: "1 Android e 1 iOS sempre permitidos; além disso depende da memória.",
+    actions: {
+      menuLabel: "Ações do dispositivo",
+      release: "Liberar a reserva",
+      reserve: "Reservar para mim",
+      unreserve: "Remover reserva",
+      shutdown: "Desligar",
+    },
+    confirmShutdown: {
+      title: "Desligar este dispositivo?",
+      message: "Isso desliga o dispositivo. Nada mais na máquina é afetado.",
+      midTurnTitle: "Este dispositivo está em uso agora",
+      midTurnMessage:
+        "{{agent}} está usando este dispositivo agora. Desligá-lo vai interromper essa etapa. Desligar mesmo assim?",
+      confirmLabel: "Desligar",
+    },
+    blocked_one: "{{count}} recusa recente",
+    blocked_other: "{{count}} recusas recentes",
   },
   mcpStatus: {
     collapsedSummary: {
