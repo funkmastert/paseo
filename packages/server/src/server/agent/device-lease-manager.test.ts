@@ -91,6 +91,11 @@ function createManager(
     readDaemonConfig: () => ({ deviceLeases: state.config }),
     listAgents: () => state.agents,
     sendSystemMessageToAgent,
+    // Never shell out to real adb/xcrun in a unit test.
+    identityLookup: {
+      androidSerial: async () => undefined,
+      iosSimulatorName: async () => undefined,
+    },
     logger,
     now: () => state.nowMs,
     // An M3 Max: 3 total slots, 2 per platform.
@@ -209,7 +214,7 @@ describe("DeviceLeaseManager", () => {
     );
   });
 
-  test("refuses when the machine has no memory headroom, with a slot free", async () => {
+  test("the guaranteed floor allows the first device of a platform even with no headroom", async () => {
     const { manager } = createManager({ memory: THRASHING_MEMORY });
 
     const decision = await manager.gateLaunch({
@@ -217,8 +222,39 @@ describe("DeviceLeaseManager", () => {
       command: "xcrun simctl boot 'iPhone 17 Pro'",
     });
 
+    expect(decision).toEqual({ decision: "allow" });
+  });
+
+  test("headroom still refuses a second device of the same platform", async () => {
+    const { manager } = createManager({
+      memory: THRASHING_MEMORY,
+      rows: [simulatorRow(1, UDID_A)],
+    });
+    // The floor device is already running and held, so this boot targets a new one.
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    const decision = await manager.gateLaunch({
+      agentId: "agent-2",
+      command: `xcrun simctl boot ${UDID_B}`,
+    });
+
     expect(decision.decision).toBe("deny");
     expect(decision.decision === "deny" && decision.message).toContain("swap is 96% used");
+  });
+
+  test("the floor is per platform: an iOS floor launch is allowed while Android is at 99% swap", async () => {
+    const { manager } = createManager({
+      memory: { ...THRASHING_MEMORY, swapUsedBytes: THRASHING_MEMORY.swapTotalBytes * 0.99 },
+      rows: [emulatorRow(1, 0, "Pixel_7")],
+    });
+    await manager.checkout({ agentId: "agent-1", platform: "android", device: "Pixel_7" });
+
+    const decision = await manager.gateLaunch({
+      agentId: "agent-2",
+      command: "xcrun simctl boot 'iPhone 17 Pro'",
+    });
+
+    expect(decision).toEqual({ decision: "allow" });
   });
 
   test("re-booting a device that is already up costs no slot", async () => {
@@ -257,6 +293,9 @@ describe("DeviceLeaseManager", () => {
     const { manager } = createManager({
       rows: [simulatorRow(1, UDID_A), simulatorRow(2, UDID_B)],
     });
+    // Both already held, so there is nothing left for agent-3 to reuse.
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_B });
 
     expect(await manager.checkout({ agentId: "agent-3", platform: "ios" })).toEqual({
       status: "unavailable",
@@ -269,6 +308,8 @@ describe("DeviceLeaseManager", () => {
     const { manager, state } = createManager({
       rows: [simulatorRow(1, UDID_A), simulatorRow(2, UDID_B)],
     });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_B });
 
     const pending = manager.checkout({ agentId: "agent-3", platform: "ios", wait: true });
     await vi.waitFor(async () => {
@@ -436,6 +477,8 @@ describe("DeviceLeaseManager", () => {
       rows: [simulatorRow(101, UDID_A), simulatorRow(102, UDID_B)],
       drainIntervalMs: 20,
     });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+    await manager.checkout({ agentId: "agent-2", platform: "ios", device: UDID_B });
 
     const waiting = manager.checkout({ agentId: "agent-3", platform: "ios", wait: true });
     await vi.waitFor(async () => {
@@ -715,6 +758,144 @@ describe("DeviceLeaseManager with a provider it cannot refuse", () => {
       attribution: "process",
       provider: "pi",
       enforcement: "observes",
+    });
+  });
+});
+
+describe("DeviceLeaseManager reuse", () => {
+  test("checkout binds to the device the caller names", async () => {
+    const { manager } = createManager({
+      rows: [simulatorRow(1, UDID_A), simulatorRow(2, UDID_B)],
+    });
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_B });
+
+    expect(result).toMatchObject({ status: "granted", device: { deviceId: UDID_B } });
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices.find((d) => d.deviceId === UDID_B)).toMatchObject({
+      agentId: "agent-1",
+      attribution: "lease",
+      state: "running",
+    });
+    // Only one running device was claimed — the other is still free.
+    expect(snapshot.devices.find((d) => d.deviceId === UDID_A)?.agentId).toBeUndefined();
+  });
+
+  test("checkout binds to an unheld running device when none is named", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    expect(result).toMatchObject({ status: "granted", device: { deviceId: UDID_A } });
+    // Binds immediately — no "starting" lease, so no never-started clock is running.
+    expect((await manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      state: "running",
+      agentId: "agent-1",
+    });
+  });
+
+  test("a named device that isn't running allocates a new slot instead of reusing another one", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_C });
+
+    // Granted a pending slot, not bound to UDID_A — the caller asked for a specific device.
+    expect(result).toMatchObject({ status: "granted" });
+    expect(result.status === "granted" && result.device).toBeUndefined();
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.devices.find((d) => d.deviceId === UDID_A)?.agentId).toBeUndefined();
+    expect(snapshot.devices.some((d) => d.state === "starting" && d.agentId === "agent-1")).toBe(
+      true,
+    );
+  });
+
+  test("checkout never binds to a device reserved for Tyler", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    manager.reserveDevice(UDID_A);
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    // Nothing to reuse, so a new slot was allocated instead.
+    expect(result).toMatchObject({ status: "granted" });
+    expect(result.status === "granted" && result.device).toBeUndefined();
+  });
+
+  test("checkout explicitly naming a reserved device does not hand it over", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    manager.reserveDevice(UDID_A);
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    expect(result.status === "granted" && result.device?.deviceId).not.toBe(UDID_A);
+  });
+
+  test("a reservation survives even though it does not evict a current holder", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    await manager.checkout({ agentId: "agent-1", platform: "ios", device: UDID_A });
+
+    manager.reserveDevice(UDID_A);
+
+    const entry = (await manager.getSnapshot()).devices.find((d) => d.deviceId === UDID_A);
+    expect(entry).toMatchObject({ agentId: "agent-1", reserved: true });
+  });
+
+  test("unreserve makes the device eligible for reuse again", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+    manager.reserveDevice(UDID_A);
+    manager.unreserveDevice(UDID_A);
+
+    const result = await manager.checkout({ agentId: "agent-1", platform: "ios" });
+
+    expect(result).toMatchObject({ status: "granted", device: { deviceId: UDID_A } });
+  });
+
+  test("the gate hands over a running device instead of duplicating it, live", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    const decision = await manager.gateLaunch({
+      agentId: "agent-1",
+      command: "expo run:ios",
+    });
+
+    expect(decision.decision).toBe("deny");
+    expect(decision.decision === "deny" && decision.message).toContain(UDID_A);
+    expect((await manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      agentId: "agent-1",
+    });
+  });
+
+  test("the gate records a would-have-handed-over note in dry run and lets the launch through", async () => {
+    const { manager } = createManager({
+      config: { enabled: true, dryRun: true },
+      rows: [simulatorRow(1, UDID_A)],
+    });
+
+    const decision = await manager.gateLaunch({
+      agentId: "agent-1",
+      command: "expo run:ios",
+    });
+
+    expect(decision).toEqual({ decision: "allow" });
+    // Not bound: the agent's own boot is what will actually happen in a real run, and binding
+    // the existing device here would misrepresent what the launch actually did.
+    expect((await manager.getSnapshot()).devices[0].agentId).toBeUndefined();
+    const snapshot = await manager.getSnapshot();
+    expect(snapshot.blocked[0]).toMatchObject({ dryRun: true, agentId: "agent-1" });
+    expect(snapshot.blocked[0].message).toContain("would have handed over");
+  });
+
+  test("naming an already-running device in a launch still binds a lease to it", async () => {
+    const { manager } = createManager({ rows: [simulatorRow(1, UDID_A)] });
+
+    expect(
+      await manager.gateLaunch({ agentId: "agent-1", command: `xcrun simctl boot ${UDID_A}` }),
+    ).toEqual({ decision: "allow" });
+
+    expect((await manager.getSnapshot()).devices[0]).toMatchObject({
+      deviceId: UDID_A,
+      agentId: "agent-1",
     });
   });
 });

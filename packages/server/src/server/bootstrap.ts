@@ -290,6 +290,7 @@ import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { createSaturationLedger } from "./agent/saturation-ledger.js";
 import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
+import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
 import {
@@ -1955,6 +1956,7 @@ export async function createPaseoDaemon(
       agentId: agent.id,
       provider: agent.provider,
       isRunning: agent.isRunning,
+      extendsProviderId: resolveProviderExtends(agent.provider, daemonConfigStore.get().providers),
     }));
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
   // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).

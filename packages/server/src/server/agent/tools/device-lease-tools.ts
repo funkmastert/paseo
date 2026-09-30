@@ -33,6 +33,9 @@ export interface RegisterDeviceLeaseToolsOptions {
   callerAgentId?: string;
   /** Throws when the caller is gone, so it is resolved lazily at each call, not at register. */
   resolveCallerProvider?: () => string | undefined;
+  /** The caller provider's `extends`, when it has one — a claude-backup-style custom provider
+   * enforces exactly like its base (device-launch-enforcement.ts). */
+  resolveCallerExtendsProviderId?: () => string | undefined;
 }
 
 const PlatformSchema = z.enum(["ios", "android"]);
@@ -67,7 +70,10 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       return undefined;
     }
     if (!provider) return undefined;
-    const enforcement = resolveDeviceLaunchEnforcement(provider);
+    const enforcement = resolveDeviceLaunchEnforcement(
+      provider,
+      options.resolveCallerExtendsProviderId?.(),
+    );
     return { tier: enforcement.tier, detail: describeDeviceLaunchEnforcement(enforcement) };
   };
 
@@ -98,6 +104,15 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
           .optional()
           .describe("Wait for a slot instead of returning immediately. Defaults to true."),
         timeoutMinutes: z.number().positive().max(120).optional(),
+        device: z
+          .string()
+          .trim()
+          .min(1)
+          .optional()
+          .describe(
+            "Use this specific already-running device (its UDID or AVD name) instead of letting " +
+              "the cap pick one. When it isn't running, a new device is booted for you instead.",
+          ),
       },
     },
     async (input, context) => {
@@ -108,6 +123,7 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         wait: input.wait ?? true,
         ...(input.reason ? { reason: input.reason } : {}),
         ...(input.timeoutMinutes ? { timeoutMs: input.timeoutMinutes * 60_000 } : {}),
+        ...(input.device ? { device: input.device } : {}),
         // A canceled turn must not leave an agent queued for a slot it will never use.
         ...(context.signal ? { signal: context.signal } : {}),
       });

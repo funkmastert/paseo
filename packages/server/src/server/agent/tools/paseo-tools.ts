@@ -91,6 +91,7 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
+import { resolveProviderExtends } from "../device-launch-enforcement.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
@@ -1300,6 +1301,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       // The cap binds different providers to different degrees, and the agent asking is the
       // one that needs to know which it is (docs/device-leases.md).
       resolveCallerProvider: () => resolveCallerAgent()?.provider,
+      resolveCallerExtendsProviderId: () =>
+        resolveProviderExtends(resolveCallerAgent()?.provider, daemonConfigStore?.get().providers),
     });
   }
 

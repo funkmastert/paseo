@@ -34,12 +34,15 @@ import {
 import {
   evaluateDeviceOccupancy,
   evaluateDeviceSlot,
+  isPlatformFloorUnfilled,
   reconcileDeviceLeases,
+  selectReusableDevice,
   type DeviceLease,
   type DeviceLeaseRelease,
   type DeviceSlotCaps,
 } from "./device-lease-registry.js";
 import { readSystemHardware, type HardwareReader } from "./device-hardware.js";
+import { DeviceIdentityLookup } from "./device-identity-lookup.js";
 import {
   DEVICE_LAUNCH_ENFORCEMENT_TIERS,
   describeDeviceLaunchEnforcement,
@@ -102,6 +105,9 @@ export interface DeviceLeaseAgentSummary {
   agentId: string;
   provider: string;
   isRunning: boolean;
+  /** `agents.providers.<provider>.extends`, when set — a claude-backup-style custom provider
+   * enforces exactly like its base (device-launch-enforcement.ts's `resolveProviderExtends`). */
+  extendsProviderId?: string;
 }
 
 export interface DeviceStatusEntry {
@@ -119,6 +125,9 @@ export interface DeviceStatusEntry {
   /** The holder's provider, and how strongly the cap binds it. Absent with no holder. */
   provider?: string;
   enforcement?: DeviceLaunchEnforcementTier;
+  /** Tyler reserved this device for himself. Independent of `attribution`: a device can be
+   * reserved and still show its current holder — reserving does not evict one. */
+  reserved?: boolean;
 }
 
 export interface DeviceStatusWaiter {
@@ -161,9 +170,28 @@ export interface DeviceStatusSnapshot {
   generatedAt: string;
 }
 
+/** Exactly which device a grant is, and how to target it, once one is known. */
+export interface DeviceCheckoutDeviceInfo {
+  deviceId: string;
+  /** A friendlier name, when identity lookup found one — a simulator's name or nothing extra
+   * for Android, whose deviceId already is the AVD name. */
+  name?: string;
+  /** Android only: the adb serial a command actually needs (`adb -s <serial> …`). */
+  serial?: string;
+  /** How to run a command against this device, ready to paste. */
+  targetHint: string;
+}
+
 export type DeviceCheckoutResult =
   | { status: "disabled" }
-  | { status: "granted"; leaseId: string; platform: DevicePlatform; note?: string }
+  | {
+      status: "granted";
+      leaseId: string;
+      platform: DevicePlatform;
+      note?: string;
+      /** Set when the grant reused an already-running device instead of a pending boot. */
+      device?: DeviceCheckoutDeviceInfo;
+    }
   | { status: "queued"; platform: DevicePlatform; ahead: number; message: string }
   | { status: "unavailable"; platform: DevicePlatform; message: string };
 
@@ -209,6 +237,44 @@ export interface DeviceLeaseManagerOptions {
   sampleMaxAgeMs?: number;
   drainIntervalMs?: number;
   createLeaseId?: () => string;
+  /** Devices Tyler reserved for himself; checkout and the gate never hand these to an agent.
+   * Defaults to an in-memory, unreserved-by-default store when not given (tests, or a daemon
+   * that hasn't wired persistence yet). */
+  reservations?: DeviceReservations;
+  /** Enriches a bare device id with its adb serial / simulator name for response text. Defaults
+   * to a real DeviceIdentityLookup; tests inject a fake runner through it instead. */
+  identityLookup?: DeviceIdentityLookupLike;
+}
+
+/** What the cap needs from a reservation store — DeviceReservationStore satisfies this. */
+export interface DeviceReservations {
+  reservedDeviceIds(): ReadonlySet<string>;
+  isReserved(deviceId: string): boolean;
+  reserve(deviceId: string, nowMs: number): void;
+  unreserve(deviceId: string): void;
+}
+
+export interface DeviceIdentityLookupLike {
+  androidSerial(avdName: string): Promise<string | undefined>;
+  iosSimulatorName(udid: string): Promise<string | undefined>;
+}
+
+/** In-memory only — reservations work, but don't survive a restart. What the cap falls back to
+ * when nobody wired a persisted DeviceReservationStore in. */
+class InMemoryDeviceReservations implements DeviceReservations {
+  private readonly reserved = new Set<string>();
+  reservedDeviceIds(): ReadonlySet<string> {
+    return this.reserved;
+  }
+  isReserved(deviceId: string): boolean {
+    return this.reserved.has(deviceId);
+  }
+  reserve(deviceId: string): void {
+    this.reserved.add(deviceId);
+  }
+  unreserve(deviceId: string): void {
+    this.reserved.delete(deviceId);
+  }
 }
 
 interface ResolvedDeviceLeaseConfig {
@@ -246,6 +312,12 @@ export interface DeviceCheckoutInput {
   wait?: boolean;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /**
+   * Name a specific running device (its UDID or AVD name) instead of letting the cap pick one
+   * to reuse. When it isn't running, a new slot is allocated rather than handing back something
+   * else — the caller asked for this device specifically.
+   */
+  device?: string;
 }
 
 function formatDuration(seconds: number): string {
@@ -290,7 +362,7 @@ function summarizeProviderEnforcement(
   const byProvider = new Map<string, DeviceStatusProviderEnforcement>();
   for (const agent of agents) {
     if (byProvider.has(agent.provider)) continue;
-    const enforcement = resolveDeviceLaunchEnforcement(agent.provider);
+    const enforcement = resolveDeviceLaunchEnforcement(agent.provider, agent.extendsProviderId);
     byProvider.set(agent.provider, {
       provider: agent.provider,
       tier: enforcement.tier,
@@ -317,6 +389,8 @@ export class DeviceLeaseManager {
   private readonly sampleMaxAgeMs: number;
   private readonly drainIntervalMs: number;
   private readonly createLeaseId: () => string;
+  private readonly reservations: DeviceReservations;
+  private readonly identityLookup: DeviceIdentityLookupLike;
 
   private leases: DeviceLease[] = [];
   private waiters: QueuedWaiter[] = [];
@@ -345,6 +419,8 @@ export class DeviceLeaseManager {
     this.sampleMaxAgeMs = options.sampleMaxAgeMs ?? SAMPLE_MAX_AGE_MS;
     this.drainIntervalMs = options.drainIntervalMs ?? DRAIN_INTERVAL_MS;
     this.createLeaseId = options.createLeaseId ?? (() => randomUUID());
+    this.reservations = options.reservations ?? new InMemoryDeviceReservations();
+    this.identityLookup = options.identityLookup ?? new DeviceIdentityLookup();
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -424,7 +500,7 @@ export class DeviceLeaseManager {
       this.chargedUnleasedDevices.add(key);
 
       const agent = agents.get(device.agentId);
-      const enforcement = resolveDeviceLaunchEnforcement(agent?.provider);
+      const enforcement = resolveDeviceLaunchEnforcement(agent?.provider, agent?.extendsProviderId);
       this.logger.info(
         {
           agentId: device.agentId,
@@ -491,6 +567,34 @@ export class DeviceLeaseManager {
     await this.ensureSample({ fresh: true });
     this.reconcile(config);
 
+    // Reuse what's already running before allocating anything new. Prefer, in order: the
+    // device the caller names (only when it's actually running — a named device that isn't
+    // running means the caller wants THAT one booted, not a substitute); a device matched in
+    // the reason text; otherwise the longest-idle unheld, unreserved device of the platform.
+    const named = input.device
+      ? this.findNamedRunningDevice(input.platform, input.device)
+      : undefined;
+    const reusable = input.device
+      ? named
+      : this.findReusableDevice({ platform: input.platform, reason: input.reason });
+    if (reusable) {
+      const lease = this.bindLease({
+        agentId: input.agentId,
+        platform: input.platform,
+        device: reusable,
+        source: "checkout",
+        reason: input.reason,
+      });
+      const device = await this.describeDevice(reusable);
+      return {
+        status: "granted",
+        leaseId: lease.id,
+        platform: input.platform,
+        note: `Using the already-running ${input.platform} device ${device.name ?? device.deviceId} instead of booting a new one.`,
+        device,
+      };
+    }
+
     const verdict = this.tryGrant(input.agentId, input.platform, "checkout", input.reason, config);
     if (verdict.granted) {
       return { status: "granted", leaseId: verdict.leaseId, platform: input.platform };
@@ -546,6 +650,22 @@ export class DeviceLeaseManager {
     return released.length;
   }
 
+  /** "Reserved for you": checkout and the gate never hand this device to an agent. Reserving a
+   * device somebody already holds does not evict them — see `applyReservation`. */
+  reserveDevice(deviceId: string): void {
+    this.reservations.reserve(deviceId, this.now());
+    this.notify();
+  }
+
+  unreserveDevice(deviceId: string): void {
+    this.reservations.unreserve(deviceId);
+    this.notify();
+  }
+
+  listReservedDeviceIds(): string[] {
+    return [...this.reservations.reservedDeviceIds()];
+  }
+
   /**
    * The enforcement point. Called from the provider's PreToolUse hook before a shell command
    * runs: a command that would boot a device is refused when there is no slot, and the refusal
@@ -563,7 +683,7 @@ export class DeviceLeaseManager {
     this.reconcile(config);
 
     for (const intent of intents) {
-      const decision = this.gateIntent(input.agentId, intent, config, sample);
+      const decision = await this.gateIntent(input.agentId, intent, config, sample);
       if (decision) {
         this.recordBlocked({
           agentId: input.agentId,
@@ -605,18 +725,32 @@ export class DeviceLeaseManager {
    * Allowing takes a lease on the agent's behalf, so a device booted without asking still fills
    * a slot and still shows a holder — the count is never quietly wrong.
    */
-  private gateIntent(
+  private async gateIntent(
     agentId: string,
     intent: DeviceLaunchIntent,
     config: ResolvedDeviceLeaseConfig,
     sample: DeviceSample,
-  ): string | undefined {
-    // Booting a device that is already up costs nothing; refusing it would be nonsense.
-    if (
-      sample.devices.some((device) =>
-        targetMatchesRunningDevice(intent.target, device, intent.platform),
-      )
-    ) {
+  ): Promise<string | undefined> {
+    // Booting a device that is already up costs nothing; refusing it would be nonsense. Bind a
+    // lease to it too (when it's unheld and unreserved), so naming a running device still
+    // shows a holder and never expires as never-started — the "stays allowed" rule is
+    // unchanged, only the bookkeeping behind it is new.
+    const matchedRunning = sample.devices.find((device) =>
+      targetMatchesRunningDevice(intent.target, device, intent.platform),
+    );
+    if (matchedRunning) {
+      if (
+        !this.reservations.isReserved(matchedRunning.deviceId) &&
+        !this.leases.some((lease) => lease.deviceId === matchedRunning.deviceId)
+      ) {
+        this.bindLease({
+          agentId,
+          platform: intent.platform,
+          device: matchedRunning,
+          source: "launch",
+          reason: undefined,
+        });
+      }
       return undefined;
     }
     // The agent already holds a slot on this platform, so this launch costs nothing new.
@@ -640,8 +774,52 @@ export class DeviceLeaseManager {
       return undefined;
     }
 
+    // The gate hands over instead of duplicating: a launch that names no device (or names one
+    // that isn't running — that command is about to create it, which is fine) is about to boot
+    // a device while an unheld, unreserved one of the same platform already exists. Live mode
+    // leases the running device to this agent and refuses the new boot; dry run allows the
+    // launch through and only records what it would have done.
+    if (intent.target === undefined) {
+      const reusable = this.findReusableDevice({ platform: intent.platform, reason: undefined });
+      if (reusable) {
+        const device = await this.describeDevice(reusable);
+        if (config.dryRun) {
+          this.recordBlocked({
+            agentId,
+            platform: intent.platform,
+            command: intent.command,
+            message: `would have handed over the already-running ${device.name ?? device.deviceId} (${device.targetHint}) instead of letting \`${intent.command}\` boot a new device`,
+            dryRun: true,
+            at: new Date(this.now()).toISOString(),
+          });
+          return undefined;
+        }
+        this.bindLease({
+          agentId,
+          platform: intent.platform,
+          device: reusable,
+          source: "launch",
+          reason: undefined,
+        });
+        return this.handoverDenialMessage(intent, device);
+      }
+    }
+
     const verdict = this.tryGrant(agentId, intent.platform, "launch", undefined, config);
     return verdict.granted ? undefined : this.denialMessage(intent, verdict.message);
+  }
+
+  private handoverDenialMessage(
+    intent: DeviceLaunchIntent,
+    device: DeviceCheckoutDeviceInfo,
+  ): string {
+    return (
+      `Bozeo device cap: \`${intent.command}\` was not run because an unheld ${intent.platform} ` +
+      `device is already running — ${device.name ?? device.deviceId} — and you now hold it. Use ` +
+      `it instead of booting a new one: \`${device.targetHint}\`. To get a different device ` +
+      `instead, call \`device_checkout\` with a \`device\` naming one, or check this one back in ` +
+      `with \`device_checkin\` first.`
+    );
   }
 
   private denialMessage(intent: DeviceLaunchIntent, reason: string): string {
@@ -703,7 +881,16 @@ export class DeviceLeaseManager {
         message: `the machine is already running ${limit} (${slot.occupancy.total} of ${config.caps.totalSlots} slots in use)`,
       };
     }
-    if (config.requireHeadroom) {
+    // The guaranteed floor: the first device of a platform is always allowed, headroom or not.
+    // Swap sits around 90% most days on the machine this was built for, and a headroom rule
+    // with no floor refuses every device, stranding mobile work before it starts. The slot cap
+    // above still applies — the floor is exempt from headroom only.
+    const isFloorGrant = isPlatformFloorUnfilled({
+      platform,
+      runningDevices: this.sample?.devices ?? [],
+      leases: this.leases,
+    });
+    if (config.requireHeadroom && !isFloorGrant) {
       const headroom = evaluateMemoryHeadroom(
         {
           ...(this.sample?.systemMemory?.availableBytes !== undefined
@@ -761,6 +948,95 @@ export class DeviceLeaseManager {
     );
     this.notify();
     return lease;
+  }
+
+  /**
+   * Leases an agent directly to a device that is already running, skipping the pending state
+   * entirely — the device exists, so there is nothing to wait for. Used for reuse at checkout
+   * and for the gate's handover: either way the lease is `running` from the instant it exists,
+   * never `starting`, so it can never expire as `never-started`.
+   */
+  private bindLease(input: {
+    agentId: string;
+    platform: DevicePlatform;
+    device: RunningDevice;
+    source: DeviceLease["source"];
+    reason: string | undefined;
+  }): DeviceLease {
+    const lease: DeviceLease = {
+      id: this.createLeaseId(),
+      agentId: input.agentId,
+      platform: input.platform,
+      source: input.source,
+      acquiredAtMs: this.now(),
+      deviceId: input.device.deviceId,
+      ...(input.reason ? { reason: input.reason } : {}),
+    };
+    this.leases.push(lease);
+    this.logger.info(
+      {
+        leaseId: lease.id,
+        agentId: input.agentId,
+        platform: input.platform,
+        deviceId: input.device.deviceId,
+        source: input.source,
+      },
+      "Device slot leased directly to an already-running device",
+    );
+    this.notify();
+    return lease;
+  }
+
+  /** Every unheld, unreserved device of a platform, ranked by the reuse priority: an explicit
+   * name (resolved by the caller), then a match in the reason text, then longest-idle. */
+  private findReusableDevice(input: {
+    platform: DevicePlatform;
+    reason: string | undefined;
+  }): RunningDevice | undefined {
+    return selectReusableDevice({
+      platform: input.platform,
+      runningDevices: this.sample?.devices ?? [],
+      leases: this.leases,
+      reservedDeviceIds: this.reservations.reservedDeviceIds(),
+      ...(input.reason ? { reason: input.reason } : {}),
+    });
+  }
+
+  /** A running device this platform's caller explicitly named, if it exists and isn't reserved
+   * or already held by somebody else. */
+  private findNamedRunningDevice(
+    platform: DevicePlatform,
+    named: string,
+  ): RunningDevice | undefined {
+    const device = (this.sample?.devices ?? []).find(
+      (candidate) =>
+        candidate.platform === platform &&
+        (candidate.platform === "ios"
+          ? candidate.deviceId.toLowerCase() === named.toLowerCase()
+          : candidate.deviceId === named),
+    );
+    if (!device) return undefined;
+    if (this.reservations.isReserved(device.deviceId)) return undefined;
+    if (this.leases.some((lease) => lease.deviceId === device.deviceId)) return undefined;
+    return device;
+  }
+
+  /** Exactly which device a grant is, in a form ready to paste into a shell command. */
+  private async describeDevice(device: RunningDevice): Promise<DeviceCheckoutDeviceInfo> {
+    if (device.platform === "ios") {
+      const name = await this.identityLookup.iosSimulatorName(device.deviceId);
+      return {
+        deviceId: device.deviceId,
+        ...(name ? { name } : {}),
+        targetHint: `xcrun simctl <command> ${device.deviceId}`,
+      };
+    }
+    const serial = await this.identityLookup.androidSerial(device.deviceId);
+    return {
+      deviceId: device.deviceId,
+      ...(serial ? { serial } : {}),
+      targetHint: serial ? `adb -s ${serial} <command>` : `adb -s <serial> <command>`,
+    };
   }
 
   private async enqueue(
@@ -1004,12 +1280,15 @@ export class DeviceLeaseManager {
   /** Stamps a status entry with its holder's provider and what the cap can do about it. */
   private applyEnforcement(
     entry: DeviceStatusEntry,
-    providerByAgentId: ReadonlyMap<string, string>,
+    agentsById: ReadonlyMap<string, DeviceLeaseAgentSummary>,
   ): DeviceStatusEntry {
-    const provider = entry.agentId ? providerByAgentId.get(entry.agentId) : undefined;
-    if (!provider) return entry;
-    entry.provider = provider;
-    entry.enforcement = resolveDeviceLaunchEnforcement(provider).tier;
+    const agent = entry.agentId ? agentsById.get(entry.agentId) : undefined;
+    if (!agent) return entry;
+    entry.provider = agent.provider;
+    entry.enforcement = resolveDeviceLaunchEnforcement(
+      agent.provider,
+      agent.extendsProviderId,
+    ).tier;
     return entry;
   }
 
@@ -1043,13 +1322,22 @@ export class DeviceLeaseManager {
     return entry;
   }
 
+  /** Stamps `reserved`, independent of the lease/process attribution above — reserving a device
+   * does not evict whoever already holds it. */
+  private applyReservation(entry: DeviceStatusEntry): DeviceStatusEntry {
+    if (entry.deviceId && this.reservations.isReserved(entry.deviceId)) {
+      entry.reserved = true;
+    }
+    return entry;
+  }
+
   private buildSnapshot(
     config: ResolvedDeviceLeaseConfig,
     sample: DeviceSample,
   ): DeviceStatusSnapshot {
     const nowMs = this.now();
     const agents = this.listAgents();
-    const providerByAgentId = new Map(agents.map((agent) => [agent.agentId, agent.provider]));
+    const agentsById = new Map(agents.map((agent) => [agent.agentId, agent]));
     const leaseByDeviceId = new Map(
       this.leases
         .filter((lease) => lease.deviceId !== undefined)
@@ -1058,9 +1346,11 @@ export class DeviceLeaseManager {
 
     // Running devices come first and come from `ps`. A lease only decorates one with a holder.
     const devices: DeviceStatusEntry[] = sample.devices.map((device) =>
-      this.applyEnforcement(
-        this.toRunningDeviceEntry(device, leaseByDeviceId.get(device.deviceId), nowMs),
-        providerByAgentId,
+      this.applyReservation(
+        this.applyEnforcement(
+          this.toRunningDeviceEntry(device, leaseByDeviceId.get(device.deviceId), nowMs),
+          agentsById,
+        ),
       ),
     );
 
@@ -1078,7 +1368,7 @@ export class DeviceLeaseManager {
             source: lease.source,
             ...(lease.reason ? { reason: lease.reason } : {}),
           },
-          providerByAgentId,
+          agentsById,
         ),
       );
     }
