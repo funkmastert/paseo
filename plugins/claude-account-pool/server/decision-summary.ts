@@ -53,6 +53,14 @@ export function describeDecision(decision: AgentDecision): string {
       : `MCP servers: all — ${mcp.reason}`,
   );
 
+  // Only the create hook's decision carries an answer; a preview says "decided at create" in the task-class reason.
+  if (decision.jev?.wouldBe) {
+    const { wouldBe } = decision.jev;
+    lines.push(
+      `JEV spawn hint: ${decision.jev.status}, ${decision.jev.applied ? "applied" : "not applied"}. With every answer applied: ${wouldBe.taskClass ?? "standard"}${wouldBe.role !== undefined ? `, role ${wouldBe.role}` : ""}, ${wouldBe.model ?? "the request's own model"} (${wouldBe.move === "none" ? "no class move" : `a move ${wouldBe.move}`}).`,
+    );
+  }
+
   if (account.kind !== "not-evaluated") {
     lines.push(`Account: ${account.providerId ?? account.kind} — ${account.reason}`);
   }

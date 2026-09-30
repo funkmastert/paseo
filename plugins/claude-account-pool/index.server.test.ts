@@ -550,5 +550,165 @@ describe("contribute (index.server)", () => {
       expect(h.logged()).not.toContain("UNVERIFIED MODEL");
       h.done();
     });
+
+    describe("JEV's spawn hint (docs/jev.md, Feature 2)", () => {
+      const LANE = {
+        today: { calls: 0, answered: 0, failed: 0, unavailable: 0, inputTokens: 0, usd: 0, usdSource: "none" },
+        maxUsdPerDay: 1,
+        exhausted: false,
+        circuit: "closed",
+        resetsAt: "2026-09-30T00:00:00.000Z",
+      };
+      function jevStatus(shadow: boolean) {
+        return {
+          available: true,
+          reason: null,
+          keyPresent: true,
+          provider: "fake",
+          model: "jev-fake",
+          features: { spawnHint: { enabled: true, shadow }, agentTools: { enabled: true, shadow: false } },
+          lanes: { control: LANE, agentTools: LANE, interactive: LANE },
+          spawnHint: { applyHard: false, applyRole: false },
+          agentTools: { assignShare: 0.5 },
+          todayByFeature: {},
+          last7Days: [],
+        };
+      }
+      /** A mechanical answer both floors accept, for a child whose role is a guess. */
+      const MECHANICAL = {
+        task_class: { type: "choice", choice: "mechanical", probabilities: {}, confidence: 0.9 },
+        reasoning: { type: "score", score: 0.2, legend: {}, probabilities: {}, confidence: 0.9 },
+        role: { type: "choice", choice: "worker", probabilities: {}, confidence: 0.9 },
+      };
+      const UNLABELLED_CHILD = {
+        callerAgentId: "caller-1",
+        initialPrompt: "Implement the retry helper in src/net.ts and add a unit test.",
+      };
+
+      function withJev(
+        h: ReturnType<typeof harness>,
+        options: { shadow: boolean; decide: (...args: unknown[]) => Promise<unknown> },
+      ) {
+        const decide = vi.fn(options.decide);
+        const checkScope = vi.fn().mockResolvedValue("ok");
+        (h.live.paseo as unknown as { jev: unknown }).jev = {
+          decide,
+          status: vi.fn().mockResolvedValue(jevStatus(options.shadow)),
+          checkScope,
+        };
+        return { decide, checkScope };
+      }
+
+      function answered(outcome: "answered" | "shadow") {
+        return async () => ({
+          requestId: "r",
+          callId: "jev-call-1",
+          outcome,
+          reason: null,
+          answers: MECHANICAL,
+          model: "jev-fake",
+          elapsedMs: 5,
+        });
+      }
+
+      it("live: a mechanical answer moves an unlabelled child to Haiku, labels it, and logs wouldBe", async () => {
+        const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+        const random = vi.spyOn(Math, "random").mockReturnValue(0.1);
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+        const { decide, checkScope } = withJev(h, { shadow: false, decide: answered("answered") });
+
+        const created = await h.create("claude-sonnet-5", UNLABELLED_CHILD);
+
+        expect(created.config.model).toBe("claude-haiku-4-5");
+        expect(decide).toHaveBeenCalledTimes(1);
+        expect((decide.mock.calls[0] as unknown[])[0]).toMatchObject({
+          feature: "spawnHint",
+          scope: { cwd: "/tmp", parentAgentId: "caller-1" },
+        });
+        expect(checkScope).toHaveBeenCalledWith({ cwd: "/tmp", parentAgentId: "caller-1" }, { timeout: 2_000 });
+        expect(created.labels).toMatchObject({
+          "paseo.task-class-source": "jev",
+          "paseo.jev-call": "jev-call-1",
+          "paseo.jev-tools": "on",
+        });
+        const [line] = decisionLines(lines.mock.calls);
+        expect(line).toMatchObject({
+          taskClass: { value: "mechanical", source: "jev" },
+          jev: {
+            status: "answered",
+            callId: "jev-call-1",
+            taskClass: { choice: "mechanical", confidence: 0.9 },
+            reasoning: { score: 0.2, confidence: 0.9 },
+            applied: true,
+            wouldBe: { taskClass: "mechanical", role: "worker", model: "claude-haiku-4-5", move: "down" },
+          },
+          jevTools: "on",
+        });
+        random.mockRestore();
+        lines.mockRestore();
+        h.done();
+      });
+
+      it("shadow, the default: the answer is logged as wouldBe and the create runs as today", async () => {
+        const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+        withJev(h, { shadow: true, decide: answered("shadow") });
+
+        const created = await h.create("claude-sonnet-5", UNLABELLED_CHILD);
+
+        expect(created.config.model).toBe("claude-sonnet-5");
+        expect(created.labels).toMatchObject({ "paseo.task-class-source": "default", "paseo.jev-call": "jev-call-1" });
+        expect(decisionLines(lines.mock.calls)[0]).toMatchObject({
+          taskClass: { value: null, source: "default" },
+          jev: { status: "shadow", applied: false, wouldBe: { taskClass: "mechanical", move: "down" } },
+        });
+        lines.mockRestore();
+        h.done();
+      });
+
+      it("a daemon without JEV: nothing is asked and the line and labels are today's", async () => {
+        const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+
+        const created = await h.create("claude-sonnet-5", UNLABELLED_CHILD);
+
+        expect(created.config.model).toBe("claude-sonnet-5");
+        expect(created.labels?.["paseo.jev-call"]).toBeUndefined();
+        expect(created.labels?.["paseo.jev-tools"]).toBeUndefined();
+        const [line] = decisionLines(lines.mock.calls);
+        expect(line).not.toHaveProperty("jev");
+        expect(line).not.toHaveProperty("jevTools");
+        lines.mockRestore();
+        h.done();
+      });
+
+      it("a rejected call fails no create and applies nothing", async () => {
+        const lines = vi.spyOn(console, "log").mockImplementation(() => {});
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+        withJev(h, {
+          shadow: false,
+          decide: async () => {
+            throw new Error("socket closed");
+          },
+        });
+
+        const created = await h.create("claude-sonnet-5", UNLABELLED_CHILD);
+
+        expect(created.config.model).toBe("claude-sonnet-5");
+        expect(decisionLines(lines.mock.calls)[0]).toMatchObject({ jev: { status: "unavailable", reason: "error", applied: false } });
+        lines.mockRestore();
+        h.done();
+      });
+
+      it("a root create never asks", async () => {
+        const h = harness({ providers: PROVIDERS, agentModelPolicy: LIVE_POLICY });
+        const { decide } = withJev(h, { shadow: false, decide: answered("answered") });
+
+        await h.create(undefined, { initialPrompt: "Rename the helper everywhere." });
+
+        expect(decide).not.toHaveBeenCalled();
+        h.done();
+      });
+    });
   });
 });

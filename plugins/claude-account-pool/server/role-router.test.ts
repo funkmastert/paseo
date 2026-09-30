@@ -5,8 +5,11 @@ import {
   AGENT_ROLE_LABEL,
   AGENT_TYPE_LABEL,
   DEFAULT_POLICY as SHIPPED_POLICY,
+  JEV_CALL_LABEL,
+  JEV_TOOLS_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_LABEL,
+  TASK_CLASS_SOURCE_LABEL,
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
@@ -17,6 +20,8 @@ import type { ModelCatalog, ThinkingCatalog } from "./model-catalog";
 import { createRouter } from "./router";
 import { createRecentAgentTypes } from "./recent-agent-types";
 import { createRoleRouter, type RoleCreateRouter, type RoleRouterOptions } from "./role-router";
+import type { JevToolsWorld } from "./classifier";
+import type { SpawnHint } from "./jev-hint";
 
 type CreateAgentRequest = PluginBeforeRequests["agent.create"];
 
@@ -2318,5 +2323,129 @@ describe("createRoleRouter — output style (config.outputStyle)", () => {
       fakeContext,
     );
     expect(result?.config.outputStyle).toBeUndefined();
+  });
+});
+
+describe("JEV's labels", () => {
+  /** A worker whose mechanical pool differs, so a mechanical answer moves the model. */
+  function jevOptions(): RoleRouterOptions {
+    const policy: RoleModelPolicy = {
+      ...DEFAULT_POLICY,
+      roles: DEFAULT_POLICY.roles.map((role) =>
+        role.id === "worker"
+          ? { ...role, models: ["claude-sonnet-5"], mechanicalModels: ["claude-haiku-4-5"], hardModels: [] }
+          : role,
+      ),
+    };
+    return baseOptions({
+      policyCache: fakePolicyCache(policy),
+      catalogCache: fakeCatalogCache(catalog({ claude: ["claude-sonnet-5", "claude-haiku-4-5"] })),
+      poolCache: fakePoolCache({ workers: [{ providerId: "claude-backup", priority: 1 }], leader: { providerId: "leader" } }),
+    });
+  }
+
+  const mechanical = (status: "answered" | "shadow"): SpawnHint => ({
+    status,
+    callId: "jev-call-7",
+    answers: { taskClass: { choice: "mechanical", confidence: 0.9 }, reasoning: { score: 0.2, confidence: 0.9 } },
+    proposal: { taskClass: "mechanical" },
+    applyHard: false,
+    applyRole: false,
+  });
+
+  const unlabelled = () =>
+    request({
+      callerAgentId: "c1",
+      labels: { [AGENT_ROLE_LABEL]: "worker" },
+      initialPrompt: "Implement the retry helper.",
+      config: { provider: "claude", cwd: "/tmp/work" },
+    });
+
+  it("an answered hint moves the model and writes the source and the call id", () => {
+    const result = createRoleRouter(jevOptions())({ ...unlabelled(), jevHint: mechanical("answered") }, fakeContext);
+
+    expect(result?.config.model).toBe("claude-haiku-4-5");
+    expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "jev", [JEV_CALL_LABEL]: "jev-call-7" });
+  });
+
+  it("a shadowed hint changes no model and still names the call, with the source that decided", () => {
+    const result = createRoleRouter(jevOptions())({ ...unlabelled(), jevHint: mechanical("shadow") }, fakeContext);
+
+    expect(result?.config.model).toBe("claude-sonnet-5");
+    expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "default", [JEV_CALL_LABEL]: "jev-call-7" });
+  });
+
+  it("a hint that is not an answer writes nothing", () => {
+    const router = createRoleRouter(jevOptions());
+
+    const without = router(unlabelled(), fakeContext);
+    const withFailure = router(
+      { ...unlabelled(), jevHint: { status: "unavailable", reason: "excluded", callId: "rejected:1" } },
+      fakeContext,
+    );
+
+    expect(withFailure).toEqual(without);
+    expect(withFailure?.labels?.[JEV_CALL_LABEL]).toBeUndefined();
+  });
+
+  it("a hint that makes classification throw passes the request through untouched", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exploding = {
+      status: "answered",
+      callId: "c",
+      answers: {},
+      get proposal(): never {
+        throw new Error("boom");
+      },
+      applyHard: false,
+      applyRole: false,
+    } as unknown as SpawnHint;
+
+    const result = createRoleRouter(jevOptions())({ ...unlabelled(), jevHint: exploding }, fakeContext);
+
+    expect(result).toBeUndefined();
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  describe("paseo.jev-tools", () => {
+    const tools = (draw: number): JevToolsWorld => ({ active: true, scope: "ok", assignShare: 0.5, draw });
+
+    it("labels an eligible create with its arm", () => {
+      const router = createRoleRouter(jevOptions());
+
+      expect(router({ ...unlabelled(), jevTools: tools(0.1) }, fakeContext)?.labels?.[JEV_TOOLS_LABEL]).toBe("on");
+      expect(router({ ...unlabelled(), jevTools: tools(0.9) }, fakeContext)?.labels?.[JEV_TOOLS_LABEL]).toBe("control");
+    });
+
+    it("labels a root create too, whose request is otherwise left alone", () => {
+      const result = createRoleRouter(baseOptions())(
+        { ...request({ initialPrompt: "lead this" }), jevTools: tools(0.1) },
+        fakeContext,
+      );
+
+      expect(result?.labels).toEqual({ [JEV_TOOLS_LABEL]: "on" });
+    });
+
+    it("keeps an arm the create already carries, so a successor keeps its predecessor's tools", () => {
+      const carried = request({
+        callerAgentId: "c1",
+        labels: { [AGENT_ROLE_LABEL]: "worker", [JEV_TOOLS_LABEL]: "control" },
+        config: { provider: "claude", cwd: "/tmp/work" },
+      });
+
+      const result = createRoleRouter(jevOptions())({ ...carried, jevTools: tools(0.1) }, fakeContext);
+
+      expect(result?.labels?.[JEV_TOOLS_LABEL]).toBe("control");
+    });
+
+    it("writes nothing for an ineligible create", () => {
+      const result = createRoleRouter(baseOptions())(
+        { ...request({}), jevTools: { active: true, scope: "excluded", assignShare: 1, draw: 0 } },
+        fakeContext,
+      );
+
+      expect(result).toBeUndefined();
+    });
   });
 });

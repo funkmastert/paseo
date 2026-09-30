@@ -267,6 +267,121 @@ describe("classifyAgent — inference may choose a model, never remove capabilit
   });
 });
 
+describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never remove a tool)", () => {
+  /** An answered hint that names a role, with every switch on. */
+  function jevHint(roleId: string, taskClass?: "mechanical" | "hard"): ClassifierInput["jevHint"] {
+    return {
+      status: "answered",
+      callId: "call-1",
+      answers: {
+        role: { choice: roleId, confidence: 0.95 },
+        ...(taskClass
+          ? { taskClass: { choice: taskClass, confidence: 0.95 }, reasoning: { score: taskClass === "hard" ? 2 : 0, confidence: 0.9 } }
+          : {}),
+      },
+      proposal: { roleId, ...(taskClass ? { taskClass } : {}) },
+      applyHard: true,
+      applyRole: true,
+    };
+  }
+
+  // An implementation prompt with no role or seed keyword: the keyword tier would say worker.
+  const implementation = child({ title: "retry loop", initialPrompt: "Implement the retry loop in the fetch helper." });
+
+  for (const enforce of [false, true]) {
+    it(`a role JEV named withholds its tool profile with enforceToolsOnClassifiedRoles ${enforce ? "on" : "off"}`, () => {
+      const policy = { ...LIVE_POLICY, enforceToolsOnClassifiedRoles: enforce };
+
+      const decision = classifyAgent({ ...implementation, jevHint: jevHint("reviewer") }, world({ policy }));
+
+      expect(decision.role).toMatchObject({ source: "classified-jev", tier: 3, evidenceBased: false });
+      expect(decision.role.role.id).toBe("reviewer");
+      expect(decision.tools.deniedTools).toEqual([]);
+      expect(decision.tools.withheld?.profile.kind).toBe("read-only");
+      // The model is the named role's: that part of a guess is allowed.
+      expect(decision.model.model).toBe("claude-sonnet-5");
+    });
+  }
+
+  it("the same flag on still enforces a keyword-guessed role, so the flag is what the JEV rule overrides", () => {
+    const policy = { ...LIVE_POLICY, enforceToolsOnClassifiedRoles: true };
+
+    const decision = classifyAgent(child({ title: "review the output" }), world({ policy }));
+
+    expect(decision.role.source).toBe("classified-seed");
+    expect(decision.tools.deniedTools).toContain("Write");
+  });
+
+  it("the JEV sources reach the decision and its reasons", () => {
+    const decision = classifyAgent(
+      { ...implementation, jevHint: jevHint("advisor", "mechanical") },
+      world({ policy: LIVE_POLICY }),
+    );
+
+    expect(decision.role.source).toBe("classified-jev");
+    expect(decision.role.reason).toContain("JEV");
+    expect(decision.taskClass).toMatchObject({ taskClass: "mechanical", source: "jev" });
+    expect(decision.taskClass.reason).toContain("JEV");
+    expect(decision.jev).toMatchObject({ status: "answered", callId: "call-1", applied: true });
+  });
+
+  it("a hint that is not an answer is today's decision, recorded", () => {
+    const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+    const withFailure = classifyAgent(
+      { ...implementation, jevHint: { status: "failed", reason: "timeout", callId: "call-2" } },
+      world({ policy: LIVE_POLICY }),
+    );
+
+    const { jev, ...rest } = withFailure;
+    expect(rest).toEqual(without);
+    expect(jev).toEqual({ status: "failed", reason: "timeout", callId: "call-2", applied: false });
+  });
+
+  it("is replayable: the same hint gives the same decision", () => {
+    const input = { ...implementation, jevHint: jevHint("advisor", "mechanical") };
+
+    expect(classifyAgent(input, world({ policy: LIVE_POLICY }))).toEqual(classifyAgent(input, world({ policy: LIVE_POLICY })));
+  });
+});
+
+describe("classifyAgent — the JEV agent tools' arm", () => {
+  const tools = (overrides: Partial<NonNullable<ClassifierWorld["jevToolsAvailable"]>> = {}) => ({
+    active: true,
+    scope: "ok" as const,
+    assignShare: 0.5,
+    draw: 0.2,
+    ...overrides,
+  });
+
+  it("is not evaluated without the world's input", () => {
+    expect(classifyAgent(child({ title: "x" }), world()).jevTools).toBeUndefined();
+  });
+
+  it("splits eligible creates by the draw against assignShare", () => {
+    expect(classifyAgent(child({ title: "x" }), world({ jevToolsAvailable: tools({ draw: 0.49 }) })).jevTools?.arm).toBe("on");
+    expect(classifyAgent(child({ title: "x" }), world({ jevToolsAvailable: tools({ draw: 0.5 }) })).jevTools?.arm).toBe(
+      "control",
+    );
+  });
+
+  it("gives no arm when the feature is off, the scope is excluded or unchecked, or Read is denied", () => {
+    expect(classifyAgent(child({ title: "x" }), world({ jevToolsAvailable: tools({ active: false }) })).jevTools?.arm).toBeNull();
+    expect(
+      classifyAgent(child({ title: "x" }), world({ jevToolsAvailable: tools({ scope: "excluded" }) })).jevTools?.arm,
+    ).toBeNull();
+    expect(
+      classifyAgent(child({ title: "x" }), world({ jevToolsAvailable: tools({ scope: "unknown" }) })).jevTools?.arm,
+    ).toBeNull();
+    const noRead = withRole(LIVE_POLICY, "worker", { toolProfile: { kind: "orchestrator" } });
+    const denied = classifyAgent(
+      child({ labels: { "paseo.agent-role": "worker" }, title: "x" }),
+      world({ policy: noRead, jevToolsAvailable: tools() }),
+    );
+    expect(denied.tools.deniedTools).toContain("Read");
+    expect(denied.jevTools?.arm).toBeNull();
+  });
+});
+
 describe("classifyAgent — inheritance", () => {
   it("a child is never less restricted than its parent", () => {
     const policy = withRole(LIVE_POLICY, "worker", { toolProfile: { kind: "unrestricted" } });
