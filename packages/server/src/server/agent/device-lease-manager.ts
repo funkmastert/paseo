@@ -677,6 +677,17 @@ export class DeviceLeaseManager {
     return true;
   }
 
+  /**
+   * A live `agents.deviceLeases` config edit (the Devices UI's dry-run switch, or any other
+   * writer) changes what the next `getSnapshot()` reports, but nothing makes that next call
+   * happen on its own — the daemon only pushes `device_status_update` when something here
+   * calls `notify()`. Without this, the switch a config writer just flipped stays looking like
+   * its old value until the next resource-monitor sweep reconciles a sample (up to ~60s).
+   */
+  refreshSnapshot(): void {
+    this.notify();
+  }
+
   /** "Reserved for you": checkout and the gate never hand this device to an agent. Reserving a
    * device somebody already holds does not evict them — see `applyReservation`. */
   reserveDevice(deviceId: string): void {

@@ -988,3 +988,28 @@ describe("DeviceLeaseManager shutdownDevice", () => {
     expect(shutdownExec).toHaveBeenCalled();
   });
 });
+
+describe("DeviceLeaseManager refreshSnapshot", () => {
+  test("notifies subscribers without needing a lease or config change", () => {
+    const { manager } = createManager();
+    const listener = vi.fn();
+    manager.subscribe(listener);
+
+    manager.refreshSnapshot();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  test("a subsequent getSnapshot reflects a config edit made since the last push", async () => {
+    const { manager, state } = createManager({ config: { enabled: true, dryRun: false } });
+    expect((await manager.getSnapshot()).dryRun).toBe(false);
+
+    state.config = { enabled: true, dryRun: true };
+    const listener = vi.fn();
+    manager.subscribe(listener);
+    manager.refreshSnapshot();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect((await manager.getSnapshot()).dryRun).toBe(true);
+  });
+});

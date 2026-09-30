@@ -1,4 +1,7 @@
-import type { SessionEventSubscription } from "@getpaseo/protocol/messages";
+import type {
+  MutableDaemonConfigPatch,
+  SessionEventSubscription,
+} from "@getpaseo/protocol/messages";
 import type { McpGatewaySnapshotEntry } from "./mcp-gateway/gateway.js";
 import type { AgentRequests } from "./agent/requests/index.js";
 import equal from "fast-deep-equal";
@@ -2778,21 +2781,30 @@ export class Session {
         return this.daemonSession.handleDiagnosticsRequest(msg);
       case "daemon.update.request":
         return this.daemonSession.handleUpdateRequest(msg);
-      case "set_daemon_config_request":
+      case "set_daemon_config_request": {
+        const patched = this.daemonConfigStore.patch(msg.config);
         this.emit({
           type: "set_daemon_config_response",
-          payload: {
-            requestId: msg.requestId,
-            config: this.daemonConfigStore.patch(msg.config),
-          },
+          payload: { requestId: msg.requestId, config: patched },
         });
+        this.refreshDeviceStatusIfPatched(msg.config);
         return undefined;
+      }
       case "read_project_config_request":
         return this.projectConfigSession.handleReadProjectConfigRequest(msg);
       case "write_project_config_request":
         return this.projectConfigSession.handleWriteProjectConfigRequest(msg);
       default:
         return undefined;
+    }
+  }
+
+  /** A daemon-config patch doesn't otherwise make the daemon push a fresh device_status_update
+   * on its own — the dry-run switch (or any other deviceLeases writer) would look stuck until
+   * the next resource-monitor sweep, up to a minute away. */
+  private refreshDeviceStatusIfPatched(config: MutableDaemonConfigPatch): void {
+    if (config.deviceLeases !== undefined) {
+      this.agentManager.refreshDeviceStatus();
     }
   }
 

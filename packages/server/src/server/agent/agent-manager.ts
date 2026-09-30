@@ -188,6 +188,9 @@ function submittedPromptText(prompt: AgentPromptInput): string {
 export interface DeviceLeaseStatusSource {
   getSnapshot(): Promise<DeviceStatusSnapshot>;
   subscribe(listener: () => void): () => void;
+  /** Pushes a fresh `device_status_update` now, instead of waiting for the next resource-monitor
+   * sweep — for a config writer (the dry-run switch) whose effect nothing else would notice. */
+  refreshSnapshot(): void;
   releaseLeaseForDevice(deviceId: string): Promise<boolean>;
   reserveDevice(deviceId: string): Promise<void>;
   unreserveDevice(deviceId: string): Promise<void>;
@@ -1598,6 +1601,12 @@ export class AgentManager {
   /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
   onDeviceStatusChange(listener: () => void): () => void {
     return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Called after a daemon-config patch touches `agents.deviceLeases`, so the dry-run switch
+   * (or any other writer) is reflected without waiting on the next sweep. */
+  refreshDeviceStatus(): void {
+    this.deviceLeaseStatusSource?.refreshSnapshot();
   }
 
   /** Releases whoever's lease is bound to this device. False when nobody held it or the cap

@@ -94,7 +94,7 @@ function useDryRunToggle(serverId: string | null) {
       void (async () => {
         setPending(true);
         try {
-          await patchConfig({ agents: { deviceLeases: { dryRun: next } } });
+          await patchConfig({ deviceLeases: { dryRun: next } });
         } finally {
           setPending(false);
         }

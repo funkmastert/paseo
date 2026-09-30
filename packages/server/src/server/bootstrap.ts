@@ -1982,6 +1982,7 @@ export async function createPaseoDaemon(
   agentManager.setDeviceLeaseStatusSource({
     getSnapshot: () => deviceLeaseManager.getSnapshot(),
     subscribe: (listener) => deviceLeaseManager.subscribe(listener),
+    refreshSnapshot: () => deviceLeaseManager.refreshSnapshot(),
     releaseLeaseForDevice: (deviceId) => deviceLeaseManager.releaseLeaseForDevice(deviceId),
     reserveDevice: async (deviceId) => deviceLeaseManager.reserveDevice(deviceId),
     unreserveDevice: async (deviceId) => deviceLeaseManager.unreserveDevice(deviceId),
