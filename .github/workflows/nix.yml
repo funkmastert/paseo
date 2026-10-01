@@ -132,8 +132,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          app="result-desktop/Applications/Paseo.app"
-          test -x "$app/Contents/MacOS/Paseo"
+          # electron-builder names the bundle after executableName/productName,
+          # which a rebranded fork overrides — never hardcode "Paseo" here.
+          app_name="$(node -e "console.log(require('./packages/desktop/scripts/executable-name.js').readExecutableNameFromConfig())")"
+          app="result-desktop/Applications/${app_name}.app"
+          test -x "$app/Contents/MacOS/${app_name}"
           test -L result-desktop/bin/paseo-desktop
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = "sh.paseo.desktop"
           find "$app" -name Info.plist -print0 | xargs -0 -n 1 plutil -lint
