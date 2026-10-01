@@ -130,7 +130,9 @@ function backupRefs(cwd: string): string[] {
 beforeEach(() => {
   vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
   vi.stubEnv("GIT_CONFIG_SYSTEM", "/dev/null");
-  root = realpathSync(mkdtempSync(join(tmpdir(), "work-snapshot-sweep-")));
+  // .native, not the plain JS walker: on a GitHub-hosted Windows runner TEMP is an 8.3 short
+  // name that only .native (and git's own internal resolution) expands.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "work-snapshot-sweep-")));
   remote = join(root, "remote.git");
   git(root, "init", "-q", "--bare", "-b", "main", remote);
   const seed = join(root, "seed");
@@ -317,10 +319,12 @@ describe("AgentWorkSnapshotSweep", () => {
   });
 
   test("worktrees under /tmp go first when the per-sweep cap bites", async () => {
-    const tmpParent = realpathSync(mkdtempSync("/tmp/work-snapshot-sweep-"));
+    const tmpParent = realpathSync.native(mkdtempSync("/tmp/work-snapshot-sweep-"));
     cleanup.push(tmpParent);
     // Not `root`: on Linux tmpdir() is /tmp, so both repos would rank as /tmp.
-    const elsewhereParent = realpathSync(mkdtempSync(join(homedir(), ".work-snapshot-sweep-")));
+    const elsewhereParent = realpathSync.native(
+      mkdtempSync(join(homedir(), ".work-snapshot-sweep-")),
+    );
     cleanup.push(elsewhereParent);
     const elsewhere = makeRepo(elsewhereParent, "elsewhere");
     const inTmp = makeRepo(tmpParent, "in-tmp");

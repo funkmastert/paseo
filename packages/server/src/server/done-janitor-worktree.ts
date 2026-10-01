@@ -57,13 +57,16 @@ export interface CheckWorktreeDeletionSafetyInput {
   runGit?: RunGitCommand;
 }
 
-// Git reports --path-format=absolute paths with forward slashes even on win32. realpathSync
-// resolves that fine when the path exists, but the catch fallback must still return something
+// Git reports --path-format=absolute paths with forward slashes even on win32, and on a
+// GitHub-hosted Windows runner TEMP is routinely an 8.3 short name ("RUNNER~1") that the plain
+// JS realpathSync walker leaves untouched (it only follows symlinks/reparse points) while git's
+// own internal resolution expands it — .native calls the OS's GetFinalPathNameByHandle instead,
+// so both sides land on the same canonical form. The catch fallback must still return something
 // native so two realpathOrSelf() results stay comparable when one side never hits the
 // filesystem (e.g. a path that does not exist).
 function realpathOrSelf(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }

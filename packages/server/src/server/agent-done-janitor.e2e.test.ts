@@ -230,8 +230,8 @@ test("a closed agent archives itself and frees its clean worktree; a pinned work
 });
 
 test("an empty project whose directory is gone leaves every connected sidebar without a reload", async () => {
-  const gone = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-gone-")));
-  const alive = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-alive-")));
+  const gone = realpathSync.native(mkdtempSync(path.join(tmpdir(), "done-janitor-gone-")));
+  const alive = realpathSync.native(mkdtempSync(path.join(tmpdir(), "done-janitor-alive-")));
   tempRoots.push(gone, alive);
   const goneProject = (await ctx.client.addProject(gone)).project;
   const aliveProject = (await ctx.client.addProject(alive)).project;
@@ -304,7 +304,7 @@ test("the idle-workspace sweep archives every idle kind, and deletes a dirty wor
   const secret = await createWorktreeWithAgent(repoDir, "sweep-secret");
   writeFileSync(path.join(secret.dir, "notes.txt"), "draft\n");
   writeFileSync(path.join(secret.dir, ".env"), "TOKEN=only-copy\n");
-  const plainDir = realpathSync(mkdtempSync(path.join(tmpdir(), "done-janitor-plain-")));
+  const plainDir = realpathSync.native(mkdtempSync(path.join(tmpdir(), "done-janitor-plain-")));
   tempRoots.push(plainDir);
   const plain = (
     await ctx.client.createWorkspace({

@@ -149,8 +149,10 @@ function backupRefs(cwd: string): string[] {
 beforeEach(() => {
   vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
   vi.stubEnv("GIT_CONFIG_SYSTEM", "/dev/null");
-  // Real path: git reports the top level resolved, and macOS tmpdir is behind a symlink.
-  root = realpathSync(mkdtempSync(join(tmpdir(), "worktree-snapshot-")));
+  // Real path: git reports the top level resolved, macOS tmpdir is behind a symlink, and on a
+  // GitHub-hosted Windows runner TEMP is an 8.3 short name — .native expands that the way git's
+  // own internal resolution does; the plain JS walker only follows symlinks and leaves it alone.
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "worktree-snapshot-")));
   repo = join(root, "repo");
   remote = join(root, "remote.git");
   bundleDir = join(root, "bundles");

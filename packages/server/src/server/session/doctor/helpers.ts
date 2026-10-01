@@ -11,7 +11,11 @@ export function lstatOrNull(target: string): Stats | null {
 
 export function realpathOrNull(target: string): string | null {
   try {
-    return realpathSync(target);
+    // .native, not the plain JS walker: on Windows the latter only follows symlinks/reparse
+    // points and leaves an 8.3 short-name component (TEMP on a GitHub-hosted runner is
+    // routinely "RUNNER~1") exactly as given, so two paths that are the same real directory
+    // compare unequal. .native calls the OS's own GetFinalPathNameByHandle, which resolves it.
+    return realpathSync.native(target);
   } catch {
     return null;
   }
