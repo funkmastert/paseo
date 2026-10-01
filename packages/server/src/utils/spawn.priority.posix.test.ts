@@ -55,7 +55,7 @@ describe.skipIf(isPlatform("win32"))("spawn priority option", () => {
   });
 });
 
-describe("runWithSpawnPriority", () => {
+describe.skipIf(isPlatform("win32"))("runWithSpawnPriority", () => {
   afterEach(() => {
     resetProcessPriorityPolicy();
   });
