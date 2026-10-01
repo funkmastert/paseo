@@ -1,6 +1,6 @@
 # JEV build: tracks, ownership, and what exists today
 
-The build plan for [docs/jev.md](../jev.md). Seven tracks build it: foundation, then six feature tracks in parallel that do not talk to each other. Every line reference is to commit `09a1c045f` on `multi-account-orchestrator` unless another branch is named; after the foundation merges, find a region by the function named beside it, not by the number.
+The build plan for [docs/jev.md](../jev.md). Seven tracks build it: foundation, then six feature tracks in parallel that do not talk to each other. A second wave of three builds feature 16, the savings ledger and the JEV dashboard ([The savings wave](#the-savings-wave)). Every line reference is to commit `09a1c045f` on `multi-account-orchestrator` unless another branch is named; after the foundation merges, find a region by the function named beside it, not by the number.
 
 The decisions D1–D8 are in [docs/jev.md](../jev.md#decisions), numbered as in `~/bozeo-ops/jev-build-state.md`. Build to them; they are not open.
 
@@ -15,6 +15,9 @@ The decisions D1–D8 are in [docs/jev.md](../jev.md#decisions), numbered as in 
 | stalls      | 10                                                                                                              | foundation merges                                       | `multi-account-orchestrator-jev-stalls`      |
 | ui          | 11                                                                                                              | foundation merges                                       | `multi-account-orchestrator-jev-ui`          |
 | compaction  | 9                                                                                                               | the others merge; dormant until leader compaction is on | `multi-account-orchestrator-jev-compaction`  |
+| savings     | the savings ledger, both `jev.savings.*` RPCs, the classifier's durable record, every feature's hook-in         | classifier, remediation, stalls, tools and ui merge     | `multi-account-orchestrator-jev-savings`     |
+| read-check  | 16                                                                                                              | the savings track's seam commit                         | `multi-account-orchestrator-jev-read-check`  |
+| dashboard   | the JEV dashboard                                                                                               | the savings track's seam commit                         | `multi-account-orchestrator-jev-dashboard`   |
 
 ## File ownership
 
@@ -182,6 +185,100 @@ Each track rebases on the integration branch before its adversarial review and a
 - No live JEV call anywhere, including manual runs. The fake, or `PASEO_JEV_BACKEND=fake` on a scratch daemon, never port 6767.
 - Fail-open tests: every non-`answered` outcome gives today's behaviour, asserted against the same fixture as the answered case.
 - Scope tests: the call passes the scope its row in "Scope per feature" names, and an excluded subject gives today's behaviour with the transport never called.
+
+## The savings wave
+
+Three tracks build [feature 16](../jev.md#feature-16-file-read-check), [the savings ledger](../jev.md#savings) and [the JEV dashboard](../jev.md#the-jev-dashboard). They start once classifier, remediation, stalls, tools and ui have merged: the ledger hooks into each of those, feature 16 reuses the tools track's `jev-file-state.ts`, and the dashboard links from the ui track's strip row and popover. Line references in this section are to `44e45491f`; the five merges move some of them, so find a region by the function named beside it.
+
+### The seam commit
+
+The savings track's first commit, pushed before anything else. The read-check and dashboard tracks branch from it, so neither waits on the ledger itself:
+
+- `JevService.savings: JevSavingsSink` in `contract.ts`, and a sink in `service.ts` that drops everything;
+- `jev.savings.summary` and `jev.savings.events` in `protocol/src/jev/rpc-schemas.ts`, registered in `messages.ts` beside `jev.ask`; optional `mode`, `wouldBe` and `savingsId` on `JevDecisionRecordSchema`; `features.jevSavings` in the `server_info` schema; the regenerated validators;
+- `DaemonClient.jevSavingsSummary` and `jevSavingsEvents`, each with a `timeout` option (`client/src/daemon-client.ts`);
+- the two permissions in `authorization/operation-permissions.ts`: `daemon.read` for the summary, `workspace.read` for the events.
+
+The daemon does not advertise `jevSavings` until the handlers land, later on the same branch.
+
+### read-check
+
+| File                                                                         | Change                                                                                                                                                                                        |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/server/src/server/jev/read-check/*.ts`                             | New: `recognize.ts`, `state.ts`, `decision.ts`, `observer.ts`, `validation.ts`, and their tests                                                                                               |
+| `packages/server/src/server/agent/providers/claude/agent.ts`                 | **Regions:** `buildHooks` (`:5186-5212`) and the new callbacks beside `gateDeviceLaunch`; the `fileReadObserver` option beside `deviceLaunchGate` (`:447`, `:479`, `:1581`, `:1595`, `:1646`) |
+| `packages/server/src/server/agent/providers/claude/agent.read-check.test.ts` | New                                                                                                                                                                                           |
+| `packages/server/src/server/agent/provider-runtime.ts`                       | The observer beside `deviceLaunchGate` (`:30`)                                                                                                                                                |
+| `packages/server/src/server/bootstrap.ts`                                    | **Region:** the observer's construction, beside the device launch gate's (`:1869-1895`)                                                                                                       |
+| `packages/server/src/server/jev/contract.ts`                                 | **Region:** `readCheck` in `JevFeatureId`, `reads` in `JevLane`; `JevSavingsFeature` becomes `JevFeatureId`                                                                                   |
+| `packages/server/src/server/jev/{config,lanes,ledger,audit,service}.ts`      | Register the feature and the lane the way `askJev` and `interactive` were (`a48841b11`); `reads` takes rate tokens last. In `ledger.ts` and `service.ts`, the feature and lane maps only      |
+| `packages/server/src/server/persisted-config.ts`                             | The `readCheck` keys in `AgentJevSchema`                                                                                                                                                      |
+| `packages/server/src/services/quota-fetcher/providers/jev.ts`                | **Region:** the constants at the top: `readCheck` in the feature order and labels, `reads` in the lanes                                                                                       |
+| `docs/jev.md`                                                                | "Feature 16" only, and its rows in the shared tables                                                                                                                                          |
+| `docs/providers.md`                                                          | "Gating a tool call": the read check is the third hook built this way                                                                                                                         |
+
+### savings
+
+| File                                                                                                                                    | Change                                                                                                                                                                                                                                     |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/server/src/server/jev/savings.ts`, `savings-formulas.ts`                                                                      | New: records, rollup, counters, the reader; the price weights, formulas and evidence rules; their tests                                                                                                                                    |
+| `packages/server/src/server/jev/contract.ts`                                                                                            | **Region:** the savings block and `JevService.savings` (the seam)                                                                                                                                                                          |
+| `packages/server/src/server/jev/service.ts`                                                                                             | **Region:** the `savings` member, its start and stop                                                                                                                                                                                       |
+| `packages/server/src/server/jev/ledger.ts`                                                                                              | **Region:** looking up an entry by `callId`                                                                                                                                                                                                |
+| `packages/server/src/server/jev/decisions.ts`                                                                                           | Carry `mode`, `wouldBe` and `savingsId`                                                                                                                                                                                                    |
+| `packages/server/src/server/session/jev/jev-session.ts`                                                                                 | The two handlers; the `jev.ask` record                                                                                                                                                                                                     |
+| `packages/server/src/server/session.ts`                                                                                                 | **Region:** `dispatchJevMessage` (`:2278-2294`), two cases                                                                                                                                                                                 |
+| `packages/server/src/server/websocket-server.ts`                                                                                        | **Region:** the `server_info` features (`:1747-1750`), `jevSavings: true`                                                                                                                                                                  |
+| `packages/protocol/src/jev/rpc-schemas.ts`, `messages.ts`, generated validators                                                         | The seam                                                                                                                                                                                                                                   |
+| `packages/protocol/src/agent-labels.ts`                                                                                                 | `JEV_SPAWN_LABEL = "paseo.jev-spawn"`                                                                                                                                                                                                      |
+| `packages/client/src/daemon-client.ts`                                                                                                  | The seam                                                                                                                                                                                                                                   |
+| `packages/server/src/server/authorization/operation-permissions.ts`                                                                     | The seam                                                                                                                                                                                                                                   |
+| `plugins/claude-account-pool/server/classifier.ts`                                                                                      | `decideJevRecord`: the class and model the create runs without JEV                                                                                                                                                                         |
+| `plugins/claude-account-pool/server/role-router.ts`                                                                                     | Write `paseo.jev-spawn` beside `paseo.jev-call`                                                                                                                                                                                            |
+| `packages/server/src/server/bootstrap.ts`                                                                                               | **Region:** the spawn-hint recorder after `createJevService` (`:1469`): agent creation and archive through `agentManager.subscribe` (`agent-manager.ts:1798`), never `setAgentArchivedCallback`, which has one owner (`bootstrap.ts:2482`) |
+| `remediation/jev-triage.ts`, `attention-push-triage.ts`, `agent/tools/jev-tools.ts`, `agent/stall-judgment-log.ts`, `away-reply/job.ts` | One call each, at the site in [Writing](../jev.md#writing)                                                                                                                                                                                 |
+| `packages/server/src/services/quota-fetcher/providers/jev.ts`                                                                           | **Region:** the would-have count: read `mode` and `wouldBe`, not the start of `action`                                                                                                                                                     |
+| `docs/jev.md`                                                                                                                           | "Savings" only                                                                                                                                                                                                                             |
+
+### dashboard
+
+| File                                                                                                    | Change                                                                 |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `packages/app/src/app/jev.tsx`, `packages/app/src/screens/jev-dashboard-screen.tsx`                     | New: the route and the screen                                          |
+| `packages/app/src/jev/jev-dashboard-*.ts(x)`, `use-jev-savings-summary.ts`, `use-jev-savings-events.ts` | New: the model, the view, the two queries, their tests                 |
+| `packages/app/src/components/sidebar/use-sidebar-jev-dashboard-target.ts`                               | New, after `use-sidebar-agent-roles-target.ts`, with its test          |
+| `packages/app/src/components/left-sidebar.tsx`                                                          | **Region:** `SidebarFooter`'s icon row (`:484-507`)                    |
+| `packages/app/src/app/_layout.tsx`, `utils/host-routes.ts`, `command-center/root-registration.tsx`      | The route, its builder and the command-center action, beside Ask JEV's |
+| `packages/app/src/orchestration/account-budget-strip-view.tsx`                                          | The JEV row opens the dashboard                                        |
+| `packages/app/src/jev/jev-decisions-section.tsx`                                                        | "All JEV activity"                                                     |
+| `packages/app/src/i18n/resources/*.ts`                                                                  | The dashboard's strings, in every locale                               |
+| `docs/jev.md`                                                                                           | "The JEV dashboard" only                                               |
+| `docs/orchestration-panel.md`                                                                           | The budget strip section: the JEV row opens the dashboard              |
+
+### Shared files in the wave
+
+| File               | Regions and owners                                                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `contract.ts`      | savings: the seam, first. read-check: the two unions.                                                                 |
+| `service.ts`       | savings: the seam, first, then the `savings` member. read-check: the feature and lane maps.                           |
+| `ledger.ts`        | savings: the lookup by `callId`. read-check: the lane and feature maps.                                               |
+| `bootstrap.ts`     | read-check: the observer beside the device launch gate. savings: the spawn-hint recorder after `createJevService`.    |
+| `providers/jev.ts` | read-check: the constants at the top. savings: the would-have count.                                                  |
+| `docs/jev.md`      | Each track its own section. The shared tables at the top already carry the wave's rows; a track corrects its own row. |
+
+`agent.ts` and `jev-session.ts` each have one owner in the wave.
+
+### Merge order
+
+savings, read-check, dashboard. read-check's observer needs the real sink to validate against, and the dashboard needs the handlers to show anything on a device. Each rebases on the integration branch before its adversarial review and again before merge.
+
+### Done, for the wave
+
+Everything in [Done, for every track](#done-for-every-track), and:
+
+- read-check: the shadow-latency test in `agent.read-check.test.ts` green: a shadow callback answers before the observer's work starts.
+- savings: a scratch daemon on `PASEO_JEV_BACKEND=fake` shows records from at least one hooked feature in `jev.savings.summary`.
+- dashboard: the QA bar for UI in [docs/qa.md](../qa.md): desktop, web and phone, each with a screenshot of the dashboard and of the sidebar button, against a scratch daemon on the fake.
 
 ## What exists today
 

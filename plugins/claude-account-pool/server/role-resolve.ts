@@ -23,13 +23,27 @@ export type ResolveRoleTier = 1 | 2 | 3 | 4;
  * someone. Absent on tiers 1, 2 and 4, where no text matching happened — and
  * absent on a tier-3 result too when the text matched nothing and the worker
  * default is simply what was left.
+ *
+ * `jev` is JEV's spawn hint replacing the keyword guess (docs/jev.md,
+ * "Feature 2"). Still tier 3: a guess, so it may pick a model and never a
+ * tool profile.
  */
-export type ClassificationMatch = "vocabulary" | "seed";
+export type ClassificationMatch = "vocabulary" | "seed" | "jev";
 
 export interface ResolveRoleInput {
   labels?: Record<string, string>;
   title?: string | null;
   initialPrompt?: string;
+}
+
+/**
+ * JEV's role proposal, already past its confidence floor (server/jev-hint.ts).
+ * `apply` false means the answer is recorded, not used: shadow mode, or
+ * `spawnHint.applyRole` off.
+ */
+export interface RoleJevInput {
+  roleId: string;
+  apply: boolean;
 }
 
 export interface ResolveRoleResult {
@@ -192,7 +206,11 @@ function classify(
  *   3. Automatic task classification (configured vocabulary, then seeds).
  *   4. Default: worker (only when there's no title/prompt text to classify).
  */
-export function resolveRole(policy: RoleModelPolicy, input: ResolveRoleInput): ResolveRoleResult {
+export function resolveRole(
+  policy: RoleModelPolicy,
+  input: ResolveRoleInput,
+  jev?: RoleJevInput,
+): ResolveRoleResult {
   const typeLabelValue = input.labels?.[AGENT_TYPE_LABEL];
   const tier1Key = typeLabelValue !== undefined ? typeLabelValue : (input.title ?? undefined);
   if (tier1Key !== undefined) {
@@ -212,13 +230,32 @@ export function resolveRole(policy: RoleModelPolicy, input: ResolveRoleInput): R
     if (role) {
       return { role, tier: 2 };
     }
-    return { ...classify(policy, classificationText), unknownDeclaredValue: declaredRole };
+    return { ...classifyWithJev(policy, classificationText, jev), unknownDeclaredValue: declaredRole };
   }
 
-  return classify(policy, classificationText);
+  return classifyWithJev(policy, classificationText, jev);
 }
 
-export type TaskClassSource = "declared" | "classified" | "default";
+/**
+ * Tiers 3–4 with JEV's role in front of the keywords, when it applies. The
+ * leader is never a JEV answer: it is not offered as an option, and a policy
+ * edit that removed a role since the question was built falls through.
+ */
+function classifyWithJev(
+  policy: RoleModelPolicy,
+  text: string,
+  jev: RoleJevInput | undefined,
+): { role: RoleRecord; tier: 3 | 4; match?: ClassificationMatch } {
+  if (jev?.apply && jev.roleId !== LEADER_ROLE_ID) {
+    const role = findRoleById(policy, jev.roleId);
+    if (role) {
+      return { role, tier: 3, match: "jev" };
+    }
+  }
+  return classify(policy, text);
+}
+
+export type TaskClassSource = "declared" | "jev" | "classified" | "default";
 
 export interface ResolveTaskClassResult {
   /** Undefined means "default": no class resolved, so classModels() falls back to the role's standard pool. */
@@ -242,16 +279,36 @@ const HARD_SEED_RE =
 const MECHANICAL_SEED_RE =
   /\btypo\b|\brenam(?:e|ing)\b|\bformatting\b|\bwhitespace\b|\bchangelog\b|\blint(?:ing)?\b|\bdead code\b|\bunused import\b|\bone[- ]liner\b|\btrivial\b|\bbump(?:ed|ing)? (?:the )?version\b/;
 
-/** Tier "classified"/"default": deterministic keyword classification over lowercase(title + " " + initialPrompt). */
-function classifyTaskClass(text: string): ResolveTaskClassResult {
+/**
+ * JEV's class proposal, already past its floors (server/jev-hint.ts). Each
+ * `apply` flag false means that direction is recorded, not used: shadow mode
+ * turns both off, and `spawnHint.applyHard` off keeps a hard answer a record.
+ */
+export interface TaskClassJevInput {
+  proposed: "mechanical" | "hard" | undefined;
+  applyMechanical: boolean;
+  applyHard: boolean;
+}
+
+/**
+ * Tiers "jev"/"classified"/"default" over lowercase(title + " " + initialPrompt).
+ *
+ * A risk keyword outranks JEV: JEV cannot lower a task the hard seed marked.
+ * JEV outranks the mechanical seed, and a JEV `standard` is no proposal at
+ * all, so it never lifts a task off that seed.
+ */
+function classifyTaskClass(text: string, jev: TaskClassJevInput | undefined): ResolveTaskClassResult {
   const trimmed = text.trim();
-  if (trimmed.length === 0) {
-    return { taskClass: undefined, source: "default" };
-  }
-  if (HARD_SEED_RE.test(trimmed)) {
+  if (trimmed.length > 0 && HARD_SEED_RE.test(trimmed)) {
     return { taskClass: "hard", source: "classified" };
   }
-  if (MECHANICAL_SEED_RE.test(trimmed)) {
+  if (jev?.proposed === "mechanical" && jev.applyMechanical) {
+    return { taskClass: "mechanical", source: "jev" };
+  }
+  if (jev?.proposed === "hard" && jev.applyHard) {
+    return { taskClass: "hard", source: "jev" };
+  }
+  if (trimmed.length > 0 && MECHANICAL_SEED_RE.test(trimmed)) {
     return { taskClass: "mechanical", source: "classified" };
   }
   return { taskClass: undefined, source: "default" };
@@ -273,14 +330,15 @@ function classifyTaskClass(text: string): ResolveTaskClassResult {
  *   2. Unknown declared value: never blocks — falls through to
  *      classification/default, with `unknownDeclaredValue` set so the
  *      caller can be told once.
- *   3. Classified: seed-keyword text classification (title + initialPrompt).
- *      A guess here may only ever pick a model; unlike the role guess it
- *      doesn't gate anything else, so there is no evidence-based/withheld
- *      split to make.
+ *   3. Classified: seed-keyword text classification (title + initialPrompt),
+ *      with JEV's spawn hint between the hard seed and the mechanical seed
+ *      (`classifyTaskClass`). A guess here may only ever pick a model;
+ *      unlike the role guess it doesn't gate anything else, so there is no
+ *      evidence-based/withheld split to make.
  *   4. Default: undefined — classModels() falls back to the role's standard
  *      pool, exactly what happens today with no task-class concept at all.
  */
-export function resolveTaskClass(input: ResolveRoleInput): ResolveTaskClassResult {
+export function resolveTaskClass(input: ResolveRoleInput, jev?: TaskClassJevInput): ResolveTaskClassResult {
   const declared = input.labels?.[TASK_CLASS_LABEL];
   const classificationText = `${input.title ?? ""} ${input.initialPrompt ?? ""}`.toLowerCase();
   if (declared !== undefined) {
@@ -289,7 +347,7 @@ export function resolveTaskClass(input: ResolveRoleInput): ResolveTaskClassResul
     if (matched) {
       return { taskClass: matched as TaskClassId, source: "declared" };
     }
-    return { ...classifyTaskClass(classificationText), unknownDeclaredValue: declared };
+    return { ...classifyTaskClass(classificationText, jev), unknownDeclaredValue: declared };
   }
-  return classifyTaskClass(classificationText);
+  return classifyTaskClass(classificationText, jev);
 }

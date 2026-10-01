@@ -70,6 +70,8 @@ export const RoleModelPolicyExplainResultSchema = z.object({
     "declared-label",
     "classified-vocabulary",
     "classified-seed",
+    // A preview never asks JEV, so it never reports this; the hook's decision can.
+    "classified-jev",
     "default",
   ]),
   /** The numeric tier. Absent for a root agent, which resolves to `leader` structurally rather than by classification. */
@@ -124,7 +126,8 @@ export const RoleModelPolicyExplainResultSchema = z.object({
    * used before this dimension existed.
    */
   taskClass: z.enum(TASK_CLASS_IDS).optional(),
-  taskClassSource: z.union([z.literal("declared"), z.literal("classified"), z.literal("default")]),
+  // `jev` never comes from a preview, which does not ask JEV; listed so the type is the classifier's.
+  taskClassSource: z.union([z.literal("declared"), z.literal("jev"), z.literal("classified"), z.literal("default")]),
   /** Set when the query's `taskClass` didn't match mechanical/standard/hard; resolution still fell through, never blocked. */
   unknownDeclaredTaskClass: z.string().optional(),
   /**

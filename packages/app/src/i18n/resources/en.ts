@@ -357,6 +357,7 @@ export const en = {
       next: "Next",
       answerPlaceholder: "Type your answer...",
       otherPlaceholder: "Other...",
+      answerInConversation: "Answer in the full conversation",
     },
     todo: {
       title: "Tasks",

@@ -4,6 +4,8 @@ import type { RpcInput, RpcOutput } from "@getpaseo/plugin";
 import { CURRENT_SCHEMA_VERSION, RoleModelPolicySchema, type RoleModelPolicy } from "../shared/role-policy-schema";
 import { roleModelPolicyRpc, type RoleModelPolicyExplainResult } from "../shared/role-policy-rpc";
 import type { HealthTracker } from "./health";
+import type { JevAvailability } from "./jev-availability";
+import { spawnHintPreview } from "./jev-hint";
 import type { McpGatewayCache } from "./mcp-gateway-cache";
 import { mcpScopeLabelValue } from "./mcp-scope";
 import type { ModelCatalogCache } from "./model-catalog";
@@ -36,6 +38,13 @@ export interface RoleModelPolicyRpcDeps {
   recentAgentTypes: RecentAgentTypes;
   /** Optional: without it the preview reports every agent keeping every MCP server, as the hook would. */
   mcpGatewayCache?: Pick<McpGatewayCache, "get" | "forceRefresh">;
+  /**
+   * JEV's spawn-hint switches. The preview never asks JEV (it must not spend);
+   * with this it says "decided at create" where a live create would ask and
+   * could act on the answer. JEV repeats disagree 5–13% of the time, so this
+   * is the one place the preview and the hook may differ.
+   */
+  jevAvailability?: Pick<JevAvailability, "get">;
 }
 
 export interface RoleModelPolicyRpcHandlers {
@@ -271,29 +280,29 @@ export function createRoleModelPolicyRpcHandlers(deps: RoleModelPolicyRpcDeps): 
       if (input.mcp !== undefined) labels[MCP_LABEL] = input.mcp;
       await deps.mcpGatewayCache?.forceRefresh();
 
-      const decision = classifyAgent(
-        {
-          labels: Object.keys(labels).length > 0 ? labels : undefined,
-          title: input.title,
-          initialPrompt: input.prompt,
-          // A root agent has no caller; anything else is simulated as a child
-          // of a synthetic caller, which is what makes the leader tier
-          // reachable from this screen at all.
-          callerAgentId: input.root === true ? undefined : "(preview)",
-          requestedProvider: input.requestedProvider,
-          requestedModel: input.requestedModel,
-          requestedThinkingOptionId: input.requestedThinkingOptionId,
-        },
-        {
-          policy: freshPolicy,
-          catalog: deps.catalogCache.get(),
-          thinkingCatalog: deps.catalogCache.getThinking(),
-          pool,
-          health: deps.health,
-          nowMs: Date.now(),
-          mcpGateway: deps.mcpGatewayCache?.get(),
-        },
-      );
+      const classifierInput = {
+        labels: Object.keys(labels).length > 0 ? labels : undefined,
+        title: input.title,
+        initialPrompt: input.prompt,
+        // A root agent has no caller; anything else is simulated as a child
+        // of a synthetic caller, which is what makes the leader tier
+        // reachable from this screen at all.
+        callerAgentId: input.root === true ? undefined : "(preview)",
+        requestedProvider: input.requestedProvider,
+        requestedModel: input.requestedModel,
+        requestedThinkingOptionId: input.requestedThinkingOptionId,
+      };
+      const world = {
+        policy: freshPolicy,
+        catalog: deps.catalogCache.get(),
+        thinkingCatalog: deps.catalogCache.getThinking(),
+        pool,
+        health: deps.health,
+        nowMs: Date.now(),
+        mcpGateway: deps.mcpGatewayCache?.get(),
+      };
+      const preview = spawnHintPreview(classifierInput, world, deps.jevAvailability?.get()?.spawnHint);
+      const decision = classifyAgent(preview ? { ...classifierInput, jevHint: preview } : classifierInput, world);
 
       const { role, taskClass, model, tools, account, thinking, outputStyle, mcp } = decision;
       const mcpScopeLabel = mcpScopeLabelValue(mcp);

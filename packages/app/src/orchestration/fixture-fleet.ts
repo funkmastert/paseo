@@ -70,7 +70,7 @@ const FLEET: FixtureSpec[] = [
     title: "Relaunch app on device for pull-to-refresh test",
     status: "running",
     ageMinutes: 0,
-    activity: "[Bash] adb -s R5CT30 shell am start -n sh.paseo.dev/.MainActivity",
+    activity: "[Bash] adb -s emulator-5554 shell am start -n sh.paseo.dev/.MainActivity",
     tokensPerMinute: 9_400,
     children: [
       {

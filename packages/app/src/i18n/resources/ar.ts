@@ -359,6 +359,7 @@ export const ar: TranslationResources = {
       next: "التالي",
       answerPlaceholder: "اكتب إجابتك...",
       otherPlaceholder: "آخر...",
+      answerInConversation: "أجب في المحادثة الكاملة",
     },
     todo: {
       title: "المهام",

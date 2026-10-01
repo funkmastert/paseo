@@ -1,13 +1,14 @@
 import { ExternalLink } from "lucide-react-native";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Text, View } from "react-native";
+import { Pressable, Text, View } from "react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useStoreWithEqualityFn } from "zustand/traditional";
 import { AgentIdChip } from "@/components/agent-id-chip";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { paneContentToolbarIconSize, ToolbarButton } from "@/components/ui/pane-content-toolbar";
 import { mutedIconColorMapping } from "@/components/ui/icon-color";
+import { isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { useAppSettings } from "@/hooks/use-settings";
 import type { SidebarWorkspaceEntry } from "@/hooks/use-sidebar-workspaces-list";
@@ -40,8 +41,9 @@ interface PinnedGridCellProps {
 }
 
 /**
- * One pinned chat, mounted as the same agent panel a workspace tab renders: it streams, shows
- * its own status, and takes input through its own composer. Nothing about the chat is copied.
+ * One pinned chat, mounted as the same agent panel a workspace tab renders in read-only mode: it
+ * streams and shows its own status, but has no composer. Questions, plan approval, and permission
+ * requests still answer in place — clicking anywhere else in the cell opens the real conversation.
  */
 export const PinnedGridCell = memo(function PinnedGridCell({
   workspace,
@@ -111,6 +113,23 @@ export const PinnedGridCell = memo(function PinnedGridCell({
     return false;
   }, [onFocus, workspaceKey]);
 
+  // Hover lives on this plain View (docs/hover.md): the body Pressable below, and everything
+  // nested inside it (question cards, links), can claim their own presses without fighting this.
+  const [isHovered, setIsHovered] = useState(false);
+  const handlePointerEnter = useCallback(() => setIsHovered(true), []);
+  const handlePointerLeave = useCallback(() => setIsHovered(false), []);
+
+  const handleOpenBody = useCallback(() => {
+    // A drag that ends over the cell is a text selection, not a click — don't navigate away
+    // from under it. Nested Pressables (question cards, links) claim their own press first and
+    // never reach this handler at all.
+    const selection = isWeb ? window.getSelection() : null;
+    if (selection && !selection.isCollapsed && selection.toString().length > 0) {
+      return;
+    }
+    handleOpenWorkspace();
+  }, [handleOpenWorkspace]);
+
   const content = useMemo(() => {
     if (!agentId) {
       return null;
@@ -123,6 +142,9 @@ export const PinnedGridCell = memo(function PinnedGridCell({
       normalizedServerId: serverId,
       normalizedWorkspaceId: workspaceId,
       host: "main",
+      // A glance: no composer, no forking. Questions, plan approval, and permission requests
+      // still answer in place — the agent panel reuses the same timeline cards it always does.
+      readOnly: true,
       // The grid has no tab strip or layout of its own. Anything a chat asks the workspace to open
       // — a file, a diff, a side pane — opens in the workspace itself, and leaves the grid.
       onOpenTab: handleOpenTarget,
@@ -137,8 +159,10 @@ export const PinnedGridCell = memo(function PinnedGridCell({
 
   return (
     <View
-      style={styles.cell}
+      style={[styles.cell, isHovered && styles.cellHovered]}
       onStartShouldSetResponderCapture={handleCaptureResponder}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
       testID={`pinned-grid-cell-${workspaceKey}`}
     >
       <View style={[styles.header, focused && styles.headerFocused]}>
@@ -167,7 +191,13 @@ export const PinnedGridCell = memo(function PinnedGridCell({
           />
         </ToolbarButton>
       </View>
-      <View style={styles.body}>
+      <Pressable
+        style={styles.body}
+        onPress={handleOpenBody}
+        accessibilityRole="button"
+        accessibilityLabel={t("pinnedGrid.openWorkspace")}
+        testID={`pinned-grid-cell-body-${workspaceKey}`}
+      >
         {content ? (
           <WorkspacePaneContent
             content={content}
@@ -184,7 +214,7 @@ export const PinnedGridCell = memo(function PinnedGridCell({
             )}
           </View>
         )}
-      </View>
+      </Pressable>
     </View>
   );
 });
@@ -201,6 +231,9 @@ const styles = StyleSheet.create((theme) => ({
     borderColor: theme.colors.border,
     borderRadius: theme.borderRadius.lg,
     overflow: "hidden",
+  },
+  cellHovered: {
+    borderColor: theme.colors.borderAccent,
   },
   header: {
     minHeight: 40,

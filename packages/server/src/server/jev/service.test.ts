@@ -285,7 +285,7 @@ describe("JevService.decide: egress fails closed", () => {
   it("a marker that redaction removes still excludes the call", async () => {
     const { service, home, transport } = makeHarness();
     const outcome = await service.decide(
-      spawnHint(home, { state: { prompt: "mail tyler@wonderly.com about the rollout" } }),
+      spawnHint(home, { state: { prompt: "mail someone@wonderly.com about the rollout" } }),
     );
     expect(kindAndReason(outcome)).toBe("unavailable:excluded");
     expect(transport.calls).toHaveLength(0);

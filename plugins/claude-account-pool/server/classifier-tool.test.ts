@@ -213,3 +213,22 @@ describe("the agent_model_policy tool — MCP servers", () => {
     expect(text).toContain("Left out: slack.");
   });
 });
+
+describe("the agent_model_policy tool — JEV's spawn hint", () => {
+  const call = { id: 1, method: "tools/call", params: { name: "agent_model_policy", arguments: { prompt: "Implement the retry helper." } } };
+  const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false };
+
+  it("says the class is decided at create once the hint is live, and never asks JEV", () => {
+    const reply = handleMcpMessage(call, world, () => live) as { result: { content: { text: string }[] } };
+
+    expect(reply.result.content[0].text).toContain("Decided at create");
+  });
+
+  it("says nothing extra while the hint is in shadow mode", () => {
+    const reply = handleMcpMessage(call, world, () => ({ ...live, shadow: true })) as {
+      result: { content: { text: string }[] };
+    };
+
+    expect(reply.result.content[0].text).not.toContain("Decided at create");
+  });
+});
