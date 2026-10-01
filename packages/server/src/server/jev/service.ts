@@ -60,6 +60,7 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   awayReply: "control",
   agentTools: "agentTools",
   askJev: "interactive",
+  readCheck: "reads",
 };
 
 /** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
@@ -257,6 +258,7 @@ function laneLimits(config: ResolvedJevConfig): JevLaneLimits {
     control: config.maxConcurrent,
     agentTools: config.agentTools.maxConcurrent,
     interactive: config.askJev.maxConcurrent,
+    reads: config.readCheck.maxConcurrent,
     perGroup: config.agentTools.maxConcurrentPerCall,
     requestsPerSecond: config.maxRequestsPerSecond,
   };
@@ -270,6 +272,8 @@ function laneCapUsd(config: ResolvedJevConfig, lane: JevLane): number {
       return config.agentTools.maxUsdPerDay;
     case "interactive":
       return config.askJev.maxUsdPerDay;
+    case "reads":
+      return config.readCheck.maxUsdPerDay;
   }
 }
 
@@ -926,7 +930,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     );
     const shadow =
       !JEV_FEATURES_WITHOUT_SHADOW.has(ctx.input.feature) &&
-      featureConfig(ctx.config, ctx.input.feature).shadow;
+      (ctx.input.shadow === true || featureConfig(ctx.config, ctx.input.feature).shadow);
     return { kind: shadow ? "shadow" : "answered", callId: ctx.callId, answers, meta };
   }
 
@@ -1022,6 +1026,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
         control: laneStatus("control"),
         agentTools: laneStatus("agentTools"),
         interactive: laneStatus("interactive"),
+        reads: laneStatus("reads"),
       },
       spawnHint: {
         applyHard: config?.spawnHint.applyHard ?? false,

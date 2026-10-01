@@ -815,6 +815,22 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    // Feature 16. Shadow by default (D6); `shadow: false` is live mode (D11).
+    readCheck: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        minTokens: z.number().optional(),
+        liveMinTokens: z.number().optional(),
+        liveTimeoutMs: z.number().optional(),
+        liveShare: z.number().optional(),
+        maxDeniesPerAgentPerHour: z.number().optional(),
+        maxConcurrent: z.number().optional(),
+        maxUsdPerDay: z.number().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 

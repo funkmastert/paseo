@@ -66,6 +66,20 @@ export interface ResolvedJevConfig {
     maxConcurrent: number;
     maxUsdPerDay: number;
   };
+  /** Feature 16, the `reads` lane. Shadow by default (D6); `shadow: false` is live mode (D11). */
+  readCheck: ResolvedJevFeatureConfig & {
+    /** Reads estimated below this are counted, never judged. */
+    minTokens: number;
+    /** Live mode holds only reads this large. */
+    liveMinTokens: number;
+    /** How long a live read waits for its verdict, clamped to 300–2,000 ms. */
+    liveTimeoutMs: number;
+    /** Share of agents live mode applies to; the rest stay in shadow as its control. */
+    liveShare: number;
+    maxDeniesPerAgentPerHour: number;
+    maxConcurrent: number;
+    maxUsdPerDay: number;
+  };
 }
 
 export const JEV_PROVIDER_DEFAULTS: Record<
@@ -106,6 +120,9 @@ const DEFAULT_ENV_FILE = "~/.config/paseo/jev.env";
 /** A person is waiting on the answer, and a slow call holds an `interactive` slot. */
 export const JEV_ASK_MAX_TIMEOUT_MS = 30_000;
 const JEV_ASK_MIN_TIMEOUT_MS = 1_000;
+/** A live read check holds the agent's read; past this it goes through unchecked. */
+const JEV_READ_LIVE_MIN_TIMEOUT_MS = 300;
+const JEV_READ_LIVE_MAX_TIMEOUT_MS = 2_000;
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -258,6 +275,7 @@ export function resolveJevConfig(
   const compactionTiming = record(section["compactionTiming"]);
   const stallJudgment = record(section["stallJudgment"]);
   const askJev = record(section["askJev"]);
+  const readCheck = record(section["readCheck"]);
 
   return {
     enabled: bool(section["enabled"], true),
@@ -336,6 +354,25 @@ export function resolveJevConfig(
       ),
       maxConcurrent: Math.floor(positiveNumber(askJev["maxConcurrent"], 2)),
       maxUsdPerDay: positiveNumber(askJev["maxUsdPerDay"], 0.25),
+    },
+    readCheck: {
+      ...resolveFeature(readCheck, { enabled: true, shadow: true, timeoutMs: 5000 }),
+      minTokens: Math.floor(positiveNumber(readCheck["minTokens"], 2000)),
+      liveMinTokens: Math.floor(positiveNumber(readCheck["liveMinTokens"], 8000)),
+      liveTimeoutMs: Math.floor(
+        numberInRange(
+          readCheck["liveTimeoutMs"],
+          1000,
+          JEV_READ_LIVE_MIN_TIMEOUT_MS,
+          JEV_READ_LIVE_MAX_TIMEOUT_MS,
+        ),
+      ),
+      liveShare: numberInRange(readCheck["liveShare"], 0.5, 0, 1),
+      maxDeniesPerAgentPerHour: Math.floor(
+        positiveNumber(readCheck["maxDeniesPerAgentPerHour"], 5),
+      ),
+      maxConcurrent: Math.floor(positiveNumber(readCheck["maxConcurrent"], 2)),
+      maxUsdPerDay: positiveNumber(readCheck["maxUsdPerDay"], 0.25),
     },
   };
 }
