@@ -315,7 +315,7 @@ describe("settling and validating", () => {
     });
   });
 
-  test("with no read observer reporting, a closed window validates nothing", async () => {
+  test("with no read observer reporting, a closed window validates nothing and gives no figure", async () => {
     const h = await harness();
     const id = h.ledger.recordObserved(
       {
@@ -333,7 +333,11 @@ describe("settling and validating", () => {
     h.clock.now = NOON + 61 * MINUTE;
     h.ledger.sweep();
 
-    expect(h.ledger.events({ range: "today" }).events[0]?.validation).toBeNull();
+    expect(h.ledger.events({ range: "today" }).events[0]).toMatchObject({
+      validation: null,
+      pending: false,
+      tokensSavedEstimate: null,
+    });
   });
 });
 

@@ -64,6 +64,9 @@ const ROLLUP_TOP_ENTRIES = 50;
 const SUMMARY_TOP_ENTRIES = 10;
 const EVENTS_DEFAULT_LIMIT = 50;
 const EVENTS_MAX_LIMIT = 200;
+/** An agent-tool record's regret window, kept in its facts so a restart rebuilds it. */
+const REGRET_PATHS_FACT = "regretPaths";
+const REGRET_WINDOW_FACT = "regretWindowMs";
 
 /** The dashboard's feature order: the budget strip's, with feature 16 added. */
 export const JEV_SAVINGS_FEATURE_ORDER: readonly JevSavingsFeature[] = [
@@ -272,6 +275,7 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       platform: this.options.platform,
     });
     this.loaded = true;
+    this.rebuildWatches();
     for (const run of this.beforeLoad.splice(0)) run();
     this.sweep();
     const flushEvery = this.options.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
@@ -513,16 +517,60 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
    */
   watchReads(savingsId: string, agentId: string, paths: readonly string[], windowMs: number): void {
     if (!savingsId || paths.length === 0) return;
-    const startedMs = this.now();
-    const list = this.watches.get(agentId) ?? [];
-    list.push({
+    this.whenLoaded(() => {
+      const folded = this.byId.get(savingsId);
+      // The watch lives on the record, so a restart rebuilds it (`rebuildWatches`).
+      if (folded && typeof folded.facts[REGRET_PATHS_FACT] !== "string") {
+        this.settle(savingsId, {
+          [REGRET_PATHS_FACT]: JSON.stringify(paths),
+          [REGRET_WINDOW_FACT]: windowMs,
+        });
+      }
+      this.addWatch(savingsId, agentId, paths, folded?.atMs ?? this.now(), windowMs);
+    });
+  }
+
+  /**
+   * One regret window from the tool call's time. The paths are matched as given and as their real
+   * paths: feature 16 reports a read by its real path, and `/var`, `/tmp` and a symlinked worktree
+   * name the same file two ways.
+   */
+  private addWatch(
+    savingsId: string,
+    agentId: string,
+    paths: readonly string[],
+    startedMs: number,
+    windowMs: number,
+  ): void {
+    const watch: ReadWatch = {
       savingsId,
       agentId,
       paths: new Set(paths),
       startedMs,
       untilMs: startedMs + windowMs,
-    });
+    };
+    const list = this.watches.get(agentId) ?? [];
+    list.push(watch);
     this.watches.set(agentId, list);
+    void this.addRealPaths(watch, paths);
+  }
+
+  private async addRealPaths(watch: ReadWatch, paths: readonly string[]): Promise<void> {
+    const real = await Promise.all(
+      paths.map((filePath) => fs.realpath(filePath).catch(() => null)),
+    );
+    for (const filePath of real) if (filePath) watch.paths.add(filePath);
+  }
+
+  /** The regret windows of the agent-tool records still pending, after a restart. */
+  private rebuildWatches(): void {
+    for (const record of this.records) {
+      if (record.feature !== "agentTools" || !record.price.pending || !record.agentId) continue;
+      const paths = parsePaths(record.facts[REGRET_PATHS_FACT]);
+      const windowMs = record.facts[REGRET_WINDOW_FACT];
+      if (paths.length === 0 || typeof windowMs !== "number") continue;
+      this.addWatch(record.id, record.agentId, paths, record.atMs, windowMs);
+    }
   }
 
   // ---- the reader ----
@@ -665,13 +713,16 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       for (const [agentId, list] of this.watches) {
         const open = list.filter((watch) => {
           if (watch.untilMs > nowMs) return true;
-          // Held only if feature 16's observer reported reads during the window.
+          // Held only if feature 16's observer reported reads during the window. Otherwise
+          // nothing could have seen a regret, and the record gets no figure.
           if (this.lastNoteReadMs >= watch.startedMs) {
             this.validate(watch.savingsId, {
               outcome: "held",
               signal: null,
               afterMinutes: Math.round((watch.untilMs - watch.startedMs) / 60_000),
             });
+          } else {
+            this.settle(watch.savingsId, { regretWatch: "unobserved" });
           }
           return false;
         });
@@ -905,7 +956,7 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       mode: record.mode,
       outcome: record.outcome,
       involvement: record.involvement,
-      decision: { ...record.decision, detail: { ...record.facts } },
+      decision: { ...record.decision, detail: withoutRegretPaths(record.facts) },
       benefit: record.price.benefit,
       tokensSavedEstimate: record.price.tokens,
       otherBenefit: record.price.otherBenefit,
@@ -1328,6 +1379,25 @@ function reviveDay(value: Record<string, unknown>): DayAgg {
     workspaces: reviveTallies(value["workspaces"]),
     spend,
   };
+}
+
+function parsePaths(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/** An event's detail without the watched paths, which can be 120 long. */
+function withoutRegretPaths(facts: JevSavingsFacts): JevSavingsFacts {
+  if (!(REGRET_PATHS_FACT in facts)) return { ...facts };
+  const { [REGRET_PATHS_FACT]: _paths, ...rest } = facts;
+  return rest;
 }
 
 /** The savings id recorded for a JEV call, through any sink; null when the sink keeps no index. */

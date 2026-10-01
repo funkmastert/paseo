@@ -220,7 +220,19 @@ describe("features 4-6, agent tools", () => {
   };
 
   test("held: (T_avoided - T_result) x R x w(m) - S(C) x w(m)", () => {
-    expect(price("agentTools", "live", { did: "answered" }, facts).tokens).toBe(64_950);
+    expect(price("agentTools", "live", { did: "answered" }, facts, held).tokens).toBe(64_950);
+  });
+
+  test("pending until the regret window closes; no figure when nothing watched it", () => {
+    expect(price("agentTools", "live", { did: "answered" }, facts)).toMatchObject({
+      tokens: null,
+      pending: true,
+    });
+    for (const regretWatch of ["unobserved", "none"]) {
+      expect(
+        price("agentTools", "live", { did: "answered" }, { ...facts, regretWatch }),
+      ).toMatchObject({ benefit: "tokens", tokens: null, pending: false });
+    }
   });
 
   test("a regret read costs the result's residency and the extra step", () => {
@@ -241,7 +253,7 @@ describe("features 4-6, agent tools", () => {
   });
 
   test("an unknown caller context uses the fleet median and says so", () => {
-    const result = price("agentTools", "live", {}, { ...facts, callerContextTokens: null });
+    const result = price("agentTools", "live", {}, { ...facts, callerContextTokens: null }, held);
     expect(result.basis?.inputs["C source"]).toContain("fleet median");
   });
 });

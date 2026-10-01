@@ -1,4 +1,13 @@
-import { appendFileSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -91,20 +100,32 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     };
   }
 
-  test("an answered file tool is live, priced at 2.35 characters a token, and watched for a regret", async () => {
+  /** Feature 16's observer reporting some other read, so a closing window can hold. */
+  function observerRead(savings: JevSavingsLedger, atMs: number) {
+    savings.noteRead({
+      agentId: "agent-other",
+      path: "/repo/elsewhere.ts",
+      tool: "Read",
+      at: new Date(atMs).toISOString(),
+      contextTokens: 100,
+    });
+  }
+
+  test("an answered file tool is live and pending until its regret window closes; a re-read is a regret", async () => {
     const { savings, clock } = await ledger();
     const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
 
     adapt(toolLine());
-    const [held] = savings.events({ range: "today" }).events;
-    expect(held).toMatchObject({
+    const [record] = savings.events({ range: "today" }).events;
+    expect(record).toMatchObject({
       feature: "agentTools",
       mode: "live",
       outcome: "answered",
       jevCostUsd: 0.0002,
-      tokensSavedEstimate: 64_950,
+      pending: true,
+      tokensSavedEstimate: null,
     });
-    expect(held?.basis?.inputs).toMatchObject({ T_avoided: 10_000, T_result: 200 });
+    expect(savings.summary("today").live.tokensSaved).toBe(0);
 
     clock.now = NOON + 5 * MINUTE;
     savings.noteRead({
@@ -116,6 +137,7 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     });
     expect(savings.events({ range: "today" }).events[0]).toMatchObject({
       validation: { outcome: "regret" },
+      pending: false,
       tokensSavedEstimate: -7_550,
     });
   });
@@ -125,15 +147,96 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     // plus Read's 7-character line prefix, at 2.35 characters a token (`jev-tool-use-log.ts`).
     const readTokensAvoided = Math.ceil((20_000 + 7 * 400) / 2.35);
     expect(readTokensAvoided).toBe(9_703);
-    const { savings } = await ledger();
+    const { savings, clock } = await ledger();
     const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
 
     adapt(toolLine({ readTokensAvoided, resultChars: 470, callerContextTokens: 150_000 }));
+    observerRead(savings, NOON + 10 * MINUTE);
+    clock.now = NOON + 61 * MINUTE;
+    savings.sweep();
 
     const [record] = savings.events({ range: "today" }).events;
+    expect(record?.validation).toMatchObject({ outcome: "held" });
     expect(record?.basis?.inputs).toMatchObject({ T_avoided: 9_703, T_result: 200, C: 150_000 });
     // (9,703 - 200) x 14.5 x 0.5 - (0.1 x 150,000 + 2,200) x 0.5
     expect(record?.tokensSavedEstimate).toBe(60_297);
+    expect(savings.summary("today").live.tokensSaved).toBe(60_297);
+  });
+
+  test("a window nothing watched gives no figure, and neither does a call that sent no path", async () => {
+    const { savings, clock } = await ledger();
+    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+
+    adapt(toolLine());
+    adapt(toolLine({ tool: "ask_jev", paths: [], at: new Date(NOON + 1).toISOString() }));
+    clock.now = NOON + 61 * MINUTE;
+    savings.sweep();
+
+    const events = savings.events({ range: "today" }).events;
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event).toMatchObject({ pending: false, tokensSavedEstimate: null, validation: null });
+    }
+    expect(savings.summary("today").live.tokensSaved).toBe(0);
+  });
+
+  test("the regret window survives a restart: a re-read after it is still a regret", async () => {
+    const dir = tempDir();
+    const clock = { now: NOON };
+    const open = async () => {
+      const savings = new JevSavingsLedger({
+        dir,
+        logger: pino({ level: "silent" }),
+        now: () => clock.now,
+        findCall: () => null,
+      });
+      await savings.load();
+      cleanups.push(() => savings.stop());
+      return savings;
+    };
+    const first = await open();
+    createToolUseSavingsAdapter({ savings: first, readAgentModel: () => "claude-sonnet-5" })(
+      toolLine(),
+    );
+    await first.stop();
+
+    clock.now = NOON + 20 * MINUTE;
+    const second = await open();
+    expect(second.events({ range: "today" }).events[0]).toMatchObject({ pending: true });
+    second.noteRead({
+      agentId: "agent-1",
+      path: "/repo/src/a.ts",
+      tool: "Read",
+      at: new Date(clock.now).toISOString(),
+      contextTokens: 4_000,
+    });
+    const [event] = second.events({ range: "today" }).events;
+    expect(event).toMatchObject({ validation: { outcome: "regret" }, tokensSavedEstimate: -7_550 });
+    expect(event?.decision.detail).not.toHaveProperty("regretPaths");
+  });
+
+  test("a regret read by the real path matches a call that named the file through a symlink", async () => {
+    const dir = tempDir();
+    const realDir = path.join(dir, "real");
+    mkdirSync(realDir);
+    writeFileSync(path.join(realDir, "a.ts"), "x");
+    symlinkSync(realDir, path.join(dir, "link"));
+    const { savings } = await ledger();
+    createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" })(
+      toolLine({ paths: [path.join(dir, "link", "a.ts")] }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    savings.noteRead({
+      agentId: "agent-1",
+      path: realpathSync(path.join(realDir, "a.ts")),
+      tool: "Read",
+      at: new Date(NOON + MINUTE).toISOString(),
+      contextTokens: 4_000,
+    });
+    expect(savings.events({ range: "today" }).events[0]?.validation).toMatchObject({
+      outcome: "regret",
+    });
   });
 
   test("a refusal is nothing, an unavailable call is a not-asked count, ask_jev_diff_risk claims nothing", async () => {

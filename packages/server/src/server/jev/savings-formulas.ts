@@ -346,8 +346,11 @@ export const JEV_FILE_TOOLS = new Set([
 
 /**
  * Features 4-6. Facts: `tool`, `tAvoided` (tokens of the files or output sent to JEV),
- * `tResult` (tokens of the tool's result), `callerContextTokens` (`C`), `model`, `answered`.
- * Held: `(T_avoided - T_result) x R x w(m) - S(C) x w(m)`. Regret: `-(T_result x R + S(C)) x w(m)`.
+ * `tResult` (tokens of the tool's result), `callerContextTokens` (`C`), `model`, `answered`, and
+ * `regretWatch`: `none` when no path was sent, `unobserved` when the window closed with nothing
+ * reporting reads. Held: `(T_avoided - T_result) x R x w(m) - S(C) x w(m)`. Regret:
+ * `-(T_result x R + S(C)) x w(m)`. A saving is pending until the regret window says which, and a
+ * window nothing watched gives no figure: an unwatched saving cannot be told from a regret.
  */
 function priceAgentTools({ facts, validation }: JevSavingsPriceInput): JevSavingsPrice {
   const tool = str(facts, "tool");
@@ -355,6 +358,16 @@ function priceAgentTools({ facts, validation }: JevSavingsPriceInput): JevSaving
     return noTokensPrice("none", "none: ask_jev_diff_risk may only add review");
   if (facts["answered"] === false)
     return tokensPrice(0, "0: no answer, the agent fell back to Read or Bash", { tool });
+  if (validation === null) {
+    const watch = str(facts, "regretWatch");
+    if (watch === "none")
+      return noTokensPrice("tokens", "no figure: no path was sent, so no regret can be seen");
+    if (watch === "unobserved")
+      return noTokensPrice("tokens", "no figure: nothing reported reads during the regret window");
+    return isPartial(facts)
+      ? partialPrice("tokens", "the regret window")
+      : pendingPrice("tokens", "the regret window");
+  }
   const tAvoided = num(facts, "tAvoided") ?? 0;
   const tResult = num(facts, "tResult") ?? 0;
   const contextKnown = num(facts, "callerContextTokens");

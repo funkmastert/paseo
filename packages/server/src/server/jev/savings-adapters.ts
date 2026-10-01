@@ -4,7 +4,7 @@ import type { Logger } from "pino";
 
 import type { JevSavingsSink } from "./contract.js";
 import { JevSavingsLedger } from "./savings.js";
-import { estimateContextTokens } from "./savings-formulas.js";
+import { estimateContextTokens, type JevSavingsFacts } from "./savings-formulas.js";
 import { pendingSavingsFor } from "./savings-hooks.js";
 
 /**
@@ -135,6 +135,9 @@ export function recordToolUseSavings(
   }
   if ((num(line, "jevCalls") ?? 0) === 0) return "";
   const answered = outcome === "answered" || outcome === "partial";
+  const paths = Array.isArray(line["paths"])
+    ? line["paths"].filter((value): value is string => typeof value === "string")
+    : [];
   const avoided = num(line, "readTokensAvoided") ?? 0;
   const id = savings.recordObserved(
     {
@@ -154,6 +157,7 @@ export function recordToolUseSavings(
         model: context.model,
         jevCalls: num(line, "jevCalls"),
         commandSha256: str(line, "commandSha256"),
+        ...regretWatchFacts(answered ? paths : []),
       },
     },
     {
@@ -163,11 +167,15 @@ export function recordToolUseSavings(
       jevCostUsd: num(line, "jevUsd"),
     },
   );
-  const paths = Array.isArray(line["paths"])
-    ? line["paths"].filter((value): value is string => typeof value === "string")
-    : [];
   if (answered && id) savings.watchReads(id, agentId, paths, TOOL_REGRET_WINDOW_MS);
   return id;
+}
+
+/** The regret window, kept on the record so a restart rebuilds it; `none` with no path to watch. */
+function regretWatchFacts(paths: readonly string[]): JevSavingsFacts {
+  return paths.length === 0
+    ? { regretWatch: "none" }
+    : { regretPaths: JSON.stringify(paths), regretWindowMs: TOOL_REGRET_WINDOW_MS };
 }
 
 function notAskedReason(reason: string | null): "excluded" | "inactive" {
