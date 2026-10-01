@@ -57,7 +57,7 @@ import type {
   ImportProviderSessionContext,
   ResolveAgentDefaultModeInput,
 } from "./agent-sdk-types.js";
-import type { PaseoToolCatalog } from "./tools/types.js";
+import type { PaseoToolCatalog, PaseoToolRuntimeContext } from "./tools/types.js";
 import type { ProviderDefinition } from "./provider-registry.js";
 
 const DESKTOP_OPEN_AGENT_TAB_LABEL = getOpenAgentTabLabel("desktop-client");
@@ -5060,7 +5060,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
 
   const codex = new CaptureClient("codex");
   const claude = new CaptureClient("claude");
-  const policyInputs: Array<{ callerAgentId?: string; paseoToolPolicy?: unknown }> = [];
+  const policyInputs: PaseoToolRuntimeContext[] = [];
   const paseoTools: PaseoToolCatalog = {
     tools: new Map(),
     getTool: () => undefined,
@@ -5083,7 +5083,7 @@ test("uses each provider's current policy for new sessions and snapshots it by a
   const codexAgent = await manager.createAgent(
     { provider: "codex", cwd: workdir },
     "00000000-0000-4000-8000-000000000107",
-    { workspaceId: undefined },
+    { workspaceId: undefined, labels: { "paseo.jev-tools": "on" } },
   );
   const claudeAgent = await manager.createAgent(
     { provider: "claude", cwd: workdir },
@@ -5091,9 +5091,20 @@ test("uses each provider's current policy for new sessions and snapshots it by a
     { workspaceId: undefined },
   );
 
+  // The catalog is built before the agent is registered, so it gets the launch labels and cwd:
+  // the JEV tools' eligibility is decided from them (docs/jev.md, "Which agents get them").
   expect(policyInputs).toEqual([
-    { callerAgentId: codexAgent.id, paseoToolPolicy: { disabledTools: ["list_agents"] } },
+    {
+      callerAgentId: codexAgent.id,
+      callerCwd: codexAgent.cwd,
+      callerLabels: { "paseo.jev-tools": "on" },
+      paseoToolPolicy: { disabledTools: ["list_agents"] },
+    },
   ]);
+  expect(manager.getAgentLaunchEnv(codexAgent.id)).toMatchObject({
+    PASEO_AGENT_ID: codexAgent.id,
+    PASEO_AGENT_CWD: codexAgent.cwd,
+  });
   expect(codex.launchContexts[0]?.paseoTools).toBe(paseoTools);
   expect(claude.launchContexts[0]?.paseoTools).toBeUndefined();
   expect(codex.configs[0]?.mcpServers?.paseo).toBeUndefined();
@@ -5117,9 +5128,15 @@ test("uses each provider's current policy for new sessions and snapshots it by a
     disabledTools: ["create_agent"],
   });
   expect(policyInputs).toEqual([
-    { callerAgentId: codexAgent.id, paseoToolPolicy: { disabledTools: ["list_agents"] } },
+    {
+      callerAgentId: codexAgent.id,
+      callerCwd: codexAgent.cwd,
+      callerLabels: { "paseo.jev-tools": "on" },
+      paseoToolPolicy: { disabledTools: ["list_agents"] },
+    },
     {
       callerAgentId: nextCodexAgent.id,
+      callerCwd: nextCodexAgent.cwd,
       paseoToolPolicy: { disabledTools: ["create_agent"] },
     },
   ]);
