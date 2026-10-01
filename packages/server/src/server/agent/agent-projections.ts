@@ -23,6 +23,7 @@ import { isStoredAgentProviderAvailable, toAgentPersistenceHandle } from "../per
 import { computeTokenRate } from "./token-rate-tracker.js";
 import { isDelegatedAgent } from "@getpaseo/protocol/agent-labels";
 import { summarizeOwedFinishReport } from "./finish-obligation.js";
+import { computeNeedsInput, computeResumability } from "./activity-vocabulary.js";
 export type { ManagedAgent };
 
 interface ProjectionOptions {
@@ -112,6 +113,7 @@ export function toAgentPayload(
     runtimeInfo,
     configuredThinkingOptionId: thinkingOptionId,
   });
+  const persistence = projectPersistenceHandleForWire(agent.persistence);
 
   const payload: AgentSnapshotPayload = {
     id: agent.id,
@@ -137,10 +139,24 @@ export function toAgentPayload(
     availableModes: cloneAvailableModes(agent.availableModes),
     features: normalizeFeatures(agent.features),
     pendingPermissions: sanitizePendingPermissions(agent.pendingPermissions),
-    persistence: projectPersistenceHandleForWire(agent.persistence),
+    persistence,
     title: options?.title ?? null,
     labels: agent.labels,
+    resumability: computeResumability({
+      isLive: agent.lifecycle !== "closed",
+      hasPersistenceHandle: persistence !== null,
+    }),
   };
+
+  const needsInput = computeNeedsInput({
+    pendingPermissionKinds: Array.from(agent.pendingPermissions.values()).map((p) => p.kind),
+    status: agent.lifecycle,
+    lastError: agent.lastError,
+    spendPaused: agent.tokenBurnAlert?.governorStage === "pause",
+  });
+  if (needsInput !== undefined) {
+    payload.needsInput = needsInput;
+  }
 
   const usage = sanitizeUsage(agent.lastUsage);
   if (usage !== undefined) {
@@ -263,6 +279,12 @@ export function buildStoredAgentPayload(
     buildStoredPersistenceHandle(record, validProviders),
   );
   const owedFinishReport = summarizeOwedFinishReport(record.finishObligations);
+  const needsInput = computeNeedsInput({
+    pendingPermissionKinds: [],
+    status: record.lastStatus,
+    lastError: record.lastError ?? undefined,
+    spendPaused: false,
+  });
 
   return {
     id: record.id,
@@ -291,6 +313,12 @@ export function buildStoredAgentPayload(
     labels: normalizeLabels(record.labels),
     ...(providerAvailable ? {} : { providerUnavailable: true }),
     ...(owedFinishReport ? { owedFinishReport } : {}),
+    ...(needsInput ? { needsInput } : {}),
+    resumability: computeResumability({
+      isLive: false,
+      hasPersistenceHandle: persistence !== null,
+      providerAvailable,
+    }),
   };
 }
 
@@ -350,6 +378,8 @@ export function toAgentListItemPayload(agent: AgentSnapshotPayload): AgentListIt
     ...(agent.owedFinishReport !== undefined ? { owedFinishReport: agent.owedFinishReport } : {}),
     ...(agent.modelDivergence !== undefined ? { modelDivergence: agent.modelDivergence } : {}),
     ...(agent.turnQueued !== undefined ? { turnQueued: agent.turnQueued } : {}),
+    ...(agent.needsInput !== undefined ? { needsInput: agent.needsInput } : {}),
+    ...(agent.resumability !== undefined ? { resumability: agent.resumability } : {}),
   };
 }
 

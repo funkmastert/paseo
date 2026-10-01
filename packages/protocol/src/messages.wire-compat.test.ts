@@ -382,6 +382,54 @@ describe("wire schema compatibility", () => {
     expect(newParsed.resourceAlert).toEqual(payloadFromNewDaemon.resourceAlert);
   });
 
+  test("old clients strip unknown needsInput/resumability fields from new daemon snapshots", () => {
+    // Same wire-safety proof as tokenBurnAlert above, for OR-D1's activity vocabulary. Both stay
+    // plain strings/arrays on the wire (not closed enums), but an old client's schema has no
+    // notion of either key at all, so this proves the field-level strip rather than the
+    // open-string parsing — see agent-types.ts's AgentNeedsInput/AgentResumability doc comments.
+    const LegacySnapshotSchema = AgentSnapshotPayloadSchema.omit({
+      needsInput: true,
+      resumability: true,
+    });
+    const payloadFromNewDaemon = {
+      id: "agent-1",
+      provider: "claude",
+      cwd: "/tmp/project",
+      model: null,
+      thinkingOptionId: null,
+      effectiveThinkingOptionId: null,
+      createdAt: "2026-09-12T00:00:00.000Z",
+      updatedAt: "2026-09-12T00:00:00.000Z",
+      lastUserMessageAt: null,
+      status: "closed",
+      capabilities: {
+        supportsStreaming: true,
+        supportsSessionPersistence: true,
+        supportsDynamicModes: true,
+        supportsMcpServers: true,
+        supportsReasoningStream: true,
+        supportsToolInvocations: true,
+      },
+      currentModeId: null,
+      availableModes: [],
+      pendingPermissions: [],
+      persistence: null,
+      title: null,
+      labels: {},
+      attentionReason: null,
+      needsInput: { count: 1, reasons: ["usage_limit"] },
+      resumability: "unreachable",
+    };
+
+    const legacyParsed = LegacySnapshotSchema.parse(payloadFromNewDaemon);
+    expect(legacyParsed).not.toHaveProperty("needsInput");
+    expect(legacyParsed).not.toHaveProperty("resumability");
+
+    const newParsed = AgentSnapshotPayloadSchema.parse(payloadFromNewDaemon);
+    expect(newParsed.needsInput).toEqual(payloadFromNewDaemon.needsInput);
+    expect(newParsed.resumability).toBe(payloadFromNewDaemon.resumability);
+  });
+
   test("old clients strip an unknown diskUsage field from new daemon workspace descriptors", () => {
     // Models an old client's schema, generated before diskUsage existed. WorkspaceDescriptorPayloadSchema
     // ends in a `.transform()` (`workspaceDirectory` defaulting), so it has no `.omit()` — this

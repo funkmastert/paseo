@@ -297,6 +297,7 @@ export const ptBR: TranslationResources = {
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muito alto",
       modelDiverged: "Modelo diferente",
+      unreachable: "Inacessível",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {

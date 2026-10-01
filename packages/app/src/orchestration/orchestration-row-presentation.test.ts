@@ -72,6 +72,43 @@ describe("resolveOrchestrationRowPresentation", () => {
     expect(resolveOrchestrationRowPresentation(unknown).badge).toBe("report-undelivered");
   });
 
+  it("badges needs-input from a server-derived reason even with no pendingPermissions entry", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    for (const reason of ["permission", "question", "usage_limit", "spend_paused"] as const) {
+      const agent: Agent = { ...finished, needsInput: { count: 1, reasons: [reason] } };
+      expect(resolveOrchestrationRowPresentation(agent).badge).toBe("needs-input");
+    }
+  });
+
+  it("badges a closed agent nothing can resume as unreachable", () => {
+    const closed = byTitle("Reap leases whose holder went away");
+    const agent: Agent = { ...closed, resumability: "unreachable" };
+    expect(resolveOrchestrationRowPresentation(agent).badge).toBe("unreachable");
+  });
+
+  it("does not badge unreachable when needs-input or failed already applies", () => {
+    const finished = byTitle("Audit every field the panel renders");
+    const needsInput: Agent = {
+      ...finished,
+      resumability: "unreachable",
+      needsInput: { count: 1, reasons: ["permission"] },
+    };
+    expect(resolveOrchestrationRowPresentation(needsInput).badge).toBe("needs-input");
+
+    const failed: Agent = { ...finished, status: "error", resumability: "unreachable" };
+    expect(resolveOrchestrationRowPresentation(failed).badge).toBe("failed");
+  });
+
+  it("does not badge resumable or live closed agents as unreachable", () => {
+    const closed = byTitle("Reap leases whose holder went away");
+    expect(
+      resolveOrchestrationRowPresentation({ ...closed, resumability: "resumable" }).badge,
+    ).toBeNull();
+    expect(
+      resolveOrchestrationRowPresentation({ ...closed, resumability: "unknown" }).badge,
+    ).toBeNull();
+  });
+
   it("separates a closed agent from an idle one", () => {
     expect(
       resolveOrchestrationRowPresentation(byTitle("Reap leases whose holder went away")).isClosed,

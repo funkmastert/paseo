@@ -61,13 +61,20 @@ function projectAgentAlerts(
   agent: Agent,
 ): Pick<
   AgentSnapshotPayload,
-  "tokenBurnAlert" | "owedFinishReport" | "modelDivergence" | "turnQueued"
+  | "tokenBurnAlert"
+  | "owedFinishReport"
+  | "modelDivergence"
+  | "turnQueued"
+  | "needsInput"
+  | "resumability"
 > {
   return {
     ...(agent.tokenBurnAlert ? { tokenBurnAlert: agent.tokenBurnAlert } : {}),
     ...(agent.owedFinishReport ? { owedFinishReport: agent.owedFinishReport } : {}),
     ...(agent.turnQueued ? { turnQueued: agent.turnQueued } : {}),
     ...(agent.modelDivergence ? { modelDivergence: agent.modelDivergence } : {}),
+    ...(agent.needsInput ? { needsInput: agent.needsInput } : {}),
+    ...(agent.resumability !== undefined ? { resumability: agent.resumability } : {}),
   };
 }
 
@@ -149,6 +156,8 @@ export function normalizeAgentSnapshot(snapshot: AgentSnapshotPayload, serverId:
     owedFinishReport: snapshot.owedFinishReport,
     turnQueued: snapshot.turnQueued,
     modelDivergence: snapshot.modelDivergence,
+    needsInput: snapshot.needsInput,
+    resumability: snapshot.resumability,
     title: snapshot.title ?? null,
     cwd: snapshot.cwd,
     workspaceId: snapshot.workspaceId,

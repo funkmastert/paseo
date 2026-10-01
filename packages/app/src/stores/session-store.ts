@@ -36,6 +36,7 @@ import type {
   ModelDivergenceAlert,
   TokenBurnAlert,
   OwedFinishReport,
+  AgentNeedsInput,
 } from "@getpaseo/protocol/agent-types";
 import type {
   AgentMcpServerStatus,
@@ -138,6 +139,18 @@ export interface Agent {
    * agent was not configured with. Absent when the monitor is off and on old daemons.
    */
   modelDivergence?: ModelDivergenceAlert;
+  /**
+   * Blocking conditions this agent needs a person to resolve — pending permissions, a
+   * limit-shaped error, a paused spend governor. Absent while simply working, and on daemons
+   * that predate it. See docs/agent-lifecycle.md#needs-input.
+   */
+  needsInput?: AgentNeedsInput;
+  /**
+   * Whether a closed agent can be brought back. Absent on daemons that predate it; a client that
+   * cares treats an absent value the way it treats `"unknown"`. See AgentResumability's doc
+   * comment in `@getpaseo/protocol/agent-types`.
+   */
+  resumability?: string;
   title: string | null;
   cwd: string;
   workspaceId?: string;

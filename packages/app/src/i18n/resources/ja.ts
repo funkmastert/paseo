@@ -297,6 +297,7 @@ export const ja: TranslationResources = {
       tokenBurnWarning: "高消費",
       tokenBurnDanger: "非常に高い消費",
       modelDiverged: "想定外のモデル",
+      unreachable: "到達不能",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 合計 {{total}}",
     archiveSheet: {

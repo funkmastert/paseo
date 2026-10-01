@@ -1,6 +1,11 @@
 import type { Agent } from "@/stores/session-store";
 
-export type OrchestrationRowBadge = "needs-input" | "failed" | "owes-report" | "report-undelivered";
+export type OrchestrationRowBadge =
+  | "needs-input"
+  | "failed"
+  | "owes-report"
+  | "report-undelivered"
+  | "unreachable";
 
 /** Keys of `agentList.status` — the words the compact row's second line falls back to. */
 export type OrchestrationRowStatusKey =
@@ -46,10 +51,18 @@ function resolveStatusKey(agent: Agent): OrchestrationRowStatusKey {
 }
 
 function resolveBadge(agent: Agent): OrchestrationRowBadge | null {
-  if (agent.pendingPermissions.length > 0 || agent.attentionReason === "permission") {
+  // `needsInput` folds pendingPermissions plus usage-limit and spend-paused reasons; the
+  // pre-existing checks stay as a fallback for a daemon that predates the field.
+  if (
+    (agent.needsInput?.count ?? 0) > 0 ||
+    agent.pendingPermissions.length > 0 ||
+    agent.attentionReason === "permission"
+  ) {
     return "needs-input";
   }
   if (agent.status === "error" || agent.attentionReason === "error") return "failed";
+  // A closed agent nothing can resume — no persistence handle, or a provider that is gone.
+  if (agent.resumability === "unreachable") return "unreachable";
   const owed = agent.owedFinishReport;
   if (!owed) return null;
   // `state` is open on the wire; anything but "parked" means the report is stuck in delivery.

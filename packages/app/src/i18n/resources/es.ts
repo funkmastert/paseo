@@ -297,6 +297,7 @@ export const es: TranslationResources = {
       tokenBurnWarning: "Consumo alto",
       tokenBurnDanger: "Consumo muy alto",
       modelDiverged: "Modelo distinto",
+      unreachable: "Inaccesible",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {

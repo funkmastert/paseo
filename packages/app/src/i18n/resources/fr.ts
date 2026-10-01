@@ -298,6 +298,7 @@ export const fr: TranslationResources = {
       tokenBurnWarning: "Consommation élevée",
       tokenBurnDanger: "Consommation très élevée",
       modelDiverged: "Modèle inattendu",
+      unreachable: "Inaccessible",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} au total",
     archiveSheet: {

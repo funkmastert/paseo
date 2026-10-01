@@ -292,6 +292,7 @@ export const en = {
       tokenBurnWarning: "High burn",
       tokenBurnDanger: "Very high burn",
       modelDiverged: "Wrong model",
+      unreachable: "Unreachable",
     },
     tokenBurnTooltip: "{{rate}} tok/min · {{total}} total",
     archiveSheet: {
