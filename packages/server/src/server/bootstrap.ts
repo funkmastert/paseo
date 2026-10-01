@@ -344,6 +344,7 @@ import {
   type JevBudgetExhaustedEvent,
   type JevServiceRuntime,
 } from "./jev/service.js";
+import { startSavingsAdapters } from "./jev/savings-adapters.js";
 import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
@@ -1951,6 +1952,16 @@ export async function createPaseoDaemon(
   });
   // Feature 2's savings record: the spawn hint's label, priced when the child closes (docs/jev.md).
   const spawnHintSavings = startSpawnHintSavings({ savings: jev.savings, agentManager });
+  // Features still on their own branches report through their measurement files until they merge.
+  const savingsAdapters = startSavingsAdapters({
+    jevDir: path.join(config.paseoHome, "jev"),
+    savings: jev.savings,
+    readAgentModel: (agentId) => {
+      const agent = agentManager.getAgent(agentId);
+      return agent ? (agent.runtimeInfo?.model ?? agent.config.model ?? null) : null;
+    },
+    logger,
+  });
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
   // before AgentManager because the providers need its gate, and it only reads the agent list.
   listDeviceLeaseAgents = () =>
@@ -3429,6 +3440,7 @@ export async function createPaseoDaemon(
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
     spawnHintSavings.stop();
+    savingsAdapters.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
