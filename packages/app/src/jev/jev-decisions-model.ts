@@ -35,10 +35,18 @@ export function jevFeatureLabel(feature: string): string {
   return JEV_FEATURE_LABELS[feature] ?? feature;
 }
 
-// TODO(jev-ui-fix F5): read the mode off the note itself once the savings track adds it to
-// JevDecisionNote, instead of the host's current status, which can disagree with the mode the
-// decision was actually made under.
+/**
+ * `mode` is the note's own record of shadow vs. live, from the savings track's hook-in
+ * (contract.ts, `JevDecisionNote.mode`): it never disagrees with the mode the decision was
+ * actually made under, unlike `applied` or the host's current status. A note from before that
+ * hook-in has no `mode`; for those, fall back to the old heuristic (today's status, which can be
+ * wrong if the feature's shadow setting changed since).
+ */
 function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisionTag | null {
+  if (record.mode !== undefined) {
+    if (record.mode !== "shadow") return null;
+    return record.feature === "awayReply" ? "dryRun" : "shadow";
+  }
   if (record.applied) return null;
   if (status === null) return null;
   if (!status.features[record.feature]?.shadow) return null;

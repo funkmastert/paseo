@@ -75,6 +75,39 @@ describe("buildJevDecisionsView", () => {
     ]);
   });
 
+  it("reads the tag off the note's own mode, even when it disagrees with the host's current status", () => {
+    // The host's status now says live, but this note was recorded while the feature was shadow.
+    const view = buildJevDecisionsView(
+      [record({ mode: "shadow", applied: true })],
+      status({ remediationTriage: false }),
+    );
+    expect(view.lines[0].tag).toBe("shadow");
+  });
+
+  it("tags nothing for a live mode, even when applied is false", () => {
+    const view = buildJevDecisionsView(
+      [record({ mode: "live", applied: false })],
+      status({ remediationTriage: true }),
+    );
+    expect(view.lines[0].tag).toBeNull();
+  });
+
+  it("says dry run for the away reply's own shadow mode", () => {
+    const view = buildJevDecisionsView(
+      [record({ feature: "awayReply", mode: "shadow" })],
+      status({ awayReply: false }),
+    );
+    expect(view.lines[0].tag).toBe("dryRun");
+  });
+
+  it("falls back to the old heuristic for a note recorded before the savings hook-in (no mode)", () => {
+    const view = buildJevDecisionsView(
+      [record({ applied: false })],
+      status({ remediationTriage: true }),
+    );
+    expect(view.lines[0].tag).toBe("shadow");
+  });
+
   it("tags nothing when the host's status could not be read", () => {
     expect(buildJevDecisionsView([record()], null).lines[0].tag).toBeNull();
   });
