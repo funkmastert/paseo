@@ -142,6 +142,8 @@ export class JevEgressScopeChecker {
   private roots: CachedRoots | null = null;
   private readonly repositories = new Map<string, Cached<GitRepository | null>>();
   private readonly remoteUrls = new Map<string, Cached<string[]>>();
+  /** Loads running now, by cache and key: concurrent checks of one directory share one git. */
+  private readonly loading = new WeakMap<Map<string, unknown>, Map<string, Promise<unknown>>>();
 
   constructor(deps: EgressScopeDependencies) {
     this.homeDir = deps.homeDir;
@@ -448,14 +450,36 @@ export class JevEgressScopeChecker {
     });
   }
 
-  /** Failures are not cached: the next call retries, and is excluded again if git still fails. */
-  private async cached<T>(
+  /**
+   * Failures are not cached: the next call retries, and is excluded again if git still fails. A
+   * load already running for the key is shared, failure included; its budget is the first
+   * caller's, and each caller still stops at its own deadline (`withinBudget`).
+   */
+  private cached<T>(
     cache: Map<string, Cached<T>>,
     key: string,
     load: () => Promise<T>,
   ): Promise<T> {
     const hit = cache.get(key);
-    if (hit && this.now() - hit.at < GIT_TTL_MS) return hit.value;
+    if (hit && this.now() - hit.at < GIT_TTL_MS) return Promise.resolve(hit.value);
+    let running = this.loading.get(cache);
+    if (!running) {
+      running = new Map();
+      this.loading.set(cache, running);
+    }
+    const shared = running.get(key) as Promise<T> | undefined;
+    if (shared) return shared;
+    const inFlight = running;
+    const promise = this.load(cache, key, load).finally(() => inFlight.delete(key));
+    inFlight.set(key, promise);
+    return promise;
+  }
+
+  private async load<T>(
+    cache: Map<string, Cached<T>>,
+    key: string,
+    load: () => Promise<T>,
+  ): Promise<T> {
     const value = await load();
     const now = this.now();
     for (const [staleKey, entry] of cache) {
