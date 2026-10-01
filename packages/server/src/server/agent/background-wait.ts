@@ -46,7 +46,7 @@ const WORK =
 
 /** What an agent waits on outside its machine. Only these make an external wait. */
 const EXTERNAL =
-  "(?:ci|github actions|pipelines?|(?:pr|ci|status|required) checks|checks on (?:the |my )?pr|bugbot|lore|(?:pr|code) reviews?|reviews? (?:on|of) (?:the |my )?(?:pr|#\\d+)|the pr|my pr|#\\d+|deploy(?:s|ment)?|rollout|merge queue|testflight|eas builds?|play console)";
+  "(?:(?:the|my|its) )?(?:(?:pr|ci|status|required) checks|checks on (?:the |my )?pr|(?:pr|code) reviews?|reviews? (?:on|of) (?:the |my )?(?:pr|#\\d+)|ci|github actions|pipelines?|bugbot|lore|pr|deploy(?:s|ment)?|rollout|merge queue|testflight|eas builds?|play console)|#\\d+";
 
 const WAIT_VERB =
   "\\b(?:wait(?:ing)?|standing by|hold(?:ing)? on)\\b[^.!?\\n]{0,40}?\\b(?:for|on|until)\\b";
@@ -71,15 +71,13 @@ const REPORTS_DONE = /\b(?:passed|finished|completed|succeeded|failed|green|done
 
 const EXTERNAL_PATTERNS: readonly RegExp[] = [
   // "Waiting on CI", "it's waiting on CI before I merge it".
-  new RegExp(`${WAIT_VERB}[^.!?\\n]{0,60}?(?<![\\w-])${EXTERNAL}(?![\\w-])`, "i"),
+  new RegExp(`${WAIT_VERB}[^.!?\\n]{0,60}?(?<![\\w-])(${EXTERNAL})(?![\\w-])`, "i"),
   // "I'll merge once CI is green", "will continue after the deploy".
   new RegExp(
-    `\\b(?:i['’]ll|i will|will)\\s+(?:merge|land|ship|release|continue|resume|proceed|check back|report back|follow up|pick (?:this|it) (?:back )?up)\\b[^.!?\\n]{0,60}?\\b(?:when|once|after|as soon as)\\b[^.!?\\n]{0,40}?(?<![\\w-])${EXTERNAL}(?![\\w-])`,
+    `\\b(?:i['’]ll|i will|will)\\s+(?:merge|land|ship|release|continue|resume|proceed|check back|report back|follow up|pick (?:this|it) (?:back )?up)\\b[^.!?\\n]{0,60}?\\b(?:when|once|after|as soon as)\\b[^.!?\\n]{0,40}?(?<![\\w-])(${EXTERNAL})(?![\\w-])`,
     "i",
   ),
 ];
-const EXTERNAL_TARGET = new RegExp(`(?<![\\w-])${EXTERNAL}(?![\\w-])`, "i");
-
 /**
  * Waiting for a person ("once you confirm", "on your review") is a finished turn, not a stuck one.
  * Only a person named after the connector counts: "I'll report back to you when it finishes" is
@@ -148,9 +146,10 @@ export function findBackgroundWait(message: string): BackgroundWaitMatch | null 
 /** Whether a final message says the agent is waiting on CI, a PR, a deploy or a review. Pure. */
 export function findExternalWait(message: string): ExternalWaitMatch | null {
   for (const sentence of waitSentences(message)) {
-    if (!EXTERNAL_PATTERNS.some((pattern) => pattern.test(sentence))) continue;
-    const target = sentence.match(EXTERNAL_TARGET)?.[0];
-    if (target) return { quote: clipQuote(sentence), target };
+    for (const pattern of EXTERNAL_PATTERNS) {
+      const target = sentence.match(pattern)?.[1];
+      if (target) return { quote: clipQuote(sentence), target };
+    }
   }
   return null;
 }
@@ -303,7 +302,7 @@ export function buildBackgroundWaitPrompt(input: {
 }): string {
   const minutes = Math.floor(input.quietForMs / 60_000);
   return [
-    `Your last turn started ${input.launched.join(", ")} in the background and ended ${minutes} minutes ago saying: "${input.quote}"`,
+    `Your last turn started background work (${input.launched.join(", ")}) and ended ${minutes} minutes ago saying: "${input.quote}"`,
     "Nothing of it is still running under you, and nothing woke you when it ended, so the Paseo daemon sent this message.",
     "Check the result of that work (its output, log or file, the agent, the build or test run) and continue.",
   ].join("\n\n");

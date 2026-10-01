@@ -4,8 +4,13 @@ import path from "node:path";
 import pino from "pino";
 import { describe, expect, test } from "vitest";
 
-import { AgentStallSweep, type IdleResumeResult } from "./agent-stall-sweep.js";
-import type { StallSweepAgentSummary } from "./agent/agent-manager.js";
+import {
+  AgentStallSweep,
+  resumeIdleAgentWaitingOnBackground,
+  type IdleResumeResult,
+} from "./agent-stall-sweep.js";
+import type { AgentManager, StallSweepAgentSummary } from "./agent/agent-manager.js";
+import type { AgentStorage } from "./agent/agent-storage.js";
 import type { AgentTimelineItem } from "./agent/agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent/agent-timeline-store-types.js";
 import type { ProcessSampleRow } from "./agent/process-sampler.js";
@@ -33,6 +38,8 @@ interface FakeAgent {
   cpuSecondsPerSweep: number;
   /** Commands of processes under the agent's root, e.g. a background shell. */
   children: string[];
+  /** False: no process carries its id, as for Codex's app-server. */
+  attributable: boolean;
 }
 
 interface HarnessOptions {
@@ -42,6 +49,8 @@ interface HarnessOptions {
   jev?: Record<string, unknown>;
   /** No judge at all: today's sweep. */
   noJudge?: boolean;
+  /** The background-wait rule live; absent: `BACKGROUND_WAIT_LIVE`, as in production. */
+  backgroundWaitLive?: boolean;
 }
 
 const ANSWERED = { stallJudgment: { shadow: false } };
@@ -61,6 +70,9 @@ class Harness {
   readonly idleResumes: Array<{ agentId: string; prompt: string }> = [];
   readonly lines: StallMeasurementLine[] = [];
   readonly lastErrors = new Map<string, string>();
+  readonly scheduled = new Set<string>();
+  readonly claimedByRecovery = new Set<string>();
+  readonly sessionFamilies = new Map<string, string>();
   health = new Map<string, ProviderHealth>();
   config: RemediationConfig | undefined = undefined;
   loopWatch = true;
@@ -121,11 +133,15 @@ class Harness {
           return this.idleResult;
         },
         recordMeasurement: (line) => this.lines.push(line),
+        listScheduledAgentIds: async () => this.scheduled,
+        isClaimedByRestartRecovery: (agentId) => this.claimedByRecovery.has(agentId),
+        readSessionFamily: (agentId) => this.sessionFamilies.get(agentId),
       },
       sink: { observe: async (observation) => void this.observations.push(observation) },
       readRemediationConfig: () => this.config,
       logger,
       now: () => this.nowMs,
+      backgroundWaitLive: options.backgroundWaitLive,
     });
   }
 
@@ -162,6 +178,7 @@ class Harness {
       cpuSeconds: 100,
       cpuSecondsPerSweep: 0,
       children: [],
+      attributable: true,
       ...process,
     };
     this.agents.set(id, agent);
@@ -169,12 +186,16 @@ class Harness {
     return agent;
   }
 
-  /** An agent idle since `quietMinutes` ago whose last message is `message`. */
+  /**
+   * An agent idle since `quietMinutes` ago whose last message is `message`. Its final turn ran
+   * `turn`: by default a background shell, which makes the wait its own work.
+   */
   addIdle(
     id: string,
     message: string,
     quietMinutes: number,
     overrides: Partial<StallSweepAgentSummary> = {},
+    turn: AgentTimelineRow[] = [backgroundBashRow("npm run gate")],
   ) {
     const agent = this.add(id, {
       lifecycle: "idle",
@@ -182,11 +203,7 @@ class Harness {
       lastActivityAt: new Date(this.nowMs - quietMinutes * MINUTE).toISOString(),
       ...overrides,
     });
-    this.timelines.set(id, [
-      userRow("Ship the fix"),
-      bashRow("npm run gate &"),
-      assistantRow(message),
-    ]);
+    this.timelines.set(id, [userRow("Ship the fix"), ...turn, assistantRow(message)]);
     return agent;
   }
 
@@ -209,6 +226,7 @@ class Harness {
     let pid = 100;
     for (const agent of this.agents.values()) {
       pid += 10;
+      if (!agent.attributable) continue;
       const rootPid = pid;
       rows.push({
         pid: rootPid,
@@ -276,20 +294,50 @@ function userRow(text: string) {
 function assistantRow(text: string) {
   return row({ type: "assistant_message", text });
 }
-function bashRow(command: string, status: "running" | "completed" | "failed" = "completed") {
+function bashRow(
+  command: string,
+  status: "running" | "completed" | "failed" = "completed",
+  output?: string,
+) {
   callSeq += 1;
   const base = {
     type: "tool_call" as const,
     callId: `call-${callSeq}`,
     name: "Bash",
-    detail: { type: "shell" as const, command },
+    detail: { type: "shell" as const, command, ...(output ? { output } : {}) },
   };
   return status === "failed"
     ? row({ ...base, status, error: "3 tests failed" })
     : row({ ...base, status, error: null });
 }
+/** A `run_in_background` Bash call, as Claude answers it. */
+function backgroundBashRow(command: string) {
+  return bashRow(
+    command,
+    "completed",
+    `Command running in background with ID: b${callSeq}. Output is being written to: /private/tmp/claude-501/x/tasks/b${callSeq}.output`,
+  );
+}
+function toolRow(name: string) {
+  callSeq += 1;
+  return row({
+    type: "tool_call",
+    callId: `call-${callSeq}`,
+    name,
+    detail: { type: "unknown", input: {}, output: null },
+    status: "completed",
+    error: null,
+  });
+}
 function repeated(command: string, times: number) {
   return Array.from({ length: times }, () => bashRow(command, "failed"));
+}
+
+function actions(lines: readonly { action: string }[]): string[] {
+  return lines.map((line) => line.action);
+}
+function agentIds(entries: readonly { agentId: string }[]): string[] {
+  return entries.map((entry) => entry.agentId);
 }
 
 /** The prompt a stall gets from today's sweep, with no judge at all. */
@@ -591,11 +639,29 @@ describe("the loop watch", () => {
     expect(h.jev.transport.calls).toHaveLength(0);
   });
 
+  test.each([
+    ["other", choice("other", 0.9)],
+    ["waiting on a person", choice("waiting_on_human", 0.9)],
+    ["looping under 0.80", choice("looping", 0.79)],
+  ])("after %s, the same repeat is left alone for 30 minutes too", async (_name, answers) => {
+    const h = new Harness({ jev: ANSWERED, answers });
+    busyLooper(h);
+    await h.sweep.tick();
+    for (let sweep = 0; sweep < 5; sweep += 1) await h.tick();
+    expect(h.jev.transport.calls).toHaveLength(1);
+    await h.tick();
+    expect(h.jev.transport.calls).toHaveLength(2);
+  });
+
   test("a looping agent cannot spend past its hourly cap", async () => {
     const h = new Harness({ jev: ANSWERED, answers: choice("other", 0.9) });
     busyLooper(h);
     await h.sweep.tick();
-    for (let sweep = 0; sweep < 11; sweep += 1) await h.tick();
+    // A repeat that changes every sweep is asked about every sweep.
+    for (let sweep = 0; sweep < 11; sweep += 1) {
+      h.timeline("a1", repeated(`npm test -- step${sweep}`, 4));
+      await h.tick();
+    }
     expect(h.jev.transport.calls).toHaveLength(MAX_JUDGMENTS_PER_AGENT_PER_HOUR);
     expect(
       h.linesOf("judgment").filter((line) => line.reason === "agent-hourly-cap").length,
@@ -614,49 +680,188 @@ describe("the loop watch", () => {
   });
 });
 
-describe("an idle agent waiting on background work", () => {
+describe("an idle agent nothing will wake", () => {
   const WAIT = "The full gate is running in the background; I'll report back when it finishes.";
+  const CI_WAIT =
+    "[#6722](https://github.com/acme/mobile/pull/6722) is up; it's waiting on CI before I merge it.";
+  const LIVE = { backgroundWaitLive: true };
+  /** A final turn that ran only foreground commands: no background work of its own. */
+  const FOREGROUND = () => [bashRow("git push", "completed", "pushed")];
 
-  test("with no shell left under it, it gets one resume prompt, and no JEV call", async () => {
-    const h = new Harness({ jev: ANSWERED });
-    h.addIdle("a1", WAIT, 12);
-    const report = await h.sweep.tick();
-    expect(h.idleResumes).toHaveLength(1);
-    const prompt = h.idleResumes[0]?.prompt ?? "";
-    expect(prompt).toMatch(/^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/);
-    expect(prompt).toContain(`"${WAIT}"`);
-    expect(report?.entries).toContainEqual({ agentId: "a1", action: "resumed-idle", detail: WAIT });
-    expect(h.jev.transport.calls).toHaveLength(0);
-    expect(h.linesOf("background-wait")).toEqual([
-      expect.objectContaining({ agentId: "a1", action: "resumed", quietMinutes: 12, quote: WAIT }),
-    ]);
+  describe("record-only (BACKGROUND_WAIT_LIVE is false)", () => {
+    test("records would-resume and sends nothing, with dryRun off", async () => {
+      const h = new Harness();
+      h.addIdle("a1", WAIT, 12);
+      const report = await h.sweep.tick();
+      await h.tick();
+      expect(h.idleResumes).toEqual([]);
+      expect(report?.entries).toContainEqual({
+        agentId: "a1",
+        action: "would-resume-idle",
+        detail: `own-work: ${WAIT}`,
+      });
+      expect(h.linesOf("background-wait")).toEqual([
+        expect.objectContaining({
+          agentId: "a1",
+          waitClass: "own-work",
+          action: "would-resume",
+          quietMinutes: 12,
+          quote: WAIT,
+          launched: ["a background shell"],
+          target: null,
+        }),
+      ]);
+    });
+
+    test("records an external wait nothing watches", async () => {
+      const h = new Harness();
+      h.addIdle("a1", CI_WAIT, 16, {}, FOREGROUND());
+      await h.sweep.tick();
+      expect(h.idleResumes).toEqual([]);
+      expect(h.linesOf("background-wait")).toEqual([
+        expect.objectContaining({
+          waitClass: "external-wait",
+          action: "would-resume",
+          target: "CI",
+          launched: [],
+        }),
+      ]);
+    });
   });
 
-  test("works with JEV off: it is code only", async () => {
-    const h = new Harness({ jev: { enabled: false } });
+  describe("live", () => {
+    test("own work: one prompt to check the result, and no JEV call", async () => {
+      const h = new Harness({ jev: ANSWERED, ...LIVE });
+      h.addIdle("a1", WAIT, 12);
+      const report = await h.sweep.tick();
+      expect(h.idleResumes).toHaveLength(1);
+      const prompt = h.idleResumes[0]?.prompt ?? "";
+      expect(prompt).toMatch(/^<paseo-system>\n[\s\S]*\n<\/paseo-system>$/);
+      expect(prompt).toContain(`"${WAIT}"`);
+      expect(prompt).toContain("started background work (a background shell)");
+      expect(prompt).toContain("Check the result");
+      expect(report?.entries).toContainEqual({
+        agentId: "a1",
+        action: "resumed-idle",
+        detail: `own-work: ${WAIT}`,
+      });
+      expect(h.jev.transport.calls).toHaveLength(0);
+      expect(h.linesOf("background-wait")).toEqual([
+        expect.objectContaining({ agentId: "a1", action: "resumed", waitClass: "own-work" }),
+      ]);
+    });
+
+    test("an external wait: one prompt saying nothing is watching it", async () => {
+      const h = new Harness(LIVE);
+      h.addIdle("a1", CI_WAIT, 16, {}, FOREGROUND());
+      await h.sweep.tick();
+      expect(h.idleResumes[0]?.prompt).toContain("Nothing is watching CI");
+    });
+
+    test("works with JEV off: it is code only", async () => {
+      const h = new Harness({ jev: { enabled: false }, ...LIVE });
+      h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      expect(h.idleResumes).toHaveLength(1);
+    });
+
+    test("once per final message, and at most 3 a day", async () => {
+      const h = new Harness(LIVE);
+      const agent = h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      await h.tick();
+      expect(h.idleResumes).toHaveLength(1);
+
+      for (let round = 0; round < 3; round += 1) {
+        // It resumed, started the gate again, and ended its turn the same way.
+        h.timelines
+          .get("a1")
+          ?.push(userRow("resume"), backgroundBashRow("npm run gate"), assistantRow(WAIT));
+        agent.summary.lastActivityAt = new Date(h.nowMs - 11 * MINUTE).toISOString();
+        await h.tick();
+      }
+      expect(h.idleResumes).toHaveLength(3);
+      expect(actions(h.linesOf("background-wait"))).toEqual([
+        "resumed",
+        "resumed",
+        "resumed",
+        "capped",
+      ]);
+    });
+
+    test("a dry-run sweep only records it, once", async () => {
+      const h = new Harness(LIVE);
+      h.config = { stalledAgents: { dryRun: true } };
+      h.addIdle("a1", WAIT, 12);
+      const report = await h.sweep.tick();
+      await h.tick();
+      expect(h.idleResumes).toEqual([]);
+      expect(report?.entries).toContainEqual(
+        expect.objectContaining({ action: "would-resume-idle" }),
+      );
+      expect(actions(h.linesOf("background-wait"))).toEqual(["would-resume"]);
+    });
+
+    test("shares the sweep's nudge budget, after the stalls", async () => {
+      const h = new Harness({ noJudge: true, ...LIVE });
+      h.config = { stalledAgents: { maxNudgesPerSweep: 1 } };
+      h.add("stuck");
+      await h.sweep.tick();
+      await h.tick();
+      h.addIdle("a1", WAIT, 12);
+      await h.tick();
+      expect(agentIds(h.nudges)).toEqual(["stuck"]);
+      expect(h.idleResumes).toEqual([]);
+      await h.tick();
+      expect(h.idleResumes).toHaveLength(1);
+    });
+
+    test("a resume the agent refused is not counted against the day", async () => {
+      const h = new Harness(LIVE);
+      h.idleResult = { kind: "skipped", reason: "no longer idle" };
+      h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([
+        expect.objectContaining({ action: "skipped", detail: "no longer idle" }),
+      ]);
+    });
+  });
+
+  test("a disabled sweep leaves it alone", async () => {
+    const h = new Harness(LIVE);
+    h.config = { stalledAgents: { enabled: false } };
     h.addIdle("a1", WAIT, 12);
     await h.sweep.tick();
-    expect(h.idleResumes).toHaveLength(1);
+    expect(h.idleResumes).toEqual([]);
+    expect(h.linesOf("background-wait")).toEqual([]);
   });
 
-  test("waits while a shell still runs under it, and resumes once it ends", async () => {
+  test("waits while a shell still runs under it, and records it once the shell ends", async () => {
     const h = new Harness();
     const agent = h.addIdle("a1", WAIT, 12);
     agent.children = [
       "/bin/zsh -c source ~/.claude/shell-snapshots/snapshot.sh && eval 'npm run gate'",
     ];
     await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
+    expect(h.linesOf("background-wait")).toEqual([]);
     agent.children = ["<defunct>"];
     await h.tick();
-    expect(h.idleResumes).toHaveLength(1);
+    expect(h.linesOf("background-wait")).toHaveLength(1);
+  });
+
+  test("waits while Git Bash runs under a Windows agent", async () => {
+    const h = new Harness();
+    const agent = h.addIdle("a1", WAIT, 12);
+    agent.children = ['"C:\\Program Files\\Git\\bin\\bash.exe" -c "npm run gate"'];
+    await h.sweep.tick();
+    expect(h.linesOf("background-wait")).toEqual([]);
   });
 
   test("is left alone before 10 quiet minutes", async () => {
     const h = new Harness();
     h.addIdle("a1", WAIT, 9);
     await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
+    expect(h.linesOf("background-wait")).toEqual([]);
   });
 
   test.each([
@@ -664,26 +869,15 @@ describe("an idle agent waiting on background work", () => {
     ["a permission is pending", { pendingPermissionCount: 1 }],
     ["it is busy", { busy: true }],
     ["it is internal", { internal: true }],
+    [
+      "account failover retired it: its successor carries the work",
+      { labels: { "paseo.account-failover.migrated-to": "a2" } },
+    ],
   ])("is left alone when %s", async (_name, overrides) => {
     const h = new Harness();
     h.addIdle("a1", WAIT, 12, overrides);
     await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
-  });
-
-  test("is left alone while a Paseo child it started is running: its finish report wakes it", async () => {
-    const h = new Harness();
-    h.addIdle("a1", "Spawned the reviewer agent in the background; waiting on its report.", 12);
-    h.add(
-      "child",
-      {
-        labels: { "paseo.parent-agent-id": "a1" },
-        lastActivityAt: new Date(START).toISOString(),
-      },
-      { cpuSecondsPerSweep: 150 },
-    );
-    await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
+    expect(h.linesOf("background-wait")).toEqual([]);
   });
 
   test("is left alone when its last turn failed: that is account failover's or a person's", async () => {
@@ -691,84 +885,257 @@ describe("an idle agent waiting on background work", () => {
     h.addIdle("a1", WAIT, 12);
     h.lastErrors.set("a1", "Claude usage limit reached");
     await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
+    expect(h.linesOf("background-wait")).toEqual([]);
   });
 
-  test.each([
-    ["a question", "The gate is green. Should I merge the branch?"],
-    ["a wait on a person", "Everything is staged; waiting for your go-ahead before I push."],
-    ["a finished turn", "Merged and pushed. All tests pass."],
-  ])("is left alone when its last message is %s", async (_name, message) => {
+  test("is left alone while its account is not askable, and recorded once it is", async () => {
     const h = new Harness();
-    h.addIdle("a1", message, 12);
-    await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
-  });
-
-  test("once per final message, and at most 3 a day", async () => {
-    const h = new Harness();
-    const agent = h.addIdle("a1", WAIT, 12);
-    await h.sweep.tick();
-    await h.tick();
-    expect(h.idleResumes).toHaveLength(1);
-
-    for (let round = 0; round < 3; round += 1) {
-      // It resumed, started the gate again, and ended its turn the same way.
-      h.timelines.get("a1")?.push(userRow("resume"), assistantRow(WAIT));
-      agent.summary.lastActivityAt = new Date(h.nowMs - 11 * MINUTE).toISOString();
-      await h.tick();
-    }
-    expect(h.idleResumes).toHaveLength(3);
-    expect(h.linesOf("background-wait").map((line) => line.action)).toEqual([
-      "resumed",
-      "resumed",
-      "resumed",
-      "capped",
-    ]);
-  });
-
-  test("a dry-run sweep only reports it, once", async () => {
-    const h = new Harness();
-    h.config = { stalledAgents: { dryRun: true } };
+    h.health.set("claude", { askable: false, reason: "at its usage limit" });
     h.addIdle("a1", WAIT, 12);
-    const report = await h.sweep.tick();
+    await h.sweep.tick();
+    expect(h.linesOf("background-wait")).toEqual([]);
+    h.health.set("claude", { askable: true });
     await h.tick();
-    expect(h.idleResumes).toEqual([]);
-    expect(report?.entries).toContainEqual(
-      expect.objectContaining({ action: "would-resume-idle" }),
+    expect(h.linesOf("background-wait")).toHaveLength(1);
+  });
+
+  describe("an agent whose process tree cannot be attributed", () => {
+    test("on Codex it is skipped: a running build there cannot be seen", async () => {
+      const h = new Harness();
+      const agent = h.addIdle("a1", CI_WAIT, 16, { provider: "codex" }, FOREGROUND());
+      agent.attributable = false;
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("on a Claude account it is recorded: Claude's root always carries its id", async () => {
+      const h = new Harness();
+      const agent = h.addIdle("a1", WAIT, 12, { provider: "claude-backup" });
+      h.sessionFamilies.set("a1", "claude");
+      agent.attributable = false;
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toHaveLength(1);
+    });
+  });
+
+  describe("something will wake it", () => {
+    test("a Paseo child it started is running: its finish report wakes it", async () => {
+      const h = new Harness();
+      h.addIdle("a1", "I spawned the reviewer agent in the background.", 12, {}, [
+        toolRow("mcp__paseo__create_agent"),
+      ]);
+      h.add(
+        "child",
+        {
+          labels: { "paseo.parent-agent-id": "a1" },
+          lastActivityAt: new Date(START).toISOString(),
+        },
+        { cpuSecondsPerSweep: 150 },
+      );
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("a child still names its moved parent: the successor down the chain is covered", async () => {
+      const h = new Harness();
+      h.add("old", {
+        lifecycle: "idle",
+        busy: false,
+        labels: { "paseo.account-failover.migrated-to": "mid" },
+      });
+      h.add("mid", {
+        lifecycle: "idle",
+        busy: false,
+        labels: { "paseo.account-failover.migrated-to": "new" },
+      });
+      h.addIdle("new", WAIT, 12);
+      h.add(
+        "child",
+        {
+          labels: { "paseo.parent-agent-id": "old" },
+          lastActivityAt: new Date(START).toISOString(),
+        },
+        { cpuSecondsPerSweep: 150 },
+      );
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("an idle child with a live shell under it", async () => {
+      const h = new Harness();
+      h.addIdle("lead", WAIT, 12);
+      const child = h.addIdle("child", "Merging.", 30, {
+        labels: { "paseo.parent-agent-id": "lead" },
+      });
+      child.children = ["/bin/zsh -c 'npm run browser-test'"];
+      await h.sweep.tick();
+      expect(agentIds(h.linesOf("background-wait"))).not.toContain("lead");
+    });
+
+    test("an idle child with a provider subagent still running", async () => {
+      const h = new Harness();
+      h.addIdle("lead", WAIT, 12);
+      h.addIdle("child", "Merging.", 30, {
+        labels: { "paseo.parent-agent-id": "lead" },
+        runningProviderSubagentCount: 1,
+      });
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("a schedule or heartbeat targets it", async () => {
+      const h = new Harness();
+      h.scheduled.add("a1");
+      h.addIdle("a1", CI_WAIT, 19, {}, FOREGROUND());
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test.each(["ScheduleWakeup", "mcp__paseo__create_schedule", "mcp__paseo__create_heartbeat"])(
+      "its final turn set up a wakeup (%s)",
+      async (name) => {
+        const h = new Harness();
+        h.addIdle("a1", CI_WAIT, 19, {}, [toolRow(name)]);
+        await h.sweep.tick();
+        expect(h.linesOf("background-wait")).toEqual([]);
+      },
     );
-    expect(h.linesOf("background-wait").map((line) => line.action)).toEqual(["would-resume"]);
+
+    test("restart recovery is about to resume it", async () => {
+      const h = new Harness();
+      h.claimedByRecovery.add("a1");
+      h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("restart recovery is about to resume a child of it", async () => {
+      const h = new Harness();
+      h.addIdle("lead", WAIT, 12);
+      h.add("child", {
+        lifecycle: "closed",
+        busy: false,
+        labels: { "paseo.parent-agent-id": "lead" },
+      });
+      h.claimedByRecovery.add("child");
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
   });
 
-  test("a disabled sweep leaves it alone", async () => {
-    const h = new Harness();
-    h.config = { stalledAgents: { enabled: false } };
-    h.addIdle("a1", WAIT, 12);
-    await h.sweep.tick();
-    expect(h.idleResumes).toEqual([]);
+  describe("endings that are neither class", () => {
+    // The seven false positives the review's replay of 2026-09-22..29 found, shaped on their
+    // final messages and turns.
+    test.each([
+      [
+        "a worker waiting on its leader's review",
+        "I'm waiting for the review findings.",
+        [bashRow("git diff --stat", "completed", "3 files")],
+      ],
+      [
+        "a recommendation to a person",
+        "Recommend assigning it to C3 rather than waiting for it to surface as a confusing playtest report.",
+        [bashRow("cat docs/plan.md", "completed", "...")],
+      ],
+      [
+        "a handoff that waits on the orchestrator's go",
+        "When you say bundle 3 has landed, I'll rebase. Then I'll run `gate:quick`, wait for them in the same turn, and report the SHA.",
+        [bashRow("git status", "completed", "clean")],
+      ],
+      [
+        "a wait on background work launched in an earlier turn",
+        "Still waiting on the background build.",
+        [bashRow("git status", "completed", "clean")],
+      ],
+      [
+        "a question to a person after a wait",
+        "Waiting on CI. **Merge now, or hold for the review?**",
+        [backgroundBashRow("gh pr checks --watch")],
+      ],
+    ])("is left alone: %s", async (_name, message, turn) => {
+      const h = new Harness();
+      h.addIdle("a1", message, 20, {}, turn);
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
   });
 
-  test("shares the sweep's nudge budget, after the stalls", async () => {
-    const h = new Harness({ noJudge: true });
-    h.config = { stalledAgents: { maxNudgesPerSweep: 1 } };
-    h.add("stuck");
-    await h.sweep.tick();
-    await h.tick();
-    h.addIdle("a1", WAIT, 12);
-    await h.tick();
-    expect(h.nudges.map((nudge) => nudge.agentId)).toEqual(["stuck"]);
-    expect(h.idleResumes).toEqual([]);
-    await h.tick();
-    expect(h.idleResumes).toHaveLength(1);
-  });
+  describe("the outcome line", () => {
+    test("records what came of a would-resume at the next idle check", async () => {
+      const h = new Harness();
+      const agent = h.addIdle("a1", CI_WAIT, 16, {}, FOREGROUND());
+      await h.sweep.tick();
+      // A person prompted it; it merged and went idle again 9 minutes later.
+      h.timelines
+        .get("a1")
+        ?.push(
+          userRow("get it green and merge"),
+          bashRow("gh pr merge 6722"),
+          assistantRow("Merged."),
+        );
+      agent.summary.lastActivityAt = new Date(h.nowMs + 9 * MINUTE).toISOString();
+      await h.tick();
+      await h.tick();
+      expect(h.linesOf("background-wait-outcome")).toEqual([
+        expect.objectContaining({
+          agentId: "a1",
+          waitClass: "external-wait",
+          resumed: false,
+          woke: "prompt",
+          toolWork: true,
+          rewaited: false,
+          minutesToNextIdle: 9,
+        }),
+      ]);
+    });
 
-  test("a resume the agent refused is not counted against the day", async () => {
-    const h = new Harness();
-    h.idleResult = { kind: "skipped", reason: "no longer idle" };
-    h.addIdle("a1", WAIT, 12);
-    await h.sweep.tick();
-    expect(h.linesOf("background-wait")).toEqual([
-      expect.objectContaining({ action: "skipped", detail: "no longer idle" }),
-    ]);
+    test("tells a resume that ended waiting again from one that worked", async () => {
+      const h = new Harness(LIVE);
+      const agent = h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      h.timelines.get("a1")?.push(userRow(h.idleResumes[0]?.prompt ?? ""), assistantRow(WAIT));
+      agent.summary.lastActivityAt = new Date(h.nowMs + 2 * MINUTE).toISOString();
+      await h.tick();
+      expect(h.linesOf("background-wait-outcome")).toEqual([
+        expect.objectContaining({
+          resumed: true,
+          woke: "resume",
+          toolWork: false,
+          rewaited: true,
+          minutesToNextIdle: 2,
+        }),
+      ]);
+    });
+
+    test("waits while the agent is still running", async () => {
+      const h = new Harness();
+      const agent = h.addIdle("a1", WAIT, 12);
+      await h.sweep.tick();
+      agent.summary.lifecycle = "running";
+      agent.summary.busy = true;
+      agent.summary.lastActivityAt = new Date(h.nowMs + MINUTE).toISOString();
+      await h.tick();
+      expect(h.linesOf("background-wait-outcome")).toEqual([]);
+    });
+  });
+});
+
+describe("the production resume", () => {
+  test("skips an agent whose turn started while its record was read", async () => {
+    let lifecycle = "idle";
+    const agentManager = {
+      getAgent: () => ({ lifecycle, labels: {} }),
+    } as unknown as AgentManager;
+    const agentStorage = {
+      get: async () => {
+        lifecycle = "running";
+        return { archivedAt: null };
+      },
+    } as unknown as AgentStorage;
+    const result = await resumeIdleAgentWaitingOnBackground(
+      { agentManager, agentStorage, logger },
+      { agentId: "a1", prompt: "check the result" },
+    );
+    expect(result).toEqual({ kind: "skipped", reason: "no longer idle" });
   });
 });

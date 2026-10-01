@@ -185,6 +185,14 @@ describe("the loop prefilter", () => {
     ["the Paseo wait tool", () => tool("mcp__paseo__wait_for_agent", { agentId: "a1" })],
     ["reading a background shell", () => tool("BashOutput", { bash_id: "shell-1" })],
     ["reading a background task", () => tool("TaskOutput", { task_id: "task-1" })],
+    [
+      "reading a background task's output file",
+      () => bash("cat /private/tmp/claude-501/-Users-x/abc/tasks/b9mwhkqb3.output | tail -20"),
+    ],
+    ["an orchestrator listing its agents", () => bash("paseo ls -a")],
+    ["the repo's CLI listing agents", () => bash("npm run cli -- ls -a -g")],
+    ["the Paseo status tool", () => tool("mcp__paseo__get_agent_status", { agentId: "a1" })],
+    ["the Paseo activity tool", () => tool("mcp__paseo__get_agent_activity", { agentId: "a1" })],
   ])("skips a known poller: %s", (_name, make) => {
     const rows = [make(), make(), make(), make(), make(), make()];
     expect(findLoop(rows)).toBeNull();
