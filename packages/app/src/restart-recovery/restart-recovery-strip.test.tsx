@@ -57,7 +57,6 @@ vi.mock("./use-restart-recovery", () => ({
   }),
 }));
 
-import { router } from "expo-router";
 import { RestartRecoveryStrip } from "./restart-recovery-strip";
 
 function entry(overrides: Partial<RestartRecoveryEntry> = {}): RestartRecoveryEntry {
