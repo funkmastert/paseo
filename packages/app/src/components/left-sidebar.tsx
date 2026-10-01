@@ -1,5 +1,5 @@
 import { router } from "expo-router";
-import { FolderPlus, GitBranch, Import, Server, Settings, X } from "lucide-react-native";
+import { FolderPlus, Gauge, GitBranch, Import, Server, Settings, X } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
@@ -26,6 +26,7 @@ import { SidebarDisplayPreferencesMenu } from "@/components/sidebar/display-pref
 import { SidebarNavRows } from "@/components/sidebar/sidebar-nav-rows";
 import { SidebarHelpMenu } from "@/components/sidebar/sidebar-help-menu";
 import { useSidebarAgentRolesTarget } from "@/components/sidebar/use-sidebar-agent-roles-target";
+import { useSidebarJevDashboardTarget } from "@/components/sidebar/use-sidebar-jev-dashboard-target";
 import { SidebarResizeHandle } from "@/components/sidebar-resize-handle";
 import { Shortcut } from "@/components/ui/shortcut";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -48,7 +49,11 @@ import { usePanelStore } from "@/stores/panel-store";
 import { useOwnsWindowChromeCorner, WindowChromeSafeArea } from "@/utils/desktop-window";
 import { useCloseAgentListGesture } from "@/mobile-panels/gestures";
 import { MobilePanelOverlay } from "@/mobile-panels/presentation";
-import { buildSettingsAddHostRoute, buildSettingsRoute } from "@/utils/host-routes";
+import {
+  buildJevDashboardRoute,
+  buildSettingsAddHostRoute,
+  buildSettingsRoute,
+} from "@/utils/host-routes";
 import { openHostOverview } from "@/navigation/settings-navigation";
 import { McpStatusStrip } from "@/mcp-status/mcp-status-strip";
 import { DeviceStatusStrip } from "@/device-status/device-status-strip";
@@ -495,6 +500,7 @@ function SidebarFooter({
           icon={Import}
           theme={theme}
         />
+        <SidebarJevDashboardSlot theme={theme} />
         <SidebarSupportSlot theme={theme} />
         <FooterIconButton
           onPress={handleSettings}
@@ -506,6 +512,34 @@ function SidebarFooter({
         />
       </View>
     </View>
+  );
+}
+
+const JEV_DASHBOARD_LABEL = "JEV dashboard";
+
+/**
+ * The footer slot before the Agent roles / Help slot: the active host's JEV dashboard, when that
+ * host is connected and speaks `server_info.features.jevSavings`. Null renders no button, so the
+ * footer never shows a dead one for a stock host, an older daemon, or a disconnected one
+ * (docs/jev.md, "The JEV dashboard" → "Where it lives").
+ */
+function SidebarJevDashboardSlot({ theme }: { theme: SidebarTheme }) {
+  const jevTarget = useSidebarJevDashboardTarget();
+  const openJevDashboard = useCallback(() => {
+    if (!jevTarget) return;
+    router.push(buildJevDashboardRoute(jevTarget.serverId));
+  }, [jevTarget]);
+
+  if (!jevTarget) return null;
+
+  return (
+    <FooterIconButton
+      onPress={openJevDashboard}
+      testID="sidebar-jev-dashboard"
+      label={JEV_DASHBOARD_LABEL}
+      icon={Gauge}
+      theme={theme}
+    />
   );
 }
 
