@@ -5,6 +5,7 @@ import { addDeleteOptions, runDeleteCommand } from "./delete.js";
 import { addLsOptions, runLsCommand } from "./ls.js";
 import { addRunOptions, runRunCommand } from "./run.js";
 import { addLogsOptions, runLogsCommand } from "./logs.js";
+import { addGrepOptions, runGrepCommand } from "./grep.js";
 import { addStopOptions, runStopCommand } from "./stop.js";
 import { addSendOptions, runSendCommand } from "./send.js";
 import { addInspectOptions, runInspectCommand } from "./inspect.js";
@@ -43,6 +44,10 @@ export function createAgentCommand(): Command {
 
   addDaemonHostOption(addLogsOptions(agent.command("logs"))).action(
     withGlobalOptions(runLogsCommand),
+  );
+
+  addJsonAndDaemonHostOptions(addGrepOptions(agent.command("grep"))).action(
+    withOutput(runGrepCommand),
   );
 
   addJsonAndDaemonHostOptions(addOpenOptions(agent.command("open"))).action(

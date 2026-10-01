@@ -1825,6 +1825,8 @@ export class VoiceAssistantWebSocketServer {
         workspaceRecovery: true,
         // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
         restartRecovery: this.restartRecovery !== undefined,
+        // COMPAT(agentTranscriptSearch): added in v0.8.x, remove gate after 2027-09-30.
+        agentTranscriptSearch: true,
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: true,
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
