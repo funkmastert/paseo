@@ -8,6 +8,7 @@ import {
   requiredPermissionForOutbound,
 } from "../../authorization/operation-permissions.js";
 import { createTestJevService } from "../../jev/fake.js";
+import type { JevSavingsLedger } from "../../jev/savings.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import { JevSession } from "./jev-session.js";
 
@@ -127,6 +128,57 @@ describe("jev.savings.* over the real service", () => {
         range: "7d",
       }),
     ).rejects.toThrow(/not available/);
+  });
+
+  it("the events are filtered to the workspaces the caller may read (review m4)", async () => {
+    const { service } = await harness();
+    const ledger = service.savings as JevSavingsLedger;
+    for (const [callId, workspaceId] of [
+      ["c1", "ws-1"],
+      ["c2", "ws-2"],
+      ["c3", null],
+    ] as const) {
+      ledger.recordObserved(
+        {
+          feature: "askJev",
+          callSite: "jev.ask",
+          callId,
+          workspaceId,
+          involvement: "a question",
+          decision: { did: "answered", wouldBe: null, changed: false },
+          facts: {},
+        },
+        { mode: "live", outcome: "answered", jevCostUsd: null },
+      );
+    }
+    const emitted: SessionOutboundMessage[] = [];
+    const scoped = new JevSession({
+      host: { emit: (msg) => emitted.push(msg) },
+      service,
+      logger: { warn: vi.fn() },
+      permittedWorkspaceIds: () => ["ws-1"],
+    });
+    await scoped.handleSavingsEvents({
+      type: "jev.savings.events.request",
+      requestId: "e-1",
+      range: "today",
+    });
+    const unscoped = new JevSession({
+      host: { emit: (msg) => emitted.push(msg) },
+      service,
+      logger: { warn: vi.fn() },
+    });
+    await unscoped.handleSavingsEvents({
+      type: "jev.savings.events.request",
+      requestId: "e-2",
+      range: "today",
+    });
+
+    const pages = emitted.filter(
+      (m): m is EventsResponse => m.type === "jev.savings.events.response",
+    );
+    expect(pages[0]?.payload.events.map((e) => e.workspaceId)).toEqual(["ws-1"]);
+    expect(pages[1]?.payload.events).toHaveLength(3);
   });
 
   it("the summary needs daemon.read and the events workspace.read", () => {

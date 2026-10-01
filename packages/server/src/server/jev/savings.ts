@@ -666,6 +666,7 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       1,
       Math.min(EVENTS_MAX_LIMIT, Math.floor(query.limit ?? EVENTS_DEFAULT_LIMIT)),
     );
+    const workspaces = query.workspaceIds ? new Set(query.workspaceIds) : null;
     const matches: Folded[] = [];
     for (let index = this.records.length - 1; index >= 0; index -= 1) {
       const record = this.records[index]!;
@@ -673,6 +674,7 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       if (query.cursor && record.id >= query.cursor) continue;
       if (query.feature && record.feature !== query.feature) continue;
       if (query.agentId && record.agentId !== query.agentId) continue;
+      if (workspaces && (!record.workspaceId || !workspaces.has(record.workspaceId))) continue;
       matches.push(record);
     }
     matches.sort((a, b) => compareIds(b.id, a.id));

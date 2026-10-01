@@ -662,6 +662,11 @@ export interface JevSavingsEventsQuery {
   cursor?: string;
   /** Default 50, at most 200. */
   limit?: number;
+  /**
+   * Only records in these workspaces; a record with no workspace is left out too. Absent for a
+   * caller whose grant covers the daemon (docs/permissions.md, "Resources").
+   */
+  workspaceIds?: readonly string[];
 }
 
 export interface JevSavingsEventsPage {

@@ -31,6 +31,12 @@ export interface JevSessionOptions {
    * its provider, which a question must not do.
    */
   readAgentThread?: (agentId: string) => JevAskAgentThread | null;
+  /**
+   * The workspaces the caller may read, for `jev.savings.events`. Null or absent is the whole
+   * daemon: grants are daemon-wide today, and a workspace-scoped grant passes its ids here
+   * (docs/permissions.md, "Resources").
+   */
+  permittedWorkspaceIds?: () => readonly string[] | null;
 }
 
 /** The question id sent for `jev.ask`. JEV never sees ids; it reads the instructions. */
@@ -539,8 +545,10 @@ export class JevSession {
     msg: Extract<SessionInboundMessage, { type: "jev.savings.events.request" }>,
   ): Promise<void> {
     const reader = this.requireSavingsReader();
+    const workspaceIds = this.options.permittedWorkspaceIds?.() ?? null;
     const page = reader.events({
       range: savingsRange(msg.range),
+      ...(workspaceIds ? { workspaceIds } : {}),
       ...(msg.feature ? { feature: msg.feature as JevSavingsFeature } : {}),
       ...(msg.agentId ? { agentId: msg.agentId } : {}),
       ...(msg.cursor ? { cursor: msg.cursor } : {}),
