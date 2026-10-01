@@ -250,7 +250,7 @@ describe("ReadCheckObserver: shadow, the default", () => {
       agentId: AGENT,
       workspaceId: "ws-1",
       involvement: "Does this agent need src/session.ts?",
-      decision: { did: "read", wouldBe: "skip", changed: false },
+      decision: { did: "read", wouldBe: "would-skip", changed: false },
       pending: true,
     });
     expect(savings.records[0]!.facts["contextTokens"]).toBeGreaterThan(2000);
@@ -424,7 +424,7 @@ describe("ReadCheckObserver: did the agent use it", () => {
     const file = writeRepoFile("src/session.ts", content);
     harness.observer.postToolUse(readPost(file, content));
     await harness.observer.idle();
-    expect(harness.savings.records[0]!.decision.wouldBe).toBe("skip");
+    expect(harness.savings.records[0]!.decision.wouldBe).toBe("would-skip");
     return { ...harness, file, content };
   }
 
@@ -502,7 +502,7 @@ describe("ReadCheckObserver: live mode (D11)", () => {
     );
     expect(savings.records[0]).toMatchObject({
       callSite: "read-check.live",
-      decision: { did: "deny", wouldBe: "deny", changed: true },
+      decision: { did: "deny", wouldBe: "would-skip", changed: true },
       pending: true,
     });
     expect(savings.records[0]!.facts["estimated"]).toBe(true);

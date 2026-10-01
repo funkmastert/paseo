@@ -306,17 +306,6 @@ function displayPathOf(realPath: string, agentCwd: string): string {
   return relative && !relative.startsWith("..") && !path.isAbsolute(relative) ? relative : realPath;
 }
 
-function wouldBeOf(answer: ReadCheckAnswer): string {
-  switch (answer.verdict) {
-    case "would-skip":
-      return "skip";
-    case "would-narrow":
-      return "narrow";
-    case "needed":
-      return "read";
-  }
-}
-
 /** A call that sent nothing is a daily counter, never a record. */
 function notAskedReasonFor(
   outcome: Extract<JevOutcome, { kind: "unavailable" }>,
@@ -1015,8 +1004,6 @@ export class ReadCheckObserver implements FileReadObserver {
     facts: Record<string, string | number | boolean | null>;
     tool: "Read" | "Bash";
     pending: boolean;
-    /** Overrides the answer's own mapping, e.g. a deny the deadline overtook. */
-    wouldBe?: string;
   }): string | null {
     const { asked } = input;
     const facts = {
@@ -1039,7 +1026,8 @@ export class ReadCheckObserver implements FileReadObserver {
         involvement: `Does this agent need ${asked.displayPath}?`,
         decision: {
           did: input.did,
-          wouldBe: input.wouldBe ?? (asked.kind === "failed" ? null : wouldBeOf(asked.answer)),
+          // The verdict the savings ledger prices (docs/jev.md, "Formulas"); a live deny is `did`.
+          wouldBe: asked.kind === "failed" ? null : asked.answer.verdict,
           changed: input.changed,
           detail: facts,
         },
@@ -1267,7 +1255,6 @@ export class ReadCheckObserver implements FileReadObserver {
         facts: { ...args.facts, liveReason: "deadline" },
         tool: read.tool,
         pending: false,
-        wouldBe: "deny",
       });
     }
     const now = this.now();
@@ -1283,7 +1270,6 @@ export class ReadCheckObserver implements FileReadObserver {
       facts: args.facts,
       tool: read.tool,
       pending: true,
-      wouldBe: "deny",
     });
     try {
       this.options.jev.decisions.record({
