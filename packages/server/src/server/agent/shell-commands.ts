@@ -30,6 +30,11 @@ export interface ShellVisitor {
   command(args: ExpandedWord[], context: ShellContext): boolean;
   /** The file an output redirection (`>`, `>>`, `&>`, …) writes. Returning true stops the walk. */
   outputRedirect(target: ExpandedWord, context: ShellContext): boolean;
+  /**
+   * A command whose name the walk cannot know (`$EDITOR x`, `$(which cat) x`), which `command`
+   * never sees. Returning true stops the walk. Absent: such commands are skipped silently.
+   */
+  unresolvedCommand?(context: ShellContext): boolean;
 }
 
 /** Visits every command `script` would run, in order, including nested and substituted ones. */
@@ -774,7 +779,11 @@ function evalCommand(
   // Peel wrappers (`sudo`, `env`, `xargs`, …) and keywords until the command that actually runs.
   for (let guard = 0; guard < 32; guard++) {
     const head = rest[0];
-    if (!head || !head.resolved) return;
+    if (!head) return;
+    if (!head.resolved) {
+      if (state.visitor.unresolvedCommand?.(context)) state.stopped = true;
+      return;
+    }
     const name = commandName(head.text);
     const unwrapped = unwrapCommand(name, rest);
     if (unwrapped) {
