@@ -1401,6 +1401,40 @@ function resolveJevTransportOverride(config: PaseoDaemonConfig): JevTransport | 
   return Number.isFinite(delayMs) && delayMs > 0 ? withJevTransportDelay(fake, delayMs) : fake;
 }
 
+/**
+ * The read check's observer. `PASEO_READ_CHECK_HOOKS=off` at daemon start leaves `hooks` unset, so
+ * no Claude session registers a read-check hook at all: the measured baseline, and a way out that
+ * needs no config schema.
+ */
+function createDaemonReadCheckObserver(input: {
+  jev: JevService;
+  paseoHome: string;
+  logger: Logger;
+  getAgentManager: () => AgentManager;
+}): { observer: ReadCheckObserver; hooks: ReadCheckObserver | undefined } {
+  const readCheckConfig = createJevConfigReader({
+    paseoHome: input.paseoHome,
+    homeDir: homedir(),
+    logger: input.logger,
+  });
+  const observer = new ReadCheckObserver({
+    jev: input.jev,
+    savings: input.jev.savings,
+    readConfig: () => {
+      const read = readCheckConfig.read();
+      return read.ok && read.config.enabled ? read.config.readCheck : null;
+    },
+    agents: createReadCheckAgentSource(input.getAgentManager),
+    homeDir: homedir(),
+    paseoHome: input.paseoHome,
+    logger: input.logger,
+  });
+  return {
+    observer,
+    hooks: process.env.PASEO_READ_CHECK_HOOKS === "off" ? undefined : observer,
+  };
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
@@ -1900,22 +1934,11 @@ export async function createPaseoDaemon(
 
   // Feature 16, the file-read check (docs/jev.md). The Claude hooks hand it every Read, Bash and
   // edit call; in shadow, the default, it answers in the same tick and judges after the read ran.
-  const readCheckConfig = createJevConfigReader({
-    paseoHome: config.paseoHome,
-    homeDir: homedir(),
-    logger,
-  });
-  const readCheckObserver = new ReadCheckObserver({
+  const readCheckObserver = createDaemonReadCheckObserver({
     jev,
-    savings: jev.savings,
-    readConfig: () => {
-      const read = readCheckConfig.read();
-      return read.ok && read.config.enabled ? read.config.readCheck : null;
-    },
-    agents: createReadCheckAgentSource(() => agentManager),
-    homeDir: homedir(),
     paseoHome: config.paseoHome,
     logger,
+    getAgentManager: () => agentManager,
   });
 
   // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
@@ -1940,11 +1963,7 @@ export async function createPaseoDaemon(
       managedProcesses,
       deviceLaunchGate,
       isCatastropheGateEnabled,
-      // `PASEO_READ_CHECK_HOOKS=off` at daemon start registers no read-check hook at all: the
-      // measured baseline, and a way out that needs no config schema.
-      ...(process.env.PASEO_READ_CHECK_HOOKS === "off"
-        ? {}
-        : { fileReadObserver: readCheckObserver }),
+      fileReadObserver: readCheckObserver.hooks,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -3459,7 +3478,7 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
-    await readCheckObserver.stop();
+    await readCheckObserver.observer.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");
