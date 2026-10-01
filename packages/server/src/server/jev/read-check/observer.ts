@@ -1,4 +1,4 @@
-import { promises as fsPromises } from "node:fs";
+import { promises as fsPromises, type Stats } from "node:fs";
 import path from "node:path";
 import type { Logger } from "pino";
 
@@ -17,7 +17,8 @@ import {
   type ReadCheckAnswer,
 } from "./decision.js";
 import { JEV_CHARS_PER_TOKEN } from "../savings-formulas.js";
-import { isInside, isSecretShapedPath, readCheckDeniedRoots } from "./paths.js";
+import { isSecretShapedPath } from "../secret-paths.js";
+import { isHomeOrAbove, isInside, isPersonalPath, type PersonalPathRules } from "./paths.js";
 import {
   editedPath,
   rangeKey,
@@ -32,6 +33,7 @@ import {
   describeSize,
   estimateReadTokens,
   READ_CHECK_QUESTIONS,
+  READ_TOOL_LINE_PREFIX_CHARS,
   readToolCharacters,
   sliceRange,
 } from "./state.js";
@@ -106,9 +108,16 @@ export interface ReadCheckAgentSource {
   ): { epoch: string; rows: ReadCheckTimelineRow[] } | null;
 }
 
+export type ReadCheckStat = Pick<Stats, "nlink" | "size" | "isFile" | "isSymbolicLink">;
+
 export interface ReadCheckFileSystem {
   realpath(filePath: string): Promise<string>;
+  /** At most `MAX_OBSERVER_FILE_BYTES` from the start of a regular file. */
   readFile(filePath: string): Promise<Buffer>;
+  /** Never opens the file. */
+  stat(filePath: string): Promise<ReadCheckStat>;
+  lstat(filePath: string): Promise<ReadCheckStat>;
+  readlink(filePath: string): Promise<string>;
 }
 
 export interface ReadCheckObserverOptions {
@@ -126,6 +135,8 @@ export interface ReadCheckObserverOptions {
   defer?: (work: () => void) => void;
   /** The sweep's period. Default 60 s; 0 disables the timer (tests call `sweep`). */
   sweepIntervalMs?: number;
+  /** Default `process.platform`: darwin and win32 compare paths case-insensitively. */
+  platform?: NodeJS.Platform;
 }
 
 const CALL_SITE_SHADOW = "read-check.shadow";
@@ -140,6 +151,15 @@ const SCAN_ROWS = 200;
 const MAX_OBSERVER_FILE_BYTES = 8 * 1024 * 1024;
 const BINARY_PROBE_BYTES = 8192;
 const STOP_WAIT_MS = 1000;
+/**
+ * Reads judged at once, from the path checks to JEV's answer. A read past this is dropped as
+ * `saturated`: a burst of large reads costs a few git runs, not one per read.
+ */
+const MAX_CONCURRENT_JUDGMENTS = 3;
+/** Symlink hops followed when checking every name a path goes by; the kernel stops at 40. */
+const MAX_SYMLINK_HOPS = 40;
+/** Characters `Read` adds to each line: its number, a tab and the newline. */
+const READ_TOOL_LINE_OVERHEAD = READ_TOOL_LINE_PREFIX_CHARS + 1;
 
 interface HookFields {
   toolName: string;
@@ -195,7 +215,7 @@ interface AgentReadState {
 interface Measured {
   /** Characters in context per file: a multi-file Bash read is split evenly. */
   charactersPerFile: number;
-  /** The text the agent saw, when one file was read; null for several. */
+  /** What `Read` loaded. Null for Bash: its output is never sent, the file is read from disk. */
   text: string | null;
   notText: boolean;
   dedup: boolean;
@@ -252,7 +272,7 @@ function measureBash(read: RecognizedRead, response: unknown): Measured | null {
   }
   return {
     charactersPerFile: (stdout.length + stderr.length) / read.files.length,
-    text: read.files.length === 1 ? stdout : null,
+    text: null,
     notText: stdout.slice(0, BINARY_PROBE_BYTES).includes("\u0000"),
     dedup: false,
     lines: null,
@@ -301,7 +321,8 @@ function wouldBeOf(answer: ReadCheckAnswer): string {
 function notAskedReasonFor(
   outcome: Extract<JevOutcome, { kind: "unavailable" }>,
 ): JevNotAskedReason {
-  return outcome.reason === "excluded" ? "excluded" : "inactive";
+  if (outcome.reason === "excluded") return "excluded";
+  return outcome.reason === "saturated" ? "saturated" : "inactive";
 }
 
 type RangeText = ReturnType<typeof sliceRange>;
@@ -318,6 +339,8 @@ interface ShadowReadInput {
   contextTokens: number | null;
   config: ReadCheckConfig | null;
   state: AgentReadState;
+  /** The validation signal mark just after this read was noted: later uses are replayed. */
+  signalMark: number;
 }
 
 interface LiveReadInput {
@@ -326,6 +349,7 @@ interface LiveReadInput {
   read: RecognizedRead;
   file: RecognizedFile;
   config: ReadCheckConfig;
+  signalMark: number;
   /** False once the read was let through: a deny then is never given. */
   settleVerdict: (value: { denyReason: string } | null) => boolean;
 }
@@ -344,8 +368,11 @@ interface Asked {
   };
 }
 
-const defaultFs: ReadCheckFileSystem = {
+export const defaultReadCheckFs: ReadCheckFileSystem = {
   realpath: (filePath) => fsPromises.realpath(filePath),
+  stat: (filePath) => fsPromises.stat(filePath),
+  lstat: (filePath) => fsPromises.lstat(filePath),
+  readlink: (filePath) => fsPromises.readlink(filePath),
   readFile: async (filePath) => {
     const handle = await fsPromises.open(filePath, "r");
     try {
@@ -369,7 +396,9 @@ export class ReadCheckObserver implements FileReadObserver {
   private readonly validation: ReadCheckValidation;
   private readonly agents = new Map<string, AgentReadState>();
   private readonly pending = new Map<string, PendingRead>();
-  private readonly deniedRoots: string[];
+  private readonly personal: PersonalPathRules;
+  private realHomeAdded = false;
+  private judging = 0;
   private liveSnapshot: LiveSnapshot = { enabled: false, live: false, liveShare: 0 };
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly inFlight = new Set<Promise<unknown>>();
@@ -377,12 +406,13 @@ export class ReadCheckObserver implements FileReadObserver {
   constructor(private readonly options: ReadCheckObserverOptions) {
     this.logger = options.logger.child({ module: "jev-read-check" });
     this.now = options.now ?? Date.now;
-    this.fs = options.fs ?? defaultFs;
+    this.fs = options.fs ?? defaultReadCheckFs;
     this.defer = options.defer ?? ((work) => setImmediate(work));
-    this.deniedRoots = readCheckDeniedRoots({
-      homeDir: options.homeDir,
+    this.personal = {
+      homeDirs: [options.homeDir],
       paseoHome: options.paseoHome,
-    });
+      platform: options.platform ?? process.platform,
+    };
     this.validation = new ReadCheckValidation({
       now: this.now,
       onClose: (close) => this.onWindowClose(close),
@@ -630,22 +660,30 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
-   * Rules 3 and 4 of "When JEV is asked": the agent's cwd, denied roots, secret names, then the
-   * D7 scope check. Nothing here opens the file.
+   * Rules 3 and 4 of "When JEV is asked". Default deny: a file is sent only when it is inside the
+   * agent's cwd and inside a git work tree below the home directory, and no name it goes by (as
+   * named, each symlink hop, its real path) is secret-shaped or personal. A hard link could be
+   * any file under another name, so one is never sent. Then the D7 scope check. Nothing here
+   * opens the file.
    */
   private async eligibility(input: {
     agentId: string;
     agentCwd: string;
+    namedPath: string;
     realPath: string;
   }): Promise<JevNotAskedReason | null> {
+    await this.addRealHome();
     const realCwd = await this.realpathOf(input.agentCwd);
     if (!isInside(input.realPath, realCwd)) return "outside-cwd";
-    if (
-      isSecretShapedPath(input.realPath) ||
-      this.deniedRoots.some((root) => isInside(input.realPath, root))
-    ) {
+    const names = [...(await this.symlinkChain(input.namedPath)), input.realPath];
+    if (names.some((name) => isSecretShapedPath(name) || isPersonalPath(name, this.personal))) {
       return "secret-path";
     }
+    const stat = await this.fs.stat(input.realPath).catch(() => null);
+    if (!stat?.isFile()) return "not-text";
+    if (stat.nlink > 1) return "secret-path";
+    const workTree = await this.workTreeOf(input.realPath);
+    if (workTree === null || isHomeOrAbove(workTree, this.personal)) return "outside-repo";
     const scope = await this.options.jev
       .checkScope({
         cwds: [input.agentCwd],
@@ -655,6 +693,39 @@ export class ReadCheckObserver implements FileReadObserver {
       })
       .catch(() => "excluded" as const);
     return scope === "ok" ? null : "excluded";
+  }
+
+  /** The home directory as realpath spells it, checked as well as the configured one. */
+  private async addRealHome(): Promise<void> {
+    if (this.realHomeAdded) return;
+    this.realHomeAdded = true;
+    const realHome = await this.realpathOf(this.options.homeDir);
+    if (!this.personal.homeDirs.includes(realHome)) this.personal.homeDirs.push(realHome);
+  }
+
+  /** The path as named and every path its symlinks point at on the way to the real file. */
+  private async symlinkChain(namedPath: string): Promise<string[]> {
+    const names = [path.resolve(namedPath)];
+    for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop += 1) {
+      const current = names[names.length - 1]!;
+      const link = await this.fs.lstat(current).catch(() => null);
+      if (!link?.isSymbolicLink()) break;
+      const target = await this.fs.readlink(current).catch(() => null);
+      if (target === null) break;
+      names.push(path.resolve(path.dirname(current), target));
+    }
+    return names;
+  }
+
+  /** The nearest directory at or above the file's that holds a `.git`, as git finds its work tree. */
+  private async workTreeOf(realPath: string): Promise<string | null> {
+    let directory = path.dirname(realPath);
+    for (;;) {
+      if (await this.fs.lstat(path.join(directory, ".git")).catch(() => null)) return directory;
+      const parent = path.dirname(directory);
+      if (parent === directory) return null;
+      directory = parent;
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -673,6 +744,7 @@ export class ReadCheckObserver implements FileReadObserver {
     });
     if (!read) return;
     const measured = measure(read, hook.toolResponse);
+    let compoundCounted = false;
     const state = this.stateFor(event.agentId);
     const contextTokens = measured ? estimateReadTokens(measured.charactersPerFile) : null;
 
@@ -683,11 +755,18 @@ export class ReadCheckObserver implements FileReadObserver {
       const realPath = await this.realpathOf(file.path);
       this.noteRead(event.agentId, realPath, read.tool, at, contextTokens);
       this.validation.noteRead(event.agentId, realPath, at);
+      const signalMark = this.validation.mark();
       if (liveSavingsId && read.files.length === 1) {
         this.settle(liveSavingsId, { contextTokens, estimated: false });
         continue;
       }
       if (pending?.retryOfDeny) continue;
+      // Its output may hold more than one file's text: counted once, never judged.
+      if (read.compound) {
+        if (!compoundCounted) this.countNotAsked("compound");
+        compoundCounted = true;
+        continue;
+      }
       await this.judgeShadow({
         event,
         at,
@@ -699,17 +778,44 @@ export class ReadCheckObserver implements FileReadObserver {
         contextTokens,
         config,
         state,
+        signalMark,
       });
     }
   }
 
   private async judgeShadow(input: ShadowReadInput): Promise<void> {
-    const reason = await this.shadowGate(input);
+    const reason = this.shadowGate(input);
     if (reason) return this.countNotAsked(reason);
+    if (this.judging >= MAX_CONCURRENT_JUDGMENTS) return this.countNotAsked("saturated");
+    this.judging += 1;
+    try {
+      await this.judgeClaimed(input);
+    } finally {
+      this.judging -= 1;
+    }
+  }
+
+  /**
+   * A read that passed the cheap rules claims its `path|range`, so a burst of the same read is one
+   * call and the rest are repeats. A claim that ends with nothing recorded is released.
+   */
+  private async judgeClaimed(input: ShadowReadInput): Promise<void> {
     const { event, read, file, realPath, state } = input;
+    const key = `${realPath}|${rangeKey(file.range)}`;
+    state.judged.set(key, this.now());
+    const ineligible = await this.eligibility({
+      agentId: event.agentId,
+      agentCwd: event.agentCwd,
+      namedPath: file.path,
+      realPath,
+    });
+    if (ineligible) {
+      state.judged.delete(key);
+      return this.countNotAsked(ineligible);
+    }
     const slice = await this.shadowSlice(input);
     if (!slice) {
-      state.judged.delete(`${realPath}|${rangeKey(file.range)}`);
+      state.judged.delete(key);
       return this.countNotAsked("not-text");
     }
     const tokens = input.contextTokens ?? 0;
@@ -723,7 +829,10 @@ export class ReadCheckObserver implements FileReadObserver {
       deadlineMs: input.config?.timeoutMs ?? 5000,
       live: false,
     });
-    if (!asked) return;
+    if (!asked) {
+      state.judged.delete(key);
+      return;
+    }
     const savingsId = this.recordInvolvement({
       asked,
       agentId: event.agentId,
@@ -747,6 +856,7 @@ export class ReadCheckObserver implements FileReadObserver {
         mode: "shadow",
         // From the read, not the verdict: a use while JEV was answering still counts.
         openedAt: input.at,
+        signalsAfter: input.signalMark,
         rangeText: slice.text,
         after: asked.around.cursor,
         turnId: asked.around.turnId,
@@ -755,38 +865,32 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
-   * The not-asked reason for a read that ran, in the order of "When JEV is asked", except that the
-   * repeat rule runs before the path rules and the scope check: it is a map lookup, and the scope
-   * check runs git. A read that passes claims its `path|range`, so a burst of the same read is one
-   * call and the rest are repeats; a claim the path rules refuse is released.
+   * The not-asked reason for a read that ran, from what is already in hand, in the order of "When
+   * JEV is asked". The repeat rule runs before the path rules and the scope check: it is a map
+   * lookup, and the scope check runs git.
    */
-  private async shadowGate(input: ShadowReadInput): Promise<JevNotAskedReason | null> {
+  private shadowGate(input: ShadowReadInput): JevNotAskedReason | null {
     const { measured, config, read, state } = input;
     if (measured?.dedup) return "dedup";
     if (!config || !this.options.jev.isActive("readCheck")) return "inactive";
     // Before the floor: an image or a PDF loads tokens its text length does not show.
     if (measured?.notText || read.notText) return "not-text";
     if (!measured || (input.contextTokens ?? 0) < config.minTokens) return "below-floor";
-    const key = `${input.realPath}|${rangeKey(input.file.range)}`;
-    const judgedAt = state.judged.get(key);
+    const judgedAt = state.judged.get(`${input.realPath}|${rangeKey(input.file.range)}`);
     if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return "repeat";
-    state.judged.set(key, this.now());
-    const ineligible = await this.eligibility({
-      agentId: input.event.agentId,
-      agentCwd: input.event.agentCwd,
-      realPath: input.realPath,
-    });
-    if (ineligible) state.judged.delete(key);
-    return ineligible;
+    return null;
   }
 
   /**
-   * The range's text after the scope check passed. One file: exactly what the agent saw. Several
-   * files in one Bash line: each is judged on its own range, read here.
+   * The range's text after the scope check passed. A `Read`: exactly what it loaded. A Bash read:
+   * the file's range read here from the eligible file, never the command's output, which could
+   * hold anything the line printed.
    */
   private async shadowSlice(input: ShadowReadInput): Promise<RangeText | null> {
     const { measured } = input;
-    if (measured?.text == null) return this.loadRange(input.realPath, input.file, []);
+    if (input.read.tool === "Bash" || measured?.text == null) {
+      return this.loadRange(input.realPath, input.file, input.read.filters);
+    }
     const text = measured.text;
     const lines = measured.lines;
     const totalLines = lines?.total ?? text.split("\n").length;
@@ -867,6 +971,9 @@ export class ReadCheckObserver implements FileReadObserver {
     } catch {
       return null;
     }
+    // Only the head of a large file is read: a range from its end would be the wrong text.
+    const fromEnd = file.range.kind === "last-lines" || file.range.kind === "last-bytes";
+    if (fromEnd && buffer.length >= MAX_OBSERVER_FILE_BYTES) return null;
     if (!hasTextBody(buffer)) return null;
     const slice = sliceRange(buffer.toString("utf8"), file.range);
     return filters.length > 0 ? { ...slice, text: applyFilters(slice.text, filters) } : slice;
@@ -955,7 +1062,8 @@ export class ReadCheckObserver implements FileReadObserver {
       cwd: hook.cwd ?? event.agentCwd,
       home: this.options.homeDir,
     });
-    const single = read && read.files.length === 1 && !read.notText ? read.files[0]! : null;
+    const single =
+      read && read.files.length === 1 && !read.notText && !read.compound ? read.files[0]! : null;
     if (!read || !single) return null;
     const state = this.stateFor(event.agentId);
     const config = this.refreshLiveSnapshot();
@@ -993,7 +1101,15 @@ export class ReadCheckObserver implements FileReadObserver {
     };
     const timer = setTimeout(() => settleVerdict(null), config.liveTimeoutMs);
     timer.unref?.();
-    const judged = this.judgeLive({ event, hook, read, file: single, config, settleVerdict })
+    const judged = this.judgeLive({
+      event,
+      hook,
+      read,
+      file: single,
+      config,
+      signalMark: this.validation.mark(),
+      settleVerdict,
+    })
       .catch((error) => {
         this.logger.debug({ err: error }, "read check: live judgment failed; the read runs");
         return null;
@@ -1009,6 +1125,16 @@ export class ReadCheckObserver implements FileReadObserver {
 
   /** Resolves the savings id of a live record whose read ran, for Post to settle; else null. */
   private async judgeLive(input: LiveReadInput): Promise<string | null> {
+    if (this.judging >= MAX_CONCURRENT_JUDGMENTS) return null;
+    this.judging += 1;
+    try {
+      return await this.judgeLiveClaimed(input);
+    } finally {
+      this.judging -= 1;
+    }
+  }
+
+  private async judgeLiveClaimed(input: LiveReadInput): Promise<string | null> {
     const startedAt = this.now();
     const prepared = await this.prepareLive(input);
     if (!prepared) return null;
@@ -1058,8 +1184,10 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /**
-   * Everything code checks before a live read is worth holding: the switch, the path rules and
-   * scope, the size (smaller reads are judged after they run, as in shadow) and the repeat rule.
+   * Everything code checks before a live read is worth holding: the switch, the edit and repeat
+   * rules, the size from the file's metadata, then the path rules and scope, then the exact size
+   * (smaller reads are judged after they run, as in shadow). The size bound comes first so a small
+   * read never waits on git.
    */
   private async prepareLive(
     input: LiveReadInput,
@@ -1072,9 +1200,17 @@ export class ReadCheckObserver implements FileReadObserver {
     const key = `${realPath}|${rangeKey(file.range)}`;
     const judgedAt = state.judged.get(key);
     if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return null;
-    if (await this.eligibility({ agentId: event.agentId, agentCwd: event.agentCwd, realPath })) {
+    const stat = await this.fs.stat(realPath).catch(() => null);
+    if (!stat?.isFile() || this.maxReadTokens(stat.size, file) < config.liveMinTokens) {
       return null;
     }
+    const ineligible = await this.eligibility({
+      agentId: event.agentId,
+      agentCwd: event.agentCwd,
+      namedPath: file.path,
+      realPath,
+    });
+    if (ineligible) return null;
     const slice = await this.loadRange(realPath, file, read.filters);
     if (!slice) return null;
     const characters = read.tool === "Read" ? readToolCharacters(slice.text) : slice.text.length;
@@ -1082,6 +1218,26 @@ export class ReadCheckObserver implements FileReadObserver {
     if (tokens < config.liveMinTokens) return null;
     state.judged.set(key, this.now());
     return { realPath, slice, tokens };
+  }
+
+  /**
+   * The most tokens a read of a file this size could load, from its size alone: every byte a
+   * character, and at most one line per byte (or the range's line count), each with Read's
+   * numbering. An upper bound, so a read under it is surely under the live floor.
+   */
+  private maxReadTokens(size: number, file: RecognizedFile): number {
+    const range = file.range;
+    const bytes =
+      range.kind === "first-bytes" || range.kind === "last-bytes"
+        ? Math.min(size, range.count)
+        : size;
+    let lines = bytes + 1;
+    if (range.kind === "lines" && range.last !== null) {
+      lines = Math.min(lines, Math.max(0, range.last - range.first + 1));
+    } else if (range.kind === "last-lines") {
+      lines = Math.min(lines, range.count);
+    }
+    return estimateReadTokens(bytes + READ_TOOL_LINE_OVERHEAD * lines);
   }
 
   /** Denies the held read once, unless the deadline let it through first. */
@@ -1154,6 +1310,7 @@ export class ReadCheckObserver implements FileReadObserver {
         spellings: [prepared.realPath, asked.displayPath, file.path],
         mode: "live",
         openedAt: now,
+        signalsAfter: input.signalMark,
         rangeText: prepared.slice.text,
         after: asked.around.cursor,
         turnId: asked.around.turnId,

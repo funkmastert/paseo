@@ -18,6 +18,7 @@ import {
   type TestJevServiceOptions,
 } from "../fake.js";
 import {
+  defaultReadCheckFs,
   ReadCheckObserver,
   type ReadCheckAgentSource,
   type ReadCheckFileSystem,
@@ -197,7 +198,8 @@ beforeEach(() => {
   root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "read-check-")));
   repo = path.join(root, "projects", "app");
   paseoHome = path.join(root, ".paseo");
-  mkdirSync(repo, { recursive: true });
+  // A git work tree: only files inside one are ever sent.
+  mkdirSync(path.join(repo, ".git"), { recursive: true });
   mkdirSync(paseoHome, { recursive: true });
   rows = [
     {
@@ -334,15 +336,14 @@ describe("ReadCheckObserver: shadow, the default", () => {
       const readFile = vi.fn<ReadCheckFileSystem["readFile"]>();
       const { observer, savings, jev } = setup({
         config: { excludeCwds: [repo] },
-        fs: { realpath: async (p) => p, readFile },
+        fs: { ...defaultReadCheckFs, realpath: async (p) => p, readFile },
       });
       const content = bigSource();
       writeRepoFile("a.ts", content);
-      writeRepoFile("b.ts", content);
-      // Two files: the observer would read each from disk, if scope allowed it.
-      observer.postToolUse(bashPost("cat a.ts b.ts", content + content));
+      // A Bash read: the observer would read the file from disk, if scope allowed it.
+      observer.postToolUse(bashPost("cat a.ts", content));
       await observer.idle();
-      expect(savings.notAsked).toEqual(["excluded", "excluded"]);
+      expect(savings.notAsked).toEqual(["excluded"]);
       expect(readFile).not.toHaveBeenCalled();
       expect(jev.transport.calls).toEqual([]);
     });

@@ -154,3 +154,53 @@ describe("ReadCheckValidation", () => {
     expect(closes[0]?.validation.signal).toBe("quoted");
   });
 });
+
+describe("ReadCheckValidation: signals while JEV was answering", () => {
+  test("an edit after the read's mark, before the window opened, closes it at once", () => {
+    const { validation, closes } = setup();
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0);
+    const mark = validation.mark();
+    validation.noteEdit("agent-1", "/repo/src/session.ts", T0 + 100);
+    validation.open({
+      savingsId: "sv_1",
+      agentId: "agent-1",
+      path: "/repo/src/session.ts",
+      spellings: [],
+      mode: "shadow",
+      openedAt: T0,
+      signalsAfter: mark,
+      rangeText: "",
+      after: null,
+      turnId: null,
+    });
+    expect(closes).toEqual([
+      expect.objectContaining({
+        savingsId: "sv_1",
+        validation: { outcome: "false-skip", signal: "edited", afterMinutes: 0 },
+      }),
+    ]);
+    expect(validation.size).toBe(0);
+  });
+
+  test("the read itself, other paths and other agents are not replayed", () => {
+    const { validation, closes } = setup();
+    validation.noteRead("agent-1", "/repo/src/session.ts", T0);
+    const mark = validation.mark();
+    validation.noteEdit("agent-2", "/repo/src/session.ts", T0 + 100);
+    validation.noteEdit("agent-1", "/repo/src/other.ts", T0 + 100);
+    validation.open({
+      savingsId: "sv_1",
+      agentId: "agent-1",
+      path: "/repo/src/session.ts",
+      spellings: [],
+      mode: "shadow",
+      openedAt: T0,
+      signalsAfter: mark,
+      rangeText: "",
+      after: null,
+      turnId: null,
+    });
+    expect(closes).toEqual([]);
+    expect(validation.size).toBe(1);
+  });
+});

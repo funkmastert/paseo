@@ -24,6 +24,11 @@ export const READ_CHECK_QUOTE_MIN_CHARS = 40;
 export const READ_CHECK_MAX_QUOTE_LINES = 2000;
 /** A daemon-wide ceiling, so a burst of verdicts cannot hold unbounded line sets. */
 const MAX_OPEN_WINDOWS = 500;
+/**
+ * Edit and read signals kept for windows that open later: JEV answers seconds after the read, and
+ * a use in between still counts. Daemon-wide, oldest dropped first.
+ */
+const MAX_RECENT_SIGNALS = 1000;
 
 export type ReadCheckSignal = "edited" | "reread" | "quoted" | "redirected";
 
@@ -43,6 +48,11 @@ export interface ReadCheckWindowInput {
   spellings: string[];
   mode: "shadow" | "live";
   openedAt: number;
+  /**
+   * `mark()` taken just after the read was noted. Edit and read signals after it, which arrived
+   * while JEV was answering, are replayed when the window opens. Absent: none are replayed.
+   */
+  signalsAfter?: number;
   /** The text the read loaded (or would have), for the quote check. */
   rangeText: string;
   /** The read's timeline row, when it was found: later rows are scanned from here. */
@@ -51,7 +61,15 @@ export interface ReadCheckWindowInput {
   turnId: string | null;
 }
 
-interface OpenWindow extends Omit<ReadCheckWindowInput, "rangeText"> {
+interface RecentSignal {
+  mark: number;
+  agentId: string;
+  path: string;
+  signal: ReadCheckSignal;
+  at: number;
+}
+
+interface OpenWindow extends Omit<ReadCheckWindowInput, "rangeText" | "signalsAfter"> {
   quoteHashes: Set<string>;
   turns: string[];
 }
@@ -123,6 +141,8 @@ export interface ReadCheckValidationOptions {
 
 export class ReadCheckValidation {
   private readonly windows = new Map<string, OpenWindow>();
+  private readonly recent: RecentSignal[] = [];
+  private lastMark = 0;
 
   constructor(private readonly options: ReadCheckValidationOptions) {}
 
@@ -136,12 +156,23 @@ export class ReadCheckValidation {
       const oldest = this.windows.keys().next().value;
       if (oldest !== undefined) this.close(oldest, null, null);
     }
-    const { rangeText, ...rest } = input;
+    const { rangeText, signalsAfter, ...rest } = input;
     this.windows.set(input.savingsId, {
       ...rest,
       quoteHashes: quoteHashesOf(rangeText),
       turns: input.turnId ? [input.turnId] : [],
     });
+    if (signalsAfter === undefined) return;
+    const used = this.recent.find(
+      (entry) =>
+        entry.mark > signalsAfter && entry.agentId === input.agentId && entry.path === input.path,
+    );
+    if (used) this.close(input.savingsId, used.signal, used.at);
+  }
+
+  /** The newest signal so far; a window opened with it replays only signals after it. */
+  mark(): number {
+    return this.lastMark;
   }
 
   /** Open windows for an agent, for the observer's scan of its later timeline rows. */
@@ -211,6 +242,9 @@ export class ReadCheckValidation {
   }
 
   private signalPath(agentId: string, path: string, signal: ReadCheckSignal, at: number): void {
+    this.lastMark += 1;
+    this.recent.push({ mark: this.lastMark, agentId, path, signal, at });
+    if (this.recent.length > MAX_RECENT_SIGNALS) this.recent.shift();
     for (const [savingsId, window] of this.windows) {
       if (window.agentId === agentId && window.path === path && at >= window.openedAt) {
         this.close(savingsId, signal, at);

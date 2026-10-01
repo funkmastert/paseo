@@ -422,10 +422,16 @@ export type JevNotAskedReason =
   | "inactive"
   /** An image, a PDF, a notebook, or a NUL byte in the first 8 KB. */
   | "not-text"
-  /** A secret-shaped name or a denied root (`agent/tools/jev-file-state.ts`). */
+  /** A secret-shaped name (`jev/secret-paths.ts`), a personal location or a hard link, by any name it goes by. */
   | "secret-path"
   /** Outside the agent's cwd, which the file tools refuse too. */
   | "outside-cwd"
+  /** Not inside a git work tree below the home directory: only project files are ever sent. */
+  | "outside-repo"
+  /** A Bash line that can print more than one file's text: several files, stdin, a redirect. */
+  | "compound"
+  /** Too many reads already being judged, or the lane's slot or rate token did not come in time. */
+  | "saturated"
   /** The CLI answered `file_unchanged`: the read loaded nothing. */
   | "dedup"
   /** Judged for the same agent, path and range in the last 30 minutes; the verdict is reused. */

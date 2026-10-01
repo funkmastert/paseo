@@ -190,7 +190,7 @@ function bigSource(seed: number): string {
 /** One session, one turn of `READS` Reads; returns the per-read gaps. */
 async function runReads(label: string, observer?: FileReadObserver): Promise<number[]> {
   const repo = path.join(scratch, label);
-  mkdirSync(repo, { recursive: true });
+  mkdirSync(path.join(repo, ".git"), { recursive: true });
   const files = Array.from({ length: READS }, (_, index) => {
     const file = path.join(repo, `src/file-${index}.ts`);
     mkdirSync(path.dirname(file), { recursive: true });

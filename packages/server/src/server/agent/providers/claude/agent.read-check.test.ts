@@ -206,7 +206,7 @@ function slowObserver(config: Record<string, unknown> = {}, defer?: (work: () =>
 beforeEach(() => {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "claude-read-check-")));
   repo = path.join(root, "repo");
-  mkdirSync(repo, { recursive: true });
+  mkdirSync(path.join(repo, ".git"), { recursive: true });
 });
 
 afterEach(() => {
@@ -365,12 +365,12 @@ describe("Claude read check: shadow adds nothing to a read", () => {
     // the event loop's own scheduling moves either side's median by about a millisecond.
     expect(max(on)).toBeLessThan(100);
     expect(median(on) - median(off)).toBeLessThan(5);
-    // The reads started their 2-second judgments (the last few start a few event-loop turns after
-    // their hooks returned) and none had an answer when the reads were done: no read waited on
-    // one. Past the lane's two slots they queue and give up as saturated.
-    expect(duringReads.started).toBeGreaterThanOrEqual(READS - 3);
+    // The first reads started their 2-second judgments and none had an answer when the reads were
+    // done: no read waited on one. Past the observer's three judgments in flight the rest are
+    // dropped as saturated before any git or JEV work.
+    expect(duringReads.started).toBe(3);
     expect(duringReads.finished).toBe(0);
-    expect(judging.finished).toBe(READS);
+    expect(judging.finished).toBe(3);
   }, 60_000);
 });
 
