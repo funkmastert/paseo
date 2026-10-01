@@ -2068,7 +2068,6 @@ export const ar: TranslationResources = {
     jevTitle: "قرارات JEV",
     jevShadow: "وضع الظل",
     jevDryRun: "تشغيل تجريبي",
-    jevNotApplied: "لم يُطبَّق",
     jevOlder: "{{count}} أقدم",
   },
   review: {

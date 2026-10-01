@@ -1,3 +1,4 @@
+import { JEV_FEATURE_LABELS } from "@getpaseo/protocol/jev/labels";
 import type {
   JevDecisionRecord,
   JevFeatureId,
@@ -6,6 +7,7 @@ import type {
   JevSpendTotals,
   JevStatus,
 } from "../../../server/jev/contract.js";
+import { JEV_FEATURE_LANES } from "../../../server/jev/service.js";
 import type {
   ProviderUsage,
   ProviderUsageBalance,
@@ -28,7 +30,8 @@ const DISPLAY_NAME = "JEV";
 const HIDDEN_REASONS = new Set<string>(["no-key", "disabled"]);
 
 const UNAVAILABLE_HINTS: Readonly<Record<string, string>> = {
-  "config-unreadable": "agents.jev in config.json is invalid; JEV is off until it is fixed",
+  "config-unreadable":
+    "config.json could not be read, or agents.jev in it is invalid; JEV is off until it is fixed",
   "key-rejected": "The JEV key was rejected; JEV is off until the key is replaced",
 };
 
@@ -44,17 +47,6 @@ const FEATURE_ORDER: readonly JevFeatureId[] = [
   "askJev",
 ];
 
-const FEATURE_LABELS: Readonly<Record<string, string>> = {
-  spawnHint: "Spawn hint",
-  remediationTriage: "Remediation triage",
-  notificationTriage: "Finish triage",
-  stallJudgment: "Stall judgment",
-  compactionTiming: "Compaction timing",
-  awayReply: "Away reply",
-  agentTools: "Agent tools",
-  askJev: "Ask JEV",
-};
-
 const LANE_LABELS: Readonly<Record<JevLane, string>> = {
   control: "Control",
   agentTools: "Agent tools",
@@ -66,8 +58,6 @@ const LANE_BALANCE_IDS: Readonly<Record<JevLane, string>> = {
   agentTools: "tools-today",
   interactive: "ask-today",
 };
-
-const LANES: readonly JevLane[] = ["control", "agentTools", "interactive"];
 
 // The spawn hint's note carries its answers as "task_class mechanical 0.91, reasoning 0.6"
 // (`formatVerdict` in session/jev/jev-session.ts); the class is what a shadow day is judged on.
@@ -103,12 +93,17 @@ export class JevUsageFetcher implements ProviderUsageFetcher {
   }
 }
 
-/** The strip row for a status and the host's decisions, as of `nowMs`. */
+/**
+ * The strip row for a status and the host's decisions, as of `nowMs`. Null for `HIDDEN_REASONS`:
+ * nobody opted in, or JEV is switched off, so no card should appear anywhere a `ProviderUsage` is
+ * shown, not just on the strip (`provider.ts`: "Null means the provider reports nothing at all").
+ */
 export function buildJevUsage(
   status: JevStatus,
   decisions: readonly JevDecisionRecord[],
   nowMs: number,
-): ProviderUsage {
+): ProviderUsage | null {
+  if (status.reason !== null && HIDDEN_REASONS.has(status.reason)) return null;
   const base = {
     providerId: PROVIDER_ID,
     displayName: DISPLAY_NAME,
@@ -116,11 +111,7 @@ export function buildJevUsage(
     fetchedAt: new Date(nowMs).toISOString(),
     windows: [],
   };
-  // A spent lane is not a reason to hide the row: that is when it matters most.
-  if (!status.available && status.reason !== null && status.reason !== "daily-budget") {
-    if (HIDDEN_REASONS.has(status.reason)) {
-      return { ...base, status: "unavailable", balances: [], details: [], error: null };
-    }
+  if (!status.available && status.reason !== null) {
     return {
       ...base,
       status: "error",
@@ -129,12 +120,16 @@ export function buildJevUsage(
       error: UNAVAILABLE_HINTS[status.reason] ?? `JEV is off: ${status.reason}`,
     };
   }
+  const lanes = Object.keys(status.lanes) as JevLane[];
   const today = decisionsToday(decisions, nowMs);
   return {
     ...base,
     status: "available",
-    balances: [...LANES.map((lane) => laneBalance(lane, status.lanes[lane])), callsBalance(status)],
-    details: [...laneAlerts(status), ...featureDetails(status, today)],
+    balances: [
+      ...lanes.map((lane) => laneBalance(lane, status.lanes[lane])),
+      callsBalance(status, lanes),
+    ],
+    details: [...laneAlerts(status, lanes), ...featureDetails(status, today)],
     error: null,
   };
 }
@@ -157,31 +152,39 @@ function laneBalance(lane: JevLane, laneStatus: JevLaneStatus): ProviderUsageBal
   };
 }
 
-/** Calls that reached JEV or failed trying. A refusal (no key, excluded, budget) sent nothing. */
+/**
+ * Calls that reached JEV or failed trying. A refusal (no key, excluded, budget) sent nothing, so
+ * `unavailable` is excluded.
+ * TODO(jev-ui-fix F8): `failed` also mixes in redaction, state-too-large, request-too-large and
+ * invalid-request, which stop before sending (contract.ts, `JevFailureReason`) and should be
+ * excluded too, but `JevSpendTotals` has no per-reason breakdown to exclude them by — only the
+ * ledger's per-entry `reason` does, and `ledger.ts`/`contract.ts` are outside this track. Minor
+ * overcount until a totals field carries the split.
+ */
 function sentCalls(totals: JevSpendTotals | undefined): number {
   if (!totals) return 0;
   return Math.max(0, totals.calls - totals.unavailable);
 }
 
-function callsBalance(status: JevStatus): ProviderUsageBalance {
-  const used = LANES.reduce((sum, lane) => sum + sentCalls(status.lanes[lane]?.today), 0);
+function callsBalance(status: JevStatus, lanes: readonly JevLane[]): ProviderUsageBalance {
+  const used = lanes.reduce((sum, lane) => sum + sentCalls(status.lanes[lane]?.today), 0);
   return { id: "calls-today", label: "Calls today", used, unit: "requests" };
 }
 
 /**
  * A lane that stopped sending says so first: a spent cap turns its features off until the host's
- * midnight, and an open circuit pauses them. Without these the day's JEV simply goes quiet.
+ * local midnight, and an open circuit pauses them. Without these the day's JEV simply goes quiet.
  */
-function laneAlerts(status: JevStatus): ProviderUsageDetail[] {
+function laneAlerts(status: JevStatus, lanes: readonly JevLane[]): ProviderUsageDetail[] {
   const alerts: ProviderUsageDetail[] = [];
-  for (const lane of LANES) {
+  for (const lane of lanes) {
     const laneStatus = status.lanes[lane];
     if (!laneStatus) continue;
     if (laneStatus.exhausted) {
       alerts.push({
         id: `lane:${lane}:spent`,
         label: `${LANE_LABELS[lane]} budget spent`,
-        value: `${laneFeatureNames(status, lane)} off until midnight`,
+        value: `${laneFeatureNames(status, lane)} off until local midnight`,
         tone: "warning",
       });
     } else if (laneStatus.circuit === "open") {
@@ -196,13 +199,8 @@ function laneAlerts(status: JevStatus): ProviderUsageDetail[] {
   return alerts;
 }
 
-const FEATURE_LANES: Readonly<Record<string, JevLane>> = {
-  agentTools: "agentTools",
-  askJev: "interactive",
-};
-
 function laneOf(feature: string): JevLane {
-  return FEATURE_LANES[feature] ?? "control";
+  return JEV_FEATURE_LANES[feature as JevFeatureId] ?? "control";
 }
 
 function laneFeatureNames(status: JevStatus, lane: JevLane): string {
@@ -223,7 +221,7 @@ function orderedFeatures(status: JevStatus): JevFeatureId[] {
 }
 
 function featureLabel(feature: string): string {
-  return FEATURE_LABELS[feature] ?? feature;
+  return JEV_FEATURE_LABELS[feature] ?? feature;
 }
 
 /** The host's local midnight before `nowMs`: the ledger's day. */
@@ -297,7 +295,7 @@ export function summarizeFeatureDay(
   const applied = records.filter((record) => record.applied).length;
   if (shadow) return summarizeWouldHave(records);
   if (feature === "askJev") return `${records.length} ${plural(records.length, "question")} today`;
-  return `${applied} of ${records.length} applied`;
+  return `${applied} of ${records.length} changed what code did`;
 }
 
 function summarizeSpawnHints(records: readonly JevDecisionRecord[], shadow: boolean): string {
@@ -314,19 +312,24 @@ function summarizeSpawnHints(records: readonly JevDecisionRecord[], shadow: bool
       : `${creates} asked`;
   if (shadow) return answered;
   const applied = records.filter((record) => record.applied).length;
-  return `${answered}; ${applied} applied`;
+  return `${answered}; ${applied} changed what code did`;
 }
 
 /**
- * Shadow notes whose action starts "would" are the ones where the answer would have changed what
- * code did; every other shadow note did exactly what today's code does. Grouped by the action up
- * to its first parenthesis, so "would reply (a reason); dry run" groups by "would reply".
+ * Shadow notes whose action names "would" somewhere are the ones where the answer would have
+ * changed what code did; every other shadow note did exactly what today's code does. A feature
+ * writes "would" at the start of its own verdict ("would have: ..."), but not every track's wording
+ * leads with it (finish triage: "sent as an alert; would have sent a digest (shadow)"), so this
+ * finds the word wherever it falls and groups from there to its first parenthesis, e.g. "would
+ * reply (a reason); dry run" groups by "would reply".
  */
 function summarizeWouldHave(records: readonly JevDecisionRecord[]): string {
   const groups = new Map<string, number>();
   for (const record of records) {
-    if (record.applied || !/^would\b/i.test(record.action)) continue;
-    const phrase = record.action.split(" (")[0].trim();
+    if (record.applied) continue;
+    const start = record.action.search(/\bwould\b/i);
+    if (start < 0) continue;
+    const phrase = record.action.slice(start).split(" (")[0].trim();
     groups.set(phrase, (groups.get(phrase) ?? 0) + 1);
   }
   const decided = `${records.length} ${plural(records.length, "decision")}`;
@@ -341,7 +344,11 @@ function plural(count: number, word: string): string {
   return count === 1 ? word : `${word}s`;
 }
 
-// Sub-cent spend is the normal case for JEV (about $0.0002 a call), so it keeps three places.
+// Sub-cent spend is the normal case for JEV (about $0.0002 a call): one or two calls would read
+// "$0.000" at three places, so it keeps four under a cent, matching `formatJevCost`
+// (app/src/jev/jev-decisions-model.ts).
 function formatUsd(usd: number): string {
-  return usd >= 0.1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(3)}`;
+  if (usd >= 0.1) return `$${usd.toFixed(2)}`;
+  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(4)}`;
 }

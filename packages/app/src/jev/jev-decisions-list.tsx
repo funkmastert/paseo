@@ -8,7 +8,6 @@ import type { JevDecisionLine, JevDecisionTag, JevDecisionsView } from "./jev-de
 const TAG_KEYS: Record<JevDecisionTag, string> = {
   shadow: "contextWindow.jevShadow",
   dryRun: "contextWindow.jevDryRun",
-  notApplied: "contextWindow.jevNotApplied",
 };
 
 /**

@@ -115,9 +115,10 @@ is shown for non-Claude accounts only.
 JEV's row is its spend per lane against each cap, today's call count, and one line per JEV feature
 with its mode (live, shadow, dry run, off) and what it did or would have done today. A lane that
 hit its cap turns its balance to the warning tone and adds a warning line naming the features it
-switched off until midnight. On a phone the warning stays in view and the feature lines fold
-behind a toggle. It has no worker chip: no agent runs on JEV. What each line means and where it
-comes from is in [jev.md](jev.md#spend-on-the-budget-strip).
+switched off until local midnight. The warning stays in view and the feature lines fold behind a
+toggle on every form factor: a wide panel has room for the lanes and the alerts next to every other
+account's figures, not a line per feature. It has no worker chip: no agent runs on JEV. What each
+line means and where it comes from is in [jev.md](jev.md#spend-on-the-budget-strip).
 
 - **An account always gets a row.** One the usage endpoint has no reading for, or a usage read that
   failed, renders as unavailable rather than disappearing.

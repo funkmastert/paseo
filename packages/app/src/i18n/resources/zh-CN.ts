@@ -2043,7 +2043,6 @@ export const zhCN: TranslationResources = {
     jevTitle: "JEV 决策",
     jevShadow: "影子模式",
     jevDryRun: "试运行",
-    jevNotApplied: "未应用",
     jevOlder: "更早的 {{count}} 条",
   },
   review: {

@@ -59,7 +59,7 @@ describe("buildJevDecisionsView", () => {
     });
   });
 
-  it("says dry run for the away reply, not applied for a live feature, nothing when applied", () => {
+  it("says dry run for the away reply, nothing for a live feature that kept today's behaviour, nothing when applied", () => {
     const view = buildJevDecisionsView(
       [
         record({ feature: "awayReply", callId: "a" }),
@@ -70,13 +70,13 @@ describe("buildJevDecisionsView", () => {
     );
     expect(view.lines.map((line) => [line.feature, line.tag])).toEqual([
       ["Away reply", "dryRun"],
-      ["Stall judgment", "notApplied"],
+      ["Stall judgment", null],
       ["Ask JEV", null],
     ]);
   });
 
-  it("falls back to not applied when the host's status could not be read", () => {
-    expect(buildJevDecisionsView([record()], null).lines[0].tag).toBe("notApplied");
+  it("tags nothing when the host's status could not be read", () => {
+    expect(buildJevDecisionsView([record()], null).lines[0].tag).toBeNull();
   });
 
   it("lists the newest and counts the rest", () => {

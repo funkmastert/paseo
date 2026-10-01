@@ -2101,7 +2101,6 @@ export const ru: TranslationResources = {
     jevTitle: "Решения JEV",
     jevShadow: "Теневой режим",
     jevDryRun: "Пробный запуск",
-    jevNotApplied: "Не применено",
     jevOlder: "Ещё {{count}}",
   },
   review: {

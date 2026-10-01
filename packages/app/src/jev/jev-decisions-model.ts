@@ -1,25 +1,16 @@
+import { JEV_FEATURE_LABELS } from "@getpaseo/protocol/jev/labels";
 import type { JevDecisionRecord, JevStatus } from "@getpaseo/protocol/jev/rpc-schemas";
 
 /** Newest first; older ones are counted, not listed, so the popover stays a glance. */
 export const JEV_DECISIONS_SHOWN = 8;
 
-const FEATURE_LABELS: Readonly<Record<string, string>> = {
-  spawnHint: "Spawn hint",
-  remediationTriage: "Remediation triage",
-  notificationTriage: "Finish triage",
-  stallJudgment: "Stall judgment",
-  compactionTiming: "Compaction timing",
-  awayReply: "Away reply",
-  agentTools: "Agent tools",
-  askJev: "Ask JEV",
-};
-
 /**
- * Why a decision was not acted on. `shadow` (and feature 14's `dryRun`) is the feature's mode, so
- * the action reads as what code would have done; `notApplied` is a live feature whose code chose
- * today's behaviour anyway.
+ * `shadow` (and feature 14's `dryRun`) marks a note the host's current status says is in shadow,
+ * so the action reads as what code would have done. A live feature whose code kept today's
+ * behaviour anyway, or a status read that failed, gets no tag: the host does not know which it
+ * was when the decision was made, and a tag read from the mode now would be a guess.
  */
-export type JevDecisionTag = "shadow" | "dryRun" | "notApplied";
+export type JevDecisionTag = "shadow" | "dryRun";
 
 export interface JevDecisionLine {
   key: string;
@@ -41,15 +32,14 @@ export interface JevDecisionsView {
 }
 
 export function jevFeatureLabel(feature: string): string {
-  return FEATURE_LABELS[feature] ?? feature;
+  return JEV_FEATURE_LABELS[feature] ?? feature;
 }
 
 function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisionTag | null {
   if (record.applied) return null;
-  if (status?.features[record.feature]?.shadow) {
-    return record.feature === "awayReply" ? "dryRun" : "shadow";
-  }
-  return "notApplied";
+  if (status === null) return null;
+  if (!status.features[record.feature]?.shadow) return null;
+  return record.feature === "awayReply" ? "dryRun" : "shadow";
 }
 
 /** JEV calls cost fractions of a cent, so the figure keeps the digits that carry it. */

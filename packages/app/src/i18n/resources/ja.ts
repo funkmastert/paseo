@@ -2088,7 +2088,6 @@ export const ja: TranslationResources = {
     jevTitle: "JEV の判断",
     jevShadow: "シャドー",
     jevDryRun: "ドライラン",
-    jevNotApplied: "未適用",
     jevOlder: "ほか {{count}} 件",
   },
   review: {

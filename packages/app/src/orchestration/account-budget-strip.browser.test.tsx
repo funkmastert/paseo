@@ -251,7 +251,7 @@ describe.each([
 
   it("lists each JEV feature with its mode and what it would have done", () => {
     const container = mountStrip();
-    if (compact) openJevDetails(container);
+    openJevDetails(container);
     const detail = (id: string) =>
       container.querySelector(`[data-testid="orchestration-account-detail-feature:${id}"]`)
         ?.textContent;
@@ -268,8 +268,8 @@ describe.each([
     const shown = (id: string) =>
       container.querySelector(`[data-testid="orchestration-account-detail-${id}"]`) !== null;
     expect(shown("lane:control:spent")).toBe(true);
-    // A phone folds the feature list behind a toggle; a wide panel has room for it.
-    expect(shown("feature:spawnHint")).toBe(!compact);
+    // The feature list folds behind a toggle on every form factor.
+    expect(shown("feature:spawnHint")).toBe(false);
   });
 
   it("keeps another provider's details off the strip", () => {
@@ -314,7 +314,7 @@ describe.each([
     expect(overflowing.map((node) => node.getAttribute("data-testid") ?? node.tagName)).toEqual([]);
   });
 
-  it.runIf(compact)("captures the strip with JEV's features open", async () => {
+  it("captures the strip with JEV's features open", async () => {
     await page.viewport(width + 24, 1400);
     const container = mountStrip();
     openJevDetails(container);

@@ -2076,7 +2076,6 @@ export const en = {
     jevTitle: "JEV decisions",
     jevShadow: "Shadow",
     jevDryRun: "Dry run",
-    jevNotApplied: "Not applied",
     jevOlder: "{{count}} older",
   },
   review: {

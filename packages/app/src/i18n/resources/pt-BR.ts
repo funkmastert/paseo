@@ -2101,7 +2101,6 @@ export const ptBR: TranslationResources = {
     jevTitle: "Decisões do JEV",
     jevShadow: "Sombra",
     jevDryRun: "Simulação",
-    jevNotApplied: "Não aplicada",
     jevOlder: "{{count}} anteriores",
   },
   review: {

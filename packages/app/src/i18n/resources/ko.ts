@@ -2079,7 +2079,6 @@ export const ko: TranslationResources = {
     jevTitle: "JEV 판단",
     jevShadow: "섀도",
     jevDryRun: "드라이 런",
-    jevNotApplied: "적용 안 됨",
     jevOlder: "이전 {{count}}건",
   },
   review: {

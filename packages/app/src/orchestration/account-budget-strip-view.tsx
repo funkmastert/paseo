@@ -168,10 +168,12 @@ function isAlert(detail: AccountDetailViewModel): boolean {
 }
 
 /**
- * A phone has room for the figures, not a feature list: a warning stays in view, and the rest
- * (JEV's features and what each did today) opens on a tap.
+ * Neither a phone nor a desktop panel has room for a feature-by-feature list beside every other
+ * account's figures: a warning stays in view, and the rest (JEV's features and what each did
+ * today) opens on a tap. The dashboard (docs/jev.md, "The JEV dashboard") is where that detail
+ * belongs full-time; this stays a fold until it ships.
  */
-function CompactDetails({
+function FoldableDetails({
   providerId,
   details,
 }: {
@@ -246,9 +248,7 @@ function AccountBudgetBody({
           <ProviderUsageWindowBar key={window.id} window={window} />
         ))}
         {balances}
-        {row.details.map((detail) => (
-          <AccountDetail key={detail.id} detail={detail} />
-        ))}
+        <FoldableDetails providerId={row.providerId} details={row.details} />
       </View>
     );
   }
@@ -269,7 +269,7 @@ function AccountBudgetBody({
       {balances.length > 0 || row.details.length > 0 ? (
         <View style={styles.bars}>
           {balances}
-          <CompactDetails providerId={row.providerId} details={row.details} />
+          <FoldableDetails providerId={row.providerId} details={row.details} />
         </View>
       ) : null}
     </>
@@ -438,10 +438,11 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.sm,
     textAlign: "right",
   },
-  // The toggle sits on the rows' leading rail, not centred under them.
+  // The toggle sits on the rows' leading rail, not centred under them. `xs` buttons pad
+  // horizontally by spacing[3] (control-geometry.ts), not spacing[2]: cancel that, not a guess.
   detailsToggle: {
     alignSelf: "flex-start",
-    marginLeft: -theme.spacing[2],
+    marginLeft: -theme.spacing[3],
   },
   balanceWarning: {
     color: theme.colors.statusWarning,
