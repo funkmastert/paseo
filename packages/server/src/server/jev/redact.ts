@@ -25,6 +25,26 @@ const SECRET_SUFFIX_RE =
   /(?:secret|token|passw(?:or)?d|passphrase|pwd|pass|key|auth|credentials?)$/i;
 
 const MIN_SECRET_LENGTH = 8;
+/** A PIN or a one-time code is short: `ADMIN_PIN=482913`. */
+const SHORT_SECRET_NAME_RE = /^(?:pin|passcode|otp)$/i;
+const MIN_SHORT_SECRET_LENGTH = 4;
+/** Names whose value is a `user:password` pair: `SMTP_LOGIN=ops:Hunter22pw`. */
+const PAIR_NAME_RE = /^(?:login|creds?|userpass|basic(?:auth)?)$/i;
+/**
+ * A key or a token as an assignment's whole value: a base64 run of 16 or more that ends the value.
+ * Sticky at the value's start and bounded, so a name in every few characters stays linear.
+ */
+const BASE64_VALUE_RE = /\\?["']?([A-Za-z0-9+/]{16,4096}={0,2})(?![\w+/=.:@-])/y;
+/** A password after an email address and a colon: `ops@example.com:Hunter22pw`. */
+const PAIR_PASSWORD_RE = /:([^\s"'`,;&|@:/]{4,256})/y;
+/** A JSON `"value": "…"`, as Terraform state keeps outputs and attributes. */
+const JSON_VALUE_RE = /"value"[ \t\r\n]{0,16}:[ \t\r\n]{0,16}"((?:[^"\\\r\n]|\\.){1,4096})"/g;
+/** `"sensitive": true` in the same object as a `"value"`, before or after it. */
+const SENSITIVE_RE = /"sensitive"[ \t\r\n]{0,16}:[ \t\r\n]{0,16}true/;
+/** The key whose object holds a `"value"`: `"admin_token": {"value": …`. */
+const VALUE_PARENT_RE =
+  /"([A-Za-z_][\w.-]{0,63})"[ \t\r\n]{0,16}:[ \t\r\n]{0,16}\{[ \t\r\n]{0,16}$/;
+const OBJECT_CONTEXT_CHARS = 256;
 const SAFE_KIND_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const LAST_CAMEL_WORD_RE = /(?:[A-Z][a-z0-9]+|[A-Z]+|[a-z0-9]+)$/;
 
@@ -456,7 +476,11 @@ function redactText(text: string, ctx: WalkContext): string {
   entropySpans(text, findings.secrets);
   bareRunSpans(text, findings.secrets);
   exactSpans(text, ctx.secrets, findings.secrets);
-  for (const match of text.matchAll(EMAIL_RE)) findings.emails.push(rangeOf(match));
+  sensitiveValueSpans(text, findings.secrets);
+  for (const match of text.matchAll(EMAIL_RE)) {
+    findings.emails.push(rangeOf(match));
+    pairPasswordSpan(text, rangeOf(match).end, findings.secrets);
+  }
   if (ctx.home) {
     for (const match of text.matchAll(ctx.home)) findings.homes.push(rangeOf(match));
   }
@@ -555,12 +579,83 @@ function userinfoSpans(text: string, findings: LeafFindings): void {
 function assignmentSpans(text: string, out: SecretSpan[]): void {
   const re = new RegExp(ASSIGNMENT_NAME_RE);
   for (let match = re.exec(text); match; match = re.exec(text)) {
-    if (!isSecretName(match[1])) continue;
+    const word = lastNameWord(match[1]);
+    if (SHORT_SECRET_NAME_RE.test(word)) {
+      const value = assignedValue(text, re.lastIndex);
+      if (value.end - value.start >= MIN_SHORT_SECRET_LENGTH)
+        out.push({ ...value, kind: "assignment" });
+      re.lastIndex = Math.max(re.lastIndex, value.end);
+      continue;
+    }
+    if (PAIR_NAME_RE.test(word)) {
+      const value = assignedValue(text, re.lastIndex);
+      const colon = text.slice(value.start, value.end).indexOf(":");
+      if (colon !== -1 && value.end - (value.start + colon + 1) >= MIN_SHORT_SECRET_LENGTH) {
+        out.push({ start: value.start + colon + 1, end: value.end, kind: "assignment" });
+      }
+      re.lastIndex = Math.max(re.lastIndex, value.end);
+      continue;
+    }
+    if (!isSecretName(match[1])) {
+      base64ValueSpan(text, re.lastIndex, out);
+      continue;
+    }
     const yamlLine =
       match[2] === ":" && PASSPHRASE_NAME_RE.test(match[1]) && startsLine(text, match.index);
     const value = yamlLine ? lineValue(text, re.lastIndex) : assignedValue(text, re.lastIndex);
     if (value.end - value.start >= MIN_SECRET_LENGTH) out.push({ ...value, kind: "assignment" });
     re.lastIndex = Math.max(re.lastIndex, value.end);
+  }
+}
+
+/** A name's last `_`/`-`/`.` segment, or that segment's last camelCase word: `ADMIN_PIN`, `adminPin`. */
+function lastNameWord(name: string): string {
+  const lastSegment = name.split(/[_.-]/).findLast((segment) => segment.length > 0) ?? "";
+  if (SHORT_SECRET_NAME_RE.test(lastSegment) || PAIR_NAME_RE.test(lastSegment)) return lastSegment;
+  return LAST_CAMEL_WORD_RE.exec(lastSegment)?.[0] ?? "";
+}
+
+/** Any name: a whole value shaped like a base64 key, `INTERNAL_SIGNING=Zm9v…`. */
+function base64ValueSpan(text: string, from: number, out: SecretSpan[]): void {
+  BASE64_VALUE_RE.lastIndex = from;
+  const match = BASE64_VALUE_RE.exec(text);
+  if (!match) return;
+  const run = match[1].replace(/=+$/, "");
+  const mixed = /[0-9]/.test(run) && /[A-Z]/.test(run) && /[a-z]/.test(run);
+  if (!mixed || classChangeRatio(run) < MIN_CLASS_CHANGE_RATIO) return;
+  const end = from + match[0].length;
+  out.push({ start: end - match[1].length, end, kind: "entropy" });
+}
+
+/** The password of `user@host:password`, right after the email address ends; a port is not one. */
+function pairPasswordSpan(text: string, emailEnd: number, out: SecretSpan[]): void {
+  PAIR_PASSWORD_RE.lastIndex = emailEnd;
+  const match = PAIR_PASSWORD_RE.exec(text);
+  if (match && !/^\d+$/.test(match[1])) {
+    out.push({ start: emailEnd + 1, end: emailEnd + match[0].length, kind: "userinfo" });
+  }
+}
+
+/**
+ * Terraform state and JSON like it: a `"value"` in an object marked `"sensitive": true`, or under
+ * a secret-shaped key (`"admin_token": {"value": …}`). The object is looked at 256 characters
+ * either side, so the scan stays linear.
+ */
+function sensitiveValueSpans(text: string, out: SecretSpan[]): void {
+  for (const match of text.matchAll(JSON_VALUE_RE)) {
+    const { start, end } = rangeOf(match);
+    const before = text.slice(Math.max(0, start - OBJECT_CONTEXT_CHARS), start);
+    const after = text.slice(end, end + OBJECT_CONTEXT_CHARS);
+    const objectBefore = before.slice(before.lastIndexOf("{"));
+    const objectAfter = after.slice(0, after.includes("}") ? after.indexOf("}") : after.length);
+    const parent = VALUE_PARENT_RE.exec(before)?.[1];
+    if (
+      SENSITIVE_RE.test(objectBefore) ||
+      SENSITIVE_RE.test(objectAfter) ||
+      (parent !== undefined && isSecretName(parent))
+    ) {
+      out.push({ start: end - 1 - match[1].length, end: end - 1, kind: "assignment" });
+    }
   }
 }
 
