@@ -1930,6 +1930,8 @@ export const es: TranslationResources = {
       accountLeadersHere: "Líderes {{count}}",
       accountWorkersHere: "Trabajadores {{count}}",
       accountBalanceLeft: "{{amount}} restantes",
+      accountDetailsShow: "Mostrar {{count}} más",
+      accountDetailsHide: "Mostrar menos",
       staleTitle: "Sin actualizar",
       staleLastSynced: "Última sincronización {{time}}",
       staleNeverSynced: "Aún sin sincronizar",
@@ -2113,6 +2115,10 @@ export const es: TranslationResources = {
     memoryFileWarning: "{{path}} tiene {{tokens}} tokens, por encima de {{limit}}.",
     reReadAdvice:
       "Esta sesión relee ~{{tokens}} tokens en cada turno. Una sesión nueva con un traspaso breve es más barata.",
+    jevTitle: "Decisiones de JEV",
+    jevShadow: "Sombra",
+    jevDryRun: "Simulación",
+    jevOlder: "{{count}} anteriores",
   },
   review: {
     comment: {

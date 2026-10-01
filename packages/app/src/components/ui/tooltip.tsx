@@ -28,6 +28,7 @@ import { FadeIn, FadeOut } from "react-native-reanimated";
 import { StyleSheet } from "react-native-unistyles";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { FloatingSurface } from "@/components/ui/floating";
+import { BORDER_WIDTH, SPACING } from "@/styles/theme";
 import { isWeb } from "@/constants/platform";
 import { getOverlayRoot, OVERLAY_Z } from "@/lib/overlay-root";
 
@@ -566,6 +567,15 @@ export function TooltipContent({
     </Modal>
   );
 }
+
+/**
+ * `content`'s horizontal padding and border, both sides — the frame outside the text a caller
+ * sizing a tooltip by its text width (e.g. `context-window-meter.tsx`'s `maxWidth`) must add back.
+ * `spacing` and `borderWidth` are static (color-scheme only touches tokens like `colors`), so this
+ * is a literal derived once, not a theme read (docs/unistyles.md, "Hard-coded constants for
+ * genuinely static values") — change `content`'s padding or border below and this stays correct.
+ */
+export const TOOLTIP_CONTENT_FRAME_X = 2 * (SPACING[2] + BORDER_WIDTH[1]);
 
 const styles = StyleSheet.create((theme) => ({
   overlay: { flex: 1 },
