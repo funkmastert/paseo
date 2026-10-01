@@ -1884,6 +1884,8 @@ export const ar: TranslationResources = {
       accountLeadersHere: "القادة {{count}}",
       accountWorkersHere: "العاملون {{count}}",
       accountBalanceLeft: "المتبقي {{amount}}",
+      accountDetailsShow: "عرض {{count}} أخرى",
+      accountDetailsHide: "عرض أقل",
       staleTitle: "لا يتم التحديث",
       staleLastSynced: "آخر مزامنة {{time}}",
       staleNeverSynced: "لم تتم المزامنة بعد",
@@ -2064,6 +2066,10 @@ export const ar: TranslationResources = {
     memoryFileWarning: "يبلغ حجم {{path}} {{tokens}} رمزًا، أي أكثر من {{limit}}.",
     reReadAdvice:
       "تعيد هذه الجلسة قراءة نحو {{tokens}} رمز في كل جولة. جلسة جديدة مع ملخص تسليم قصير أرخص.",
+    jevTitle: "قرارات JEV",
+    jevShadow: "وضع الظل",
+    jevDryRun: "تشغيل تجريبي",
+    jevOlder: "{{count}} أقدم",
   },
   review: {
     comment: {

@@ -1915,6 +1915,8 @@ export const ru: TranslationResources = {
       accountLeadersHere: "Лидеры {{count}}",
       accountWorkersHere: "Исполнители {{count}}",
       accountBalanceLeft: "осталось {{amount}}",
+      accountDetailsShow: "Показать ещё {{count}}",
+      accountDetailsHide: "Свернуть",
       staleTitle: "Не обновляется",
       staleLastSynced: "Последняя синхронизация: {{time}}",
       staleNeverSynced: "Ещё не синхронизировано",
@@ -2097,6 +2099,10 @@ export const ru: TranslationResources = {
     memoryFileWarning: "{{path}}: {{tokens}} токенов, больше {{limit}}.",
     reReadAdvice:
       "Эта сессия перечитывает ~{{tokens}} токенов на каждом ходу. Новая сессия с кратким handoff обойдётся дешевле.",
+    jevTitle: "Решения JEV",
+    jevShadow: "Теневой режим",
+    jevDryRun: "Пробный запуск",
+    jevOlder: "Ещё {{count}}",
   },
   review: {
     comment: {

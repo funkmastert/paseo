@@ -1935,6 +1935,8 @@ export const fr: TranslationResources = {
       accountLeadersHere: "Leaders {{count}}",
       accountWorkersHere: "Workers {{count}}",
       accountBalanceLeft: "{{amount}} restants",
+      accountDetailsShow: "Afficher {{count}} de plus",
+      accountDetailsHide: "Afficher moins",
       staleTitle: "Pas de mise à jour",
       staleLastSynced: "Dernière synchronisation {{time}}",
       staleNeverSynced: "Pas encore synchronisé",
@@ -2117,6 +2119,10 @@ export const fr: TranslationResources = {
     memoryFileWarning: "{{path}} fait {{tokens}} tokens, au-dessus de {{limit}}.",
     reReadAdvice:
       "Cette session relit ~{{tokens}} tokens à chaque tour. Une nouvelle session avec un court récapitulatif coûte moins cher.",
+    jevTitle: "Décisions de JEV",
+    jevShadow: "Mode fantôme",
+    jevDryRun: "Simulation",
+    jevOlder: "{{count}} plus anciennes",
   },
   review: {
     comment: {

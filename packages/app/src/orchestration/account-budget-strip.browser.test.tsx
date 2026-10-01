@@ -85,6 +85,65 @@ const OPENAI_USAGE: ProviderUsage = {
   planLabel: "pro",
   windows: [{ id: "session", label: "Session", usedPct: 97, resetsAt: hoursFromNow(3) }],
   balances: [{ id: "credits", label: "Credits", remaining: 4658.87, unit: "usd", tone: "ok" }],
+  // Another provider's details stay on its usage card, off the strip.
+  details: [{ id: "status", label: "Status", value: "active" }],
+};
+
+// JEV as its fetcher reports it on a day the control lane ran out: the spent lane first, then each
+// feature with its mode and what it did or would have done.
+const JEV_USAGE: ProviderUsage = {
+  providerId: "jev",
+  displayName: "JEV",
+  status: "available",
+  planLabel: "via OpenRouter",
+  windows: [],
+  balances: [
+    {
+      id: "control-today",
+      label: "Control today",
+      used: 1.004,
+      limit: 1,
+      unit: "usd",
+      tone: "warning",
+    },
+    { id: "tools-today", label: "Agent tools today", used: 0.0412, limit: 0.5, unit: "usd" },
+    { id: "ask-today", label: "Ask JEV today", used: 0.0006, limit: 0.25, unit: "usd" },
+    { id: "calls-today", label: "Calls today", used: 5180, unit: "requests" },
+  ],
+  details: [
+    {
+      id: "lane:control:spent",
+      label: "Control budget spent",
+      value:
+        "Spawn hint, Remediation triage, Finish triage, Stall judgment, Away reply off until midnight",
+      tone: "warning",
+    },
+    {
+      id: "feature:spawnHint",
+      label: "Spawn hint",
+      value: "Shadow · 14 creates answered 11 mechanical, 3 hard · $0.004",
+    },
+    {
+      id: "feature:remediationTriage",
+      label: "Remediation triage",
+      value:
+        "Shadow · 3× would have: no remediation agent; sent to a person of 5 decisions · $0.002",
+    },
+    {
+      id: "feature:notificationTriage",
+      label: "Finish triage",
+      value: "Shadow · 22 decisions, none would change anything · $0.009",
+    },
+    { id: "feature:stallJudgment", label: "Stall judgment", value: "Shadow" },
+    { id: "feature:compactionTiming", label: "Compaction timing", value: "Off" },
+    {
+      id: "feature:awayReply",
+      label: "Away reply",
+      value: "Dry run · 2× would reply of 3 decisions",
+    },
+    { id: "feature:agentTools", label: "Agent tools", value: "Live · 96 calls today · $0.041" },
+    { id: "feature:askJev", label: "Ask JEV", value: "Live · 2 questions today" },
+  ],
 };
 
 const agent = (provider: string, status: Agent["status"]) => ({ provider, status }) as Agent;
@@ -109,13 +168,23 @@ const FIXTURE_ROWS = buildAccountBudgetRows(
     account("claude-personal", "Claude Personal", 64, 87),
     account("claude-backup", "Claude Backup", 4, 12),
     OPENAI_USAGE,
+    JEV_USAGE,
   ],
-  [...POOL.map((member) => member.providerId), "codex"],
+  [...POOL.map((member) => member.providerId), "codex", "jev"],
   undefined,
   { pool: POOL, usage: TAB_COUNTS },
 );
 
 const FETCHED_AT = new Date(FIXTURE_NOW_MS - 90_000);
+
+function openJevDetails(container: HTMLElement) {
+  const toggle = container.querySelector<HTMLElement>(
+    '[data-testid="orchestration-account-details-toggle-jev"]',
+  );
+  expect(toggle?.textContent).toBe("Show 8 more");
+  act(() => toggle?.click());
+  expect(toggle?.textContent).toBe("Show less");
+}
 
 function Strip() {
   return (
@@ -141,14 +210,71 @@ describe.each([
     const container = mountStrip();
     const shown = Array.from(container.querySelectorAll('[data-testid^="orchestration-account-"]'))
       .map((node) => node.getAttribute("data-testid"))
-      .filter((id) => !id?.includes("usage-") && !id?.includes("balance-"));
+      .filter(
+        (id) =>
+          !id?.includes("usage-") &&
+          !id?.includes("balance-") &&
+          !id?.includes("detail-") &&
+          !id?.includes("details-"),
+      );
     expect(shown).toEqual([
       "orchestration-account-claude",
       "orchestration-account-claude-personal",
       "orchestration-account-claude-backup",
       "orchestration-account-section-rule",
       "orchestration-account-codex",
+      "orchestration-account-jev",
     ]);
+  });
+
+  it("names JEV by its vendor and says it goes through OpenRouter", () => {
+    const text = mountStrip().querySelector(
+      '[data-testid="orchestration-account-jev"]',
+    )?.textContent;
+    expect(text).toContain("TypeSafe (JEV)");
+    expect(text).toContain("Via OpenRouter");
+  });
+
+  it("shows JEV's spend per lane against its cap, the spent lane in the warning tone", () => {
+    const container = mountStrip();
+    const balance = (id: string) =>
+      container.querySelector(`[data-testid="orchestration-account-balance-${id}"]`);
+    expect(balance("control-today")?.textContent).toBe("Control today$1.00 / $1.00");
+    expect(balance("tools-today")?.textContent).toBe("Agent tools today$0.0412 / $0.50");
+    expect(balance("calls-today")?.textContent).toBe("Calls today5,180");
+    const spent = container.querySelector(
+      '[data-testid="orchestration-account-detail-lane:control:spent"]',
+    );
+    expect(spent?.textContent).toContain("Control budget spent");
+    expect(spent?.textContent).toContain("off until midnight");
+  });
+
+  it("lists each JEV feature with its mode and what it would have done", () => {
+    const container = mountStrip();
+    openJevDetails(container);
+    const detail = (id: string) =>
+      container.querySelector(`[data-testid="orchestration-account-detail-feature:${id}"]`)
+        ?.textContent;
+    expect(detail("spawnHint")).toBe(
+      "Spawn hintShadow · 14 creates answered 11 mechanical, 3 hard · $0.004",
+    );
+    expect(detail("awayReply")).toBe("Away replyDry run · 2× would reply of 3 decisions");
+    expect(detail("compactionTiming")).toBe("Compaction timingOff");
+    expect(detail("askJev")).toBe("Ask JEVLive · 2 questions today");
+  });
+
+  it("keeps the spent lane in view whether or not the feature list is open", () => {
+    const container = mountStrip();
+    const shown = (id: string) =>
+      container.querySelector(`[data-testid="orchestration-account-detail-${id}"]`) !== null;
+    expect(shown("lane:control:spent")).toBe(true);
+    // The feature list folds behind a toggle on every form factor.
+    expect(shown("feature:spawnHint")).toBe(false);
+  });
+
+  it("keeps another provider's details off the strip", () => {
+    const codex = mountStrip().querySelector('[data-testid="orchestration-account-codex"]');
+    expect(codex?.querySelector('[data-testid^="orchestration-account-detail-"]')).toBeNull();
   });
 
   it("names the OpenAI account and its plan, with no pool role", () => {
@@ -188,8 +314,18 @@ describe.each([
     expect(overflowing.map((node) => node.getAttribute("data-testid") ?? node.tagName)).toEqual([]);
   });
 
+  it("captures the strip with JEV's features open", async () => {
+    await page.viewport(width + 24, 1400);
+    const container = mountStrip();
+    openJevDetails(container);
+    await page.screenshot({
+      element: container,
+      path: `../../../../.artifacts/orchestration-account-strip-${name}-jev-open.png`,
+    });
+  });
+
   it("captures the strip", async () => {
-    await page.viewport(width + 24, 600);
+    await page.viewport(width + 24, compact ? 1400 : 900);
     const container = mountStrip();
     await page.screenshot({
       element: container,

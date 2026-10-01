@@ -1,5 +1,12 @@
 import { classify } from "./classify";
-import { WINDOW_ACCOUNT, WINDOW_FIVE_HOUR, WINDOW_SEVEN_DAY, isWeeklyWindow, modelWindowFor } from "./windows";
+import {
+  WINDOW_ACCOUNT,
+  WINDOW_FIVE_HOUR,
+  WINDOW_SEVEN_DAY,
+  isOtherModelWindow,
+  isWeeklyWindow,
+  modelWindowFor,
+} from "./windows";
 
 export type WindowStatus = "healthy" | "drained" | "capped" | "probation";
 
@@ -157,6 +164,25 @@ export function relevantWindows(modelId: string): string[] {
     windows.push(modelWindow);
   }
   return windows;
+}
+
+/**
+ * Every window that gates a spawn of `modelId` on one account: `relevantWindows`'s static list,
+ * plus any window already observed for the account that `isOtherModelWindow` doesn't rule out.
+ *
+ * `relevantWindows` alone misses three live cases, because it can only name the one model-scoped
+ * window it recognizes for `modelId`'s own family: a `weekly_surface_*` window (stops every
+ * model, never in the static list at all), a `weekly_model_*` window whose family isn't in
+ * `MODEL_FAMILIES` (e.g. a new model family), and any model-scoped window at all when `modelId`
+ * itself doesn't resolve to a known family (an unset or unmapped model, held to every window —
+ * the same convention the daemon's `windowLimitsModel` uses, see account-pool-headroom.ts). In
+ * all three the daemon counts the account dead for the spawn; missing the window here let the
+ * pool place the spawn there anyway.
+ */
+export function gatingWindowIds(modelId: string, observedWindowIds: readonly string[]): string[] {
+  return [...new Set([...relevantWindows(modelId), ...observedWindowIds])].filter(
+    (window) => !isOtherModelWindow(window, modelId),
+  );
 }
 
 export function createHealthTracker(options: HealthTrackerOptions = {}): HealthTracker {
@@ -320,7 +346,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   }
 
   function isHealthyFor(providerId: string, modelId: string): boolean {
-    return relevantWindows(modelId).every((window) => {
+    return gatingWindowIds(modelId, windowIds(providerId)).every((window) => {
       const state = getSettled(providerId, window);
       return state.status === "healthy" || state.status === "probation";
     });
@@ -329,7 +355,7 @@ export function createHealthTracker(options: HealthTrackerOptions = {}): HealthT
   /** The settled windows a spawn of `modelId` must get past; every observed window with none named. */
   function gatingWindows(providerId: string, modelId?: string): InternalWindowState[] {
     if (modelId) {
-      return relevantWindows(modelId).map((window) => getSettled(providerId, window));
+      return gatingWindowIds(modelId, windowIds(providerId)).map((window) => getSettled(providerId, window));
     }
     const providerWindows = windowsFor(providerId);
     for (const [window, state] of providerWindows) {
