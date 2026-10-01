@@ -17,9 +17,13 @@ import { JEV_ASK_QUESTION_ID, JevSession, type JevAskAgentThread } from "./jev-s
 type AskRequest = Extract<SessionInboundMessage, { type: "jev.ask.request" }>;
 type AskResponse = Extract<SessionOutboundMessage, { type: "jev.ask.response" }>;
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  for (const cleanup of cleanups.splice(0)) cleanup();
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => {
+  // Reverse order: a later cleanup (e.g. a service's stop(), which awaits its ledger/audit
+  // flush) may still be writing into a directory an earlier cleanup is about to remove. Running
+  // teardown LIFO settles writes before the temp dir goes away, instead of racing rmSync against
+  // an in-flight fs.mkdir/appendFile and failing with ENOTEMPTY.
+  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -39,6 +43,11 @@ function harness(
   mkdirSync(path.join(home, "mobile-worktrees", "app"), { recursive: true });
   const { readAgentThread, ...serviceOptions } = options;
   const service = createTestJevService({ paseoHome: home, homeDir: home, ...serviceOptions });
+  // Audit lines are written off-path (audit.ts's append()), so a test that never calls
+  // service.stop() itself leaves that write in flight when the temp dir gets removed. stop() is
+  // idempotent (flush()/writeChain no-op once settled), so this is safe alongside the one test
+  // that already awaits it directly to read the audit file.
+  cleanups.push(() => service.stop());
   const emitted: SessionOutboundMessage[] = [];
   const session = new JevSession({
     host: { emit: (msg) => emitted.push(msg) },
