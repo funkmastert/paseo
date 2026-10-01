@@ -6826,6 +6826,24 @@ export const DeviceStatusBlockedSchema = z.object({
   at: z.string(),
 });
 
+// COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30. A
+// connected physical device — a USB Android phone, an iPhone paired with or without a cable.
+// No slot/headroom fields: a phone costs the Mac no memory (docs/device-leases.md, Physical
+// devices).
+export const PhysicalDeviceStatusEntrySchema = z.object({
+  id: z.string(),
+  platform: z.enum(["ios", "android"]),
+  name: z.string().optional(),
+  transport: z.enum(["usb", "network"]),
+  connected: z.boolean(),
+  /** Seconds until an unplugged device's lease releases on its own. Absent when connected. */
+  graceRemainingSeconds: z.number().optional(),
+  agentId: z.string().optional(),
+  heldForSeconds: z.number().optional(),
+  reason: z.string().optional(),
+  reserved: z.boolean(),
+});
+
 // COMPAT(deviceLeases): added in v0.8.1, remove gating when all clients read device status.
 // Copies mcp_status_update's pattern exactly: new session message, SessionEventSubscriptionSchema
 // entry, feature flag, permission mapping to daemon.read, subscription-gated emission.
@@ -6843,6 +6861,8 @@ export const DeviceStatusUpdateMessageSchema = z.object({
     // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.
     enforcement: z.array(DeviceStatusProviderEnforcementSchema).optional(),
     generatedAt: z.string(),
+    // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+    physicalDevices: z.array(PhysicalDeviceStatusEntrySchema).optional(),
   }),
 });
 
@@ -7832,6 +7852,7 @@ export type McpGatewayStatusEntry = z.infer<typeof McpGatewayStatusEntrySchema>;
 export type McpStatusUpdateMessage = z.infer<typeof McpStatusUpdateMessageSchema>;
 export type DeviceStatusUpdateMessage = z.infer<typeof DeviceStatusUpdateMessageSchema>;
 export type DeviceStatusEntry = z.infer<typeof DeviceStatusEntrySchema>;
+export type PhysicalDeviceStatusEntry = z.infer<typeof PhysicalDeviceStatusEntrySchema>;
 export type DeviceStatusProviderEnforcement = z.infer<typeof DeviceStatusProviderEnforcementSchema>;
 export type DeviceLeaseReleaseRequest = z.infer<typeof DeviceLeaseReleaseRequestSchema>;
 export type DeviceLeaseReleaseResponse = z.infer<typeof DeviceLeaseReleaseResponseSchema>;

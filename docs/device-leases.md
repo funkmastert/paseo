@@ -190,6 +190,48 @@ Device cap would have refused a device launch
 
 An `xcodebuild test` run clones simulators onto disk and deletes them when it ends; a killed run leaves them. `agent-gone` is the right signal for that, but a lease is the wrong owner — it is released the moment the device stops, which is the event that was supposed to take the clone with it. [The artifact janitor](artifact-janitor.md) keeps its own cleanup obligations and reads the same agent list this registry does. All it needs from here is `listLeasedDeviceIds`, so it never deletes a device somebody is holding.
 
+## Physical devices
+
+A USB Pixel, an iPhone paired over the network with no cable — leased too, but not through the cap above. A phone costs the Mac no memory, so there is no slot cap or memory-headroom check for one; the point is narrower: stop one agent's `adb install` from overwriting another agent's install on the same phone.
+
+### Why they bypass the cap
+
+`PhysicalDeviceLeaseManager` (`physical-device-lease-manager.ts`) is a separate manager from `DeviceLeaseManager`, not another job inside it. It shares two things with the emulator cap rather than duplicating them: the `agents.deviceLeases` enabled/dryRun toggle — one switch for the whole feature — and the reservation store, since a reservation is just a device id, physical or not.
+
+### Detection sources
+
+Connections change constantly, so this is live detection, not a `ps` sample:
+
+- **Android**: a daemon-owned `adb track-devices -l` child (`AdbTrackDevicesService`). adb's host protocol frames every response with a 4-hex-character length prefix; the CLI subcommand relays that framing unmodified, one frame per connect/disconnect, each frame the full current device list rather than a diff. The child restarts with backoff if it or the adb server dies; an ENOENT (adb not installed) turns detection off instead of retrying forever.
+- **iOS**: polling `xcrun devicectl list devices --json-output <file>` (`DevicectlPollingService`) — devicectl has no watch mode. Only `reality: "physical"` entries count; simulators are the process scan's job. macOS only, and an ENOENT (Xcode command line tools missing) stops polling for good.
+
+`properties.connection.state` in devicectl's JSON looks like the field that answers "is it reachable", and it isn't: it tracks devicectl's own remote-virtualization tunnel (what `devicectl device install`/`process launch` use), and it reads `"disconnected"` on a device the plain-text `devicectl list devices` table calls "available (paired)" at the same instant — verified against a real iPhone paired over the network with no active tunnel. Presence in the polled device list is the connectivity signal used instead: devicectl only lists what it currently detects, so a device that stops being reachable drops out of the list on its own.
+
+### The grace period
+
+A disconnected device keeps its lease for `graceMinutes` (30) — phones get unplugged and re-paired constantly, and dropping the holder on the first missed poll would hand a mid-session device to the next agent that asks. The clock starts at the sweep that first notices the disconnect, not retroactively at the real disconnect time (nothing was watching before that sweep ran), the same way the emulator cap's `pendingTtlMinutes` works. Reconnecting inside the window keeps the same holder; past it, the lease releases as `device-disconnected`.
+
+### What the gate checks
+
+`gateInstall` is the enforcement point — the physical-device analog of the emulator cap's `gateLaunch`, called from the same PreToolUse hook. `device-install-commands.ts` recognizes the commands that install, uninstall, or launch on a device that already exists (the emulator cap's `device-launch-commands.ts` deliberately excludes these, since they cost no slot): `adb install`/`install-multiple`/`uninstall`/`shell am start`/`shell pm clear`, `gradlew install*`, `expo run:android|ios --device`, `react-native run-android --deviceId`/`run-ios --udid`, `devicectl device install`/`process launch --device`, `xcodebuild -destination` naming a physical id or name, `ios-deploy --id`, `flutter run -d`. Read-only commands (`adb devices`, `adb logcat`) are never matched at all.
+
+Resolving a command's target:
+
+- a free, unreserved device → leased to the agent on the spot, command proceeds
+- held by another agent → refused (or recorded, in dry run), naming the holder
+- reserved for Tyler → refused regardless of holder
+- untargeted, with more than one connected device of the command's platform → refused; the gate can't know which one was meant (`gradlew installDebug` with no `ANDROID_SERIAL` is refused here even with only two devices connected, since it would install on both)
+- untargeted, with exactly one connected device → that one is the target
+- names a device the gate doesn't currently see connected → nothing to protect; allowed through, and the command fails on its own
+
+`ANDROID_SERIAL`, `adb -s`, `--device`, `--deviceId`, `--udid`, and `-destination 'id=…'` are all recognized as targets.
+
+### Checkout
+
+`device_checkout` takes `kind: "physical"` (default is `"simulator"`, the emulator cap) and an optional `device` naming a serial or UDID. No waiting queue: unlike the emulator cap, a physical device doesn't free up on its own the way a slot does when a device stops, so there is nothing worth parking an agent for — `checkout` returns `unavailable` immediately when nothing is free, and the agent is told to ask again. The response names the serial/UDID and exactly how to target it (`adb -s <serial> …` / `ANDROID_SERIAL=<serial>`, or `--device <udid>` / `-destination 'id=<udid>'`).
+
+"Reserved for you" applies the same way it does to a simulator or emulator — checkout and the install gate both exclude a reserved device, named explicitly or not.
+
 ## Why this is not part of the resource monitor
 
 [The resource monitor](resource-monitor.md) watches usage and reacts once it is already bad: memory, CPU, swap, abandoned build daemons. This decides whether something starts at all. They share one `ps` sample and the same safety discipline — off by default, dry-runnable, fails open — but a threshold that fires after the fact cannot prevent the launch that crossed it.

@@ -139,6 +139,12 @@ export class PhysicalDeviceLeaseManager {
     return () => this.listeners.delete(listener);
   }
 
+  /** Same reason as DeviceLeaseManager.refreshSnapshot: a daemon-config edit to the shared
+   * agents.deviceLeases toggle doesn't otherwise make this push a fresh update on its own. */
+  refreshSnapshot(): void {
+    this.notify();
+  }
+
   private notify(): void {
     for (const listener of this.listeners) {
       try {

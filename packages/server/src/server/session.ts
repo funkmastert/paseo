@@ -1710,10 +1710,16 @@ export class Session {
    */
   private ensureDeviceStatusSubscription(): void {
     if (this.unsubscribeDeviceStatus) return;
-    this.unsubscribeDeviceStatus = this.agentManager.onDeviceStatusChange(() => {
+    const emitIfSubscribed = () => {
       if (!this.wantsEvent("device_status_update")) return;
       void this.emitDeviceStatusUpdate();
-    });
+    };
+    const unsubscribeEmulator = this.agentManager.onDeviceStatusChange(emitIfSubscribed);
+    const unsubscribePhysical = this.agentManager.onPhysicalDeviceStatusChange(emitIfSubscribed);
+    this.unsubscribeDeviceStatus = () => {
+      unsubscribeEmulator();
+      unsubscribePhysical();
+    };
   }
 
   /**
@@ -1725,6 +1731,7 @@ export class Session {
     try {
       const snapshot = await this.agentManager.getDeviceStatusSnapshot();
       if (!snapshot) return;
+      const physical = await this.agentManager.getPhysicalDeviceStatusSnapshot();
       const message = {
         type: "device_status_update" as const,
         payload: {
@@ -1738,6 +1745,7 @@ export class Session {
           blocked: snapshot.blocked,
           enforcement: snapshot.enforcement,
           generatedAt: snapshot.generatedAt,
+          ...(physical ? { physicalDevices: physical.devices } : {}),
         },
       };
       if (source) this.emitForSource(message, source);

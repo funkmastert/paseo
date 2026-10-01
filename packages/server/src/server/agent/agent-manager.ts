@@ -1,5 +1,6 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import type { DeviceShutdownResult, DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { PhysicalDeviceStatusSnapshot } from "./physical-device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
 import {
   describeHookAgent,
@@ -198,6 +199,19 @@ export interface DeviceLeaseStatusSource {
     deviceId: string;
     confirmMidTurnHolder?: boolean;
   }): Promise<DeviceShutdownResult>;
+}
+
+/**
+ * The physical-device analog of DeviceLeaseStatusSource. Separate rather than folded into it:
+ * physical devices have no slot cap and no shutdown action, and their reservation store is the
+ * same instance the emulator cap uses — reserve/unreserve above already reach a physical device
+ * id without this interface's help, which is why it's narrower (no reserve/unreserve of its own).
+ */
+export interface PhysicalDeviceLeaseStatusSource {
+  getSnapshot(): Promise<PhysicalDeviceStatusSnapshot>;
+  subscribe(listener: () => void): () => void;
+  releaseLeaseForDevice(deviceId: string): boolean;
+  refreshSnapshot(): void;
 }
 
 export class AgentManagerShuttingDownError extends Error {
@@ -1285,6 +1299,7 @@ export class AgentManager {
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
+  private physicalDeviceLeaseStatusSource: PhysicalDeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
@@ -1514,6 +1529,10 @@ export class AgentManager {
     this.deviceLeaseStatusSource = source;
   }
 
+  setPhysicalDeviceLeaseStatusSource(source: PhysicalDeviceLeaseStatusSource | null): void {
+    this.physicalDeviceLeaseStatusSource = source;
+  }
+
   /**
    * The durable finish-report ledger (docs/finish-reports.md), set by bootstrap. Hung off the
    * manager so `setupFinishNotification` reaches it from every call site without a new
@@ -1607,12 +1626,26 @@ export class AgentManager {
    * (or any other writer) is reflected without waiting on the next sweep. */
   refreshDeviceStatus(): void {
     this.deviceLeaseStatusSource?.refreshSnapshot();
+    this.physicalDeviceLeaseStatusSource?.refreshSnapshot();
   }
 
-  /** Releases whoever's lease is bound to this device. False when nobody held it or the cap
-   * isn't wired. */
+  /** Current physical-device snapshot, or null when no detection is wired. */
+  async getPhysicalDeviceStatusSnapshot(): Promise<PhysicalDeviceStatusSnapshot | null> {
+    return (await this.physicalDeviceLeaseStatusSource?.getSnapshot()) ?? null;
+  }
+
+  /** Subscribes to physical-device changes; returns an unsubscribe function. No-ops when unwired. */
+  onPhysicalDeviceStatusChange(listener: () => void): () => void {
+    return this.physicalDeviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Releases whoever's lease is bound to this device — tries the emulator cap first, then
+   * physical devices, since the Devices UI's "Release" action doesn't know which kind a row is.
+   * False when nobody held it in either, or neither is wired. */
   async releaseDeviceLease(deviceId: string): Promise<boolean> {
-    return (await this.deviceLeaseStatusSource?.releaseLeaseForDevice(deviceId)) ?? false;
+    const released = (await this.deviceLeaseStatusSource?.releaseLeaseForDevice(deviceId)) ?? false;
+    if (released) return true;
+    return this.physicalDeviceLeaseStatusSource?.releaseLeaseForDevice(deviceId) ?? false;
   }
 
   async setDeviceReservation(deviceId: string, reserved: boolean): Promise<void> {

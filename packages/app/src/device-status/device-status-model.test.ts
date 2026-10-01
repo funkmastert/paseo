@@ -227,3 +227,86 @@ describe("buildDeviceStatusStripModel and the provider asymmetry", () => {
     expect(model.rows.every((row) => row.enforcement === undefined)).toBe(true);
   });
 });
+
+describe("buildDeviceStatusStripModel and physical devices", () => {
+  test("a connected physical device becomes a row with its last-4-character short id", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            name: "Fake Pixel",
+            transport: "usb",
+            connected: true,
+            reserved: false,
+            agentId: "agent-1",
+            heldForSeconds: 120,
+          },
+        ],
+      }),
+      { "agent-1": "Android build" },
+    );
+
+    expect(model.physicalRows).toEqual([
+      {
+        key: "FAKESERIAL45291",
+        id: "FAKESERIAL45291",
+        shortId: "5291",
+        platform: "android",
+        name: "Fake Pixel",
+        transport: "usb",
+        connected: true,
+        reserved: false,
+        agentId: "agent-1",
+        agentLabel: "Android build",
+        heldForSeconds: 120,
+      },
+    ]);
+  });
+
+  test("a physical device with no simulator/emulator running still keeps the panel visible", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 0,
+        physicalDevices: [
+          {
+            id: "00000000-000FAKE00E0001",
+            platform: "ios",
+            transport: "network",
+            connected: true,
+            reserved: false,
+          },
+        ],
+      }),
+    );
+
+    expect(model.hasData).toBe(true);
+    expect(model.rows).toEqual([]);
+  });
+
+  test("a disconnected physical device carries the grace countdown", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            transport: "usb",
+            connected: false,
+            reserved: false,
+            agentId: "agent-1",
+            graceRemainingSeconds: 900,
+          },
+        ],
+      }),
+    );
+
+    expect(model.physicalRows[0]).toMatchObject({ connected: false, graceRemainingSeconds: 900 });
+  });
+
+  test("no physicalDevices field at all (an older daemon) is an empty list, not an error", () => {
+    const model = buildDeviceStatusStripModel(payload({ used: 1 }));
+    expect(model.physicalRows).toEqual([]);
+  });
+});

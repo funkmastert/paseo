@@ -2,6 +2,7 @@ import type { DeviceStatusUpdateMessage } from "@getpaseo/protocol/messages";
 
 type DeviceStatusPayload = DeviceStatusUpdateMessage["payload"];
 type DeviceStatusEntry = DeviceStatusPayload["devices"][number];
+type PhysicalDeviceStatusEntry = NonNullable<DeviceStatusPayload["physicalDevices"]>[number];
 
 export type DeviceStatusTone = "ok" | "warning" | "danger";
 
@@ -34,6 +35,22 @@ export interface DeviceStatusRow {
   isRunning: boolean;
 }
 
+export interface PhysicalDeviceStatusRow {
+  key: string;
+  id: string;
+  /** The last 4 characters only (docs/device-leases.md) — never the full serial/UDID. */
+  shortId: string;
+  platform: "ios" | "android";
+  name?: string;
+  transport: "usb" | "network";
+  connected: boolean;
+  graceRemainingSeconds?: number;
+  agentId?: string;
+  agentLabel?: string;
+  heldForSeconds?: number;
+  reserved: boolean;
+}
+
 /** "Enforcing", "Dry run", or the cap turned off entirely. What the Devices section's header
  * reads, and what the dry-run switch reflects. */
 export type DeviceStatusMode = "off" | "dryRun" | "enforcing";
@@ -58,6 +75,8 @@ export interface DeviceStatusStripModel {
   blocked: DeviceStatusPayload["blocked"];
   /** Devices running under nobody's lease. Called out because they are the cap's blind spot. */
   unleasedCount: number;
+  /** Connected physical devices (USB/network) — outside the slot cap entirely. */
+  physicalRows: PhysicalDeviceStatusRow[];
   /**
    * Providers with a live agent that the cap cannot refuse outright, weakest first. A cap that
    * silently binds some agents and not others is the half-truth that makes the whole readout
@@ -130,6 +149,30 @@ function countUnleased(devices: readonly DeviceStatusEntry[]): number {
     .length;
 }
 
+function toPhysicalRow(
+  device: PhysicalDeviceStatusEntry,
+  agentLabels: Record<string, string>,
+): PhysicalDeviceStatusRow {
+  return {
+    key: device.id,
+    id: device.id,
+    shortId: device.id.slice(-4),
+    platform: device.platform,
+    transport: device.transport,
+    connected: device.connected,
+    reserved: device.reserved,
+    ...(device.name ? { name: device.name } : {}),
+    ...(device.graceRemainingSeconds !== undefined
+      ? { graceRemainingSeconds: device.graceRemainingSeconds }
+      : {}),
+    ...(device.agentId ? { agentId: device.agentId } : {}),
+    ...(device.agentId && agentLabels[device.agentId]
+      ? { agentLabel: agentLabels[device.agentId] }
+      : {}),
+    ...(device.heldForSeconds !== undefined ? { heldForSeconds: device.heldForSeconds } : {}),
+  };
+}
+
 export function buildDeviceStatusStripModel(
   payload: DeviceStatusPayload | undefined,
   agentLabels: Record<string, string> = {},
@@ -138,10 +181,12 @@ export function buildDeviceStatusStripModel(
   const waiting = payload?.waiting ?? [];
   const used = payload?.used ?? 0;
   const totalSlots = payload?.totalSlots ?? 0;
+  const physicalDevices = payload?.physicalDevices ?? [];
   return {
     // A daemon with the cap off and nothing running has nothing to say; the strip disappears
-    // rather than sitting there reporting zero.
-    hasData: devices.length > 0 || waiting.length > 0,
+    // rather than sitting there reporting zero. Physical devices have no "cap off" state, so
+    // any connected one is enough on its own to keep the panel visible.
+    hasData: devices.length > 0 || waiting.length > 0 || physicalDevices.length > 0,
     enabled: payload?.enabled ?? false,
     dryRun: payload?.dryRun ?? false,
     mode: resolveMode(payload),
@@ -153,5 +198,6 @@ export function buildDeviceStatusStripModel(
     blocked: payload?.blocked ?? [],
     unleasedCount: countUnleased(devices),
     unenforcedProviders: resolveUnenforcedProviders(payload),
+    physicalRows: physicalDevices.map((device) => toPhysicalRow(device, agentLabels)),
   };
 }

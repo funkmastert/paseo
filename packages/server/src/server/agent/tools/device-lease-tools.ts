@@ -20,6 +20,7 @@ import {
   resolveDeviceLaunchEnforcement,
 } from "../device-launch-enforcement.js";
 import type { DeviceLeaseManager, DeviceStatusSnapshot } from "../device-lease-manager.js";
+import type { PhysicalDeviceLeaseManager } from "../physical-device-lease-manager.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
 
 export interface RegisterDeviceLeaseToolsOptions {
@@ -30,6 +31,10 @@ export interface RegisterDeviceLeaseToolsOptions {
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => void;
   manager: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot">;
+  /** Physical devices (docs/device-leases.md, Physical devices) — `device_checkout` routes to
+   * this instead when the caller asks for `kind: "physical"`. Absent on a daemon that hasn't
+   * wired physical detection in (tests, an older build). */
+  physicalManager?: Pick<PhysicalDeviceLeaseManager, "checkout" | "checkin" | "getSnapshot">;
   callerAgentId?: string;
   /** Throws when the caller is gone, so it is resolved lazily at each call, not at register. */
   resolveCallerProvider?: () => string | undefined;
@@ -39,6 +44,7 @@ export interface RegisterDeviceLeaseToolsOptions {
 }
 
 const PlatformSchema = z.enum(["ios", "android"]);
+const KindSchema = z.enum(["simulator", "physical"]);
 
 const NO_AGENT_MESSAGE =
   "Device checkout needs to know which agent is asking, and this session has no agent id.";
@@ -110,13 +116,34 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
           .min(1)
           .optional()
           .describe(
-            "Use this specific already-running device (its UDID or AVD name) instead of letting " +
-              "the cap pick one. When it isn't running, a new device is booted for you instead.",
+            "Use this specific already-running device (its UDID or AVD name, or — for kind " +
+              '"physical" — its serial/UDID) instead of letting the cap pick one. For a ' +
+              "simulator/emulator, naming one that isn't running boots a new device instead.",
           ),
+        kind: KindSchema.optional().describe(
+          'Defaults to "simulator" (a booted iOS simulator or Android emulator, counted against ' +
+            'the slot cap). "physical" checks out a connected USB/network device instead — no ' +
+            "slot cap, but it protects against another agent overwriting your install.",
+        ),
       },
     },
     async (input, context) => {
       if (!callerAgentId) return toResult({ error: NO_AGENT_MESSAGE }, true);
+      if (input.kind === "physical") {
+        if (!options.physicalManager) {
+          return toResult(
+            { error: "Physical device detection is not available on this daemon." },
+            true,
+          );
+        }
+        const result = await options.physicalManager.checkout({
+          agentId: callerAgentId,
+          platform: input.platform,
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.device ? { device: input.device } : {}),
+        });
+        return toResult(result, result.status === "unavailable");
+      }
       const result = await manager.checkout({
         agentId: callerAgentId,
         platform: input.platform,
@@ -140,10 +167,19 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
         "Shut the device down too — the slot is also freed automatically when the device stops or the agent ends.",
       inputSchema: {
         leaseId: z.string().optional().describe("Defaults to every slot this agent holds."),
+        kind: KindSchema.optional(),
       },
     },
     async (input) => {
       if (!callerAgentId) return toResult({ error: NO_AGENT_MESSAGE }, true);
+      if (input.kind === "physical") {
+        const released =
+          (await options.physicalManager?.checkin({
+            agentId: callerAgentId,
+            ...(input.leaseId ? { leaseId: input.leaseId } : {}),
+          })) ?? 0;
+        return toResult({ released });
+      }
       const released = await manager.checkin({
         agentId: callerAgentId,
         ...(input.leaseId ? { leaseId: input.leaseId } : {}),
@@ -159,15 +195,18 @@ export function registerDeviceLeaseTools(options: RegisterDeviceLeaseToolsOption
       description:
         "Every iOS simulator and Android emulator running on this machine, who holds each one and for how long, " +
         "and how they count against the cap. Counted from the process list, so devices nobody checked out are included. " +
+        "Also includes connected physical devices (USB/network) and who holds each — no slot cap for those. " +
         "Also says what the cap can and cannot do about your own device launches, which depends on which agent you are.",
       inputSchema: {},
     },
     async () => {
       const snapshot = await manager.getSnapshot();
+      const physical = await options.physicalManager?.getSnapshot();
       const enforcement = describeCallerEnforcement();
       return toResult({
         summary: summarize(snapshot),
         ...snapshot,
+        ...(physical ? { physicalDevices: physical.devices } : {}),
         ...(enforcement ? { yourEnforcement: enforcement } : {}),
       });
     },
