@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,12 +33,28 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
+// execSync's shell-string form needs a shell that understands POSIX quoting — cmd.exe, the
+// default on Windows, does not, and silently mis-splits a 'quoted multi-word' argument. Tokenize
+// ourselves and run git directly so no shell is involved.
+function shellSplit(command: string): string[] {
+  const tokens: string[] = [];
+  const pattern = /'([^']*)'|(\S+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(command)) !== null) {
+    tokens.push(match[1] !== undefined ? match[1] : (match[2] as string));
+  }
+  return tokens;
+}
+
 function git(cwd: string, command: string): void {
-  execSync(`git -c commit.gpgsign=false ${command}`, { cwd, stdio: "pipe" });
+  execFileSync("git", ["-c", "commit.gpgsign=false", ...shellSplit(command)], {
+    cwd,
+    stdio: "pipe",
+  });
 }
 
 function initGitRepoWithRemote(repoDir: string, remoteDir: string): void {
-  execSync(`git init --bare -b main ${remoteDir}`, { stdio: "pipe" });
+  execFileSync("git", ["init", "--bare", "-b", "main", remoteDir], { stdio: "pipe" });
   git(repoDir, "init -b main");
   git(repoDir, "config user.email 'paseo-test@example.com'");
   git(repoDir, "config user.name 'Paseo Test'");

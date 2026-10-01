@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -86,7 +87,9 @@ describe("collectJevSecretValues", () => {
           },
         }),
         readFile: (filePath) => {
-          expect(filePath).toBe("/tmp/openai.env");
+          // expandUserPath resolves to an absolute native path, so "/tmp/openai.env" becomes
+          // a drive-prefixed backslash path on win32 — compare against the same resolution.
+          expect(filePath).toBe(resolve("/tmp/openai.env"));
           return "MY_OPENAI=sk-file-value-3333\n";
         },
       }),

@@ -1126,30 +1126,37 @@ describe("AgentResourceMonitor reaper", () => {
     expect(reapPushes(push.sent)).toHaveLength(0);
   });
 
-  test("a same-uid daemon with no marker is reaped once its resolved cwd sits under an agent's worktree", async () => {
-    const clock = { ms: 1_000_000 };
-    const { signaller, sent } = createFakeSignaller();
-    const unmarkedCommand =
-      "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
-      "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
-      "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
-    const { monitor, push } = createMonitor({
-      agents: [],
-      processRows: [gradleDaemonRow({ command: unmarkedCommand })],
-      config: REAP_ON,
-      signaller,
-      now: () => clock.ms,
-      agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
-      cwdResolver: {
-        resolve: async () => new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
-      },
-    });
+  // The reaper's same-uid path compares a process row's uid against process.getuid(), which is
+  // undefined on win32 (no uid concept there) — structurally never matches, so these two can
+  // never exercise the branch they test on Windows without a separate, SID-based ownership
+  // strategy for that platform.
+  test.skipIf(process.platform === "win32")(
+    "a same-uid daemon with no marker is reaped once its resolved cwd sits under an agent's worktree",
+    async () => {
+      const clock = { ms: 1_000_000 };
+      const { signaller, sent } = createFakeSignaller();
+      const unmarkedCommand =
+        "/Applications/Android Studio.app/Contents/jbr/Contents/Home/bin/java -Xmx6g " +
+        "-cp /Users/t/.gradle/lib/gradle-daemon-main-9.7.1.jar " +
+        "org.gradle.launcher.daemon.bootstrap.GradleDaemon 9.7.1";
+      const { monitor, push } = createMonitor({
+        agents: [],
+        processRows: [gradleDaemonRow({ command: unmarkedCommand })],
+        config: REAP_ON,
+        signaller,
+        now: () => clock.ms,
+        agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
+        cwdResolver: {
+          resolve: async () => new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+        },
+      });
 
-    await sweep(monitor, 20, clock);
+      await sweep(monitor, 20, clock);
 
-    expect(sent).toEqual([{ pid: 28056, signal: "SIGTERM" }]);
-    expect(reapPushes(push.sent)).toHaveLength(1);
-  });
+      expect(sent).toEqual([{ pid: 28056, signal: "SIGTERM" }]);
+      expect(reapPushes(push.sent)).toHaveLength(1);
+    },
+  );
 
   test("a same-uid daemon whose resolved cwd is nobody's agent workspace is still spared", async () => {
     const clock = { ms: 1_000_000 };
@@ -1201,48 +1208,55 @@ describe("AgentResourceMonitor reaper", () => {
     expect(reapPushes(push.sent)).toHaveLength(0);
   });
 
-  test("an agent's idle Metro is reaped only while no client is connected to it", async () => {
-    const metroRow = row({
-      pid: 31337,
-      ppid: 1,
-      uid: OWNER_UID,
-      rssKb: 900_000,
-      cpuPercent: 0,
-      command:
-        "/usr/local/bin/node /Users/t/.paseo/worktrees/abc12345/node_modules/.bin/expo start",
-    });
-    const run = async (connected: boolean) => {
-      const clock = { ms: 1_000_000 };
-      const { signaller, sent } = createFakeSignaller();
-      const asked: number[][] = [];
-      const { monitor } = createMonitor({
-        agents: [],
-        processRows: [metroRow],
-        config: REAP_ON,
-        signaller,
-        now: () => clock.ms,
-        agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
-        cwdResolver: {
-          resolve: async () => new Map([[31337, "/Users/t/.paseo/worktrees/abc12345"]]),
-        },
-        connectionChecker: {
-          check: async (pids) => {
-            asked.push([...pids]);
-            return new Map(pids.map((pid) => [pid, connected] as const));
-          },
-        },
+  // Same reason as the skip above: this row's reap path also goes through the same-uid gate,
+  // which process.getuid() being undefined on win32 can never satisfy.
+  test.skipIf(process.platform === "win32")(
+    "an agent's idle Metro is reaped only while no client is connected to it",
+    async () => {
+      const metroRow = row({
+        pid: 31337,
+        ppid: 1,
+        uid: OWNER_UID,
+        rssKb: 900_000,
+        cpuPercent: 0,
+        command:
+          "/usr/local/bin/node /Users/t/.paseo/worktrees/abc12345/node_modules/.bin/expo start",
       });
-      await sweep(monitor, 30, clock);
-      return { sent, asked };
-    };
+      const run = async (connected: boolean) => {
+        const clock = { ms: 1_000_000 };
+        const { signaller, sent } = createFakeSignaller();
+        const asked: number[][] = [];
+        const { monitor } = createMonitor({
+          agents: [],
+          processRows: [metroRow],
+          config: REAP_ON,
+          signaller,
+          now: () => clock.ms,
+          agentCwds: ["/Users/t/.paseo/worktrees/abc12345"],
+          cwdResolver: {
+            resolve: async () => new Map([[31337, "/Users/t/.paseo/worktrees/abc12345"]]),
+          },
+          connectionChecker: {
+            check: async (pids) => {
+              asked.push([...pids]);
+              return new Map(pids.map((pid) => [pid, connected] as const));
+            },
+          },
+        });
+        await sweep(monitor, 30, clock);
+        return { sent, asked };
+      };
 
-    const phoneConnected = await run(true);
-    expect(phoneConnected.sent).toEqual([]);
-    expect(phoneConnected.asked.every((pids) => pids.length === 1 && pids[0] === 31337)).toBe(true);
+      const phoneConnected = await run(true);
+      expect(phoneConnected.sent).toEqual([]);
+      expect(phoneConnected.asked.every((pids) => pids.length === 1 && pids[0] === 31337)).toBe(
+        true,
+      );
 
-    const nobodyConnected = await run(false);
-    expect(nobodyConnected.sent).toEqual([{ pid: 31337, signal: "SIGTERM" }]);
-  });
+      const nobodyConnected = await run(false);
+      expect(nobodyConnected.sent).toEqual([{ pid: 31337, signal: "SIGTERM" }]);
+    },
+  );
 
   test("a daemon that refuses the signal is warned about once and then left alone", async () => {
     const clock = { ms: 1_000_000 };
