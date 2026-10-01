@@ -96,6 +96,10 @@ import {
   JevDecisionsListResponseSchema,
   JevAskRequestSchema,
   JevAskResponseSchema,
+  JevSavingsSummaryRequestSchema,
+  JevSavingsSummaryResponseSchema,
+  JevSavingsEventsRequestSchema,
+  JevSavingsEventsResponseSchema,
 } from "./jev/rpc-schemas.js";
 import {
   PaseoConfigRawSchema,
@@ -3876,6 +3880,8 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   JevScopeCheckRequestSchema,
   JevDecisionsListRequestSchema,
   JevAskRequestSchema,
+  JevSavingsSummaryRequestSchema,
+  JevSavingsEventsRequestSchema,
   ResumeAgentRequestMessageSchema,
   ImportAgentRequestMessageSchema,
   RefreshAgentRequestMessageSchema,
@@ -4347,9 +4353,7 @@ export const ServerInfoStatusPayloadSchema = z
         jev: z.boolean().optional(),
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
         jevAsk: z.boolean().optional(),
-        // COMPAT(jevSavings): dashboard track's stand-in ahead of the savings
-        // track's seam commit, which owns this field for real. Reconcile at
-        // merge: take the seam's version.
+        // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: z.boolean().optional(),
       })
       .optional(),
@@ -7579,6 +7583,8 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   JevScopeCheckResponseSchema,
   JevDecisionsListResponseSchema,
   JevAskResponseSchema,
+  JevSavingsSummaryResponseSchema,
+  JevSavingsEventsResponseSchema,
   ListCommandsResponseSchema,
   ListTerminalsResponseSchema,
   TerminalsChangedSchema,

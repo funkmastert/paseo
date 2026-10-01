@@ -331,6 +331,8 @@ export interface JevService {
   checkScope(scope: JevEgressScope): Promise<"ok" | "excluded">;
   status(): JevStatus;
   readonly decisions: JevDecisionSink;
+  /** The savings ledger (docs/jev.md, "Savings"): one record per JEV involvement. */
+  readonly savings: JevSavingsSink;
   /** The agent's decisions, newest first, including its spawn hint. Serves `jev.decisions.list`. */
   listDecisions(agentId: string): JevDecisionRecord[];
 }
@@ -526,10 +528,7 @@ export interface JevSavingsInput {
   pending?: boolean;
 }
 
-/**
- * The savings track adds `readonly savings: JevSavingsSink` to `JevService`. Every method appends
- * off the caller's path and never throws.
- */
+/** `JevService.savings`. Every method appends off the caller's path and never throws. */
 export interface JevSavingsSink {
   /**
    * Appends an involvement and returns its id. `mode`, `outcome`, `at` and `jevCostUsd` come from
