@@ -80,7 +80,7 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
       jevUsd: 0.0002,
       jevInputTokens: 2_000,
       resultChars: 470,
-      readTokensAvoided: 6_714,
+      readTokensAvoided: 10_000,
       callerContextTokens: 100_000,
       cwd: "/repo",
       paths: ["/repo/src/a.ts"],
@@ -118,6 +118,22 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
       validation: { outcome: "regret" },
       tokensSavedEstimate: -7_550,
     });
+  });
+
+  test("T_avoided is the tools track's own count, used as it is (review example 2)", async () => {
+    // The tools branch's `estimateReadTokens` for a 20,000-character, 400-line file: characters
+    // plus Read's 7-character line prefix, at 2.35 characters a token (`jev-tool-use-log.ts`).
+    const readTokensAvoided = Math.ceil((20_000 + 7 * 400) / 2.35);
+    expect(readTokensAvoided).toBe(9_703);
+    const { savings } = await ledger();
+    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+
+    adapt(toolLine({ readTokensAvoided, resultChars: 470, callerContextTokens: 150_000 }));
+
+    const [record] = savings.events({ range: "today" }).events;
+    expect(record?.basis?.inputs).toMatchObject({ T_avoided: 9_703, T_result: 200, C: 150_000 });
+    // (9,703 - 200) x 14.5 x 0.5 - (0.1 x 150,000 + 2,200) x 0.5
+    expect(record?.tokensSavedEstimate).toBe(60_297);
   });
 
   test("a refusal is nothing, an unavailable call is a not-asked count, ask_jev_diff_risk claims nothing", async () => {

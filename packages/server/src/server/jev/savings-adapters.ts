@@ -4,7 +4,7 @@ import type { Logger } from "pino";
 
 import type { JevSavingsSink } from "./contract.js";
 import { JevSavingsLedger } from "./savings.js";
-import { estimateContextTokens, JEV_CHARS_PER_TOKEN } from "./savings-formulas.js";
+import { estimateContextTokens } from "./savings-formulas.js";
 import { pendingSavingsFor } from "./savings-hooks.js";
 
 /**
@@ -18,8 +18,6 @@ import { pendingSavingsFor } from "./savings-hooks.js";
 const POLL_INTERVAL_MS = 15_000;
 /** Feature 4's validation window: a read of a path sent to JEV within this is a regret. */
 const TOOL_REGRET_WINDOW_MS = 60 * 60_000;
-/** `estimateReadTokens` on the tools branch: 3.5 bytes a token, plus a token a line. */
-const TOOLS_BYTES_PER_TOKEN = 3.5;
 /** The stall track's floors for `blocked_missing_info` and `waiting_on_human` (`STALL_JUDGMENT_FLOORS`). */
 const PERSON_FIRST_FLOOR = 0.75;
 const PERSON_FIRST_ACTIVITIES = new Set(["blocked_missing_info", "waiting_on_human"]);
@@ -112,17 +110,20 @@ function num(line: Line, key: string): number | null {
 
 /**
  * Features 4-6: one tool call, as `tool-use.jsonl` records it (`JevToolUseRecord`). Mode, outcome
- * and cost come from the line, which sums every JEV call the tool made. `T_avoided` converts the
- * line's `readTokensAvoided` (3.5 bytes a token) to 2.35 characters a token, and the basis says so.
- * A path sent to JEV is watched for a regret read. `callId` is the tool call's first JEV call once
- * the tools code passes it; the adapter, which has none, builds one from the agent, time and tool.
+ * and cost come from the line, which sums every JEV call the tool made. `T_avoided` is the line's
+ * `readTokensAvoided` as it is: the tools track counts it at 2.35 characters a token, with Read's
+ * 7-character line prefix (`estimateReadTokens`), so converting it again would inflate it. A path
+ * sent to JEV is watched for a regret read. `callId` is the tool call's first JEV call once the
+ * tools code passes it; the adapter, which has none, builds one from the agent, time and tool.
+ * `record` is `object` so the tools code can pass its typed `JevToolUseRecord` as it is.
  */
 export function recordToolUseSavings(
   savings: JevSavingsSink | null | undefined,
-  line: Line,
+  record: object,
   context: { callId?: string | null; model: string | null },
 ): string {
   if (!(savings instanceof JevSavingsLedger)) return "";
+  const line = record as Line;
   const agentId = str(line, "agentId");
   const tool = str(line, "tool");
   const at = str(line, "at");
@@ -146,8 +147,8 @@ export function recordToolUseSavings(
       facts: {
         tool,
         answered,
-        tAvoided: Math.round((avoided * TOOLS_BYTES_PER_TOKEN) / JEV_CHARS_PER_TOKEN),
-        tAvoidedSource: `readTokensAvoided ${avoided} at 3.5 bytes a token, rescaled to ${JEV_CHARS_PER_TOKEN} characters`,
+        tAvoided: avoided,
+        tAvoidedSource: "readTokensAvoided, the tools track's count at 2.35 characters a token",
         tResult: estimateContextTokens(num(line, "resultChars") ?? 0),
         callerContextTokens: num(line, "callerContextTokens"),
         model: context.model,
