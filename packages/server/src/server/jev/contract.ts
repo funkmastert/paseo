@@ -497,6 +497,10 @@ export interface JevSavingsSettlement {
   tokensSavedEstimate: number | null;
   otherBenefit: JevOtherBenefit | null;
   basis: JevSavingsBasis | null;
+  /** The facts this settlement added, so a restart reprices from the same inputs. */
+  facts?: Record<string, string | number | boolean | null>;
+  /** Still waiting on another fact after this one. Absent: no longer pending. */
+  pending?: boolean;
 }
 
 /** A later line for the same id: what the validation window saw. At most one per id. */
