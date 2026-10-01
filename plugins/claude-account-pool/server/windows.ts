@@ -56,15 +56,23 @@ export function modelWindowFor(modelId: string): string | undefined {
 
 /**
  * Whether `window` is a weekly window scoped to a model other than `modelId`'s, so it bounds
- * nothing a spawn of `modelId` needs. False when no model is named: then nothing can be ruled out.
- * The family is read from the window id, so a daemon id like `weekly_model_fable_5` still matches
- * a Fable model.
+ * nothing a spawn of `modelId` needs. False when no model is named, or when `modelId` doesn't
+ * resolve to a known family (an unset, default, or unrecognized model): either way nothing can be
+ * ruled out, so the model is held to the window instead — the same convention the daemon's
+ * `windowLimitsModel` uses (account-pool-headroom.ts) for a model with no known family. The
+ * family is read from the window id, so a daemon id like `weekly_model_fable_5` still matches a
+ * Fable model, and a window for a family this list doesn't recognize (e.g. a new model family)
+ * still isn't ruled out for a same-family model.
  */
 export function isOtherModelWindow(window: string, modelId: string): boolean {
-  if (!modelId || !window.startsWith("weekly_model_")) {
+  if (!window.startsWith("weekly_model_")) {
     return false;
   }
-  return detectModelFamily(window.slice("weekly_model_".length)) !== detectModelFamily(modelId);
+  const agentFamily = modelId ? detectModelFamily(modelId) : undefined;
+  if (agentFamily === undefined) {
+    return false;
+  }
+  return detectModelFamily(window.slice("weekly_model_".length)) !== agentFamily;
 }
 
 /**

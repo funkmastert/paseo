@@ -10,8 +10,7 @@
  * Health decides *whether* an account may be used; this decides *which* of the ones that may.
  * Scoring never overrides a cap.
  */
-import { relevantWindows, type HealthTracker } from "./health";
-import { isOtherModelWindow } from "./windows";
+import { gatingWindowIds, type HealthTracker } from "./health";
 
 /** Just the reads scoring needs, so callers can pass a full HealthTracker or a stub. */
 export type HeadroomHealth = Pick<HealthTracker, "describeWindow" | "windowIds">;
@@ -101,11 +100,7 @@ export function scoreAccount(
   // is how a "best" candidate turns out to be capped. Another model's weekly window bounds
   // nothing this spawn needs, and scoring it demoted an account with a full Sonnet week for Opus
   // work it had room for.
-  const windows = new Set(
-    [...relevantWindows(modelId), ...health.windowIds(providerId)].filter(
-      (window) => !isOtherModelWindow(window, modelId),
-    ),
-  );
+  const windows = gatingWindowIds(modelId, health.windowIds(providerId));
 
   let lowest: number | null = null;
   for (const window of windows) {

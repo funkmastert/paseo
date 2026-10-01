@@ -1,7 +1,7 @@
 import { POOL_FAMILY } from "../shared/role-policy-schema";
 import { echoed } from "./echo";
 import { rankByHeadroom, type HeadroomHealth } from "./headroom";
-import { relevantWindows, type HealthTracker } from "./health";
+import { gatingWindowIds, type HealthTracker } from "./health";
 
 /**
  * The account half of "what should this agent be", extracted from
@@ -165,7 +165,7 @@ export function cappedWindowFor(
   providerId: string,
   modelId: string,
 ): CappedWindow | undefined {
-  const windows = modelId ? relevantWindows(modelId) : health.windowIds(providerId);
+  const windows = modelId ? gatingWindowIds(modelId, health.windowIds(providerId)) : health.windowIds(providerId);
   for (const window of windows) {
     const state = health.describeWindow(providerId, window);
     if (state?.status === "capped") {
