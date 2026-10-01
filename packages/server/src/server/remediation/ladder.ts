@@ -85,6 +85,21 @@ interface ResolvedCondition {
 }
 
 /**
+ * The config's `graceMinutes` replaces the observation's `graceMs`; the sender's own hold is added
+ * on top of either, so rung 2 never starts before the sender has acted.
+ */
+function resolveGraceMs(
+  override: RemediationConditionOverride | undefined,
+  observation: RemediationObservation,
+): number {
+  const graceMs =
+    override?.graceMinutes !== undefined
+      ? override.graceMinutes * MINUTE_MS
+      : (observation.graceMs ?? 0);
+  return graceMs + (observation.holdMs ?? 0);
+}
+
+/**
  * The remediation ladder (docs/remediation.md). Monitors report conditions through `observe`;
  * the ladder keeps one episode per key, starts at most one bounded agent for it, and tells a
  * person once when neither the remedy nor the agent could fix it. Every change is written to
@@ -543,21 +558,6 @@ export class RemediationLadder implements RemediationSink {
       this.logger.warn({ err: error }, "Remediation ladder: push failed");
     }
   }
-}
-
-/**
- * The config's `graceMinutes` replaces the observation's `graceMs`; the sender's own hold is added
- * on top of either, so rung 2 never starts before the sender has acted.
- */
-function resolveGraceMs(
-  override: RemediationConditionOverride | undefined,
-  observation: RemediationObservation,
-): number {
-  const graceMs =
-    override?.graceMinutes !== undefined
-      ? override.graceMinutes * MINUTE_MS
-      : (observation.graceMs ?? 0);
-  return graceMs + (observation.holdMs ?? 0);
 }
 
 function toStoredObservation(observation: RemediationObservation): LadderEpisode["observation"] {
