@@ -3453,7 +3453,7 @@ export async function createPaseoDaemon(
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
     spawnHintSavings.stop();
-    savingsAdapters.stop();
+    await savingsAdapters.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");

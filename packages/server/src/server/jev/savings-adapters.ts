@@ -30,9 +30,15 @@ const STALL_FLOORS: Readonly<Record<string, number>> = {
 
 type Line = Record<string, unknown>;
 
-/** Follows one JSONL file from its end, across one rotation to `rotatedPath`. */
+/**
+ * Follows one JSONL file from its end, across one rotation to `rotatedPath`. A new inode at the
+ * path is a rotation only when the rotated file is the one being followed; otherwise the file was
+ * rewritten in place (a boot prune), its lines are old, and the tail restarts at its end. Where the
+ * filesystem reports no inode, a shrink is read as a rotation.
+ */
 export class JsonlTail {
   private offset: number | null = null;
+  private ino = 0;
   private remainder = Buffer.alloc(0);
 
   constructor(
@@ -43,18 +49,28 @@ export class JsonlTail {
 
   /** Starts at the file's current end. */
   async start(): Promise<void> {
-    this.offset = (await fs.stat(this.filePath).catch(() => null))?.size ?? 0;
+    const stat = await fs.stat(this.filePath).catch(() => null);
+    this.offset = stat?.size ?? 0;
+    this.ino = stat?.ino ?? 0;
   }
 
   async poll(): Promise<void> {
     if (this.offset === null) await this.start();
-    const size = (await fs.stat(this.filePath).catch(() => null))?.size ?? 0;
+    const stat = await fs.stat(this.filePath).catch(() => null);
+    const size = stat?.size ?? 0;
+    const ino = stat?.ino ?? 0;
     const offset = this.offset ?? 0;
-    if (size < offset) {
-      // Rotated: the rest of the old file is the rotated one's tail.
-      await this.readFrom(this.rotatedPath, offset);
+    const replaced = ino !== 0 && this.ino !== 0 ? ino !== this.ino : size < offset;
+    if (replaced) {
+      const rotated = await fs.stat(this.rotatedPath).catch(() => null);
+      const wasRotated = this.ino === 0 || ino === 0 || rotated?.ino === this.ino;
+      // The rest of the old file is the rotated one's tail, and the new file is all new.
+      if (wasRotated) await this.readFrom(this.rotatedPath, offset);
       this.remainder = Buffer.alloc(0);
-      this.offset = 0;
+      this.offset = wasRotated ? 0 : size;
+      this.ino = ino;
+    } else if (this.ino === 0) {
+      this.ino = ino;
     }
     if (size > (this.offset ?? 0))
       this.offset = await this.readFrom(this.filePath, this.offset ?? 0);
@@ -297,13 +313,16 @@ function closeEpisode(savings: JevSavingsSink, byEpisode: Map<string, string>, l
   }
 }
 
-/** Tails both files and polls them every 15 seconds. Stop flushes nothing: the ledger owns that. */
+/**
+ * Tails both files and polls them every 15 seconds. `stop` polls a last time, so the lines of the
+ * last interval count; the ledger flushes them after.
+ */
 export function startSavingsAdapters(options: {
   jevDir: string;
   savings: JevSavingsSink;
   readAgentModel: (agentId: string) => string | null;
   logger: Logger;
-}): { stop(): void; poll(): Promise<void> } {
+}): { stop(): Promise<void>; poll(): Promise<void> } {
   const tails = [
     new JsonlTail(
       path.join(options.jevDir, "tool-use.jsonl"),
@@ -328,7 +347,10 @@ export function startSavingsAdapters(options: {
   const timer = setInterval(() => void poll(), POLL_INTERVAL_MS);
   timer.unref?.();
   return {
-    stop: () => clearInterval(timer),
+    stop: async () => {
+      clearInterval(timer);
+      await poll();
+    },
     poll,
   };
 }

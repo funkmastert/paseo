@@ -19,6 +19,7 @@ import {
   createStallJudgmentSavingsAdapter,
   createToolUseSavingsAdapter,
   JsonlTail,
+  startSavingsAdapters,
 } from "./savings-adapters.js";
 import { createRemediationSavingsHook, RemediationAgentCosts } from "./savings-hooks.js";
 
@@ -71,6 +72,73 @@ describe("JsonlTail", () => {
     writeFileSync(file, `${JSON.stringify({ n: 4 })}\n`);
     await tail.poll();
     expect(seen).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe("JsonlTail edges (review m3)", () => {
+  test("a file rewritten in place, as a boot prune does, is not read as a rotation", async () => {
+    const dir = tempDir();
+    const file = path.join(dir, "stall-judgments.jsonl");
+    const rotated = path.join(dir, "stall-judgments.1.jsonl");
+    writeFileSync(rotated, `${JSON.stringify({ n: "rotated-old" })}\n`.repeat(20));
+    writeFileSync(file, `${JSON.stringify({ n: "old" })}\n`.repeat(10));
+    const seen: unknown[] = [];
+    const tail = new JsonlTail(file, rotated, (line) => seen.push(line["n"]));
+    await tail.start();
+
+    // The prune writes a shorter file and renames it over the old one.
+    writeFileSync(`${file}.tmp`, `${JSON.stringify({ n: "old" })}\n`.repeat(2));
+    renameSync(`${file}.tmp`, file);
+    await tail.poll();
+    appendFileSync(file, `${JSON.stringify({ n: "new" })}\n`);
+    await tail.poll();
+    expect(seen).toEqual(["new"]);
+  });
+
+  test("a rotation is seen even when the new file already outgrew the old offset", async () => {
+    const dir = tempDir();
+    const file = path.join(dir, "tool-use.jsonl");
+    const rotated = path.join(dir, "tool-use.1.jsonl");
+    writeFileSync(file, `${JSON.stringify({ n: 0 })}\n`);
+    const seen: unknown[] = [];
+    const tail = new JsonlTail(file, rotated, (line) => seen.push(line["n"]));
+    await tail.start();
+
+    appendFileSync(file, `${JSON.stringify({ n: 1 })}\n`);
+    renameSync(file, rotated);
+    writeFileSync(file, `${JSON.stringify({ n: 2, pad: "x".repeat(200) })}\n`);
+    await tail.poll();
+    expect(seen).toEqual([1, 2]);
+  });
+
+  test("stop polls a last time, so the last lines before shutdown count", async () => {
+    const dir = tempDir();
+    const { savings } = await ledger();
+    const adapters = startSavingsAdapters({
+      jevDir: dir,
+      savings,
+      readAgentModel: () => "claude-sonnet-5",
+      logger: pino({ level: "silent" }),
+    });
+    await adapters.poll();
+    appendFileSync(
+      path.join(dir, "tool-use.jsonl"),
+      `${JSON.stringify({
+        v: 1,
+        at: new Date(NOON).toISOString(),
+        agentId: "agent-1",
+        tool: "ask_jev_file_bool",
+        outcome: "answered",
+        jevCalls: 1,
+        jevUsd: 0.0001,
+        resultChars: 100,
+        readTokensAvoided: 1_000,
+        callerContextTokens: null,
+        paths: ["/repo/a.ts"],
+      })}\n`,
+    );
+    await adapters.stop();
+    expect(savings.events({ range: "today" }).events).toHaveLength(1);
   });
 });
 
