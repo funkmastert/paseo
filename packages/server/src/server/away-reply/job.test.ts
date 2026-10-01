@@ -26,6 +26,7 @@ import {
   harness,
   type Harness,
 } from "./test-utils/harness.js";
+import type { JevServiceRuntime } from "../jev/service.js";
 
 const SENTINEL = "SENTINEL-LAST-MESSAGE-4d2a";
 const GO_WITH_B_TEXT = `${MARKER} Go with option B. ${AWAY_REPLY_GUARD}`;
@@ -771,12 +772,14 @@ describe("dry run (D6), the default", () => {
 
   it("reports to the savings ledger: a dry-run reply is pending until Tyler's answer settles its minutes", async () => {
     const h = setup({ awayReply: {} });
-    await h.service.start();
+    // The harness's default service is the real one over the fake.
+    const jev = h.service as JevServiceRuntime;
+    await jev.start();
     h.waitingLeader();
     h.waitingLeader(OPTIONS_MESSAGE, "leader-2");
     h.at(T0 + 62 * MINUTE);
     await h.job.tick();
-    const pending = h.service.savings.events({ range: "all" }).events;
+    const pending = jev.savings.events({ range: "all" }).events;
     expect(pending).toHaveLength(2);
     expect(pending[0]).toMatchObject({
       feature: "awayReply",
@@ -785,7 +788,7 @@ describe("dry run (D6), the default", () => {
       benefit: "time",
       pending: true,
     });
-    expect(h.service.listDecisions("leader-1")[0]).toMatchObject({
+    expect(jev.listDecisions("leader-1")[0]).toMatchObject({
       mode: "shadow",
       wouldBe: "reply:option",
       savingsId: expect.stringMatching(/^sv_/),
@@ -796,9 +799,7 @@ describe("dry run (D6), the default", () => {
     h.at(T0 + 95 * MINUTE);
     await h.job.tick();
 
-    const byAgent = new Map(
-      h.service.savings.events({ range: "all" }).events.map((e) => [e.agentId, e]),
-    );
+    const byAgent = new Map(jev.savings.events({ range: "all" }).events.map((e) => [e.agentId, e]));
     expect(byAgent.get("leader-1")).toMatchObject({
       pending: false,
       tokensSavedEstimate: null,
@@ -809,7 +810,7 @@ describe("dry run (D6), the default", () => {
       otherBenefit: { unit: "minutes", value: 0 },
       validation: { outcome: "contradicted" },
     });
-    await h.service.stop();
+    await jev.stop();
   });
 
   it("fills in whether Tyler made the same choice when he answers", async () => {
