@@ -210,6 +210,20 @@ type ResponsePayload<T extends CoordinationResponseType> = Extract<
   { type: T }
 >["payload"];
 
+/** A host without coordination (only a test) answers every request as disabled. */
+export function createCoordinationSession(
+  options: Omit<CoordinationSessionOptions, "coordination"> & {
+    coordination: CoordinationSessionOptions["coordination"] | undefined;
+  },
+): CoordinationSession {
+  return new CoordinationSession({
+    ...options,
+    coordination: options.coordination ?? {
+      require: () => Promise.reject(new CoordinationUnavailableError("Coordination is not wired.")),
+    },
+  });
+}
+
 function actorOf(actor: string | undefined): string {
   return actor?.trim() ? actor : HUMAN_WORK_ITEM_OWNER;
 }

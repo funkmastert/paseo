@@ -1248,6 +1248,24 @@ function createFinishObligationService(input: {
 }
 
 // Wired once the WebSocket server exists: it owns the push sender and the provider-usage cache.
+function createCoordinationRuntime(input: {
+  config: Pick<PaseoDaemonConfig, "paseoHome" | "coordination" | "coordinationOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  logger: Logger;
+}): CoordinationRuntime {
+  const { config, agentManager, agentStorage, logger } = input;
+  const onCommitStep = config.coordinationOverrides?.onCommitStep;
+  return new CoordinationRuntime({
+    paseoHome: config.paseoHome,
+    config: config.coordination,
+    logger,
+    deliver: createAgentPromptDeliverer({ agentManager, agentStorage, logger }),
+    turns: createAgentTurnSource(agentManager),
+    ...(onCommitStep ? { onCommitStep } : {}),
+  });
+}
+
 function createAccountFailoverMonitor(input: {
   config: Pick<PaseoDaemonConfig, "accountFailoverOverrides">;
   agentManager: AgentManager;
@@ -2526,16 +2544,7 @@ export async function createPaseoDaemon(
 
   // Built here so the WebSocket server and the agent tools can hold it; opened by start() below,
   // after the monitors. See docs/work-queue.md#surfaces.
-  const coordination = new CoordinationRuntime({
-    paseoHome: config.paseoHome,
-    config: config.coordination,
-    logger,
-    deliver: createAgentPromptDeliverer({ agentManager, agentStorage, logger }),
-    turns: createAgentTurnSource(agentManager),
-    ...(config.coordinationOverrides?.onCommitStep
-      ? { onCommitStep: config.coordinationOverrides.onCommitStep }
-      : {}),
-  });
+  const coordination = createCoordinationRuntime({ config, agentManager, agentStorage, logger });
 
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,

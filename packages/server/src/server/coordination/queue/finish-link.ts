@@ -51,7 +51,7 @@ export class WorkQueueFinishLink {
 
   async idle(): Promise<void> {
     while (this.inFlight.size > 0) {
-      await Promise.allSettled([...this.inFlight]);
+      await Promise.allSettled(this.inFlight);
     }
   }
 

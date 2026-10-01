@@ -63,7 +63,11 @@ describe("coordination session", () => {
     });
     expect(closed).toMatchObject({ payload: { item: { state: "done", owner: "human" } } });
 
-    const shown = await send({ type: "coordination.queue.show.request", requestId: "r4", id: "wi-1" });
+    const shown = await send({
+      type: "coordination.queue.show.request",
+      requestId: "r4",
+      id: "wi-1",
+    });
     expect(shown).toMatchObject({ type: "coordination.queue.show.response" });
     if (shown.type !== "coordination.queue.show.response") throw new Error("wrong type");
     expect(shown.payload.transitions?.map((row) => row.to)).toEqual([
@@ -93,7 +97,11 @@ describe("coordination session", () => {
   });
 
   it("answers an unknown id as not_found", async () => {
-    const response = await send({ type: "coordination.queue.show.request", requestId: "r1", id: "nope" });
+    const response = await send({
+      type: "coordination.queue.show.request",
+      requestId: "r1",
+      id: "nope",
+    });
     expect(response).toMatchObject({ payload: { errorCode: "not_found" } });
   });
 
@@ -142,7 +150,8 @@ describe("coordination session", () => {
     const off = new CoordinationSession({
       host: { emit: (msg) => emitted.push(msg) },
       coordination: {
-        require: () => Promise.reject(new CoordinationUnavailableError("Coordination is disabled.")),
+        require: () =>
+          Promise.reject(new CoordinationUnavailableError("Coordination is disabled.")),
       },
       logger: createTestLogger(),
     });

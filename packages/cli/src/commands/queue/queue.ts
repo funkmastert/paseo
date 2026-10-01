@@ -165,7 +165,12 @@ export async function queueClaim(
 ): Promise<QueueWriteResult> {
   const payload = await client.coordinationQueueClaim({ id, actor });
   const item = requireItem(payload);
-  return { action: "Claimed", changed: payload.changed !== false, item, next: nextQueueStep(item, actor) };
+  return {
+    action: "Claimed",
+    changed: payload.changed !== false,
+    item,
+    next: nextQueueStep(item, actor),
+  };
 }
 
 export async function queueDone(
@@ -181,7 +186,12 @@ export async function queueDone(
     actor,
   });
   const item = requireItem(payload);
-  return { action: "Closed", changed: payload.changed !== false, item, next: nextQueueStep(item, actor) };
+  return {
+    action: "Closed",
+    changed: payload.changed !== false,
+    item,
+    next: nextQueueStep(item, actor),
+  };
 }
 
 export async function queueBlock(
@@ -197,7 +207,12 @@ export async function queueBlock(
     actor,
   });
   const item = requireItem(payload);
-  return { action: "Blocked", changed: payload.changed !== false, item, next: nextQueueStep(item, actor) };
+  return {
+    action: "Blocked",
+    changed: payload.changed !== false,
+    item,
+    next: nextQueueStep(item, actor),
+  };
 }
 
 export async function queueHandoff(
@@ -269,7 +284,13 @@ export function queueListSchema(full: boolean): OutputSchema<QueueRow> {
     serialize: (row) =>
       full
         ? row.item
-        : { id: row.id, state: row.state, owner: row.owner, title: row.title, closure: row.closure },
+        : {
+            id: row.id,
+            state: row.state,
+            owner: row.owner,
+            title: row.title,
+            closure: row.closure,
+          },
   };
 }
 
@@ -304,11 +325,16 @@ export function renderQueueShow(result: QueueShowResult): string {
     ...(item.handedOffFrom ? [`handed off from: ${item.handedOffFrom}`] : []),
     ...(item.handedOffTo ? [`handed off to: ${item.handedOffTo}`] : []),
     ...(item.delivery
-      ? [`delivery: ${item.delivery.state}${item.delivery.reason ? ` (${item.delivery.reason})` : ""}`]
+      ? [
+          `delivery: ${item.delivery.state}${item.delivery.reason ? ` (${item.delivery.reason})` : ""}`,
+        ]
       : []),
   ];
   if (item.body) {
-    lines.push("", full || item.body.length <= 400 ? item.body : `${item.body.slice(0, 399)}… (--full for all)`);
+    lines.push(
+      "",
+      full || item.body.length <= 400 ? item.body : `${item.body.slice(0, 399)}… (--full for all)`,
+    );
   }
   const transitions = full ? result.transitions : result.transitions.slice(-5);
   if (transitions.length > 0) {
@@ -412,7 +438,9 @@ export async function runQueueLsCommand(
 ): Promise<ListResult<QueueRow>> {
   const rows = await withQueueClient(options, (client) =>
     queueList(client, {
-      ...(options.owner ? { owner: options.owner === "me" ? resolveQueueActor(options) : options.owner } : {}),
+      ...(options.owner
+        ? { owner: options.owner === "me" ? resolveQueueActor(options) : options.owner }
+        : {}),
       ...(options.state ? { states: options.state as WorkItem["state"][] } : {}),
       ...(options.all ? { all: true } : {}),
       ...(options.limit ? { limit: Number(options.limit) } : {}),
@@ -492,7 +520,11 @@ export async function runQueueBlockCommand(
     await withQueueClient(options, (client) =>
       queueBlock(
         client,
-        { id, on: requiredOption(options.on, "--on"), ...(options.note ? { note: options.note } : {}) },
+        {
+          id,
+          on: requiredOption(options.on, "--on"),
+          ...(options.note ? { note: options.note } : {}),
+        },
         actor,
       ),
     ),
@@ -509,7 +541,11 @@ export async function runQueueHandoffCommand(
     await withQueueClient(options, (client) =>
       queueHandoff(
         client,
-        { id, to: requiredOption(options.to, "--to"), ...(options.note ? { note: options.note } : {}) },
+        {
+          id,
+          to: requiredOption(options.to, "--to"),
+          ...(options.note ? { note: options.note } : {}),
+        },
         actor,
       ),
     ),

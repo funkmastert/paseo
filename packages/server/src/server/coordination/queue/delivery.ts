@@ -59,7 +59,7 @@ export class WorkQueueDelivery {
   /** Resolves when every delivery started so far has been recorded. */
   async idle(): Promise<void> {
     while (this.inFlight.size > 0) {
-      await Promise.allSettled([...this.inFlight]);
+      await Promise.allSettled(this.inFlight);
     }
   }
 

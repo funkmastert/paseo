@@ -67,7 +67,11 @@ describe("work queue chaos", () => {
     const first = await startDaemon(homeRoot, {
       coordinationOverrides: {
         onCommitStep: async (step) => {
-          if (step.kind === "item-written" && step.op === "handoff" && step.itemId === successorId) {
+          if (
+            step.kind === "item-written" &&
+            step.op === "handoff" &&
+            step.itemId === successorId
+          ) {
             killed = true;
             throw new Error("simulated daemon death between successor write and source close");
           }
@@ -148,7 +152,10 @@ describe("work queue chaos", () => {
     expect(shown.transitions?.map((row) => row.to)).toEqual(["pending"]);
 
     const claimed = await second.client.coordinationQueueClaim({ id: "wi-baton", actor: agent.id });
-    expect(claimed).toMatchObject({ changed: true, item: { state: "in-progress", owner: agent.id } });
+    expect(claimed).toMatchObject({
+      changed: true,
+      item: { state: "in-progress", owner: agent.id },
+    });
   }, 60_000);
 
   test("coordination off: no feature flag, and requests are answered as disabled", async () => {

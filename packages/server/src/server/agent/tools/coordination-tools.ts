@@ -801,7 +801,9 @@ function actorOf(host: CoordinationToolHost): string {
 
 function formatClosure(item: WorkItem): string | null {
   if (!item.closure) return null;
-  return item.closure.target ? `${item.closure.reason}=${item.closure.target}` : item.closure.reason;
+  return item.closure.target
+    ? `${item.closure.reason}=${item.closure.target}`
+    : item.closure.reason;
 }
 
 export interface QueueItemRow {
@@ -853,7 +855,8 @@ export function nextQueueAction(item: WorkItem, actor: string): string {
       ? `When finished, queue_update it to done with a closure (${CLOSURE_HELP})`
       : `${item.owner} is working on it.`;
   }
-  if (item.state === "blocked") return `Blocked on ${item.closure?.target ?? "?"}; unblock with queue_update.`;
+  if (item.state === "blocked")
+    return `Blocked on ${item.closure?.target ?? "?"}; unblock with queue_update.`;
   if (item.state === "handed-off") return `Closed; the work continues as ${item.handedOffTo}.`;
   return "Closed. Follow-on work is a new item.";
 }
@@ -862,7 +865,7 @@ const queueCreateTool = defineCoordinationTool({
   name: "queue_create",
   title: "Create work item",
   description:
-    "Create a work item owned by an agent id or \"human\". An agent owner gets it as a prompt. " +
+    'Create a work item owned by an agent id or "human". An agent owner gets it as a prompt. ' +
     "Pass your own `id` to make a retry safe. Owners close items with a closure that says where " +
     "the work went; it cannot be dropped silently.",
   inputSchema: {
@@ -870,7 +873,10 @@ const queueCreateTool = defineCoordinationTool({
     owner: z.string().min(1).describe('An agent id, or "human"'),
     body: z.string().optional(),
     tags: z.array(z.string()).optional(),
-    id: z.string().optional().describe("Caller-minted id; a repeat with the same content is a no-op"),
+    id: z
+      .string()
+      .optional()
+      .describe("Caller-minted id; a repeat with the same content is a no-op"),
     full: z.boolean().optional(),
   },
   handler: async (input, host) => {
@@ -962,8 +968,9 @@ const queueUpdateTool = defineCoordinationTool({
           ...(input.tags ? { tags: input.tags } : {}),
           ...revision,
         });
+    const changedText = input.state ? `moved to ${result.item.state}` : "updated";
     return toResult({
-      result: result.changed ? (input.state ? `moved to ${result.item.state}` : "updated") : "unchanged",
+      result: result.changed ? changedText : "unchanged",
       item: toQueueItemRow(result.item, Boolean(input.full)),
       next: nextQueueAction(result.item, actor),
     });
@@ -974,7 +981,7 @@ const queueHandoffTool = defineCoordinationTool({
   name: "queue_handoff",
   title: "Hand off work item",
   description:
-    "Hand a work item to a new owner (agent id or \"human\"): closes it as handed-off and opens a " +
+    'Hand a work item to a new owner (agent id or "human"): closes it as handed-off and opens a ' +
     "successor for the new owner in one step, so the work cannot be lost between them.",
   inputSchema: {
     id: z.string().min(1),
@@ -1053,7 +1060,9 @@ const queueShowTool = defineCoordinationTool({
     const full = Boolean(input.full);
     const transitions = full ? found.transitions : found.transitions.slice(-5);
     return toResult({
-      item: full ? found.item : { ...toQueueItemRow(found.item, false), body: truncate(found.item.body ?? null, 400) },
+      item: full
+        ? found.item
+        : { ...toQueueItemRow(found.item, false), body: truncate(found.item.body ?? null, 400) },
       transitions: transitions.map(toTransitionRow),
       next: nextQueueAction(found.item, actorOf(host)),
     });

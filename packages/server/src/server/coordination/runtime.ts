@@ -1,6 +1,10 @@
 import type { Logger } from "pino";
 import { resolveCoordinationConfig, type CoordinationConfigInput } from "./config.js";
-import { openCoordination, type Coordination, type OpenCoordinationOptions } from "./coordination.js";
+import {
+  openCoordination,
+  type Coordination,
+  type OpenCoordinationOptions,
+} from "./coordination.js";
 import { WorkQueueDelivery, type DeliverPromptToAgent } from "./queue/delivery.js";
 import { WorkQueueFinishLink, type AgentTurnSource } from "./queue/finish-link.js";
 

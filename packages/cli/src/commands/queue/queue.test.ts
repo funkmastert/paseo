@@ -91,7 +91,11 @@ describe("paseo queue", () => {
     const { client, calls } = fakeClient({
       coordinationQueueCreate: { requestId: "r", item: item(), changed: true },
     });
-    const result = await queueCreate(client, { title: "Review the plan", owner: "agent-a" }, "human");
+    const result = await queueCreate(
+      client,
+      { title: "Review the plan", owner: "agent-a" },
+      "human",
+    );
     expect(calls).toEqual([
       {
         method: "coordinationQueueCreate",
@@ -110,7 +114,11 @@ describe("paseo queue", () => {
   it("claim, done and block send the right transition and point at the next step", async () => {
     const claimed = await queueClaim(
       fakeClient({
-        coordinationQueueClaim: { requestId: "r", item: item({ state: "in-progress" }), changed: false },
+        coordinationQueueClaim: {
+          requestId: "r",
+          item: item({ state: "in-progress" }),
+          changed: false,
+        },
       }).client,
       "wi-1",
       "agent-a",

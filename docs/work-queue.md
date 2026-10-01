@@ -2,7 +2,7 @@
 
 The work queue gives a piece of work an owner, a state and a required closure, so work handed between agents cannot vanish. The fleet stream next to it is an append-only log of things that happened. Both live in daemon core under `packages/server/src/server/coordination/`; wire shapes are in `packages/protocol/src/coordination/`.
 
-This doc covers the core: states, the closure contract, storage, retention and the stream. Agent tools, session RPCs, the CLI and delivery are built on `WorkQueueService` (`coordination/queue/service.ts`) and gated on `server_info.features`; they are not part of the core.
+Every surface goes through `WorkQueueService` (`coordination/queue/service.ts`): the agent tools, the session RPCs, the `paseo queue` CLI, delivery to the owner and the closure marker in an agent's final message. The daemon holds it in a `CoordinationRuntime` (`coordination/runtime.ts`).
 
 ## States
 
@@ -37,6 +37,40 @@ Finishing as `done` requires a closure reason that says where the work went:
 `blocked` also requires a closure, and it must be `blocked_on` with a target. `denied` and `canceled` fill in their own reason when none is given. `handed-off` is reachable only through handoff. A closure on a move into `pending` or `in-progress` is refused.
 
 This is input validation of the queue API, not a gate on anything an agent can already do. The errors are written for the caller, often an agent, to act on: each one names what to send instead.
+
+## Surfaces
+
+| Surface     | Where                                                                                                                                                          |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent tools | `queue_create`, `queue_claim`, `queue_update`, `queue_handoff`, `queue_list`, `queue_show` in `agent/tools/coordination-tools.ts`                              |
+| RPCs        | `coordination.queue.{create,claim,transition,update,handoff,list,show}` and `coordination.stream.list`, in `packages/protocol/src/coordination/rpc-schemas.ts` |
+| CLI         | `paseo queue ls\|show\|create\|claim\|done\|block\|handoff`, with `--json`                                                                                     |
+
+The calling agent is the actor for a tool. An RPC names its actor, and the daemon uses `human` when it does not. The CLI sends `--as`, else `$PASEO_AGENT_ID` (the daemon sets it in every agent's shell), else `human`.
+
+Tool output and CLI reads are compact by default: id, title, owner, state, closure, delivery. Pass `full: true` or `--full` for whole items and every transition. Every write answers with what happened, the item's state now and the next action, so the caller never needs a second read to know what to do.
+
+RPC errors come back in the payload as `error` and `errorCode` (`disabled`, `not_found`, `conflict`, `invalid`, `internal`), never as `rpc_error`. The CLI turns them into `QUEUE_<CODE>` errors and exits 1, the same as any failed command. It does not pre-flight a health check: OpenRig's queue CLI reported healthy daemons as down because its health deadline was shorter than the request's. The request goes out and reports its own failure.
+
+## Delivery
+
+Creating an item for an agent, or handing one off to an agent, sends the owner one prompt through `sendPromptToAgent`. The prompt joins a running turn rather than replacing it, the same as a finish report. It names the item and teaches the closure in two lines. The result lands on the item's `delivery`: `delivered`, or `failed` with the reason. An archived or unknown agent fails delivery instead of being woken. An item for `human` sends nothing and stays `not_attempted`; the Inbox shows it.
+
+Delivery listens to the service's item-changed event, which fires only when a call changed something, so an idempotent repeat create never delivers twice. If a daemon dies between the create and the delivery, the next one delivers every `pending` agent item still `not_attempted` when it opens. A `failed` delivery is not retried; the item says so and waits for someone to hand it on.
+
+## Closure marker
+
+An agent can close the items it owns from its final message, one line per item:
+
+```
+queue: <itemId> <state> [<reason>[=<target>]]
+queue: wi_123 done no-follow-on
+queue: wi_123 blocked blocked_on=wi_456
+```
+
+`state` is `done`, `blocked`, `failed`, `denied` or `canceled`; the reason and target follow the closure contract above. When an agent leaves `running` and owns open items, the daemon reads its final message and applies each marker as a transition by that agent. A message with no marker changes nothing, and the item stays where it was for the stuck sweep to find.
+
+Parsing is strict. A line that starts with `queue:` and does not fit the grammar is logged and ignored, and so are two markers for one item. A marker for an item the agent does not own, or one the closure contract rejects (a `done` with no reason), is logged and changes nothing. The parser is `coordination/queue/closure-marker.ts`.
 
 ## Storage
 
@@ -87,8 +121,10 @@ The stream and item-changed listeners run after the queue commit. A failure in e
 }
 ```
 
-Read once at boot. Off unless `enabled` is true.
+Read once at boot. Off unless `enabled` is true. Off means no `queue_*` tools, no `server_info.features.coordinationQueue`, and every `coordination.*` request answered with `errorCode: "disabled"`.
+
+The daemon opens coordination after its monitors start, then runs retention at once and every six hours. A store that fails to open (a corrupt journal, an unreadable directory) is logged as `COORDINATION DISABLED` and the daemon runs on without it: the flag drops and every request is answered as disabled. It never fails or delays boot.
 
 ## Relation to finish reports
 
-The queue does not replace [finish reports](./finish-reports.md). A finish obligation lives on the child's agent record and tracks one delegated turn until its report reaches the owner; it stays the wake path. A work item tracks owned work across turns, agents and handoffs. A finish moves an item only when the finish text carries an explicit closure; otherwise the item stays `in-progress` for the stuck sweep to find.
+The queue does not replace [finish reports](./finish-reports.md). A finish obligation lives on the child's agent record and tracks one delegated turn until its report reaches the owner; it stays the wake path. A work item tracks owned work across turns, agents and handoffs. A finish moves an item only through a [closure marker](#closure-marker).

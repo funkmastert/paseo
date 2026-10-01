@@ -75,7 +75,10 @@ function parseLine(line: string): ClosureMarker | MalformedClosureMarker {
   const reason = separator === -1 ? closureToken : closureToken.slice(0, separator);
   const target = separator === -1 ? undefined : closureToken.slice(separator + 1);
   if (!isClosureReason(reason)) {
-    return { line, problem: `closure reason must be one of ${WORK_ITEM_CLOSURE_REASONS.join(", ")}` };
+    return {
+      line,
+      problem: `closure reason must be one of ${WORK_ITEM_CLOSURE_REASONS.join(", ")}`,
+    };
   }
   if (target === "") return { line, problem: "empty target after `=`" };
   return {
