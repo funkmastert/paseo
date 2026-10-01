@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import {
   AgentStallSweep,
@@ -15,9 +15,10 @@ import type { AgentTimelineItem } from "./agent/agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent/agent-timeline-store-types.js";
 import type { ProcessSampleRow } from "./agent/process-sampler.js";
 import { createJevStallJudge, MAX_JUDGMENTS_PER_AGENT_PER_HOUR } from "./agent/stall-judgment.js";
-import type { StallMeasurementLine } from "./agent/stall-judgment-log.js";
+import { StallJudgmentLog, type StallMeasurementLine } from "./agent/stall-judgment-log.js";
 import type { ProviderHealth } from "./agent-done-janitor.js";
 import { createTestJevService, type JevFakeBehavior, type JevScriptedAnswer } from "./jev/fake.js";
+import { createStallJudgmentSavingsAdapter, startSavingsAdapters } from "./jev/savings-adapters.js";
 import type { RemediationConfig } from "./remediation/config.js";
 import type { RemediationObservation } from "./remediation/contract.js";
 
@@ -77,6 +78,8 @@ class Harness {
   config: RemediationConfig | undefined = undefined;
   loopWatch = true;
   idleResult: IdleResumeResult = { kind: "sent" };
+  /** Called with each measurement line after it is kept, as bootstrap's `recordMeasurement` is. */
+  measurementHook: ((line: StallMeasurementLine) => void) | null = null;
   readonly jev: ReturnType<typeof createTestJevService>;
   readonly sweep: AgentStallSweep;
 
@@ -132,7 +135,10 @@ class Harness {
           this.idleResumes.push(input);
           return this.idleResult;
         },
-        recordMeasurement: (line) => this.lines.push(line),
+        recordMeasurement: (line) => {
+          this.lines.push(line);
+          this.measurementHook?.(line);
+        },
         listScheduledAgentIds: async () => this.scheduled,
         isClaimedByRestartRecovery: (agentId) => this.claimedByRecovery.has(agentId),
         readSessionFamily: (agentId) => this.sessionFamilies.get(agentId),
@@ -1159,5 +1165,44 @@ describe("the production resume", () => {
       { agentId: "a1", prompt: "check the result" },
     );
     expect(result).toEqual({ kind: "skipped", reason: "no longer idle" });
+  });
+});
+
+describe("the savings ledger (docs/jev.md, Savings)", () => {
+  test("one judgment produces exactly one savings record, with the file tails running", async () => {
+    const h = new Harness({ jev: ANSWERED, answers: choice("other", 0.9) });
+    await h.jev.start();
+    const jevDir = path.join(h.jev.paseoHome, "jev");
+    const log = new StallJudgmentLog({ dir: jevDir, logger });
+    // Bootstrap's `recordMeasurement`: the line goes to the file and to the savings ledger.
+    const recordStallSavings = createStallJudgmentSavingsAdapter({ savings: h.jev.savings });
+    h.measurementHook = (line) => {
+      log.append(line);
+      recordStallSavings(line);
+    };
+    // The tails still run for features on their own branches; none may read the stall file.
+    const adapters = startSavingsAdapters({
+      jevDir,
+      savings: h.jev.savings,
+      readAgentModel: () => null,
+      logger,
+    });
+    const record = vi.spyOn(h.jev.savings, "record");
+    try {
+      await adapters.poll();
+      h.add("a1");
+      await h.warmUp();
+      await log.flush();
+      await adapters.stop();
+
+      const judgments = h.linesOf("judgment");
+      expect(judgments).toHaveLength(1);
+      expect(record.mock.calls.map(([input]) => input.callId)).toEqual([judgments[0]?.callId]);
+      expect(h.jev.savings.events({ range: "all", feature: "stallJudgment" }).events).toHaveLength(
+        1,
+      );
+    } finally {
+      await h.jev.stop();
+    }
   });
 });

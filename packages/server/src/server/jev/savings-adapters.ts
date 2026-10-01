@@ -227,9 +227,11 @@ export function createToolUseSavingsAdapter(options: {
 }
 
 /**
- * Feature 10, from `stall-judgments.jsonl`. A `judgment` with a call records (pending for a
+ * Feature 10, fed each line the stall sweep writes to `stall-judgments.jsonl` (bootstrap's
+ * `recordMeasurement`), not by a tail. A `judgment` with a call records (pending for a
  * person-first label, which the remediation hook settles from the episode's agent); an
  * `episode-closed` settles a stall that never reached rung 2 and validates a `progressing` hold.
+ * Other lines, the background-wait rule's included, are not JEV calls and count nothing.
  */
 export function createStallJudgmentSavingsAdapter(options: {
   savings: JevSavingsSink;
@@ -325,8 +327,9 @@ function closeEpisode(savings: JevSavingsSink, byEpisode: Map<string, string>, l
 }
 
 /**
- * Tails both files and polls them every 15 seconds. `stop` polls a last time, so the lines of the
- * last interval count; the ledger flushes them after.
+ * Tails the files of features still on their own branches and polls them every 15 seconds. `stop`
+ * polls a last time, so the lines of the last interval count; the ledger flushes them after. The
+ * stall judgment merged and calls its adapter directly, so `stall-judgments.jsonl` is not tailed.
  */
 export function startSavingsAdapters(options: {
   jevDir: string;
@@ -339,11 +342,6 @@ export function startSavingsAdapters(options: {
       path.join(options.jevDir, "tool-use.jsonl"),
       path.join(options.jevDir, "tool-use.1.jsonl"),
       createToolUseSavingsAdapter(options),
-    ),
-    new JsonlTail(
-      path.join(options.jevDir, "stall-judgments.jsonl"),
-      path.join(options.jevDir, "stall-judgments.1.jsonl"),
-      createStallJudgmentSavingsAdapter(options),
     ),
   ];
   let polling: Promise<void> = Promise.all(tails.map((tail) => tail.start())).then(() => undefined);

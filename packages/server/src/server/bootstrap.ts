@@ -353,7 +353,7 @@ import {
   type JevBudgetExhaustedEvent,
   type JevServiceRuntime,
 } from "./jev/service.js";
-import { startSavingsAdapters } from "./jev/savings-adapters.js";
+import { createStallJudgmentSavingsAdapter, startSavingsAdapters } from "./jev/savings-adapters.js";
 import { createSavingsLookups } from "./jev/savings-lookups.js";
 import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
@@ -1193,6 +1193,9 @@ function createAgentStallSweep(input: {
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
   const judgmentLog = new StallJudgmentLog({ dir: path.join(input.paseoHome, "jev"), logger });
+  // Feature 10's savings record (docs/jev.md, "Savings"), fed each measurement line as it is
+  // written. It replaced the adapter that tailed the file, so a judgment counts once.
+  const recordStallSavings = createStallJudgmentSavingsAdapter({ savings: input.jev.savings });
   return new AgentStallSweep({
     dependencies: {
       listAgents: () => agentManager.listAgentsForStallSweep(),
@@ -1256,7 +1259,10 @@ function createAgentStallSweep(input: {
           { agentManager, agentStorage, logger, paceResume: input.paceResume },
           resume,
         ),
-      recordMeasurement: (line) => judgmentLog.append(line),
+      recordMeasurement: (line) => {
+        judgmentLog.append(line);
+        recordStallSavings(line);
+      },
       listScheduledAgentIds: async () =>
         new Set(
           (await input.scheduleService.list()).flatMap((schedule) =>
