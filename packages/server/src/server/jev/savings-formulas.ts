@@ -256,6 +256,11 @@ function priceSpawnHint({ mode, facts }: JevSavingsPriceInput): JevSavingsPrice 
  */
 function priceRemediationTriage(input: JevSavingsPriceInput): JevSavingsPrice {
   const { mode, decision, facts } = input;
+  if (facts["claimedBy"] === "stallJudgment") {
+    return tokensPrice(0, "0: feature 10's person-first label owns this episode's agent", {
+      claimedBy: "stallJudgment",
+    });
+  }
   const skip = decision.wouldBe === "person" || decision.wouldBe === "defer";
   if (!skip) return tokensPrice(0, "0: the answer keeps the agent", { wouldBe: decision.wouldBe });
   if (mode === "shadow") {
@@ -484,6 +489,15 @@ function priceStallJudgment({ mode, facts }: JevSavingsPriceInput): JevSavingsPr
   if (facts["personFirst"] !== true) {
     return tokensPrice(0, "0: the loop watch and the progressing hold save nothing countable", {
       activity: str(facts, "activity"),
+    });
+  }
+  const claimedBy = str(facts, "claimedBy");
+  if (claimedBy !== null) {
+    return tokensPrice(0, "0: an earlier label of this episode owns its agent", { claimedBy });
+  }
+  if (facts["willPush"] === false) {
+    return tokensPrice(0, "0: the escalation would not push, so the ladder starts the agent", {
+      willPush: "false",
     });
   }
   if (facts["reachedRung2"] === false) {

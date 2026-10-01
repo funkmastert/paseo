@@ -338,6 +338,139 @@ describe("the stall judgment adapter (stall-judgments.jsonl) and its remediation
     });
   });
 
+  test("one stalled-agent episode's agent is claimed once: feature 10's person-first label owns it (review M4)", async () => {
+    const { savings, calls } = await ledger();
+    calls.set("stall-1", entry("stall-1"));
+    calls.set("stall-2", entry("stall-2"));
+    calls.set("triage-1", {
+      ...entry("triage-1"),
+      feature: "remediationTriage",
+      callSite: "remediation.triage",
+    });
+    const adapt = createStallJudgmentSavingsAdapter({ savings });
+    adapt(judgment("blocked_missing_info", 0.8, "stall-1"));
+    // A second judgment of the same episode, after a recheck.
+    adapt({
+      ...judgment("waiting_on_human", 0.9, "stall-2"),
+      at: new Date(NOON + 1).toISOString(),
+    });
+
+    const hook = createRemediationSavingsHook({
+      savings,
+      costs: new RemediationAgentCosts(),
+      now: () => NOON,
+    });
+    const triageEvent = {
+      type: "triage" as const,
+      at: new Date(NOON + 5 * MINUTE).toISOString(),
+      episode: "ep-1",
+      key: "stalled-agent:agent-1",
+      kind: "stalled-agent",
+      level: "alert" as const,
+      willPush: true,
+      pushPreview: null,
+      linkedAgentId: "agent-1",
+      triage: {
+        callId: "triage-1",
+        outcome: "shadow" as const,
+        reason: null,
+        route: "needs_person",
+        routeConfidence: 0.9,
+        evidenceCurrent: 0.9,
+        costUsd: 0.0001,
+      },
+      decision: {
+        wouldBe: "person" as const,
+        action: "start-agent" as const,
+        applied: false,
+        deferMs: 10 * MINUTE,
+      },
+    };
+    hook(triageEvent);
+    hook({
+      type: "agent-ended",
+      at: new Date(NOON + 40 * MINUTE).toISOString(),
+      episode: "ep-1",
+      key: "stalled-agent:agent-1",
+      kind: "stalled-agent",
+      agentId: "fixer-1",
+      result: "not-fixed",
+      cause: "report",
+      agentTotalTokens: 2_000_000,
+      agentModel: "claude-sonnet-5",
+      minutesRunning: 30,
+      triageCallId: "triage-1",
+      triageWouldBe: "person",
+      triageApplied: false,
+    });
+
+    const byCall = new Map(
+      savings.events({ range: "today" }).events.map((event) => [event.id, event]),
+    );
+    const figure = (callId: string) => byCall.get(savings.idForCall(callId) ?? "");
+    expect(figure("stall-1")).toMatchObject({ pending: false, tokensSavedEstimate: 1_000_000 });
+    expect(figure("stall-2")).toMatchObject({ pending: false, tokensSavedEstimate: 0 });
+    expect(figure("triage-1")).toMatchObject({ pending: false, tokensSavedEstimate: 0 });
+    expect(figure("triage-1")?.basis?.formula).toContain("feature 10");
+    expect(savings.summary("today").shadow.tokensWouldSave).toBe(1_000_000);
+  });
+
+  test("a person-first label whose escalation would not push owns nothing: the ladder starts the agent", async () => {
+    const { savings, calls } = await ledger();
+    calls.set("stall-1", entry("stall-1"));
+    calls.set("triage-1", { ...entry("triage-1"), feature: "remediationTriage" });
+    createStallJudgmentSavingsAdapter({ savings })(judgment("blocked_missing_info", 0.8));
+    const hook = createRemediationSavingsHook({
+      savings,
+      costs: new RemediationAgentCosts(),
+      now: () => NOON,
+    });
+    hook({
+      type: "triage",
+      at: new Date(NOON).toISOString(),
+      episode: "ep-1",
+      key: "stalled-agent:agent-1",
+      kind: "stalled-agent",
+      level: "alert",
+      willPush: false,
+      pushPreview: null,
+      linkedAgentId: "agent-1",
+      triage: {
+        callId: "triage-1",
+        outcome: "shadow",
+        reason: null,
+        route: "clearing_on_its_own",
+        routeConfidence: 0.9,
+        evidenceCurrent: 0.1,
+        costUsd: 0.0001,
+      },
+      decision: {
+        wouldBe: "start-agent",
+        action: "start-agent",
+        applied: false,
+        deferMs: 10 * MINUTE,
+      },
+    });
+    hook({
+      type: "agent-ended",
+      at: new Date(NOON + 40 * MINUTE).toISOString(),
+      episode: "ep-1",
+      key: "stalled-agent:agent-1",
+      kind: "stalled-agent",
+      agentId: "fixer-1",
+      result: "not-fixed",
+      cause: "report",
+      agentTotalTokens: 2_000_000,
+      agentModel: "claude-sonnet-5",
+      minutesRunning: 30,
+      triageCallId: "triage-1",
+      triageWouldBe: "start-agent",
+      triageApplied: false,
+    });
+
+    expect(savings.summary("today").shadow.tokensWouldSave).toBe(0);
+  });
+
   test("a stall that closed before rung 2 saves nothing; a progressing hold that stayed stalled is contradicted", async () => {
     const { savings, calls } = await ledger();
     calls.set("stall-1", entry("stall-1"));

@@ -241,15 +241,33 @@ function settleAgentEnded(
     }
   }
   if (!event.key.startsWith(STALLED_AGENT_KEY_PREFIX)) return;
-  for (const stall of pendingSavingsFor(savings, "stallJudgment")) {
-    if (stall.facts["episodeKey"] !== event.key || stall.facts["personFirst"] !== true) continue;
-    savings.settle(stall.id, facts);
-    savings.validate(stall.id, {
-      outcome: fixed ? "contradicted" : "held",
-      signal: fixed ? "fixed" : "not-fixed",
-      afterMinutes: event.minutesRunning,
-    });
+  const triageFacts = id && savings instanceof JevSavingsLedger ? savings.factsOf(id) : null;
+  // The ladder honours a person-first label only when the escalation reaches a phone now.
+  if (triageFacts?.["willPush"] === false) {
+    for (const stall of personFirstStalls(savings, event.key)) {
+      savings.settle(stall.id, { ...facts, willPush: false });
+    }
+    return;
   }
+  const [owner, ...others] = personFirstStalls(savings, event.key);
+  if (!owner) return;
+  // One saving per remediation agent: the ladder reads `personFirst` before it triages, so the
+  // stall judgment's label owns the episode, and the triage and any later label claim nothing.
+  if (id) savings.settle(id, { claimedBy: "stallJudgment" });
+  savings.settle(owner.id, facts);
+  savings.validate(owner.id, {
+    outcome: fixed ? "contradicted" : "held",
+    signal: fixed ? "fixed" : "not-fixed",
+    afterMinutes: event.minutesRunning,
+  });
+  for (const other of others) savings.settle(other.id, { ...facts, claimedBy: owner.id });
+}
+
+/** The pending person-first stall records of one episode, oldest first. */
+function personFirstStalls(savings: JevSavingsSink, episodeKey: string) {
+  return pendingSavingsFor(savings, "stallJudgment")
+    .filter((stall) => stall.facts["episodeKey"] === episodeKey)
+    .filter((stall) => stall.facts["personFirst"] === true);
 }
 
 /**
@@ -277,14 +295,11 @@ function settleStallPersonFirst(
 ): void {
   if (!event.skipped || !event.key.startsWith(STALLED_AGENT_KEY_PREFIX)) return;
   const { median, samples } = costs.median(event.kind, nowMs);
-  for (const stall of pendingSavingsFor(savings, "stallJudgment")) {
-    if (stall.facts["episodeKey"] !== event.key) continue;
-    savings.settle(stall.id, {
-      personFirstSkipped: true,
-      medianTokens: median,
-      medianSamples: samples,
-    });
-  }
+  const [owner, ...others] = personFirstStalls(savings, event.key);
+  if (!owner) return;
+  const facts = { personFirstSkipped: true, medianTokens: median, medianSamples: samples };
+  savings.settle(owner.id, facts);
+  for (const other of others) savings.settle(other.id, { ...facts, claimedBy: owner.id });
 }
 
 /** Feature 3b: one involvement per triaged finish that reached JEV. Returns its id, or "". */
