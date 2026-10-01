@@ -1940,7 +1940,11 @@ export async function createPaseoDaemon(
       managedProcesses,
       deviceLaunchGate,
       isCatastropheGateEnabled,
-      fileReadObserver: readCheckObserver,
+      // `PASEO_READ_CHECK_HOOKS=off` at daemon start registers no read-check hook at all: the
+      // measured baseline, and a way out that needs no config schema.
+      ...(process.env.PASEO_READ_CHECK_HOOKS === "off"
+        ? {}
+        : { fileReadObserver: readCheckObserver }),
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },

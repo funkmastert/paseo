@@ -359,6 +359,37 @@ describe("ReadCheckObserver: shadow, the default", () => {
     });
   });
 
+  test("recent lists each earlier tool call once, and never the read itself", async () => {
+    const { observer, jev } = setup();
+    const content = bigSource();
+    const file = writeRepoFile("src/session.ts", content);
+    const call = (status: "running" | "completed", detail: Record<string, unknown>) => ({
+      seq: rows.length + 1,
+      timestamp: new Date().toISOString(),
+      turnId: "turn-1",
+      item: {
+        type: "tool_call" as const,
+        callId: "toolu_grep",
+        name: "Grep",
+        status,
+        error: null,
+        detail,
+      },
+    });
+    rows.push(
+      call("running", { type: "unknown", input: null, output: null }) as ReadCheckTimelineRow,
+    );
+    rows.push(
+      call("completed", { type: "search", query: "resolveSessionToken" }) as ReadCheckTimelineRow,
+    );
+    observer.postToolUse(readPost(file, content));
+    await observer.idle();
+    expect((jev.transport.calls[0]!.state as Record<string, unknown>)["recent"]).toEqual([
+      "assistant: I will look at the session module next.",
+      "tool Grep resolveSessionToken",
+    ]);
+  });
+
   test("a Bash read is measured from its output and keeps its description", async () => {
     const { observer, jev, savings } = setup();
     const content = bigSource();

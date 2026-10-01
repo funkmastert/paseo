@@ -266,6 +266,17 @@ function measure(read: RecognizedRead, response: unknown): Measured | null {
     : measureBash(read, response);
 }
 
+/** A tool call appears once per state it went through; `recent` keeps only its newest row. */
+function latestRowPerCall(rows: readonly ReadCheckTimelineRow[]): ReadCheckTimelineRow[] {
+  const last = new Map<string, number>();
+  rows.forEach((row, index) => {
+    if (row.item.type === "tool_call") last.set(row.item.callId, index);
+  });
+  return rows.filter(
+    (row, index) => row.item.type !== "tool_call" || last.get(row.item.callId) === index,
+  );
+}
+
 function hasTextBody(buffer: Buffer): boolean {
   return !buffer.subarray(0, BINARY_PROBE_BYTES).includes(0);
 }
@@ -604,14 +615,15 @@ export class ReadCheckObserver implements FileReadObserver {
       page = null;
     }
     if (!page) return { recent: [], cursor: null, turnId: null };
-    const index = toolUseId
-      ? page.rows.findIndex((row) => row.item.type === "tool_call" && row.item.callId === toolUseId)
-      : -1;
-    const before = index >= 0 ? page.rows.slice(0, index) : page.rows;
-    // The read's own row when it is there, else the newest: later rows are scanned from it.
-    const anchor = index >= 0 ? page.rows[index] : page.rows[page.rows.length - 1];
+    const isOwn = (row: ReadCheckTimelineRow) =>
+      toolUseId !== null && row.item.type === "tool_call" && row.item.callId === toolUseId;
+    const first = page.rows.findIndex(isOwn);
+    const before = first >= 0 ? page.rows.slice(0, first) : page.rows;
+    // The read's own newest row when it is there, else the newest: later rows are scanned from it.
+    const own = page.rows.filter(isOwn);
+    const anchor = own[own.length - 1] ?? page.rows[page.rows.length - 1];
     return {
-      recent: before.map((row) => row.item),
+      recent: latestRowPerCall(before).map((row) => row.item),
       cursor: anchor ? { epoch: page.epoch, seq: anchor.seq } : null,
       turnId: anchor?.turnId ?? null,
     };
