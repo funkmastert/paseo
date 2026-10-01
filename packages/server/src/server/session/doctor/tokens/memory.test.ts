@@ -84,7 +84,7 @@ describe("stableAuditKey", () => {
   it("falls back to the absolute path outside a git repository", async () => {
     const file = path.join(root, "CLAUDE.md");
     writeFileSync(file, "no git here");
-    expect(await stableAuditKey(file)).toBe(realpathSync(file));
+    expect(await stableAuditKey(file)).toBe(realpathSync.native(file));
   });
 });
 

@@ -562,27 +562,35 @@ describe("readWorktreeCoverage, what git alone does not show", () => {
     expect(coverage?.hidden).toEqual([]);
   });
 
-  test("a directory it cannot read is listed: git skips it without failing", async () => {
-    const worktree = addWorktree("unreadable", "feature");
-    mkdirSync(join(worktree, "notes"));
-    writeFileSync(join(worktree, "notes", "n.txt"), "hidden notes\n");
-    lockDirectory(join(worktree, "notes"));
+  // chmod 0o000 makes a directory genuinely unreadable on POSIX; on Windows it only toggles the
+  // read-only attribute, so git still reads straight through it and these never see "unreadable".
+  test.skipIf(process.platform === "win32")(
+    "a directory it cannot read is listed: git skips it without failing",
+    async () => {
+      const worktree = addWorktree("unreadable", "feature");
+      mkdirSync(join(worktree, "notes"));
+      writeFileSync(join(worktree, "notes", "n.txt"), "hidden notes\n");
+      lockDirectory(join(worktree, "notes"));
 
-    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+      const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
 
-    expect(coverage?.unreadable).toEqual(["notes/"]);
-  });
+      expect(coverage?.unreadable).toEqual(["notes/"]);
+    },
+  );
 
-  test("a directory inside an ignored one that it cannot read is listed too", async () => {
-    const worktree = addWorktree("unreadable-ignored", "feature");
-    commit(worktree, ".gitignore", "node_modules/\n");
-    mkdirSync(join(worktree, "node_modules", "pkg"), { recursive: true });
-    lockDirectory(join(worktree, "node_modules", "pkg"));
+  test.skipIf(process.platform === "win32")(
+    "a directory inside an ignored one that it cannot read is listed too",
+    async () => {
+      const worktree = addWorktree("unreadable-ignored", "feature");
+      commit(worktree, ".gitignore", "node_modules/\n");
+      mkdirSync(join(worktree, "node_modules", "pkg"), { recursive: true });
+      lockDirectory(join(worktree, "node_modules", "pkg"));
 
-    const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
+      const coverage = await readWorktreeCoverage({ worktreePath: worktree, commit: null });
 
-    expect(coverage?.unreadable).toEqual(["node_modules/pkg/"]);
-  });
+      expect(coverage?.unreadable).toEqual(["node_modules/pkg/"]);
+    },
+  );
 
   test("a repository nested anywhere is listed, inside an ignored directory too", async () => {
     const worktree = addWorktree("nested-ignored", "feature");
@@ -699,16 +707,21 @@ describe("the deletion invariant on real worktrees", () => {
     expect(await plan(worktree)).toBe("holds: holds: every file is tracked and pushed");
   });
 
-  test("M3: an unreadable directory is kept, so the delete never stops half-way", async () => {
-    const worktree = fixture("M3");
-    mkdirSync(join(worktree, "notes"));
-    writeFileSync(join(worktree, "notes", "n.txt"), "hidden notes\n");
-    lockDirectory(join(worktree, "notes"));
+  // Same reason as the readWorktreeCoverage skips above: chmod 0o000 doesn't make a directory
+  // unreadable on Windows.
+  test.skipIf(process.platform === "win32")(
+    "M3: an unreadable directory is kept, so the delete never stops half-way",
+    async () => {
+      const worktree = fixture("M3");
+      mkdirSync(join(worktree, "notes"));
+      writeFileSync(join(worktree, "notes", "n.txt"), "hidden notes\n");
+      lockDirectory(join(worktree, "notes"));
 
-    expect(await plan(worktree)).toBe(
-      "keep: 1 director(ies) it cannot read or empty, so a delete would stop part-way (notes/)",
-    );
-  });
+      expect(await plan(worktree)).toBe(
+        "keep: 1 director(ies) it cannot read or empty, so a delete would stop part-way (notes/)",
+      );
+    },
+  );
 
   test.each([
     ["N1", "--assume-unchanged"],

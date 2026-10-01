@@ -22,7 +22,11 @@ export interface Fixture {
 
 /** A throwaway HOME with a canonical `~/.claude` (CLAUDE.md, projects/, skills/) and a paseo home. */
 export function makeFixture(): Fixture {
-  const home = realpathSync(mkdtempSync(path.join(tmpdir(), "doctor-test-")));
+  // .native, not the plain JS walker: on a GitHub-hosted Windows runner TEMP is an 8.3 short
+  // name ("RUNNER~1") that only .native (and every doctor check's own realpathOrNull, which
+  // also uses .native) expands — otherwise this fixture's own `home` never matches what the
+  // checks under test resolve it to.
+  const home = realpathSync.native(mkdtempSync(path.join(tmpdir(), "doctor-test-")));
   const paseoHome = path.join(home, ".paseo");
   mkdirSync(paseoHome, { recursive: true });
   mkdirSync(path.join(home, ".claude", "projects"), { recursive: true });

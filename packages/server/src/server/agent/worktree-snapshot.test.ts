@@ -277,11 +277,15 @@ describe("GitWorktreeSnapshotter", () => {
 
   // Whatever the untracked-file filter keeps out (size, owner-only modes, secret names), `git add`
   // must not smuggle in: a file new since HEAD is judged the same whether the agent staged it or not.
-  test.each([
-    { name: "an owner-only file", untracked: "loose-notes.txt", staged: "staged-notes.txt" },
-    { name: "a .env file", untracked: "a/.env", staged: "b/.env" },
-    { name: "a file over the size cap", untracked: "loose.bin", staged: "staged.bin" },
-  ])("staging $name does not change whether the snapshot takes it", async (item) => {
+  // "an owner-only file" (chmod 0o600) is POSIX-only — Windows has no owner/group/other mode bits
+  // to make a file "owner-only" with — skipped there, the other two cases still run.
+  test.each(
+    [
+      { name: "an owner-only file", untracked: "loose-notes.txt", staged: "staged-notes.txt" },
+      { name: "a .env file", untracked: "a/.env", staged: "b/.env" },
+      { name: "a file over the size cap", untracked: "loose.bin", staged: "staged.bin" },
+    ].filter((item) => process.platform !== "win32" || item.name !== "an owner-only file"),
+  )("staging $name does not change whether the snapshot takes it", async (item) => {
     for (const file of [item.untracked, item.staged]) {
       mkdirSync(join(repo, file, ".."), { recursive: true });
       writeFileSync(join(repo, file), item.untracked.endsWith(".bin") ? Buffer.alloc(2048) : "x\n");
@@ -506,22 +510,27 @@ describe("GitWorktreeSnapshotter leaves likely secrets out of the untracked set"
     );
   }
 
-  test("an owner-only file is left out, named in the message, and left on disk untouched", async () => {
-    writeRepoFile("notes.txt", "private notes\n", 0o600);
-    writeRepoFile("ordinary.txt", "ordinary\n");
+  // chmod 0o600 (owner-only) is a POSIX mode bit; Windows has no owner/group/other to make a
+  // file "owner-only" with, so this secret heuristic never fires there.
+  test.skipIf(process.platform === "win32")(
+    "an owner-only file is left out, named in the message, and left on disk untouched",
+    async () => {
+      writeRepoFile("notes.txt", "private notes\n", 0o600);
+      writeRepoFile("ordinary.txt", "ordinary\n");
 
-    const result = await localSnapshot();
+      const result = await localSnapshot();
 
-    expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
-    expect(snapshotFiles(result.ref)).not.toContain("notes.txt");
-    expect(snapshotMessage(result.ref)).toContain(
-      "Not snapshotted: possible secret (left on disk): notes.txt",
-    );
-    expect(readFileSync(join(repo, "notes.txt"), "utf8")).toBe("private notes\n");
-    expect(statSync(join(repo, "notes.txt")).mode & 0o777).toBe(0o600);
-    // The size-cap list stays the size-cap list.
-    expect(result.skippedFiles).toEqual([]);
-  });
+      expect(snapshotFiles(result.ref)).toContain("ordinary.txt");
+      expect(snapshotFiles(result.ref)).not.toContain("notes.txt");
+      expect(snapshotMessage(result.ref)).toContain(
+        "Not snapshotted: possible secret (left on disk): notes.txt",
+      );
+      expect(readFileSync(join(repo, "notes.txt"), "utf8")).toBe("private notes\n");
+      expect(statSync(join(repo, "notes.txt")).mode & 0o777).toBe(0o600);
+      // The size-cap list stays the size-cap list.
+      expect(result.skippedFiles).toEqual([]);
+    },
+  );
 
   test(".env and .env.* are left out; .env.example, .env.sample and .env.template are kept", async () => {
     writeRepoFile(".env", "A=1\n");

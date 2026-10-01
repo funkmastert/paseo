@@ -33,8 +33,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await ctx.cleanup();
+  // Windows can hold a just-stopped daemon's file handle open briefly; retry instead of failing
+  // on an EBUSY from that race.
   for (const tempRoot of tempRoots.splice(0)) {
-    rmSync(tempRoot, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
   }
 });
 
