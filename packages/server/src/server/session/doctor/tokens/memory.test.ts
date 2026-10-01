@@ -18,7 +18,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  // Windows can hold a just-closed file handle open briefly (antivirus, indexing); retry instead
+  // of failing the whole suite on an EBUSY from a spawned git process's own cleanup race.
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 });
 
 describe("stableAuditKey", () => {

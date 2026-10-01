@@ -71,10 +71,13 @@ async function createHome(): Promise<Home> {
     client: null,
     cleanup: async () => {
       await stopDaemon(home);
+      // Windows can hold a just-stopped daemon's file handle open briefly; retry instead of
+      // failing the suite on an EBUSY from that race.
+      const rmOpts = { recursive: true, force: true, maxRetries: 10, retryDelay: 20 } as const;
       await Promise.all([
-        rm(root, { recursive: true, force: true }),
-        rm(cwd, { recursive: true, force: true }),
-        ...home.staticDirs.map((dir) => rm(dir, { recursive: true, force: true })),
+        rm(root, rmOpts),
+        rm(cwd, rmOpts),
+        ...home.staticDirs.map((dir) => rm(dir, rmOpts)),
       ]);
     },
   };
