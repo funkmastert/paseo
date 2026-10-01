@@ -3,15 +3,18 @@ import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import {
   headroomByProvider,
   saturatedProviderIds,
+  staleUsageAges,
   windowLimitsModel,
 } from "./account-pool-headroom.js";
 
 const NOW_MS = Date.parse("2026-09-22T12:00:00Z");
 const hours = (n: number) => new Date(NOW_MS + n * 60 * 60 * 1000).toISOString();
+const STALE_AFTER_MS = 15 * 60 * 1000;
 
 function provider(
   providerId: string,
   windows: Array<{ id: string; usedPct?: number | null; resetsAt?: string | null }>,
+  fetchedAt?: string | null,
 ): ProviderUsage {
   return {
     providerId,
@@ -19,6 +22,7 @@ function provider(
     status: "ok",
     planLabel: null,
     windows: windows.map((window) => ({ label: window.id, ...window })),
+    ...(fetchedAt !== undefined ? { fetchedAt } : {}),
   } as ProviderUsage;
 }
 
@@ -163,5 +167,67 @@ describe("headroomByProvider", () => {
 
   it("returns an empty map when usage could not be read at all", () => {
     expect(headroomByProvider(null, NOW_MS).size).toBe(0);
+  });
+});
+
+describe("staleUsageAges", () => {
+  it("names a provider whose own fetchedAt is older than the bound, with its age", () => {
+    const twentyMinAgo = new Date(NOW_MS - 20 * 60 * 1000).toISOString();
+    const ages = staleUsageAges(
+      [provider("stale", [{ id: "weekly", usedPct: 50 }], twentyMinAgo)],
+      NOW_MS,
+      STALE_AFTER_MS,
+      NOW_MS,
+    );
+    expect(ages.get("stale")).toBe(20 * 60 * 1000);
+  });
+
+  it("leaves a provider fresh within the bound alone", () => {
+    const fiveMinAgo = new Date(NOW_MS - 5 * 60 * 1000).toISOString();
+    const ages = staleUsageAges(
+      [provider("fresh", [{ id: "weekly", usedPct: 50 }], fiveMinAgo)],
+      NOW_MS,
+      STALE_AFTER_MS,
+      NOW_MS,
+    );
+    expect(ages.has("fresh")).toBe(false);
+  });
+
+  it("falls back to the batch fetch time for a row with no fetchedAt of its own", () => {
+    // The Claude fetcher never sets a per-row fetchedAt; every row in one response shares the
+    // list's own fetchedAt instead.
+    const twentyMinAgo = NOW_MS - 20 * 60 * 1000;
+    const ages = staleUsageAges(
+      [provider("claude-worker", [{ id: "weekly", usedPct: 50 }])],
+      NOW_MS,
+      STALE_AFTER_MS,
+      twentyMinAgo,
+    );
+    expect(ages.get("claude-worker")).toBe(20 * 60 * 1000);
+  });
+
+  it("is never stale with no fetchedAt at all, own or batch", () => {
+    const ages = staleUsageAges(
+      [provider("unread", [{ id: "weekly", usedPct: 50 }])],
+      NOW_MS,
+      STALE_AFTER_MS,
+      null,
+    );
+    expect(ages.size).toBe(0);
+  });
+
+  it("falls back to the batch time when its own fetchedAt does not parse", () => {
+    const twentyMinAgo = NOW_MS - 20 * 60 * 1000;
+    const ages = staleUsageAges(
+      [provider("odd", [{ id: "weekly", usedPct: 50 }], "not-a-date")],
+      NOW_MS,
+      STALE_AFTER_MS,
+      twentyMinAgo,
+    );
+    expect(ages.get("odd")).toBe(20 * 60 * 1000);
+  });
+
+  it("returns an empty map when usage could not be read at all", () => {
+    expect(staleUsageAges(null, NOW_MS, STALE_AFTER_MS, NOW_MS).size).toBe(0);
   });
 });

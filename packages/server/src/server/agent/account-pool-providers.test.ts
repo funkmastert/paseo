@@ -285,6 +285,78 @@ describe("pickFailoverTarget", () => {
       pickFailoverTarget([], { deadProviderIds: none, sourceProviderId: "claude" }),
     ).toBeNull();
   });
+
+  describe("auth tier", () => {
+    const signedIn: AgentAccountAuth = { state: "signed-in", accountLabel: "worker@example.com" };
+
+    it("ranks a worker whose auth is confirmed signed-in ahead of one that could not be read", () => {
+      expect(
+        pickFailoverTarget(entries, {
+          deadProviderIds: none,
+          sourceProviderId: "claude",
+          accounts: new Map([
+            ["claude-w1a", { state: "unknown" }],
+            ["claude-w1b", signedIn],
+          ]),
+        }),
+      ).toBe("claude-w1b");
+    });
+
+    it("still uses the only account left even when its auth could not be confirmed", () => {
+      // Never a hard refusal: stranding an agent over a read the daemon could not make would be
+      // worse than the uncertainty.
+      expect(
+        pickFailoverTarget(entries, {
+          deadProviderIds: new Set(["claude-w1b", "claude-w2"]),
+          sourceProviderId: "claude",
+          accounts: new Map([["claude-w1a", { state: "unknown" }]]),
+        }),
+      ).toBe("claude-w1a");
+    });
+
+    it("lets auth tier break a tie headroom alone would not", () => {
+      // Equal headroom, so without the auth tier the lower provider id (claude-w1a) would win.
+      expect(
+        pickFailoverTarget(entries, {
+          deadProviderIds: none,
+          sourceProviderId: "claude",
+          headroom: new Map([
+            ["claude-w1a", 50],
+            ["claude-w1b", 50],
+          ]),
+          accounts: new Map([
+            ["claude-w1a", { state: "unknown" }],
+            ["claude-w1b", signedIn],
+          ]),
+        }),
+      ).toBe("claude-w1b");
+    });
+
+    it("prefers a worker's headroom within the signed-in tier over an unknown worker with more", () => {
+      // Role beats headroom and auth tier beats headroom too: a confirmed account with less
+      // budget left still outranks an unread one with more.
+      expect(
+        pickFailoverTarget(entries, {
+          deadProviderIds: none,
+          sourceProviderId: "claude",
+          headroom: new Map([
+            ["claude-w1a", 90],
+            ["claude-w1b", 10],
+          ]),
+          accounts: new Map([
+            ["claude-w1a", { state: "unknown" }],
+            ["claude-w1b", signedIn],
+          ]),
+        }),
+      ).toBe("claude-w1b");
+    });
+
+    it("treats every provider as equally known when accounts is omitted", () => {
+      expect(
+        pickFailoverTarget(entries, { deadProviderIds: none, sourceProviderId: "claude" }),
+      ).toBe("claude-w1a");
+    });
+  });
 });
 
 describe("providersShareAccount", () => {

@@ -101,11 +101,30 @@ export interface PickFailoverTargetOptions {
    * from children.
    */
   preferLeader?: boolean;
+  /**
+   * Account identity per pool provider id, from `AgentManager.describeProviderAccount` (OR-D8).
+   * A provider whose auth could not be confirmed signed-in ranks after one that is, within the
+   * same role tier — unknown is not healthy, but it is never excluded: a candidate still gets
+   * used when nothing better exists, since refusing it would strand an agent over a read the
+   * daemon could not make, not a cap the account actually hit. Omitted ranks every provider as
+   * equally known, which is today's behavior for callers that never ask.
+   */
+  accounts?: ReadonlyMap<string, AgentAccountAuth | null>;
+}
+
+/** 0 when `providerId`'s auth is known signed-in, 1 for signed-out, unknown, or no answer. */
+function authTierOf(
+  accounts: ReadonlyMap<string, AgentAccountAuth | null> | undefined,
+  providerId: string,
+): number {
+  if (!accounts) return 0;
+  return accounts.get(providerId)?.state === "signed-in" ? 0 : 1;
 }
 
 /**
  * Where a stuck agent goes: an enabled account that is not dead this sweep and is not the one it
- * is leaving, preferring a worker, and among equals preferring the one with the most budget left.
+ * is leaving, preferring a worker, then one known signed-in over one whose auth could not be
+ * confirmed, then among equals the one with the most budget left.
  *
  * **Isolation is a preference, not a rule.** Workers are still tried first — keeping rescued
  * agents off the leader's account is the budget separation the pool exists for. But when no
@@ -140,6 +159,7 @@ export function pickFailoverTarget(
   const ranked = [...eligible].sort(
     (a, b) =>
       leaderRank(a) - leaderRank(b) ||
+      authTierOf(options.accounts, a.providerId) - authTierOf(options.accounts, b.providerId) ||
       headroomOf(b.providerId) - headroomOf(a.providerId) ||
       a.priority - b.priority ||
       a.providerId.localeCompare(b.providerId),

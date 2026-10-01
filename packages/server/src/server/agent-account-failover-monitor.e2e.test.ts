@@ -72,6 +72,7 @@ function usageRow(
   providerId: string,
   usedPcts: number[],
   status: ProviderUsage["status"] = "available",
+  fetchedAt?: string,
 ): ProviderUsage {
   return {
     providerId,
@@ -88,6 +89,7 @@ function usageRow(
     balances: [],
     details: [],
     error: null,
+    ...(fetchedAt !== undefined ? { fetchedAt } : {}),
   };
 }
 
@@ -729,6 +731,27 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(providerOf(harness, leader)).toBe("claude-backup");
   }, 60_000);
 
+  test("ignores a usage row older than the staleness bound, so a stale 100% does not condemn the account", async () => {
+    const pinnedMs = Date.parse("2026-09-22T12:00:00.000Z");
+    harness.setClock(pinnedMs);
+    const stale = usageRow(
+      "claude-personal",
+      [100],
+      "available",
+      new Date(pinnedMs - 20 * MINUTE_MS).toISOString(),
+    );
+    harness.setUsage([stale]);
+    const leader = await createAgent(harness, { provider: "claude-personal", title: "Leader" });
+    await failOnLimit(harness, leader, "stream closed");
+
+    await harness.sweep();
+
+    // The reading is 20 minutes old against the default 15-minute bound (OR-D8), so the
+    // proactive leg never sees the 100% at all: an ordinary error on a live account is not a
+    // rescue candidate.
+    expect(providerOf(harness, leader)).toBe("claude-personal");
+  }, 60_000);
+
   test("adopts a successor that a person already imported by hand instead of importing again", async () => {
     const labeledLeader = await createAgent(harness, { provider: "claude", title: "Labeled" });
     const unlabeledLeader = await createAgent(harness, { provider: "claude", title: "Unlabeled" });
@@ -1013,6 +1036,18 @@ describe("AccountFailoverMonitor (e2e)", () => {
 
     // claude-personal is the higher-priority worker, and is skipped: it is the exhausted account
     // under another name. The rescue goes to the one account that has its own budget.
+    expect(providerOf(harness, leader)).toBe("claude-backup");
+  }, 60_000);
+
+  test("ranks a worker whose auth is confirmed signed-in ahead of one that could not be read", async () => {
+    // Every pool provider defaults to "unknown" auth (line ~120). Confirming just claude-backup
+    // lets it outrank claude-personal despite claude-personal's lower (better) priority number.
+    harness.setAccount("claude-backup", { state: "signed-in", accountLabel: "worker@example.com" });
+    const leader = await createAgent(harness, { provider: "claude", title: "Leader" });
+    await failOnLimit(harness, leader);
+
+    await harness.sweep();
+
     expect(providerOf(harness, leader)).toBe("claude-backup");
   }, 60_000);
 
