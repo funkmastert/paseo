@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, realpathSync, rmSync, type Dirent } from "node:fs";
 import { access, constants, lstat, opendir, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { isBuildManifest } from "./agent/workspace-sweep-detector.js";
 import type { WorktreeSnapshotOffsite } from "./remediation/contract.js";
@@ -57,11 +57,15 @@ export interface CheckWorktreeDeletionSafetyInput {
   runGit?: RunGitCommand;
 }
 
+// Git reports --path-format=absolute paths with forward slashes even on win32. realpathSync
+// resolves that fine when the path exists, but the catch fallback must still return something
+// native so two realpathOrSelf() results stay comparable when one side never hits the
+// filesystem (e.g. a path that does not exist).
 function realpathOrSelf(path: string): string {
   try {
     return realpathSync(path);
   } catch {
-    return path;
+    return resolve(path);
   }
 }
 
