@@ -63,6 +63,8 @@ A provider with no usable reading is treated as full rather than worst: a usage 
 
 Role beats headroom. For a child, a leader account with more room left is still the account whose budget the pool is protecting.
 
+Within a role tier, an account known signed-in beats one whose auth could not be confirmed (OR-D8): "unknown" is not "healthy", read from the same `describeProviderAccount` identity check [Two providers, one account](#two-providers-one-account) already does. It is a ranking preference, not a refusal — an unread account still takes the agent when nothing better exists, since stranding it over a read the daemon could not make, rather than a cap the account actually hit, would be worse than the uncertainty. `pickFailoverTarget` names the reason in the log when it lands on one.
+
 ### When no account is left
 
 Nothing moves. Every remaining target would fail on the first turn, so a rescue onto one spends a move and a resume to leave the agent exactly as stuck on a different account, with its evidence scattered across two. The agent keeps its conversation and continues the moment an account recovers. This is the one account condition Tyler hears about; see [When Tyler hears](#when-tyler-hears).
@@ -88,6 +90,8 @@ Two independent signals, either one sufficient (`account-failover-detector.ts`):
   `lastError` only exists if the provider reports the turn as failed. The Claude CLI reports a capped turn as a synthetic assistant message (`isApiErrorMessage`, `error: "rate_limit"`) followed by a `result` with `subtype: "success"` and `is_error: true`. `appendResultEvents` in the Claude provider turns that into `turn_failed`; before it did, a capped turn completed, the agent went idle with no error, and this monitor had nothing to read. Any provider added to the pool has to report a capped turn the same way. The e2e suite injects failures as `turn_failed` directly, so it cannot catch a provider that doesn't.
 
 - **Proactive.** A usage window at or above 100%, read from the daemon's cached `ProviderUsageService` (the same rows the Host Usage screen shows). An account reporting `unavailable` with no windows is never dead on that basis: an account can serve traffic fine while its usage is unreadable.
+
+  A usage row older than `usageStaleAfterMs` (15 minutes by default) is ignored outright rather than trusted either way (`account-pool-headroom.ts#staleUsageAges`, OR-D8): a feed that stopped refreshing can't wedge a recovered account dead on a stale 100%. Freshness is read from the row's own `fetchedAt` when a fetcher sets one — the OpenAI usage fetcher does — and otherwise from when `ProviderUsageService.listUsage()` actually fetched, the timestamp every row in one response shares. The Claude fetcher never sets a per-row `fetchedAt`, so every Claude pool provider's row is dated by that shared batch time. The same bound and the same ignored rows apply to the target side below: a stale row must not make a target look like it has headroom it may no longer have. A verdict change — a provider's row going stale, or coming back fresh — logs once ("usage row for \<provider\> is \<age\> old; ignored"), not every sweep.
 
   A model's weekly window (`weekly_model_*`) stops only that model, so it makes the account dead only for agents on that model family (`windowLimitsModel`): an Opus cap moves the Opus leaders and leaves the Sonnet workers where they are. The session, weekly and surface windows stop everyone. An agent whose model is unset or in no known family is held to every window, since it may be on the capped model. The same rule decides which windows count toward a target's 90% line and its headroom. The family list matches the account-pool plugin's (`plugins/claude-account-pool/server/windows.ts`); change them together.
 
@@ -206,13 +210,14 @@ The stranded case goes through the [remediation ladder](remediation.md), which o
 
 `agents.accountFailover` in `$PASEO_HOME/config.json`. Every field is optional, and the defaults work without any config change:
 
-| Field                     | Default | Effect                                                                     |
-| ------------------------- | ------- | -------------------------------------------------------------------------- |
-| `enabled`                 | `true`  | `false` stops all sweeps.                                                  |
-| `migrateSubagents`        | `true`  | `false` moves leaders only and leaves subagents to their leader.           |
-| `migrationConcurrency`    | `3`     | Migrations run at once per sweep.                                          |
-| `notifyParent`            | `true`  | `false` skips the steered message a running parent gets after an _import_. |
-| `collapseToSharedAccount` | `true`  | `false` bars the leader account as a target for children.                  |
+| Field                     | Default           | Effect                                                                                                                                   |
+| ------------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                 | `true`            | `false` stops all sweeps.                                                                                                                |
+| `migrateSubagents`        | `true`            | `false` moves leaders only and leaves subagents to their leader.                                                                         |
+| `migrationConcurrency`    | `3`               | Migrations run at once per sweep.                                                                                                        |
+| `notifyParent`            | `true`            | `false` skips the steered message a running parent gets after an _import_.                                                               |
+| `collapseToSharedAccount` | `true`            | `false` bars the leader account as a target for children.                                                                                |
+| `usageStaleAfterMs`       | `900000` (15 min) | A pool provider's usage row older than this is ignored by both the proactive dead-account check and the target headroom ranking (OR-D8). |
 
 `returnHome`, `returnMaxHomeUsedPct`, `returnMinIdleMinutes`, `returnCooldownMinutes`, `returnRetryBackoffMinutes` and `returnMaxUsageAgeMinutes` are accepted and ignored. They configured the return leg, which is gone; they stay in the schema so a config that sets them still loads (`COMPAT(failoverReturn)`).
 

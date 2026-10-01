@@ -7,7 +7,7 @@ import type { AgentLifecycleStatus } from "@getpaseo/protocol/agent-lifecycle";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary } from "./agent-manager.js";
-import { isModelWindow, windowLimitsModel } from "./account-pool-headroom.js";
+import { isModelWindow, staleUsageAges, windowLimitsModel } from "./account-pool-headroom.js";
 
 // Loose substring matching by design: provider error copy drifts, and a false positive costs an
 // unnecessary migration (conversation, model, and predecessor all survive) while a false
@@ -112,6 +112,14 @@ export interface PlanAccountFailoverSweepInput {
   nowMs: number;
   reactiveSignalTtlMs: number;
   migrateSubagents: boolean;
+  /** How old a provider's usage row may be before the proactive leg ignores it (OR-D8). */
+  usageStaleAfterMs: number;
+  /**
+   * When `usage` was actually fetched, from `ProviderUsageService.listUsage()`'s own
+   * `fetchedAt` — the fallback age for a row that carries no `fetchedAt` of its own, which is
+   * every Claude pool provider's row today. Null when usage could not be read at all.
+   */
+  usageFetchedAtMs: number | null;
 }
 
 export interface AccountFailoverSweepPlan {
@@ -127,6 +135,12 @@ export interface AccountFailoverSweepPlan {
   sightings: Map<string, LimitErrorSighting>;
   /** Carry into the next sweep's `previousProviderSightings`; entries past the TTL are dropped. */
   providerSightings: Map<string, ProviderLimitSighting>;
+  /**
+   * Pool providers whose usage row this sweep ignored as too old (OR-D8), keyed to its age. The
+   * monitor reuses this to keep the target-headroom leg off the same stale rows, and logs once
+   * per provider per verdict change rather than every sweep.
+   */
+  staleUsageAges: Map<string, number>;
 }
 
 /**
@@ -196,7 +210,9 @@ export function isStuckTurn(
  *   is never dead on that basis alone: it may be serving traffic fine with unreadable usage. A
  *   model's weekly window at its cap condemns the account for agents on that model only.
  *   A healthy usage reading never clears a reactive signal either — a monthly spend cap does not
- *   show up in the utilization windows at all.
+ *   show up in the utilization windows at all. A usage row older than `usageStaleAfterMs`
+ *   (OR-D8) is ignored outright rather than trusted either way, so a feed that stopped
+ *   refreshing can't wedge a recovered account dead on a stale 100%.
  *
  * A sighting keeps its first-seen time only while both the error text and the timeline
  * generation are unchanged, so a new attempt that fails with identical text (a resume prompt
@@ -242,7 +258,18 @@ export function planAccountFailoverSweep(
     if (input.poolProviderIds.has(providerId)) deadProviderIds.add(providerId);
   }
 
-  const usageCaps = readUsageCaps(input.usage, input.poolProviderIds);
+  // A provider's usage row this old is ignored rather than trusted either way: a stale 100% must
+  // not condemn a recovered account forever, and (the monitor's job, with the same map) a stale
+  // reading must not make a target look like it has headroom it may no longer have.
+  const staleUsage = staleUsageAges(
+    input.usage,
+    input.nowMs,
+    input.usageStaleAfterMs,
+    input.usageFetchedAtMs,
+  );
+  const freshUsage =
+    input.usage?.filter((provider) => !staleUsage.has(provider.providerId)) ?? null;
+  const usageCaps = readUsageCaps(freshUsage, input.poolProviderIds);
   for (const providerId of usageCaps.accountWide) deadProviderIds.add(providerId);
   const cappedModelWindows = usageCaps.modelWindows;
 
@@ -259,5 +286,12 @@ export function planAccountFailoverSweep(
       (input.migrateSubagents || getParentAgentIdFromLabels(agent.labels) === null),
   );
 
-  return { deadProviderIds, cappedModelWindows, candidates, sightings, providerSightings };
+  return {
+    deadProviderIds,
+    cappedModelWindows,
+    candidates,
+    sightings,
+    providerSightings,
+    staleUsageAges: staleUsage,
+  };
 }

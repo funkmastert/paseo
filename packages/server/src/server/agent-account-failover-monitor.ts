@@ -17,6 +17,7 @@ import {
   type ProviderLimitSighting,
 } from "./agent/account-failover-detector.js";
 import {
+  DEFAULT_USAGE_STALE_AFTER_MS,
   headroomByProvider,
   saturatedProviderIds,
   windowLimitsModel,
@@ -71,6 +72,11 @@ export interface AccountFailoverConfig {
    * accounts run out for the week one after the other.
    */
   collapseToSharedAccount?: boolean;
+  /**
+   * How old a pool provider's cached usage row may be before the proactive leg and the target
+   * headroom ranking both ignore it (OR-D8). Default 15 minutes.
+   */
+  usageStaleAfterMs?: number;
   // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
   returnHome?: boolean;
   returnMaxHomeUsedPct?: number;
@@ -113,6 +119,7 @@ interface ResolvedAccountFailoverConfig {
   migrationConcurrency: number;
   notifyParent: boolean;
   collapseToSharedAccount: boolean;
+  usageStaleAfterMs: number;
 }
 
 function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccountFailoverConfig {
@@ -121,6 +128,7 @@ function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccou
     migrationConcurrency: config?.migrationConcurrency ?? DEFAULT_MIGRATION_CONCURRENCY,
     notifyParent: config?.notifyParent ?? true,
     collapseToSharedAccount: config?.collapseToSharedAccount ?? true,
+    usageStaleAfterMs: config?.usageStaleAfterMs ?? DEFAULT_USAGE_STALE_AFTER_MS,
   };
 }
 
@@ -157,6 +165,8 @@ export class AccountFailoverMonitor {
   private sweepInFlight = false;
   private sightings = new Map<string, LimitErrorSighting>();
   private providerSightings = new Map<string, ProviderLimitSighting>();
+  /** The previous sweep's `staleUsageAges`, so a provider going stale or fresh again logs once. */
+  private staleUsageAges = new Map<string, number>();
   private unresumed = new Map<string, UnresumedAgent>();
   /** Whether the last stranding observation was active, so the all-clear is sent once. */
   private strandingActive = false;
@@ -217,6 +227,7 @@ export class AccountFailoverMonitor {
       this.sightings.clear();
       this.providerSightings.clear();
       this.idleBackoffs.clear();
+      this.staleUsageAges.clear();
       await this.observeStranding({ stranded: [], deadPoolIds: [], usage: null });
       return;
     }
@@ -234,21 +245,28 @@ export class AccountFailoverMonitor {
       nowMs,
       reactiveSignalTtlMs: this.reactiveSignalTtlMs,
       migrateSubagents: config.migrateSubagents,
+      usageStaleAfterMs: config.usageStaleAfterMs,
+      usageFetchedAtMs: usage?.fetchedAtMs ?? null,
     });
     this.sightings = plan.sightings;
     this.providerSightings = plan.providerSightings;
+    this.logStaleUsageChanges(plan.staleUsageAges);
+    this.staleUsageAges = plan.staleUsageAges;
     // Before the early return below: a queue of agents waiting to be restarted is work to do
     // even on a sweep that finds no new candidates, which is the usual case.
     await this.retryUnresumed();
     const rows = usage?.providers ?? null;
+    // Same staleness bound as the dead-account check, and the same providers it ignored: a row
+    // too old to trust must not make a target look like it has headroom it may no longer have.
+    const freshRows = rows?.filter((row) => !plan.staleUsageAges.has(row.providerId)) ?? null;
     // Per agent, because a model's weekly window stops only that model. Ranked from the same rows
     // the plan read, so "which account is deadest" and "which has the most left" can never
     // disagree about what the usage said this sweep.
     const targetsFor = (agent: AccountFailoverAgentSummary) => ({
-      headroom: headroomByProvider(rows, nowMs, agent.model),
+      headroom: headroomByProvider(freshRows, nowMs, agent.model),
       // Never a move target: a dead account, or one with a window at 90% or more that stops the
       // agent's model, which would cap it again within a turn or two.
-      unusable: new Set([...plan.deadProviderIds, ...saturatedProviderIds(rows, agent.model)]),
+      unusable: new Set([...plan.deadProviderIds, ...saturatedProviderIds(freshRows, agent.model)]),
     });
     // An account move rebuilds the agent's whole prompt cache, so only two kinds of agent move:
     // one whose turn was cut off on a dead account (rescued and resumed here), and an idle root on
@@ -301,6 +319,26 @@ export class AccountFailoverMonitor {
         accounts,
         config,
       });
+    }
+  }
+
+  /**
+   * Logs a provider's usage row going stale or becoming fresh again, once per change rather than
+   * every sweep (OR-D8) — the same discipline the resource monitor's reaper uses for its own
+   * verdict changes (docs/resource-monitor.md).
+   */
+  private logStaleUsageChanges(current: ReadonlyMap<string, number>): void {
+    const { logger } = this.options;
+    for (const [providerId, ageMs] of current) {
+      if (this.staleUsageAges.has(providerId)) continue;
+      logger.warn(
+        { providerId, ageMs },
+        `Account failover: usage row for ${providerId} is ${formatAgeMinutes(ageMs)} old; ignored`,
+      );
+    }
+    for (const providerId of this.staleUsageAges.keys()) {
+      if (current.has(providerId)) continue;
+      logger.info({ providerId }, `Account failover: usage row for ${providerId} is fresh again`);
     }
   }
 
@@ -772,6 +810,10 @@ export class AccountFailoverMonitor {
       );
     }
   }
+}
+
+function formatAgeMinutes(ageMs: number): string {
+  return `${Math.round(ageMs / 60_000)}m`;
 }
 
 /**

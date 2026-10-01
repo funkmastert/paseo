@@ -597,7 +597,7 @@ function pickTarget(params: {
   sameSession: readonly StoredAgentRecord[];
 }): string | null {
   const { input, sameSession } = params;
-  return pickFailoverTarget(input.poolEntries, {
+  const targetProviderId = pickFailoverTarget(input.poolEntries, {
     headroom: input.headroom,
     allowLeader: input.allowLeaderTarget,
     preferLeader: getParentAgentIdFromLabels(input.agent.labels) === null,
@@ -607,7 +607,20 @@ function pickTarget(params: {
       agentManager: input.agentManager,
     }),
     sourceProviderId: input.agent.provider,
+    accounts: input.accounts,
   });
+  // Named here, not inside pickFailoverTarget: that function is pure (OR-D8's detector-adjacent
+  // logic never does I/O), and this is the one place that already knows both the pick and why.
+  if (targetProviderId) {
+    const authState = input.accounts.get(targetProviderId)?.state ?? "unread";
+    if (authState !== "signed-in") {
+      input.logger.info(
+        { agentId: input.agent.id, targetProviderId, authState },
+        "Account failover: target account's auth could not be confirmed signed-in; using it anyway",
+      );
+    }
+  }
+  return targetProviderId;
 }
 
 export type IdleRehomeOutcome =

@@ -11,6 +11,43 @@
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 
 /**
+ * How long a cached usage row may be trusted before the proactive dead-account check
+ * (`account-failover-detector.ts`) and target ranking both have to treat it as unreadable rather
+ * than live (OR-D8). Configurable via `agents.accountFailover.usageStaleAfterMs`. Without a
+ * bound, a usage row that stopped refreshing would either wedge an account dead forever at a
+ * stale 100%, or dangle a stale 0% in front of the headroom ranking as if it were free.
+ */
+export const DEFAULT_USAGE_STALE_AFTER_MS = 15 * 60 * 1000;
+
+/**
+ * Every pool provider whose usage row is older than `staleAfterMs`, keyed to how old it is. A
+ * row's own `fetchedAt` wins when a fetcher sets one (the OpenAI usage fetcher does); the Claude
+ * fetcher never does, so those rows fall back to `batchFetchedAtMs` — when
+ * `ProviderUsageService.listUsage()` last actually fetched, the same timestamp every row in that
+ * response shares. A provider with neither is never stale — there is no evidence it is old, and
+ * a response from before provenance tracking existed must keep working. The caller filters these
+ * rows out of both legs: the dead-account check (so a stale 100% does not condemn an account
+ * forever) and headroom/saturation ranking (so a stale reading does not make a target look like
+ * it has room it may no longer have).
+ */
+export function staleUsageAges(
+  usage: readonly ProviderUsage[] | null,
+  nowMs: number,
+  staleAfterMs: number,
+  batchFetchedAtMs: number | null,
+): Map<string, number> {
+  const ages = new Map<string, number>();
+  for (const provider of usage ?? []) {
+    const ownFetchedAtMs = provider.fetchedAt ? Date.parse(provider.fetchedAt) : Number.NaN;
+    const fetchedAtMs = Number.isFinite(ownFetchedAtMs) ? ownFetchedAtMs : batchFetchedAtMs;
+    if (fetchedAtMs === null || !Number.isFinite(fetchedAtMs)) continue;
+    const age = nowMs - fetchedAtMs;
+    if (age > staleAfterMs) ages.set(provider.providerId, age);
+  }
+  return ages;
+}
+
+/**
  * How far ahead a reset is worth anything. A day: the span a rescue actually has to cover, so a
  * window resetting on Friday does not pull an agent onto an account that cannot run it today.
  */

@@ -65,16 +65,23 @@ function usage(providerId: string, usedPcts: Array<number | null>): ProviderUsag
   };
 }
 
+const USAGE_STALE_AFTER_MS = 15 * 60 * 1000;
+
 function plan(overrides: Partial<PlanAccountFailoverSweepInput>) {
+  const nowMs = overrides.nowMs ?? 1_000_000;
   return planAccountFailoverSweep({
     poolProviderIds: POOL,
     agents: [],
     usage: [],
     previousSightings: new Map(),
     previousProviderSightings: new Map(),
-    nowMs: 1_000_000,
+    nowMs,
     reactiveSignalTtlMs: TTL_MS,
     migrateSubagents: true,
+    usageStaleAfterMs: USAGE_STALE_AFTER_MS,
+    // Fresh by default: the batch was fetched at the same instant the sweep reads it, so no
+    // existing test picks up staleness it did not ask for.
+    usageFetchedAtMs: nowMs,
     ...overrides,
   });
 }
@@ -283,6 +290,30 @@ describe("planAccountFailoverSweep", () => {
     expect(ids(result.candidates)).toEqual(["opus"]);
     expect(isAccountDeadFor(result, opus)).toBe(true);
     expect(isAccountDeadFor(result, sonnet)).toBe(false);
+  });
+
+  it("ignores a usage row older than the staleness bound rather than treating it as dead", () => {
+    const stale = {
+      ...usage("claude-personal", [100]),
+      fetchedAt: new Date(1_000_000 - 20 * 60 * 1000).toISOString(),
+    };
+
+    const result = plan({ usage: [stale] });
+
+    expect(result.deadProviderIds.size).toBe(0);
+    expect(result.staleUsageAges.get("claude-personal")).toBe(20 * 60 * 1000);
+  });
+
+  it("falls back to the batch fetch time for a Claude row, which never carries its own fetchedAt", () => {
+    const capped = usage("claude-personal", [100]);
+    expect(capped.fetchedAt).toBeUndefined();
+
+    const fresh = plan({ usage: [capped], usageFetchedAtMs: 1_000_000 });
+    expect([...fresh.deadProviderIds]).toEqual(["claude-personal"]);
+
+    const stale = plan({ usage: [capped], usageFetchedAtMs: 1_000_000 - 20 * 60 * 1000 });
+    expect(stale.deadProviderIds.size).toBe(0);
+    expect(stale.staleUsageAges.get("claude-personal")).toBe(20 * 60 * 1000);
   });
 
   it("never makes an idle agent without its own limit failure a candidate, but takes one in error", () => {
