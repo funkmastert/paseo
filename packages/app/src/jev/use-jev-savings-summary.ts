@@ -16,9 +16,10 @@ export function jevSavingsSummaryQueryKey(
 }
 
 /**
- * `jev.savings.summary` for a range. Reads a local fake reader until the savings track's seam
- * lands a real `DaemonClient.jevSavingsSummary` (`fake-jev-savings-reader.ts`); swap the `queryFn`
- * for a client call at that point, same shape.
+ * `jev.savings.summary` for a range. The savings track's seam already landed a real
+ * `DaemonClient.jevSavingsSummary`, but its handler is `JevService.savings`'s drop-everything sink
+ * until the ledger merges — so this reads a local fake until then (`fake-jev-savings-reader.ts`);
+ * swap the `queryFn` for a client call at that point, same shape.
  */
 export function useJevSavingsSummary(
   serverId: string | null | undefined,

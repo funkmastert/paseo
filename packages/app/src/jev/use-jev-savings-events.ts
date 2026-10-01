@@ -3,7 +3,6 @@ import { createFakeJevSavingsReader } from "@/jev/fake-jev-savings-reader";
 import type {
   JevSavingsEvent,
   JevSavingsEventsPage,
-  JevSavingsFeature,
   JevSavingsRange,
 } from "@/jev/jev-savings-types";
 import { useFetchQueries } from "@/data/query";
@@ -21,7 +20,7 @@ export interface JevSavingsEventsState {
 
 export function jevSavingsEventsQueryKey(
   serverId: string | null | undefined,
-  query: { range: JevSavingsRange; feature?: JevSavingsFeature; agentId?: string },
+  query: { range: JevSavingsRange; feature?: string; agentId?: string },
 ) {
   return [
     "jevSavingsEvents",
@@ -60,9 +59,10 @@ function useFilteredCursors(filterKey: string): {
 }
 
 /**
- * `jev.savings.events`, paged by cursor, filterable by feature and agent. Reads a local fake
- * reader until the savings track's seam lands a real `DaemonClient.jevSavingsEvents`
- * (`fake-jev-savings-reader.ts`); swap the `queryFn` for a client call at that point, same shape.
+ * `jev.savings.events`, paged by cursor, filterable by feature and agent. The savings track's seam
+ * already landed a real `DaemonClient.jevSavingsEvents`, but its handler drops everything until
+ * the ledger merges — so this reads a local fake until then (`fake-jev-savings-reader.ts`); swap
+ * the `queryFn` for a client call at that point, same shape.
  *
  * Each fetched cursor is its own cached query (`useFetchQueries`, not `useInfiniteQuery`, which
  * app code may not call directly — `no-restricted-imports`). "Load more" appends the previous
@@ -70,7 +70,7 @@ function useFilteredCursors(filterKey: string): {
  */
 export function useJevSavingsEvents(
   serverId: string | null | undefined,
-  query: { range: JevSavingsRange; feature?: JevSavingsFeature; agentId?: string },
+  query: { range: JevSavingsRange; feature?: string; agentId?: string },
   options: { enabled?: boolean } = {},
 ): JevSavingsEventsState {
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");

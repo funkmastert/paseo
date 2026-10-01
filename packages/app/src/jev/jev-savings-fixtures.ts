@@ -7,7 +7,7 @@ import type {
 
 /**
  * Canned savings data standing in for `jev.savings.summary` / `jev.savings.events` until the
- * savings track's seam lands. Shapes a believable story across the three ranges: `spawnHint`,
+ * savings ledger's handlers land. Shapes a believable story across the three ranges: `spawnHint`,
  * `notificationTriage`, `stallJudgment` and `readCheck` are shadow and not yet past their evidence
  * rule; `remediationTriage` is shadow and past it, ready for Tyler to flip; `agentTools` and
  * `askJev` are live; `compactionTiming` is dormant; `awayReply` is dry run.

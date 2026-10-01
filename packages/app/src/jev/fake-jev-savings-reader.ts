@@ -15,8 +15,10 @@ const MAX_LIMIT = 200;
 
 /**
  * Stands in for the real `JevSavingsReader` (a `jev.savings.summary` / `jev.savings.events`
- * round trip through `DaemonClient`) until the savings track's seam lands. At merge, delete this
- * and call the client directly from the hooks.
+ * round trip through `DaemonClient`) until the savings ledger's handlers land on
+ * `multi-account-orchestrator` (its seam is merged; `JevService.savings` still drops everything —
+ * docs/design-notes/jev-tracks.md, "The seam commit"). At merge, delete this and call the client
+ * directly from the hooks.
  */
 export function createFakeJevSavingsReader(): JevSavingsReader {
   return {

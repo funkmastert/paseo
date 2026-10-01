@@ -12,4 +12,7 @@ export const JEV_FEATURE_LABELS: Readonly<Record<string, string>> = {
   awayReply: "Away reply",
   agentTools: "Agent tools",
   askJev: "Ask JEV",
+  // Feature 16, the file-read check: not a JevFeatureId yet (docs/jev.md, "Savings"), but the
+  // savings ledger's JevSavingsFeature union names it, and the JEV dashboard needs its label.
+  readCheck: "File-read check",
 };

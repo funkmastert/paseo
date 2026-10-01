@@ -25,7 +25,7 @@ import {
   type JevDashboardFeatureRow,
   type JevDashboardTile,
 } from "@/jev/jev-dashboard-model";
-import type { JevSavingsEvent, JevSavingsFeature, JevSavingsRange } from "@/jev/jev-savings-types";
+import type { JevSavingsEvent, JevSavingsRange } from "@/jev/jev-savings-types";
 import { useJevDashboardHostStatus } from "@/jev/use-jev-dashboard-host-status";
 import { useJevSavingsEvents } from "@/jev/use-jev-savings-events";
 import { useJevSavingsSummary } from "@/jev/use-jev-savings-summary";
@@ -87,7 +87,7 @@ function JevDashboardScreenContent({
     initialServerId ?? activeWorkspace?.serverId ?? hosts[0]?.serverId ?? null,
   );
   const [range, setRange] = useState<JevSavingsRange>("today");
-  const [featureFilter, setFeatureFilter] = useState<JevSavingsFeature | undefined>(undefined);
+  const [featureFilter, setFeatureFilter] = useState<string | undefined>(undefined);
   const agentFilter = initialAgentId ?? undefined;
 
   const serverId =
@@ -277,8 +277,8 @@ function JevDashboardReadyContent({
   onLoadMoreEvents: () => void;
   range: JevSavingsRange;
   onRangeChange: (range: JevSavingsRange) => void;
-  featureFilter: JevSavingsFeature | undefined;
-  onFeatureFilterChange: (feature: JevSavingsFeature | undefined) => void;
+  featureFilter: string | undefined;
+  onFeatureFilterChange: (feature: string | undefined) => void;
   onOpenAgent: (agentId: string, workspaceId: string | null) => void;
   onOpenWorkspace: (workspaceId: string) => void;
 }) {
@@ -402,8 +402,8 @@ function FeatureTable({
   onSelectFeature,
 }: {
   rows: JevDashboardFeatureRow[];
-  selectedFeature: JevSavingsFeature | undefined;
-  onSelectFeature: (feature: JevSavingsFeature | undefined) => void;
+  selectedFeature: string | undefined;
+  onSelectFeature: (feature: string | undefined) => void;
 }) {
   return (
     <View style={styles.card} testID="jev-dashboard-feature-table">
@@ -434,8 +434,8 @@ function FeatureRow({
 }: {
   row: JevDashboardFeatureRow;
   bordered: boolean;
-  selectedFeature: JevSavingsFeature | undefined;
-  onSelectFeature: (feature: JevSavingsFeature | undefined) => void;
+  selectedFeature: string | undefined;
+  onSelectFeature: (feature: string | undefined) => void;
 }) {
   const selected = selectedFeature === row.feature;
   const handlePress = useCallback(

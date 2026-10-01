@@ -1,18 +1,17 @@
+import { JEV_FEATURE_LABELS } from "@getpaseo/protocol/jev/labels";
 import type {
-  JevFeatureState,
   JevOtherBenefit,
   JevSavingsDay,
-  JevSavingsFeature,
   JevSavingsFeatureSummary,
   JevSavingsSummary,
 } from "@/jev/jev-savings-types";
 
 /**
- * Feature order and labels, local to the dashboard until the ui track's `JEV_FEATURE_LANES` /
- * `FEATURE_LABELS` (docs/jev.md, "Feature 11") land on `multi-account-orchestrator`. At merge,
- * delete these two and import the shared source instead.
+ * Display order, local to the dashboard: `feature` travels the wire as a plain string
+ * (docs/jev.md, "Savings"), so a feature neither this list nor `JEV_FEATURE_LABELS` names yet
+ * still renders, just last and by its raw id (`jevFeatureLabel` below).
  */
-export const JEV_SAVINGS_FEATURE_ORDER: JevSavingsFeature[] = [
+export const JEV_SAVINGS_FEATURE_ORDER: readonly string[] = [
   "spawnHint",
   "remediationTriage",
   "notificationTriage",
@@ -24,23 +23,15 @@ export const JEV_SAVINGS_FEATURE_ORDER: JevSavingsFeature[] = [
   "readCheck",
 ];
 
-export const JEV_SAVINGS_FEATURE_LABELS: Record<JevSavingsFeature, string> = {
-  spawnHint: "Spawn hint",
-  remediationTriage: "Remediation triage",
-  notificationTriage: "Finish triage",
-  agentTools: "Agent tools",
-  compactionTiming: "Compaction timing",
-  stallJudgment: "Stall judgment",
-  awayReply: "Away reply",
-  askJev: "Ask JEV",
-  readCheck: "File-read check",
-};
+export function jevFeatureLabel(feature: string): string {
+  return JEV_FEATURE_LABELS[feature] ?? feature;
+}
 
 /**
  * Away reply's own vocabulary is "dry run", not "shadow" (`agents.jev.awayReply.dryRun`); every
  * other feature's `shadow` state reads as "Shadow". `off` and `live` read the same everywhere.
  */
-export function jevFeatureStateLabel(feature: JevSavingsFeature, state: JevFeatureState): string {
+export function jevFeatureStateLabel(feature: string, state: string): string {
   switch (state) {
     case "off":
       return "Off";
@@ -50,6 +41,8 @@ export function jevFeatureStateLabel(feature: JevSavingsFeature, state: JevFeatu
       return "Live";
     case "shadow":
       return feature === "awayReply" ? "Dry run" : "Shadow";
+    default:
+      return state;
   }
 }
 
@@ -125,18 +118,19 @@ export function formatUsd(usd: number): string {
 }
 
 export function formatOtherBenefit(benefit: JevOtherBenefit): string {
-  switch (benefit.unit) {
-    case "pushes-held":
-      return `${Math.round(benefit.value)} push${Math.round(benefit.value) === 1 ? "" : "es"} held`;
-    case "minutes": {
-      if (benefit.value < 60) return `${Math.round(benefit.value)} min of waiting`;
-      return `${(benefit.value / 60).toFixed(1)} h of waiting`;
-    }
+  if (benefit.unit === "pushes-held") {
+    const count = Math.round(benefit.value);
+    return `${count} push${count === 1 ? "" : "es"} held`;
   }
+  if (benefit.unit === "minutes") {
+    if (benefit.value < 60) return `${Math.round(benefit.value)} min of waiting`;
+    return `${(benefit.value / 60).toFixed(1)} h of waiting`;
+  }
+  return `${benefit.value} ${benefit.unit}`;
 }
 
 export interface JevDashboardFeatureRow {
-  feature: JevSavingsFeature;
+  feature: string;
   label: string;
   stateLabel: string;
   involvements: number;
@@ -164,7 +158,7 @@ export function buildJevDashboardFeatureRows(summary: JevSavingsSummary): JevDas
   });
 }
 
-function zeroedFeatureSummary(feature: JevSavingsFeature): JevSavingsFeatureSummary {
+function zeroedFeatureSummary(feature: string): JevSavingsFeatureSummary {
   const zeroTotals = { involvements: 0, changed: 0, tokens: 0, otherBenefit: null, pending: 0 };
   return {
     feature,
@@ -195,7 +189,7 @@ function buildFeatureRow(entry: JevSavingsFeatureSummary): JevDashboardFeatureRo
   const otherBenefitText = buildOtherBenefitText(entry);
   return {
     feature: entry.feature,
-    label: JEV_SAVINGS_FEATURE_LABELS[entry.feature],
+    label: jevFeatureLabel(entry.feature),
     stateLabel: jevFeatureStateLabel(entry.feature, entry.state),
     involvements: entry.live.involvements + entry.shadow.involvements,
     notAskedTotal,
