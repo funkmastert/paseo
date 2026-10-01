@@ -12,7 +12,11 @@ import type {
   JevSavingsSink,
   JevSavingsValidation,
 } from "../contract.js";
-import { createTestJevService, type JevScriptedAnswer } from "../fake.js";
+import {
+  createTestJevService,
+  type JevScriptedAnswer,
+  type TestJevServiceOptions,
+} from "../fake.js";
 import {
   ReadCheckObserver,
   type ReadCheckAgentSource,
@@ -95,7 +99,7 @@ function setup(
   options: {
     config?: Record<string, unknown>;
     answers?: Record<string, JevScriptedAnswer>;
-    behavior?: Parameters<typeof createTestJevService>[0]["behavior"];
+    behavior?: TestJevServiceOptions["behavior"];
     fs?: ReadCheckFileSystem;
   } = {},
 ) {

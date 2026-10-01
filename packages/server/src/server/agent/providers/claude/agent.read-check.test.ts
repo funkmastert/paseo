@@ -71,7 +71,7 @@ function createQueryMock(): Query {
     [Symbol.asyncIterator]() {
       return this;
     },
-  } as Query;
+  } as unknown as Query;
 }
 
 type HookCallback = (input: unknown) => Promise<Record<string, unknown>>;
