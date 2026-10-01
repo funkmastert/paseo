@@ -733,8 +733,9 @@ export class ReadCheckObserver implements FileReadObserver {
     const { measured, config, read } = input;
     if (measured?.dedup) return "dedup";
     if (!config || !this.options.jev.isActive("readCheck")) return "inactive";
+    // Before the floor: an image or a PDF loads tokens its text length does not show.
+    if (measured?.notText || read.notText) return "not-text";
     if (!measured || (input.contextTokens ?? 0) < config.minTokens) return "below-floor";
-    if (measured.notText || read.notText) return "not-text";
     const ineligible = await this.eligibility({
       agentId: input.event.agentId,
       agentCwd: input.event.agentCwd,
