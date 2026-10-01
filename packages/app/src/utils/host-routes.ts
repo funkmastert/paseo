@@ -432,6 +432,15 @@ export function buildAskJevRoute() {
   return "/ask-jev" as const;
 }
 
+/** JEV belongs to a host, not a workspace (docs/jev.md, "The JEV dashboard"). */
+export function buildJevDashboardRoute(serverId?: string) {
+  const normalized = trimNonEmpty(serverId);
+  if (!normalized) {
+    return "/jev" as const;
+  }
+  return `/jev?host=${encodeSegment(normalized)}` as const;
+}
+
 export function buildPinnedGridRoute() {
   return "/pinned-grid" as const;
 }

@@ -4347,6 +4347,10 @@ export const ServerInfoStatusPayloadSchema = z
         jev: z.boolean().optional(),
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
         jevAsk: z.boolean().optional(),
+        // COMPAT(jevSavings): dashboard track's stand-in ahead of the savings
+        // track's seam commit, which owns this field for real. Reconcile at
+        // merge: take the seam's version.
+        jevSavings: z.boolean().optional(),
       })
       .optional(),
   })
