@@ -13,6 +13,9 @@ pre-commit:
         # found" — failing the hook, and taking the typecheck job's verdict
         # with it, for a commit that has nothing wrong with it.
         - "plugins/claude-account-pool/**"
+        # ops/** is in .oxfmtrc.json's own ignorePatterns (it keeps its own
+        # style too). Same failure mode as above for a commit touching only ops/.
+        - "ops/**"
       run: npm run format:check:files -- {staged_files}
     - name: lint
       glob: "*.{js,jsx,ts,tsx}"
