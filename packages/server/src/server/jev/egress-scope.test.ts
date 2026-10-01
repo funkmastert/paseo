@@ -142,14 +142,22 @@ describe("check: paths", () => {
     expect(await checker().check(scope, COMPANY)).toEqual(excludedBy("cwd:0"));
   });
 
-  test("roots compare case-insensitively on darwin and case-sensitively on linux", async () => {
-    const scope = { cwds: ["~/Mobile-Worktrees/app"] };
+  // The checker's injected `platform` only drives case-folding, not which path module parses
+  // its inputs — that's always node:path for the real host (correct in production, where
+  // platform always equals the host anyway). Simulating a different platform than the actual
+  // CI runner only produces matching results when the runner's native path module is already
+  // POSIX-flavored, i.e. on darwin/linux.
+  test.skipIf(process.platform === "win32")(
+    "roots compare case-insensitively on darwin and case-sensitively on linux",
+    async () => {
+      const scope = { cwds: ["~/Mobile-Worktrees/app"] };
 
-    expect(await checker({ platform: "darwin" }).check(scope, COMPANY)).toEqual(
-      excludedBy("cwd:0"),
-    );
-    expect(await checker({ platform: "linux" }).check(scope, COMPANY)).toEqual(NOT_EXCLUDED);
-  });
+      expect(await checker({ platform: "darwin" }).check(scope, COMPANY)).toEqual(
+        excludedBy("cwd:0"),
+      );
+      expect(await checker({ platform: "linux" }).check(scope, COMPANY)).toEqual(NOT_EXCLUDED);
+    },
+  );
 
   test("roots match whole segments, and a trailing * matches siblings by prefix", async () => {
     const check = checker();
@@ -207,29 +215,37 @@ describe("check: paths", () => {
     expect(await checker().check({ cwds: [dir("safe")] }, config)).toEqual(excludedBy("error"));
   });
 
-  test("on darwin a /System/Volumes/Data path matches the root under /Users it firmlinks to", async () => {
-    const root = dir("home", "backend-net");
-    const viaDataVolume = `/System/Volumes/Data${join(root, "app")}`;
-    const config = { ...NOTHING, excludeCwds: [root] };
-    const runGit = async () => NOT_A_REPOSITORY;
+  // See the skip comment on "roots compare case-insensitively" above: simulating darwin/linux
+  // only matches real behavior when the host's own node:path is already POSIX-flavored.
+  test.skipIf(process.platform === "win32")(
+    "on darwin a /System/Volumes/Data path matches the root under /Users it firmlinks to",
+    async () => {
+      const root = dir("home", "backend-net");
+      const viaDataVolume = `/System/Volumes/Data${join(root, "app")}`;
+      const config = { ...NOTHING, excludeCwds: [root] };
+      const runGit = async () => NOT_A_REPOSITORY;
 
-    expect(
-      await checker({ platform: "darwin", runGit }).check({ cwds: [viaDataVolume] }, config),
-    ).toEqual(excludedBy("cwd:0"));
-    expect(
-      await checker({ platform: "linux", runGit }).check({ cwds: [viaDataVolume] }, config),
-    ).toEqual(NOT_EXCLUDED);
-  });
+      expect(
+        await checker({ platform: "darwin", runGit }).check({ cwds: [viaDataVolume] }, config),
+      ).toEqual(excludedBy("cwd:0"));
+      expect(
+        await checker({ platform: "linux", runGit }).check({ cwds: [viaDataVolume] }, config),
+      ).toEqual(NOT_EXCLUDED);
+    },
+  );
 
-  test("on darwin a root spelled through /System/Volumes/Data matches the /Users path", async () => {
-    const root = dir("home", "backend-net");
-    const config = { ...NOTHING, excludeCwds: [`/System/Volumes/Data${root}`] };
-    const runGit = async () => NOT_A_REPOSITORY;
+  test.skipIf(process.platform === "win32")(
+    "on darwin a root spelled through /System/Volumes/Data matches the /Users path",
+    async () => {
+      const root = dir("home", "backend-net");
+      const config = { ...NOTHING, excludeCwds: [`/System/Volumes/Data${root}`] };
+      const runGit = async () => NOT_A_REPOSITORY;
 
-    expect(
-      await checker({ platform: "darwin", runGit }).check({ cwds: [join(root, "app")] }, config),
-    ).toEqual(excludedBy("cwd:0"));
-  });
+      expect(
+        await checker({ platform: "darwin", runGit }).check({ cwds: [join(root, "app")] }, config),
+      ).toEqual(excludedBy("cwd:0"));
+    },
+  );
 
   test("a changed config is not answered from the roots cache", async () => {
     const check = checker();
