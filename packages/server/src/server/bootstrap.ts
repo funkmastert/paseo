@@ -345,6 +345,7 @@ import {
   type JevServiceRuntime,
 } from "./jev/service.js";
 import { startSavingsAdapters } from "./jev/savings-adapters.js";
+import { createSavingsLookups } from "./jev/savings-lookups.js";
 import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
@@ -1524,6 +1525,18 @@ export async function createPaseoDaemon(
         jevKey,
       ),
     readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+    // "Where agents use it" on the JEV dashboard. The storage and the registry are built below;
+    // the lookups only read them once a record asks.
+    savingsLookups: createSavingsLookups({
+      liveAgent: (agentId) => {
+        const agent = agentManager.getAgent(agentId);
+        return agent
+          ? { title: agent.config.title ?? null, workspaceId: agent.workspaceId ?? null }
+          : null;
+      },
+      listStoredAgents: async () => agentStorage.list(),
+      listWorkspaces: async () => (await workspaceRegistry?.list()) ?? [],
+    }),
   });
   await jev.start();
 

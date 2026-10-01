@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 
 import { createDaemonTestContext, type DaemonTestContext } from "../test-utils/index.js";
@@ -50,6 +53,50 @@ describe("the savings ledger over the WebSocket", () => {
       { feature: "askJev", mode: "live", outcome: "answered", tokensSavedEstimate: null },
     ]);
     expect(page.nextCursor).toBeNull();
+  });
+
+  test("a question about an agent carries the agent's title and workspace (review M5)", async () => {
+    const cwd = mkdtempSync(path.join(tmpdir(), "jev-savings-where-"));
+    try {
+      const created = await ctx.client.createWorkspace({
+        source: { kind: "directory", path: cwd },
+      });
+      const workspaceId = created.workspace?.id;
+      if (!workspaceId) throw new Error(created.error ?? "Expected a workspace");
+      const agent = await ctx.client.createAgent({
+        provider: "codex",
+        cwd,
+        workspaceId,
+        title: "Billing export",
+      });
+
+      const asked = await ctx.client.jevAsk(
+        {
+          context: "",
+          agentId: agent.id,
+          question: { type: "noul", instructions: "Is it stuck?" },
+        },
+        { timeout: 10_000 },
+      );
+      expect(asked.outcome).toBe("answered");
+
+      const page = await ctx.client.jevSavingsEvents(
+        { range: "today", agentId: agent.id },
+        { timeout: 5_000 },
+      );
+      expect(page.events).toMatchObject([
+        { feature: "askJev", agentId: agent.id, agentTitle: "Billing export", workspaceId },
+      ]);
+      const { summary } = await ctx.client.jevSavingsSummary("today", { timeout: 5_000 });
+      expect(summary.topAgents).toContainEqual(
+        expect.objectContaining({ id: agent.id, label: "Billing export" }),
+      );
+      expect(summary.topWorkspaces).toContainEqual(
+        expect.objectContaining({ id: workspaceId, label: path.basename(cwd) }),
+      );
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("an unknown range is an rpc_error, not an empty summary", async () => {
