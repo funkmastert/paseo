@@ -313,8 +313,13 @@ describe("a stall candidate's judgment", () => {
     expect(report?.entries).toContainEqual(
       expect.objectContaining({ agentId: "a1", action: "held" }),
     );
-    // The ladder's grace moves with the hold, so its recheck still starts from the nudge.
-    expect(h.stallObservations("a1").at(-1)).toMatchObject({ active: true, graceMs: 50 * MINUTE });
+    // The ladder adds the hold to its grace, an override's included, so its recheck still starts
+    // from the nudge.
+    expect(h.stallObservations("a1").at(-1)).toMatchObject({
+      active: true,
+      graceMs: 20 * MINUTE,
+      holdMs: 30 * MINUTE,
+    });
 
     for (let sweep = 0; sweep < 5; sweep += 1) await h.tick();
     expect(h.nudges).toEqual([]);

@@ -1157,6 +1157,9 @@ function createAgentStallSweep(input: {
   jev: JevService;
   /** Where `agents.jev` and the stall judgment's measurement file live. */
   paseoHome: string;
+  /** The background-wait rule skips an agent a schedule, or restart recovery, is about to wake. */
+  scheduleService: Pick<ScheduleService, "list">;
+  restartRecovery: Pick<RestartRecoveryService, "isAboutToResume">;
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
   const judgmentLog = new StallJudgmentLog({ dir: path.join(input.paseoHome, "jev"), logger });
@@ -1224,6 +1227,18 @@ function createAgentStallSweep(input: {
           resume,
         ),
       recordMeasurement: (line) => judgmentLog.append(line),
+      listScheduledAgentIds: async () =>
+        new Set(
+          (await input.scheduleService.list()).flatMap((schedule) =>
+            schedule.target.type === "agent" && schedule.status !== "completed"
+              ? [schedule.target.agentId]
+              : [],
+          ),
+        ),
+      isClaimedByRestartRecovery: (agentId) => input.restartRecovery.isAboutToResume(agentId),
+      readSessionFamily: (agentId) =>
+        agentManager.listAgentsForLeaderCompaction().find((agent) => agent.id === agentId)
+          ?.sessionFamily,
     },
     sink: input.sink,
     readRemediationConfig: () => input.daemonConfigStore.get().remediation,
@@ -3263,6 +3278,8 @@ export async function createPaseoDaemon(
               paceResume: (resume, fn) => resumePacer.run(resume, fn),
               jev,
               paseoHome: config.paseoHome,
+              scheduleService,
+              restartRecovery,
             });
             agentStallSweep = stallSweep;
             stallSweep.start();

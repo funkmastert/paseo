@@ -266,10 +266,13 @@ export function firstUserMessage(rows: readonly AgentTimelineRow[]): string | nu
 /**
  * Calls that repeat by design: waiting on another agent, CI, a timer or a background shell. The
  * doc names `paseo wait`, `gh run watch`, `sleep` and the Paseo wait tools; reading a background
- * shell's output (`BashOutput`, `TaskOutput`) is the same kind of wait.
+ * shell's output (`BashOutput`, `TaskOutput`, `cat …/tasks/<id>.output`) is the same kind of wait,
+ * and so is an orchestrator checking on its agents (`paseo ls`, `get_agent_status`).
  */
-const POLLER_TOOL_NAME = /(?:^|__)(?:wait_for_agent(?:_start)?|BashOutput|TaskOutput)$/;
-const POLLER_COMMAND = /\bpaseo\s+wait\b|\bgh\s+run\s+watch\b|(?:^|[\s;&|(])sleep\s+\d/;
+const POLLER_TOOL_NAME =
+  /(?:^|__)(?:wait_for_agent(?:_start)?|BashOutput|TaskOutput|get_agent_status|get_agent_activity|list_agents)$/;
+const POLLER_COMMAND =
+  /\bpaseo\s+(?:wait|ls)\b|\bnpm\s+run\s+cli\s+--\s+ls\b|\bgh\s+run\s+watch\b|(?:^|[\s;&|(])sleep\s+\d|\b(?:cat|tail)\b[^|;&]*\/tasks\/[^\s/]+\.output\b/;
 
 export function isKnownPoller(item: ToolCallItem): boolean {
   if (POLLER_TOOL_NAME.test(item.name)) return true;

@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Logger } from "pino";
 
+import type { BackgroundWaitClass } from "./background-wait.js";
 import type { StallActivity, StallJudgmentBranch } from "./stall-judgment.js";
 
 /**
@@ -92,11 +93,31 @@ export type StallMeasurementLine =
       type: "background-wait";
       at: string;
       agentId: string;
+      waitClass: BackgroundWaitClass;
       /** `resumed`, `would-resume`, `capped`, `failed`, `skipped`. */
       action: string;
       quietMinutes: number;
       quote: string;
+      /** Own work: what the final turn launched ("a background shell"). */
+      launched: string[];
+      /** External wait: what it waits on ("CI"). */
+      target: string | null;
       detail: string | null;
+    }
+  | {
+      /** What came of a `resumed` or `would-resume` line, at the agent's next idle check. */
+      type: "background-wait-outcome";
+      at: string;
+      agentId: string;
+      waitClass: BackgroundWaitClass;
+      /** False for `would-resume`: what happened without a resume. */
+      resumed: boolean;
+      /** What started the next turn: the resume, another prompt, or the agent itself. */
+      woke: "resume" | "prompt" | "self";
+      toolWork: boolean;
+      /** The next turn ended waiting again. */
+      rewaited: boolean;
+      minutesToNextIdle: number;
     };
 
 export interface StallJudgmentLogOptions {

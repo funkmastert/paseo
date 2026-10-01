@@ -200,10 +200,7 @@ export class RemediationLadder implements RemediationSink {
         timeoutMinutes: observation.escalation?.timeoutMinutes ?? base.timeoutMinutes,
         cooldownMinutes: override?.cooldownMinutes ?? base.cooldownMinutes,
       },
-      graceMs:
-        override?.graceMinutes !== undefined
-          ? override.graceMinutes * MINUTE_MS
-          : (observation.graceMs ?? 0),
+      graceMs: resolveGraceMs(override, observation),
       notify: isNotifyRungEnabled(config) && override?.notify !== false,
       escalate: base.enabled && override?.escalate !== false,
     };
@@ -546,6 +543,21 @@ export class RemediationLadder implements RemediationSink {
       this.logger.warn({ err: error }, "Remediation ladder: push failed");
     }
   }
+}
+
+/**
+ * The config's `graceMinutes` replaces the observation's `graceMs`; the sender's own hold is added
+ * on top of either, so rung 2 never starts before the sender has acted.
+ */
+function resolveGraceMs(
+  override: RemediationConditionOverride | undefined,
+  observation: RemediationObservation,
+): number {
+  const graceMs =
+    override?.graceMinutes !== undefined
+      ? override.graceMinutes * MINUTE_MS
+      : (observation.graceMs ?? 0);
+  return graceMs + (observation.holdMs ?? 0);
 }
 
 function toStoredObservation(observation: RemediationObservation): LadderEpisode["observation"] {

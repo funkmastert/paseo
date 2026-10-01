@@ -105,6 +105,11 @@ export interface RemediationObservation {
    * `conditions.<kind>.graceMinutes` overrides it. Default 0.
    */
   graceMs?: number;
+  /**
+   * How long the sender put off its own rung-1 action (a stall judgment's hold). Added to the
+   * grace, whether it is `graceMs` or the config's override, so rung 2 never starts before it.
+   */
+  holdMs?: number;
   /** The rung 3 level. Default `alert`. */
   level?: "notice" | "alert" | "urgent";
   /** Absent: no agent can help, so rung 2 is skipped. */

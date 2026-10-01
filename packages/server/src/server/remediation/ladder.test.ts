@@ -169,6 +169,16 @@ describe("RemediationLadder rung 2", () => {
     expect(fleet.created).toHaveLength(1);
   });
 
+  it("adds the sender's hold on top of the config's graceMinutes", async () => {
+    config = { conditions: { "orphan-build-daemons": { graceMinutes: 0 } } };
+    const ladder = buildLadder();
+    await ladder.observe(observation({ holdMs: 30 * MINUTE }));
+    expect(fleet.created).toEqual([]);
+    nowMs += 30 * MINUTE;
+    await ladder.observe(observation({ holdMs: 30 * MINUTE }));
+    expect(fleet.created).toHaveLength(1);
+  });
+
   it("escalates a remedy-less condition with a task on the first sweep at grace 0", async () => {
     const ladder = buildLadder();
     await ladder.observe(observation({ remedy: "none", graceMs: undefined }));

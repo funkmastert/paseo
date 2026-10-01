@@ -4,17 +4,24 @@ import type { Logger } from "pino";
 import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 
 import type { AgentManager, StallSweepAgentSummary } from "./agent/agent-manager.js";
+import type { AgentTimelineItem } from "./agent/agent-sdk-types.js";
 import type { AgentTimelineRow } from "./agent/agent-timeline-store-types.js";
 import {
+  BACKGROUND_WAIT_LIVE,
+  BACKGROUND_WAIT_PROMPT_MARK,
   BACKGROUND_WAIT_QUIET_MS,
   BACKGROUND_WAIT_READ_ROWS,
   MAX_BACKGROUND_WAIT_RESUMES_PER_DAY,
   buildBackgroundWaitPrompt,
+  buildExternalWaitPrompt,
   findBackgroundShells,
   findBackgroundWait,
+  findExternalWait,
   readFinalMessage,
-  type BackgroundWaitMatch,
+  readFinalTurnWork,
+  type BackgroundWaitClass,
 } from "./agent/background-wait.js";
+import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "./agent/account-failover-detector.js";
 import {
   LOOP_WATCH_CONSECUTIVE,
   LOOP_WATCH_FLOOR,
@@ -116,6 +123,16 @@ export interface StallSweepDependencies {
   resumeIdleAgent?(input: { agentId: string; prompt: string }): Promise<IdleResumeResult>;
   /** Appends a line to the stall judgment's measurement file. */
   recordMeasurement?(line: StallMeasurementLine): void;
+  /** Agents a schedule or heartbeat still targets: it will wake them. Absent: none. */
+  listScheduledAgentIds?(): Promise<ReadonlySet<string>>;
+  /** Restart recovery has claimed the agent and is about to resume it. Absent: none. */
+  isClaimedByRestartRecovery?(agentId: string): boolean;
+  /**
+   * The built-in provider whose client runs the agent (`claude` for every Claude account). Only
+   * Claude's process tree is attributable; the background-wait rule skips the rest when it finds
+   * no tree. Absent: the agent's provider id.
+   */
+  readSessionFamily?(agentId: string): string | undefined;
 }
 
 export type IdleResumeResult =
@@ -130,6 +147,8 @@ export interface AgentStallSweepOptions {
   logger: Logger;
   sweepIntervalMs?: number;
   now?: () => number;
+  /** Tests only: production takes `BACKGROUND_WAIT_LIVE`. */
+  backgroundWaitLive?: boolean;
 }
 
 export interface StallSweepReportEntry {
@@ -204,12 +223,28 @@ interface IdleWaitMemory {
   checkedActivityAt: string | null;
   /** Resume times, for the per-day cap. */
   resumes: number[];
+  /** A `resumed` or `would-resume` line whose outcome is recorded at the next idle check. */
+  pendingOutcome: PendingOutcome | null;
+}
+
+interface PendingOutcome {
+  atMs: number;
+  /** The final message's last row: what came after it is the outcome. */
+  seq: number;
+  waitClass: BackgroundWaitClass;
+  resumed: boolean;
 }
 
 interface IdleWaitCandidate {
   agent: StallSweepAgentSummary;
   quietForMs: number;
-  match: BackgroundWaitMatch;
+  waitClass: BackgroundWaitClass;
+  quote: string;
+  /** Own work: what the final turn launched. */
+  launched: string[];
+  /** External wait: what it waits on. */
+  target: string | null;
+  seq: number;
 }
 
 interface StallCandidate {
@@ -237,11 +272,13 @@ export class AgentStallSweep {
   private cpuRateMemory: CpuRateMemory | undefined;
   private readonly memory = new Map<string, AgentStallMemory>();
   private readonly idleWaits = new Map<string, IdleWaitMemory>();
+  private readonly backgroundWaitLive: boolean;
 
   constructor(options: AgentStallSweepOptions) {
     this.options = options;
     this.deps = options.dependencies;
     this.now = options.now ?? Date.now;
+    this.backgroundWaitLive = options.backgroundWaitLive ?? BACKGROUND_WAIT_LIVE;
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -302,11 +339,16 @@ export class AgentStallSweep {
       }
       if (memory.loop?.reported) await this.closeLoop(latest, memory.loop, "left running");
     }
-    const idleWaits = this.findIdleWaits(agents, config, nowMs);
+    const idleWaits = await this.findIdleWaits(agents, config, nowMs);
     if (running.length === 0 && idleWaits.length === 0) return report;
 
+    const idleChildren = idleChildrenOf(agents, idleWaits);
     const sample = await this.sampleProcessTrees(
-      [...runningIds, ...idleWaits.map((wait) => wait.agent.id)],
+      [
+        ...runningIds,
+        ...idleWaits.map((wait) => wait.agent.id),
+        ...[...idleChildren.values()].flat().map((child) => child.id),
+      ],
       nowMs,
     );
     if (!sample) {
@@ -347,7 +389,16 @@ export class AgentStallSweep {
       new Set(candidates.map((candidate) => candidate.agent.id)),
       nowMs,
     );
-    await this.resumeIdleWaits(report, idleWaits, sample, config, nowMs, budget);
+    await this.resumeIdleWaits({
+      report,
+      waits: idleWaits,
+      idleChildren,
+      sample,
+      config,
+      nowMs,
+      budget,
+      readHealth,
+    });
     return report;
   }
 
@@ -761,12 +812,11 @@ export class AgentStallSweep {
         reported: loop.reported,
       };
     }
+    // Any other answer leaves this repeat alone for a while: asking again next sweep would get the
+    // same answer and spend the control lane away-reply and remediation share.
     loop.consecutive = 0;
-    if (activity === "progressing") {
-      loop.quiet = { signature: match.signature, untilMs: nowMs + LOOP_WATCH_QUIET_MS };
-      return { would: "leave it for 30 minutes unless the repeat changes", reported: null };
-    }
-    return { would: "nothing", reported: null };
+    loop.quiet = { signature: match.signature, untilMs: nowMs + LOOP_WATCH_QUIET_MS };
+    return { would: "leave it for 30 minutes unless the repeat changes", reported: null };
   }
 
   private async closeLoop(
@@ -796,42 +846,91 @@ export class AgentStallSweep {
   // ─── Idle agents waiting on background work ────────────────────────────────────────────────
 
   /**
-   * Idle agents whose last message says they are waiting on background work, quiet for
-   * `BACKGROUND_WAIT_QUIET_MS`, with nothing that would wake them: no provider subagent or Paseo
-   * child still running. The process check needs `ps` and runs in `resumeIdleWaits`.
+   * Idle agents quiet for `BACKGROUND_WAIT_QUIET_MS` whose final turn is one of the two classes
+   * (agent/background-wait.ts), with nothing that would wake them: no provider subagent, Paseo
+   * child, schedule or restart-recovery resume. The process check needs `ps` and runs in
+   * `resumeIdleWaits`. Records the outcome of an earlier line on the way.
    */
-  private findIdleWaits(
+  private async findIdleWaits(
     agents: StallSweepAgentSummary[],
     config: ResolvedStalledAgentSweepConfig,
     nowMs: number,
-  ): IdleWaitCandidate[] {
+  ): Promise<IdleWaitCandidate[]> {
     const present = new Set(agents.map((agent) => agent.id));
     for (const agentId of this.idleWaits.keys()) {
       if (!present.has(agentId)) this.idleWaits.delete(agentId);
     }
     if (!config.enabled || !this.deps.readRecentActivity || !this.deps.resumeIdleAgent) return [];
-    const parentsOfRunning = new Set(
-      agents
-        .filter((agent) => agent.lifecycle === "running" || agent.busy)
-        .map((agent) => getParentAgentIdFromLabels(agent.labels))
-        .filter((parentId): parentId is string => parentId !== null),
-    );
+    for (const agent of agents) this.recordOutcome(agent);
+
+    const protectedParents = this.findProtectedParents(agents);
+    const quiet = agents.flatMap((agent) => {
+      const quietForMs = idleQuietForMs(agent, protectedParents, nowMs);
+      if (quietForMs === null) return [];
+      if (this.idleWaits.get(agent.id)?.checkedActivityAt === agent.lastActivityAt) return [];
+      if (this.isClaimedByRecovery(agent.id)) return [];
+      return [{ agent, quietForMs }];
+    });
+    if (quiet.length === 0) return [];
+    const scheduled = await this.listScheduledAgentIds();
+    // Cannot tell which agents a schedule wakes: look again next sweep.
+    if (!scheduled) return [];
+
     const waits: IdleWaitCandidate[] = [];
-    for (const agent of agents) {
-      const quietForMs = idleQuietForMs(agent, parentsOfRunning, nowMs);
-      if (quietForMs === null) continue;
-      if (this.idleWaits.get(agent.id)?.checkedActivityAt === agent.lastActivityAt) continue;
-      const match = this.readBackgroundWait(agent);
-      if (!match) {
-        this.markIdleChecked(agent);
-        continue;
-      }
-      waits.push({ agent, quietForMs, match });
+    for (const { agent, quietForMs } of quiet) {
+      // A schedule or heartbeat wakes it; the next check is after it does.
+      const candidate = scheduled.has(agent.id) ? null : this.readIdleWait(agent, quietForMs);
+      if (candidate) waits.push(candidate);
+      else this.markIdleChecked(agent);
     }
     return waits;
   }
 
-  private readBackgroundWait(agent: StallSweepAgentSummary): BackgroundWaitMatch | null {
+  /**
+   * Parents something will wake, keyed by every id they answer to: each parent label is followed
+   * through `migrated-to` to the successor that carries its work (docs/account-failover.md). A
+   * child wakes its parent while it runs, while restart recovery is about to resume it, and while
+   * a provider subagent it started runs; an idle child with a live shell is checked after `ps`.
+   */
+  private findProtectedParents(agents: readonly StallSweepAgentSummary[]): Set<string> {
+    const successors = successorsOf(agents);
+    const parents = new Set<string>();
+    for (const agent of agents) {
+      const parentId = getParentAgentIdFromLabels(agent.labels);
+      if (parentId === null) continue;
+      const wakes =
+        agent.lifecycle === "running" ||
+        agent.busy ||
+        agent.runningProviderSubagentCount > 0 ||
+        this.isClaimedByRecovery(agent.id);
+      if (!wakes) continue;
+      for (const id of followSuccessors(parentId, successors)) parents.add(id);
+    }
+    return parents;
+  }
+
+  private isClaimedByRecovery(agentId: string): boolean {
+    try {
+      return this.deps.isClaimedByRestartRecovery?.(agentId) === true;
+    } catch {
+      // Cannot tell: leave it to recovery.
+      return true;
+    }
+  }
+
+  private async listScheduledAgentIds(): Promise<ReadonlySet<string> | null> {
+    try {
+      return (await this.deps.listScheduledAgentIds?.()) ?? new Set();
+    } catch {
+      return null;
+    }
+  }
+
+  /** The agent's final turn as one of the two classes, or null when it is neither. */
+  private readIdleWait(
+    agent: StallSweepAgentSummary,
+    quietForMs: number,
+  ): IdleWaitCandidate | null {
     try {
       // A failed last turn is not a wait, and a limit failure is account failover's: a prompt row
       // would re-date it.
@@ -841,53 +940,138 @@ export class AgentStallSweep {
     }
     const rows = this.readActivity(agent.id, BACKGROUND_WAIT_READ_ROWS);
     const message = rows ? readFinalMessage(rows) : null;
-    return message ? findBackgroundWait(message.text) : null;
+    if (!rows || !message) return null;
+    const work = readFinalTurnWork(rows);
+    // A wakeup, schedule or heartbeat it set up will wake it.
+    if (work.watcher) return null;
+    const wait = findBackgroundWait(message.text);
+    const external = findExternalWait(message.text);
+    const base = { agent, quietForMs, seq: message.seq };
+    if (work.launched.length > 0 && (wait ?? external)) {
+      const quote = (wait ?? external)?.quote ?? "";
+      return { ...base, waitClass: "own-work", quote, launched: work.launched, target: null };
+    }
+    if (work.launched.length === 0 && external) {
+      return {
+        ...base,
+        waitClass: "external-wait",
+        quote: external.quote,
+        launched: [],
+        target: external.target,
+      };
+    }
+    return null;
   }
 
   private markIdleChecked(agent: StallSweepAgentSummary): IdleWaitMemory {
-    const memory = this.idleWaits.get(agent.id) ?? { checkedActivityAt: null, resumes: [] };
+    const memory = this.idleWaits.get(agent.id) ?? {
+      checkedActivityAt: null,
+      resumes: [],
+      pendingOutcome: null,
+    };
     memory.checkedActivityAt = agent.lastActivityAt;
     this.idleWaits.set(agent.id, memory);
     return memory;
   }
 
   /**
-   * Resumes each idle wait whose process tree has no shell left: the background command it waits
-   * on has ended, or never existed. One prompt per final message, at most
+   * Records what came of a `resumed` or `would-resume` line once the agent is idle again after
+   * new activity: whether the next turn did tool work or waited again, and how long until it went
+   * idle. Measured for both, so the rule's precision can be read before `BACKGROUND_WAIT_LIVE`
+   * is flipped: a would-resume the agent sat on is a resume it needed.
+   */
+  private recordOutcome(agent: StallSweepAgentSummary): void {
+    const memory = this.idleWaits.get(agent.id);
+    const pending = memory?.pendingOutcome;
+    if (!memory || !pending) return;
+    if (agent.lifecycle !== "idle" || agent.busy) return;
+    const lastActivityAtMs = agent.lastActivityAt ? Date.parse(agent.lastActivityAt) : Number.NaN;
+    if (!Number.isFinite(lastActivityAtMs) || lastActivityAtMs <= pending.atMs) return;
+    memory.pendingOutcome = null;
+    const rows = (this.readActivity(agent.id, BACKGROUND_WAIT_READ_ROWS) ?? []).filter(
+      (row) => row.seq > pending.seq,
+    );
+    const firstPrompt = rows.find((row) => row.item.type === "user_message")?.item;
+    const final = readFinalMessage(rows);
+    this.measure({
+      type: "background-wait-outcome",
+      at: new Date(this.now()).toISOString(),
+      agentId: agent.id,
+      waitClass: pending.waitClass,
+      resumed: pending.resumed,
+      woke: describeWake(firstPrompt),
+      toolWork: rows.some((row) => row.item.type === "tool_call"),
+      rewaited:
+        final !== null &&
+        (findBackgroundWait(final.text) !== null || findExternalWait(final.text) !== null),
+      minutesToNextIdle: Math.floor((lastActivityAtMs - pending.atMs) / 60_000),
+    });
+  }
+
+  /**
+   * Records each idle wait with nothing left running under it, and resumes it when the rule is
+   * live (`BACKGROUND_WAIT_LIVE`, and not a dry run). Live: one prompt per final message, at most
    * `MAX_BACKGROUND_WAIT_RESUMES_PER_DAY` per agent, out of the sweep's remaining nudge budget.
    */
-  private async resumeIdleWaits(
-    report: StallSweepReport,
-    waits: IdleWaitCandidate[],
-    sample: { trees: Map<string, AgentProcessTree>; rows: ProcessSampleRow[] },
-    config: ResolvedStalledAgentSweepConfig,
-    nowMs: number,
-    budget: number,
-  ): Promise<void> {
+  private async resumeIdleWaits(input: {
+    report: StallSweepReport;
+    waits: IdleWaitCandidate[];
+    idleChildren: ReadonlyMap<string, StallSweepAgentSummary[]>;
+    sample: { trees: Map<string, AgentProcessTree>; rows: ProcessSampleRow[] };
+    config: ResolvedStalledAgentSweepConfig;
+    nowMs: number;
+    budget: number;
+    readHealth: (provider: string) => Promise<ProviderHealth>;
+  }): Promise<void> {
+    const { report, sample, config, nowMs } = input;
     const resume = this.deps.resumeIdleAgent;
     if (!resume) return;
-    let remaining = budget;
-    for (const wait of waits) {
+    const live = this.backgroundWaitLive && !config.dryRun;
+    let remaining = input.budget;
+    for (const wait of input.waits) {
       const { agent } = wait;
-      // Still running under it: the wait is real. Check again next sweep.
-      if (findBackgroundShells(sample.rows, sample.trees.get(agent.id)?.pids[0]).length > 0)
+      const tree = sample.trees.get(agent.id);
+      if (!tree && this.sessionFamilyOf(agent) !== "claude") {
+        // Codex's app-server and OpenCode's shared server carry no agent id, so nothing under
+        // them can be seen. Claude's root always can: no tree means no process.
+        this.markIdleChecked(agent);
         continue;
+      }
+      // Still running under it, or under an idle child of it: the wait is real. Next sweep.
+      const liveShells = [agent, ...(input.idleChildren.get(agent.id) ?? [])].some((owner) => {
+        const rootPid = sample.trees.get(owner.id)?.pids[0];
+        return rootPid !== undefined && findBackgroundShells(sample.rows, rootPid).length > 0;
+      });
+      if (liveShells) continue;
+      // A resume into a capped account fails at once and hands failover an agent nobody needed
+      // to run. Checked again next sweep.
+      if ((await input.readHealth(agent.provider)).askable === false) continue;
+
       const line = (action: string, detail: string | null) =>
         this.measure({
           type: "background-wait",
           at: new Date(nowMs).toISOString(),
           agentId: agent.id,
+          waitClass: wait.waitClass,
           action,
           quietMinutes: Math.floor(wait.quietForMs / 60_000),
-          quote: wait.match.quote,
+          quote: wait.quote,
+          launched: wait.launched,
+          target: wait.target,
           detail,
         });
-      if (config.dryRun) {
-        this.markIdleChecked(agent);
+      const pending = (resumed: boolean): PendingOutcome => ({
+        atMs: nowMs,
+        seq: wait.seq,
+        waitClass: wait.waitClass,
+        resumed,
+      });
+      if (!live) {
+        this.markIdleChecked(agent).pendingOutcome = pending(false);
         report.entries.push({
           agentId: agent.id,
           action: "would-resume-idle",
-          detail: wait.match.quote,
+          detail: `${wait.waitClass}: ${wait.quote}`,
         });
         line("would-resume", null);
         continue;
@@ -905,7 +1089,17 @@ export class AgentStallSweep {
       }
       remaining -= 1;
       const prompt = formatSystemNotificationPrompt(
-        buildBackgroundWaitPrompt({ quietForMs: wait.quietForMs, quote: wait.match.quote }),
+        wait.waitClass === "own-work"
+          ? buildBackgroundWaitPrompt({
+              quietForMs: wait.quietForMs,
+              quote: wait.quote,
+              launched: wait.launched,
+            })
+          : buildExternalWaitPrompt({
+              quietForMs: wait.quietForMs,
+              quote: wait.quote,
+              target: wait.target ?? "it",
+            }),
       );
       let result: IdleResumeResult;
       try {
@@ -915,21 +1109,31 @@ export class AgentStallSweep {
       }
       if (result.kind === "sent") {
         memory.resumes.push(nowMs);
+        memory.pendingOutcome = pending(true);
         report.entries.push({
           agentId: agent.id,
           action: "resumed-idle",
-          detail: wait.match.quote,
+          detail: `${wait.waitClass}: ${wait.quote}`,
         });
       }
       line(result.kind === "sent" ? "resumed" : result.kind, describeIdleResume(result));
       this.options.logger.info(
         {
           agentId: agent.id,
+          waitClass: wait.waitClass,
           quietForMs: wait.quietForMs,
           result: result.kind,
         },
-        "Stalled-agent sweep: resumed an idle agent waiting on background work nothing will wake it for",
+        "Stalled-agent sweep: resumed an idle agent nothing would wake",
       );
+    }
+  }
+
+  private sessionFamilyOf(agent: StallSweepAgentSummary): string {
+    try {
+      return this.deps.readSessionFamily?.(agent.id) ?? agent.provider;
+    } catch {
+      return agent.provider;
     }
   }
 
@@ -1265,8 +1469,8 @@ function buildStallObservation(input: {
   const recovery = snapshotRef
     ? `A snapshot of its worktree exists at ${snapshotRef}.`
     : "No snapshot of its worktree exists, so do not discard anything in it.";
-  // A `progressing` hold moves the nudge later; the ladder's grace moves with it, so its recheck
-  // still starts from the nudge.
+  // A `progressing` hold moves the nudge later; the ladder adds it to the grace, an override's
+  // included, so its recheck still starts from the nudge.
   const holdMs = episode.hold ? episode.hold.untilMs - episode.hold.startedAtMs : 0;
   return {
     key: stallEpisodeKey(agent.id),
@@ -1277,7 +1481,8 @@ function buildStallObservation(input: {
     summary,
     evidence,
     attempts: [...episode.attempts],
-    graceMs: config.recheckMinutes * 60_000 + holdMs,
+    graceMs: config.recheckMinutes * 60_000,
+    ...(holdMs > 0 ? { holdMs } : {}),
     level: "alert",
     escalation: {
       task: [
@@ -1307,6 +1512,12 @@ function describeVerdict(judgment: StallJudgment): string {
   return `${judgment.answer.activity} (${judgment.answer.confidence.toFixed(2)})`;
 }
 
+/** What started the turn after a background-wait line: the resume, another prompt, or itself. */
+function describeWake(firstPrompt: AgentTimelineItem | undefined): "resume" | "prompt" | "self" {
+  if (firstPrompt?.type !== "user_message") return "self";
+  return BACKGROUND_WAIT_PROMPT_MARK.test(firstPrompt.text) ? "resume" : "prompt";
+}
+
 function describeIdleResume(result: IdleResumeResult): string | null {
   switch (result.kind) {
     case "sent":
@@ -1319,23 +1530,66 @@ function describeIdleResume(result: IdleResumeResult): string | null {
 }
 
 /**
- * How long an idle agent has been quiet, when it could be waiting on background work that nothing
- * will wake it for: idle and quiet past `BACKGROUND_WAIT_QUIET_MS`, not busy, not internal, no
- * permission or janitor question, and no provider subagent or Paseo child still running. Null
- * otherwise. A running Paseo child's finish report wakes its parent.
+ * How long an idle agent has been quiet, when nothing may wake it: idle and quiet past
+ * `BACKGROUND_WAIT_QUIET_MS`, not busy, not internal, no permission or janitor question, no
+ * provider subagent, no child that wakes it, and not retired by account failover (its successor
+ * carries the work). Null otherwise.
  */
 function idleQuietForMs(
   agent: StallSweepAgentSummary,
-  parentsOfRunning: ReadonlySet<string>,
+  protectedParents: ReadonlySet<string>,
   nowMs: number,
 ): number | null {
   if (agent.lifecycle !== "idle" || agent.internal || agent.busy || agent.quietTurn) return null;
   if (agent.pendingPermissionCount > 0 || agent.turnQueued) return null;
-  if (agent.runningProviderSubagentCount > 0 || parentsOfRunning.has(agent.id)) return null;
+  if (agent.runningProviderSubagentCount > 0 || protectedParents.has(agent.id)) return null;
+  if (agent.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]) return null;
   const lastActivityAtMs = agent.lastActivityAt ? Date.parse(agent.lastActivityAt) : Number.NaN;
   if (!Number.isFinite(lastActivityAtMs)) return null;
   const quietForMs = nowMs - lastActivityAtMs;
   return quietForMs >= BACKGROUND_WAIT_QUIET_MS ? quietForMs : null;
+}
+
+/** Each retired agent's `migrated-to` successor. */
+function successorsOf(agents: readonly StallSweepAgentSummary[]): Map<string, string> {
+  const successors = new Map<string, string>();
+  for (const agent of agents) {
+    const successor = agent.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL];
+    if (successor) successors.set(agent.id, successor);
+  }
+  return successors;
+}
+
+/** `agentId` and every successor down its `migrated-to` chain. */
+function followSuccessors(agentId: string, successors: ReadonlyMap<string, string>): string[] {
+  const chain: string[] = [];
+  let current: string | undefined = agentId;
+  while (current !== undefined && !chain.includes(current)) {
+    chain.push(current);
+    current = successors.get(current);
+  }
+  return chain;
+}
+
+/** Each idle wait's idle children, through `migrated-to`: their live shells count as its own. */
+function idleChildrenOf(
+  agents: readonly StallSweepAgentSummary[],
+  waits: readonly IdleWaitCandidate[],
+): Map<string, StallSweepAgentSummary[]> {
+  const waitIds = new Set(waits.map((wait) => wait.agent.id));
+  const successors = successorsOf(agents);
+  const children = new Map<string, StallSweepAgentSummary[]>();
+  for (const agent of agents) {
+    const parentId = getParentAgentIdFromLabels(agent.labels);
+    if (parentId === null || agent.lifecycle !== "idle") continue;
+    for (const id of followSuccessors(parentId, successors)) {
+      if (!waitIds.has(id)) continue;
+      const list = children.get(id) ?? [];
+      list.push(agent);
+      children.set(id, list);
+    }
+  }
+  return children;
 }
 
 function summarizeJudgment(judgment: StallJudgment): StallJudgmentSummary | null {
@@ -1498,6 +1752,10 @@ export async function resumeIdleAgentWaitingOnBackground(
       try {
         const record = await agentStorage.get(input.agentId);
         if (record?.archivedAt) return { kind: "skipped", reason: "archived" };
+        // A turn that started during the read would get this prompt steered into it.
+        if (agentManager.getAgent(input.agentId)?.lifecycle !== "idle") {
+          return { kind: "skipped", reason: "no longer idle" };
+        }
         await sendPromptToAgent({
           agentManager,
           agentStorage,
