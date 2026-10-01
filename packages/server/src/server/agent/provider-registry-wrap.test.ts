@@ -397,7 +397,10 @@ describe("wrapClientProvider", () => {
     });
 
     const scope = clients["claude-personal"]?.resolveMcpConfigScope?.("/workspace");
-    expect(scope?.configDir).toBe(personalDir);
+    // ${VAR} expansion is plain string substitution against the literal template below, which
+    // writes "/" (same as a real provider config would) — not the native-separator path.join
+    // used to create the fixture directory on disk.
+    expect(scope?.configDir).toBe(`${accountsHome}/.claude-personal`);
     expect(
       findPerDirMcpServer({
         configDir: scope?.configDir ?? "",

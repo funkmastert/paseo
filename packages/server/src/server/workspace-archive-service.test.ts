@@ -748,6 +748,9 @@ describe("archiveByScope", () => {
   });
 
   test("resolveArchiveDirectory: a flagged worktree's root, and nothing for a local checkout", async () => {
+    // "/w/h/slug" is a fictitious root that never exists on disk, so canonicalizePath falls back
+    // to path.resolve() of it rather than a realpath — which, on win32, prefixes the current
+    // drive. Compare against that same fallback instead of the bare POSIX literal.
     expect(
       await resolveArchiveDirectory(
         {
@@ -760,7 +763,7 @@ describe("archiveByScope", () => {
         },
         {},
       ),
-    ).toBe("/w/h/slug");
+    ).toBe(path.resolve("/w/h/slug"));
     expect(
       await resolveArchiveDirectory(
         {

@@ -192,7 +192,10 @@ export class GitWorktreeSnapshotter implements WorktreeSnapshotter {
     if (!existsSync(cwd)) return { kind: "unreadable", error: "the directory does not exist" };
     const top = await this.tryGit(cwd, ["rev-parse", "--show-toplevel"]);
     if (!top) return { kind: "unreadable", error: "it is not inside a git repository" };
-    const worktreePath = top.trim();
+    // Git for Windows reports --show-toplevel with forward slashes even on win32; resolve
+    // through the native path module so worktreePath matches every other path this class
+    // and its callers compare it against.
+    const worktreePath = resolveGitRevParsePath(cwd, top) ?? top.trim();
     try {
       const head =
         (await this.tryGit(worktreePath, ["rev-parse", "--verify", "--quiet", "HEAD"]))?.trim() ||
