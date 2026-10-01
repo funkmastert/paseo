@@ -2194,8 +2194,8 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
     logger,
   });
-  // One-time: titles agents supplied at creation were stamped "manual" before "agent" existed,
-  // which kept the tracker off most workspaces. Never fatal; the marker makes it run once.
+  // One-time: titles agents supplied at creation used to be stamped "manual", which kept the
+  // tracker off most workspaces. Never fatal; the marker makes it run once.
   await migrateWorkspaceTitleSources({
     workspaceRegistry,
     listAgents: () => agentStorage.list(),
@@ -2570,7 +2570,7 @@ export async function createPaseoDaemon(
         title,
         projectId,
         // Only agents reach this (create_workspace), so the title tracker may refresh it.
-        title ? { titleSource: "agent" } : undefined,
+        title ? { titleSource: "auto" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;

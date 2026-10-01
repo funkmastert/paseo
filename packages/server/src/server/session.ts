@@ -6639,10 +6639,8 @@ export class Session {
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
     // A title a person typed is theirs; an agent's (a CLI run under PASEO_AGENT_ID) and one
     // derived from the first prompt may be refreshed.
-    let titleSource: WorkspaceTitleSource = "auto";
-    if (explicitTitle) {
-      titleSource = request.callerAgentId ? "agent" : "manual";
-    }
+    const titleSource: WorkspaceTitleSource =
+      explicitTitle && !request.callerAgentId ? "manual" : "auto";
     const createdWorkspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
@@ -6732,7 +6730,7 @@ export class Session {
         githubPrNumber: source.githubPrNumber,
         firstAgentContext: request.firstAgentContext,
         title: request.title,
-        ...(request.callerAgentId ? { titleSource: "agent" as const } : {}),
+        ...(request.callerAgentId ? { titleSource: "auto" as const } : {}),
       },
       source.baseBranch
         ? { resolveDefaultBranch: async () => source.baseBranch as string }

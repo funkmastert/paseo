@@ -3,10 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 
 import {
   createPersistedWorkspaceRecord,
+  FileBackedWorkspaceRegistry,
   isAutoTitledWorkspace,
+  PersistedWorkspaceRecordSchema,
   type PersistedWorkspaceRecord,
 } from "./workspace-registry.js";
 import {
@@ -45,8 +48,8 @@ function childAgent(overrides: Partial<TitleSourceMigrationAgent> = {}): TitleSo
 }
 
 describe("classifyWorkspaceTitleSource", () => {
-  test("a creation-time manual title whose first agent an agent spawned becomes agent", () => {
-    expect(classifyWorkspaceTitleSource(record(), childAgent())).toBe("agent");
+  test("a creation-time manual title whose first agent an agent spawned becomes auto", () => {
+    expect(classifyWorkspaceTitleSource(record(), childAgent())).toBe("auto");
   });
 
   test("a manual title renamed after creation stays manual even with a child first agent", () => {
@@ -60,9 +63,8 @@ describe("classifyWorkspaceTitleSource", () => {
     expect(classifyWorkspaceTitleSource(record(), null)).toBeNull();
   });
 
-  test("auto and agent records are left alone", () => {
+  test("auto records are left alone", () => {
     expect(classifyWorkspaceTitleSource(record({ titleSource: "auto" }), childAgent())).toBeNull();
-    expect(classifyWorkspaceTitleSource(record({ titleSource: "agent" }), childAgent())).toBeNull();
   });
 
   describe("absent provenance (M1)", () => {
@@ -84,9 +86,9 @@ describe("classifyWorkspaceTitleSource", () => {
       ).toBe("auto");
     });
 
-    test("a creation-time title from an agent-spawned first agent is agent", () => {
+    test("a creation-time title from an agent-spawned first agent is auto", () => {
       expect(classifyWorkspaceTitleSource(record({ titleSource: undefined }), childAgent())).toBe(
-        "agent",
+        "auto",
       );
     });
 
@@ -154,15 +156,14 @@ describe("migrateWorkspaceTitleSources", () => {
 
     const counts = await migrateWorkspaceTitleSources(h.deps);
 
-    expect(h.byId.get("wks_child")?.titleSource).toBe("agent");
+    expect(h.byId.get("wks_child")?.titleSource).toBe("auto");
     expect(isAutoTitledWorkspace(h.byId.get("wks_child")!)).toBe(true);
     expect(h.byId.get("wks_typed")?.titleSource).toBe("manual");
     expect(h.byId.get("wks_null")?.titleSource).toBe("auto");
     expect(h.byId.get("wks_old")?.titleSource).toBe("manual");
     expect(counts).toMatchObject({
-      manualToAgent: 1,
+      manualToAuto: 1,
       absentToAuto: 1,
-      absentToAgent: 0,
       absentToManual: 1,
     });
     // Titles are never rewritten by the migration, only their provenance.
@@ -176,5 +177,39 @@ describe("migrateWorkspaceTitleSources", () => {
     });
     expect(again).toBeNull();
     expect(h.byId.get("wks_later")?.titleSource).toBe("manual");
+  });
+
+  test("a workspaces.json the new code writes parses with the previous build's schema", async () => {
+    // The rollback build parses the whole file with z.array(schema) and this exact enum; one
+    // record it can't parse hides every workspace from it.
+    const previousSchema = PersistedWorkspaceRecordSchema.extend({
+      titleSource: z.enum(["auto", "manual"]).optional(),
+    });
+    const filePath = path.join(dir, "projects", "workspaces.json");
+    const registry = new FileBackedWorkspaceRegistry(filePath, pino({ level: "silent" }));
+    await registry.initialize();
+    for (const seeded of [
+      record({ workspaceId: "wks_child" }),
+      record({ workspaceId: "wks_typed", updatedAt: "2026-09-21T00:00:00.000Z" }),
+      record({ workspaceId: "wks_null", title: null, titleSource: undefined }),
+      record({ workspaceId: "wks_branch", title: "feat/thing", titleSource: undefined }),
+      record({ workspaceId: "wks_old", title: "Bozeo fork", titleSource: undefined }),
+      // What the create paths write for an agent caller.
+      record({ workspaceId: "wks_agent_created", titleSource: "auto" }),
+    ]) {
+      await registry.upsert(seeded);
+    }
+
+    await migrateWorkspaceTitleSources({
+      workspaceRegistry: registry,
+      listAgents: async () => [childAgent({ workspaceId: "wks_child" })],
+      markerPath: path.join(dir, "projects", "workspace-title-source-migration.json"),
+      logger: pino({ level: "silent" }),
+    });
+
+    const written = JSON.parse(await readFile(filePath, "utf8")) as unknown[];
+    const parsed = z.array(previousSchema).parse(written);
+    expect(parsed).toHaveLength(6);
+    expect(new Set(parsed.map((entry) => entry.titleSource))).toEqual(new Set(["auto", "manual"]));
   });
 });

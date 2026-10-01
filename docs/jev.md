@@ -1703,8 +1703,8 @@ No key, the switch off, an outage, a low-confidence answer or D7 all land on the
 ### Tests and verification
 
 - `workspace-title-refresh-jev.test.ts`: each action, low confidence, D7 sending nothing, the state leaving out agent titles, and the decision-store record.
-- `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and `agent` provenance.
-- `workspace-title-source-migration.test.ts`: each reclassification rule and the run-once marker.
+- `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and an agent-supplied (`auto`) title.
+- `workspace-title-source-migration.test.ts`: each reclassification rule, the run-once marker, and a `workspaces.json` written after the migration parsing with the previous build's `auto | manual` schema.
 
 ## Testing
 

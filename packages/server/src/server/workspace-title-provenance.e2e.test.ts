@@ -75,7 +75,7 @@ test("a rename through a real daemon records who named the workspace", async () 
     });
     expect(await readWorkspace(daemon.paseoHome, agentNamed.workspace!.id)).toMatchObject({
       title: "Named by an agent",
-      titleSource: "agent",
+      titleSource: "auto",
     });
   } finally {
     await client.close().catch(() => undefined);

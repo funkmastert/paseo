@@ -248,28 +248,32 @@ cadence and a ceiling make sure the name keeps up regardless. The prompt asks fo
 subject and to keep the current name through continuations and refinements, and a near-equal
 result writes nothing, so a busy workspace's name changes a few times a day, not every look.
 
-**Provenance decides scope, not workspace kind.** `titleSource` on the workspace record says who
-named it, and only a person's own edit is protected:
+**Provenance decides scope, not workspace kind.** `titleSource` on the workspace record decides
+whether Paseo may rename it. Only a person's own edit is protected:
 
-| Source   | Written by                                                                                                  | Refreshed |
-| -------- | ----------------------------------------------------------------------------------------------------------- | --------- |
-| `manual` | The app's rename (inline or the modal) and a title typed in the app's create form                           | Never     |
-| `agent`  | `create_workspace` and `rename_workspace` over MCP, `paseo workspace create --title` under `PASEO_AGENT_ID` | Yes       |
-| `auto`   | The auto-namer, the tracker, and renaming to empty                                                          | Yes       |
-| absent   | Records written before provenance existed                                                                   | Never     |
+| Source   | Written by                                                                                                                                                                                  | Refreshed |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
+| `manual` | The app's rename (inline or the modal) and a title typed in the app's create form                                                                                                           | Never     |
+| `auto`   | The auto-namer, the tracker, renaming to empty, and every agent-supplied title: `create_workspace` and `rename_workspace` over MCP, `paseo workspace create --title` under `PASEO_AGENT_ID` | Yes       |
+| absent   | Records written before provenance existed                                                                                                                                                   | Never     |
+
+**Never add a value to the enum.** Every daemon build parses `workspaces.json` with
+`z.array(schema)`, so a single record carrying a value an older build doesn't know makes that build
+see no workspaces at all, and its next write can drop them. Rolling back to the previous build has
+to keep working, so new meanings map onto `auto` or `manual`.
 
 **Absent means hand-set**, because silently renaming something the user named is worse than
 leaving a stale name. Renaming a workspace to **empty** hands naming back to Paseo: the row falls
 back to the branch or directory name, and the tracker names it at its next sweep. The title and its
 source are re-read inside the registry write, so a rename that lands while the LLM is running wins.
 
-Before `agent` existed, every title supplied at creation was stamped `manual`, which kept the
-tracker off most orchestrated workspaces. `workspace-title-source-migration.ts` reclassifies once
-per `PASEO_HOME` (marker `projects/workspace-title-source-migration.json`, counts in the daemon
-log). A `manual` or absent record becomes `agent` only if it was never edited after creation
+Agent-supplied titles used to be stamped `manual`, which kept the tracker off most orchestrated
+workspaces. `workspace-title-source-migration.ts` reclassifies once per `PASEO_HOME` (marker
+`projects/workspace-title-source-migration.json`, counts in the daemon log) and only ever writes
+`auto` or `manual`. A `manual` or absent record becomes `auto` if it was never edited after creation
 (`createdAt` equals `updatedAt`) and its first agent carries `paseo.parent-agent-id`. An absent
-record with no title, or a title equal to its branch or display name, becomes `auto`. Every other
-absent record becomes `manual`. The pass never changes a title.
+record with no title, or a title equal to its branch or display name, also becomes `auto`. Every
+other absent record becomes `manual`. The pass never changes a title.
 
 **Cost.** A refresh is one small structured call: about 700 input tokens and 20 output. A workspace
 with no running-or-idle agent active inside `activityWindowMinutes` (default 60) is never swept, so

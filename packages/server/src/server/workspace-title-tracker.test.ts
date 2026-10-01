@@ -245,7 +245,7 @@ describe("WorkspaceTitleTracker", () => {
   test("an agent-supplied title is refreshed like a generated one", async () => {
     const agents = [agent()];
     const harness = createHarness({
-      workspaces: [workspace({ title: "polish-android-a9ds", titleSource: "agent" })],
+      workspaces: [workspace({ title: "polish-android-a9ds", titleSource: "auto" })],
       agents,
       titleRefreshConfig: { ceilingUserTurns: 1 },
     });

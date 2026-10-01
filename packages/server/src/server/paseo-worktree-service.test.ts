@@ -43,14 +43,14 @@ test("a title an agent supplied is recorded as the agent's, so the tracker may r
       cwd: repoDir,
       worktreeSlug: "agent-named",
       title: "Polish the thing",
-      titleSource: "agent",
+      titleSource: "auto",
       runSetup: false,
       paseoHome: path.join(tempDir, ".paseo"),
     },
     deps,
   );
 
-  expect(result.workspace).toMatchObject({ title: "Polish the thing", titleSource: "agent" });
+  expect(result.workspace).toMatchObject({ title: "Polish the thing", titleSource: "auto" });
 });
 
 test("creates a worktree and registers it in the source workspace project without git snapshot lookup", async () => {

@@ -33,8 +33,11 @@ import { runWithGitCommandPriority } from "../utils/run-git-command.js";
 export interface CreatePaseoWorktreeInput extends CreateWorktreeCoreInput {
   projectId?: string;
   title?: string;
-  /** Who supplied `title`. Absent means a person did; only an agent caller passes "agent". */
-  titleSource?: Extract<WorkspaceTitleSource, "manual" | "agent">;
+  /**
+   * Provenance for `title`. Absent means a person supplied it ("manual"); an agent caller passes
+   * "auto" so the title tracker may refresh it.
+   */
+  titleSource?: WorkspaceTitleSource;
 }
 
 export interface CreatePaseoWorktreeResult {
@@ -102,7 +105,7 @@ async function createPaseoWorktreeWithPriority(
       baseBranch: resolveIntentBaseBranch(createdWorktree.intent),
       title: input.title?.trim() || resolveFirstAgentPromptTitle(input.firstAgentContext),
       // A title the create request carried is the requester's: a person's stays theirs, an
-      // agent's may be refreshed later. One derived from the first prompt belongs to the
+      // agent's ("auto") may be refreshed later. One derived from the first prompt belongs to the
       // auto-namer and the tracker that follows it.
       titleSource: input.title?.trim() ? (input.titleSource ?? "manual") : "auto",
       expectsInitialAgent: Boolean(input.firstAgentContext),

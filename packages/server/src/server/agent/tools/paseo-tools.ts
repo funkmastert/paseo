@@ -1420,7 +1420,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
             ...(worktreeSlug ? { worktreeSlug } : {}),
             ...worktreeTarget,
             // An agent named it, so the title tracker may refresh it later.
-            ...(title ? { title, titleSource: "agent" as const } : {}),
+            ...(title ? { title, titleSource: "auto" as const } : {}),
           },
         );
         if (!result.ok) {
@@ -2375,7 +2375,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         ...existing,
         title,
         // An agent's rename, not a person's: the title tracker may refresh it as the work moves.
-        titleSource: "agent",
+        titleSource: "auto",
         updatedAt: new Date().toISOString(),
       });
       await options.emitWorkspaceUpdatesForWorkspaceIds([workspaceId]);

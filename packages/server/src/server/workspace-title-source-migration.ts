@@ -8,14 +8,14 @@ import type {
 } from "./workspace-registry.js";
 
 /**
- * One-time reclassification of workspace title provenance (docs/jev.md, feature 17).
+ * One-time reclassification of workspace title provenance (docs/agent-lifecycle.md).
  *
- * Until `titleSource: "agent"` existed, every title supplied at creation was stamped "manual",
- * so a workspace an orchestrator named for its child read as hand-named and the title tracker
- * never touched it. Records written before provenance existed carry no source at all and read as
- * manual too. This pass moves a record to a refreshable source only on evidence that a person
- * did not name it; everything else stays (or becomes explicitly) manual. Titles are never
- * rewritten here, only their provenance.
+ * Every title supplied at creation used to be stamped "manual", so a workspace an orchestrator
+ * named for its child read as hand-named and the title tracker never touched it. Records written
+ * before provenance existed carry no source at all and read as manual too. This pass moves a
+ * record to "auto" only on evidence that a person did not name it; everything else stays (or
+ * becomes explicitly) "manual". It only ever writes those two values, which every daemon version
+ * parses, so rolling back after it ran loses nothing. Titles are never rewritten here.
  */
 
 const MIGRATION_VERSION = 1;
@@ -30,9 +30,8 @@ export interface TitleSourceMigrationAgent {
 
 export interface TitleSourceMigrationCounts {
   scanned: number;
-  manualToAgent: number;
+  manualToAuto: number;
   absentToAuto: number;
-  absentToAgent: number;
   absentToManual: number;
 }
 
@@ -53,7 +52,7 @@ export function classifyWorkspaceTitleSource(
   firstAgent: TitleSourceMigrationAgent | null,
 ): WorkspaceTitleSource | null {
   if (workspace.titleSource === "manual") {
-    return namedAtCreationByAnAgent(workspace, firstAgent) ? "agent" : null;
+    return namedAtCreationByAnAgent(workspace, firstAgent) ? "auto" : null;
   }
   if (workspace.titleSource !== undefined) {
     return null;
@@ -63,7 +62,7 @@ export function classifyWorkspaceTitleSource(
     // Nobody named it, or the name is the branch placeholder the daemon derived.
     return "auto";
   }
-  return namedAtCreationByAnAgent(workspace, firstAgent) ? "agent" : "manual";
+  return namedAtCreationByAnAgent(workspace, firstAgent) ? "auto" : "manual";
 }
 
 function earliestAgentByWorkspaceId(
@@ -105,9 +104,8 @@ export async function migrateWorkspaceTitleSources(input: {
   const firstAgents = earliestAgentByWorkspaceId(await input.listAgents());
   const counts: TitleSourceMigrationCounts = {
     scanned: 0,
-    manualToAgent: 0,
+    manualToAuto: 0,
     absentToAuto: 0,
-    absentToAgent: 0,
     absentToManual: 0,
   };
   for (const workspace of await input.workspaceRegistry.list()) {
@@ -127,9 +125,8 @@ export async function migrateWorkspaceTitleSources(input: {
       return { ...current, titleSource: next };
     });
     if (!changed) continue;
-    if (from === "manual") counts.manualToAgent += 1;
+    if (from === "manual") counts.manualToAuto += 1;
     else if (next === "auto") counts.absentToAuto += 1;
-    else if (next === "agent") counts.absentToAgent += 1;
     else counts.absentToManual += 1;
   }
   await writeFileAtomic(
