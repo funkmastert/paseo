@@ -195,6 +195,14 @@ import {
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
+import {
+  CoordinationSession,
+  isCoordinationRequest,
+} from "./session/coordination/coordination-session.js";
+import {
+  CoordinationUnavailableError,
+  type CoordinationRuntime,
+} from "./coordination/runtime.js";
 import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
 import type { JevService } from "./jev/contract.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
@@ -574,6 +582,7 @@ export interface SessionOptions {
   providerUsageService: ProviderUsageService;
   usageHistory?: UsageHistoryStore;
   contextUsage?: AgentContextUsageService;
+  coordination?: Pick<CoordinationRuntime, "require">;
   jev?: JevService | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
@@ -834,6 +843,7 @@ export class Session {
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
+  private readonly coordinationSession: CoordinationSession;
   private readonly jevSession: JevSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
@@ -890,6 +900,7 @@ export class Session {
       providerUsageService,
       usageHistory,
       contextUsage,
+      coordination,
       jev,
       serviceProxy,
       scriptRuntimeStore,
@@ -1058,6 +1069,15 @@ export class Session {
           agentStorage: this.agentStorage,
           logger: this.sessionLogger,
         });
+      },
+      logger: this.sessionLogger,
+    });
+    this.coordinationSession = new CoordinationSession({
+      host: { emit: (msg) => this.emit(msg) },
+      // A host without coordination (only a test) answers every request as disabled.
+      coordination: coordination ?? {
+        require: () =>
+          Promise.reject(new CoordinationUnavailableError("Coordination is not wired.")),
       },
       logger: this.sessionLogger,
     });
@@ -2235,6 +2255,7 @@ export class Session {
       this.dispatchWorkspaceFileMessage(msg, source) ??
       this.dispatchProviderMessage(msg) ??
       this.dispatchUsageMessage(msg) ??
+      this.dispatchCoordinationMessage(msg) ??
       this.dispatchOrchestrationSkillsMessage(msg) ??
       this.dispatchPluginDirectoryMessage(msg) ??
       this.dispatchPluginMessage(msg) ??
@@ -2261,6 +2282,10 @@ export class Session {
       this.dispatchContextUsageMessage(msg) ??
       this.dispatchJevMessage(msg)
     );
+  }
+
+  private dispatchCoordinationMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    return isCoordinationRequest(msg) ? this.coordinationSession.handle(msg) : undefined;
   }
 
   private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {

@@ -7,7 +7,7 @@ import {
   type CoordinationConfigInput,
 } from "./config.js";
 import { WorkQueueService } from "./queue/service.js";
-import { WorkQueueStore } from "./queue/store.js";
+import { WorkQueueStore, type WorkQueueStoreOptions } from "./queue/store.js";
 import { StreamStore } from "./stream/store.js";
 
 export interface Coordination {
@@ -22,6 +22,7 @@ export interface OpenCoordinationOptions {
   logger: Logger;
   now?: () => Date;
   newId?: () => string;
+  onCommitStep?: WorkQueueStoreOptions["onCommitStep"];
 }
 
 // Opens the queue and stream under `$PASEO_HOME/coordination/`. Opening the queue completes any
@@ -30,7 +31,11 @@ export async function openCoordination(options: OpenCoordinationOptions): Promis
   const config = resolveCoordinationConfig(options.config);
   const root = path.join(options.paseoHome, "coordination");
   const logger = options.logger.child({ module: "coordination" });
-  const store = await WorkQueueStore.open({ rootDir: path.join(root, "queue"), logger });
+  const store = await WorkQueueStore.open({
+    rootDir: path.join(root, "queue"),
+    logger,
+    ...(options.onCommitStep ? { onCommitStep: options.onCommitStep } : {}),
+  });
   const stream = await StreamStore.open({
     rootDir: path.join(root, "stream"),
     retention: {

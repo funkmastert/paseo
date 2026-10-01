@@ -566,6 +566,7 @@ function resolveAgentMonitorConfig(
   | "budgetPacing"
   | "leaderCompaction"
   | "contextMeter"
+  | "coordination"
   | "doneJanitor"
   | "admission"
   | "refocus"
@@ -586,6 +587,7 @@ function resolveAgentMonitorConfig(
     budgetPacing: agents?.budgetPacing,
     leaderCompaction: agents?.leaderCompaction,
     contextMeter: agents?.contextMeter,
+    coordination: agents?.coordination,
     doneJanitor: agents?.doneJanitor,
     admission: agents?.admission,
     refocus: agents?.refocus,
