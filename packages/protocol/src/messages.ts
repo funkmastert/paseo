@@ -74,6 +74,10 @@ import {
   UsageHistoryGetResponseSchema,
 } from "./usage-history/rpc-schemas.js";
 import {
+  AgentTranscriptSearchRequestSchema,
+  AgentTranscriptSearchResponseSchema,
+} from "./transcript-search/rpc-schemas.js";
+import {
   RestartRecoveryGetPlanRequestSchema,
   RestartRecoveryApplyRequestSchema,
   RestartRecoveryDismissRequestSchema,
@@ -3784,6 +3788,7 @@ export const SessionEventsSetSubscriptionResponseSchema = z.object({
 
 export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionRequestSchema,
+  AgentTranscriptSearchRequestSchema,
   RestartRecoveryGetPlanRequestSchema,
   RestartRecoveryApplyRequestSchema,
   RestartRecoveryDismissRequestSchema,
@@ -4252,6 +4257,8 @@ export const ServerInfoStatusPayloadSchema = z
         workspaceRecovery: z.boolean().optional(),
         // COMPAT(restartRecovery): added in v0.8.x, remove gate after 2027-09-23.
         restartRecovery: z.boolean().optional(),
+        // COMPAT(agentTranscriptSearch): added in v0.8.x, remove gate after 2027-09-30.
+        agentTranscriptSearch: z.boolean().optional(),
         // COMPAT(workspaceFileEditing): added in v0.2.0, remove after 2027-01-18 once daemon floor >= v0.2.0.
         workspaceFileEditing: z.boolean().optional(),
         // COMPAT(providerUsageList): added in v0.1.98, drop the gate when daemon floor >= v0.1.98.
@@ -7378,6 +7385,7 @@ export const AgentSkillsImportLegacySelectionResponseSchema = z.object({
 
 export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   SessionEventsSetSubscriptionResponseSchema,
+  AgentTranscriptSearchResponseSchema,
   RestartRecoveryGetPlanResponseSchema,
   RestartRecoveryApplyResponseSchema,
   RestartRecoveryDismissResponseSchema,

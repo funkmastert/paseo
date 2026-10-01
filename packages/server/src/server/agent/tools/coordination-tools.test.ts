@@ -526,6 +526,51 @@ describe("list_peers", () => {
   });
 });
 
+describe("search_agent_transcript", () => {
+  test("reports coverage per agent across a parentAgentId tree, honestly", async () => {
+    const harness = createHarness([
+      { id: "root", title: "Root", status: "idle" },
+      { id: "child", title: "Child", status: "idle", labels: { [PARENT_LABEL]: "root" } },
+      { id: "other", title: "Other", status: "idle" },
+    ]);
+
+    // None of these fake agents has a real session id, so every one resolves to "not_found"
+    // without touching the filesystem — the point here is the tool's wiring (tree expansion,
+    // output shape), not the file search itself (covered in search-core.test.ts).
+    const result = await call(harness, "search_agent_transcript", {
+      agentId: "root",
+      pattern: "anything",
+      tree: true,
+    });
+
+    expect(typeof result.backend).toBe("string");
+    expect(result.agents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ agentId: "root", coverage: "not_found" }),
+        expect.objectContaining({ agentId: "child", coverage: "not_found" }),
+      ]),
+    );
+    expect(result.agents).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ agentId: "other" })]),
+    );
+  });
+
+  test("without tree=true, only the named agent is searched", async () => {
+    const harness = createHarness([
+      { id: "root", title: "Root", status: "idle" },
+      { id: "child", title: "Child", status: "idle", labels: { [PARENT_LABEL]: "root" } },
+    ]);
+
+    const result = await call(harness, "search_agent_transcript", {
+      agentId: "root",
+      pattern: "anything",
+    });
+
+    expect(result.agents).toHaveLength(1);
+    expect(result.agents[0]).toMatchObject({ agentId: "root" });
+  });
+});
+
 function entry(overrides: Partial<FleetEntry> & { id: string }): FleetEntry {
   return {
     title: null,

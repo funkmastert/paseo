@@ -169,6 +169,7 @@ import {
 } from "./compat/normalize-provider-models.js";
 import { TerminalStreamRouter, type TerminalStreamEvent } from "./terminal-stream-router.js";
 import type { RestartRecoveryPlan } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
+import type { AgentTranscriptSearchAgentResult } from "@getpaseo/protocol/transcript-search/rpc-schemas";
 import type { JevQuestion, JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
 import type {
   BrowserAutomationExecuteRequest,
@@ -2923,6 +2924,36 @@ export class DaemonClient {
         },
       });
     return requireRestartRecoveryPlan(payload);
+  }
+
+  /** Grep an agent's own transcript, or its whole descendant tree. Gate on `features.agentTranscriptSearch`. */
+  async searchAgentTranscript(
+    agentId: string,
+    pattern: string,
+    options: { tree?: boolean; regex?: boolean; caseInsensitive?: boolean; full?: boolean } = {},
+    requestId?: string,
+  ): Promise<{
+    backend: string | null;
+    agents: AgentTranscriptSearchAgentResult[];
+    targetSetTruncated: boolean;
+    error: string | null;
+  }> {
+    return await this.sendNamespacedCorrelatedSessionRequest<"agent.transcript_search.search.response">(
+      {
+        requestId,
+        message: {
+          type: "agent.transcript_search.search.request",
+          agentId,
+          pattern,
+          ...(options.tree !== undefined ? { tree: options.tree } : {}),
+          ...(options.regex !== undefined ? { regex: options.regex } : {}),
+          ...(options.caseInsensitive !== undefined
+            ? { caseInsensitive: options.caseInsensitive }
+            : {}),
+          ...(options.full !== undefined ? { full: options.full } : {}),
+        },
+      },
+    );
   }
 
   async inspectWorkspaceRecovery(

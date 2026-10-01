@@ -184,6 +184,7 @@ import { NotifyPolicySession } from "./session/notify-policy/notify-policy-sessi
 import { ScheduleSession } from "./session/schedule/schedule-session.js";
 import { RestartRecoverySession } from "./session/restart-recovery/restart-recovery-session.js";
 import type { RestartRecoveryService } from "./agent/restart-recovery/service.js";
+import { TranscriptSearchSession } from "./session/transcript-search/transcript-search-session.js";
 import { ProviderCatalogSession } from "./session/provider/provider-catalog-session.js";
 import {
   createUsageHistorySession,
@@ -831,6 +832,7 @@ export class Session {
   private readonly scheduleSession: ScheduleSession;
   private readonly notifyPolicySession: NotifyPolicySession;
   private readonly restartRecoverySession: RestartRecoverySession;
+  private readonly transcriptSearchSession: TranscriptSearchSession;
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
@@ -1026,6 +1028,12 @@ export class Session {
     this.restartRecoverySession = new RestartRecoverySession({
       host: { emit: (msg) => this.emit(msg) },
       service: options.restartRecovery,
+      logger: this.sessionLogger,
+    });
+    this.transcriptSearchSession = new TranscriptSearchSession({
+      host: { emit: (msg) => this.emit(msg) },
+      agentManager: this.agentManager,
+      agentStorage: this.agentStorage,
       logger: this.sessionLogger,
     });
     this.providerCatalogSession = new ProviderCatalogSession({
@@ -2254,12 +2262,13 @@ export class Session {
     );
   }
 
-  /** Usage reads: the accounts' usage history, an agent's context breakdown, and JEV. */
+  /** Usage reads: the accounts' usage history, an agent's context breakdown, JEV, and transcript search. */
   private dispatchUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {
     return (
       this.dispatchUsageHistoryMessage(msg) ??
       this.dispatchContextUsageMessage(msg) ??
-      this.dispatchJevMessage(msg)
+      this.dispatchJevMessage(msg) ??
+      this.dispatchTranscriptSearchMessage(msg)
     );
   }
 
@@ -3004,6 +3013,11 @@ export class Session {
       default:
         return undefined;
     }
+  }
+
+  private dispatchTranscriptSearchMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (msg.type !== "agent.transcript_search.search.request") return undefined;
+    return this.transcriptSearchSession.handleSearchRequest(msg);
   }
 
   private dispatchScheduleMessage(msg: SessionInboundMessage): Promise<void> | undefined {

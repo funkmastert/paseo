@@ -80,6 +80,45 @@ Permission requests are notification checkpoints, not the end of that subscripti
 The permission notification includes the normalized request plus the child and request IDs, so the caller can inspect it and respond without fetching agent status.
 A watched child that closes before its finish event also notifies the caller so delegated work cannot disappear silently during archive or workspace teardown. A daemon shutdown is not such a close: the report stays owed on the child's record, and the restarted daemon delivers it. [finish-reports.md](finish-reports.md) covers the durable ledger, its retry and escalation ladder, and how the report follows a successor.
 
+## Transcript search
+
+`search_agent_transcript` (MCP tool, `coordination-tools.ts`) and `paseo agent grep` (CLI, over the
+`agent.transcript_search.search` RPC) grep an agent's own provider transcript — Claude JSONL under
+the account's `projects/` dir, Codex's rollout file — without loading the agent's full timeline.
+`tree: true` extends the search to every descendant found by walking `paseo.parent-agent-id`
+labels, the same relationship [Relationships](#relationships) describes.
+
+The coverage report is the point, not an afterthought: `packages/server/src/server/agent-history-search.ts`
+documents why a daemon that guesses at a partial search and answers "not found" is worse than one
+that admits it did not search at all. This tool never guesses. Every agent in the result carries
+one of exactly five coverage values — `searched`, `not_found` (no transcript file for that agent),
+`unsupported` (the agent's provider has no known transcript location), `truncated` (cut short by a
+per-agent match cap or the request's total output cap), `timed_out` (a regex search on the Node
+fallback backend ran past its deadline and was killed) — plus which `backend` ran. Compact by
+default (few matches, short excerpts, a small total-output cap); `full: true` raises every cap.
+
+Backend selection tries three tiers, in order: a real `rg` on PATH; failing that, the Claude Code
+CLI binary the daemon already resolves for the claude provider (`findExecutable`, honoring
+`CLAUDE_CODE_EXECPATH`), spawned with `argv0: "rg"` — Claude Code's own executable behaves as a
+full ripgrep when invoked that way, which is what the common `rg` shell function wrapping it
+relies on, and is the only ripgrep most Bozeo machines actually have; failing that, a streaming
+Node line-by-line scan. This covers Windows too (`rg.exe`, the same Claude binary trick). Nothing
+here ships a vendored ripgrep binary, so a daemon with neither real ripgrep nor a Claude binary
+still always searches, just slower. The reported `backend` is `"ripgrep"`, `"ripgrep (claude)"`, or
+`"node"`.
+
+A regex pattern only ever runs on the main thread when one of the two ripgrep forms is doing the
+matching (ripgrep's own engine is linear-time; no catastrophic backtracking). On the Node fallback,
+a regex search runs in a `worker_threads` worker with a deadline
+(`DEFAULT_REGEX_WORKER_TIMEOUT_MS`, 10 s) instead, so a pathological pattern gets
+`Worker#terminate()`'d instead of wedging the daemon's event loop — a synchronous `RegExp#test()` on
+the main thread cannot be interrupted once it starts. Literal (non-regex) search stays on the main
+thread either way; it is linear by construction.
+
+Excerpt text is pulled out of each matched JSONL row's known shape (Claude SDK message envelopes)
+with a generic string-harvesting fallback for anything else (Codex rollout rows included) — the raw
+JSON of a row is never returned as a match.
+
 ## Provider-managed child agents
 
 Some providers can create their own child sessions inside one provider runtime. OMP's task tool reports these with `child_session` events; `AgentManager` imports the live provider handle, stamps `paseo.parent-agent-id`, and surfaces the result as a normal subagent in the parent's subagents track.

@@ -7,6 +7,9 @@
  *   list_peers               what my siblings and children are doing right now
  *   broadcast_agent_prompt   one message to a label-selected set of my children or siblings,
  *                            without turning it into a paid turn for every one of them
+ *   search_agent_transcript  grep an agent's (or its whole descendant tree's) own provider
+ *                            transcript, with an honest coverage report, instead of loading its
+ *                            full timeline
  *
  * Why these exist: agents repeatedly got their own identity wrong (which account they ran on,
  * who their parent was, which model they actually had), and one reported its predecessor's id as
@@ -49,6 +52,7 @@ import {
   ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
   HANDOFF_FROM_LABEL,
 } from "../account-failover-detector.js";
+import { searchAgentTranscript } from "../transcript-search/index.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
 
 // The classifier's label vocabulary. Mirrored here rather than imported: the classifier lives in
@@ -763,6 +767,66 @@ async function deliver(input: {
 }
 
 // ---------------------------------------------------------------------------------------------
+// search_agent_transcript
+// ---------------------------------------------------------------------------------------------
+
+const searchAgentTranscriptTool = defineCoordinationTool({
+  name: "search_agent_transcript",
+  title: "Search an agent's transcript",
+  description:
+    "Grep an agent's own provider transcript (Claude JSONL, Codex rollout) for a pattern, without " +
+    "loading its whole timeline. Set tree=true to also search every descendant (its children, " +
+    "their children, and so on). Literal substring match by default; set regex=true for a regular " +
+    "expression, ignoreCase=true to fold case. Reports which backend ran (ripgrep, ripgrep running " +
+    "as the Claude Code binary, or a Node fallback) and, per agent, whether it was actually " +
+    "searched, had no transcript file, uses a provider this cannot read, was cut short by a cap, " +
+    "or timed out (a regex on the Node fallback is killed after a deadline rather than risking the " +
+    "daemon) — a 'not found' only ever means what it says, never a guess from a partial search. " +
+    "Compact by default (fewer matches, shorter excerpts, total output capped); full=true raises " +
+    "every cap.",
+  inputSchema: {
+    agentId: z
+      .string()
+      .min(1)
+      .describe("Agent to search. Any agent id, not only your own children."),
+    pattern: z
+      .string()
+      .trim()
+      .min(1)
+      .max(500)
+      .describe("Literal text, or a regex when regex=true."),
+    tree: z
+      .boolean()
+      .optional()
+      .describe("Also search every descendant of agentId. Defaults to false."),
+    regex: z
+      .boolean()
+      .optional()
+      .describe("Treat pattern as a regular expression. Defaults to false."),
+    ignoreCase: z.boolean().optional().describe("Case-insensitive match. Defaults to false."),
+    full: z
+      .boolean()
+      .optional()
+      .describe(
+        "More matches per agent, longer excerpts, a larger total output cap. Defaults to false.",
+      ),
+  },
+  handler: async ({ agentId, pattern, tree, regex, ignoreCase, full }, host) => {
+    const result = await searchAgentTranscript({
+      agentManager: host.agentManager,
+      agentStorage: host.agentStorage,
+      rootAgentId: agentId,
+      pattern,
+      tree,
+      regex,
+      caseInsensitive: ignoreCase,
+      full,
+    });
+    return toResult(result);
+  },
+});
+
+// ---------------------------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------------------------
 
@@ -771,6 +835,7 @@ const COORDINATION_TOOLS: readonly CoordinationToolDefinition[] = [
   whoamiTool,
   listPeersTool,
   broadcastAgentPromptTool,
+  searchAgentTranscriptTool,
 ];
 
 export function registerCoordinationTools(options: RegisterCoordinationToolsOptions): void {
