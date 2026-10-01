@@ -106,6 +106,34 @@ describe("createHealthTracker", () => {
     expect(tracker.snapshot()[PROVIDER]?.[weeklyModelWindow("opus")]?.status).toBe("capped");
   });
 
+  it("B-01: a weekly_surface_* window stops every model, even one relevantWindows never names", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportUsage(PROVIDER, [
+      { window: "weekly_surface_claude_design", usedPct: 100, resetsAt: null },
+    ]);
+
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(false);
+  });
+
+  it("B-01: a weekly_model_* window for a family this list doesn't recognize still gates its own model", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportUsage(PROVIDER, [{ window: "weekly_model_mythos", usedPct: 100, resetsAt: null }]);
+
+    expect(tracker.isHealthyFor(PROVIDER, "claude-mythos-1")).toBe(false);
+    // A real family's weekly window is untouched by the unknown one.
+    expect(tracker.isHealthyFor(PROVIDER, OPUS_MODEL)).toBe(true);
+  });
+
+  it("B-01: a model id with no recognized family is held to every weekly_model_* window, like the daemon's windowLimitsModel", () => {
+    const { tracker } = trackerAt("2026-09-10T10:00:00Z");
+
+    tracker.reportUsage(PROVIDER, [{ window: weeklyModelWindow("opus"), usedPct: 100, resetsAt: null }]);
+
+    expect(tracker.isHealthyFor(PROVIDER, "default")).toBe(false);
+  });
+
   it("leaves state untouched on usage fetch failure (no reading = no change)", () => {
     const { tracker } = trackerAt("2026-09-10T10:00:00Z");
 
