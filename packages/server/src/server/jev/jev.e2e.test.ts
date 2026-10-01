@@ -52,31 +52,35 @@ describe("the key never reaches a child", () => {
     expect(JSON.stringify(env)).not.toContain(FAKE_KEY);
   });
 
-  test("a terminal's environment does not carry it", async () => {
-    const workspace = await ctx.client.createWorkspace({
-      source: { kind: "directory", path: workdir },
-      title: "jev-e2e",
-    });
-    expect(workspace.error ?? null).toBeNull();
-    const created = await ctx.client.createTerminal(workdir, "env-check", undefined, {
-      workspaceId: workspace.workspace!.id,
-      command: "/bin/sh",
-      args: ["-c", "env; echo JEV_E2E_DONE; sleep 5"],
-    });
-    expect(created.error).toBeNull();
-    const terminalId = created.terminal?.id;
-    expect(terminalId).toBeTruthy();
-    let text = "";
-    for (let i = 0; i < 50 && !text.includes("JEV_E2E_DONE"); i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      const captured = await ctx.client.captureTerminal(terminalId!, { stripAnsi: true });
-      text = captured.lines.join("\n");
-    }
-    expect(text).toContain("JEV_E2E_DONE");
-    expect(text).toContain(MARKER);
-    expect(text).not.toContain(FAKE_KEY);
-    expect(text).not.toContain("PASEO_JEV_API_KEY");
-  });
+  // /bin/sh does not exist on win32.
+  test.skipIf(process.platform === "win32")(
+    "a terminal's environment does not carry it",
+    async () => {
+      const workspace = await ctx.client.createWorkspace({
+        source: { kind: "directory", path: workdir },
+        title: "jev-e2e",
+      });
+      expect(workspace.error ?? null).toBeNull();
+      const created = await ctx.client.createTerminal(workdir, "env-check", undefined, {
+        workspaceId: workspace.workspace!.id,
+        command: "/bin/sh",
+        args: ["-c", "env; echo JEV_E2E_DONE; sleep 5"],
+      });
+      expect(created.error).toBeNull();
+      const terminalId = created.terminal?.id;
+      expect(terminalId).toBeTruthy();
+      let text = "";
+      for (let i = 0; i < 50 && !text.includes("JEV_E2E_DONE"); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const captured = await ctx.client.captureTerminal(terminalId!, { stripAnsi: true });
+        text = captured.lines.join("\n");
+      }
+      expect(text).toContain("JEV_E2E_DONE");
+      expect(text).toContain(MARKER);
+      expect(text).not.toContain(FAKE_KEY);
+      expect(text).not.toContain("PASEO_JEV_API_KEY");
+    },
+  );
 });
 
 describe("the four RPCs over the wire", () => {
