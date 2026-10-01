@@ -1270,6 +1270,7 @@ export const es: TranslationResources = {
         title: "Cambiar nombre del espacio de trabajo",
         submit: "Rebautizar",
         invalidBranchName: "Nombre de sucursal no válido",
+        autoPlaceholder: "Nombrar automáticamente",
       },
       toasts: {
         workspacePathUnavailable: "RutaWorkspaceno disponible",
@@ -2003,6 +2004,19 @@ export const es: TranslationResources = {
     },
     notRestorable: "No se puede reanudar",
     error: "La recuperación falló: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo se cerró y detuvo el daemon",
+      update: "El daemon se reinició para una actualización",
+      crashed: "El daemon falló",
+      power_loss: "El Mac se reinició o perdió la energía",
+      cli_stop: "Detenido desde la línea de comandos",
+    },
+    age: "desde {{when}}",
+    ranFor: "se ejecutó {{duration}}",
+    keepRunningHint:
+      'Salir de Bozeo detiene el daemon: activa "Mantener el daemon en ejecución al salir" para evitarlo.',
+    resumeModeHint:
+      "Bozeo puede reanudar por su cuenta los agentes interrumpidos así: establece agents.restartRecovery.mode en resume en config.json.",
     expand: "Expandir recuperación tras reinicio",
     collapse: "Contraer recuperación tras reinicio",
   },

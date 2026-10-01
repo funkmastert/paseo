@@ -89,7 +89,9 @@ export type JevFeatureId =
   /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
   | "awayReply"
   /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
-  | "askJev";
+  | "askJev"
+  /** Feature 17: whether a workspace's name still fits before spending a title regeneration. */
+  | "titleRefresh";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
@@ -497,6 +499,10 @@ export interface JevSavingsSettlement {
   tokensSavedEstimate: number | null;
   otherBenefit: JevOtherBenefit | null;
   basis: JevSavingsBasis | null;
+  /** The facts this settlement added, so a restart reprices from the same inputs. */
+  facts?: Record<string, string | number | boolean | null>;
+  /** Still waiting on another fact after this one. Absent: no longer pending. */
+  pending?: boolean;
 }
 
 /** A later line for the same id: what the validation window saw. At most one per id. */
@@ -568,6 +574,11 @@ export interface JevSavingsModeTotals {
   /** Live: answers that changed what code did. Shadow: answers that would have. */
   changed: number;
   tokens: number;
+  /**
+   * The part of `tokens` that is an estimate (a skipped agent priced at its kind's median), for the
+   * dashboard to label "estimated", not "saved". Absent from an older daemon.
+   */
+  estimatedTokens?: number;
   otherBenefit: JevOtherBenefit | null;
   /** Involvements whose figure is still pending. */
   pending: number;
@@ -646,6 +657,8 @@ export interface JevSavingsEvent {
   otherBenefit: JevOtherBenefit | null;
   basis: JevSavingsBasis | null;
   pending: boolean;
+  /** The figure is an estimate, not measured tokens. Absent from an older daemon. */
+  estimated?: boolean;
   validation: JevSavingsValidation | null;
   jevCostUsd: number | null;
 }
@@ -658,6 +671,11 @@ export interface JevSavingsEventsQuery {
   cursor?: string;
   /** Default 50, at most 200. */
   limit?: number;
+  /**
+   * Only records in these workspaces; a record with no workspace is left out too. Absent for a
+   * caller whose grant covers the daemon (docs/permissions.md, "Resources").
+   */
+  workspaceIds?: readonly string[];
 }
 
 export interface JevSavingsEventsPage {

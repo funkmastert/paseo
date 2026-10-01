@@ -146,6 +146,40 @@ export function formatMessageTimestamp(date: Date, now: Date = new Date()): stri
 }
 
 /**
+ * Format a moment for "from {{when}}"-style prose.
+ * - Same day: "1:54 PM" (the "from" already says it was earlier)
+ * - Yesterday: "yesterday 1:54 PM"
+ * - Within ~6 days: "Wednesday 1:54 PM"
+ * - Older: "14 May 2026, 1:54 PM"
+ */
+export function formatDayRelativeTime(date: Date, now: Date = new Date()): string {
+  const time = getTimeFormatter().format(date);
+  if (isSameLocalDay(date, now)) {
+    return time;
+  }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (isSameLocalDay(date, yesterday)) {
+    return `yesterday ${time}`;
+  }
+
+  const diffMs = now.getTime() - date.getTime();
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+  if (diffDays >= 0 && diffDays < 7) {
+    const weekday = date.toLocaleDateString(undefined, { weekday: "long" });
+    return `${weekday} ${time}`;
+  }
+
+  const dateLabel = date.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+  return `${dateLabel}, ${time}`;
+}
+
+/**
  * Format a duration as a compact human-readable string.
  * - 0-60s: whole seconds ("47s")
  * - Minutes/hours: integers only ("2m 12s", "1h 5m")

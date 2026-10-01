@@ -3251,6 +3251,9 @@ export const WorkspaceCreateRequestSchema = z.object({
   requestId: z.string(),
   // Optional user-set title applied to the created workspace.
   title: z.string().optional(),
+  // The agent the request is made for (a CLI run under PASEO_AGENT_ID). An agent's title is
+  // one Paseo may refresh later; a title without it is a person's and is never auto-changed.
+  callerAgentId: z.string().optional(),
   // Optional prompt context for workspace-level name/branch generation.
   firstAgentContext: FirstAgentContextSchema.optional(),
   source: z.discriminatedUnion("kind", [

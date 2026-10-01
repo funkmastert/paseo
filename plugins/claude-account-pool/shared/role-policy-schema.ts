@@ -27,10 +27,14 @@ export const TASK_CLASS_LABEL = "paseo.task-class";
  *   the decision, made before the agent existed, to it.
  * - `JEV_TOOLS_LABEL`: the D8 arm, `on` or `control`, of a create eligible for
  *   the JEV agent tools. The daemon lists the tools for `on` only.
+ * - `JEV_SPAWN_LABEL`: the spawn hint's durable record beside `JEV_CALL_LABEL`,
+ *   `v1;base=<class>/<model>;would=<class>/<model>;move=<down|up|none>;applied=<0|1>`.
+ *   The daemon's savings ledger reads it at create (docs/jev.md, "Savings").
  */
 export const TASK_CLASS_SOURCE_LABEL = "paseo.task-class-source";
 export const JEV_CALL_LABEL = "paseo.jev-call";
 export const JEV_TOOLS_LABEL = "paseo.jev-tools";
+export const JEV_SPAWN_LABEL = "paseo.jev-spawn";
 
 /**
  * Asks for MCP gateway servers a child would not get by default: a

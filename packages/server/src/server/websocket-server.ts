@@ -1757,9 +1757,7 @@ export class VoiceAssistantWebSocketServer {
         jev: true,
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
         jevAsk: true,
-        // COMPAT(jevSavings): dashboard track's stand-in ahead of the savings
-        // track's seam commit, which owns this flag for real (gated on the
-        // savings sink existing). Reconcile at merge: take the seam's version.
+        // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
         jevSavings: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
@@ -2708,6 +2706,7 @@ export class VoiceAssistantWebSocketServer {
         record: jev
           ? finishTriageRecorderFor({
               agentManager: this.agentManager,
+              savings: jev.savings,
               file: () =>
                 createJsonlAppender({
                   filePath: join(this.paseoHome, "jev", "finish-triage.jsonl"),

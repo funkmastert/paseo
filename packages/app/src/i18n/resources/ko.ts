@@ -1243,6 +1243,7 @@ export const ko: TranslationResources = {
         title: "워크스페이스 이름 변경",
         submit: "이름 변경",
         invalidBranchName: "잘못된 브랜치 이름",
+        autoPlaceholder: "자동으로 이름 지정",
       },
       toasts: {
         workspacePathUnavailable: "워크스페이스 경로를 사용할 수 없습니다",
@@ -1967,6 +1968,19 @@ export const ko: TranslationResources = {
     },
     notRestorable: "재개할 수 없음",
     error: "복구 실패: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo가 종료되면서 데몬이 중지되었습니다",
+      update: "업데이트를 위해 데몬이 재시작되었습니다",
+      crashed: "데몬이 충돌했습니다",
+      power_loss: "Mac이 재부팅되었거나 전원이 끊겼습니다",
+      cli_stop: "명령줄에서 중지되었습니다",
+    },
+    age: "{{when}}부터",
+    ranFor: "{{duration}} 동안 실행됨",
+    keepRunningHint:
+      'Bozeo를 종료하면 데몬도 중지됩니다. "종료 후에도 데몬 계속 실행"을 켜면 방지할 수 있습니다.',
+    resumeModeHint:
+      "Bozeo는 이렇게 중단된 에이전트를 스스로 재개할 수 있습니다: config.json에서 agents.restartRecovery.mode를 resume으로 설정하세요.",
     expand: "재시작 복구 펼치기",
     collapse: "재시작 복구 접기",
   },

@@ -1236,6 +1236,7 @@ export const ar: TranslationResources = {
         title: "إعادة تسمية مساحة العمل",
         submit: "إعادة تسمية",
         invalidBranchName: "اسم الفرع غير صالح",
+        autoPlaceholder: "تسمية تلقائية",
       },
       toasts: {
         workspacePathUnavailable: "مسار Workspace غير متوفر",
@@ -1957,6 +1958,19 @@ export const ar: TranslationResources = {
     },
     notRestorable: "لا يمكن الاستئناف",
     error: "فشل الاسترداد: {{error}}",
+    reason: {
+      bozeo_quit: "أنهى Bozeo عمله وأوقف الخدمة الخلفية",
+      update: "أعيد تشغيل الخدمة الخلفية من أجل تحديث",
+      crashed: "تعطلت الخدمة الخلفية",
+      power_loss: "أعيد تشغيل الـ Mac أو انقطعت عنه الطاقة",
+      cli_stop: "تم الإيقاف من سطر الأوامر",
+    },
+    age: "منذ {{when}}",
+    ranFor: "عمل لمدة {{duration}}",
+    keepRunningHint:
+      "إنهاء Bozeo يوقف الخدمة الخلفية — فعّل «إبقاء الخدمة الخلفية قيد التشغيل بعد الإنهاء» لتجنب ذلك.",
+    resumeModeHint:
+      "يمكن لـ Bozeo استئناف الوكلاء المنقطعين كهذا تلقائيًا: اضبط agents.restartRecovery.mode على resume في config.json.",
     expand: "توسيع الاسترداد بعد إعادة التشغيل",
     collapse: "طي الاسترداد بعد إعادة التشغيل",
   },

@@ -1252,6 +1252,7 @@ export const ru: TranslationResources = {
         title: "Переименовать рабочее пространство",
         submit: "Переименовать",
         invalidBranchName: "Недопустимое имя ветки",
+        autoPlaceholder: "Называть автоматически",
       },
       toasts: {
         workspacePathUnavailable: "Путь к рабочему пространству недоступен",
@@ -1988,6 +1989,19 @@ export const ru: TranslationResources = {
     },
     notRestorable: "Нельзя возобновить",
     error: "Восстановление не удалось: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo завершился и остановил демон",
+      update: "Демон перезапустился для обновления",
+      crashed: "Демон аварийно завершился",
+      power_loss: "Mac перезагрузился или потерял питание",
+      cli_stop: "Остановлен из командной строки",
+    },
+    age: "с {{when}}",
+    ranFor: "работал {{duration}}",
+    keepRunningHint:
+      "Выход из Bozeo останавливает демон — включите «Оставлять демон запущенным после выхода», чтобы избежать этого.",
+    resumeModeHint:
+      "Bozeo может сам возобновлять такие прерванные агенты: установите agents.restartRecovery.mode в resume в config.json.",
     expand: "Развернуть восстановление после перезапуска",
     collapse: "Свернуть восстановление после перезапуска",
   },

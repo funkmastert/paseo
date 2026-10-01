@@ -1248,6 +1248,7 @@ export const ja: TranslationResources = {
         title: "ワークスペースの名前を変更",
         submit: "名前を変更",
         invalidBranchName: "無効なブランチ名",
+        autoPlaceholder: "自動的に名前を付ける",
       },
       toasts: {
         workspacePathUnavailable: "ワークスペースパスが利用できません",
@@ -1976,6 +1977,19 @@ export const ja: TranslationResources = {
     },
     notRestorable: "再開できません",
     error: "復旧に失敗しました: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo が終了してデーモンを停止しました",
+      update: "デーモンは更新のために再起動しました",
+      crashed: "デーモンがクラッシュしました",
+      power_loss: "Mac が再起動または電源が失われました",
+      cli_stop: "コマンドラインから停止されました",
+    },
+    age: "{{when}}から",
+    ranFor: "{{duration}}実行していました",
+    keepRunningHint:
+      "Bozeo を終了するとデーモンも停止します。「終了後もデーモンを実行し続ける」を有効にすると回避できます。",
+    resumeModeHint:
+      "Bozeo はこのように中断されたエージェントを自動で再開できます: config.json の agents.restartRecovery.mode を resume に設定してください。",
     expand: "再起動後の復旧を展開",
     collapse: "再起動後の復旧を折りたたむ",
   },

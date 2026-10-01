@@ -22,6 +22,10 @@ export type RestartRecoveryState = LiteralUnion<
   "pending" | "resuming" | "resumed" | "failed" | "not_attempted" | "dismissed",
   string
 >;
+export type PreviousShutdownReason = LiteralUnion<
+  "bozeo_quit" | "update" | "crashed" | "power_loss" | "cli_stop" | "unknown",
+  string
+>;
 
 export const RestartRecoveryCheckSchema = z.object({
   /** `session`, `workspace`, `provider`, `transcript`, `account` or `live`. */
@@ -41,6 +45,12 @@ export const RestartRecoveryEntrySchema = z.object({
   depth: z.number().int().nonnegative(),
   /** When the interrupted run started. */
   runStartedAt: z.string(),
+  /**
+   * COMPAT(restartRecoveryStoppedAt): added in v0.9.x, optional so an old daemon parses. When the
+   * daemon stopped (the episode's shutdown time), so a client can show how long the run had been
+   * going. Remove the gate after 2027-09-30.
+   */
+  stoppedAt: z.string().nullable().optional(),
   readiness: z.string(),
   checks: z.array(RestartRecoveryCheckSchema),
   state: z.string(),
@@ -55,6 +65,19 @@ export const RestartRecoveryPlanSchema = z.object({
   capturedAt: z.string(),
   /** `crash`, `clean` or `unknown`, from the previous daemon's shutdown receipt when there is one. */
   previousShutdown: z.string(),
+  /**
+   * COMPAT(restartRecoveryPreviousShutdownInfo): added in v0.9.x, optional so an old daemon
+   * parses. The plain-language reason behind `previousShutdown`, with a timestamp: one of
+   * bozeo_quit, update, crashed, power_loss, cli_stop, unknown. Remove the gate after
+   * 2027-09-30.
+   */
+  previousShutdownInfo: z
+    .object({
+      reason: z.string(),
+      at: z.string().nullable(),
+      detail: z.string().optional(),
+    })
+    .optional(),
   applying: z.boolean(),
   entries: z.array(RestartRecoveryEntrySchema),
 });
@@ -112,10 +135,15 @@ export type RestartRecoveryEntry = Omit<
 };
 export type RestartRecoveryPlan = Omit<
   z.infer<typeof RestartRecoveryPlanSchema>,
-  "mode" | "entries"
+  "mode" | "entries" | "previousShutdownInfo"
 > & {
   mode: RestartRecoveryMode;
   entries: RestartRecoveryEntry[];
+  previousShutdownInfo?: {
+    reason: PreviousShutdownReason;
+    at: string | null;
+    detail?: string;
+  };
 };
 export type RestartRecoveryGetPlanRequest = z.infer<typeof RestartRecoveryGetPlanRequestSchema>;
 export type RestartRecoveryApplyRequest = z.infer<typeof RestartRecoveryApplyRequestSchema>;

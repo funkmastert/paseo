@@ -70,6 +70,11 @@ describe("workspace title provenance", () => {
     expect(isAutoTitledWorkspace(workspaceRecord({ titleSource: "auto" }))).toBe(true);
   });
 
+  test("an agent-supplied title is refreshable; only a person's edit is frozen", () => {
+    // Agent-supplied titles are stamped "auto" (paseo-tools.ts, session.ts).
+    expect(isAutoTitledWorkspace(workspaceRecord({ titleSource: "auto" }))).toBe(true);
+  });
+
   test("auto-naming an untitled workspace claims provenance", async () => {
     const updated = await runAutoName(workspaceRecord());
 

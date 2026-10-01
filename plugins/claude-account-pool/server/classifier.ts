@@ -462,6 +462,15 @@ export interface JevHintDecision {
     model: string | null;
     move: "down" | "up" | "none";
   };
+  /**
+   * The class and model this create runs without JEV: the class resolved with no hint and the
+   * role resolved with no hint. Present with `wouldBe`. The spawn hint's savings are priced
+   * against it (docs/jev.md, "Savings"), so a shadow day can say what the move would save.
+   */
+  base?: {
+    taskClass: TaskClassId | null;
+    model: string | null;
+  };
 }
 
 /** The D8 arm for the JEV agent tools, or null when the create is not eligible. */
@@ -1438,6 +1447,7 @@ export function classifyAgent(input: ClassifierInput, world: ClassifierWorld): A
     decision.jev = decideJevRecord(input, world, input.jevHint, {
       hasCaller,
       role: roleDecision,
+      baseRole: (jevlessRole ?? roleDecision).role,
       taskClass: classResolution.taskClass,
       source: classResolution.source,
       wouldBeClass,
@@ -1457,6 +1467,8 @@ function decideJevRecord(
   resolved: {
     hasCaller: boolean;
     role: RoleDecision;
+    /** The role this create gets with no hint: the one whose model `base` reports. */
+    baseRole: RoleRecord;
     taskClass: TaskClassId | undefined;
     source: TaskClassSource;
     wouldBeClass: TaskClassId | undefined;
@@ -1478,6 +1490,7 @@ function decideJevRecord(
       ? resolveRole(world.policy, textInput, { roleId: hint.proposal.roleId, apply: true }).role
       : resolved.role.role;
   const wouldBeModel = decideModel(input, world, wouldBeRole, resolved.wouldBeClass);
+  const baseModel = decideModel(input, world, resolved.baseRole, baselineClass);
   const rankDelta = classRank(resolved.wouldBeClass) - classRank(baselineClass);
   return {
     status: hint.status,
@@ -1490,5 +1503,6 @@ function decideJevRecord(
       model: wouldBeModel.model ?? null,
       move: rankDelta < 0 ? "down" : rankDelta > 0 ? "up" : "none",
     },
+    base: { taskClass: baselineClass ?? null, model: baseModel.model ?? null },
   };
 }
