@@ -86,6 +86,24 @@ import {
   AgentContextUsageReadResponseSchema,
 } from "./context-usage/rpc-schemas.js";
 import {
+  CoordinationQueueCreateRequestSchema,
+  CoordinationQueueClaimRequestSchema,
+  CoordinationQueueTransitionRequestSchema,
+  CoordinationQueueUpdateRequestSchema,
+  CoordinationQueueHandoffRequestSchema,
+  CoordinationQueueListRequestSchema,
+  CoordinationQueueShowRequestSchema,
+  CoordinationStreamListRequestSchema,
+  CoordinationQueueCreateResponseSchema,
+  CoordinationQueueClaimResponseSchema,
+  CoordinationQueueTransitionResponseSchema,
+  CoordinationQueueUpdateResponseSchema,
+  CoordinationQueueHandoffResponseSchema,
+  CoordinationQueueListResponseSchema,
+  CoordinationQueueShowResponseSchema,
+  CoordinationStreamListResponseSchema,
+} from "./coordination/rpc-schemas.js";
+import {
   JevDecideRequestSchema,
   JevDecideResponseSchema,
   JevStatusRequestSchema,
@@ -3871,6 +3889,14 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListRequestMessageSchema,
   UsageHistoryGetRequestSchema,
   AgentContextUsageReadRequestSchema,
+  CoordinationQueueCreateRequestSchema,
+  CoordinationQueueClaimRequestSchema,
+  CoordinationQueueTransitionRequestSchema,
+  CoordinationQueueUpdateRequestSchema,
+  CoordinationQueueHandoffRequestSchema,
+  CoordinationQueueListRequestSchema,
+  CoordinationQueueShowRequestSchema,
+  CoordinationStreamListRequestSchema,
   JevDecideRequestSchema,
   JevStatusRequestSchema,
   JevScopeCheckRequestSchema,
@@ -4343,6 +4369,8 @@ export const ServerInfoStatusPayloadSchema = z
         usageHistory: z.boolean().optional(),
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: z.boolean().optional(),
+        // COMPAT(coordinationQueue): added in v0.8.x, remove gate after 2027-09-30.
+        coordinationQueue: z.boolean().optional(),
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
         jev: z.boolean().optional(),
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
@@ -7570,6 +7598,14 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderUsageListResponseMessageSchema,
   UsageHistoryGetResponseSchema,
   AgentContextUsageReadResponseSchema,
+  CoordinationQueueCreateResponseSchema,
+  CoordinationQueueClaimResponseSchema,
+  CoordinationQueueTransitionResponseSchema,
+  CoordinationQueueUpdateResponseSchema,
+  CoordinationQueueHandoffResponseSchema,
+  CoordinationQueueListResponseSchema,
+  CoordinationQueueShowResponseSchema,
+  CoordinationStreamListResponseSchema,
   JevDecideResponseSchema,
   JevStatusResponseSchema,
   JevScopeCheckResponseSchema,
