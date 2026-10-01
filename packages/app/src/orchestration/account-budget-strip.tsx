@@ -1,7 +1,9 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
+import { router } from "expo-router";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useProviderUsage } from "@/provider-usage/use-provider-usage";
+import { buildJevDashboardRoute } from "@/utils/host-routes";
 import {
   buildAccountBudgetRows,
   resolveAccountPool,
@@ -62,6 +64,17 @@ export function AccountBudgetStrip({
     () => (view.kind === "ready" ? new Date(view.fetchedAt) : null),
     [view],
   );
+  const openJevDashboard = useCallback(
+    (targetServerId: string) => router.push(buildJevDashboardRoute(targetServerId)),
+    [],
+  );
 
-  return <AccountBudgetStripView rows={rows} serverId={serverId} fetchedAt={fetchedAt} />;
+  return (
+    <AccountBudgetStripView
+      rows={rows}
+      serverId={serverId}
+      fetchedAt={fetchedAt}
+      onOpenJevDashboard={openJevDashboard}
+    />
+  );
 }

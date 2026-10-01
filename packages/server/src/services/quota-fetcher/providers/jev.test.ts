@@ -14,7 +14,6 @@ import { buildJevUsage, JevUsageFetcher, summarizeFeatureDay } from "./jev.js";
 
 // Noon local, so "today" is unambiguous whatever zone the test runs in.
 const NOW = new Date(2026, 8, 29, 12, 0, 0).getTime();
-const YESTERDAY = new Date(2026, 8, 28, 23, 0, 0).toISOString();
 const MIDNIGHT = new Date(2026, 8, 30).toISOString();
 
 function totals(overrides: Partial<JevSpendTotals> = {}): JevSpendTotals {
@@ -122,7 +121,6 @@ describe("buildJevUsage", () => {
             interactive: lane({ today: totals({ calls: 1, unavailable: 1 }), maxUsdPerDay: 0.25 }),
           },
         }),
-        [],
         NOW,
       ),
     );
@@ -161,18 +159,17 @@ describe("buildJevUsage", () => {
 
   it("is absent (no row at all, not just hidden on the strip) when nobody opted in or JEV is off", () => {
     for (const reason of ["no-key", "disabled"] as const) {
-      expect(buildJevUsage(status({ available: false, reason }), [], NOW)).toBeNull();
+      expect(buildJevUsage(status({ available: false, reason }), NOW)).toBeNull();
     }
   });
 
   it("says why when JEV went quiet on its own", () => {
-    const rejected = buildJevUsage(status({ available: false, reason: "key-rejected" }), [], NOW);
+    const rejected = buildJevUsage(status({ available: false, reason: "key-rejected" }), NOW);
     expect(rejected?.status).toBe("error");
     expect(rejected?.error).toMatch(/key was rejected/);
 
     const unreadable = buildJevUsage(
       status({ available: false, reason: "config-unreadable" }),
-      [],
       NOW,
     );
     expect(unreadable?.status).toBe("error");
@@ -189,7 +186,6 @@ describe("buildJevUsage", () => {
             interactive: lane({ maxUsdPerDay: 0.25 }),
           },
         }),
-        [],
         NOW,
       ),
     );
@@ -197,14 +193,16 @@ describe("buildJevUsage", () => {
     expect(usage.status).toBe("available");
     expect(usage.balances?.find((balance) => balance.id === "control-today")?.tone).toBe("warning");
     expect(usage.balances?.find((balance) => balance.id === "tools-today")?.tone).toBeUndefined();
-    // First among the details, so it is the first thing under the balances.
-    expect(usage.details?.[0]).toEqual({
-      id: "lane:control:spent",
-      label: "Control budget spent",
-      value:
-        "Spawn hint, Remediation triage, Finish triage, Stall judgment, Compaction timing, Away reply off until local midnight",
-      tone: "warning",
-    });
+    // The only detail: the strip's per-feature lines moved to the JEV dashboard.
+    expect(usage.details).toEqual([
+      {
+        id: "lane:control:spent",
+        label: "Control budget spent",
+        value:
+          "Spawn hint, Remediation triage, Finish triage, Stall judgment, Compaction timing, Away reply off until local midnight",
+        tone: "warning",
+      },
+    ]);
   });
 
   it("flags a lane whose circuit is open", () => {
@@ -217,7 +215,6 @@ describe("buildJevUsage", () => {
             interactive: lane({ maxUsdPerDay: 0.25 }),
           },
         }),
-        [],
         NOW,
       ),
     );
@@ -225,89 +222,6 @@ describe("buildJevUsage", () => {
       label: "Agent tools paused",
       tone: "warning",
     });
-  });
-
-  it("lists every feature with its mode, in strip order", () => {
-    const base = status();
-    const usage = must(
-      buildJevUsage(
-        status({
-          features: {
-            ...base.features,
-            compactionTiming: { enabled: false, shadow: true },
-            stallJudgment: { enabled: true, shadow: false },
-          },
-        }),
-        [],
-        NOW,
-      ),
-    );
-
-    expect(usage.details?.map((entry) => [entry.label, entry.value])).toEqual([
-      ["Spawn hint", "Shadow"],
-      ["Remediation triage", "Shadow"],
-      ["Finish triage", "Shadow"],
-      ["Stall judgment", "Live"],
-      ["Compaction timing", "Off"],
-      // Feature 14's shadow is its dry run, and it says so in its own word.
-      ["Away reply", "Dry run"],
-      ["Agent tools", "Live"],
-      ["Ask JEV", "Live"],
-    ]);
-  });
-
-  it("summarizes today's shadow decisions as what they would have changed, with the cost", () => {
-    const base = status();
-    const usage = must(
-      buildJevUsage(
-        status({
-          todayByFeature: {
-            ...base.todayByFeature,
-            remediationTriage: totals({ calls: 4, answered: 4, usd: 0.0008 }),
-          },
-        }),
-        [
-          decision({ action: "would have: no remediation agent; sent to a person (not applied)" }),
-          decision({ action: "would have: no remediation agent; sent to a person (not applied)" }),
-          decision({
-            action: "would have: remediation agent held for one grace window (not applied)",
-          }),
-          decision({ action: "remediation agent started" }),
-          // Yesterday's decision is not today's.
-          decision({ action: "would have: something else (not applied)", at: YESTERDAY }),
-        ],
-        NOW,
-      ),
-    );
-
-    expect(detail(usage, "feature:remediationTriage")?.value).toBe(
-      "Shadow · 2× would have: no remediation agent; sent to a person, +1 other of 4 decisions · $0.0008",
-    );
-  });
-
-  it("groups a shadow decision by 'would' wherever it falls, not only at the start", () => {
-    const base = status();
-    const usage = must(
-      buildJevUsage(
-        status({
-          todayByFeature: {
-            ...base.todayByFeature,
-            notificationTriage: totals({ calls: 1, answered: 1 }),
-          },
-        }),
-        [
-          decision({
-            feature: "notificationTriage",
-            action: "sent as an alert; would have sent a digest (shadow)",
-          }),
-        ],
-        NOW,
-      ),
-    );
-
-    expect(detail(usage, "feature:notificationTriage")?.value).toBe(
-      "Shadow · 1× would have sent a digest of 1 decision",
-    );
   });
 
   it("reports the spawn hint's answered classes, and how many were applied once live", () => {
@@ -373,24 +287,8 @@ describe("buildJevUsage", () => {
   });
 
   it("labels the fake backend so its $0 is not read as free JEV", () => {
-    expect(must(buildJevUsage(status({ provider: "fake" }), [], NOW)).planLabel).toBe(
-      "fake backend",
-    );
-    expect(must(buildJevUsage(status({ provider: "typesafe" }), [], NOW)).planLabel).toBeNull();
-  });
-
-  it("keeps a feature's spend readable under a cent, matching the popover's cost format", () => {
-    const base = status();
-    const usage = must(
-      buildJevUsage(
-        status({
-          todayByFeature: { ...base.todayByFeature, stallJudgment: totals({ usd: 0.0004 }) },
-        }),
-        [],
-        NOW,
-      ),
-    );
-    expect(detail(usage, "feature:stallJudgment")?.value).toBe("Shadow · $0.0004");
+    expect(must(buildJevUsage(status({ provider: "fake" }), NOW)).planLabel).toBe("fake backend");
+    expect(must(buildJevUsage(status({ provider: "typesafe" }), NOW)).planLabel).toBeNull();
   });
 });
 
@@ -405,7 +303,7 @@ describe("JevUsageFetcher", () => {
     await expect(fetcher.fetchUsage()).resolves.toBeNull();
   });
 
-  it("reads the real service over the fake: a call shows up in the lane and the feature line", async () => {
+  it("reads the real service over the fake: a call shows up in the lane", async () => {
     const jev = createTestJevService({
       answers: { answer: { type: "choice", choice: "yes", confidence: 0.9 } },
     });
@@ -420,29 +318,13 @@ describe("JevUsageFetcher", () => {
       scope: { cwds: [] },
     });
     expect(outcome.kind).toBe("answered");
-    jev.decisions.record({
-      agentId: "agent-1",
-      callId: outcome.callId,
-      feature: "askJev",
-      question: "Pick",
-      verdict: "yes 0.9",
-      confidence: 0.9,
-      action: "asked by a person in the app",
-      applied: true,
-    });
 
-    const fetcher = new JevUsageFetcher({
-      readStatus: () => jev.status(),
-      readDecisions: () => jev.listDecisions("agent-1"),
-    });
+    const fetcher = new JevUsageFetcher({ readStatus: () => jev.status() });
     const usage = await fetcher.fetchUsage();
 
     expect(usage?.status).toBe("available");
     expect(usage?.planLabel).toBe("fake backend");
     expect(usage?.balances?.find((balance) => balance.id === "calls-today")?.used).toBe(1);
-    expect(usage?.details?.find((entry) => entry.id === "feature:askJev")?.value).toBe(
-      "Live · 1 question today",
-    );
     const lanes: JevLane[] = ["control", "agentTools", "interactive"];
     expect(lanes.map((id) => jev.status().lanes[id].exhausted)).toEqual([false, false, false]);
   });
