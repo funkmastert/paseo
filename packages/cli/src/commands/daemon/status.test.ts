@@ -2,7 +2,28 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { resolveVitalsRows, selectRelayStatus } from "./status.js";
+import { resolveDaemonProbeTarget, resolveVitalsRows, selectRelayStatus } from "./status.js";
+
+describe("resolveDaemonProbeTarget", () => {
+  const originalHost = process.env.PASEO_HOST;
+  afterEach(() => {
+    if (originalHost === undefined) delete process.env.PASEO_HOST;
+    else process.env.PASEO_HOST = originalHost;
+  });
+
+  // N22: `daemon status` used to probe state.listen (the local daemon's own persisted config)
+  // regardless of --host/PASEO_HOST, so it reported on the wrong daemon when either was set to
+  // point somewhere else — unlike every other command.
+  test("honours PASEO_HOST, the same as every other command", () => {
+    process.env.PASEO_HOST = "example.internal:9999";
+    expect(resolveDaemonProbeTarget({})).toBe("example.internal:9999");
+  });
+
+  test("an explicit --host wins over PASEO_HOST", () => {
+    process.env.PASEO_HOST = "example.internal:9999";
+    expect(resolveDaemonProbeTarget({ host: "other.internal:1111" })).toBe("other.internal:1111");
+  });
+});
 
 describe("selectRelayStatus", () => {
   const persisted = {
