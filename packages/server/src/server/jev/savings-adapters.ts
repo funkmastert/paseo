@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Logger } from "pino";
@@ -159,7 +160,7 @@ export function recordToolUseSavings(
     {
       feature: "agentTools",
       callSite: `tools.${tool}`,
-      callId: context.callId ?? `tool-use:${agentId}:${at}:${tool}`,
+      callId: context.callId ?? syntheticToolCallId(line, { agentId, at, tool }),
       agentId,
       involvement: tool,
       decision: { did: outcome, wouldBe: null, changed: answered },
@@ -185,6 +186,16 @@ export function recordToolUseSavings(
   );
   if (answered && id) savings.watchReads(id, agentId, paths, TOOL_REGRET_WINDOW_MS);
   return id;
+}
+
+/**
+ * The adapter's `callId` for a line that names no JEV call: the agent, time and tool, plus a hash
+ * of the whole line, so two different calls in one millisecond stay two records. Only a line
+ * repeated byte for byte collapses, which is a re-delivery, not a second call.
+ */
+function syntheticToolCallId(line: Line, key: { agentId: string; at: string; tool: string }) {
+  const digest = createHash("sha256").update(JSON.stringify(line)).digest("hex").slice(0, 12);
+  return `tool-use:${key.agentId}:${key.at}:${key.tool}:${digest}`;
 }
 
 /** The regret window, kept on the record so a restart rebuilds it; `none` with no path to watch. */

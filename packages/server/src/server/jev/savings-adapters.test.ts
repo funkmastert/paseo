@@ -307,6 +307,17 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     });
   });
 
+  test("two different calls of one tool in the same millisecond are two records (review m8)", async () => {
+    const { savings } = await ledger();
+    const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
+
+    adapt(toolLine({ paths: ["/repo/src/a.ts"] }));
+    adapt(toolLine({ paths: ["/repo/src/b.ts"] }));
+    adapt(toolLine({ paths: ["/repo/src/b.ts"] }));
+
+    expect(savings.events({ range: "today" }).events).toHaveLength(2);
+  });
+
   test("a refusal is nothing, an unavailable call is a not-asked count, ask_jev_diff_risk claims nothing", async () => {
     const { savings } = await ledger();
     const adapt = createToolUseSavingsAdapter({ savings, readAgentModel: () => "claude-sonnet-5" });
