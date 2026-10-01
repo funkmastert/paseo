@@ -55,6 +55,8 @@ interface TestPaseoDaemonOptions {
   jevOverrides?: PaseoDaemonConfig["jevOverrides"];
   daemonVitals?: PaseoDaemonConfig["daemonVitals"];
   restartRecovery?: PaseoDaemonConfig["restartRecovery"];
+  coordination?: PaseoDaemonConfig["coordination"];
+  coordinationOverrides?: PaseoDaemonConfig["coordinationOverrides"];
   pluginsEnabled?: PaseoDaemonConfig["pluginsEnabled"];
   plugins?: PaseoDaemonConfig["plugins"];
 }
@@ -215,6 +217,8 @@ async function prepareTestDaemonConfig(
     jevOverrides: options.jevOverrides,
     daemonVitals: options.daemonVitals,
     restartRecovery: options.restartRecovery,
+    coordination: options.coordination,
+    coordinationOverrides: options.coordinationOverrides,
     pluginsEnabled: options.pluginsEnabled,
     plugins: options.plugins,
   };
