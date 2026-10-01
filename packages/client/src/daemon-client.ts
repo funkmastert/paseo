@@ -487,6 +487,33 @@ type UsageHistoryGetPayload = Extract<
   SessionOutboundMessage,
   { type: "usage.history.get.response" }
 >["payload"];
+type CoordinationQueueInput<T extends SessionInboundMessage["type"]> = Omit<
+  Extract<SessionInboundMessage, { type: T }>,
+  "type" | "requestId"
+>;
+
+interface CoordinationRequestOptions {
+  requestId?: string;
+  timeout?: number;
+}
+
+export type CoordinationQueueMutationPayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordination.queue.create.response" }
+>["payload"];
+export type CoordinationQueueListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordination.queue.list.response" }
+>["payload"];
+export type CoordinationQueueShowPayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordination.queue.show.response" }
+>["payload"];
+export type CoordinationStreamListPayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordination.stream.list.response" }
+>["payload"];
+
 export type AgentContextUsageReadPayload = Extract<
   SessionOutboundMessage,
   { type: "agent.context_usage.read.response" }
@@ -5276,6 +5303,91 @@ export class DaemonClient {
       requestId: options?.requestId,
       timeout: options?.timeout,
       message: { type: "agent.context_usage.read.request", agentId },
+    });
+  }
+
+  // Work queue and fleet stream (docs/work-queue.md). COMPAT(coordinationQueue): callers gate on
+  // `server_info.features.coordinationQueue`; an older daemon answers an unknown request type with
+  // nothing, so an ungated call would only time out. Every payload carries `error` and `errorCode`
+  // instead of throwing, so a caller can tell "disabled" from "invalid" from "not found".
+
+  async coordinationQueueCreate(
+    input: CoordinationQueueInput<"coordination.queue.create.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueMutationPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.create.response">({
+      ...options,
+      message: { type: "coordination.queue.create.request", ...input },
+    });
+  }
+
+  async coordinationQueueClaim(
+    input: CoordinationQueueInput<"coordination.queue.claim.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueMutationPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.claim.response">({
+      ...options,
+      message: { type: "coordination.queue.claim.request", ...input },
+    });
+  }
+
+  async coordinationQueueTransition(
+    input: CoordinationQueueInput<"coordination.queue.transition.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueMutationPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.transition.response">({
+      ...options,
+      message: { type: "coordination.queue.transition.request", ...input },
+    });
+  }
+
+  async coordinationQueueUpdate(
+    input: CoordinationQueueInput<"coordination.queue.update.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueMutationPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.update.response">({
+      ...options,
+      message: { type: "coordination.queue.update.request", ...input },
+    });
+  }
+
+  async coordinationQueueHandoff(
+    input: CoordinationQueueInput<"coordination.queue.handoff.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueMutationPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.handoff.response">({
+      ...options,
+      message: { type: "coordination.queue.handoff.request", ...input },
+    });
+  }
+
+  async coordinationQueueList(
+    input: CoordinationQueueInput<"coordination.queue.list.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueListPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.list.response">({
+      ...options,
+      message: { type: "coordination.queue.list.request", ...input },
+    });
+  }
+
+  async coordinationQueueShow(
+    input: CoordinationQueueInput<"coordination.queue.show.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationQueueShowPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.queue.show.response">({
+      ...options,
+      message: { type: "coordination.queue.show.request", ...input },
+    });
+  }
+
+  async coordinationStreamList(
+    input: CoordinationQueueInput<"coordination.stream.list.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationStreamListPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.stream.list.response">({
+      ...options,
+      message: { type: "coordination.stream.list.request", ...input },
     });
   }
 

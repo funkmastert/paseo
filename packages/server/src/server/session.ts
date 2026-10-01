@@ -196,6 +196,12 @@ import {
   type ContextUsageSession,
 } from "./session/context-usage/context-usage-session.js";
 import type { AgentContextUsageService } from "./context-usage/agent-context-usage-service.js";
+import {
+  createCoordinationSession,
+  isCoordinationRequest,
+  type CoordinationSession,
+} from "./session/coordination/coordination-session.js";
+import type { CoordinationRuntime } from "./coordination/runtime.js";
 import { createJevSession, type JevSession } from "./session/jev/jev-session.js";
 import type { JevService } from "./jev/contract.js";
 import { WorkspaceFilesSession } from "./session/files/workspace-files-session.js";
@@ -575,6 +581,7 @@ export interface SessionOptions {
   providerUsageService: ProviderUsageService;
   usageHistory?: UsageHistoryStore;
   contextUsage?: AgentContextUsageService;
+  coordination?: Pick<CoordinationRuntime, "require">;
   jev?: JevService | null;
   hubExecutionAgents?: HubExecutionAgents;
   hubRelationships?: HubRelationshipManagement;
@@ -836,6 +843,7 @@ export class Session {
   private readonly providerCatalogSession: ProviderCatalogSession;
   private readonly usageHistorySession: UsageHistorySession | null;
   private readonly contextUsageSession: ContextUsageSession | null;
+  private readonly coordinationSession: CoordinationSession;
   private readonly jevSession: JevSession | null;
   private readonly workspaceFilesSession: WorkspaceFilesSession;
   private readonly agentConfigSession: AgentConfigSession;
@@ -892,6 +900,7 @@ export class Session {
       providerUsageService,
       usageHistory,
       contextUsage,
+      coordination,
       jev,
       serviceProxy,
       scriptRuntimeStore,
@@ -1067,6 +1076,11 @@ export class Session {
           logger: this.sessionLogger,
         });
       },
+      logger: this.sessionLogger,
+    });
+    this.coordinationSession = createCoordinationSession({
+      host: { emit: (msg) => this.emit(msg) },
+      coordination,
       logger: this.sessionLogger,
     });
     this.jevSession = createJevSession({
@@ -2248,7 +2262,7 @@ export class Session {
       this.dispatchPluginMessage(msg) ??
       this.dispatchTerminalMessage(msg) ??
       this.dispatchScheduleMessage(msg) ??
-      this.dispatchRestartRecoveryMessage(msg) ??
+      this.dispatchDurableWorkMessage(msg) ??
       this.dispatchMiscMessage(msg);
     if (promise) await promise;
   }
@@ -2270,6 +2284,12 @@ export class Session {
       this.dispatchJevMessage(msg) ??
       this.dispatchTranscriptSearchMessage(msg)
     );
+  }
+
+  /** Work that has to survive a restart: restart recovery and the work queue. */
+  private dispatchDurableWorkMessage(msg: SessionInboundMessage): Promise<void> | undefined {
+    if (isCoordinationRequest(msg)) return this.coordinationSession.handle(msg);
+    return this.dispatchRestartRecoveryMessage(msg);
   }
 
   private dispatchContextUsageMessage(msg: SessionInboundMessage): Promise<void> | undefined {

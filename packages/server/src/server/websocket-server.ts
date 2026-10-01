@@ -1,3 +1,4 @@
+import type { CoordinationRuntime } from "./coordination/runtime.js";
 import { AgentRequests } from "./agent/requests/index.js";
 import { WebSocket, WebSocketServer } from "ws";
 import type { IncomingMessage, Server as HTTPServer } from "http";
@@ -175,6 +176,7 @@ interface WebSocketServerConfig {
   relayConfig?: boolean;
   startPaused?: boolean;
   autoPinExpiry?: SessionOptions["autoPinExpiry"];
+  coordination?: CoordinationRuntime;
 }
 
 type WebSocketRuntimeMetrics = SessionRuntimeMetrics & CheckoutDiffMetrics;
@@ -627,6 +629,7 @@ export class VoiceAssistantWebSocketServer {
   private readonly orchestrationSkills: SessionOptions["orchestrationSkills"];
   private readonly jev: JevService | null | undefined;
   private readonly autoPinExpiry: SessionOptions["autoPinExpiry"];
+  private readonly coordination: CoordinationRuntime | undefined;
 
   constructor(
     server: HTTPServer,
@@ -685,6 +688,7 @@ export class VoiceAssistantWebSocketServer {
     this.workspaceSetupRuntime = workspaceSetupRuntime;
     this.advertiseDaemonStatusRpc = wsConfig.daemonStatusRpc !== false;
     this.autoPinExpiry = wsConfig.autoPinExpiry;
+    this.coordination = wsConfig.coordination;
     this.advertiseRelayConfig = wsConfig.relayConfig !== false;
     this.connectionLifecycle = wsConfig.startPaused === true ? "starting" : "accepting";
     this.serverId = serverId;
@@ -1514,6 +1518,7 @@ export class VoiceAssistantWebSocketServer {
       workspaceGitService: this.workspaceGitService,
       workspaceAutoName: this.workspaceAutoName,
       autoPinExpiry: this.autoPinExpiry,
+      ...(this.coordination ? { coordination: this.coordination } : {}),
       daemonConfigStore: this.daemonConfigStore,
       getWorktreeDiskUsage: this.getWorktreeDiskUsage,
       requestWorktreeDiskUsageSample: this.requestWorktreeDiskUsageSample,
@@ -1751,6 +1756,8 @@ export class VoiceAssistantWebSocketServer {
         usageHistory: true,
         // COMPAT(agentContextUsage): added in v0.8.2, remove gate after 2027-09-24.
         agentContextUsage: true,
+        // COMPAT(coordinationQueue): added in v0.8.x, remove gate after 2027-09-30.
+        ...(this.coordination?.advertised ? { coordinationQueue: true } : {}),
         // COMPAT(jev): added in v0.8.x, remove gate after 2027-03-28.
         jev: true,
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.

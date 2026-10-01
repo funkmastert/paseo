@@ -195,6 +195,9 @@ import type {
   ProviderOverride,
 } from "./agent/provider-launch-config.js";
 import { loadPersistedConfig, type PersistedConfig } from "./persisted-config.js";
+import { CoordinationRuntime } from "./coordination/runtime.js";
+import { createAgentPromptDeliverer, createAgentTurnSource } from "./coordination/agent-ports.js";
+import type { CoordinationConfigInput } from "./coordination/config.js";
 import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
 import { releaseWorkspaceServicePortPlan } from "./workspace-service-port-registry.js";
 import { ScriptHealthMonitor } from "./script-health-monitor.js";
@@ -678,6 +681,12 @@ export interface PaseoDaemonConfig {
     isClaimedByRestartRecovery?: (agentId: string) => boolean;
   };
   doneJanitor?: DoneJanitorConfig;
+  /** `agents.coordination` (docs/work-queue.md). Off unless `enabled` is true. */
+  coordination?: CoordinationConfigInput;
+  /** Test seams for the coordination runtime; production leaves this unset. */
+  coordinationOverrides?: {
+    onCommitStep?: ConstructorParameters<typeof CoordinationRuntime>[0]["onCommitStep"];
+  };
   admission?: ChildAdmissionConfig;
   refocus?: RefocusConfig;
   /** The catastrophe gate's kill switch (docs/catastrophe-gate.md). Absent means on. */
@@ -1239,6 +1248,24 @@ function createFinishObligationService(input: {
 }
 
 // Wired once the WebSocket server exists: it owns the push sender and the provider-usage cache.
+function createCoordinationRuntime(input: {
+  config: Pick<PaseoDaemonConfig, "paseoHome" | "coordination" | "coordinationOverrides">;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  logger: Logger;
+}): CoordinationRuntime {
+  const { config, agentManager, agentStorage, logger } = input;
+  const onCommitStep = config.coordinationOverrides?.onCommitStep;
+  return new CoordinationRuntime({
+    paseoHome: config.paseoHome,
+    config: config.coordination,
+    logger,
+    deliver: createAgentPromptDeliverer({ agentManager, agentStorage, logger }),
+    turns: createAgentTurnSource(agentManager),
+    ...(onCommitStep ? { onCommitStep } : {}),
+  });
+}
+
 function createAccountFailoverMonitor(input: {
   config: Pick<PaseoDaemonConfig, "accountFailoverOverrides">;
   agentManager: AgentManager;
@@ -2515,6 +2542,10 @@ export async function createPaseoDaemon(
   );
   logger.info({ elapsed: elapsed() }, "Preparing voice and MCP runtime");
 
+  // Built here so the WebSocket server and the agent tools can hold it; opened by start() below,
+  // after the monitors. See docs/work-queue.md#surfaces.
+  const coordination = createCoordinationRuntime({ config, agentManager, agentStorage, logger });
+
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2571,6 +2602,7 @@ export async function createPaseoDaemon(
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
     deviceLeaseManager,
+    coordination,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -2866,6 +2898,7 @@ export async function createPaseoDaemon(
                 relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
                 startPaused: true,
                 autoPinExpiry,
+                coordination,
               },
               workspaceAutoName,
               config.auth,
@@ -3311,6 +3344,7 @@ export async function createPaseoDaemon(
               logger,
             });
             restartRecovery.start();
+            void coordination.start();
             relayRuntime = createRelayRuntime({
               config: {
                 enabled: relayEnabled,
@@ -3391,6 +3425,7 @@ export async function createPaseoDaemon(
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
     restartRecovery.stop();
+    coordination.stop();
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();

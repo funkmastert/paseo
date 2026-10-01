@@ -92,6 +92,7 @@ import {
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
+import type { CoordinationRuntime } from "../../coordination/runtime.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
   toCompactAgentListItem,
@@ -158,6 +159,8 @@ export interface PaseoToolHostDependencies {
   browserToolsBroker?: BrowserToolsBroker | null;
   /** The device cap (docs/device-leases.md). Absent means no checkout tools are offered. */
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
+  /** The work queue tools register only when coordination is enabled (docs/work-queue.md). */
+  coordination?: Pick<CoordinationRuntime, "enabled" | "require">;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1309,6 +1312,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     agentStorage,
     callerAgentId,
     logger: childLogger,
+    ...(options.coordination?.enabled ? { coordination: options.coordination } : {}),
   });
 
   registerTool(

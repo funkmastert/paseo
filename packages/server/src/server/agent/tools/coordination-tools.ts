@@ -10,6 +10,9 @@
  *   search_agent_transcript  grep an agent's (or its whole descendant tree's) own provider
  *                            transcript, with an honest coverage report, instead of loading its
  *                            full timeline
+ *   queue_*                  the work queue (OR-A1): create, claim, update, hand off, list and
+ *                            show owned work items. Registered only when coordination is enabled.
+ *                            See docs/work-queue.md.
  *
  * Why these exist: agents repeatedly got their own identity wrong (which account they ran on,
  * who their parent was, which model they actually had), and one reported its predecessor's id as
@@ -54,6 +57,14 @@ import {
 } from "../account-failover-detector.js";
 import { searchAgentTranscript } from "../transcript-search/index.js";
 import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from "./types.js";
+import {
+  HUMAN_WORK_ITEM_OWNER,
+  WORK_ITEM_CLOSURE_REASONS,
+  WorkItemStateSchema,
+  type WorkItem,
+  type WorkItemTransition,
+} from "@getpaseo/protocol/coordination/queue-schemas";
+import type { CoordinationRuntime } from "../../coordination/runtime.js";
 
 // The classifier's label vocabulary. Mirrored here rather than imported: the classifier lives in
 // a plugin that the daemon core must not depend on (docs/plugins.md), and these strings are the
@@ -75,6 +86,8 @@ export interface CoordinationToolHost {
   /** Absent for a top-level session (a human, the CLI, the app). Identity tools need it. */
   callerAgentId?: string;
   logger: Logger;
+  /** Present only when coordination is enabled; the queue tools register only then. */
+  coordination?: Pick<CoordinationRuntime, "require">;
 }
 
 export interface RegisterCoordinationToolsOptions extends CoordinationToolHost {
@@ -827,6 +840,300 @@ const searchAgentTranscriptTool = defineCoordinationTool({
 });
 
 // ---------------------------------------------------------------------------------------------
+// Work queue (OR-A1): owned work items with a required closure. docs/work-queue.md
+// ---------------------------------------------------------------------------------------------
+
+const CLOSURE_HELP =
+  "done needs a closure: no-follow-on, handed_off_to=<owner>, blocked_on=<target>, " +
+  "escalation=<target>, denied or canceled; blocked needs blocked_on=<target>.";
+
+const ClosureInputSchema = z.object({
+  reason: z.enum(WORK_ITEM_CLOSURE_REASONS),
+  target: z.string().optional().describe("Required for handed_off_to, blocked_on, escalation"),
+  note: z.string().optional(),
+});
+
+async function requireQueue(host: CoordinationToolHost) {
+  if (!host.coordination) throw new Error("The work queue is not enabled on this daemon.");
+  return (await host.coordination.require()).queue;
+}
+
+/** Who is acting: the calling agent, or `human` for a session with no agent id. */
+function actorOf(host: CoordinationToolHost): string {
+  return host.callerAgentId ?? HUMAN_WORK_ITEM_OWNER;
+}
+
+function formatClosure(item: WorkItem): string | null {
+  if (!item.closure) return null;
+  return item.closure.target
+    ? `${item.closure.reason}=${item.closure.target}`
+    : item.closure.reason;
+}
+
+export interface QueueItemRow {
+  id: string;
+  title: string | null;
+  owner: string;
+  state: string;
+  closure: string | null;
+  delivery: string | null;
+  handedOffTo?: string;
+  handedOffFrom?: string;
+}
+
+/** Compact by default (OR-H4): the fields a caller acts on. `full` returns the whole item. */
+export function toQueueItemRow(item: WorkItem, full: boolean): QueueItemRow | WorkItem {
+  if (full) return item;
+  return {
+    id: item.id,
+    title: truncate(item.title, 80),
+    owner: item.owner,
+    state: item.state,
+    closure: formatClosure(item),
+    delivery: item.delivery?.state ?? null,
+    ...(item.handedOffTo ? { handedOffTo: item.handedOffTo } : {}),
+    ...(item.handedOffFrom ? { handedOffFrom: item.handedOffFrom } : {}),
+  };
+}
+
+function toTransitionRow(row: WorkItemTransition): Record<string, unknown> {
+  return {
+    at: row.at,
+    from: row.from ?? null,
+    to: row.to,
+    actor: row.actor ?? null,
+    ...(row.closure ? { closure: row.closure } : {}),
+    ...(row.note ? { note: row.note } : {}),
+  };
+}
+
+/** What the caller should do next with an item in this state. */
+export function nextQueueAction(item: WorkItem, actor: string): string {
+  if (item.state === "pending") {
+    return item.owner === actor
+      ? `Claim it with queue_claim when you start.`
+      : `Waiting for ${item.owner} to claim it.`;
+  }
+  if (item.state === "in-progress") {
+    return item.owner === actor
+      ? `When finished, queue_update it to done with a closure (${CLOSURE_HELP})`
+      : `${item.owner} is working on it.`;
+  }
+  if (item.state === "blocked")
+    return `Blocked on ${item.closure?.target ?? "?"}; unblock with queue_update.`;
+  if (item.state === "handed-off") return `Closed; the work continues as ${item.handedOffTo}.`;
+  return "Closed. Follow-on work is a new item.";
+}
+
+const queueCreateTool = defineCoordinationTool({
+  name: "queue_create",
+  title: "Create work item",
+  description:
+    'Create a work item owned by an agent id or "human". An agent owner gets it as a prompt. ' +
+    "Pass your own `id` to make a retry safe. Owners close items with a closure that says where " +
+    "the work went; it cannot be dropped silently.",
+  inputSchema: {
+    title: z.string().min(1),
+    owner: z.string().min(1).describe('An agent id, or "human"'),
+    body: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    id: z
+      .string()
+      .optional()
+      .describe("Caller-minted id; a repeat with the same content is a no-op"),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const actor = actorOf(host);
+    const result = await queue.create({
+      ...(input.id ? { id: input.id } : {}),
+      title: input.title,
+      owner: input.owner,
+      createdBy: actor,
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.tags ? { tags: input.tags } : {}),
+    });
+    return toResult({
+      result: result.changed ? "created" : "unchanged (already exists)",
+      item: toQueueItemRow(result.item, Boolean(input.full)),
+      next: nextQueueAction(result.item, actor),
+    });
+  },
+});
+
+const queueClaimTool = defineCoordinationTool({
+  name: "queue_claim",
+  title: "Claim work item",
+  description:
+    "Claim a work item: you become its owner and it moves to in-progress. An item someone else " +
+    "has in progress cannot be claimed; use queue_handoff.",
+  inputSchema: {
+    id: z.string().min(1),
+    note: z.string().optional(),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const actor = actorOf(host);
+    const result = await queue.claim(input.id, {
+      actor,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
+    return toResult({
+      result: result.changed ? "claimed" : "unchanged (already yours)",
+      item: toQueueItemRow(result.item, Boolean(input.full)),
+      next: nextQueueAction(result.item, actor),
+    });
+  },
+});
+
+const queueUpdateTool = defineCoordinationTool({
+  name: "queue_update",
+  title: "Update work item",
+  description:
+    "Change a work item's state (done, blocked, failed, denied, canceled, or back to pending / " +
+    `in-progress) or its title, body and tags. ${CLOSURE_HELP}`,
+  inputSchema: {
+    id: z.string().min(1),
+    state: WorkItemStateSchema.optional(),
+    closure: ClosureInputSchema.optional(),
+    note: z.string().optional(),
+    title: z.string().optional(),
+    body: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    expectedRevision: z.number().int().nonnegative().optional(),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const actor = actorOf(host);
+    const editsFields =
+      input.title !== undefined || input.body !== undefined || input.tags !== undefined;
+    if (input.state && editsFields) {
+      throw new Error("Change the state or edit fields, not both in one call: send two calls.");
+    }
+    if (!input.state && !editsFields) {
+      throw new Error("Nothing to update: pass `state` (with `closure`) or title, body or tags.");
+    }
+    const revision =
+      input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {};
+    const result = input.state
+      ? await queue.transition(input.id, {
+          to: input.state,
+          ...(input.closure ? { closure: input.closure } : {}),
+          ...(input.note !== undefined ? { note: input.note } : {}),
+          actor,
+          ...revision,
+        })
+      : await queue.update(input.id, {
+          ...(input.title !== undefined ? { title: input.title } : {}),
+          ...(input.body !== undefined ? { body: input.body } : {}),
+          ...(input.tags ? { tags: input.tags } : {}),
+          ...revision,
+        });
+    const changedText = input.state ? `moved to ${result.item.state}` : "updated";
+    return toResult({
+      result: result.changed ? changedText : "unchanged",
+      item: toQueueItemRow(result.item, Boolean(input.full)),
+      next: nextQueueAction(result.item, actor),
+    });
+  },
+});
+
+const queueHandoffTool = defineCoordinationTool({
+  name: "queue_handoff",
+  title: "Hand off work item",
+  description:
+    'Hand a work item to a new owner (agent id or "human"): closes it as handed-off and opens a ' +
+    "successor for the new owner in one step, so the work cannot be lost between them.",
+  inputSchema: {
+    id: z.string().min(1),
+    to: z.string().min(1).describe('The new owner: an agent id, or "human"'),
+    note: z.string().optional(),
+    title: z.string().optional(),
+    body: z.string().optional(),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const actor = actorOf(host);
+    const result = await queue.handoff(input.id, {
+      to: input.to,
+      actor,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.title !== undefined ? { title: input.title } : {}),
+      ...(input.body !== undefined ? { body: input.body } : {}),
+    });
+    const full = Boolean(input.full);
+    return toResult({
+      result: result.changed ? "handed off" : "unchanged (already handed off)",
+      source: toQueueItemRow(result.source, full),
+      successor: toQueueItemRow(result.successor, full),
+      next: nextQueueAction(result.successor, actor),
+    });
+  },
+});
+
+const queueListTool = defineCoordinationTool({
+  name: "queue_list",
+  title: "List work items",
+  description:
+    'List work items, open ones by default. `owner: "me"` lists yours. Compact rows; `full: true` ' +
+    "for whole items.",
+  inputSchema: {
+    owner: z.string().optional().describe('An agent id, "human", or "me"'),
+    states: z.array(WorkItemStateSchema).optional(),
+    includeClosed: z.boolean().optional(),
+    limit: z.number().int().positive().max(500).optional(),
+    cursor: z.string().optional(),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const owner = input.owner === "me" ? actorOf(host) : input.owner;
+    const page = await queue.list({
+      ...(owner ? { owner } : {}),
+      ...(input.states ? { states: input.states } : {}),
+      openOnly: !input.includeClosed && !input.states,
+      limit: input.limit ?? (input.full ? FULL_ROW_LIMIT : COMPACT_ROW_LIMIT),
+      ...(input.cursor ? { cursor: input.cursor } : {}),
+    });
+    return toResult({
+      count: page.items.length,
+      items: page.items.map((item) => toQueueItemRow(item, Boolean(input.full))),
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    });
+  },
+});
+
+const queueShowTool = defineCoordinationTool({
+  name: "queue_show",
+  title: "Show work item",
+  description:
+    "Show one work item and its last transitions. `full: true` for the whole item and every " +
+    "transition.",
+  inputSchema: {
+    id: z.string().min(1),
+    full: z.boolean().optional(),
+  },
+  handler: async (input, host) => {
+    const queue = await requireQueue(host);
+    const found = await queue.get(input.id);
+    if (!found) throw new Error(`No work item with id "${input.id}". queue_list shows open items.`);
+    const full = Boolean(input.full);
+    const transitions = full ? found.transitions : found.transitions.slice(-5);
+    return toResult({
+      item: full
+        ? found.item
+        : { ...toQueueItemRow(found.item, false), body: truncate(found.item.body ?? null, 400) },
+      transitions: transitions.map(toTransitionRow),
+      next: nextQueueAction(found.item, actorOf(host)),
+    });
+  },
+});
+
+// ---------------------------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------------------------
 
@@ -838,14 +1145,26 @@ const COORDINATION_TOOLS: readonly CoordinationToolDefinition[] = [
   searchAgentTranscriptTool,
 ];
 
+/** Registered only when the host has coordination (agents.coordination.enabled). */
+const QUEUE_TOOLS: readonly CoordinationToolDefinition[] = [
+  queueCreateTool,
+  queueClaimTool,
+  queueUpdateTool,
+  queueHandoffTool,
+  queueListTool,
+  queueShowTool,
+];
+
 export function registerCoordinationTools(options: RegisterCoordinationToolsOptions): void {
   const host: CoordinationToolHost = {
     agentManager: options.agentManager,
     agentStorage: options.agentStorage,
     ...(options.callerAgentId !== undefined ? { callerAgentId: options.callerAgentId } : {}),
     logger: options.logger,
+    ...(options.coordination ? { coordination: options.coordination } : {}),
   };
-  for (const tool of COORDINATION_TOOLS) {
+  const tools = host.coordination ? [...COORDINATION_TOOLS, ...QUEUE_TOOLS] : COORDINATION_TOOLS;
+  for (const tool of tools) {
     options.registerTool(tool.name, tool.config, (input, context) =>
       tool.handler(input, host, context),
     );
