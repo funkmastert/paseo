@@ -39,6 +39,23 @@ work is gone. Report that exit as a turn failure so the agent lands in `error` w
 Only the Claude provider does this today; the others still report a death only when a turn happens to
 be in flight.
 
+### Resumability
+
+`resumability` on the agent snapshot (`AgentSnapshotPayload`, `packages/protocol/src/messages.ts`)
+names whether a closed agent can be brought back, derived from residency and persistence-handle
+presence alone — never I/O, so it costs nothing on the projection hot path
+(`computeResumability`, `packages/server/src/server/agent/activity-vocabulary.ts`). `"live"` is a
+resident runtime (any status other than `closed`). `"resumable"` is closed with a persistence
+handle this daemon can resume from. `"unreachable"` is closed with nothing to resume — no
+persistence handle, or (read from a stored record with the registered-provider list already in
+hand) the handle's provider is no longer registered or enabled, the same cheap, synchronous facts
+`checkAgentProviderMove` checks without I/O (`provider-move.ts`). `"unknown"` is closed with a
+persistence handle, read from a live in-memory agent that has no registered-provider list in hand
+to confirm reachability with — threading one through would put a lookup on the hot live-agent
+projection path for a case the stored-record path already answers for free. A plain string on the
+wire, like `OwedFinishReport.state` ([finish-reports.md](finish-reports.md#what-the-panel-shows)),
+so a later value parses on every shipped client.
+
 ### Cancellation
 
 Provider interruption is idempotent at the `AgentSession` boundary. It resolves when the prior
@@ -232,6 +249,23 @@ delay, and nothing times a pending permission out.
 The flag is also what stops a push repeating. `checkAndSetAttention` returns early when the agent
 is already flagged, so an unread agent cannot notify twice — which means a stale flag suppresses
 notifications rather than causing them. The noise a stale flag causes is in the UI.
+
+## Needs input
+
+`needsInput` on the agent snapshot is a count of blocking conditions plus which ones, distinct
+from attention: attention is an unread signal about something that already happened, needs-input
+is a live count of conditions open right now (`computeNeedsInput`,
+`packages/server/src/server/agent/activity-vocabulary.ts`). Present only while at least one
+holds; an agent simply working carries nothing. `count` is how many conditions are open, not
+`reasons.length` — several pending permissions count individually. The reasons this daemon emits
+today: `"permission"` (a pending permission request that is not a clarifying question),
+`"question"` (a pending permission request of kind `"question"`), `"usage_limit"` (an `error`
+status whose `lastError` is limit-shaped — `isLimitShapedError`,
+[account-failover.md](account-failover.md)), and `"spend_paused"` (the spend governor's `pause`
+stage, [token-burn.md](token-burn.md)). `reasons` is a plain `string[]` on the wire, not a closed
+union, so a reason added later still parses on every shipped client; the orchestration panel row
+(`packages/app/src/orchestration/orchestration-row-presentation.ts`) treats any nonzero count as
+its existing "needs input" badge rather than switching on individual reasons.
 
 ## Activity summary
 

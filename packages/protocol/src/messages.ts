@@ -893,6 +893,7 @@ import type {
   TokenBurnAlert,
   ResourceAlert,
   OwedFinishReport,
+  AgentNeedsInput,
 } from "./agent-types.js";
 
 // WebSocket payloads have already crossed JSON serialization. Keeping this as
@@ -1074,6 +1075,17 @@ const OwedFinishReportSchema: z.ZodType<OwedFinishReport> = z.object({
   since: z.string(),
   attempts: z.number().optional(),
 });
+
+// `reasons` holds plain strings rather than a closed enum, like `OwedFinishReportSchema.state`
+// above, so a reason added later still parses on old apps.
+const AgentNeedsInputSchema: z.ZodType<AgentNeedsInput> = z.object({
+  count: z.number(),
+  reasons: z.array(z.string()),
+});
+
+// A plain string, like `OwedFinishReportSchema.state` above, so a resumability value added
+// later still parses on old apps. See AgentResumability's doc comment in agent-types.ts.
+const AgentResumabilitySchema = z.string();
 
 const McpStdioServerConfigSchema = z.object({
   type: z.literal("stdio"),
@@ -1553,6 +1565,11 @@ export const AgentSnapshotPayloadSchema = z.object({
   // COMPAT(turnQueued): additive optional field, nothing to remove. Set while a child's new turn
   // waits for a machine-wide admission slot; the agent's status reads running meanwhile.
   turnQueued: AgentTurnQueuedSchema.optional(),
+  // COMPAT(activityVocabulary): added in v0.8.1, optional and stays optional — older daemons
+  // never send either field. See AgentNeedsInput/AgentResumability's doc comments in
+  // agent-types.ts and docs/agent-lifecycle.md#needs-input.
+  needsInput: AgentNeedsInputSchema.optional(),
+  resumability: AgentResumabilitySchema.optional(),
 });
 
 export type AgentSnapshotPayload = z.infer<typeof AgentSnapshotPayloadSchema>;
@@ -1588,6 +1605,10 @@ export const AgentListItemPayloadSchema = z.object({
   modelDivergence: ModelDivergenceAlertSchema.optional(),
   // COMPAT(turnQueued): additive optional field, nothing to remove.
   turnQueued: AgentTurnQueuedSchema.optional(),
+  // COMPAT(activityVocabulary): added in v0.8.1, optional and stays optional — see
+  // AgentSnapshotPayloadSchema's identical fields above.
+  needsInput: AgentNeedsInputSchema.optional(),
+  resumability: AgentResumabilitySchema.optional(),
 });
 
 export type AgentListItemPayload = z.infer<typeof AgentListItemPayloadSchema>;

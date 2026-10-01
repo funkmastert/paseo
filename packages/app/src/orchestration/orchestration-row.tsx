@@ -82,6 +82,7 @@ const ROW_BADGES = {
   failed: { labelKey: "agentList.badges.failed", variant: "error" },
   "owes-report": { labelKey: "agentList.badges.owesReport", variant: "warning" },
   "report-undelivered": { labelKey: "agentList.badges.reportUndelivered", variant: "error" },
+  unreachable: { labelKey: "agentList.badges.unreachable", variant: "error" },
 } as const satisfies Record<
   OrchestrationRowBadge,
   { labelKey: string; variant: "warning" | "error" }
@@ -368,6 +369,9 @@ function CompactOrchestrationRow({
             ) : null}
             {presentation.badge === "failed" ? (
               <StatusBadge label={t("agentList.badges.failed")} variant="error" />
+            ) : null}
+            {presentation.badge === "unreachable" ? (
+              <StatusBadge label={t("agentList.badges.unreachable")} variant="error" />
             ) : null}
             <Text style={styles.compactDetail} numberOfLines={1}>
               {secondary}

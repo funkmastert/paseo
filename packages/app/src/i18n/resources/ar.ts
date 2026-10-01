@@ -294,6 +294,7 @@ export const ar: TranslationResources = {
       tokenBurnWarning: "استهلاك مرتفع",
       tokenBurnDanger: "استهلاك مرتفع جدًا",
       modelDiverged: "نموذج غير متوقع",
+      unreachable: "غير قابل للوصول",
     },
     tokenBurnTooltip: "{{rate}} tok/min · الإجمالي {{total}}",
     archiveSheet: {

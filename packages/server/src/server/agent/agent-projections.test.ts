@@ -591,6 +591,67 @@ describe("toAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("resourceAlert");
   });
+
+  it("reads resumability 'live' off a resident runtime, regardless of status", () => {
+    expect(toAgentPayload(createManagedAgent({ lifecycle: "idle" })).resumability).toBe("live");
+    expect(toAgentPayload(createManagedAgent({ lifecycle: "running" })).resumability).toBe("live");
+    expect(toAgentPayload(createManagedAgent({ lifecycle: "error" })).resumability).toBe("live");
+  });
+
+  it("reads resumability 'unknown' for a closed agent with a persistence handle — no registered-provider list on this path", () => {
+    const agent = createManagedAgent({ lifecycle: "closed" });
+
+    expect(toAgentPayload(agent).resumability).toBe("unknown");
+  });
+
+  it("reads resumability 'unreachable' for a closed agent with no persistence handle", () => {
+    const agent = createManagedAgent({ lifecycle: "closed", persistence: null });
+
+    expect(toAgentPayload(agent).resumability).toBe("unreachable");
+  });
+
+  it("omits needsInput when nothing needs it", () => {
+    const payload = toAgentPayload(createManagedAgent({ lifecycle: "idle" }));
+
+    expect(payload).not.toHaveProperty("needsInput");
+  });
+
+  it("counts a pending question permission as the 'question' needsInput reason", () => {
+    const agent = createManagedAgent({
+      pendingPermissions: new Map([["p1", createPermission({ kind: "question" })]]),
+    });
+
+    expect(toAgentPayload(agent).needsInput).toEqual({ count: 1, reasons: ["question"] });
+  });
+
+  it("counts a pending tool permission as the 'permission' needsInput reason", () => {
+    const agent = createManagedAgent({
+      pendingPermissions: new Map([["p1", createPermission({ kind: "tool" })]]),
+    });
+
+    expect(toAgentPayload(agent).needsInput).toEqual({ count: 1, reasons: ["permission"] });
+  });
+
+  it("reads needsInput reason 'usage_limit' off a limit-shaped error in error status", () => {
+    const agent = createManagedAgent({ lifecycle: "error", lastError: "hit your usage limit" });
+
+    expect(toAgentPayload(agent).needsInput).toEqual({ count: 1, reasons: ["usage_limit"] });
+  });
+
+  it("reads needsInput reason 'spend_paused' off a paused spend-governor alert", () => {
+    const agent = createManagedAgent({
+      tokenBurnAlert: {
+        trigger: "total",
+        totalTokens: 1_000_000,
+        budgetTokens: 1_000_000,
+        spentTokens: 1_500_000,
+        governorStage: "pause",
+        firstBreachedAt: "2026-09-12T00:00:00.000Z",
+      },
+    });
+
+    expect(toAgentPayload(agent).needsInput).toEqual({ count: 1, reasons: ["spend_paused"] });
+  });
 });
 
 describe("buildStoredAgentPayload", () => {
@@ -695,6 +756,45 @@ describe("buildStoredAgentPayload", () => {
 
     expect(payload).not.toHaveProperty("resourceAlert");
   });
+
+  it("reads resumability 'resumable' for a closed record with a persistence handle on a registered provider", () => {
+    const record = toStoredAgentRecord(createManagedAgent({}), { title: "Stored Agent" });
+
+    expect(buildStoredAgentPayload(record, ["claude"]).resumability).toBe("resumable");
+  });
+
+  it("reads resumability 'unreachable' for a closed record with no persistence handle", () => {
+    const record = toStoredAgentRecord(createManagedAgent({ persistence: null }), {
+      title: "Stored Agent",
+    });
+
+    expect(buildStoredAgentPayload(record, ["claude"]).resumability).toBe("unreachable");
+  });
+
+  it("reads resumability 'unreachable' for a closed record whose provider is no longer registered", () => {
+    const record = toStoredAgentRecord(createManagedAgent({}), { title: "Stored Agent" });
+
+    // No registered providers at all — the cheap, synchronous check this path can afford.
+    expect(buildStoredAgentPayload(record, []).resumability).toBe("unreachable");
+  });
+
+  it("reads needsInput reason 'usage_limit' off a stored record's limit-shaped lastError", () => {
+    const agent = createManagedAgent({ lifecycle: "error", lastError: "hit your usage limit" });
+    const record = toStoredAgentRecord(agent, { title: "Stored Agent" });
+
+    expect(buildStoredAgentPayload(record, ["claude"]).needsInput).toEqual({
+      count: 1,
+      reasons: ["usage_limit"],
+    });
+  });
+
+  it("omits needsInput for a closed record with no limit-shaped error", () => {
+    const record = toStoredAgentRecord(createManagedAgent({ lifecycle: "idle" }), {
+      title: "Stored Agent",
+    });
+
+    expect(buildStoredAgentPayload(record, ["claude"])).not.toHaveProperty("needsInput");
+  });
 });
 
 describe("toAgentListItemPayload", () => {
@@ -786,6 +886,27 @@ describe("toAgentListItemPayload", () => {
     const listItem = toAgentListItemPayload(snapshot);
 
     expect(listItem).not.toHaveProperty("lastActivitySummary");
+  });
+
+  it("carries needsInput and resumability through from the snapshot payload", () => {
+    const agent = createManagedAgent({
+      pendingPermissions: new Map([["p1", createPermission({ kind: "question" })]]),
+    });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem.needsInput).toEqual(snapshot.needsInput);
+    expect(listItem.resumability).toBe(snapshot.resumability);
+  });
+
+  it("omits needsInput when the snapshot doesn't have one", () => {
+    const agent = createManagedAgent({ lifecycle: "idle" });
+    const snapshot = toAgentPayload(agent);
+
+    const listItem = toAgentListItemPayload(snapshot);
+
+    expect(listItem).not.toHaveProperty("needsInput");
   });
 });
 

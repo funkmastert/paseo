@@ -295,6 +295,7 @@ export const ko: TranslationResources = {
       tokenBurnWarning: "높은 소비량",
       tokenBurnDanger: "매우 높은 소비량",
       modelDiverged: "예상 외 모델",
+      unreachable: "연결 불가",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 총 {{total}}",
     archiveSheet: {

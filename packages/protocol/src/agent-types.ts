@@ -271,6 +271,43 @@ export interface OwedFinishReport {
   attempts?: number;
 }
 
+/**
+ * A count of blocking conditions this agent needs a person (or its owner) to resolve before work
+ * can continue, plus which ones — OpenRig's needs-input vocabulary, adapted
+ * (docs/agent-lifecycle.md#needs-input). Present only while at least one holds; an agent simply
+ * working carries nothing. `count` is how many distinct conditions are open, not
+ * `reasons.length` — several pending permissions count individually. `reasons` is `string[]`,
+ * not a closed union, so a later reason parses on every shipped client, the same reasoning as
+ * `OwedFinishReport.state` above. The reasons this daemon emits today: `"permission"` (a pending
+ * permission request that is not a clarifying question), `"question"` (a pending permission
+ * request of kind `"question"`), `"usage_limit"` (an `error` status whose `lastError` is
+ * limit-shaped — `isLimitShapedError`, account-failover-detector.ts), and `"spend_paused"` (the
+ * spend governor's `pause` stage — spend-governor.ts).
+ */
+export interface AgentNeedsInput {
+  count: number;
+  reasons: string[];
+}
+
+/**
+ * Whether a closed agent can be brought back — derived from runtime residency and persistence
+ * handle presence, never I/O (docs/agent-lifecycle.md#runtime-residency). A plain `string` on the
+ * wire, like `OwedFinishReport.state` above, so a later value parses on every shipped client. The
+ * values this daemon emits today:
+ *
+ * - `"live"`: a provider runtime is resident (any status other than `closed`).
+ * - `"resumable"`: closed, with a persistence handle this daemon can resume from.
+ * - `"unreachable"`: closed, with nothing to resume — no persistence handle, or (for a stored
+ *   record read with the registered-provider list in hand) the handle's provider is no longer
+ *   registered or enabled, the same cheap, synchronous facts `checkAgentProviderMove` checks
+ *   without I/O (provider-move.ts).
+ * - `"unknown"`: closed, with a persistence handle, read from a live in-memory agent that has no
+ *   registered-provider list in hand to confirm reachability with — threading one through would
+ *   put a lookup on the hot live-agent projection path for a case the stored-record path already
+ *   answers for free.
+ */
+export type AgentResumability = string;
+
 export const TOOL_CALL_ICON_NAMES = [
   "wrench",
   "square_terminal",

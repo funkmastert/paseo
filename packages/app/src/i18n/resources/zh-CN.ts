@@ -294,6 +294,7 @@ export const zhCN: TranslationResources = {
       tokenBurnWarning: "消耗较高",
       tokenBurnDanger: "消耗过高",
       modelDiverged: "模型不符",
+      unreachable: "无法访问",
     },
     tokenBurnTooltip: "{{rate}} tok/min · 共 {{total}}",
     archiveSheet: {

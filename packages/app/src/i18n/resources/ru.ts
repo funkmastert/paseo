@@ -296,6 +296,7 @@ export const ru: TranslationResources = {
       tokenBurnWarning: "Высокий расход",
       tokenBurnDanger: "Очень высокий расход",
       modelDiverged: "Другая модель",
+      unreachable: "Недоступен",
     },
     tokenBurnTooltip: "{{rate}} tok/min · всего {{total}}",
     archiveSheet: {
