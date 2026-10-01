@@ -66,7 +66,7 @@ async function setup() {
     verdicts: [],
     chargedAgentId: null,
   });
-  return { savings, recorder, agents, clock };
+  return { savings, recorder, agents, clock, calls };
 }
 
 function child(overrides: Partial<SpawnHintAgentView> = {}): SpawnHintAgentView {
@@ -107,6 +107,20 @@ describe("paseo.jev-spawn", () => {
 });
 
 describe("the spawn hint's savings record", () => {
+  test("the running model is read again at settle: a model that changed after the first state counts (review m7)", async () => {
+    const { savings, recorder, calls } = await setup();
+    calls.set("call-7", { ...calls.get("call-7")!, outcome: "answered" });
+    recorder.onAgent(child({ model: "claude-sonnet-5" }));
+    recorder.onAgent(
+      child({ closed: true, totalTokens: 1_000_000, model: "claude-haiku-4-5-20251001" }),
+    );
+
+    const [event] = savings.events({ range: "today" }).events;
+    // Live: W x (w(base) - w(m)) with m the model that ran at the end, Haiku.
+    expect(event).toMatchObject({ mode: "live", tokensSavedEstimate: 250_000 });
+    expect(event?.basis?.inputs).toMatchObject({ m: "claude-haiku-4-5-20251001" });
+  });
+
   test("a new child is recorded pending, and its close prices the would-be move", async () => {
     const { savings, recorder } = await setup();
 

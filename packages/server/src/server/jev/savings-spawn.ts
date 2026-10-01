@@ -99,7 +99,12 @@ export function createSpawnHintSavingsRecorder(options: {
     const facts = savings instanceof JevSavingsLedger ? savings.factsOf(savingsId) : null;
     if (facts && typeof facts["agentTotalTokens"] === "number") return;
     if (agent && createdThisRun(agent) && agent.totalTokens !== null) {
-      savings.settle(savingsId, { agentTotalTokens: agent.totalTokens });
+      // The model is read again here: `runtimeInfo.model` arrives after the first state, and a
+      // failover or an alias can change it.
+      savings.settle(savingsId, {
+        agentTotalTokens: agent.totalTokens,
+        ...(agent.model ? { runningModel: agent.model } : {}),
+      });
     } else {
       savings.settle(savingsId, { partial: true });
     }
