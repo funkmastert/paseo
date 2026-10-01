@@ -22,7 +22,7 @@ That tells you a monitor's push level too: see "Rank by what happens" in [notifi
 
 The ladder keeps one episode per key (`orphan-build-daemons`, `stalled-agent:<agentId>`, `work-at-risk:<path>`). A monitor calls `observe()` every sweep; repeats are free.
 
-- The first active observation opens the episode, recorded at `record`. The grace window runs from here: `conditions.<kind>.graceMinutes`, else the observation's `graceMs`, else 0. With grace 0, a remedy-less condition with a task escalates on its first sweep.
+- The first active observation opens the episode, recorded at `record`. The grace window runs from here: `conditions.<kind>.graceMinutes`, else the observation's `graceMs`, else 0, plus the observation's `holdMs` (a monitor putting off its own rung-1 action, as a stall judgment's hold does). With grace 0, a remedy-less condition with a task escalates on its first sweep.
 - The first inactive observation closes it, recorded at `record` with the attempts. An agent still running then finishes, and its report still counts: NOT_FIXED reaches rung 3 even though the condition cleared. The work-at-risk sweep relies on this.
 - An agent that reports FIXED while the monitor still reports the condition gets one more grace window, then rung 3, never a second agent.
 - Rung 3 fires at most once per episode.
