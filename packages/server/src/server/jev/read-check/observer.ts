@@ -139,6 +139,7 @@ const SCAN_ROWS = 200;
 /** A file larger than this is never read whole by the observer; its estimate is from its size. */
 const MAX_OBSERVER_FILE_BYTES = 8 * 1024 * 1024;
 const BINARY_PROBE_BYTES = 8192;
+const STOP_WAIT_MS = 1000;
 
 interface HookFields {
   toolName: string;
@@ -445,11 +446,22 @@ export class ReadCheckObserver implements FileReadObserver {
     }
   }
 
-  /** Stops the sweep and waits for queued work. */
+  /**
+   * Stops the sweep and gives queued work a moment to land its records. A judgment still waiting
+   * on JEV past that is dropped: shutdown never waits out a JEV deadline.
+   */
   async stop(): Promise<void> {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
-    await Promise.allSettled(this.inFlight);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.idle(),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, STOP_WAIT_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   /** Test seam: resolves once every queued piece of work has finished. */
@@ -684,8 +696,10 @@ export class ReadCheckObserver implements FileReadObserver {
     if (reason) return this.countNotAsked(reason);
     const { event, read, file, realPath, state } = input;
     const slice = await this.shadowSlice(input);
-    if (!slice) return this.countNotAsked("not-text");
-    state.judged.set(`${realPath}|${rangeKey(file.range)}`, this.now());
+    if (!slice) {
+      state.judged.delete(`${realPath}|${rangeKey(file.range)}`);
+      return this.countNotAsked("not-text");
+    }
     const tokens = input.contextTokens ?? 0;
     const asked = await this.ask({
       event,
@@ -728,22 +742,30 @@ export class ReadCheckObserver implements FileReadObserver {
     }
   }
 
-  /** The not-asked reason for a read that ran, in the order of "When JEV is asked"; null to ask. */
+  /**
+   * The not-asked reason for a read that ran, in the order of "When JEV is asked", except that the
+   * repeat rule runs before the path rules and the scope check: it is a map lookup, and the scope
+   * check runs git. A read that passes claims its `path|range`, so a burst of the same read is one
+   * call and the rest are repeats; a claim the path rules refuse is released.
+   */
   private async shadowGate(input: ShadowReadInput): Promise<JevNotAskedReason | null> {
-    const { measured, config, read } = input;
+    const { measured, config, read, state } = input;
     if (measured?.dedup) return "dedup";
     if (!config || !this.options.jev.isActive("readCheck")) return "inactive";
     // Before the floor: an image or a PDF loads tokens its text length does not show.
     if (measured?.notText || read.notText) return "not-text";
     if (!measured || (input.contextTokens ?? 0) < config.minTokens) return "below-floor";
+    const key = `${input.realPath}|${rangeKey(input.file.range)}`;
+    const judgedAt = state.judged.get(key);
+    if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return "repeat";
+    state.judged.set(key, this.now());
     const ineligible = await this.eligibility({
       agentId: input.event.agentId,
       agentCwd: input.event.agentCwd,
       realPath: input.realPath,
     });
-    if (ineligible) return ineligible;
-    const judgedAt = input.state.judged.get(`${input.realPath}|${rangeKey(input.file.range)}`);
-    return judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS ? "repeat" : null;
+    if (ineligible) state.judged.delete(key);
+    return ineligible;
   }
 
   /**
@@ -1035,6 +1057,9 @@ export class ReadCheckObserver implements FileReadObserver {
     const realPath = await this.realpathOf(file.path);
     const state = this.stateFor(event.agentId);
     if (state.edited.has(realPath) || state.denied.has(realPath)) return null;
+    const key = `${realPath}|${rangeKey(file.range)}`;
+    const judgedAt = state.judged.get(key);
+    if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return null;
     if (await this.eligibility({ agentId: event.agentId, agentCwd: event.agentCwd, realPath })) {
       return null;
     }
@@ -1043,9 +1068,6 @@ export class ReadCheckObserver implements FileReadObserver {
     const characters = read.tool === "Read" ? readToolCharacters(slice.text) : slice.text.length;
     const tokens = estimateReadTokens(characters);
     if (tokens < config.liveMinTokens) return null;
-    const key = `${realPath}|${rangeKey(file.range)}`;
-    const judgedAt = state.judged.get(key);
-    if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return null;
     state.judged.set(key, this.now());
     return { realPath, slice, tokens };
   }
