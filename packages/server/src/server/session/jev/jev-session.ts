@@ -362,6 +362,7 @@ export class JevSession {
           confidence: taskClassConfidence(outcome.answers),
           action: "classifier input at create",
           applied: false,
+          mode: outcome.kind === "shadow" ? "shadow" : "live",
         });
         respond({
           callId: outcome.callId,
