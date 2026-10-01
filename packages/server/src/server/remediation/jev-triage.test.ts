@@ -453,3 +453,96 @@ describe("createRemediationTriageRecorder", () => {
     expect((await readFile(`${filePath}.1`, "utf8")).length).toBe(999_991);
   });
 });
+
+describe("the savings ledger (docs/jev.md, Savings)", () => {
+  const script = {
+    route: { type: "choice" as const, choice: "needs_person", confidence: 0.9 },
+    evidence_current: { type: "noul" as const, noul: 0.9 },
+  };
+  let home: string;
+
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(tmpdir(), "jev-triage-savings-"));
+  });
+
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true });
+  });
+
+  async function shadowSkip() {
+    const jev = createTestJevService({ paseoHome: home, homeDir: home, answers: script });
+    await jev.start();
+    const triage = await createEscalationTriage(jev)({
+      episodeKey: "stalled-agent:a1",
+      observation: observation(),
+    });
+    const decision = decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" });
+    const notes: JevDecisionNote[] = [];
+    const record = createRemediationTriageRecorder({
+      jev: { decisions: { record: (note) => notes.push(note) }, savings: jev.savings },
+      filePath: path.join(home, "jev", "remediation-triage.jsonl"),
+      logger: pino({ level: "silent" }),
+    });
+    record({
+      type: "triage",
+      at: new Date().toISOString(),
+      episode: "ep-1",
+      key: "system-memory",
+      kind: "system-memory",
+      level: "alert",
+      willPush: true,
+      pushPreview: { outcome: "interrupt", devices: 1 },
+      linkedAgentId: "agent-9",
+      triage,
+      decision,
+    });
+    return { jev, triage, notes, record };
+  }
+
+  it("records a shadow skip as pending, and its decision note carries mode, wouldBe and savingsId", async () => {
+    const { jev, triage, notes } = await shadowSkip();
+
+    const [event] = jev.savings.events({ range: "today" }).events;
+    expect(event).toMatchObject({
+      feature: "remediationTriage",
+      mode: "shadow",
+      agentId: "agent-9",
+      decision: { did: "start-agent", wouldBe: "person", changed: false },
+      pending: true,
+    });
+    expect(jev.savings.idForCall(triage.callId ?? "")).toBe(event?.id);
+    expect(notes[0]).toMatchObject({ mode: "shadow", wouldBe: "person", savingsId: event?.id });
+    await jev.stop();
+  });
+
+  it("the agent's end settles it: NOT FIXED saves A x w(m) and holds; FIXED contradicts", async () => {
+    const { jev, triage, record } = await shadowSkip();
+
+    record({
+      type: "agent-ended",
+      at: new Date().toISOString(),
+      episode: "ep-1",
+      key: "system-memory",
+      kind: "system-memory",
+      agentId: "fixer-1",
+      result: "not-fixed",
+      cause: "report",
+      agentTotalTokens: 80_000,
+      agentModel: "claude-sonnet-5",
+      minutesRunning: 12,
+      triageCallId: triage.callId,
+      triageWouldBe: "person",
+      triageApplied: false,
+    });
+
+    const [event] = jev.savings.events({ range: "today" }).events;
+    expect(event).toMatchObject({
+      tokensSavedEstimate: 40_000,
+      pending: false,
+      validation: { outcome: "held", signal: "not-fixed", afterMinutes: 12 },
+    });
+    expect(jev.savings.summary("today").shadow.tokensWouldSave).toBe(40_000);
+    expect(jev.savings.summary("today").live.tokensSaved).toBe(0);
+    await jev.stop();
+  });
+});

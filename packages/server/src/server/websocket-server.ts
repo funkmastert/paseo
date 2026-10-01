@@ -2704,6 +2704,7 @@ export class VoiceAssistantWebSocketServer {
         record: jev
           ? finishTriageRecorderFor({
               agentManager: this.agentManager,
+              savings: jev.savings,
               file: () =>
                 createJsonlAppender({
                   filePath: join(this.paseoHome, "jev", "finish-triage.jsonl"),
