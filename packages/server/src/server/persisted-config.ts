@@ -664,6 +664,22 @@ const AgentRestartRecoverySchema = z
   })
   .strict();
 
+// Work queue and fleet stream. Read once at boot. Off unless `enabled` is true; retention
+// defaults are in coordination/config.ts. See docs/work-queue.md.
+const AgentCoordinationSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    retention: z
+      .object({
+        closedItemDays: z.number().positive().optional(),
+        streamMaxEntries: z.number().int().positive().optional(),
+        streamMaxAgeDays: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
 // The OpenAI platform org's month-to-date spend on the orchestrator's account strip. Names where
 // the key lives (an env var, an env file) and never holds it. Read from config.json on
 // every fetch, so every key is live. See docs/provider-usage.md.
@@ -989,6 +1005,7 @@ export const PersistedConfigSchema = z
         remediation: AgentRemediationSchema.optional(),
         daemonVitals: AgentDaemonVitalsSchema.optional(),
         restartRecovery: AgentRestartRecoverySchema.optional(),
+        coordination: AgentCoordinationSchema.optional(),
         tokenAudit: AgentTokenAuditSchema.optional(),
         providerUsage: AgentProviderUsageSchema.optional(),
         // Any value loads; `AgentJevSchema` is what JEV itself checks (see above).

@@ -16,6 +16,7 @@ import {
   type WorkItemWithTransitions,
 } from "@getpaseo/protocol/coordination/queue-schemas";
 import { writeFileAtomic, writeJsonFileAtomic } from "../../atomic-file.js";
+import { readJsonlFile } from "../jsonl.js";
 import { QueueValidationError, isOpenState, validateTransition } from "./state-machine.js";
 
 // One JSON document per item under items/, plus journal.jsonl. Every store method is one
@@ -562,43 +563,16 @@ export class WorkQueueStore {
     return items;
   }
 
-  // A crash mid-append can leave a partial last line. It never had a matching commit, so it is
-  // cut off here before anything else appends after it.
-  private async readJournal(): Promise<JournalLine[]> {
-    let raw: string;
-    try {
-      raw = await fs.readFile(this.journalPath, "utf8");
-    } catch (error) {
-      if (isMissing(error)) return [];
-      throw error;
-    }
-    const lines: JournalLine[] = [];
-    let offset = 0;
-    while (offset < raw.length) {
-      const end = raw.indexOf("\n", offset);
-      const text = end === -1 ? raw.slice(offset) : raw.slice(offset, end);
-      const parsed = parseJournalLine(text);
-      if (!parsed) {
-        const isLast = end === -1 || raw.slice(end + 1).trim() === "";
-        if (isLast) {
-          this.options.logger.warn(
-            { journalPath: this.journalPath },
-            "Work queue: dropping a torn last journal line",
-          );
-          await fs.truncate(this.journalPath, Buffer.byteLength(raw.slice(0, offset)));
-          break;
-        }
-        throw new Error(`Work queue journal is corrupt at byte ${offset}: ${this.journalPath}`);
-      }
-      lines.push(parsed);
-      if (end === -1) {
-        // A complete last line without its newline: add it so the next append starts clean.
-        await fs.appendFile(this.journalPath, "\n");
-        break;
-      }
-      offset = end + 1;
-    }
-    return lines;
+  // A torn last line never had a matching commit, so dropping it loses nothing.
+  private readJournal(): Promise<JournalLine[]> {
+    return readJsonlFile(
+      this.journalPath,
+      (value) => {
+        const result = JournalLineSchema.safeParse(value);
+        return result.success ? result.data : null;
+      },
+      this.options.logger,
+    );
   }
 
   private async appendJournal(line: JournalLine): Promise<void> {
@@ -698,15 +672,6 @@ function decodeCursor(cursor: string): Pick<WorkItem, "createdAt" | "id"> {
     throw new QueueValidationError(
       "That cursor is not one this queue returned. Pass the nextCursor from the previous page.",
     );
-  }
-}
-
-function parseJournalLine(text: string): JournalLine | null {
-  try {
-    const result = JournalLineSchema.safeParse(JSON.parse(text));
-    return result.success ? result.data : null;
-  } catch {
-    return null;
   }
 }
 
