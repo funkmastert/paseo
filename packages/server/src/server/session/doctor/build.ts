@@ -46,7 +46,8 @@ function candidateBundles(ctx: DoctorContext): Bundle[] {
   const found: Bundle[] = [];
   if (platform === "darwin") {
     // The bundle the daemon itself runs from wins; a stale sibling install must not stand in.
-    const own = ctx.facts.daemon?.execPath && /^(.*?\.app)\//.exec(ctx.facts.daemon.execPath)?.[1];
+    const own =
+      ctx.facts.daemon?.execPath && /^(.*?\.app)[/\\]/.exec(ctx.facts.daemon.execPath)?.[1];
     const apps = [
       ...(own ? [own] : []),
       "/Applications/Bozeo.app",
