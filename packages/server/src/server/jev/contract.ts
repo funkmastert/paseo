@@ -89,7 +89,9 @@ export type JevFeatureId =
   /** Feature 14: answers a leader that has waited on Tyler past the threshold. */
   | "awayReply"
   /** Feature 15: a person's own question from the app's Ask JEV screen, over `jev.ask`. */
-  | "askJev";
+  | "askJev"
+  /** Feature 17: whether a workspace's name still fits before spending a title regeneration. */
+  | "titleRefresh";
 
 /**
  * Slots, spend caps and circuits are per lane, so agent tools can neither starve nor bankrupt
@@ -241,6 +243,15 @@ export interface JevDecisionNote {
   action: string;
   /** False in shadow mode: the action was only recorded. */
   applied: boolean;
+  /**
+   * Shadow or live, from the outcome. `applied: false` is not shadow: a live answer that kept
+   * today's behaviour is not applied either. Absent from notes written before the savings track.
+   */
+  mode?: JevSavingsMode;
+  /** `JevSavingsDecision.wouldBe`, so the per-agent list stops parsing `action`. */
+  wouldBe?: string | null;
+  /** The savings record for the same involvement, when there is one. */
+  savingsId?: string;
 }
 
 /** What `jev.decisions.list` returns per decision. */
@@ -322,6 +333,8 @@ export interface JevService {
   checkScope(scope: JevEgressScope): Promise<"ok" | "excluded">;
   status(): JevStatus;
   readonly decisions: JevDecisionSink;
+  /** The savings ledger (docs/jev.md, "Savings"): one record per JEV involvement. */
+  readonly savings: JevSavingsSink;
   /** The agent's decisions, newest first, including its spawn hint. Serves `jev.decisions.list`. */
   listDecisions(agentId: string): JevDecisionRecord[];
 }
@@ -358,3 +371,320 @@ export interface CommandGateVerdict {
  * `command` outright: the gate reads POSIX shell and resolves only POSIX cwds.
  */
 export type CommandGate = (input: { command: string; cwd: string }) => Promise<CommandGateVerdict>;
+
+/*
+ * Savings (docs/jev.md, "Savings"). One append-only record per JEV involvement, across every
+ * feature, so the JEV dashboard reads one source. Types only: the savings track implements them
+ * in `jev/savings.ts`, and the read-check track implements feature 16 against them.
+ */
+
+/**
+ * Feature 16, the file-read check, is not a `JevFeatureId` yet: the read-check track adds
+ * `"readCheck"` there, and `"reads"` to `JevLane`, when it wires the feature. Until then the
+ * savings types name it here.
+ */
+export type JevSavingsFeature = JevFeatureId | "readCheck";
+
+export type JevSavingsMode = "shadow" | "live";
+
+/**
+ * What a feature's answer buys. Only `tokens` is summed into tokens saved; the others are shown as
+ * counts in their own unit, never converted into tokens.
+ */
+export type JevBenefitKind = "tokens" | "attention" | "time" | "none";
+
+/**
+ * The dashboard's one unit: weighted tokens (docs/token-burn.md: fresh input 1, cache write 1.25,
+ * cache read 0.1, output 5) priced at Claude Opus 5.5's list price. A model move saves no tokens,
+ * only price, so every token figure is scaled by its model's price against Opus 5.5.
+ */
+export type JevSavingsUnit = "opus-equivalent-weighted-tokens";
+
+/** A benefit that is not tokens: finish pushes held for the digest (3b), leader minutes (14). */
+export interface JevOtherBenefit {
+  unit: "pushes-held" | "minutes";
+  value: number;
+}
+
+/**
+ * Why a feature saw something and did not ask JEV. Counted per day, never written as a record:
+ * feature 16 sees every file read, and most are too small to judge.
+ */
+export type JevNotAskedReason =
+  /** Under the feature's size floor (feature 16's `minTokens`): a skip could not pay. */
+  | "below-floor"
+  /** The D7 exclusion: company code is never sent. */
+  | "excluded"
+  /** `isActive` said no: no key, a switch off, a spent lane or an open circuit. */
+  | "inactive"
+  /** An image, a PDF, a notebook, or a NUL byte in the first 8 KB. */
+  | "not-text"
+  /** A secret-shaped name or a denied root (`agent/tools/jev-file-state.ts`). */
+  | "secret-path"
+  /** Outside the agent's cwd, which the file tools refuse too. */
+  | "outside-cwd"
+  /** The CLI answered `file_unchanged`: the read loaded nothing. */
+  | "dedup"
+  /** Judged for the same agent, path and range in the last 30 minutes; the verdict is reused. */
+  | "repeat";
+
+export interface JevSavingsDecision {
+  /** What code did, in the feature's words: `start-agent`, `alert`, `class standard on claude-sonnet-5`. */
+  did: string;
+  /** What the answer maps to with every switch on, in either mode. Null when no usable answer came. */
+  wouldBe: string | null;
+  /** `did` differs from today's behaviour. Only a live answer can make it true. */
+  changed: boolean;
+  /** The facts the feature's formula reads (see `JevSavingsInput.facts`), echoed for the reader. */
+  detail?: Record<string, string | number | boolean | null>;
+}
+
+/** How a token figure was reached, so any number on the dashboard can be recomputed by hand. */
+export interface JevSavingsBasis {
+  /** The feature's formula, with the names used in `inputs`: `W x (w(base) - w(did))`. */
+  formula: string;
+  /** Every input and constant the formula used, price weights and residency included. */
+  inputs: Record<string, number | string | null>;
+}
+
+/**
+ * Whether later events showed the answer right. `false-skip`: in shadow, the agent used what JEV
+ * said it did not need. `regret`: in live, the agent fetched it anyway after the skip.
+ * `contradicted`: an outcome went the other way (the fixer fixed it; Tyler answered at once).
+ */
+export interface JevSavingsValidation {
+  outcome: "held" | "false-skip" | "regret" | "contradicted";
+  /** What showed it: `edited`, `reread`, `quoted`, `fixed`, `messaged-within-30m`, `same-choice`. */
+  signal: string | null;
+  afterMinutes: number | null;
+}
+
+/** The first line for an id in `$PASEO_HOME/jev/savings.jsonl`. */
+export interface JevSavingsRecord {
+  v: 1;
+  type: "involvement";
+  /** `sv_` plus a time-ordered random id. */
+  id: string;
+  /** ISO. */
+  at: string;
+  feature: JevSavingsFeature;
+  callSite: string;
+  /** Joins the ledger and the audit. */
+  callId: string;
+  agentId: string | null;
+  workspaceId: string | null;
+  /** From the call's outcome: `shadow` is shadow, `answered` is live. Never inferred from `applied`. */
+  mode: JevSavingsMode;
+  outcome: JevOutcome["kind"];
+  /** What JEV was asked, in a few words: "Does this agent need src/foo.ts?". */
+  involvement: string;
+  decision: JevSavingsDecision;
+  benefit: JevBenefitKind;
+  /** Opus-equivalent weighted tokens; null while pending, and always for a non-token benefit. */
+  tokensSavedEstimate: number | null;
+  otherBenefit: JevOtherBenefit | null;
+  basis: JevSavingsBasis | null;
+  /** Waits on a later fact: a child's spend, an episode's close, a validation window. */
+  pending: boolean;
+  /** The ledger's cost for `callId`; null when nothing was sent. */
+  jevCostUsd: number | null;
+}
+
+/** A later line for the same id: the pending figure, now known. The newest settlement wins. */
+export interface JevSavingsSettlement {
+  v: 1;
+  type: "settled";
+  id: string;
+  at: string;
+  tokensSavedEstimate: number | null;
+  otherBenefit: JevOtherBenefit | null;
+  basis: JevSavingsBasis | null;
+  /** The facts this settlement added, so a restart reprices from the same inputs. */
+  facts?: Record<string, string | number | boolean | null>;
+  /** Still waiting on another fact after this one. Absent: no longer pending. */
+  pending?: boolean;
+}
+
+/** A later line for the same id: what the validation window saw. At most one per id. */
+export interface JevSavingsValidationLine {
+  v: 1;
+  type: "validated";
+  id: string;
+  at: string;
+  validation: JevSavingsValidation;
+}
+
+export type JevSavingsLine = JevSavingsRecord | JevSavingsSettlement | JevSavingsValidationLine;
+
+/**
+ * What a call site reports. Call sites report facts; the savings module prices them with the
+ * feature's formula (docs/jev.md, "Formulas"), so no feature computes tokens saved itself.
+ */
+export interface JevSavingsInput {
+  feature: JevSavingsFeature;
+  callSite: string;
+  callId: string;
+  agentId?: string | null;
+  workspaceId?: string | null;
+  involvement: string;
+  decision: JevSavingsDecision;
+  /** The formula's inputs the call site knows now: `contextTokens`, `model`, `agentTotalTokens`. */
+  facts: Record<string, string | number | boolean | null>;
+  /** True when a fact arrives later through `settle`. */
+  pending?: boolean;
+}
+
+/** `JevService.savings`. Every method appends off the caller's path and never throws. */
+export interface JevSavingsSink {
+  /**
+   * Appends an involvement and returns its id. `mode`, `outcome`, `at` and `jevCostUsd` come from
+   * the ledger entry for `callId`, so no call site can disagree with the ledger about them.
+   */
+  record(input: JevSavingsInput): string;
+  /** Adds facts that arrived later and prices the record again. */
+  settle(id: string, facts: Record<string, string | number | boolean | null>): void;
+  validate(id: string, validation: JevSavingsValidation): void;
+  countNotAsked(feature: JevSavingsFeature, reason: JevNotAskedReason): void;
+  /**
+   * Feature 16's observer reports every file read it sees, judged or not, so the savings module can
+   * find regret reads after the agent tools (features 4 and 5) without a transcript.
+   */
+  noteRead(event: JevFileReadEvent): void;
+}
+
+/** One file read an agent made, as feature 16's observer saw it. */
+export interface JevFileReadEvent {
+  agentId: string;
+  /** Real path. */
+  path: string;
+  tool: "Read" | "Bash";
+  /** ISO. */
+  at: string;
+  /** Estimated from what the tool returned; null when the result never arrived. */
+  contextTokens: number | null;
+}
+
+/** `today` is the daemon's local day; `all` is the rollup's whole retention, 400 days. */
+export type JevSavingsRange = "today" | "7d" | "all";
+
+export type JevFeatureState = "off" | "shadow" | "live" | "dormant";
+
+export interface JevSavingsModeTotals {
+  involvements: number;
+  /** Live: answers that changed what code did. Shadow: answers that would have. */
+  changed: number;
+  tokens: number;
+  /**
+   * The part of `tokens` that is an estimate (a skipped agent priced at its kind's median), for the
+   * dashboard to label "estimated", not "saved". Absent from an older daemon.
+   */
+  estimatedTokens?: number;
+  otherBenefit: JevOtherBenefit | null;
+  /** Involvements whose figure is still pending. */
+  pending: number;
+}
+
+export interface JevSavingsFeatureSummary {
+  feature: JevSavingsFeature;
+  state: JevFeatureState;
+  benefit: JevBenefitKind;
+  asked: number;
+  notAsked: Partial<Record<JevNotAskedReason, number>>;
+  live: JevSavingsModeTotals;
+  shadow: JevSavingsModeTotals;
+  validation: { checked: number; held: number; wrong: number };
+  jevUsd: number;
+  /**
+   * The evidence for flipping the feature's mode, against its pre-registered rule in code. `met`
+   * is null until the rule's minimum count is reached. Code reports; Tyler flips (D6).
+   */
+  evidence: { rule: string; observed: string; met: boolean | null };
+}
+
+export interface JevSavingsTopEntry {
+  /** An agent id or a workspace id. */
+  id: string;
+  label: string | null;
+  involvements: number;
+  liveTokens: number;
+  shadowTokens: number;
+}
+
+export interface JevSavingsDay {
+  /** The daemon's local calendar day, `YYYY-MM-DD`. */
+  day: string;
+  involvements: number;
+  liveTokens: number;
+  shadowTokens: number;
+  jevUsd: number;
+}
+
+/** `jev.savings.summary`. */
+export interface JevSavingsSummary {
+  range: JevSavingsRange;
+  /** ISO bounds of the range. */
+  from: string;
+  to: string;
+  unit: JevSavingsUnit;
+  live: { involvements: number; tokensSaved: number };
+  shadow: { involvements: number; tokensWouldSave: number };
+  /** Every lane's spend in the range, shadow calls included, from the ledger's daily totals. */
+  jevSpend: { calls: number; usd: number; tokensEquivalent: number };
+  /** `live.tokensSaved - jevSpend.tokensEquivalent`, and the same had every shadow answer applied. */
+  net: { live: number; ifLive: number };
+  features: JevSavingsFeatureSummary[];
+  /** At most 10 each. For `all`, from the per-day rollup; the rest are summed into no entry. */
+  topAgents: JevSavingsTopEntry[];
+  topWorkspaces: JevSavingsTopEntry[];
+  days: JevSavingsDay[];
+}
+
+/** `jev.savings.events`: one row per involvement, newest first, with its later lines folded in. */
+export interface JevSavingsEvent {
+  id: string;
+  at: string;
+  feature: JevSavingsFeature;
+  agentId: string | null;
+  /** Read at request time; null for an agent the daemon no longer holds. */
+  agentTitle: string | null;
+  workspaceId: string | null;
+  mode: JevSavingsMode;
+  outcome: JevOutcome["kind"];
+  involvement: string;
+  decision: JevSavingsDecision;
+  benefit: JevBenefitKind;
+  tokensSavedEstimate: number | null;
+  otherBenefit: JevOtherBenefit | null;
+  basis: JevSavingsBasis | null;
+  pending: boolean;
+  /** The figure is an estimate, not measured tokens. Absent from an older daemon. */
+  estimated?: boolean;
+  validation: JevSavingsValidation | null;
+  jevCostUsd: number | null;
+}
+
+export interface JevSavingsEventsQuery {
+  range: JevSavingsRange;
+  feature?: JevSavingsFeature;
+  agentId?: string;
+  /** The `nextCursor` of the previous page. */
+  cursor?: string;
+  /** Default 50, at most 200. */
+  limit?: number;
+  /**
+   * Only records in these workspaces; a record with no workspace is left out too. Absent for a
+   * caller whose grant covers the daemon (docs/permissions.md, "Resources").
+   */
+  workspaceIds?: readonly string[];
+}
+
+export interface JevSavingsEventsPage {
+  events: JevSavingsEvent[];
+  nextCursor: string | null;
+}
+
+/** What the session calls for the two RPCs. The savings track implements it. */
+export interface JevSavingsReader {
+  summary(range: JevSavingsRange): JevSavingsSummary;
+  events(query: JevSavingsEventsQuery): JevSavingsEventsPage;
+}

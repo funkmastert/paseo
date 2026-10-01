@@ -161,3 +161,34 @@ describe("JevDecisionStore spawn-hint attachment", () => {
     expect(store.list("agent-x", { [JEV_CALL_LABEL]: "spawn-3" })).toHaveLength(1);
   });
 });
+
+describe("savings fields", () => {
+  test("a note's mode, wouldBe and savingsId come back from list", () => {
+    const store = new JevDecisionStore();
+    store.record(note({ mode: "shadow", wouldBe: "notice", savingsId: "sv_1", applied: false }));
+
+    expect(store.list("agent-1", null)[0]).toMatchObject({
+      mode: "shadow",
+      wouldBe: "notice",
+      savingsId: "sv_1",
+      applied: false,
+    });
+  });
+
+  test("an attached spawn hint takes its wouldBe from paseo.jev-spawn", () => {
+    const store = new JevDecisionStore();
+    store.record(note({ agentId: null, callId: "call-9", mode: "shadow", applied: false }));
+
+    const [attached] = store.list("child-1", {
+      "paseo.jev-call": "call-9",
+      "paseo.jev-spawn":
+        "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+    });
+
+    expect(attached).toMatchObject({
+      agentId: "child-1",
+      mode: "shadow",
+      wouldBe: "mechanical on claude-haiku-4-5",
+    });
+  });
+});

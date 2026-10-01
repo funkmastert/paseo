@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createJevSession, JevSession } from "./jev-session.js";
+import { DROP_JEV_SAVINGS } from "../../jev/service.js";
 import type {
   JevDecideInput,
   JevDecisionNote,
@@ -80,6 +81,7 @@ function createFakeJevService(options: FakeJevServiceOptions = {}) {
     checkScope: async (scope) => (options.checkScope ? options.checkScope(scope) : "ok"),
     status: () => (options.status ? options.status() : BASE_STATUS),
     decisions: { record: (note) => recorded.push(note) },
+    savings: DROP_JEV_SAVINGS,
     listDecisions: (agentId) => (options.listDecisions ? options.listDecisions(agentId) : []),
   };
   return { service, recorded };
@@ -227,6 +229,7 @@ describe("JevSession.handleDecide", () => {
         confidence: 0.91,
         action: "classifier input at create",
         applied: false,
+        mode: "live",
       },
     ]);
     expect(emitted).toEqual([

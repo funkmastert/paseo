@@ -16,6 +16,27 @@ export const AGENT_ROLE_LABEL = "paseo.agent-role";
 export const TASK_CLASS_LABEL = "paseo.task-class";
 
 /**
+ * JEV's spawn-hint labels (docs/jev.md, "Feature 2"), spelled as in
+ * `packages/protocol/src/agent-labels.ts`. Copied rather than imported: the
+ * daemon evaluates this plugin as one bundle that resolves only the plugin
+ * SDK at runtime.
+ *
+ * - `TASK_CLASS_SOURCE_LABEL`: how the class was set, `declared`, `jev`,
+ *   `classified` or `default`. Written on creates JEV answered or shadowed.
+ * - `JEV_CALL_LABEL`: the call's `callId`, so `jev.decisions.list` can attach
+ *   the decision, made before the agent existed, to it.
+ * - `JEV_TOOLS_LABEL`: the D8 arm, `on` or `control`, of a create eligible for
+ *   the JEV agent tools. The daemon lists the tools for `on` only.
+ * - `JEV_SPAWN_LABEL`: the spawn hint's durable record beside `JEV_CALL_LABEL`,
+ *   `v1;base=<class>/<model>;would=<class>/<model>;move=<down|up|none>;applied=<0|1>`.
+ *   The daemon's savings ledger reads it at create (docs/jev.md, "Savings").
+ */
+export const TASK_CLASS_SOURCE_LABEL = "paseo.task-class-source";
+export const JEV_CALL_LABEL = "paseo.jev-call";
+export const JEV_TOOLS_LABEL = "paseo.jev-tools";
+export const JEV_SPAWN_LABEL = "paseo.jev-spawn";
+
+/**
  * Asks for MCP gateway servers a child would not get by default: a
  * comma-separated list of `mcpGateway.servers` names, `claude.ai` for the
  * account's claude.ai connectors, or `all`. Only ever adds. An unknown name

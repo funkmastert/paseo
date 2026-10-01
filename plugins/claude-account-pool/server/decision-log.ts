@@ -1,4 +1,5 @@
-import type { AgentDecision } from "./classifier";
+import { JEV_TOOLS_LABEL } from "../shared/role-policy-schema";
+import type { AgentDecision, JevHintDecision } from "./classifier";
 import { echoed } from "./echo";
 import { mcpScopeLabelValue } from "./mcp-scope";
 
@@ -167,6 +168,42 @@ function describeUnknown(request: LoggedRequest, result: LoggedRequest | undefin
   };
 }
 
+/**
+ * The `jev` field (docs/jev.md, "Labels and the log"): what JEV's spawn hint
+ * said and what it would have done. `wouldBe` is on every answer, applied or
+ * shadowed, so the shadow day can price each move. Daemon and JEV values
+ * only, and capped anyway.
+ */
+function describeJev(jev: JevHintDecision): Record<string, unknown> {
+  const { answers, wouldBe } = jev;
+  return {
+    status: jev.status,
+    ...(jev.callId !== undefined ? { callId: echoed(jev.callId) } : {}),
+    ...(jev.reason !== undefined ? { reason: echoed(jev.reason) } : {}),
+    ...(answers?.taskClass
+      ? { taskClass: { choice: echoed(answers.taskClass.choice), confidence: answers.taskClass.confidence } }
+      : {}),
+    ...(answers?.reasoning ? { reasoning: { score: answers.reasoning.score, confidence: answers.reasoning.confidence } } : {}),
+    ...(answers?.role ? { role: { choice: echoed(answers.role.choice), confidence: answers.role.confidence } } : {}),
+    applied: jev.applied,
+    ...(wouldBe
+      ? {
+          wouldBe: {
+            taskClass: wouldBe.taskClass,
+            ...(wouldBe.role !== undefined ? { role: wouldBe.role } : {}),
+            model: wouldBe.model,
+            move: wouldBe.move,
+          },
+        }
+      : {}),
+  };
+}
+
+function keptArm(result: LoggedRequest | undefined): string | null {
+  const arm = result?.labels?.[JEV_TOOLS_LABEL];
+  return typeof arm === "string" ? echoed(arm) : null;
+}
+
 function describe(decision: AgentDecision, result: LoggedRequest | undefined): Record<string, unknown> {
   const { role, taskClass, model, thinking, outputStyle, mcp } = decision;
   return {
@@ -190,6 +227,10 @@ function describe(decision: AgentDecision, result: LoggedRequest | undefined): R
     // The paseo.mcp-scope value, or "all" for an agent that keeps every server.
     mcp: mcpScopeLabelValue(mcp) ?? "all",
     account: account(result),
+    ...(decision.jev ? { jev: describeJev(decision.jev) } : {}),
+    // The D8 arm the agent carries, read off its labels, or null when it carries none (not
+    // eligible, or refused). Absent when the arm was not evaluated.
+    ...(decision.jevTools ? { jevTools: keptArm(result) } : {}),
     ...(model.unadvertisedPoolEntries.length > 0 ? { unadvertisedPoolEntries: model.unadvertisedPoolEntries } : {}),
     reasons: {
       role: role.reason,

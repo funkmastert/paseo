@@ -357,6 +357,7 @@ export const en = {
       next: "Next",
       answerPlaceholder: "Type your answer...",
       otherPlaceholder: "Other...",
+      answerInConversation: "Answer in the full conversation",
     },
     todo: {
       title: "Tasks",
@@ -1243,6 +1244,8 @@ export const en = {
         title: "Rename workspace",
         submit: "Rename",
         invalidBranchName: "Invalid branch name",
+        /** Inline edit's empty-value placeholder: clearing the name hands it back to Paseo. */
+        autoPlaceholder: "Name automatically",
       },
       toasts: {
         workspacePathUnavailable: "Workspace path not available",
@@ -1893,6 +1896,8 @@ export const en = {
       accountLeadersHere: "Leaders {{count}}",
       accountWorkersHere: "Workers {{count}}",
       accountBalanceLeft: "{{amount}} left",
+      accountDetailsShow: "Show {{count}} more",
+      accountDetailsHide: "Show less",
       staleTitle: "Not updating",
       staleLastSynced: "Last synced {{time}}",
       staleNeverSynced: "Not synced yet",
@@ -1965,6 +1970,19 @@ export const en = {
     error: "Recovery failed: {{error}}",
     expand: "Expand restart recovery",
     collapse: "Collapse restart recovery",
+    reason: {
+      bozeo_quit: "Bozeo quit and stopped the daemon",
+      update: "The daemon restarted for an update",
+      crashed: "The daemon crashed",
+      power_loss: "The Mac restarted or lost power",
+      cli_stop: "Stopped from the command line",
+    },
+    age: "from {{when}}",
+    ranFor: "ran {{duration}}",
+    keepRunningHint:
+      "Quitting Bozeo stops the daemon — turn on Keep daemon running after quit to avoid this.",
+    resumeModeHint:
+      "Bozeo can resume agents cut off like this on its own: set agents.restartRecovery.mode to resume in config.json.",
   },
   deviceStatus: {
     summary: "{{used}} of {{total}} devices",
@@ -2071,6 +2089,10 @@ export const en = {
     memoryFileWarning: "{{path}} is {{tokens}} tokens, over {{limit}}.",
     reReadAdvice:
       "This session re-reads ~{{tokens}} tokens every turn. A fresh session with a short handoff is cheaper.",
+    jevTitle: "JEV decisions",
+    jevShadow: "Shadow",
+    jevDryRun: "Dry run",
+    jevOlder: "{{count}} older",
   },
   review: {
     comment: {

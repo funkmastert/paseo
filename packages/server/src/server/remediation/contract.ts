@@ -75,9 +75,10 @@ export interface RemediationEscalationRequest {
   advice?: boolean;
   /**
    * Set by the stall judgment (docs/jev.md, Feature 10) when its answer was `blocked_missing_info`
-   * or `waiting_on_human`. The ladder is the one place that decides: it skips the agent for this
-   * observation only when the escalation will push (`condition.notify` true and the level `notice`
-   * or higher), the same rule that governs a `needs_person` remediation triage (Feature 3a).
+   * or `waiting_on_human`, and only from an `answered` outcome: the ladder cannot tell a shadow
+   * judgment from an applied one. The ladder is the one place that decides: it skips the agent for
+   * this observation only when the escalation reaches a phone now (`willEscalationPush`), the same
+   * rule that governs a `needs_person` remediation triage (Feature 3a).
    */
   personFirst?: { reason: string; confidence: number };
 }

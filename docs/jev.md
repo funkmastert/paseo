@@ -2,29 +2,31 @@
 
 JEV is TypeSafe's hosted decision model. You send it a `state` and typed questions; it returns, for each question, a yes/no probability (`noul`), one of your declared options with a distribution (`choice`), or a position on your scale (`score`). It never returns text. This fork uses it as a judgment step between deterministic code and an LLM agent: code measures and decides, JEV answers one typed question where code would otherwise guess, and code turns the answer into an action.
 
-The build is split into tracks; ownership, merge order and the verified list of existing code are in [design-notes/jev-tracks.md](design-notes/jev-tracks.md). Feature 1, the catastrophe gate, is deterministic and makes no JEV call; it is not covered here.
+The build is split into tracks; ownership, merge order and the verified list of existing code are in [design-notes/jev-tracks.md](design-notes/jev-tracks.md). Feature 1, the catastrophe gate, is deterministic and makes no JEV call; it is not covered here. What each feature saves is recorded in one place, the [savings ledger](#savings), and shown on [the JEV dashboard](#the-jev-dashboard).
 
 ## Decisions
 
-Settled by Tyler and the orchestrator on 2026-09-28, D10 on 2026-09-29 (`~/bozeo-ops/jev-build-STATE.md`). Every track builds to these.
+Settled by Tyler and the orchestrator on 2026-09-28, D10 and D11 on 2026-09-29 (`~/bozeo-ops/jev-build-STATE.md`). Every track builds to these.
 
-| #   | Decision                                                                                           | Consequence in this design                                                                                                                                                                                |
-| --- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | Agents get more power, not less. Only catastrophic operations are gated, by code.                  | No JEV answer blocks, denies or adds a confirmation to an agent's tool call. `ask_jev_diff_risk` may only add review. `ask_jev`'s `command` passes the catastrophe gate, as Bash does.                    |
-| D2  | Model tier is not capability. JEV may move a task to a cheaper model; it may never remove tools.   | A role JEV guessed (`classified-jev`) never counts as evidence for a tool profile, even with `enforceToolsOnClassifiedRoles` on.                                                                          |
-| D3  | Feature 2 is approved although the classifier header records rejecting an LLM on every create.     | The classifier track rewrites that header paragraph. JEV is one typed call on unlabelled creates, and the function stays pure.                                                                            |
-| D4  | JEV does not pick a thinking level.                                                                | The `reasoning` score feeds the task class; thinking follows the class through `policy.thinking.byTaskClass`, as today.                                                                                   |
-| D5  | The key lives in a dedicated variable. Setting it is the opt-in; the master switch stays on.       | `PASEO_JEV_API_KEY`, for both providers, not configurable. `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY` are never read. See [Key](#key).                                                                   |
-| D6  | Shadow first.                                                                                      | Every feature with a shadow mode defaults to `shadow: true` in code. Agents cannot edit `config.json`, so the code default is the lever.                                                                  |
-| D7  | Wonderly company code never goes to JEV by default. Pending Tyler's confirmation; default is safe. | `excludeCwds`, `excludeRemotes` and `excludeTextMarkers` ship with the company defaults, enforced inside `decide` for every feature, fail-closed. See [The D7 exclusion](#the-d7-exclusion).              |
-| D8  | Agent tools ship with the cost log and are switched off if they do not pay.                        | A randomized hold-out arm (`agentTools.assignShare`) and a pre-registered kill rule. See [Features 4–6](#features-46-agent-tools).                                                                        |
-| D10 | Feature 14 replies for Tyler. It acts, but never merges a PR or suggests anything destructive.     | `awayReply` starts in dry run like every feature (D6). Tyler turns it live with `agents.jev.awayReply.dryRun: false` after reading a day of its decisions. See [Feature 14](#feature-14-away-auto-reply). |
+| #   | Decision                                                                                                                              | Consequence in this design                                                                                                                                                                                                                                                |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | Agents get more power, not less. Only catastrophic operations are gated, by code.                                                     | No JEV answer blocks, denies or adds a confirmation to an agent's tool call, except feature 16 in live mode (D11). `ask_jev_diff_risk` may only add review. `ask_jev`'s `command` passes the catastrophe gate, as Bash does.                                              |
+| D2  | Model tier is not capability. JEV may move a task to a cheaper model; it may never remove tools.                                      | A role JEV guessed (`classified-jev`) never counts as evidence for a tool profile, even with `enforceToolsOnClassifiedRoles` on.                                                                                                                                          |
+| D3  | Feature 2 is approved although the classifier header records rejecting an LLM on every create.                                        | The classifier track rewrites that header paragraph. JEV is one typed call on unlabelled creates, and the function stays pure.                                                                                                                                            |
+| D4  | JEV does not pick a thinking level.                                                                                                   | The `reasoning` score feeds the task class; thinking follows the class through `policy.thinking.byTaskClass`, as today.                                                                                                                                                   |
+| D5  | The key lives in a dedicated variable. Setting it is the opt-in; the master switch stays on.                                          | `PASEO_JEV_API_KEY`, for both providers, not configurable. `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY` are never read. See [Key](#key).                                                                                                                                   |
+| D6  | Shadow first.                                                                                                                         | Every feature with a shadow mode defaults to `shadow: true` in code. Agents cannot edit `config.json`, so the code default is the lever.                                                                                                                                  |
+| D7  | Wonderly company code never goes to JEV by default. Pending Tyler's confirmation; default is safe.                                    | `excludeCwds`, `excludeRemotes` and `excludeTextMarkers` ship with the company defaults, enforced inside `decide` for every feature, fail-closed. See [The D7 exclusion](#the-d7-exclusion).                                                                              |
+| D8  | Agent tools ship with the cost log and are switched off if they do not pay.                                                           | A randomized hold-out arm (`agentTools.assignShare`) and a pre-registered kill rule. See [Features 4–6](#features-46-agent-tools).                                                                                                                                        |
+| D9  | Build everything approved, run it in shadow, then switch off whatever the numbers say does not pay.                                   | Every feature writes to the [savings ledger](#savings). [The JEV dashboard](#the-jev-dashboard) shows each feature's numbers against a rule fixed in code before the data arrives.                                                                                        |
+| D10 | Feature 14 replies for Tyler. It acts, but never merges a PR or suggests anything destructive.                                        | `awayReply` starts in dry run like every feature (D6). Tyler turns it live with `agents.jev.awayReply.dryRun: false` after reading a day of its decisions. See [Feature 14](#feature-14-away-auto-reply).                                                                 |
+| D11 | Tyler: "whenever an LLM asks to load a file into context, it has to ask Jev first to see if it's something that it would want to do." | Feature 16 is the one place a JEV answer may deny a tool call, and only in live mode, which Tyler turns on after reading the shadow numbers. It relaxes D1 for that call site alone. Shadow, the default, adds no latency. See [Feature 16](#feature-16-file-read-check). |
 
 ## Rules
 
 These bind every call site.
 
-- **JEV never gates an agent** (D1). The catastrophe gate is the only gate, and it is code.
+- **JEV never gates an agent** (D1). The catastrophe gate is the only gate, and it is code. The one exception is feature 16 in live mode (D11): it may deny a large file read once per path, and the same read then goes through.
 - **Fail open on answers.** No key, a switch off, a timeout, an HTTP error, a malformed answer, a low-confidence answer, a saturated queue or a spent budget all mean exactly today's behaviour. `JevService.decide` never rejects, and its result type makes today's behaviour the default branch (see [The outcome](#the-outcome)).
 - **Fail closed on egress.** Any error while checking scope, redacting or measuring a request sends nothing. `decide` answers `unavailable` or `failed` and the call site runs today's behaviour.
 - **JEV never removes an action.** An answer may send work to a person instead of an agent only when that person is actually told ([Feature 3a](#feature-3a-remediation-triage)). It may never drop a push.
@@ -39,18 +41,20 @@ JEV is hosted only. Calls go to OpenRouter, which forwards them to TypeSafe in t
 
 Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Everything below is sent after [redaction](#redaction).
 
-| Feature               | What is sent                                                                                                                                                                                                                                                                          |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2 Spawn hint          | The new agent's title; the first 6,000 characters of its prompt, which for a Hub-triggered create carries Slack or GitHub text from outside the machine; `spawned_by`; the policy's role names, custom role names and aliases                                                         |
-| 3a Remediation triage | The condition's kind, title and summary; its evidence (8 KB cap), which carries process command lines up to 200 characters each, agent titles, agent cwds and, for failover observations, account identifiers (exact content UNKNOWN); the remedy attempts; the agent task text       |
-| 3b Finish triage      | The agent's title and the last 4,000 characters of its final message, which can quote code, diffs and pull request bodies                                                                                                                                                             |
-| 4, 5 File tools       | Each file's full text, up to 60 KB; its path, which shows the repository's layout; the agent's question text, options and notes                                                                                                                                                       |
-| 6 `ask_jev`           | The agent's own state text (8 KB cap); named files; a command's text and everything it prints, stderr included. `ask_jev_diff_risk`: the branch's diff, minus secret-shaped file names, and every commit body                                                                         |
-| 9 Compaction timing   | A leader's user messages since its last compaction, clipped; daemon envelopes; the last restore note; its last reply, clipped; the names of tools it used. The cut point also sends up to 60 user turns of 120 characters each inside the question                                    |
-| 10 Stall judgment     | The agent's title; the first 800 characters of its assignment; its last 25 timeline rows, clipped: tool inputs including full Bash command lines, error text, assistant text and reasoning text. The loop watch sends this for running agents that are not stalled, up to 8 per sweep |
-| 11 UI                 | Nothing                                                                                                                                                                                                                                                                               |
-| 14 Away auto-reply    | A waiting leader's last message, last 4,000 characters (2,000 with a request pending), which can quote code and diffs; its listed options; a pending question and its options; a pending plan, 4,000 characters; a pending tool call's name and input, 1,000 characters               |
-| 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text     |
+| Feature               | What is sent                                                                                                                                                                                                                                                                                                                                  |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2 Spawn hint          | The new agent's title; the first 6,000 characters of its prompt, which for a Hub-triggered create carries Slack or GitHub text from outside the machine; `spawned_by`; the policy's role names, custom role names and aliases                                                                                                                 |
+| 3a Remediation triage | The condition's kind, title and summary; its evidence (8 KB cap), which carries process command lines up to 200 characters each, agent titles, agent cwds and, for failover observations, account identifiers (exact content UNKNOWN); the remedy attempts; the agent task text                                                               |
+| 3b Finish triage      | The agent's title and the last 4,000 characters of its final message, which can quote code, diffs and pull request bodies                                                                                                                                                                                                                     |
+| 4, 5 File tools       | Each file's full text, up to 60 KB; its path, which shows the repository's layout; the agent's question text, options and notes                                                                                                                                                                                                               |
+| 6 `ask_jev`           | The agent's own state text (8 KB cap); named files; a command's text and everything it prints, stderr included. `ask_jev_diff_risk`: the branch's diff, minus secret-shaped file names, and every commit body                                                                                                                                 |
+| 9 Compaction timing   | A leader's user messages since its last compaction, clipped; daemon envelopes; the last restore note; its last reply, clipped; the names of tools it used. The cut point also sends up to 60 user turns of 120 characters each inside the question                                                                                            |
+| 10 Stall judgment     | The agent's title; the first 800 characters of its assignment; its last 25 timeline rows, clipped: tool inputs including full Bash command lines, error text, assistant text and reasoning text. The loop watch sends this for running agents that are not stalled, up to 8 per sweep                                                         |
+| 11 UI                 | Nothing. The savings ledger and the JEV dashboard send nothing either.                                                                                                                                                                                                                                                                        |
+| 14 Away auto-reply    | A waiting leader's last message, last 4,000 characters (2,000 with a request pending), which can quote code and diffs; its listed options; a pending question and its options; a pending plan, 4,000 characters; a pending tool call's name and input, 1,000 characters                                                                       |
+| 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text                                                             |
+| 16 Read check         | For each judged file read: the agent's title; the first 800 characters of its assignment; its last 8 timeline rows, clipped, which carry Bash command lines and assistant text; the file's path relative to the agent's cwd, its size, up to 2,000 characters of its declaration lines and the first 6,000 characters of the range being read |
+| 17 Title refresh      | The workspace's current title and branch; for up to 4 recent sessions, their status, latest activity summary, first request and last 3 requests (each cut to 1,200 characters); the newest session's last reply (cut to 1,200 characters), which can quote code and command output                                                            |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -70,25 +74,28 @@ The alternatives, and why not:
 
 Files, all under `packages/server/src/server/jev/`:
 
-| File                | Owns                                                                                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `contract.ts`       | The types every track builds against. Committed with this doc as an interface stub.                                                                                                             |
-| `wire.ts`           | Request and response validation and the `noul` / `choice` / `score` builders, adapted from disler/ten-levels-of-jev `core/types.ts`, `core/client.ts` and `core/helpers.ts` with the MIT notice |
-| `transport.ts`      | The OpenRouter and TypeSafe HTTP transports: one attempt each                                                                                                                                   |
-| `fake.ts`           | The deterministic fake transport and `createTestJevService()`                                                                                                                                   |
-| `key.ts`            | Capturing the key from the daemon's environment at startup, and reading the env file                                                                                                            |
-| `config.ts`         | The lenient `agents.jev` resolver and its 5-second cache                                                                                                                                        |
-| `egress-scope.ts`   | The D7 exclusion: path roots, git signals, the text scan                                                                                                                                        |
-| `redact.ts`         | Outbound redaction and the exact-value secret set                                                                                                                                               |
-| `lanes.ts`          | Per-lane concurrency, the rate limiter and the per-lane circuits                                                                                                                                |
-| `ledger.ts`         | Per-call entries, daily totals, the spend caps, the budget notice                                                                                                                               |
-| `audit.ts`          | Bounded payload retention                                                                                                                                                                       |
-| `decisions.ts`      | The per-agent decision store behind `jev.decisions.list`                                                                                                                                        |
-| `service.ts`        | `createJevService()`: the order of checks in `decide`, deadlines, retries, validation, the outcome                                                                                              |
-| `answers.ts`        | `confidentChoice`, `noulOf`, `confidentScore`, `shadowAnswers`: read an outcome at a call site; each answers null, today's behaviour, unless `answered` and over the caller's floor             |
-| `agent-cwds.ts`     | The agent tree behind a scope's `agentIds`: own, ancestor and descendant cwds                                                                                                                   |
-| `secret-sources.ts` | Collecting the exact values the daemon holds, for the redactor                                                                                                                                  |
-| `command-gate.ts`   | `createCatastropheCommandGate`: `checkCatastrophe` adapted to `CommandGate`, failing closed                                                                                                     |
+| File                  | Owns                                                                                                                                                                                            |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `contract.ts`         | The types every track builds against. Committed with this doc as an interface stub.                                                                                                             |
+| `wire.ts`             | Request and response validation and the `noul` / `choice` / `score` builders, adapted from disler/ten-levels-of-jev `core/types.ts`, `core/client.ts` and `core/helpers.ts` with the MIT notice |
+| `transport.ts`        | The OpenRouter and TypeSafe HTTP transports: one attempt each                                                                                                                                   |
+| `fake.ts`             | The deterministic fake transport and `createTestJevService()`                                                                                                                                   |
+| `key.ts`              | Capturing the key from the daemon's environment at startup, and reading the env file                                                                                                            |
+| `config.ts`           | The lenient `agents.jev` resolver and its 5-second cache                                                                                                                                        |
+| `egress-scope.ts`     | The D7 exclusion: path roots, git signals, the text scan                                                                                                                                        |
+| `redact.ts`           | Outbound redaction and the exact-value secret set                                                                                                                                               |
+| `lanes.ts`            | Per-lane concurrency, the rate limiter and the per-lane circuits                                                                                                                                |
+| `ledger.ts`           | Per-call entries, daily totals, the spend caps, the budget notice                                                                                                                               |
+| `audit.ts`            | Bounded payload retention                                                                                                                                                                       |
+| `decisions.ts`        | The per-agent decision store behind `jev.decisions.list`                                                                                                                                        |
+| `service.ts`          | `createJevService()`: the order of checks in `decide`, deadlines, retries, validation, the outcome                                                                                              |
+| `answers.ts`          | `confidentChoice`, `noulOf`, `confidentScore`, `shadowAnswers`: read an outcome at a call site; each answers null, today's behaviour, unless `answered` and over the caller's floor             |
+| `agent-cwds.ts`       | The agent tree behind a scope's `agentIds`: own, ancestor and descendant cwds                                                                                                                   |
+| `secret-sources.ts`   | Collecting the exact values the daemon holds, for the redactor                                                                                                                                  |
+| `command-gate.ts`     | `createCatastropheCommandGate`: `checkCatastrophe` adapted to `CommandGate`, failing closed                                                                                                     |
+| `savings.ts`          | The [savings ledger](#savings): records, the daily rollup, the not-asked counters, the reader behind `jev.savings.*`                                                                            |
+| `savings-formulas.ts` | The price weights, each feature's formula, and each feature's evidence rule                                                                                                                     |
+| `read-check/`         | [Feature 16](#feature-16-file-read-check): recognizing reads, the state, the decision, the observer and its validation window                                                                   |
 
 No `index.ts`: callers import from the file that owns the thing.
 
@@ -123,28 +130,30 @@ The key's variable is `PASEO_JEV_API_KEY`, for both providers (D5). The provider
 
 ### Lanes, deadlines, retries, circuits
 
-Features run in three lanes, so agent tools can neither starve nor bankrupt the features that steer the daemon:
+Features run in four lanes, so agent tools and file reads can neither starve nor bankrupt the features that steer the daemon:
 
 | Lane          | Features                         | Concurrency                                            | Spend cap per day                                                  |
 | ------------- | -------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------ |
 | `control`     | Features 2, 3a, 3b, 9, 10 and 14 | `maxConcurrent`, default 4                             | `maxUsdPerDay`, default $1.00                                      |
 | `agentTools`  | Features 4–6                     | `agentTools.maxConcurrent`, default 4; 2 per tool call | `agentTools.maxUsdPerDay`, default $0.50; $0.05 per agent per hour |
 | `interactive` | Feature 15, `askJev`             | `askJev.maxConcurrent`, default 2                      | `askJev.maxUsdPerDay`, default $0.25                               |
+| `reads`       | Feature 16, `readCheck`          | `readCheck.maxConcurrent`, default 2                   | `readCheck.maxUsdPerDay`, default $0.25                            |
 
-The lanes have separate slots, circuits and caps; none can borrow another's, so a paired phone asking questions cannot spend the budget that steers the daemon. An `agentTools` call waits for its tool call's group slot (`callGroup` on `JevDecideInput`) before it takes a lane slot, so a call queued on its group's cap never holds lane capacity another agent could use. A daemon-wide rate limiter, one token per attempt, (`maxRequestsPerSecond`, default 10, at most 15; TypeSafe publishes 1,200 per minute) serves `control` and `interactive` first: a person waiting does not queue behind agents' tool calls.
+The lanes have separate slots, circuits and caps; none can borrow another's, so a paired phone asking questions cannot spend the budget that steers the daemon. An `agentTools` call waits for its tool call's group slot (`callGroup` on `JevDecideInput`) before it takes a lane slot, so a call queued on its group's cap never holds lane capacity another agent could use. A daemon-wide rate limiter, one token per attempt, (`maxRequestsPerSecond`, default 10, at most 15; TypeSafe publishes 1,200 per minute) serves `control` and `interactive` first: a person waiting does not queue behind agents' tool calls. `reads` gets a token only when no other lane is waiting; a shadow read check is never urgent, and a live one gives up at its own deadline and lets the read through.
 
 Each call site has a deadline that covers the queue, every retry and the response body. Defaults, in `agents.jev.<feature>.timeoutMs`:
 
-| Feature              | Deadline              | Why that number                                                                                 |
-| -------------------- | --------------------- | ----------------------------------------------------------------------------------------------- |
-| `spawnHint`          | 1,500 ms              | It sits on the create path. Independent p50 is 236–276 ms from Europe, p95 720 ms from Germany. |
-| `notificationTriage` | 3,000 ms              | It delays a push, not an agent                                                                  |
-| `remediationTriage`  | 5,000 ms              | The ladder is serialized; it runs once per episode                                              |
-| `agentTools`         | 8,000 ms per JEV call | The agent is waiting on its own tool call                                                       |
-| `compactionTiming`   | 5,000 ms              | Off the agent's path; the monitor sweeps every 60 s                                             |
-| `stallJudgment`      | 5,000 ms              | The sweep is serialized and runs every 5 minutes                                                |
-| `awayReply`          | 5,000 ms              | Off every agent's path; the sweep is serialized, runs every 5 minutes, and asks at most 3 times |
-| `askJev`             | 15,000 ms, at most 30 | A person is waiting and can cancel; a slow call holds one of two `interactive` slots            |
+| Feature              | Deadline              | Why that number                                                                                      |
+| -------------------- | --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `spawnHint`          | 1,500 ms              | It sits on the create path. Independent p50 is 236–276 ms from Europe, p95 720 ms from Germany.      |
+| `notificationTriage` | 3,000 ms              | It delays a push, not an agent                                                                       |
+| `remediationTriage`  | 5,000 ms              | The ladder is serialized; it runs once per episode                                                   |
+| `agentTools`         | 8,000 ms per JEV call | The agent is waiting on its own tool call                                                            |
+| `compactionTiming`   | 5,000 ms              | Off the agent's path; the monitor sweeps every 60 s                                                  |
+| `stallJudgment`      | 5,000 ms              | The sweep is serialized and runs every 5 minutes                                                     |
+| `awayReply`          | 5,000 ms              | Off every agent's path; the sweep is serialized, runs every 5 minutes, and asks at most 3 times      |
+| `askJev`             | 15,000 ms, at most 30 | A person is waiting and can cancel; a slow call holds one of two `interactive` slots                 |
+| `readCheck`          | 5,000 ms; live 1,000  | Shadow runs after the read and nothing waits. Live holds a large read; past 1,000 ms it goes through |
 
 - **The deadline starts before the scope check.** Step 2 runs inside it: each git gets only the time left, no git starts once it is spent, and the service races the check against the deadline and the caller's signal. A spawn hint whose scope check would take 4 seconds answers at 1.5.
 - **Saturated.** A call whose deadline passes during its scope check, or while it waits for a lane slot or a rate token, returns `unavailable: saturated`. Nothing was sent, and it never counts toward a circuit.
@@ -235,6 +244,12 @@ The full types are in `jev/contract.ts`. Only `answered` may change behaviour. W
 | `awayReply.skipPinnedWorkspaces`                      | `false`                   | Leave every agent in a pinned workspace alone                                 |
 | `askJev.enabled`, `.timeoutMs`                        | `true`, `15000`           | Feature 15. `timeoutMs` is clamped to 1,000–30,000                            |
 | `askJev.maxConcurrent`, `.maxUsdPerDay`               | `2`, `0.25`               | `interactive` lane slots and daily cap                                        |
+| `readCheck.enabled`, `.shadow`, `.timeoutMs`          | `true`, `true`, `5000`    | Feature 16. `shadow: false` is live mode (D11)                                |
+| `readCheck.minTokens`                                 | `2000`                    | Reads estimated below this are counted, never judged                          |
+| `readCheck.liveMinTokens`, `.liveTimeoutMs`           | `8000`, `1000`            | Live judges only reads this large, and waits at most this long; 300–2,000 ms  |
+| `readCheck.liveShare`                                 | `0.5`                     | Share of agents live mode applies to; the rest stay shadow, as its control    |
+| `readCheck.maxDeniesPerAgentPerHour`                  | `5`                       | Live denials per agent per hour                                               |
+| `readCheck.maxConcurrent`, `.maxUsdPerDay`            | `2`, `0.25`               | `reads` lane slots and daily cap                                              |
 
 `agents.jev` and `agents.childEnv` need a daemon that has the JEV foundation (its `server_info.features.jev` is set). An older daemon rejects a `config.json` that has either: new connections, config reloads and the next boot all fail. Write them only once the running daemon has the foundation, and delete them before you roll back to `/Applications/Bozeo.prev.app` or any other older build.
 
@@ -273,18 +288,20 @@ An excluded call sends nothing and audits nothing. The ledger records it with th
 
 **Scope per feature**, the call-site obligation, checked in each track's tests:
 
-| Feature               | `scope`                                                                                                                                                                                                                                                 |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2                     | `cwds: [new agent's cwd]`, `agentIds: [parent]` for a child. Over the RPC the plugin sends `cwd` and `parentAgentId`; the daemon looks up the parent itself. A request with no scope answers `unavailable: excluded`.                                   |
-| 3a                    | `agentIds: [observation.link.agentId]`; the cwd of `observation.link.workspaceId`; the path in a `work-at-risk:<path>` key. Machine-wide observations rely on the text scan, so saturation evidence naming a Wonderly agent's cwd excludes that triage. |
-| 3b                    | `agentIds: [the finishing agent]`                                                                                                                                                                                                                       |
-| 4, 5                  | `agentIds: [caller]`, `files: [each candidate]`, `baseCwd: caller cwd`, checked per file: an excluded file is `skipped` with "company code is not sent to JEV" and the others proceed                                                                   |
-| 6 `ask_jev`           | `agentIds: [caller]`, `files`, `baseCwd`, `cwds: [the command's cwd]`. The text scan covers the command and its output.                                                                                                                                 |
-| 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                            |
-| 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                      |
-| 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                 |
-| 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                    |
-| 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                           |
+| Feature               | `scope`                                                                                                                                                                                                                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2                     | `cwds: [new agent's cwd]`, `agentIds: [parent]` for a child. Over the RPC the plugin sends `cwd` and `parentAgentId`; the daemon looks up the parent itself. A request with no scope answers `unavailable: excluded`.                                                                          |
+| 3a                    | `agentIds: [observation.link.agentId]` and `escalation.cwd`; a workspace link with no agent is excluded. Machine-wide observations, work-at-risk included (its key is plain `work-at-risk`), rely on the text scan, so saturation evidence naming a Wonderly agent's cwd excludes that triage. |
+| 3b                    | `agentIds: [the finishing agent]`                                                                                                                                                                                                                                                              |
+| 4, 5                  | `agentIds: [caller]`, `files: [each candidate]`, `baseCwd: caller cwd`, checked per file: an excluded file is `skipped` with "company code is not sent to JEV" and the others proceed                                                                                                          |
+| 6 `ask_jev`           | `agentIds: [caller]`, `files`, `baseCwd`, `cwds: [the command's cwd]`. The text scan covers the command and its output.                                                                                                                                                                        |
+| 6 `ask_jev_diff_risk` | `agentIds: [caller]`, `cwds: [repository top level]`; the remote check covers the repository                                                                                                                                                                                                   |
+| 9                     | `agentIds: [leader]`, which covers its descendants                                                                                                                                                                                                                                             |
+| 10                    | `agentIds: [the agent]`                                                                                                                                                                                                                                                                        |
+| 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                                                           |
+| 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                                                                  |
+| 16                    | `agentIds: [the reading agent]`, `files: [the path]`, `baseCwd: its cwd`. The observer asks `checkScope` first and reads nothing from an excluded file; the read is counted as `excluded`                                                                                                      |
+| 17                    | `cwds: [workspace.cwd]`, `agentIds: [its recent sessions, up to 4]`. Excluded: the tracker generates exactly as it would with no JEV at all                                                                                                                                                    |
 
 The plugin decides the `paseo.jev-tools` label before the agent exists, so it asks `jev.scope.check` with the new agent's cwd and parent; an excluded agent never gets the tools.
 
@@ -366,15 +383,17 @@ A scripted `choice` gets a distribution with the named option at `confidence` an
 
 ### RPCs
 
-Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-schemas.ts`). The first four are gated on `server_info.features.jev`; `jev.ask` on `server_info.features.jevAsk`.
+Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-schemas.ts`). The first four are gated on `server_info.features.jev`; `jev.ask` on `server_info.features.jevAsk`; the two `jev.savings.*` RPCs on `server_info.features.jevSavings`.
 
-| RPC                    | Permission        | Request                                                                                                                                                                                            | Response payload                                                                                                                                            |
-| ---------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jev.decide.*`         | `workspace.write` | `feature` (only `spawnHint` is accepted), `callSite`, `state`, `questions`, `scope: { cwd, parentAgentId? }` (optional on the wire; absent answers `unavailable: excluded`), optional `deadlineMs` | `callId`, `outcome` (string: `answered`, `shadow`, `unavailable`, `failed`), `reason` (string or null), `answers` (or null), `model` (or null), `elapsedMs` |
-| `jev.status.*`         | `daemon.read`     | none                                                                                                                                                                                               | `status`: the `JevStatus` shape in `contract.ts`                                                                                                            |
-| `jev.scope.check.*`    | `workspace.read`  | `cwd`, optional `parentAgentId`                                                                                                                                                                    | `scope`: `ok` or `excluded`                                                                                                                                 |
-| `jev.decisions.list.*` | `workspace.read`  | `agentId`                                                                                                                                                                                          | `decisions`: the agent's `JevDecisionRecord`s, newest first                                                                                                 |
-| `jev.ask.*`            | `workspace.write` | `context`, one `question` (any type), optional `agentId`, optional `deadlineMs`                                                                                                                    | `callId`, `outcome`, `reason`, `answer` (or null), `model`, `elapsedMs`, `cost` (`{ usd, source }`, null when nothing was sent), `redactions`               |
+| RPC                     | Permission        | Request                                                                                                                                                                                                                              | Response payload                                                                                                                                            |
+| ----------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `jev.decide.*`          | `workspace.write` | `feature` (only `spawnHint` is accepted), `callSite`, `state`, `questions`, `scope: { cwd, parentAgentId? }` (optional on the wire; absent answers `unavailable: excluded`), optional `deadlineMs`                                   | `callId`, `outcome` (string: `answered`, `shadow`, `unavailable`, `failed`), `reason` (string or null), `answers` (or null), `model` (or null), `elapsedMs` |
+| `jev.status.*`          | `daemon.read`     | none                                                                                                                                                                                                                                 | `status`: the `JevStatus` shape in `contract.ts`                                                                                                            |
+| `jev.scope.check.*`     | `workspace.read`  | `cwd`, optional `parentAgentId`                                                                                                                                                                                                      | `scope`: `ok` or `excluded`                                                                                                                                 |
+| `jev.decisions.list.*`  | `workspace.read`  | `agentId`                                                                                                                                                                                                                            | `decisions`: the agent's `JevDecisionRecord`s, newest first                                                                                                 |
+| `jev.ask.*`             | `workspace.write` | `context`, one `question` (any type), optional `agentId`, optional `deadlineMs`                                                                                                                                                      | `callId`, `outcome`, `reason`, `answer` (or null), `model`, `elapsedMs`, `cost` (`{ usd, source }`, null when nothing was sent), `redactions`               |
+| `jev.savings.summary.*` | `daemon.read`     | `range`: `today`, `7d` or `all`                                                                                                                                                                                                      | `summary`: the `JevSavingsSummary` shape in `contract.ts`                                                                                                   |
+| `jev.savings.events.*`  | `workspace.read`  | `range`, optional `feature`, `agentId`, `cursor`, `limit` (default 50, at most 200); only the workspaces the caller may read, which under today's daemon-wide grants is every workspace ([permissions.md](permissions.md#resources)) | `events`: `JevSavingsEvent`s, newest first; `nextCursor` (or null)                                                                                          |
 
 - Outcome, reason and feature are plain strings on the wire with the values listed in a comment, so adding one never narrows a schema. The question and answer schemas are `z.discriminatedUnion("type", …)`.
 - `jev.decide` from a client serves feature 2 only; any other `feature` answers `failed: invalid-request` without a call. Every other feature is daemon-internal, so a paired phone cannot spend under `agentTools`' name. A person's own question is `jev.ask`, which always runs as `askJev` on the `interactive` lane.
@@ -384,7 +403,7 @@ Following `agent.context_usage.read` (`packages/protocol/src/context-usage/rpc-s
 
 ### Decision store
 
-`decisions.ts` keeps, in memory, the newest 50 `JevDecisionNote`s per agent, for at most 500 agents. `JevService.decisions.record(note)` writes to it and `jev.decisions.list` reads it. Nothing goes in the agent timeline store.
+`decisions.ts` keeps, in memory, the newest 50 `JevDecisionNote`s per agent, for at most 500 agents. `JevService.decisions.record(note)` writes to it and `jev.decisions.list` reads it. Nothing goes in the agent timeline store. A note carries an optional `mode`, `wouldBe` and `savingsId`: `applied: false` does not mean shadow, because a live answer that kept today's behaviour is not applied either, so a reader that needs the mode reads `mode`, never `applied`. The store is for one agent's popover; counts and totals come from the [savings ledger](#savings), which survives a restart.
 
 Timeline rows would break account failover. It identifies a limit failure by `(lastError, timelineSeq)` and dates it by `lastTimelineAt` (`agent/account-failover-detector.ts:72-81, 159-167`), both from the timeline store (`agent-manager.ts:2050-2052`). A row appended to a capped agent re-dates its failure, and its account reads dead for five more hours. The done janitor reads the timeline cursor too (`agent-manager.ts:2001-2004`).
 
@@ -398,26 +417,32 @@ When a child create has no `paseo.task-class` label, the classifier asks JEV wha
 
 ### Seam
 
-`classifyAgent` stays pure and synchronous (`plugins/claude-account-pool/server/classifier.ts:1165`; its header at `:68-75` rules out I/O). The async call happens before it:
+`classifyAgent` stays pure and synchronous (`plugins/claude-account-pool/server/classifier.ts`; its header records D3). The async work happens before it:
 
-- `index.server.ts:322-339`, the role hook. `fetchSpawnHint(request, context.paseo)` (new, `server/jev-hint.ts`) starts at the same time as `refreshPolicyForCreate()` (`:331`), and the hook awaits both before `roleRouter(input, context)` (`:332`).
-- `role-router.ts:630-650` passes the hint to `classifyAgent` as `ClassifierInput.jevHint`. The hint is consumed only inside the router's existing try/catch (`:512-531`), which passes the create through untouched on any throw.
-- `role-resolve.ts:153-177` (`resolveRole`) and `:241-253` (`resolveTaskClass`) take the hint as a tier.
-- New sources: `RoleSource` `"classified-jev"` (`classifier.ts:169-181`), `TaskClassSource` `"jev"` (`role-resolve.ts:179`).
+- `index.server.ts`, the role hook. `jevInputsFor(request, paseo)` starts `fetchSpawnHint` (`server/jev-hint.ts`) and the JEV tools' scope check (`jevToolsWorldFor`, `server/jev-availability.ts`) before `refreshPolicyForCreate()`, and the hook awaits all three before `roleRouter`.
+- `role-router.ts` passes them to `classifyAgent` as `ClassifierInput.jevHint` and `ClassifierWorld.jevToolsAvailable`, inside the router's existing try/catch, which passes the create through untouched on any throw.
+- `resolveRole` and `resolveTaskClass` (`role-resolve.ts`) take the hint as a tier.
+- New sources: `RoleSource` `"classified-jev"`, `TaskClassSource` `"jev"`.
 
-`fetchSpawnHint` returns `{ status: "not-needed" }` without a call unless an answer could change the create:
+`server/jev-availability.ts` polls `jev.status` every 60 seconds, behind the `paseo.jev` guard and a 5-second bound, for whether the hint can send, `shadow`, `applyHard` and `applyRole`, and whether the daemon serves the agent tools. The first poll starts with the plugin but is not part of its warm-up, so a slow one delays no create. A failed poll forgets the last answer, so a stale "on" never outlives the daemon that said it. The hook asks only when the last poll answered and said the hint can send. Until a poll answers, after one fails, when the daemon has no `paseo.jev`, and when the last poll says the hint cannot send (no key, switched off, lane spent or its circuit open), the hook passes no hint at all: no call, and the decision line gains nothing.
 
-- No declared task class, and, for the role resolved without JEV, running the pure classifier with each of the three classes gives different models or thinking. A root create resolves to the leader, whose policy has no mechanical pool, the same hard pool as standard, and thinking from the leader rule (`classifier.ts:1014-1021`), so root creates never call. Over the 7 days to 2026-09-28, 38 of 51 root creates were unlabelled; each would have paid up to 1.5 s for nothing.
+The `paseo.jev` guard alone is not enough. Every plugin start forks the child from the app on disk, so between staging a build and relaunching, the child has `paseo.jev` while the running daemon rejects every `jev.*` request with `unknown_schema` and logs a warning for each. The poller reads that code as a daemon without JEV and asks again only after 10 minutes.
+
+`planSpawnHint` decides, from the classifier alone, whether an answer could change the create. `fetchSpawnHint` returns `{ status: "not-needed", reason }` without a call unless:
+
+- No valid `paseo.task-class` declares the class (an unrecognized value counts as none); no hard risk keyword already made it `hard`, which JEV cannot lower; there is a title or prompt; and, for the role resolved without JEV, running the pure classifier with each of the three classes gives different models or thinking. The skip reasons are `declared`, `hard-seed`, `no-text` and `no-effect`.
+- A root create never calls (`leader`), whatever the policy says: it resolves to the leader, whose policy has no mechanical pool, the same hard pool as standard, and thinking from the leader rule. Over the 7 days to 2026-09-28, 38 of 51 root creates were unlabelled; each would have paid up to 1.5 s for nothing. A caller-less create that declares a non-leader role (a daemon job's worker) is placed like a child and asks like one, with `spawned_by` `a person or a daemon job`.
 - The check uses the plugin's cached policy, so it can start before the refresh finishes. A policy edit landing in the same second costs at most one unneeded call or one skipped call.
-- The role question rides only on calls made for the class, unless `applyRole` is on.
+- The role question rides on calls made for the class, for a child whose role is a keyword guess (tier 3 or 4). It earns a call of its own only with `applyRole` on.
 
 `fetchSpawnHint` never throws and is bounded on its own side:
 
-- It checks `typeof paseo.jev?.decide === "function"`; absent, it returns `{ status: "unavailable" }`.
-- It passes `timeout: deadline + 250 ms` to the RPC and races its own 2,000 ms timer.
-- It wraps everything and maps any error to `{ status: "unavailable" }`. The hook also wraps the await, so the worst case adds 2 seconds to a create and fails none. The role hook's total stays under the plugin's 30-second budget (`packages/server/src/server/plugins/runtime.ts:33`): the warm-up and the refresh are each capped at 5 s (`index.server.ts:35`), and the hint runs alongside the refresh.
+- It checks `typeof paseo.jev?.decide === "function"`, tagged `COMPAT(jevPaseoApi)`; absent, it returns `{ status: "unavailable", reason: "no-jev-api" }`.
+- It sends `deadlineMs: 1500`, which the daemon clamps to `spawnHint.timeoutMs`, passes `timeout: 1750` to the RPC, and races its own 2,000 ms timer (`plugin-timeout`).
+- An answer missing a question it asked, or of the wrong type, is `failed: contract`. So is one whose `callId` is not a string of 1–200 characters, and it keeps no call id: the id becomes a label, and a label that is not a string makes the daemon refuse the create.
+- It wraps everything and maps any error to `{ status: "unavailable", reason: "error" }`. The hook also wraps the await, so the worst case adds 2 seconds to a create and fails none. The role hook's total stays under the plugin's 30-second budget (`packages/server/src/server/plugins/runtime.ts:33`): the warm-up and the refresh are each capped at 5 s (`index.server.ts`), and the hint runs alongside the refresh.
 
-`jevHint` is an input, like pool health, so the decision stays replayable from its log line. The `role-model-policy.explain` RPC and the `agent_model_policy` tool pass no hint and say "decided at create" for an unlabelled value; a preview must not spend.
+`jevHint` is an input, like pool health, so the decision stays replayable from its log line. The `role-model-policy.explain` RPC and the `agent_model_policy` tool never ask; a preview must not spend. When the hint is live (not shadow) and a create would ask, they pass `{ status: "decided-at-create" }` and the task-class reason says the class is decided at create. In shadow mode they say nothing, since the create does what they show.
 
 ### State and questions
 
@@ -488,7 +513,7 @@ A JEV `standard` answer changes nothing: it never lifts a task off the mechanica
 
 Role, for a child at tiers 3–4 only, and only with `spawnHint.applyRole`: JEV's `role` at confidence ≥ 0.70 and not `other` replaces the keyword tier. Off, it is logged as `wouldBe`. A role can move cost up (`advisor`'s standard pool is Opus 5.5), which is why it waits for the shadow numbers.
 
-**Tools (D2).** `toolProfileIsEvidenceBased` (`classifier.ts:426-431`) returns `true` for tiers 3–4 whenever `policy.enforceToolsOnClassifiedRoles` is true. A `classified-jev` role returns `false` before that check, whatever the flag says. JEV can change the model a child runs; it can never take a tool away.
+**Tools (D2).** A role JEV names picks the model only. `classifyAgent` decides the tool profile and the role's MCP servers from the role resolved without JEV, under the keyword tier's own rule: `toolProfileIsEvidenceBased` returns `true` for tiers 3–4 whenever `policy.enforceToolsOnClassifiedRoles` is true. So JEV changes a child's tools in neither direction: it cannot take a tool away, and it cannot lift a profile the operator's flag enforces on a keyword guess, including when it names the same role the keywords did.
 
 Thinking follows the class through `policy.thinking.byTaskClass` (`classifier.ts:1027`), as it does now (D4).
 
@@ -496,9 +521,10 @@ Hub-triggered creates carry untrusted text. v1 never raises a class, so JEV cann
 
 ### Labels and the log
 
-- `paseo.task-class-source`: the `TaskClassSource` value, `declared`, `jev`, `classified` or `default`, spelled as in `role-resolve.ts:179`.
-- `paseo.jev-call`: the `callId`, when JEV answered or shadowed, so `jev.decisions.list` can attach the decision to the new agent.
-- The `classifier-decision` line (`decision-log.ts`) gains `jev: { status, callId, taskClass: { choice, confidence }, reasoning: { score, confidence }, role?, wouldBe? }`.
+- `paseo.task-class-source`: the `TaskClassSource` value, `declared`, `jev`, `classified` or `default`. Written with `paseo.jev-call` on a create JEV answered or shadowed, and on no other create, so an ordinary create still passes through the role hook unchanged.
+- `paseo.jev-call`: the `callId`, so `jev.decisions.list` can attach the decision to the new agent. A call that failed after sending (`failed: contract`, a timeout) gets no label; the ledger alone prices it.
+- `paseo.jev-tools`: the D8 arm, `on` or `control`, for a create eligible for the agent tools ([Which agents get them](#which-agents-get-them)). No create is labelled until the daemon serves the tools (`status.agentTools.served`), so no agent enters an arm with nothing behind it and gains seven tools mid-life, a cache break, when they ship. No agent id exists before a create, so the arm is a `Math.random()` draw against `assignShare` made in the hook and passed to the classifier as data. The hook owns the label whenever it evaluated the arm: it writes the drawn arm over any value the caller sent, and removes a caller's value from an ineligible create, so no caller picks its own arm. Nothing that carries an agent's labels forward (failover, resume, reload) runs the create hook, and a handoff agent is a new conversation with no cache to keep. The scope check is bounded at 2 s and fails closed: unanswered is no tools.
+- The `classifier-decision` line (`decision-log.ts`) gains `jev: { status, callId?, reason?, taskClass?: { choice, confidence }, reasoning?: { score, confidence }, role?: { choice, confidence }, applied, wouldBe? }` whenever the hook passed a hint, and `jevTools` (the arm the agent carries, read off its labels, or null when it carries none) whenever the arm was evaluated. `wouldBe` is on every answer, applied or shadowed: `{ taskClass, role?, model, move }`, the class, the role (when asked) and the model the create would run with every answer past its floor applied, and `move`, `down`, `up` or `none` against the class resolved without JEV.
 
 Labels never reach the Claude prompt (no `labels` in `providers/claude/agent.ts`), so they are cache-neutral.
 
@@ -510,31 +536,36 @@ Any outcome other than `answered` leaves `jevHint` as `{ status: "unavailable" |
 
 - About 1,500–2,500 input tokens per call, $0.00006–$0.0001.
 - No cache effect: the model is chosen before the session exists.
-- Median about 0.3 s on an unlabelled child create, hidden behind the policy refresh; at most 2 s. Labelled creates and root creates pay nothing. In the 7 days to 2026-09-28, 115 of 416 child creates (28%) had no `paseo.task-class`, and 100 of those ran Sonnet 5.
-- **Pays if** the mechanical moves save more than the upward moves would cost. **Measured by** the shadow day: for each unlabelled child, its `wouldBe` class × that agent's actual weighted spend × the model price ratio gives a projected Δ$, mechanical savings minus hard and advisor increases. `applyHard` and `applyRole` stay off unless their projected Δ$ is positive. Once live, compare weighted spend per unlabelled child before and after, and count mechanical children that were re-spawned or escalated as the quality cost.
+- Median about 0.3 s on an unlabelled child create that asks; at most 2 s. It runs beside the policy refresh, but that is a local config read, so it hides little of the call. Labelled creates, root creates and creates where no class would change the model pay nothing. While the agent tools are on, every create also waits for its `jev.scope.check`, bounded at 2 s, beside the same refresh. In the 7 days to 2026-09-28, 115 of 416 child creates (28%) had no `paseo.task-class`, and 100 of those ran Sonnet 5.
+- **Pays if** the mechanical moves save more than the upward moves would cost. **Measured by** the shadow day: join each line's `jev.callId` to the agent carrying it in `paseo.jev-call`; that agent's actual weighted spend × the price ratio of `wouldBe.model` to the model that ran gives a projected Δ$, mechanical savings minus hard and advisor increases, and `wouldBe.move` counts the moves each way. `applyHard` and `applyRole` stay off unless their projected Δ$ is positive. Once live, compare weighted spend per unlabelled child before and after, and count mechanical children that were re-spawned or escalated as the quality cost.
 
 ### Tests and verification
 
-- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` never lifting the mechanical seed; `other` and low confidence falling through; `not-needed` when labels are present and for a root create; no call when `paseo.jev` is absent; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); shadow logs `wouldBe` and changes nothing.
-- `classifier.test.ts`: a `classified-jev` role withholds tools with `enforceToolsOnClassifiedRoles` both off and on; `classified-jev` and the `jev` source reach the decision and the reasons.
-- `role-router` test: the new labels are written; a hint that makes classification throw passes the request through.
-- Verify: `npx vitest run plugins/claude-account-pool/server/jev-hint.test.ts --bail=1`.
+- `jev-hint.test.ts`: every precedence step with scripted answers; the `HARD_SEED_RE` override; the two-answer rule for `mechanical`; `hard` and `role` logged as `wouldBe` with the apply switches off; `standard` never lifting the mechanical seed; `other` and low confidence falling through; each `not-needed` reason, including a root create; the request's scope, deadlines and clipped prompt; no call when `paseo.jev` is absent, before a poll has answered, or when the status says off; `unavailable` when the RPC rejects and when it never resolves (the create proceeds within 2 s); a D7 exclusion changing nothing; a malformed answer, a non-string `callId` and a non-object response failing `contract`; shadow logs `wouldBe` and changes nothing; the preview.
+- `classifier.test.ts`: a `classified-jev` role leaves tools and MCP servers as the role resolved without JEV gets them, with `enforceToolsOnClassifiedRoles` both off and on, and never cancels the flag's enforcement of a keyword guess; `classified-jev` and the `jev` source reach the decision and the reasons; a non-answer is today's decision; the tools' arm and eligibility.
+- `role-router.test.ts`: the new labels are written; a hint that makes classification throw passes the request through; the drawn arm replaces a caller's, an ineligible create loses a caller's, and an unevaluated arm leaves the labels alone.
+- `jev-availability.test.ts`: reading a status, forgetting it on a failed poll, the 10-minute pause on `unknown_schema`, no arm until the daemon serves the tools, and the scope check failing closed.
+- `index.server.test.ts`: through both hooks, live, shadow, a daemon without JEV, a daemon that rejects `jev.status` and a status that never answers (both byte-identical to no JEV, with no added latency), a rejected call, a root create, and the `paseo.jev-tools` gate.
+- Verify: `cd plugins/claude-account-pool && npx vitest run server/jev-hint.test.ts server/jev-availability.test.ts --bail=1`.
 
 ## Feature 3a: remediation triage
 
-Before the ladder starts a remediation agent (up to 2M tokens), JEV judges whether an agent is the right next step. It can send the episode to a person instead, but only when that person will actually be told, or give it one more grace window.
+Before the ladder starts a remediation agent (up to 2M tokens), JEV judges whether an agent is the right next step. It can send the episode to a person instead, but only when the push reaches a phone now, or hold the agent once while a live remedy acts.
 
 ### Seam
 
-`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts:304-380`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker (`:311-342`) — and before the request is built (`:344`), call a new optional dependency:
+`RemediationLadder.startAgent` (`packages/server/src/server/remediation/ladder.ts`). After every existing gate has passed — escalation on, not in cooldown, under the daily cap, a free slot, no account blocker — and before the request is built, `routeElsewhere` runs. It honours `escalation.personFirst` first, then asks the optional dependency, once per episode:
 
 ```ts
 triageEscalation?(input: { episodeKey: string; observation: RemediationObservation }): Promise<EscalationTriage>;
+recordTriage?(event: RemediationTriageEvent): void;
 ```
 
-It is added to `RemediationLadderDependencies` (`ladder.ts:58-65`) and wired inside the ladder factory in `bootstrap.ts:864-935`, which the foundation gives a `jev` input. The episode records the result so JEV is asked once per episode: `EpisodeSchema` (`ladder-state.ts:44-59`) gains optional `jevTriage` and `jevDeferredUntil` (added by the foundation). `evaluate` (`ladder.ts:250-302`) returns early while `jevDeferredUntil` is in the future, next to the grace check at `:280-283`.
+`EscalationTriage` is what JEV said (outcome, route, confidence, `evidence_current`, cost), not what to do: the ladder turns it into an action with the pure `decideTriageAction` (`remediation/jev-triage.ts`), because only the ladder knows whether the escalation will push. Bootstrap builds both dependencies from `jev` in the ladder factory, with `previewPush` calling the notify policy's `previewDelivery` on the daemon's push sender.
 
-Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized (`ladder.ts:107, 162-164`), so a 5-second triage delays every queued observation, disk-critical included.
+The episode records the answer in `jevTriage` (`action` is what the answer maps to, `applied` whether the ladder acted on it, `level` the observation's level then) and a deferral in `jevDeferredUntil`, so a restart neither asks again nor forgets the hold. `evaluate` returns early while the hold lasts, next to the grace check. The hold ends at `jevDeferredUntil` or 15 minutes after the triage, whichever comes first, so a hold written by an older build is capped too, and it ends early when the observation's level rises past `jevTriage.level`. The 60-second poll starts the held agent once the hold ends: `evaluate` otherwise runs only on an active observation, and a monitor that went quiet would strand the episode.
+
+Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observations. The ladder is serialized, so a 5-second triage delays every queued observation, disk-critical included. The ladder bounds the call itself at 8 seconds, past the service's deadline, so a triage that never settles cannot hold the queue.
 
 ### State and questions
 
@@ -572,34 +603,44 @@ Not triaged: advisory episodes (`escalation.advice: true`), and `urgent` observa
 }
 ```
 
+The scope is `agentIds: [observation.link.agentId]`, whose cwd tree includes its workspace's, plus `escalation.cwd`. A workspace link with no agent cannot be resolved by the ladder, so it is sent as `missing` and excluded. The work-at-risk sweep's key is plain `work-at-risk`, not `work-at-risk:<path>`; its worktree paths are in the evidence, so it and every other machine-wide observation rely on the text scan.
+
 ### Thresholds
 
-| Answer                                                                         | Action                                                                                                                       |
-| ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `needs_person` at confidence ≥ 0.80, and the escalation will push              | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                           |
-| `needs_person` at confidence ≥ 0.80, and the escalation would only be recorded | The agent starts as today                                                                                                    |
-| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40       | Defer rung 2 once, by the condition's grace window or 10 minutes, whichever is longer. After that the agent starts as today. |
-| Anything else                                                                  | The agent starts as today                                                                                                    |
+| Answer                                                                                  | Action                                                                                                             |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `needs_person` at confidence ≥ 0.80, and the escalation will push                       | Rung 3 now, no agent. The push says so: "No agent started: JEV judged this needs a person (0.84)."                 |
+| `needs_person` at confidence ≥ 0.80, and the escalation will not push                   | The agent starts as today                                                                                          |
+| `clearing_on_its_own` at confidence ≥ 0.80 and `evidence_current` < 0.40, remedy `live` | Hold rung 2 once, for the condition's grace window clamped to 10–15 minutes. After that the agent starts as today. |
+| `clearing_on_its_own` with any other remedy                                             | The agent starts as today                                                                                          |
+| Anything else, including a missing `evidence_current`                                   | The agent starts as today                                                                                          |
 
-**"Will push"** means `condition.notify` is true and the level `escalate` would send at, `observation.level ?? "alert"`, is `notice` or higher. This rule exists because rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set (`ladder.ts:255`), so after a skip no agent ever starts for that episode, and `escalate` sends at `record` when `condition.notify` is false (`ladder.ts:502-507`). Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
+**"Will push"** means `condition.notify` is true (the notify rung and `conditions.<kind>.notify`), the level `escalate` sends at, `observation.level ?? "alert"`, is at least `notice`, and the notify policy's `previewDelivery` for that level and the `remediation:<key>` dedupe key says `interrupt` or `notify` with at least one registered device. So a push that would fold into one from the last hour (a recurrence of a key already pushed), one held for a digest, one below `minPostLevel`, and one with no phone to go to all start the agent. A preview that is absent or throws counts as not reaching anyone, so the rule never passes on a guess. A failed Expo send is not predictable and is not covered. Rung 3 is final: `evaluate` returns at once once `episode.escalatedAt` is set, and `escalate` sends at `record` when `condition.notify` is false. Without the rule, a JEV answer could turn "an agent fixes it" into "nobody fixes it and nobody is told".
 
-The same rule governs `escalation.personFirst`, a field the foundation adds to `RemediationObservation` for [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push. The ladder is the one place that decides.
+**When a person will not be told, the fixer runs.** The alternative, pushing anyway when notify is off for the condition, was rejected: notify off is the operator's decision, and a JEV answer, which condition evidence can steer, must neither create pushes he turned off nor drop a fix. So the worst answer a steered triage can produce is a push Tyler receives now, naming the skip, with no agent, or a hold of at most 15 minutes on a condition a live remedy is working on; everywhere else it starts the agent.
 
-A deferred episode that clears on its own closes as resolved, as any episode does.
+The same rule governs `escalation.personFirst` from [feature 10](#feature-10-stall-judgment): the ladder skips the agent for an observation carrying it only when the escalation will push, and asks JEV nothing then. The ladder is the one place that decides, and it cannot tell a shadow judgment from an applied one, so the stall judgment sets `personFirst` only from an `answered` outcome.
+
+Only a `live` remedy is held. A condition nothing is acting on cannot clear by itself, and its monitor may close the episode for another reason: the work-at-risk sweep sends `active: false` on its next sweep whether or not a judge ran, so a hold there would lose both the judge and the push.
 
 ### Fail open
 
-Not `answered`: the agent starts as today. The call is bounded by the 5-second deadline and made once per episode.
+Not `answered`: the agent starts as today. So do a triage that throws, one the ladder's 8-second bound cuts off, and a missing dependency. The call is bounded by the 5-second deadline and made once per episode; shadow is the default and records the would-be action in `jevTriage` with `applied: false`.
 
 ### Cost, cache, latency
 
 - Under 3,000 input tokens per episode. No cache effect: no agent context is touched, and a skipped remediation agent is a whole context not built. Up to 5 seconds added to rung 2, once.
-- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`~/.paseo/remediation/state.json`, `daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`. **Measured by** a week of shadow: per episode, JEV's route against the actual outcome (FIXED, NOT FIXED, or cleared within the grace) and the agent's measured spend; count skipped-and-useless agents against false `needs_person`.
+- **Pays if** the agents it skips or defers would have ended NOT FIXED, or the condition would have cleared on its own. About 7 remediation agents start a day (`daily.count: 7` on 2026-09-28), each budgeted up to 2M tokens, so one useful skip pays for years of JEV. The cost is Tyler's attention on a false `needs_person`.
+- **Measured by** `$PASEO_HOME/jev/remediation-triage.jsonl` (0600, one rotation at 1 MB), joined on `episode` (`<key>@<openedAt>`). A `triage` line carries JEV's reading, its cost, `willPush` and the decision; `agent-ended` carries the agent's result, cause, `agentTotalTokens` and model; `closed` carries how long after the triage the condition cleared, whether a deferral was holding, and `clearedDuringHold`: closed inside the hold, remedy `live`, no agent run. Episodes that ran an agent untriaged get the last two as well, so the file holds the typical agent's cost too.
+  - Shadow: a `triage` with `decision.wouldBe: "person"` whose `agent-ended` says `not-fixed` is a skipped-and-useless agent, worth its `agentTotalTokens`; one that says `fixed` is a false `needs_person`. A would-be deferral mostly cannot be judged in shadow, because the agent ran: the savings ledger credits one only when the episode closed inside the hold and the agent did not fix it ([Formulas](#formulas)). Judge the rest live.
+  - Live: a `person` episode with no `agent-ended` line is an agent avoided, and so is a `defer` episode whose `closed` line has `clearedDuringHold: true`. A `defer` whose hold ran out starts its agent and gets an `agent-ended` line. Each avoided agent is worth the median `agentTotalTokens` of the `agent-ended` lines at that agent's model price.
+  - Against: the sum of `triage.costUsd`, which the ledger's daily `remediationTriage` totals in `$PASEO_HOME/jev/ledger.json` confirm.
+  - Each `triage` about a linked agent also lands in the decision store, so feature 11 shows it on that agent.
 
 ### Tests and verification
 
-- `remediation/jev-triage.test.ts`: the decision function for each row of the table; `urgent` and advisory observations never triaged.
-- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with notify off, or a `record` level, starts the agent; `personFirst` follows the same two cases; `clearing_on_its_own` defers once and then creates; a second observation in the same episode does not ask again; `triageEscalation` absent or failing behaves exactly like today; the fields survive a state reload.
+- `remediation/jev-triage.test.ts`: the decision function for each row of the table, shadow and every non-`answered` outcome, no hold without a `live` remedy, the 10–15 minute clamp; `willEscalationPush` against the notify rung, the level, a fold, a digest, a log-only level, no phone and no preview; `urgent`, advisory and agentless observations never triaged; the state and the 8 KB cut; the scope, including an unresolvable workspace link; over the fake, answered, shadow by default, an unknown agent and a company path in the evidence sending nothing, timeout and contract failures, and steered evidence; the recorder's lines, decision note and rotation.
+- `ladder.test.ts`: `needs_person` with notify on escalates without calling `createAgent` and the push names the skip; `needs_person` with the notify rung off, the condition's notify off, a log-only level, a fold, no phone, a digest hold, or no or a throwing preview starts the agent, and a recurrence inside the dedupe hour starts it through a real `NotifyPolicy`; `personFirst` follows the same cases and asks JEV nothing when it skips; the work-at-risk sweep's observe-then-close sequence still runs its judge; `clearing_on_its_own` defers once and then creates, from the poll when the monitor went quiet; a hold is capped at 15 minutes, also when read from an older state file; an observation whose level rises is not held; a second observation in the same episode does not ask again; the fields survive a restart; a shadow answer, a throwing triage and a hung one start the agent; the measurement lines, including an untriaged agent's end; the remediation agent is created unattended.
 - Verify: `npx vitest run packages/server/src/server/remediation/ladder.test.ts --bail=1`.
 
 ## Feature 3b: finish triage
@@ -608,22 +649,32 @@ A root agent's finish pushes an `alert` today. JEV reads the final message and c
 
 ### Seam
 
-`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts:2620-2704`). The final message is already fetched at `:2644`. At `:2661-2666`:
+`VoiceAssistantWebSocketServer.broadcastAgentAttention` (`packages/server/src/server/websocket-server.ts`). The final message is already fetched there. It calls `sendAttentionPush` (`packages/server/src/server/attention-push-triage.ts`) without awaiting it:
 
-- Keep `attentionPushLevel` (`agent-attention-policy.ts:90-95`) as the base level.
-- The in-app messages (`:2668` onward) must not wait for JEV. The push moves into a detached async step: if the base is `alert` and the reason is `finished`, triage, then send; otherwise send at the base level at once.
-- The step is written so no throw can lose the push: `let level = base; try { level = await triage() } catch {} finally { send(level) }`. A throw in the state builder, in JEV or in the level function sends the `alert`.
-- The logic lives in a new `packages/server/src/server/attention-push-triage.ts`: the vetoes, the question, the state builder and a pure `finishedPushLevel(base, answers)`.
+- `attentionPushLevel` (`agent-attention-policy.ts`) stays the base level.
+- Every path that does not triage — not a finish, not an `alert`, no JEV, JEV inactive, a veto, shadow — sends before the function's first `await`, so the in-app messages that follow go out in the same order as before.
+- A live triage sends from a `finally`: `let level = base; try { level = finishedPushLevel(base, await triage, postFloor) } catch {} finally { send(level) }`. The push step bounds the call itself at 5 seconds.
+- `sendAttentionPush` sends exactly once and never rejects: a throw anywhere, the vetoes and the record included, sends the `alert` if nothing went out yet. The call site keeps a `.catch` anyway, because the daemon exits on an unhandled rejection (`daemon-worker.ts`).
+- **Shadow sends at once.** The `alert` goes out before JEV is asked, and the answer only feeds the record, so shadow neither delays nor changes a push.
+- The scope is `agentIds: [the finishing agent]`.
 
-The finished edge itself (`agent-manager.ts:6673-6691`) does not change.
+The finished edge itself (`agent-manager.ts`, `checkAndSetAttention`) does not change.
 
 ### Vetoes
 
 The final message is the agent's own text, shaped by whatever it read, and a `notice` is held for the digest: 30 minutes when available, 2 hours in focus, all of it while away ([notification-policy.md](notification-policy.md)). Code checks these before asking, and any one keeps the `alert` without a call:
 
-- the last 400 characters contain `?`, a pull request or issue URL, or `error`, `fail`, `couldn't`, `cannot`, `blocked`, `limit`, `denied` or `revert`;
+- Tyler's availability is `away` or `off`: a notice would wait up to 8 hours, long enough for the away auto-reply ([feature 14](#feature-14-away-auto-reply)) to answer the finish before he sees it;
+- the message is empty;
+- the agent has a pending permission;
 - the agent's last tool call failed;
-- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md)).
+- a child still owes this agent a finish report ([finish-reports.md](finish-reports.md));
+- a `?` anywhere in the message, outside URLs and code;
+- in the last 1,500 characters, a pull request or issue URL, `PR #123`, `#1234`, or a veto word (`attention-push-triage.ts`): failure words (`error`, `fail`, `can't`, `blocker`, `timed out`, `won't`…), ways of asking without a question mark (`want me to`, `tell me`, `pick one`, `reply`, `say the word`, `awaiting`, `i'll wait`, `until you`, `your input`, `your review`, `shall i`, `your call`…), things only a person can do (`sign in`, `credentials`, `expired`), and a message addressed to the triage (`triage`, `needs no attention`).
+
+The text is folded first: curly apostrophes become `'`, and NFKC turns the full-width `？` into `?`. The new words match whole words only, so `pick` does not catch `picked`.
+
+The vetoes are a backstop. They catch the plain ways of asking, the adversarial review's 20 phrasings among them (the fixture in `attention-push-triage.test.ts`); JEV's `routine` floor of 0.85 is the main guard. A final message written to steer JEV past both gets, at worst, the same push as a digest `notice`, and never while Tyler is away or off.
 
 ### State and question
 
@@ -649,22 +700,22 @@ The final message is the agent's own text, shaped by whatever it read, and a `no
 
 ### Thresholds
 
-`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`. Everything else sends the `alert`. A message with no text sends the `alert`.
+`routine` at confidence ≥ 0.85 turns the `alert` into a `notice`, but only while the notify policy's `minPostLevel` is `notice` or lower: under a higher floor a notice is logged, not delivered, so the `alert` goes out. Everything else sends the `alert`.
 
 ### Fail open
 
-Not `answered`, or any error: the `alert` goes out as now, at most 3 seconds later.
+Not `answered`, any error, an unreadable fact, post floor or availability, or no answer within 5 seconds: the `alert` goes out as now, at most 5 seconds later. In shadow it goes out at once.
 
 ### Cost, cache, latency
 
-- Under 1,500 input tokens per finish. No cache effect. The push is delayed by up to 3 seconds; the in-app notice is not delayed.
-- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention. **Measured by** the shadow share of root finishes rated `routine` ≥ 0.85, against whether Tyler messaged or opened that agent within 2 hours of the push.
+- Under 1,500 input tokens per finish. No cache effect. A live push is delayed by up to 3 seconds (5 at the push step's bound); a shadow push and the in-app notice are not delayed.
+- **Pays if** the finishes it rates `routine` are ones Tyler would not have opened. It saves no tokens; the gain is Tyler's attention.
+- **Measured by** `$PASEO_HOME/jev/finish-triage.jsonl` (0600, one rotation at 2 MB). A `finish` line per root finish JEV could judge: vetoed with the veto, or asked with the outcome, choice, confidence, the level sent and the level a shadow answer would have sent. A `followup` line per answered finish, with `closedBy`: `message` with the minutes until Tyler's first message to the agent from an app client (the `human-prompt` operator signal), or `window` after 2 hours with none. `superseded` (the agent finished again first) and `evicted` (over 500 pending) are censored, and so is an answered finish with no followup line, which is what a restart leaves. The share of uncensored finishes rated `routine` ≥ 0.85 that closed by `window` is the attention saved; a `routine` closed by `message` is a miss. Judge go-live on shadow lines: once live, a lowered finish Tyler sees late makes "no message" self-fulfilling. Opening the agent without writing is not visible to the daemon's push path. `daemon.log` gets a `finish-triage` line too, but keeps only 30 MB. Each asked finish also lands in the decision store, with the action saying what was sent and why.
 
 ### Tests and verification
 
-- `attention-push-triage.test.ts`: each veto; `finishedPushLevel` for each option and the floor; a delegated child's `notice` and every non-`finished` reason are never sent to JEV.
-- A websocket-server test with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push.
-- Add the row to the sender inventory in [notification-policy.md](notification-policy.md#sender-inventory).
+- `attention-push-triage.test.ts`: each veto, a question mark anywhere but in URLs and code, the review's 20 phrasings, benign status messages passing; `finishedPushLevel` for each option, the floor, shadow, other outcomes, a base it must not raise and a post floor that would log the notice; over the fake, a live `routine` sending `notice` with its record, the scope and call site, shadow sending the `alert` before JEV answers, a timeout, a throw and a hang sending `alert`, unreadable facts and post floor, an excluded agent sending JEV nothing, a permission, an error, a child's `notice` and no JEV never asking, a steered message, `away` and `off` keeping the `alert` unasked, a throwing veto step and a throwing record each sending one push without rejecting; the followups, including superseded and evicted; `readFinishFacts`.
+- `websocket-server.notifications.test.ts`, with a recording push sender and the fake: a scripted `routine` sends `notice`; a timeout sends `alert`; a throwing fake and a throwing state builder each send `alert`; an excluded agent sends `alert`; the client messages go out before the push; away mode sends the `alert` without asking; shadow sends the `alert` without waiting.
 - Verify: `npx vitest run packages/server/src/server/attention-push-triage.test.ts --bail=1`.
 
 ## Features 4–6: agent tools
@@ -673,8 +724,9 @@ Seven tools on the daemon's existing Paseo MCP server, for agents the classifier
 
 ### Which agents get them
 
-- The classifier decides, at create. The plugin polls `jev.status` every 60 seconds, behind the same `paseo.jev` guard and a timeout. An agent is eligible when `agents.jev.agentTools` is active, its decided tool profile does not deny `Read`, and `jev.scope.check` answers `ok` for its cwd and parent.
-- Of the eligible creates, the share `agentTools.assignShare` (0.5) chosen by a hash of the new agent's id gets `paseo.jev-tools: on`; the rest get `paseo.jev-tools: control`. Both arms carry the label, so D8's comparison is between agents the classifier treated alike.
+- The classifier decides, at create. The plugin polls `jev.status` every 60 seconds, behind the same `paseo.jev` guard and a timeout. An agent is eligible when the daemon serves the tools, `agents.jev.agentTools` is active, its decided tool profile does not deny `Read`, and `jev.scope.check` answers `ok` for its cwd and parent.
+- A daemon that registers the tools reports `agentTools.served: true` in `jev.status` (an optional field on `JevStatusSchema`). Until one does, the plugin labels nothing, so the arms start when the tools do.
+- Of the eligible creates, the share `agentTools.assignShare` (0.5) gets `paseo.jev-tools: on` by a `Math.random()` draw in the role hook at create; the rest get `paseo.jev-tools: control`. Both arms carry the label, so D8's comparison is between agents the classifier treated alike. The hook overwrites a label the caller sent, so the arm is always the draw.
 - The daemon lists the tools for exactly the agents carrying `on`, whatever JEV's state at launch. So a reload or resume lists the same tools and keeps the prompt cache. When JEV is off at call time the tool answers with an error naming why ("JEV is off on this host: no key. Use Read or Bash."), and the agent does what it would have done without it.
 - Agents created without the label never gain the tools.
 
@@ -1069,25 +1121,37 @@ Not `answered`: today's nudge, today's observation, word for word. The judge ask
 
 ### Spend on the budget strip
 
-JEV appears as one more account row in the budget strip's "other" section, the same way the OpenAI API's spend does ([orchestration-panel.md](orchestration-panel.md#budget-strip)). No new wire field.
+JEV appears as one more account row in the budget strip's "other" section, the same way the OpenAI API's spend does ([orchestration-panel.md](orchestration-panel.md#budget-strip)). No new wire field: the row is a `ProviderUsage` with balances and `details`.
 
-- New `packages/server/src/services/quota-fetcher/providers/jev.ts` implements `ProviderUsageFetcher` from `JevService.status()`: `providerId: "jev"`, `displayName: "JEV"`, `status: "available"`, no windows, and three balances in `ProviderUsageBalanceSchema`'s shape (`messages.ts:6836-6845`): `{ id: "control-today", label: "Control today", used, limit: <maxUsdPerDay>, unit: "usd", resetsAt: <next local midnight> }`, `{ id: "tools-today", label: "Agent tools today", used, limit: <agentTools.maxUsdPerDay>, unit: "usd", resetsAt }` and `{ id: "calls-today", label: "Calls today", used, unit: "requests" }`.
-- The service reaches the fetcher through a new `readJevStatus` factory option, threaded the way `readOpenAiApiConfig` is: `ProviderUsageFetcherFactoryOptions` (`services/quota-fetcher/provider.ts:14-19`), `ProviderUsageServiceOptions` and the constructor (`service.ts:9-19, 36-46`), the manifest entry (`manifest.ts:59-67` is the pattern), and the construction in `websocket-server.ts:779-790`.
-- When JEV is unavailable for a reason other than a spent budget, the fetcher reports `status: "unavailable"` with no balances, so the row is absent (`resolveOtherAccountIds`, `account-budget-strip-model.ts:164-183`). A spent lane reports its balance with `tone: "warning"`.
-- App: `PROVIDER_VENDORS` (`account-budget-strip-model.ts:249`) gains `jev: "TypeSafe"`, so the row reads "TypeSafe (JEV)". `ICON_ALIASES` (`:291`) has no JEV icon to point at, so the row uses the generic glyph unless the ui track adds one.
-- The row inherits the strip's 75-second poll and the service's 5-minute cache, and carries its read time like every row.
+- `packages/server/src/services/quota-fetcher/providers/jev.ts` builds the row from `JevService.status()` and the host's decisions: `providerId: "jev"`, `displayName: "JEV"`, no windows. It reads memory only, never the network.
+- **Balances**, one per lane and one count: `control-today` "Control today", `tools-today` "Agent tools today" and `ask-today` "Ask JEV today", each `{ used, limit: <the lane's maxUsdPerDay>, unit: "usd", resetsAt: <next local midnight> }`, and `calls-today` "Calls today" in `requests`. Calls today counts calls that reached JEV or failed trying; a refusal (no key, excluded, budget) sent nothing and is not counted. The Ask JEV lane is feature 15's, added after this plan.
+- **A spent lane** reports its balance with `tone: "warning"` and puts a warning detail first: "Control budget spent — Spawn hint, Remediation triage, … off until local midnight". Hitting the cap turns those features off for the rest of the day, and without this line the only sign is that JEV goes quiet. An open circuit gets a warning line too.
+- **One detail per feature**, in the strip's order, with its mode and what it did today: `Off`, `Live`, `Shadow`, or `Dry run` for feature 14, then a summary from today's decision notes and the feature's spend. This is how you decide to turn a feature live (D6):
+  - A shadow feature counts the notes whose `action` names "would" anywhere, grouped by the action from that word to its first parenthesis: "3× would have: no remediation agent; sent to a person of 5 decisions · $0.0020". A track's wording does not have to lead with "would" (finish triage: "sent as an alert; would have sent a digest (shadow)"), only to carry it. Notes with no "would" did what today's code does: "22 decisions, none would change anything".
+  - The spawn hint counts the class JEV answered, read from the note's `task_class <choice>` verdict: "14 creates answered 11 mechanical, 3 hard". The note does not carry the classifier's `wouldBe.model` or `move`; those are on the `classifier-decision` log line, which is where "would have moved N agents to Haiku" is measured.
+  - A live feature says how many changed what code did, not how many were "applied": JEV keeping today's behaviour is agreement, not a feature ignored. Ask JEV counts questions; a feature with no notes counts its calls.
+- The service reaches the fetcher through `readJevStatus` and `readJevDecisions` factory options, threaded the way `readOpenAiApiConfig` is: `ProviderUsageFetcherFactoryOptions` (`provider.ts`), `ProviderUsageServiceOptions` (`service.ts`), the manifest entry, and the `ProviderUsageService` construction in `websocket-server.ts`, which gathers decisions with `listDecisions` for every agent the agent manager has loaded. Decisions for an agent that is not loaded are not counted. The feature→lane map (`JEV_FEATURE_LANES`) and the feature labels (`@getpaseo/protocol/jev/labels`) are each one source, shared with the server's lane gating and the app's popover, so a new feature lands under the right lane and name without an edit here.
+- **When the row shows.** `no-key` and `disabled` mean nobody opted in, or JEV is switched off: the fetcher returns `null`, so there is no row anywhere a `ProviderUsage` is shown, not only on the strip. `key-rejected` and `config-unreadable` report `status: "error"` with the fix, so the row reads "Usage unavailable" with a hint: JEV turned itself off and you need to know. A spent budget keeps the row. A daemon without JEV has no service, and the fetcher reports nothing.
+- A daemon on `PASEO_JEV_BACKEND=fake` shows "Fake backend" as the plan, so its $0 is not read as free JEV.
+- App: `PROVIDER_VENDORS` gains `jev: "TypeSafe"`, so the row reads "TypeSafe (JEV)". There is no JEV icon; the row uses the generic glyph. It shows no worker chip: no agent runs on JEV. The strip shows `details` for JEV only (`STRIP_DETAIL_PROVIDERS` in `account-budget-strip-model.ts`); every other provider's details stay on its usage card. USD balances under ten cents keep up to four places, so a day of JEV does not read "$0.00".
+- The feature lines fold behind "Show 8 more" on every form factor, not only a phone: a desktop panel has room for the lanes and the alerts, not a line per feature next to every other account's figures.
+- The row inherits the strip's 75-second poll but not the service's 5-minute cache: the fetcher is `live`, so `ProviderUsageService` reads it again on every list and serves only the network rows from the cache. With the cache, a lane that had just run out read as still spending for up to five minutes.
 
 ### Decisions for an agent
 
-The context window meter's popover (`components/context-window-meter.tsx`, mounted by `composer/index.tsx:288`) gets a JEV section below the context breakdown (`:262`): the agent's decisions from `jev.decisions.list`, newest first, one compact line each — the feature, the question, the verdict with its confidence, what code did, the cost, and "shadow" when it was not applied. It follows `useAgentContextUsage` (`context-usage/use-agent-context-usage.ts`): gated on `server_info.features.jev`, fetched while the popover is open, polled every 15 seconds. With no decisions the section is absent.
+The context window meter's popover (`components/context-window-meter.tsx`, mounted by the composer) gets a JEV section below the context breakdown: `JevDecisionsSection` in `packages/app/src/jev/`. It lists the agent's decisions from `jev.decisions.list`, newest first, the eight newest and a count of the rest. Each shows the feature, a tag, when, the cost, the question, and the verdict followed by the action: what code did, or in shadow what it would have done. Feature 14's away-reply notes and feature 15's Ask JEV questions about the agent show here like every other feature's.
+
+- The tag is `Shadow` (`Dry run` for feature 14) when the note was not applied and the host's current `jev.status` has the feature in shadow, and nothing otherwise: applied, a live feature whose code kept today's behaviour (agreement, not "Not applied"), or a `jev.status` read that failed. The hook reads `jev.status` beside the list for this; the status says the feature's mode _now_, not at the decision's own time, so a status read that failed, like a feature switched between shadow and live since the decision, gets no tag rather than a guessed one. Feature 16 puts the mode on the note itself, which removes the gap.
+- Cost is the ledger's per-call figure, to four places under a cent; the fake backend reads "$0 (fake)".
+- It follows `useAgentContextUsage`: gated on `server_info.features.jev`, fetched while the popover is open, polled every 15 seconds. An older host is never asked. With no decisions the section is absent.
 
 Decisions stay out of the timeline ([Decision store](#decision-store)), so no timeline item, client capability or COMPAT shim is added, and neither `session.ts` nor `agent-manager.ts` changes for the UI.
 
 ### Tests and verification
 
-- The fetcher: balances from a status; absent when off; warning when a lane is spent.
-- The app: `account-budget-strip.browser.test.tsx` with a `jev` row in the fixture; a test for the decisions section with a fixture list, an empty list and an old daemon.
-- Verify: `npx vitest run packages/server/src/services/quota-fetcher/providers/jev.test.ts --bail=1`.
+- The fetcher (`providers/jev.test.ts`): balances from a status; absent when off or keyless; an error with a hint for a rejected key or unreadable config; warning tone and the spent-lane line; every feature's mode; the shadow summaries; the real service over the fake. `manifest.test.ts`: no row without `readJevStatus`.
+- The app: `account-budget-strip-model.test.ts` and `account-budget-strip.browser.test.tsx` with a `jev` row in the fixture, including the phone fold; `jev/jev-decisions-model.test.ts`; `jev/use-agent-jev-decisions.test.tsx` for the gate (an older host is never asked, a closed popover is not polled); `jev/jev-decisions-list.browser.test.tsx` for a fixture list and an empty one, with captures in `.artifacts/`.
+- Verify: `npx vitest run packages/server/src/services/quota-fetcher/providers/jev.test.ts`. By hand: a scratch daemon on `PASEO_JEV_BACKEND=fake`, a few Ask JEV questions with an agent attached, then the strip and that agent's popover.
 
 ## Feature 14: away auto-reply
 
@@ -1286,6 +1350,423 @@ The call never blocks the screen. Cancel drops the answer when it arrives; the d
 - The RPC through the real service over the fake, including the D7 refusal, no key, the lane's own cap and the audit's `initiator`: `packages/server/src/server/session/jev/jev-session-ask.test.ts`.
 - By hand: a scratch daemon with `PASEO_JEV_BACKEND=fake` answers every question type; one with no key shows the not-configured state.
 
+## Feature 16: file-read check
+
+Tyler's ask (D11): every time an agent loads a file into its context, JEV is asked whether the agent needs it. Every Claude `Read` and every Bash command line that only reads files is seen, and the large ones are judged. In shadow, the default, the check runs beside the read, never delays it, and records whether JEV would have skipped it and what the read cost. In live mode JEV may deny a large read once; the agent can read it again and the second read goes through.
+
+### Seam
+
+The daemon's Claude hooks, where the catastrophe gate lives (`buildHooks`, `providers/claude/agent.ts:5186`). Research 03 (`~/bozeo-ops/jev-research/03-paseo-integration-surface.md` §1) found it is the only place in Paseo that sees a `Read` before it runs: plugins, the permission system and the MCP gateway cannot, and `canUseTool` is never called under `bypassPermissions`, which every fleet agent runs.
+
+- `buildHooks` adds `PreToolUse` matchers for `Read` and `Bash`, plus `Edit`, `Write`, `MultiEdit` and `NotebookEdit`, whose calls feed the [validation window](#did-the-agent-use-it), and `PostToolUse` matchers for `Read` and `Bash`, which measure what the read loaded. `HookCallbackMatcher.matcher` filters by tool name (`@anthropic-ai/claude-agent-sdk` 0.3.246, `sdk.d.ts:851-856`); each callback re-checks the name, as the gates do.
+- The hook input carries everything the check needs: `tool_name`, `tool_input`, `tool_use_id` and `cwd` (`sdk.d.ts:2380-2385`, `:170`), `tool_response` on PostToolUse (`:2345-2355`), and `agent_id` inside a subagent (`:179`). `tool_use_id` pairs a read's PreToolUse with its PostToolUse.
+- The callbacks hand the input to a `FileReadObserver`, a new optional dependency plumbed the way `deviceLaunchGate` is: the Claude provider's options (`agent.ts:447`, `:479`), the client (`:1581`, `:1595`, `:1646`), `agent/provider-runtime.ts:30` and `bootstrap.ts:1869-1895`. The observer is daemon code in `jev/read-check/` with the agent manager, the timeline and the JEV service in reach. An agent launched without one registers no read-check matchers and behaves as today.
+
+**Zero latency in shadow.** A shadow callback copies the fields it needs, queues the work with `setImmediate`, and returns `{}` in the same tick. The CLI waits on the callback, not on the queued work. It runs the matching hooks of one event in parallel (`sdk.d.ts:2361`), and the matcherless observation hook already costs every tool call a PreToolUse and a PostToolUse round trip (`agent.ts:5310-5311`), so a callback that answers at once adds nothing to the read's wall clock. `AsyncHookJSONOutput` (`sdk.d.ts:129-132`) is not needed. A throw anywhere in the callback returns `{}`. The matcher's `timeout` is 3 seconds, which only live mode can approach; on timeout the SDK proceeds, as it does for the catastrophe gate (`agent.ts:380-384`).
+
+**Other providers.** Every fleet agent in the 7 days to 2026-09-28 was Claude (research 03: 536 of 536 agent records), so v1 covers the fleet. The rest are [deferred](#deferred): OpenCode's bridge plugin has `tool.execute.before` (`providers/opencode/bridge.test.ts:232`), which could carry the same check; Codex asks only for commands that need approval; the ACP client advertises `readTextFile: false` (`providers/acp-agent.ts:257`), so ACP agents read files themselves; Pi reports and never asks.
+
+### What counts as a read
+
+- **`Read`** of a text file. An image, a PDF (`pages`) or a notebook is counted as `not-text` and not judged.
+- **A Bash command line that only reads files.** `walkShellCommands` (`agent/shell-commands.ts:36`), the catastrophe gate's parser, visits every command the line runs with wrappers peeled, and `resolvePath` (`:954`) resolves each operand against the walk's cwd. A line counts when every command it runs is `cd` or a reader — `cat`, `head`, `tail`, `sed -n`, `less`, `more`, `bat`, `nl` — at least one names a file, and the visitor's `outputRedirect` never fires. Its whole output is then what those files loaded, split evenly between them when there are several; the basis says so. Anything else (`rg`, `grep`, `npm test`) is not a file read: research 03 counts its output as search or command output.
+- **Tokens a read loaded,** measured at PostToolUse: for `Read`, the characters of `tool_response.file.content` (`sdk-tools.d.ts:224-250`) plus 7 per line for the line-number prefix Read adds; for Bash, the characters of `stdout` and `stderr` (`sdk-tools.d.ts:3166-3174`). Tokens are characters ÷ 2.35, the fleet's calibrated median for tool results (p10 2.10, p90 2.62, n = 1,463; `~/bozeo-ops/jev-research/results-168h.json`). JEV's 2.5 bytes a token is a different tokenizer. The tools track's `estimateReadTokens` counts the same way (2.35, plus the line prefix), and the savings ledger uses 2.35 for every feature (`estimateContextTokens`, `jev/savings-formulas.ts`). A read whose PostToolUse never arrives (the tool failed, the turn was cancelled) is estimated from the requested range of the file and marked so in its basis.
+- A `file_unchanged` result (`sdk-tools.d.ts:372`), the CLI's read dedup, loaded nothing: counted as `dedup`, never judged.
+
+### When JEV is asked
+
+Every read is counted. JEV is asked only when all of these hold, checked in order; the first that fails is the read's not-asked reason, a daily counter (`JevNotAskedReason` in `contract.ts`):
+
+1. `isActive("readCheck")` (`inactive`).
+2. The estimated size of the requested range is at least `minTokens`, 2,000 (`below-floor`). Below about 1,700 tokens one wrong skip costs more than a right one saves (research 03 §3), so judging those can never pay. That is 54% of `Read` results and 70% of Bash file reads.
+3. The file is text (`not-text`), inside the agent's cwd (`outside-cwd`), and passes the file tools' rules: no denied root and no secret-shaped name (`agent/tools/jev-file-state.ts`, `secret-path`).
+4. `checkScope` answers `ok` (`excluded`). D7: a Wonderly file is never opened by the observer and never sent, and the dashboard counts it as not judged.
+5. The same agent, path and range were not judged in the last 30 minutes (`repeat`). A repeat makes no call and no record; while the earlier verdict's validation window is open, it is that window's `reread`.
+
+A read inside an in-process subagent is judged against the parent agent's task, and its record says `subagent: true`.
+
+### State and question
+
+The observer builds the state after the hook has answered, from the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 8 })`) and the file. At most 10,000 bytes:
+
+```json
+{
+  "task": "<agent title>\n<first 800 characters of its assignment>",
+  "recent": [
+    "assistant: <last assistant text, 600 characters>",
+    "tool Read src/server/session.ts",
+    "tool Bash `npm test -- auth` -> failed"
+  ],
+  "why": "<the Bash call's `description`, when it has one>",
+  "path": "<path relative to the agent's cwd>",
+  "size": "lines 1-1240 of 3100, about 14,300 tokens",
+  "outline": "<declaration lines from the range: imports, exports, classes, functions, headings; 2,000 characters>",
+  "excerpt": "<first 6,000 characters of the range>"
+}
+```
+
+The audit treats `excerpt` and `outline` as file content, as it does the agent tools' `content`: it keeps their SHA-256 and sizes, never the text ([Audit](#audit)).
+
+Enough of the file is the excerpt and the outline. Whether a file matters to a task depends on its subject — imports, names, doc comments — which the head of the range and its declarations carry. The whole range would cost up to ten times more per call, on the lane with the most calls, for a question that does not need the body. A call is about 3,500 JEV tokens, $0.00015.
+
+`recent` is the only view of intent: a `Read` carries no question, only `file_path`, `offset`, `limit` and `pages` (research 03, headline 5). The CLI emits each completed content block as it streams (`sdk.d.ts:3084`), so the text before a tool call is in the timeline when the observer reads it; the observer tests pin that ordering. An Opus 5.5 thinking block has no readable text, so `recent` often shows tool calls only.
+
+```json
+{
+  "need": {
+    "type": "choice",
+    "instructions": "An agent working on `task` is about to load the file at `path` (`size`); `excerpt` and `outline` show what it holds, and `recent` is what the agent did last. Does the agent's next step need what this read loads?",
+    "criteria": {
+      "needed": "The next steps depend on the file's contents: the agent will change it, quote it, follow its code, or its details decide what to do next",
+      "part_needed": "Only a small part matters, one function or one section; the range is far more than the next step needs",
+      "not_needed": "Unrelated to `task` and `recent`: a wrong guess, a file already understood, or one the agent will not use",
+      "other": "Cannot tell from what is shown"
+    }
+  }
+}
+```
+
+### Decision
+
+`decideReadCheck` (`read-check/decision.ts`) is pure:
+
+| Answer                      | Shadow records | Live does                                                                    |
+| --------------------------- | -------------- | ---------------------------------------------------------------------------- |
+| `not_needed` at ≥ 0.80      | `would-skip`   | Denies the read at ≥ 0.85, when every [live condition](#live-mode-d11) holds |
+| `part_needed` at ≥ 0.80     | `would-narrow` | Nothing in v1                                                                |
+| Anything else, or no answer | `needed`       | Nothing: the read runs                                                       |
+
+`would-narrow` is recorded so the shadow data says whether narrowing a read with `offset` and `limit` is worth building.
+
+### Live mode (D11)
+
+Off until Tyler sets `agents.jev.readCheck.shadow: false`, after the dashboard shows the evidence below. Live applies to the share `liveShare` (0.5) of agents chosen by a hash of the agent id; the rest stay in shadow on the same days, so live's regret rate and shadow's false-skip rate compare like with like.
+
+For an agent in the live share, a read that code estimates at `liveMinTokens` (8,000) or more is held while the observer judges it: the PreToolUse callback awaits the verdict for at most `liveTimeoutMs` (1,000 ms). That budget covers the scope check, reading the excerpt, the timeline tail and the JEV call; JEV's warm median is about 300 ms and a cold connection about 900 ms. Past it, or on any outcome but `answered`, the callback returns `{}` and the read runs. The agent's smaller reads are judged as in shadow. Research 03 §3 found 8,000 tokens the smallest read worth gating: a wrong deny costs one extra model step, about 25,000 weighted tokens at the fleet's median context, while a right one saves about 14.5 times the read. About 980 reads a week were that large (research 03, all sessions), so about 140 a day wait up to a second.
+
+The callback denies (`permissionDecision: "deny"`) only when all of these hold:
+
+- the answer is `not_needed` at ≥ 0.85;
+- the call is a `Read`, or a Bash line that only reads files;
+- this agent was not denied this path before in its session: the second read of a path always goes through, unchecked;
+- the agent has not edited the path in this session;
+- the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour.
+
+The reason the agent reads:
+
+> JEV judged src/server/session.ts (about 14,300 tokens) not needed for your task (0.91). If you need it, run the same Read again; it goes through without a check. To ask about it without loading it, use mcp**paseo**ask_jev_file_bool or mcp**paseo**ask_jev_file_choice.
+
+The last sentence goes only to agents labelled `paseo.jev-tools: on`, the only ones with the file tools.
+
+It denies; it never substitutes. A PostToolUse `updatedToolOutput` replaces a read after the CLI has recorded it, and the CLI's read dedup then answers the agent's retry with `file_unchanged`, locking it out of the file (research 03 §2). A PreToolUse deny never runs the tool, so the CLI records nothing and the retry reads the file.
+
+D1 holds everywhere else. No tool is removed (D2), the deny is advice one call overrules, and the catastrophe gate stays the only gate an agent cannot overrule.
+
+**Evidence for going live,** the rule the dashboard reports: at least 200 judged `would-skip`s of reads of 8,000 tokens or more, at most 30% of them false skips, and a positive projected net, which is the live formula applied to those shadow records. At 8,000 tokens a deny pays once more than 18% of denies are right (research 03 §3); allowing 30% false skips leaves room for shadow overcounting what agents did not use.
+
+### Did the agent use it
+
+A would-skip is a saving only if the agent did not need the file. For each `not_needed` verdict the observer watches the agent for the rest of that turn and its next two, at most 60 minutes, and records the first sign it used the file:
+
+- `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path;
+- `reread`: a `Read` or a Bash read of the path, any range; in live, the retry after a deny;
+- `quoted`: a line of 40 or more characters from the range appears in a later assistant message or tool input. The observer keeps a hash set of the range's lines, at most 2,000, taken from the PostToolUse result, and drops it when the window closes;
+- in live, an `ask_jev_file_*` call on the path is `redirected`: the deny worked as meant, and it is not a regret.
+
+With none seen, the verdict `held`. In shadow a use is a `false-skip`; in live it is a `regret`. Either lands as a `validated` line on the read's savings record.
+
+Shadow's `held` is an upper bound: a file that shaped the agent's reasoning without being edited, quoted or read again counts as unused. Live's regret is the stronger signal, because after a deny, needing the file means asking for it again. That is why live runs beside a shadow control, and why the evidence rule leaves a margin.
+
+The observer reports every read it sees, judged or not, through `jev.savings.noteRead` (`JevFileReadEvent`, `contract.ts`). The savings module uses it to find regret reads after the agent tools ([Formulas](#formulas)).
+
+### Fail open
+
+In shadow nothing the check does can reach the read: the callback answered before the work began. In live any outcome but `answered`, a timeout, an error or a failed condition lets the read run, exactly as today.
+
+### Cost, cache, latency
+
+- About 900 reads a day of 2,000 tokens or more across all sessions (research 03: 1,945 `Read` results and 4,344 Bash file reads in 7 days), at about $0.00015 each: about $0.13 a day. The `reads` lane and its $0.25 cap are its own, so read checks can never spend the budget that steers the daemon, and never enter the agent tools' D8 comparison.
+- Hooks are CLI-side callbacks that never reach the API, so registering them costs no cache (research 03 §3). A live deny is a short tool result at the tail, which is cache-neutral.
+- Shadow adds nothing to a read. Live holds a read of 8,000 tokens or more for about 0.3–0.5 s, at most `liveTimeoutMs`.
+- **Pays if,** once live, the tokens its held denies kept out of context, priced over their residency, exceed its regrets' extra steps plus its JEV spend. Shadow saves nothing by itself; it is the measurement. **Measured by** the `validated` lines on its savings records, per mode ([Formulas](#formulas)).
+
+### Tests and verification
+
+- `read-check/recognize.test.ts`: each reader and its flags; `cd` then a read; a pipe into `head`; a redirect, `rg`, and a read mixed with any other command are not reads; operands resolve against the walk's cwd.
+- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path and the regret cooldown.
+- `read-check/observer.test.ts`, against the fake: each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's caps; a repeat reuses the verdict with no call; each validation signal and the window's close; the record's mode comes from the outcome.
+- `providers/claude/agent.read-check.test.ts`: a shadow callback resolves `{}` before the observer's work starts, with an observer whose judgment never resolves; a throwing observer returns `{}`; live denies once, lets the second read through, and returns `{}` past `liveTimeoutMs`; with no observer, no read-check matcher is registered.
+- Verify: `npx vitest run packages/server/src/server/jev/read-check --bail=1`.
+
+## Savings
+
+Tyler wants to see what JEV saves, where agents use it, and whether it works. Each feature writes its own measurement file, and no two can be summed; the classifier's lives only in the daemon log, which rotates. The savings ledger is one append-only record per JEV involvement, across every feature, priced in one unit. [The JEV dashboard](#the-jev-dashboard) reads it and nothing else.
+
+### The unit
+
+Tokens saved are **Opus-equivalent weighted tokens**: weighted tokens as the fleet counts them ([token-burn.md](token-burn.md): fresh input 1, cache write 1.25, cache read 0.1, output 5), times the model's price against Claude Opus 5.5.
+
+| Model                              | Price weight `w`                  |
+| ---------------------------------- | --------------------------------- |
+| Claude Opus 5.5                    | 1.00                              |
+| Claude Opus 5                      | 1.25                              |
+| Claude Sonnet 5.5, Claude Sonnet 5 | 0.50                              |
+| Claude Haiku 4.5                   | 0.25                              |
+| Any other model                    | None: the record's figure is null |
+
+The list prices are $4, $5, $2, $2 and $1 per million input tokens, and output is five times input for each, so one weight per model matches the fleet's weighting. The fleet unit reads cache at 0.1 for every model while Opus 5.5 lists cache reads at 0.05 of its input price, so an Opus 5.5 cache read counts double. That is a known upward bias: a figure built from an Opus 5.5 agent's weighted tokens (a spawn hint's `W`, a remediation agent's `A`) is high by the share of that agent's spend that is cache reads, and the dashboard states it beside the unit. Every record's basis names the weights it used.
+
+Why this unit and not dollars:
+
+- Tyler asked in tokens, and the fleet already states agent spend in weighted tokens: `paseo.budget`, the burn monitor, the budget strip.
+- A spawn hint saves no tokens, only price. In raw tokens the one feature whose point is a cheaper model would always show zero.
+- The pool's Claude accounts are usage windows, not a per-token bill. A dollar figure would read as money not spent.
+- JEV's own cost is a real bill, so it shows in dollars too, converted at Opus 5.5's input price for the net: $0.0001 of JEV is 25 tokens.
+
+### The record
+
+`$PASEO_HOME/jev/savings.jsonl`, one JSON line each; the types are in `contract.ts`.
+
+- **`involvement`** (`JevSavingsRecord`), once per JEV call that answered, shadowed, or failed after sending: time, feature, call site, `callId` (which joins the ledger and the audit), agent, workspace, `mode`, outcome, what JEV was asked, `decision: { did, wouldBe, changed, detail }`, the benefit kind, `tokensSavedEstimate` with its `basis` (the formula and every input), `pending`, and `jevCostUsd`.
+- **`settled`**: a pending figure, now known, such as a child's spend or an episode's close. The newest settlement wins.
+- **`validated`**: what showed the answer right or wrong: `held`, `false-skip`, `regret` or `contradicted`, the signal, and how long after.
+
+A reader folds the lines by `id`. The rules:
+
+- **Mode comes from the outcome.** `shadow` is shadow, `answered` is live. It is never read off `applied`: remediation's `decideTriageAction` (`remediation/jev-triage.ts`) sets `applied: true` for a live answer that kept today's behaviour, while other tracks' `applied` means the action changed, so "not applied" covers a shadow answer and a live one that changed nothing.
+- **`did` and `wouldBe` are structured, not prose.** `wouldBe` is what the answer maps to with every switch on, in either mode; `changed` is true only when a live answer changed what code did. Readers stop matching "would" at the start of `action`, which the budget strip's fetcher does today.
+- **Call sites report facts; the savings module prices them.** A call site passes `facts` (`contextTokens`, `model`, `agentTotalTokens`, …) and the module applies the feature's formula from `savings-formulas.ts`. One module owns every formula, so a correction reprices every feature alike.
+- **Only calls that reached JEV are records.** A call that sent nothing (`unavailable`) and a read feature 16 saw but did not judge are daily counters by reason (`JevNotAskedReason`). Feature 16 alone sees about 2,700 reads a day.
+- **Tokens are never faked.** A feature whose benefit is attention or time sets `otherBenefit` in its own unit and leaves `tokensSavedEstimate` null.
+- **Estimates are marked.** A skipped agent never ran, so a live skip is priced at its kind's median. Its event has `estimated: true`, and each mode's totals carry `estimatedTokens`, the part of `tokens` that is such an estimate.
+
+### Storage
+
+- **The file.** Appended off the caller's path through `createJsonlAppender` (`jsonl-appender.ts`, from the remediation track): 0600 inside the 0700 `jev/`, rotated once to `savings.jsonl.1` (the appender's `<file>.1`) at 16 MB, about three weeks at a thousand records a day. Lines older than 30 days are pruned at boot. A `settled` line carries the facts it added, so a restart reprices every record the file holds from its facts: a formula correction reaches the last 30 days, and older days keep what the rollup holds.
+- **The rollup.** `$PASEO_HOME/jev/savings-days.json`, 0600: for each local day, per feature and mode, the involvements, changed answers, tokens, other benefit, pending count, validations, not-asked counts, JEV dollars and the evidence counters, plus that day's top 50 agents and workspaces and the JEV ledger's spend for the day (copied while `ledger.json`, which keeps 30 days, still has it). Written atomically every 30 seconds when changed and at shutdown, and kept 400 days. A settlement or validation for an earlier day updates that day. At boot the days the file holds completely are rebuilt from it. The oldest day it holds may be cut by a rotation or the prune, so the rollup wins there, unless the file holds at least as many of that day's involvements: a crash between two flushes leaves the rollup up to 30 seconds behind the file.
+- **Ranges.** `today` and `7d` read both. `all` reads the rollup, so it reaches back 400 days; recent events reach back only as far as the file, and the events list says how far.
+- **Memory.** The rollup, the newest 5,000 records and every pending one load at start, with an index of every `callId` the file holds. A record still pending after 7 days settles with what it has, and its basis says `partial`. The events list reaches back as far as memory does.
+
+### Writing
+
+`JevService` gains `savings: JevSavingsSink` (`contract.ts`) beside `decisions`:
+
+- `record(input)` returns the record's id, and fills `mode`, `outcome`, `at` and `jevCostUsd` from the ledger entry for `input.callId`, so no call site can disagree with the ledger;
+- `settle(id, facts)` adds facts that arrived later and prices the record again;
+- `validate(id, validation)`;
+- `countNotAsked(feature, reason)`;
+- `noteRead(event)`, feature 16's report of every file read.
+
+Each appends off the caller's path and never throws. A call site that also records a decision note sets the note's `savingsId`, `mode` and `wouldBe`. One call is one record: a second `record` for a `callId` returns the first id.
+
+The service's sink is a `JevSavingsLedger` (`jev/savings.ts`), which the hooks also use for joins: `idForCall` (survives a restart; the file is the index), `pendingRecords` (a hook rebuilds its joins from them), `recordObserved` (mode, outcome and cost from the caller, for a source that names no single call) and `watchReads` (a regret window over `noteRead`). Each hook checks `instanceof JevSavingsLedger`, so a test fake that drops everything (`DROP_JEV_SAVINGS`) still works.
+
+Bootstrap passes the ledger its lookups (`jev/savings-lookups.ts`): an agent's workspace, read when the record is written, and the agent's title and the workspace's name, read when the dashboard asks. A live agent answers first; stored agents and the workspace registry are cached and reloaded every minute, or within 5 seconds of a miss.
+
+**Hooking in the features already built.** None changes what a feature decides, and each feature keeps its own file for its own review. Features on main call the ledger directly; features still on their own branches are counted by an adapter that tails their measurement file from its end at start (`jev/savings-adapters.ts`, every 15 seconds, and once more at shutdown) until they merge. The tail tells a rotation from a rewrite by inode: a file rewritten in place, as the stall log's boot prune does, restarts the tail at its end.
+
+| Feature               | How                                                      | Records at                                                                         | Settles on                                                                                                                         | Validates on                                                                                                                                                                                                                              |
+| --------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2 spawn hint          | Direct: `startSpawnHintSavings` (`jev/savings-spawn.ts`) | The first `agent_state` of a child created this run that carries `paseo.jev-spawn` | The child's close, or 24 hours: its weighted `totalTokens` and the model it runs then                                              | —                                                                                                                                                                                                                                         |
+| 3a remediation triage | Direct: `createRemediationTriageRecorder`                | Its `triage` event                                                                 | `agent-ended`: the agent's tokens, model and result. `closed`: how long after the triage, and whether it cleared during a deferral | `agent-ended` after a shadow `person`: FIXED is `contradicted`, NOT FIXED `held`. A shadow `defer`: closed inside the hold with the agent NOT FIXED is `held`; the agent fixing it or the condition outlasting the hold is `contradicted` |
+| 3b finish triage      | Direct: `recordTriagedUnguarded`, beside its note        | A triaged finish that reached JEV                                                  | —                                                                                                                                  | The `followup` line of a sent or would-be notice: Tyler messaged within 30 minutes is `contradicted`, otherwise `held`                                                                                                                    |
+| 4–6 agent tools       | Adapter: `tool-use.jsonl`                                | Each tool call that made a JEV call                                                | The 60-minute regret window closing with nothing reporting reads: no figure                                                        | A `noteRead` of one of the call's `paths`, as given or as its real path, within 60 minutes: `regret`. The window closing while feature 16 reports reads: `held`                                                                           |
+| 10 stall judgment     | Adapter: `stall-judgments.jsonl`                         | A `judgment` with a call                                                           | The episode's remediation `agent-ended` or `person-first`, joined on `stalled-agent:<id>`; an `episode-closed` before rung 2       | A person-first label's agent: NOT FIXED `held`, FIXED `contradicted`. A `progressing` hold that did not close: `contradicted`                                                                                                             |
+| 14 away reply         | Direct: `AwayReplyJob.finish`                            | An evaluated episode with a call                                                   | The `followup` line: minutes until Tyler answered                                                                                  | `sameChoice` false: `contradicted`; true: `held`                                                                                                                                                                                          |
+| 15 Ask JEV            | Direct: the `jev.ask` handler                            | Every question that reached JEV                                                    | —                                                                                                                                  | —                                                                                                                                                                                                                                         |
+| 16 read check         | The read-check track: the observer                       | A judged read                                                                      | The read's PostToolUse                                                                                                             | The [validation window](#did-the-agent-use-it)                                                                                                                                                                                            |
+
+An `unavailable` call is a not-asked counter (`excluded` for the D7 exclusion, `inactive` otherwise), never a record. A call that stopped before sending (`attempts` 0) is neither.
+
+**When the tools and stalls tracks merge,** each adds one call and removes its tail from `startSavingsAdapters` in the same change, so nothing is counted twice:
+
+- Tools, in `agent/tools/jev-tools.ts` beside `deps.useLog?.append(...)`, with `ToolCall` keeping the first JEV `callId` it counts and `JevToolsDependencies` gaining `savings?: JevSavingsSink`. Pass the `JevToolUseRecord` as it is: its `readTokensAvoided` is already at 2.35 characters a token, and the function takes it without converting it again.
+
+  ```ts
+  recordToolUseSavings(deps.savings, record, { callId: call.firstCallId, model: caller.model });
+  ```
+
+- Stalls, in bootstrap's stall-sweep wiring, inside the `recordMeasurement` that appends to `StallJudgmentLog`, with `const recordStallSavings = createStallJudgmentSavingsAdapter({ savings: jev.savings })` beside it:
+
+  ```ts
+  recordStallSavings(line);
+  ```
+
+The budget strip's would-have count (`services/quota-fetcher/providers/jev.ts`, on the ui branch) still reads the start of `action`; at the ui merge it reads `mode` and `wouldBe`, which every hooked note now carries.
+
+**A durable record for the classifier.** Its decision reaches only the `classifier-decision` line (`plugins/claude-account-pool/server/decision-log.ts`, written with `console.log` from the plugin worker), and the daemon log rotates at 10 MB × 3. Its `wouldBe` never reaches the daemon's decision store, and in live mode `wouldBe.model` is the model that ran, while the model the child would have run without JEV is never computed (`decideJevRecord`, `classifier.ts`). The savings track has the classifier compute that base model (`decideModel` with the class resolved without JEV) and the role router write it beside `paseo.jev-call` as one label, `paseo.jev-spawn`:
+
+```
+v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0
+```
+
+A missing class or model is `-`, and each part is URI-encoded. The daemon reads it when the agent is created and writes the involvement, whose `detail` holds the base, would-be and running class and model. Labels persist with the agent, never reach the prompt, and are written before the agent can run. No RPC is added. `jev.decisions.list` also reads the label to give the attached spawn-hint note its `wouldBe`.
+
+`JevDecisionNote` gains optional `mode`, `wouldBe` and `savingsId` too. The per-agent popover then shows shadow from `mode`, and the strip counts would-haves from `wouldBe`. Tokens stay out of the note: the store is in memory, 50 notes an agent, and lost on restart.
+
+### Formulas
+
+Notation. `w(m)` is the price weight above. `T` is the tokens a read or a result loads: characters ÷ 2.35. `R` is residency, what one token loaded into context costs over its life: 13.75 weighted tokens, one cache write at the unit's 1.25 and then 0.1 on each of about 125 later calls. Research 03 §3 priced the write at the one-hour 2 and measured 14.1–15.0; in this unit that is 13.35–14.25. `S(C)` is one extra model step at context `C`: `0.1 × C + 2,200`, the context re-read plus the median 440 output tokens at 5.
+
+| Feature                | Benefit   | Tokens saved per record                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Built from                                                                            | Honest today?                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2 spawn hint           | tokens    | `W × (w(base) − w(m))`: `W` the child's weighted tokens, `base` the model it runs without JEV, `m` the model that ran (live) or the would-be model (shadow). An upward move is negative.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `paseo.jev-spawn` and the child's `totalTokens`                                       | Not until the label lands: there is no durable record and no base model. It assumes the child spends the same tokens on the cheaper model; mechanical children that were re-spawned or escalated are counted beside it, not netted. A child that outlives a daemon restart settles `partial`, because `totalTokens` starts from zero when an agent is loaded from disk.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| 3a remediation triage  | tokens    | A shadow `person` whose agent ended NOT FIXED: `A × w(m)`, `A` the agent's weighted `agentTotalTokens`. A shadow `defer` saves `A × w(m)` only when the episode closed inside the hold it would have held (`deferMs`, 10–15 minutes, from the triage) and the agent did not fix it; otherwise 0, because a live defer starts the agent once the hold ends. A live `person`, or a live `defer` whose episode closed during the deferral with no agent: `A` is the median of the last 30 days' agents for the same condition kind. A stalled-agent episode that a feature 10 person-first label holds counts 0 here; row 10 owns its agent. A wrong skip costs attention, shown as `contradicted`, not tokens. | `remediation-triage.jsonl`: `triage`, `agent-ended` and `closed`, joined on `episode` | Yes in shadow: the agent ran, so its tokens and result are known. A live skip is an estimate by construction: the agent that did not run has no tokens. It is marked `estimated` and nothing validates it.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 3b finish triage       | attention | None. `otherBenefit`: pushes held for the digest, live or would-be; a `contradicted` notice held none.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       | `finish-triage.jsonl`                                                                 | No tokens, and it says so.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 4, 5 file tools        | tokens    | `(T_avoided − T_result) × R × w(m) − S(C) × w(m)`: `T_avoided` the files sent to JEV, `T_result` the tool's result, `C` the caller's context. After a regret: `−(T_result × R + S(C)) × w(m)`; the file got read anyway.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | `tool-use.jsonl` and `noteRead`                                                       | In part. `T_avoided` is the line's `readTokensAvoided` as the tools track counts it (`estimateReadTokens`: characters plus Read's 7-character line prefix, at 2.35 a token), never converted again. Until the tools merge, the record's `callId` is built from the agent, time, tool and a hash of the line because the line names no JEV call, and `m` is the agent's model when the line is read. A caller context the provider has not reported uses the fleet median, 228,000 (`S` = 25,000), and the basis says so. The figure stays pending until the 60-minute regret window closes. A window nothing watched (feature 16 not reporting reads) and a call that sent no path give no figure, because an unwatched saving cannot be told from a regret. The window is kept on the record, so a restart rebuilds it. The first use's `ToolSearch` step is not recorded. The D8 report (`scripts/jev-tools-ab.ts`) remains the verdict on the tools. |
+| 6a `ask_jev`           | tokens    | As 4, with `T_avoided` the command's output. The same command in Bash within 5 steps is a regret.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `tool-use.jsonl`'s `commandSha256` against feature 16's Bash reads                    | In part: only a read of a named path is a regret today. `JevFileReadEvent` carries no command, so the command match waits until it does.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| 6b `ask_jev_diff_risk` | none      | None: it may only add review.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `tool-use.jsonl`                                                                      | —                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 9 compaction timing    | none      | None: dormant, and it spends for quality.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    | —                                                                                     | —                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 10 stall judgment      | tokens    | A `blocked_missing_info` or `waiting_on_human` label whose episode then started a remediation agent that ended NOT FIXED: that agent's `A × w(m)`, would-have in shadow. In live, when the ladder honoured `personFirst` and started no agent, `A` is the median as in 3a. The loop watch and the `progressing` hold save nothing countable. One saving per remediation agent: the ladder reads `personFirst` before it triages, so the episode's first person-first label owns the agent, and the 3a record and any later label of the same episode count 0. A label whose escalation would not push owns nothing, because the ladder starts the agent then.                                                | `stall-judgments.jsonl` joined with `remediation-triage.jsonl` on the observation key | Only when both files hold the episode; a stall that never reached rung 2 has nothing to count.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| 14 away reply          | time      | None. `otherBenefit`: in dry run, the minutes until Tyler answered when `sameChoice` held, 0 when it did not.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | `away-reply-decisions.jsonl`                                                          | No tokens. The minutes are a leader's idle time, not Tyler's. A sent reply has no figure: the job writes no follow-up after one, so nothing measures what it saved.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| 15 Ask JEV             | none      | None; counted as an involvement.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | The ledger                                                                            | —                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| 16 read check          | tokens    | Shadow `would-skip` that `held`: `T × R × w(m)`, would-have. Live deny that `held` or was `redirected`: `T × R × w(m)`, saved, with `T` estimated from the file's range because the read never ran. Live regret: `−S(C) × w(m)`, `C` the agent's context at the deny. A shadow false skip: 0.                                                                                                                                                                                                                                                                                                                                                                                                                | The observer                                                                          | Shadow is an upper bound ([Did the agent use it](#did-the-agent-use-it)).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+
+JEV's cost is subtracted once, in the net, from the ledger's totals: a shadow call costs money and saves nothing until its feature goes live.
+
+`R` is a fleet constant. A read's exact residency is 2 plus 0.1 for each request the agent makes after it, until its next compaction or its end; counting that per read is [deferred](#deferred). The basis names the constant, so a later settlement can replace it.
+
+Feature 16's facts, which the read-check track reports: `contextTokens` (`T`), `model`, `agentContextTokens` (`C` at a live deny) and `estimated` when PostToolUse never came. `decision.wouldBe` is `would-skip`, `would-narrow` or `needed`, and a live deny has `did: "deny"`. Its records stay pending until the validation window lands.
+
+### What the records cannot support yet
+
+- **Spawn hint:** only children created after this build. A child that outlives a daemon restart settles `partial` with no figure: its `totalTokens` restarted at zero.
+- **Agent tools:** the regret join needs feature 16's `noteRead`. Until feature 16 reports reads, every tool record ends with no figure. The `ToolSearch` step is not recorded either, so the D8 report stays the kill rule.
+- **Finish triage and away reply:** no tokens, by nature.
+- **Stall judgment:** a figure only when the remediation record for the same episode exists.
+- **Everything in shadow** is would-have. Nothing adds shadow to live.
+
+### Tests and verification
+
+- `jev/savings.test.ts`: append, rotation and pruning; the rollup across a restart; folding `settled` and `validated` lines; mode from the outcome, never from `applied`; a record whose `callId` the ledger does not hold is dropped with one log line; `countNotAsked` reaches the rollup and never the file; each range, the top lists and the cursor.
+- `jev/savings-formulas.test.ts`: each formula row from fixture facts, including the negative cases (an upward spawn move, a regret); an unknown model gives null; each evidence rule below and at its minimum.
+- One test per hooked feature, in that feature's test file: `remediation/jev-triage.test.ts`, `attention-push-triage.test.ts`, `away-reply/job.test.ts`, `jev/savings-spawn.test.ts`, and `jev/savings-adapters.test.ts` for the two adapters and the stall join.
+- `session/jev/jev-session-savings.test.ts`: both RPCs over the real service with the fake, and their permissions. `jev/savings.e2e.test.ts`: a daemon on `PASEO_JEV_BACKEND=fake` shows an Ask JEV question in both RPCs.
+- Verify: `npx vitest run packages/server/src/server/jev/savings.test.ts --bail=1`.
+
+## The JEV dashboard
+
+The global view of what JEV did on a host: tokens saved, live and would-have kept apart; what JEV cost; the net; each feature's numbers against the rule for flipping it; which agents and workspaces use JEV; and recent involvements, each one tap from its agent. The per-agent view stays where feature 11 put it, in the context popover.
+
+### Where it lives
+
+- **The button.** `SidebarFooter` (`components/left-sidebar.tsx:450`) renders the footer of the desktop sidebar (`:825`) and of the phone's overlay (`:645`). Its icon row gains a JEV button just before `SidebarSupportSlot` (`:520`), which shows "Agent roles" beside the settings gear. A new hook, `components/sidebar/use-sidebar-jev-dashboard-target.ts`, resolves the active host as `use-sidebar-agent-roles-target.ts` does, and returns null unless that host is connected and `useHostFeature(serverId, "jevSavings")` is true. Null renders no button, so the footer never shows a dead one. Label "JEV dashboard"; icon `Gauge`.
+- **The route.** `/jev`, app-wide like `/ask-jev` (`app/ask-jev.tsx`), rendering `screens/jev-dashboard-screen.tsx`, registered where Ask JEV is (`app/_layout.tsx`, `utils/host-routes.ts`) and with a command-center action in `command-center/root-registration.tsx`. JEV belongs to a host, not a workspace. With more than one host the screen has a host picker, opening on the button's host (`?host=<serverId>`).
+- **One screen for desktop, web and phone.** On a compact form factor (`useIsCompactFormFactor()`) the tiles stack two by two and the feature table becomes cards.
+
+### What it shows
+
+Ranges: Today, 7 days, All. Polled every 30 seconds while focused.
+
+1. **Totals.** Four tiles: _Saved_ (live), _Would have saved_ (shadow), _JEV cost_ (dollars, with the token equivalent under it) and _Net_ (live saved minus all JEV cost, with the if-live net as a second line). Shadow is never added to live: its tile says "in shadow" and uses the shadow tone. A tile whose total includes `estimatedTokens` shows that part as "estimated" under it, never folded into "saved" without a word. A caption names the unit, "Opus-equivalent tokens: weighted tokens at Opus 5.5 prices; Opus 5.5 cache reads count double, so figures from Opus 5.5 agents run high". Below, the days as bars, live and shadow as two series, following the `dataviz` skill.
+2. **Features.** A row each, in the budget strip's order (`FEATURE_ORDER`, `services/quota-fetcher/providers/jev.ts`) with feature 16 added: state (Off, Shadow, Dry run, Live, Dormant); involvements, with the not-asked counts by reason on tap; tokens live and would-have; the other benefit in its own unit ("31 pushes held", "4.2 h of waiting"); the wrong rate (false skips, regrets and contradictions over those checked); JEV cost; and the evidence: the rule, what was observed, and met, not met, or not enough data yet. A feature with no token benefit shows no token figure, never a zero.
+3. **Where agents use it.** The top 10 agents and top 10 workspaces by involvements, with their tokens. A tap opens the agent or the workspace.
+4. **Recent.** `jev.savings.events`, paged by cursor, filterable by feature: time, feature, agent, what JEV was asked, what code did and what the answer would do, mode, tokens or "pending", validation. A tap opens the agent, whose context popover lists that agent's decisions (feature 11).
+
+The dashboard never flips a mode. The evidence is how Tyler decides; the switch is his edit to `config.json` (D6). Each rule is evaluated over the summary's range, so read it on All.
+
+**Evidence rules,** constants in `savings-formulas.ts`, fixed before the data arrives:
+
+| Feature               | Flip           | Rule                                                                                                                                                                                 |
+| --------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 2 spawn hint          | shadow → live  | 50 settled unlabelled children, and a positive would-have sum after upward moves                                                                                                     |
+| 3a remediation triage | shadow → live  | 20 would-be skips to a person, at most 1 in 5 `contradicted` (the agent fixed it). Deferrals are judged live; the evidence shows how many would-be deferrals cleared inside the hold |
+| 3b finish triage      | shadow → live  | 50 would-be notices with a follow-up, at least 80% `held`                                                                                                                            |
+| 4–6 agent tools       | live → off     | 20 file-tool calls, over half ending in a regret read (feature 4's rule), or the D8 report's kill rule                                                                               |
+| 10 stall judgment     | shadow → live  | 10 person-first labels whose agent ran, at least 70% of those agents ended NOT FIXED                                                                                                 |
+| 14 away reply         | dry run → live | 20 follow-ups, `sameChoice` in at least 90%                                                                                                                                          |
+| 16 read check         | shadow → live  | 200 would-skips of reads of 8,000 tokens or more, at most 30% false skips, a positive projected net                                                                                  |
+
+### Links with feature 11
+
+- The budget strip's "TypeSafe (JEV)" row opens the dashboard for its host.
+- The context popover's JEV section ends with "All JEV activity", which opens the dashboard's recent list for that agent (`?agent=<id>`).
+- The dashboard repeats neither: the popover keeps an agent's decisions, the strip keeps today's spend against the lane caps, and the dashboard shows spend only as the cost side of the net.
+
+### Gating
+
+`server_info.features.jevSavings`, tagged `COMPAT(jevSavings)`. An older daemon shows no button, and `/jev` opened directly reads "Update the host", as Ask JEV does. A host with no key shows its not-configured state from `jev.status`, above whatever the ledger already holds.
+
+### Tests and verification
+
+- `jev/jev-dashboard-model.test.ts`: tiles from a summary fixture; shadow never summed into live; the net; a non-token feature has no token figure; each evidence state.
+- `jev/jev-dashboard.browser.test.tsx`: the screen with fixture data, paging, the feature filter, the agent filter, an older daemon, a host with no key.
+- `components/sidebar/use-sidebar-jev-dashboard-target.test.ts`: null for no host, a disconnected host and an older daemon.
+- Verify: `npx vitest run packages/app/src/jev --bail=1`.
+
+## Feature 17: session title refresh
+
+Tyler: "i never see the session names updated.. but if the session name is edited it shouldnt be updated by this mechanism.. (bonus points if we can use JEV to make it cost less)." `WorkspaceTitleTracker` (`packages/server/src/server/workspace-title-tracker.ts`) re-titles a workspace from what its recent agents are doing, on a 60-second sweep. Before it spends a structured-generation call, it asks JEV one `score` question; a confident "still fits" skips the call, which is the saving. A ceiling and a cadence make sure JEV can only make renames cheaper, never stop them.
+
+Which workspaces are eligible, and the one-time provenance migration, are in [agent-lifecycle.md](agent-lifecycle.md#workspace-names) ("Provenance decides scope"). Only a person's own edit is never refreshed.
+
+### Seam
+
+`WorkspaceTitleTracker.tick` decides when to look; `decideTitleRefresh` (`workspace-title-refresh-jev.ts`, never throws) decides whether a look generates.
+
+A workspace is looked at when its refresh interval (`metadataGeneration.workspaceTitleTracking.refreshIntervalMinutes`, 30) has passed since the last look **and** at least one user turn finished since then. The first sweep to see a workspace only starts its clocks; each restart starts them over. Each look, in order:
+
+1. **The ceiling.** `ceilingUserTurns` (8) turns or `ceilingHours` (6) hours since the last generation regenerates without asking JEV, so a JEV that always answers "fits" cannot freeze a name.
+2. **JEV.** The `fit` question. A score at or over `staleScoreThreshold` (2 of 0-3) generates; a lower score skips the call. An answer below `minConfidence` (0.6) is ignored.
+3. **The cadence.** No JEV, the gate switched off, an outage, a low-confidence answer, or a D7-excluded workspace: generate once `cadenceMinUserTurns` (3) turns and `cadenceMinMinutes` (60) minutes have passed since the last generation. D7-excluded workspaces send nothing.
+
+Every look resets the since-look turn count, so JEV is not re-asked without a new turn. Only a generation resets the ceiling and cadence counters. A cleared title is named at the next sweep without waiting for the interval, once.
+
+A generated name equal or near-equal to the current one writes nothing: same words after case, punctuation and filler words are dropped, or a word overlap of 0.8 or more. The write is discarded if the title or its source changed while JEV or the generator was running.
+
+### State and questions
+
+The title was generated from the agents' titles, so asking JEV whether it fits those titles is circular. The state is the conversation instead: per recent agent (up to 4, newest first) its status, first request, last 3 requests and activity summary, plus the newest agent's last reply. Each message is cut to 1,200 characters. Requests come from the live timeline, so they are empty after a restart until the agent's next turn.
+
+```json
+{
+  "current_title": "<workspace.title>",
+  "branch": "<workspace.branch, or null>",
+  "sessions": [
+    { "status": "running", "first_request": "…", "recent_requests": ["…"], "doing": "…" }
+  ],
+  "latest_reply": "…"
+}
+```
+
+The `fit` question's criteria run from "Still describes exactly what these sessions are doing" (0) to "Describes something unrelated to what is happening now" (3). The scope is `cwds: [workspace.cwd]`, `agentIds: [the recent agents]`. The generation prompt gets the same recent requests next to each agent's title.
+
+### Config
+
+`agents.jev.titleRefresh` (`workspace-title-refresh-config.ts`). No shadow mode: a shadow gate would ask JEV and never skip anything, which saves nothing, and the ceiling already bounds a wrong "fits". It is live by default because Tyler wants to see names change.
+
+| Key                   | Default | What it does                                                           |
+| --------------------- | ------- | ---------------------------------------------------------------------- |
+| `enabled`             | `true`  | The JEV gate. Off: every look uses the cadence                         |
+| `timeoutMs`           | `3000`  | Off the agent's path; the sweep runs every 60 s                        |
+| `staleScoreThreshold` | `2`     | A `fit` score at or over this level (0-3) regenerates                  |
+| `minConfidence`       | `0.6`   | Below this, the answer is ignored and the cadence decides              |
+| `cadenceMinUserTurns` | `3`     | Cadence: turns since the last generation                               |
+| `cadenceMinMinutes`   | `60`    | Cadence: minutes since the last generation                             |
+| `ceilingUserTurns`    | `8`     | Regenerate after this many turns since the last generation, any answer |
+| `ceilingHours`        | `6`     | Regenerate after this many hours since the last generation, any answer |
+
+`metadataGeneration.workspaceTitleTracking.enabled` turns re-titling off entirely.
+
+### Measurement
+
+Every look writes one line to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one rotation at 1 MB): the action (`untitled`, `ceiling`, `jev-stale`, `jev-fits`, `cadence`, `cadence-not-ready`), `gatedByJev`, the outcome and reason (`excluded`, `low-confidence`, an outage reason), score and confidence, whether the generation was called, and the counters. A `jev-fits` or `jev-stale` look also lands in the decision store against the workspace's most recent agent: `applied` is true for `jev-fits` (JEV skipped a call code would have made) and false for `jev-stale`, with `mode: "live"` and `wouldBe: "regenerate title"`.
+
+### Fail open
+
+No key, the switch off, an outage, a low-confidence answer or D7 all land on the cadence, and the ceiling applies in every case. JEV changes how many generation calls a workspace costs, not whether its name keeps up.
+
+### Cost, cache, latency
+
+- A few KB per look at most: four sessions' requests and one reply, each capped. Off the agent's path; the sweep is a timer.
+- **Pays if** most looks on an actively worked workspace answer "still fits", since each is a generation call avoided. **Measured by** `title-refresh.jsonl`: `jev-fits` lines against looks that generated.
+
+### Tests and verification
+
+- `workspace-title-refresh-jev.test.ts`: each action, low confidence, D7 sending nothing, the state leaving out agent titles, and the decision-store record.
+- `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and an agent-supplied (`auto`) title.
+- `workspace-title-source-migration.test.ts`: each reclassification rule, the run-once marker, and a `workspaces.json` written after the migration parsing with the previous build's `auto | manual` schema.
+
 ## Testing
 
 - Every track tests against the fake. No test makes a live call or reads a real key. A test process with `OPENROUTER_API_KEY` set, as CI's is, still uses the fake: the service reads only `PASEO_JEV_API_KEY`, and refuses a live transport under Vitest.
@@ -1314,6 +1795,10 @@ Each item is out of v1 on purpose, with the reason.
 - **Rejecting the auto-reply marker in `send_agent_prompt`.** Any agent can send a message that starts with it. The job itself never trusts the marker (it knows its replies by hash), but a leader reading one cannot tell a forged one from the real one.
 - **Ask JEV attachments beyond an agent's activity.** A workspace file, and a daemon-side cancel for a sent question, wait until the text-only screen shows what Tyler asks.
 - **A per-request zero-retention field on OpenRouter.** Whether one exists is UNKNOWN until a key exists; it is a pre-live check, and the transport sends it if it does.
+- **Feature 16 beyond Claude.** OpenCode's bridge `tool.execute.before` could carry the read check; Codex asks only for commands that need approval; the ACP client advertises `readTextFile: false`, so ACP agents read files themselves; Pi never asks. Every fleet agent is Claude today.
+- **Narrowing a read.** Feature 16 records `part_needed` as `would-narrow`. Rewriting a `Read`'s `offset` and `limit` through `updatedInput` waits until the shadow data shows how often it would help.
+- **Measured residency.** Every token formula prices a loaded token at the fleet's 13.75. Counting each agent's requests after a read would price each record exactly.
+- **Netting the spawn hint's quality cost.** Mechanical children that were re-spawned or escalated are counted beside the savings, not subtracted from them.
 
 ## Reference implementation
 

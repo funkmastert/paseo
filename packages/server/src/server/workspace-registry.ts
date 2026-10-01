@@ -48,7 +48,7 @@ const PersistedProjectRecordSchema = z.object({
   archivedAt: z.string().nullable(),
 });
 
-const PersistedWorkspaceRecordSchema = z.object({
+export const PersistedWorkspaceRecordSchema = z.object({
   workspaceId: z.string(),
   projectId: z.string(),
   cwd: z.string(),
@@ -63,10 +63,11 @@ const PersistedWorkspaceRecordSchema = z.object({
     .optional()
     .transform((value) => value ?? null),
   // COMPAT(workspaceTitleSource): added in v0.2.7, remove optional parsing after 2027-03-31.
-  // Who last named this workspace. "auto" means Paseo generated the title and may
-  // regenerate it; "manual" means a human (or an agent acting for one) chose it.
-  // Absent is a record written before provenance was tracked — see isAutoTitledWorkspace,
-  // which reads it as hand-set.
+  // Whether Paseo may rename this workspace. "manual" is a person's own edit in the app and is
+  // never touched; "auto" is everything else — a title Paseo generated or an agent supplied.
+  // Absent is a record written before provenance was tracked — see isAutoTitledWorkspace, which
+  // reads it as hand-set. Never add a value here: every daemon parses this file with
+  // z.array(schema), so one record an older build can't parse hides every workspace from it.
   titleSource: z.enum(["auto", "manual"]).optional(),
   // The worktree's git branch. Decoupled from displayName/title by construction:
   // displayName holds the human name (title), branch holds the git branch. Only
@@ -123,10 +124,11 @@ export type WorkspaceTitleSource = NonNullable<PersistedWorkspaceRecord["titleSo
 export type WorkspacePinSource = NonNullable<PersistedWorkspaceRecord["pinSource"]>;
 
 /**
- * Whether Paseo may rewrite this workspace's title. Only a title Paseo itself
- * generated is fair game. An absent titleSource is a record written before
- * provenance existed, and silently renaming something the user named is worse
- * than leaving a stale name, so unknown reads as hand-set.
+ * Whether Paseo may rewrite this workspace's title. A title Paseo generated or an agent
+ * supplied is "auto" and fair game; only a person's own edit is protected. An absent titleSource
+ * is a record written before provenance existed, and silently renaming something the user named
+ * is worse than leaving a stale name, so unknown reads as hand-set (the one-time pass in
+ * workspace-title-source-migration.ts classifies those records).
  */
 export function isAutoTitledWorkspace(
   record: Pick<PersistedWorkspaceRecord, "titleSource">,

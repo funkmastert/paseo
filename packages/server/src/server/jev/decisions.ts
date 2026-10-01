@@ -1,6 +1,11 @@
-import { JEV_CALL_LABEL, TASK_CLASS_SOURCE_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  JEV_CALL_LABEL,
+  JEV_SPAWN_LABEL,
+  TASK_CLASS_SOURCE_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 
 import type { JevDecisionNote, JevDecisionRecord, JevDecisionSink } from "./contract.js";
+import { parseJevSpawnLabel } from "./savings-spawn.js";
 
 /**
  * The per-agent decision store (docs/jev.md, "Decision store"). In memory only: a decision never
@@ -72,10 +77,15 @@ export class JevDecisionStore implements JevDecisionSink {
     const pendingRecord = callId ? this.pending.get(callId) : undefined;
     if (!pendingRecord) return own;
     const applied = labels?.[TASK_CLASS_SOURCE_LABEL] === "jev";
+    // The role router's `paseo.jev-spawn` says what the answer maps to: the note's `wouldBe`.
+    const spawn = parseJevSpawnLabel(labels?.[JEV_SPAWN_LABEL]);
+    const wouldBe = spawn
+      ? { wouldBe: `${spawn.wouldClass ?? "standard"} on ${spawn.wouldModel ?? "?"}` }
+      : {};
     own.push(
       applied
-        ? { ...pendingRecord, agentId, applied, action: SPAWN_HINT_APPLIED_ACTION }
-        : { ...pendingRecord, agentId, applied },
+        ? { ...pendingRecord, ...wouldBe, agentId, applied, action: SPAWN_HINT_APPLIED_ACTION }
+        : { ...pendingRecord, ...wouldBe, agentId, applied },
     );
     return own;
   }

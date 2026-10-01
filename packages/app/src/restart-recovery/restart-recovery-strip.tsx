@@ -6,6 +6,11 @@ import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import type { RestartRecoveryEntry } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
 import type { Theme } from "@/styles/theme";
 import { Button } from "@/components/ui/button";
+import { getIsElectron } from "@/constants/platform";
+import { useDesktopSettings } from "@/desktop/settings/desktop-settings";
+import { openHostOverview } from "@/navigation/settings-navigation";
+import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { formatDayRelativeTime, formatDuration } from "@/utils/time";
 import { useRestartRecovery } from "./use-restart-recovery";
 
 const ThemedRotateCcw = withUnistyles(RotateCcw);
@@ -21,7 +26,7 @@ function isOpenState(state: string): state is OpenState {
   return OPEN_STATES.has(state);
 }
 
-function EntryRow({ entry }: { entry: RestartRecoveryEntry }) {
+function EntryRow({ entry, serverId }: { entry: RestartRecoveryEntry; serverId: string }) {
   const { t } = useTranslation();
   let state: string = entry.state;
   if (entry.readiness === "not_restorable") {
@@ -32,17 +37,31 @@ function EntryRow({ entry }: { entry: RestartRecoveryEntry }) {
   const reason =
     entry.detail ??
     entry.checks.find((check) => check.status === "red" || check.status === "yellow")?.detail;
+  const ranFor =
+    entry.stoppedAt != null
+      ? formatDuration(new Date(entry.stoppedAt).getTime() - new Date(entry.runStartedAt).getTime())
+      : null;
+  const handlePress = useCallback(
+    () => navigateToAgent({ serverId, agentId: entry.agentId, workspaceId: entry.workspaceId }),
+    [serverId, entry.agentId, entry.workspaceId],
+  );
   return (
-    <View style={styles.row} testID={`restart-recovery-row-${entry.agentId}`}>
+    <Pressable
+      style={styles.row}
+      onPress={handlePress}
+      accessibilityRole="button"
+      testID={`restart-recovery-row-${entry.agentId}`}
+    >
       <Text style={styles.rowName} numberOfLines={1}>
         {"  ".repeat(entry.depth)}
         {entry.title ?? entry.agentId.slice(0, 8)}
       </Text>
       <Text style={styles.rowStatus} numberOfLines={2}>
         {state}
+        {ranFor ? ` · ${t("restartRecovery.ranFor", { duration: ranFor })}` : ""}
         {reason ? ` · ${reason}` : ""}
       </Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -53,11 +72,23 @@ function EntryRow({ entry }: { entry: RestartRecoveryEntry }) {
  */
 export function RestartRecoveryStrip() {
   const { t } = useTranslation();
-  const { model, resumeAll, dismissAll, busy, error } = useRestartRecovery();
+  const { model, serverId, resumeAll, dismissAll, busy, error } = useRestartRecovery();
   const [expanded, setExpanded] = useState(false);
   const handleToggle = useCallback(() => setExpanded((previous) => !previous), []);
+  const { settings: desktopSettings } = useDesktopSettings();
+  const handleOpenKeepRunningSetting = useCallback(() => {
+    openHostOverview(serverId);
+  }, [serverId]);
 
   if (!model) return null;
+
+  const reasonText = model.reason ? t(`restartRecovery.reason.${model.reason}`) : null;
+  const ageText = t("restartRecovery.age", { when: formatDayRelativeTime(new Date(model.at)) });
+  const showKeepRunningHint =
+    model.reason === "bozeo_quit" &&
+    getIsElectron() &&
+    !desktopSettings.daemon.keepRunningAfterQuit;
+  const showResumeModeHint = model.mode === "plan";
 
   return (
     <View style={styles.container} testID="restart-recovery-strip">
@@ -81,8 +112,18 @@ export function RestartRecoveryStrip() {
       </Pressable>
       {expanded ? (
         <View style={styles.rowList} testID="restart-recovery-rows">
+          <View style={styles.episodeInfo}>
+            {reasonText ? (
+              <Text style={styles.episodeReason} testID="restart-recovery-reason">
+                {reasonText}
+              </Text>
+            ) : null}
+            <Text style={styles.episodeAge} testID="restart-recovery-age">
+              {ageText}
+            </Text>
+          </View>
           {model.open.map((entry) => (
-            <EntryRow key={entry.agentId} entry={entry} />
+            <EntryRow key={entry.agentId} entry={entry} serverId={serverId} />
           ))}
           {error ? <Text style={styles.error}>{t("restartRecovery.error", { error })}</Text> : null}
           <View style={styles.actions}>
@@ -106,6 +147,20 @@ export function RestartRecoveryStrip() {
               {t("restartRecovery.dismissAll")}
             </Button>
           </View>
+          {showKeepRunningHint ? (
+            <Pressable
+              onPress={handleOpenKeepRunningSetting}
+              accessibilityRole="link"
+              testID="restart-recovery-keep-running-hint"
+            >
+              <Text style={styles.hint}>{t("restartRecovery.keepRunningHint")}</Text>
+            </Pressable>
+          ) : null}
+          {showResumeModeHint ? (
+            <Text style={styles.hint} testID="restart-recovery-resume-mode-hint">
+              {t("restartRecovery.resumeModeHint")}
+            </Text>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -139,6 +194,18 @@ const styles = StyleSheet.create((theme) => ({
   rowList: {
     paddingBottom: theme.spacing[1],
   },
+  episodeInfo: {
+    paddingHorizontal: theme.spacing[3],
+    paddingBottom: theme.spacing[1],
+  },
+  episodeReason: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foreground,
+  },
+  episodeAge: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
+  },
   row: {
     gap: 1,
     paddingHorizontal: theme.spacing[3],
@@ -162,6 +229,12 @@ const styles = StyleSheet.create((theme) => ({
   actions: {
     flexDirection: "row",
     gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[2],
+  },
+  hint: {
+    fontSize: theme.fontSize.sm,
+    color: theme.colors.foregroundMuted,
     paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[2],
   },

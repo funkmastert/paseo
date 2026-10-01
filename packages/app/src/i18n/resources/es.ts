@@ -362,6 +362,7 @@ export const es: TranslationResources = {
       next: "Siguiente",
       answerPlaceholder: "Escribe tu respuesta...",
       otherPlaceholder: "Otro...",
+      answerInConversation: "Responde en la conversación completa",
     },
     todo: {
       title: "Tareas",
@@ -1268,6 +1269,7 @@ export const es: TranslationResources = {
         title: "Cambiar nombre del espacio de trabajo",
         submit: "Rebautizar",
         invalidBranchName: "Nombre de sucursal no válido",
+        autoPlaceholder: "Nombrar automáticamente",
       },
       toasts: {
         workspacePathUnavailable: "RutaWorkspaceno disponible",
@@ -1929,6 +1931,8 @@ export const es: TranslationResources = {
       accountLeadersHere: "Líderes {{count}}",
       accountWorkersHere: "Trabajadores {{count}}",
       accountBalanceLeft: "{{amount}} restantes",
+      accountDetailsShow: "Mostrar {{count}} más",
+      accountDetailsHide: "Mostrar menos",
       staleTitle: "Sin actualizar",
       staleLastSynced: "Última sincronización {{time}}",
       staleNeverSynced: "Aún sin sincronizar",
@@ -1999,6 +2003,19 @@ export const es: TranslationResources = {
     },
     notRestorable: "No se puede reanudar",
     error: "La recuperación falló: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo se cerró y detuvo el daemon",
+      update: "El daemon se reinició para una actualización",
+      crashed: "El daemon falló",
+      power_loss: "El Mac se reinició o perdió la energía",
+      cli_stop: "Detenido desde la línea de comandos",
+    },
+    age: "desde {{when}}",
+    ranFor: "se ejecutó {{duration}}",
+    keepRunningHint:
+      'Salir de Bozeo detiene el daemon: activa "Mantener el daemon en ejecución al salir" para evitarlo.',
+    resumeModeHint:
+      "Bozeo puede reanudar por su cuenta los agentes interrumpidos así: establece agents.restartRecovery.mode en resume en config.json.",
     expand: "Expandir recuperación tras reinicio",
     collapse: "Contraer recuperación tras reinicio",
   },
@@ -2112,6 +2129,10 @@ export const es: TranslationResources = {
     memoryFileWarning: "{{path}} tiene {{tokens}} tokens, por encima de {{limit}}.",
     reReadAdvice:
       "Esta sesión relee ~{{tokens}} tokens en cada turno. Una sesión nueva con un traspaso breve es más barata.",
+    jevTitle: "Decisiones de JEV",
+    jevShadow: "Sombra",
+    jevDryRun: "Simulación",
+    jevOlder: "{{count}} anteriores",
   },
   review: {
     comment: {

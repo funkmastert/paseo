@@ -16,6 +16,9 @@ import type {
   JevFeatureId,
   JevLane,
   JevOutcome,
+  JevFeatureState,
+  JevSavingsFeature,
+  JevSavingsSink,
   JevService,
   JevStatus,
   JevTransport,
@@ -38,6 +41,7 @@ import {
 } from "./redact.js";
 import { JEV_UNATTRIBUTED_AGENT, JevSpendReservations, type JevSpendReservation } from "./spend.js";
 import { createHttpJevTransport } from "./transport.js";
+import { JevSavingsLedger } from "./savings.js";
 import {
   reportedCostUsd,
   validateJevRequest,
@@ -58,14 +62,24 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
   compactionTiming: "control",
   stallJudgment: "control",
   awayReply: "control",
+  titleRefresh: "control",
   agentTools: "agentTools",
   askJev: "interactive",
 };
 
 /** Features whose answers always go to the caller: an agent or a person asked, so it gets one. */
-const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev"]);
+const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev", "titleRefresh"]);
 
 const JEV_FEATURES = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
+
+/** A savings sink that drops everything, for test fakes. */
+export const DROP_JEV_SAVINGS: JevSavingsSink = {
+  record: () => "",
+  settle: () => undefined,
+  validate: () => undefined,
+  countNotAsked: () => undefined,
+  noteRead: () => undefined,
+};
 
 /** Bytes, not tokens: JEV's tokenizer is unknown, so 60 KB assumes about 2.5 bytes a token. */
 export const JEV_MAX_STATE_BYTES = 60_000;
@@ -104,6 +118,12 @@ export interface JevServiceOptions {
   readSecretValues?: (jevKey: string | null) => readonly JevSecretValue[];
   /** The agent's labels, for attaching its spawn hint in `listDecisions`. */
   readAgentLabels?: (agentId: string) => Readonly<Record<string, string>> | null;
+  /** The savings ledger's lookups (docs/jev.md, "Savings"). Each may throw; the ledger falls back. */
+  savingsLookups?: {
+    agentTitle?: (agentId: string) => string | null;
+    workspaceOf?: (agentId: string) => string | null;
+    workspaceLabel?: (workspaceId: string) => string | null;
+  };
   /** Checked for `VITEST` and `PASEO_JEV_BACKEND`. Defaults to `process.env`. */
   env?: Readonly<Record<string, string | undefined>>;
   now?: () => number;
@@ -118,6 +138,8 @@ export interface JevServiceOptions {
 }
 
 export interface JevServiceRuntime extends JevService {
+  /** The savings ledger: the sink, plus the joins and the reader the hooks and RPCs use. */
+  readonly savings: JevSavingsLedger;
   /** Loads the ledger's totals and narrows the audit files. Call once before serving. */
   start(): Promise<void>;
   /** Flushes the ledger and the audit queue. */
@@ -237,6 +259,15 @@ function newLedgerEntry(
   };
 }
 
+/** What the dashboard shows for a feature: off, shadow (dry run for feature 14), live or dormant. */
+function savingsFeatureState(status: JevStatus, feature: JevSavingsFeature): JevFeatureState {
+  const own = status.features[feature as JevFeatureId];
+  if (!own?.enabled) return "off";
+  // Feature 9 runs only while leader compaction is on, which it is not in v1.
+  if (feature === "compactionTiming") return "dormant";
+  return own.shadow ? "shadow" : "live";
+}
+
 function featureConfig(
   config: ResolvedJevConfig,
   feature: JevFeatureId,
@@ -334,6 +365,22 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
   const decisions = new JevDecisionStore({
     now,
     costFor: (callId) => ledger.find(callId)?.cost.usd ?? null,
+  });
+  const savings = new JevSavingsLedger({
+    dir: jevDir,
+    logger,
+    now,
+    platform: options.platform,
+    findCall: (callId) => ledger.find(callId),
+    daySpends: () => ledger.daySpends(),
+    featureState: (feature) => savingsFeatureState(status(), feature),
+    featureShadow: (feature) => {
+      const own = status().features[feature as JevFeatureId];
+      return own ? own.shadow : true;
+    },
+    agentTitle: options.savingsLookups?.agentTitle,
+    workspaceOf: options.savingsLookups?.workspaceOf,
+    workspaceLabel: options.savingsLookups?.workspaceLabel,
   });
 
   const fixedTransport = options.transport ?? null;
@@ -1041,6 +1088,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     checkScope,
     status,
     decisions,
+    savings,
     listDecisions: (agentId) => {
       let labels: Readonly<Record<string, string>> | null = null;
       try {
@@ -1052,12 +1100,14 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     },
     async start() {
       await ledger.load();
+      await savings.load();
       const snap = readSnapshot(false);
       await audit.init({ retainDays: snap.config?.audit.retainDays ?? 3 });
       if (fixedTransport?.provider === "fake") logger.info("jev: fake backend");
       else if (snap.config && !keyPresent(snap)) gateReason(snap, null);
     },
     async stop() {
+      await savings.stop();
       await ledger.stop();
       await audit.flush();
     },

@@ -10,6 +10,7 @@ import { CodexQuotaProvider } from "./providers/codex.js";
 import { CopilotQuotaProvider } from "./providers/copilot.js";
 import { CursorQuotaProvider } from "./providers/cursor.js";
 import { GrokQuotaProvider } from "./providers/grok.js";
+import { JevUsageFetcher } from "./providers/jev.js";
 import { KimiQuotaProvider } from "./providers/kimi.js";
 import { MiniMaxQuotaProvider } from "./providers/minimax.js";
 import { OpenAiApiUsageProvider } from "./providers/openai-api.js";
@@ -63,6 +64,14 @@ export const PROVIDER_USAGE_FETCHERS: readonly ProviderUsageFetcherManifestEntry
         logger: options.logger,
         fetch: options.fetch,
         readConfig: options.readOpenAiApiConfig ?? (() => undefined),
+      }),
+  },
+  {
+    providerId: "jev",
+    create: (options) =>
+      new JevUsageFetcher({
+        readStatus: options.readJevStatus ?? (() => null),
+        readDecisions: options.readJevDecisions,
       }),
   },
 ];

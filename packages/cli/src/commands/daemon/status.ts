@@ -10,7 +10,7 @@ import {
   lastWedge,
   readLastShutdownReceipt,
 } from "@getpaseo/server";
-import { connectToDaemon } from "../../utils/client.js";
+import { connectToDaemon, getDaemonHost } from "../../utils/client.js";
 import type { CommandOptions, ListResult, OutputSchema } from "../../output/index.js";
 import { resolveLocalDaemonState } from "./local-daemon.js";
 import { resolveNodePathFromPid } from "./runtime-toolchain.js";
@@ -462,13 +462,24 @@ function describeBlockedLoop(
 
 export type StatusResult = ListResult<StatusRow>;
 
+/**
+ * Which daemon this invocation should probe: --host/PASEO_HOST, the same precedence every other
+ * command uses (utils/client.ts's getDaemonHost), never state.listen. `state.listen` reflects the
+ * local supervised daemon's own persisted listen config (deliberately scrubbed of env overrides
+ * for display, see resolveLocalDaemonState) and says nothing about which daemon this invocation
+ * was told to talk to.
+ */
+export function resolveDaemonProbeTarget(options: { host?: string }): string {
+  return getDaemonHost({ host: options.host }).trim();
+}
+
 export async function runStatusCommand(
   options: CommandOptions,
   _command: Command,
 ): Promise<StatusResult> {
   const home = typeof options.home === "string" ? options.home : undefined;
   const state = resolveLocalDaemonState({ home });
-  const daemonTarget = state.listen.trim();
+  const daemonTarget = resolveDaemonProbeTarget(options);
 
   const owner = resolveOwnerLabel(state.pidInfo?.uid, state.pidInfo?.hostname);
   let daemonNode = await resolveDaemonNodeLabel(state);

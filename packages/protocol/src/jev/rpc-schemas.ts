@@ -189,6 +189,13 @@ export const JevDecisionRecordSchema = z.object({
   confidence: z.number().nullable(),
   action: z.string(),
   applied: z.boolean(),
+  // Absent from a daemon before the savings ledger. "shadow" | "live": `applied: false` is not
+  // shadow, because a live answer that kept today's behaviour is not applied either.
+  mode: z.string().optional(),
+  // What the answer maps to with every switch on, in either mode.
+  wouldBe: z.string().nullable().optional(),
+  // The savings record for the same involvement (`jev.savings.events`).
+  savingsId: z.string().optional(),
   at: z.string(),
   costUsd: z.number().nullable(),
 });
@@ -255,6 +262,168 @@ export const JevAskResponseSchema = z.object({
   }),
 });
 
+// jev.savings.*
+
+// The savings ledger (docs/jev.md, "Savings"), mirroring `JevSavingsSummary` and `JevSavingsEvent`
+// in the daemon's `jev/contract.ts`. Tokens are Opus-equivalent weighted tokens. Feature, mode,
+// outcome, benefit, state and validation outcome are plain strings with the known values in a
+// comment, so a new feature or reason never narrows the schema.
+
+export const JevSavingsOtherBenefitSchema = z.object({
+  // "pushes-held" | "minutes"
+  unit: z.string(),
+  value: z.number(),
+});
+
+export const JevSavingsModeTotalsSchema = z.object({
+  involvements: z.number(),
+  // Live: answers that changed what code did. Shadow: answers that would have.
+  changed: z.number(),
+  tokens: z.number(),
+  // The part of `tokens` that is a median estimate, not measured. Optional: absent from an older daemon.
+  estimatedTokens: z.number().optional(),
+  otherBenefit: JevSavingsOtherBenefitSchema.nullable(),
+  pending: z.number(),
+});
+
+export const JevSavingsFeatureSummarySchema = z.object({
+  // A `JevFeatureId`, or "readCheck"
+  feature: z.string(),
+  // "off" | "shadow" | "live" | "dormant"
+  state: z.string(),
+  // "tokens" | "attention" | "time" | "none"
+  benefit: z.string(),
+  asked: z.number(),
+  // Keyed by reason: "below-floor" | "excluded" | "inactive" | "not-text" | "secret-path" |
+  // "outside-cwd" | "dedup" | "repeat"
+  notAsked: z.record(z.string(), z.number()),
+  live: JevSavingsModeTotalsSchema,
+  shadow: JevSavingsModeTotalsSchema,
+  validation: z.object({ checked: z.number(), held: z.number(), wrong: z.number() }),
+  jevUsd: z.number(),
+  // `met` is null until the rule's minimum count is reached.
+  evidence: z.object({ rule: z.string(), observed: z.string(), met: z.boolean().nullable() }),
+});
+
+export const JevSavingsTopEntrySchema = z.object({
+  // An agent id or a workspace id.
+  id: z.string(),
+  label: z.string().nullable(),
+  involvements: z.number(),
+  liveTokens: z.number(),
+  shadowTokens: z.number(),
+});
+
+export const JevSavingsDaySchema = z.object({
+  // The daemon's local calendar day, YYYY-MM-DD.
+  day: z.string(),
+  involvements: z.number(),
+  liveTokens: z.number(),
+  shadowTokens: z.number(),
+  jevUsd: z.number(),
+});
+
+export const JevSavingsSummarySchema = z.object({
+  // "today" | "7d" | "all"
+  range: z.string(),
+  from: z.string(),
+  to: z.string(),
+  // "opus-equivalent-weighted-tokens"
+  unit: z.string(),
+  live: z.object({ involvements: z.number(), tokensSaved: z.number() }),
+  shadow: z.object({ involvements: z.number(), tokensWouldSave: z.number() }),
+  jevSpend: z.object({ calls: z.number(), usd: z.number(), tokensEquivalent: z.number() }),
+  net: z.object({ live: z.number(), ifLive: z.number() }),
+  features: z.array(JevSavingsFeatureSummarySchema),
+  topAgents: z.array(JevSavingsTopEntrySchema),
+  topWorkspaces: z.array(JevSavingsTopEntrySchema),
+  days: z.array(JevSavingsDaySchema),
+});
+
+export const JevSavingsDecisionSchema = z.object({
+  did: z.string(),
+  wouldBe: z.string().nullable(),
+  changed: z.boolean(),
+  detail: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+});
+
+export const JevSavingsBasisSchema = z.object({
+  formula: z.string(),
+  inputs: z.record(z.string(), z.union([z.number(), z.string(), z.null()])),
+});
+
+export const JevSavingsValidationSchema = z.object({
+  // "held" | "false-skip" | "regret" | "contradicted"
+  outcome: z.string(),
+  signal: z.string().nullable(),
+  afterMinutes: z.number().nullable(),
+});
+
+export const JevSavingsEventSchema = z.object({
+  id: z.string(),
+  at: z.string(),
+  feature: z.string(),
+  agentId: z.string().nullable(),
+  agentTitle: z.string().nullable(),
+  workspaceId: z.string().nullable(),
+  // "shadow" | "live"
+  mode: z.string(),
+  // "answered" | "shadow" | "unavailable" | "failed"
+  outcome: z.string(),
+  involvement: z.string(),
+  decision: JevSavingsDecisionSchema,
+  benefit: z.string(),
+  tokensSavedEstimate: z.number().nullable(),
+  otherBenefit: JevSavingsOtherBenefitSchema.nullable(),
+  basis: JevSavingsBasisSchema.nullable(),
+  pending: z.boolean(),
+  // The figure is an estimate, not measured tokens. Optional: absent from an older daemon.
+  estimated: z.boolean().optional(),
+  validation: JevSavingsValidationSchema.nullable(),
+  jevCostUsd: z.number().nullable(),
+});
+
+// COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30. Gated on
+// `server_info.features.jevSavings`.
+export const JevSavingsSummaryRequestSchema = z.object({
+  type: z.literal("jev.savings.summary.request"),
+  requestId: z.string(),
+  // "today" | "7d" | "all"
+  range: z.string(),
+});
+
+export const JevSavingsSummaryResponseSchema = z.object({
+  type: z.literal("jev.savings.summary.response"),
+  payload: z.object({
+    requestId: z.string(),
+    summary: JevSavingsSummarySchema,
+  }),
+});
+
+// COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30. Gated on
+// `server_info.features.jevSavings`.
+export const JevSavingsEventsRequestSchema = z.object({
+  type: z.literal("jev.savings.events.request"),
+  requestId: z.string(),
+  // "today" | "7d" | "all"
+  range: z.string(),
+  feature: z.string().optional(),
+  agentId: z.string().optional(),
+  // The previous page's `nextCursor`.
+  cursor: z.string().optional(),
+  // Default 50, at most 200.
+  limit: z.number().optional(),
+});
+
+export const JevSavingsEventsResponseSchema = z.object({
+  type: z.literal("jev.savings.events.response"),
+  payload: z.object({
+    requestId: z.string(),
+    events: z.array(JevSavingsEventSchema),
+    nextCursor: z.string().nullable(),
+  }),
+});
+
 export type JevInstructions = z.infer<typeof JevInstructionsSchema>;
 export type JevNoulQuestion = z.infer<typeof JevNoulQuestionSchema>;
 export type JevChoiceQuestion = z.infer<typeof JevChoiceQuestionSchema>;
@@ -283,3 +452,17 @@ export type JevDecisionsListResponse = z.infer<typeof JevDecisionsListResponseSc
 export type JevAskRequest = z.infer<typeof JevAskRequestSchema>;
 export type JevAskResponse = z.infer<typeof JevAskResponseSchema>;
 export type JevAskCost = z.infer<typeof JevAskCostSchema>;
+export type JevSavingsOtherBenefit = z.infer<typeof JevSavingsOtherBenefitSchema>;
+export type JevSavingsModeTotals = z.infer<typeof JevSavingsModeTotalsSchema>;
+export type JevSavingsFeatureSummary = z.infer<typeof JevSavingsFeatureSummarySchema>;
+export type JevSavingsTopEntry = z.infer<typeof JevSavingsTopEntrySchema>;
+export type JevSavingsDay = z.infer<typeof JevSavingsDaySchema>;
+export type JevSavingsSummary = z.infer<typeof JevSavingsSummarySchema>;
+export type JevSavingsDecision = z.infer<typeof JevSavingsDecisionSchema>;
+export type JevSavingsBasis = z.infer<typeof JevSavingsBasisSchema>;
+export type JevSavingsValidation = z.infer<typeof JevSavingsValidationSchema>;
+export type JevSavingsEvent = z.infer<typeof JevSavingsEventSchema>;
+export type JevSavingsSummaryRequest = z.infer<typeof JevSavingsSummaryRequestSchema>;
+export type JevSavingsSummaryResponse = z.infer<typeof JevSavingsSummaryResponseSchema>;
+export type JevSavingsEventsRequest = z.infer<typeof JevSavingsEventsRequestSchema>;
+export type JevSavingsEventsResponse = z.infer<typeof JevSavingsEventsResponseSchema>;

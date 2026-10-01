@@ -910,6 +910,24 @@ describe("explain — the thinking decision", () => {
       baseDeps({ policyCache: fakePolicyCache(policy), catalogCache: fakeCatalogCache(catalog, thinking), poolCache }),
     ).explain(input, context(fakePaseo({})));
 
+  it("says an unlabelled child's class is decided at create once JEV's hint is live, and applies nothing", async () => {
+    const live = { active: true, reason: null, shadow: false, applyHard: false, applyRole: false };
+    const handlers = createRoleModelPolicyRpcHandlers(
+      baseDeps({
+        policyCache: fakePolicyCache(policy),
+        catalogCache: fakeCatalogCache(catalog, thinking),
+        poolCache,
+        jevAvailability: { get: () => ({ spawnHint: live, agentTools: { active: false, served: false, assignShare: 0 } }) },
+      }),
+    );
+
+    const result = await handlers.explain({ role: "worker", prompt: "Implement the retry helper." }, context(fakePaseo({})));
+
+    expect(result.reasons.taskClass).toContain("Decided at create");
+    expect(result.taskClassSource).toBe("default");
+    expect(result.model).toBe(OPUS_5_5);
+  });
+
   it("reports Extra High for a root agent, with the classifier's reason", async () => {
     const result = await explain({ root: true });
     expect(result.thinking).toMatchObject({ outcome: "leader-rule", optionId: "xhigh", modelRef: OPUS_5_5 });

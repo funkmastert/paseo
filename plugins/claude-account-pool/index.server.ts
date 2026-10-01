@@ -3,6 +3,9 @@ import { createAccountIdentity } from "./server/account-identity";
 import { startClassifierToolServer, type ClassifierToolServer } from "./server/classifier-tool";
 import { echoed, echoedList } from "./server/echo";
 import { createHealthTracker } from "./server/health";
+import { createJevAvailability, jevToolsWorldFor, type JevAvailability } from "./server/jev-availability";
+import { fetchSpawnHint, type SpawnHint } from "./server/jev-hint";
+import type { JevToolsWorld } from "./server/classifier";
 import { createMcpGatewayCache, type McpGatewayCache } from "./server/mcp-gateway-cache";
 import { createModelCatalogCache, type ModelCatalogCache } from "./server/model-catalog";
 import { createNotifier, type Notifier } from "./server/notify";
@@ -13,7 +16,7 @@ import { createPolicyCache, type PolicyCache } from "./server/role-policy";
 import { createRoleModelPolicyRpcHandlers } from "./server/role-policy-rpc-handlers";
 import { createDecisionLog, type LoggedRequest } from "./server/decision-log";
 import { placesRootAsChild } from "./server/role-resolve";
-import { createRoleRouter, type RoleCreateRouter } from "./server/role-router";
+import { classifierInputFor, createRoleRouter, type RoleCreateRouter } from "./server/role-router";
 import { createProviderIdCache, createRouter, type AgentCreateRouter, type ProviderIdCache } from "./server/router";
 import { createUsagePoller, type FetchUsageFn, type UsagePoller } from "./server/usage-poll";
 import { roleModelPolicyRpc } from "./shared/role-policy-rpc";
@@ -59,6 +62,7 @@ export default function contribute(server: PluginServerContext) {
   let catalogCache: ModelCatalogCache | null = null;
   let recentAgentTypes: RecentAgentTypes | null = null;
   let roleRouter: RoleCreateRouter | null = null;
+  let jevAvailability: JevAvailability | null = null;
   // stdout, not console.error: this is a record of every create, not a problem report.
   const decisionLog = createDecisionLog({ write: (line) => console.log(line) });
   let roleModelPolicyRpcHandlers: ReturnType<typeof createRoleModelPolicyRpcHandlers> | null = null;
@@ -101,6 +105,10 @@ export default function contribute(server: PluginServerContext) {
     catalogCache = createModelCatalogCache(paseo, () => catalogFamilies(startedPolicyCache.get()));
     recentAgentTypes = createRecentAgentTypes();
     parentProfiles = createParentToolProfiles(paseo);
+    // Polls `jev.status` every 60 s. Until a poll answers, and on a daemon without JEV, it stays
+    // empty and nothing JEV runs.
+    jevAvailability = createJevAvailability(paseo);
+    const startedJevAvailability = jevAvailability;
 
     // Both caches start empty/fail-open and otherwise wait for their 60s
     // interval tick. Without this, every create in the window after a
@@ -193,6 +201,7 @@ export default function contribute(server: PluginServerContext) {
       health,
       recentAgentTypes,
       mcpGatewayCache,
+      jevAvailability,
     });
     router = createRouter({
       poolCache,
@@ -271,6 +280,9 @@ export default function contribute(server: PluginServerContext) {
           // Before its first read every child keeps every MCP server.
           startedMcpGatewayCache.forceRefresh().catch(() => undefined),
         ]).then(() => undefined);
+        // Not part of the warm-up: a slow first `jev.status` must not delay a create. A create
+        // before it answers runs as if JEV were absent.
+        void startedJevAvailability.refresh().catch(() => undefined);
         const timedOut = new Promise<void>((resolveTimeout) => {
           const timer = setTimeout(resolveTimeout, STARTUP_WARM_TIMEOUT_MS);
           // Never the reason the process stays alive.
@@ -303,6 +315,61 @@ export default function contribute(server: PluginServerContext) {
     }
   }
 
+  /**
+   * JEV's two create-time inputs (docs/jev.md, "Feature 2" and "Which agents
+   * get them"): the spawn hint, and whether the create may carry the JEV
+   * agent tools. Both read the cached policy, so they start before the
+   * per-create refresh finishes and run beside it. Each is bounded at 2 s and
+   * never throws; this wrapper catches anyway, and anything missing is
+   * today's decision.
+   *
+   * No hint at all unless the last `jev.status` poll answered and said the
+   * spawn hint can send. No poll yet, a failed one, or a daemon that rejects
+   * the request (a plugin child newer than its daemon) asks nothing, so the
+   * decision line gains nothing while JEV is off or absent.
+   */
+  async function jevInputsFor(
+    request: PluginBeforeRequests["agent.create"],
+    paseo: PluginHookContext["paseo"],
+  ): Promise<{ jevHint?: SpawnHint; jevTools?: JevToolsWorld }> {
+    try {
+      if (!policyCache || !catalogCache || !poolCache || !jevAvailability) {
+        return {};
+      }
+      const availability = jevAvailability.get();
+      const input = classifierInputFor(request);
+      const hintOff = typeof paseo.jev?.decide !== "function" || availability?.spawnHint.active !== true;
+      const [jevHint, jevTools] = await Promise.all([
+        hintOff
+          ? undefined
+          : fetchSpawnHint({
+              input,
+              cwd: request.config.cwd,
+              world: {
+                policy: policyCache.get(),
+                catalog: catalogCache.get(),
+                thinkingCatalog: catalogCache.getThinking(),
+                pool: poolCache.get().pool,
+                health,
+              },
+              availability: availability?.spawnHint,
+              paseo,
+            }),
+        jevToolsWorldFor({
+          availability,
+          paseo,
+          cwd: request.config.cwd,
+          callerAgentId: input.callerAgentId,
+          // Drawn here, not in the classifier, which stays pure. No agent id exists before the create.
+          draw: Math.random(),
+        }),
+      ]);
+      return { ...(jevHint ? { jevHint } : {}), ...(jevTools ? { jevTools } : {}) };
+    } catch {
+      return {};
+    }
+  }
+
   // Two separate registrations, not one handler calling both: `before`
   // handlers for one event run sequentially in registration order, each
   // output feeding the next input (packages/server/.../plugins/lifecycle/index.ts).
@@ -331,8 +398,9 @@ export default function contribute(server: PluginServerContext) {
     // bypasses the cache, showed it). Creates are rare and the read is a local
     // RPC. It cannot throw (loadRolePolicy keeps the last good policy on any
     // failure) and is bounded so a stuck daemon can't stall spawning.
+    const jevInputs = jevInputsFor(input.request, context.paseo);
     await refreshPolicyForCreate();
-    const routed = roleRouter?.(input, context) ?? undefined;
+    const routed = roleRouter?.({ ...input, ...(await jevInputs) }, context) ?? undefined;
     // The decision the role router noted for this create rides to the
     // account hook as a label, the one thing that survives the daemon's
     // clone and strict parse between handlers. `tag` returns its argument
@@ -386,7 +454,9 @@ export default function contribute(server: PluginServerContext) {
     const startedCatalogCache = catalogCache;
     const startedPoolCache = poolCache;
     const startedMcpGatewayCache = mcpGatewayCache;
+    const startedJevAvailability = jevAvailability;
     classifierTool = startClassifierToolServer({
+      spawnHintAvailability: () => startedJevAvailability?.get()?.spawnHint,
       world: () => ({
         policy: startedPolicyCache.get(),
         catalog: startedCatalogCache.get(),
@@ -510,6 +580,7 @@ export default function contribute(server: PluginServerContext) {
     mcpGatewayCache?.stop();
     catalogCache?.stop();
     parentProfiles?.stop();
+    jevAvailability?.stop();
     classifierTool?.close();
   };
 }

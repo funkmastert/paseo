@@ -510,6 +510,14 @@ export type JevAskPayload = Extract<
   SessionOutboundMessage,
   { type: "jev.ask.response" }
 >["payload"];
+export type JevSavingsSummaryPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.savings.summary.response" }
+>["payload"];
+export type JevSavingsEventsPayload = Extract<
+  SessionOutboundMessage,
+  { type: "jev.savings.events.response" }
+>["payload"];
 type DaemonStatusPayload = DaemonGetStatusResponse["payload"];
 type DaemonPairingOfferPayload = DaemonGetPairingOfferResponse["payload"];
 type DiagnosticsPayload = DiagnosticsResponse["payload"];
@@ -4485,6 +4493,7 @@ export class DaemonClient {
     input: {
       source: WorkspaceCreateRequest["source"];
       title?: string;
+      callerAgentId?: string;
       firstAgentContext?: WorkspaceCreateRequest["firstAgentContext"];
     },
     requestId?: string,
@@ -4495,6 +4504,7 @@ export class DaemonClient {
         type: "workspace.create.request",
         source: input.source,
         ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.callerAgentId ? { callerAgentId: input.callerAgentId } : {}),
         ...(input.firstAgentContext !== undefined
           ? { firstAgentContext: input.firstAgentContext }
           : {}),
@@ -5322,6 +5332,43 @@ export class DaemonClient {
       requestId: options?.requestId,
       timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
       message: { type: "jev.scope.check.request", ...input },
+    });
+  }
+
+  /**
+   * The savings ledger's totals for a range (docs/jev.md, "Savings"): tokens saved live and
+   * would-have in shadow, per feature, against JEV's cost.
+   */
+  async jevSavingsSummary(
+    range: "today" | "7d" | "all",
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevSavingsSummaryPayload> {
+    // COMPAT(jevSavings): callers gate on `server_info.features.jevSavings`; an older daemon
+    // answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.savings.summary.request", range },
+    });
+  }
+
+  /** One page of savings involvements, newest first. Pass the last page's `nextCursor` for more. */
+  async jevSavingsEvents(
+    query: {
+      range: "today" | "7d" | "all";
+      feature?: string;
+      agentId?: string;
+      cursor?: string;
+      limit?: number;
+    },
+    options?: { requestId?: string; timeout?: number },
+  ): Promise<JevSavingsEventsPayload> {
+    // COMPAT(jevSavings): callers gate on `server_info.features.jevSavings`; an older daemon
+    // answers an unknown request type with an `unknown_schema` rpc_error.
+    return this.sendNamespacedCorrelatedSessionRequest({
+      requestId: options?.requestId,
+      timeout: options?.timeout ?? JEV_DEFAULT_RPC_TIMEOUT_MS,
+      message: { type: "jev.savings.events.request", ...query },
     });
   }
 

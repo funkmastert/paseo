@@ -361,6 +361,7 @@ export const ru: TranslationResources = {
       next: "Далее",
       answerPlaceholder: "Введите ответ...",
       otherPlaceholder: "Другой ответ...",
+      answerInConversation: "Ответьте в полном разговоре",
     },
     todo: {
       title: "Задачи",
@@ -1250,6 +1251,7 @@ export const ru: TranslationResources = {
         title: "Переименовать рабочее пространство",
         submit: "Переименовать",
         invalidBranchName: "Недопустимое имя ветки",
+        autoPlaceholder: "Называть автоматически",
       },
       toasts: {
         workspacePathUnavailable: "Путь к рабочему пространству недоступен",
@@ -1914,6 +1916,8 @@ export const ru: TranslationResources = {
       accountLeadersHere: "Лидеры {{count}}",
       accountWorkersHere: "Исполнители {{count}}",
       accountBalanceLeft: "осталось {{amount}}",
+      accountDetailsShow: "Показать ещё {{count}}",
+      accountDetailsHide: "Свернуть",
       staleTitle: "Не обновляется",
       staleLastSynced: "Последняя синхронизация: {{time}}",
       staleNeverSynced: "Ещё не синхронизировано",
@@ -1984,6 +1988,19 @@ export const ru: TranslationResources = {
     },
     notRestorable: "Нельзя возобновить",
     error: "Восстановление не удалось: {{error}}",
+    reason: {
+      bozeo_quit: "Bozeo завершился и остановил демон",
+      update: "Демон перезапустился для обновления",
+      crashed: "Демон аварийно завершился",
+      power_loss: "Mac перезагрузился или потерял питание",
+      cli_stop: "Остановлен из командной строки",
+    },
+    age: "с {{when}}",
+    ranFor: "работал {{duration}}",
+    keepRunningHint:
+      "Выход из Bozeo останавливает демон — включите «Оставлять демон запущенным после выхода», чтобы избежать этого.",
+    resumeModeHint:
+      "Bozeo может сам возобновлять такие прерванные агенты: установите agents.restartRecovery.mode в resume в config.json.",
     expand: "Развернуть восстановление после перезапуска",
     collapse: "Свернуть восстановление после перезапуска",
   },
@@ -2096,6 +2113,10 @@ export const ru: TranslationResources = {
     memoryFileWarning: "{{path}}: {{tokens}} токенов, больше {{limit}}.",
     reReadAdvice:
       "Эта сессия перечитывает ~{{tokens}} токенов на каждом ходу. Новая сессия с кратким handoff обойдётся дешевле.",
+    jevTitle: "Решения JEV",
+    jevShadow: "Теневой режим",
+    jevDryRun: "Пробный запуск",
+    jevOlder: "Ещё {{count}}",
   },
   review: {
     comment: {

@@ -14,6 +14,7 @@ import {
 } from "../agent/permission-response.js";
 import { jevConfigSection } from "../jev/config.js";
 import type { JevOutcome, JevService } from "../jev/contract.js";
+import { recordAwayReplySavings, settleAwayReplyFollowup } from "../jev/savings-hooks.js";
 import { MonitorModeLog } from "../monitor-mode-log.js";
 import { readRawConfig } from "../session/doctor/facts.js";
 import type { FileBackedWorkspaceRegistry } from "../workspace-registry.js";
@@ -31,7 +32,7 @@ import {
   type AwayReplyContext,
   type AwayReplyDecision,
 } from "./decision.js";
-import { AwayReplyDecisionFile } from "./decision-file.js";
+import { AwayReplyDecisionFile, type AwayReplyDecisionLine } from "./decision-file.js";
 import {
   AWAY_REPLY_OPT_OUT_LABEL,
   detectWaiting,
@@ -116,7 +117,8 @@ export interface AwayReplyDependencies {
 
 export interface AwayReplyJobOptions {
   dependencies: AwayReplyDependencies;
-  jev: Pick<JevService, "decide" | "isActive" | "checkScope" | "decisions">;
+  jev: Pick<JevService, "decide" | "isActive" | "checkScope" | "decisions"> &
+    Partial<Pick<JevService, "savings">>;
   readConfig: () => ResolvedAwayReplyConfig;
   state: AwayReplyState;
   decisionFile: AwayReplyDecisionFile;
@@ -751,16 +753,6 @@ export class AwayReplyJob {
       },
       "away-reply",
     );
-    this.options.jev.decisions.record({
-      agentId: episode.agentId,
-      callId: outcome.callId,
-      feature: "awayReply",
-      question: DECISION_QUESTION,
-      verdict: verdictSummary(decision, outcome),
-      confidence: decision.confidence,
-      action: this.describeAction(result),
-      applied: result.applied,
-    });
     const response =
       episode.kind !== "turn-ended" && choice.kind !== "none"
         ? {
@@ -768,7 +760,7 @@ export class AwayReplyJob {
             selectedActionId: episode.kind === "plan" ? context.resumeActionId : null,
           }
         : null;
-    this.decisionFile.append({
+    const line: Extract<AwayReplyDecisionLine, { type: "decision" }> = {
       type: "decision",
       at: new Date(nowMs).toISOString(),
       agentId: episode.agentId,
@@ -784,7 +776,26 @@ export class AwayReplyJob {
       optionId,
       text: result.text,
       response,
+    };
+    // The savings ledger (docs/jev.md, "Savings"): minutes, never tokens; it changes nothing here.
+    const wouldReply = choice.kind === "none" ? null : { kind: choiceKind(choice) };
+    const savingsId = recordAwayReplySavings(this.options.jev.savings, line, wouldReply);
+    this.options.jev.decisions.record({
+      agentId: episode.agentId,
+      callId: outcome.callId,
+      feature: "awayReply",
+      question: DECISION_QUESTION,
+      verdict: verdictSummary(decision, outcome),
+      confidence: decision.confidence,
+      action: this.describeAction(result),
+      applied: result.applied,
+      ...(outcome.kind === "shadow" || outcome.kind === "answered"
+        ? { mode: outcome.kind === "shadow" ? ("shadow" as const) : ("live" as const) }
+        : {}),
+      wouldBe: wouldReply ? `reply:${wouldReply.kind}` : "no-reply",
+      ...(savingsId ? { savingsId } : {}),
     });
+    this.decisionFile.append(line);
     if (!result.applied) {
       this.state.addFollowUp({
         callId: outcome.callId,
@@ -866,7 +877,7 @@ export class AwayReplyJob {
     result: { outcome: string; atMs: number; tyler: string | null },
   ): void {
     this.state.removeFollowUp(followUp.episodeKey);
-    this.decisionFile.append({
+    const line: Extract<AwayReplyDecisionLine, { type: "followup" }> = {
       type: "followup",
       at: new Date(this.now()).toISOString(),
       agentId: followUp.agentId,
@@ -877,7 +888,9 @@ export class AwayReplyJob {
       would: followUp.would,
       tyler: result.tyler,
       sameChoice: sameChoice(followUp.would, result.tyler),
-    });
+    };
+    this.decisionFile.append(line);
+    settleAwayReplyFollowup(this.options.jev.savings, line);
   }
 
   private describeAction(result: { action: AwayReplyAction; reason: string }): string {

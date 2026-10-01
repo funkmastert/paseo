@@ -1,7 +1,11 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import {
   AGENT_TYPE_LABEL,
+  JEV_CALL_LABEL,
+  JEV_SPAWN_LABEL,
+  JEV_TOOLS_LABEL,
   MODEL_OVERRIDDEN_LABEL,
+  TASK_CLASS_SOURCE_LABEL,
   THINKING_OVERRIDDEN_LABEL,
   TOOLS_DENIED_LABEL,
   UNADVERTISED_MODEL_LABEL,
@@ -11,9 +15,16 @@ import {
 import { restrictionNotice } from "../shared/restriction-notice";
 import { ULTRACODE_OPTION_ID } from "../shared/thinking-levels";
 import { applyToolProfile, profileDeniedTools, serializeDeniedTools, type ToolProfile } from "../shared/tool-profiles";
-import { classifyAgent, type AgentDecision, type ClassifierWorld } from "./classifier";
+import {
+  classifyAgent,
+  type AgentDecision,
+  type ClassifierInput,
+  type ClassifierWorld,
+  type JevToolsWorld,
+} from "./classifier";
 import type { DecisionLog, LoggedRequest } from "./decision-log";
 import type { HealthTracker } from "./health";
+import type { SpawnHint } from "./jev-hint";
 import { createLogThrottle } from "./log-throttle";
 import type { ModelCatalogCache } from "./model-catalog";
 import type { PoolCache } from "./pool";
@@ -221,8 +232,21 @@ export interface RoleRouterOptions {
   now?: () => number;
 }
 
+/**
+ * What the role hook hands the router beside the request. Both are fetched
+ * by the hook before the router runs (it is synchronous) and are classifier
+ * inputs, like pool health.
+ */
+export interface RoleRouterInput {
+  request: PluginBeforeRequests["agent.create"];
+  /** JEV's spawn hint (server/jev-hint.ts). Absent is today's classifier. */
+  jevHint?: SpawnHint;
+  /** Whether the create may carry the JEV agent tools (server/jev-availability.ts). Absent: not evaluated. */
+  jevTools?: JevToolsWorld;
+}
+
 export type RoleCreateRouter = (
-  input: { request: PluginBeforeRequests["agent.create"] },
+  input: RoleRouterInput,
   context: PluginHookContext,
 ) => PluginBeforeRequests["agent.create"] | void;
 
@@ -508,7 +532,8 @@ export function createRoleRouter(options: RoleRouterOptions): RoleCreateRouter {
         toolProfileWithheldSeen,
         parentUnresolvedSeen,
       );
-      return applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
+      const scoped = applyMcpDecision(input.request, routed, decided.decision, options, declaredMcpUnknownSeen);
+      return applyJevLabels(input.request, scoped, decided.decision);
     } catch (error) {
       // Defense-in-depth on the never-block contract: every code path below
       // is meant to fail open already, but a throw anywhere in classification
@@ -591,8 +616,97 @@ function applyMcpDecision(
   return withMcpScope(base, decision.mcp) ?? routed;
 }
 
+/**
+ * The labels that record what JEV did, written on every return path.
+ *
+ * `paseo.task-class-source` and `paseo.jev-call` go on a create JEV answered
+ * or shadowed, so `jev.decisions.list` can attach the decision and say
+ * whether it applied. `paseo.jev-spawn` goes beside them: the class and model
+ * the create runs without JEV and with every answer applied, which the
+ * daemon's savings ledger prices once the child's spend is known.
+ *
+ * `paseo.jev-tools` is this hook's alone whenever the arm was evaluated: the
+ * drawn arm on an eligible create, and no label on an ineligible one, whatever
+ * the caller sent. A caller cannot pick its own D8 arm, and the label always
+ * matches the arm the decision line records. No path that carries an agent's
+ * labels forward (failover, resume, reload) runs this hook, and a fresh
+ * handoff agent is a new conversation with no cache to keep. When the arm
+ * was not evaluated (the daemon serves no JEV tools) the labels are left
+ * alone.
+ */
+function applyJevLabels(
+  request: PluginBeforeRequests["agent.create"],
+  routed: PluginBeforeRequests["agent.create"] | void,
+  decision: AgentDecision | undefined,
+): PluginBeforeRequests["agent.create"] | void {
+  if (!decision) {
+    return routed;
+  }
+  const base = (routed ?? request) as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  const extra: Record<string, string> = {};
+  const jev = decision.jev;
+  if ((jev?.status === "answered" || jev?.status === "shadow") && typeof jev.callId === "string") {
+    extra[TASK_CLASS_SOURCE_LABEL] = decision.taskClass.source;
+    extra[JEV_CALL_LABEL] = jev.callId;
+    const spawn = formatJevSpawnLabel(jev);
+    if (spawn) {
+      extra[JEV_SPAWN_LABEL] = spawn;
+    }
+  }
+  const arm = decision.jevTools?.arm;
+  if (arm) {
+    extra[JEV_TOOLS_LABEL] = arm;
+  }
+  const dropCallerArm = decision.jevTools !== undefined && !arm && base.labels?.[JEV_TOOLS_LABEL] !== undefined;
+  if (Object.keys(extra).length === 0 && !dropCallerArm) {
+    return routed;
+  }
+  const { [JEV_TOOLS_LABEL]: _callerArm, ...kept } = base.labels ?? {};
+  return { ...base, labels: { ...(dropCallerArm ? kept : base.labels), ...extra } };
+}
+
+/**
+ * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0`.
+ * A missing class or model is `-`; each part is URI-encoded so a `;`, `/` or `=` in a model id
+ * cannot shift the fields. Null when the decision carries no would-be.
+ */
+export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): string | null {
+  if (!jev.wouldBe || !jev.base) {
+    return null;
+  }
+  const part = (taskClass: string | null, model: string | null) =>
+    `${encodeURIComponent(taskClass ?? "-")}/${encodeURIComponent(model ?? "-")}`;
+  return [
+    "v1",
+    `base=${part(jev.base.taskClass, jev.base.model)}`,
+    `would=${part(jev.wouldBe.taskClass, jev.wouldBe.model)}`,
+    `move=${jev.wouldBe.move}`,
+    `applied=${jev.applied ? 1 : 0}`,
+  ].join(";");
+}
+
+/** The classifier's input for a create, read structurally off the request. */
+export function classifierInputFor(request: PluginBeforeRequests["agent.create"]): ClassifierInput {
+  // TYPE NOTE: labels/initialPrompt/callerAgentId aren't on every
+  // installed @getpaseo/plugin release's PluginBeforeRequests["agent.create"]
+  // type yet; the daemon supplies them at runtime regardless. Read
+  // structurally rather than forking the SDK types, mirroring router.ts's
+  // callerAgentId note.
+  const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
+  return {
+    labels: extended.labels,
+    title: request.config.title,
+    initialPrompt: extended.initialPrompt,
+    callerAgentId: extended.callerAgentId,
+    requestedProvider: request.config.provider,
+    requestedModel: request.config.model,
+    requestedThinkingOptionId: request.config.thinkingOptionId,
+    requestedOutputStyle: requestedOutputStyleOf(request),
+  };
+}
+
 function routeRoleForCreateUnguarded(
-  input: { request: PluginBeforeRequests["agent.create"] },
+  input: RoleRouterInput,
   options: RoleRouterOptions,
   decided: DecisionHolder,
   declaredUnknownSeen: Set<string>,
@@ -606,11 +720,7 @@ function routeRoleForCreateUnguarded(
 ): PluginBeforeRequests["agent.create"] | void {
   const { request } = input;
 
-  // TYPE NOTE: labels/initialPrompt/callerAgentId aren't on every
-  // installed @getpaseo/plugin release's PluginBeforeRequests["agent.create"]
-  // type yet; the daemon supplies them at runtime regardless. Read
-  // structurally rather than forking the SDK types, mirroring router.ts's
-  // callerAgentId note.
+  // Structural, for the same reason as `classifierInputFor`.
   const extended = request as PluginBeforeRequests["agent.create"] & RequestWithRoleFields;
   const callerAgentId = extended.callerAgentId;
   const policy = options.policyCache.get();
@@ -628,16 +738,7 @@ function routeRoleForCreateUnguarded(
   // exhaustion episodes. Asking for it here would compute an answer nobody
   // acts on — and a second answer is exactly what this refactor removes.
   const decision = classifyAgent(
-    {
-      labels: extended.labels,
-      title: request.config.title,
-      initialPrompt: extended.initialPrompt,
-      callerAgentId,
-      requestedProvider: request.config.provider,
-      requestedModel: request.config.model,
-      requestedThinkingOptionId: request.config.thinkingOptionId,
-      requestedOutputStyle: requestedOutputStyleOf(request),
-    },
+    { ...classifierInputFor(request), ...(input.jevHint ? { jevHint: input.jevHint } : {}) },
     {
       policy,
       catalog: options.catalogCache.get(),
@@ -646,6 +747,7 @@ function routeRoleForCreateUnguarded(
       health: options.health,
       callerDenials: callerDenialsFor(options, policy, callerAgentId),
       mcpGateway: options.mcpGatewayCache?.get(),
+      ...(input.jevTools ? { jevToolsAvailable: input.jevTools } : {}),
     },
   );
   decided.decision = decision;

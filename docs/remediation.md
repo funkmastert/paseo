@@ -15,7 +15,7 @@ That tells you a monitor's push level too: see "Rank by what happens" in [notifi
 ## The rungs
 
 1. **Deterministic.** The monitor detects the condition and runs its remedy with no LLM. Every sweep it reports to the ladder through `RemediationSink.observe()` (`remediation/contract.ts`): whether the condition holds, what state the remedy is in, what it tried, and the evidence it found.
-2. **One bounded agent.** When a `live` remedy has not cleared the condition within its grace window, or there is no remedy but the observation names an `escalation.task`, the ladder creates one agent for the key. A `disabled` or `dry-run` remedy skips this rung: the operator opted out of automation. So does an observation with no `escalation`.
+2. **One bounded agent.** When a `live` remedy has not cleared the condition within its grace window, or there is no remedy but the observation names an `escalation.task`, the ladder creates one agent for the key. A `disabled` or `dry-run` remedy skips this rung: the operator opted out of automation. So does an observation with no `escalation`. After every other gate passes, and once per episode, JEV judges whether an agent is the right step ([feature 3a](jev.md#feature-3a-remediation-triage)): it can send the episode to rung 3 instead, only when that push reaches a phone now, or, while a `live` remedy is acting, hold this rung once for 10 to 15 minutes. `escalation.personFirst` from the stall judgment follows the same rule. When the push would fold into one from the last hour, wait for a digest, or find no registered phone, the agent starts.
 3. **A person.** One push per episode, at the observation's `level` (default `alert`), `dedupeKey: remediation:<key>`. The body says what is wrong, what rung 1 tried, and how rung 2 ended. When an agent ran, the push opens it; the ladder leaves it unarchived for that.
 
 ## Episodes
@@ -45,7 +45,11 @@ The ladder creates it through the normal create path (`createAgentCommand`, `kin
 
 It runs in a new workspace at the observation's `escalation.cwd`, else the home directory. The done janitor archives that workspace, and the agent with it, ten minutes after the agent stops ([done-janitor.md](done-janitor.md#idle-workspaces)); a push still opens it from the archive. The prompt (`remediation/escalation.ts`) carries the condition, the summary, the evidence cut at 8 KB, the attempts, the monitor's task, and these limits: stay inside the task; no pushes to shared company forges; never restart the Paseo daemon or edit `~/.paseo/config.json`; never touch another agent's worktree except as the task says; never delete uncommitted work.
 
-The create call passes no `mode` and no `unattended`, so the agent starts in the provider's default (attended) mode. A pending permission it cannot resolve itself then runs out its clock instead of asking a person, and — since a directory outside a trusted workspace ignores `.claude/settings.json`'s `permissions.allow` — the home-directory default cwd above loses even the allowlist. `remediation/ladder.ts`'s `RemediationAgentRequest` and the `createAgentCommand` call inside `bootstrap.ts`'s `createRemediationLadder` are both the JEV remediation track's region; the fix is `unattended: true` on that call.
+The create passes `unattended: true` (`remediationCreateAgentInput` in `remediation/ladder.ts`). Nobody watches a remediation agent: in the provider's default mode a permission prompt only runs out its clock, and the home-directory default cwd, outside any trusted workspace, loses even `.claude/settings.json`'s allowlist. The week review found 5 of 9 remediation agents timed out that way (D1b-03).
+
+The create path resolves `unattended` to the mode the provider manifest marks `isUnattended`: `bypassPermissions` for Claude, `full-access` for Codex. A runtime catalog can carry only mode ids and labels, and Claude's does, so the provider registry copies `isUnattended` from the manifest onto it (`decorateModes` in `agent/provider-registry.ts`). Without the copy, `unattended` resolved to no mode and the agent started in the default one. Schedule runs with no `modeId` take the same path. `create.test.ts` checks the created agent's mode through the real Claude catalog.
+
+The catastrophe gate still applies: Claude registers it on every session, whatever the mode ([catastrophe-gate.md](catastrophe-gate.md)). It is Claude-only, so an `escalation.provider` of another provider gets that provider's unattended mode with no gate.
 
 The agent ends its final message with exactly one line:
 
@@ -78,7 +82,9 @@ Some monitors have nothing to fix, only something to say. An observation with `e
 
 ## State and restarts
 
-`$PASEO_HOME/remediation/state.json` holds the episodes, each key's cooldown, the daily count and the in-flight agent ids, written atomically on every change. After a restart the ladder reconciles in-flight agents by id and carries on: it never re-spawns one and never forgets a cooldown. An agent the restart left unloaded is waited on until its timeout. A state file that fails to parse is logged and replaced by an empty one.
+`$PASEO_HOME/remediation/state.json` holds the episodes, each key's cooldown, the daily count and the in-flight agent ids, written atomically on every change. After a restart the ladder reconciles in-flight agents by id and carries on: it never re-spawns one and never forgets a cooldown. An agent the restart left unloaded is waited on until its timeout. A state file that fails to parse is logged and replaced by an empty one. Each episode also keeps its JEV triage (`jevTriage`) and any deferral (`jevDeferredUntil`), so a restart neither asks JEV again nor drops the hold.
+
+`$PASEO_HOME/jev/remediation-triage.jsonl` records every triage, every agent's end with its token count, and every close of an episode that was triaged or ran an agent. It is what feature 3a's shadow week is judged on; see [feature 3a](jev.md#feature-3a-remediation-triage).
 
 The ladder polls in-flight agents every 60 seconds on an unref'd timer and re-reads `agents.remediation` on every poll and every observation, so config changes apply without a restart. Its mode lines are `remediation-escalation` and `remediation-notify`.
 

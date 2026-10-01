@@ -26,6 +26,7 @@ import {
   harness,
   type Harness,
 } from "./test-utils/harness.js";
+import type { JevServiceRuntime } from "../jev/service.js";
 
 const SENTINEL = "SENTINEL-LAST-MESSAGE-4d2a";
 const GO_WITH_B_TEXT = `${MARKER} Go with option B. ${AWAY_REPLY_GUARD}`;
@@ -767,6 +768,49 @@ describe("dry run (D6), the default", () => {
       expect(statSync(h.decisionPath).mode & 0o777).toBe(0o600);
       expect(statSync(h.statePath).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it("reports to the savings ledger: a dry-run reply is pending until Tyler's answer settles its minutes", async () => {
+    const h = setup({ awayReply: {} });
+    // The harness's default service is the real one over the fake.
+    const jev = h.service as JevServiceRuntime;
+    await jev.start();
+    h.waitingLeader();
+    h.waitingLeader(OPTIONS_MESSAGE, "leader-2");
+    h.at(T0 + 62 * MINUTE);
+    await h.job.tick();
+    const pending = jev.savings.events({ range: "all" }).events;
+    expect(pending).toHaveLength(2);
+    expect(pending[0]).toMatchObject({
+      feature: "awayReply",
+      mode: "shadow",
+      decision: { did: "no-reply", wouldBe: "reply:option", changed: false },
+      benefit: "time",
+      pending: true,
+    });
+    expect(jev.listDecisions("leader-1")[0]).toMatchObject({
+      mode: "shadow",
+      wouldBe: "reply:option",
+      savingsId: expect.stringMatching(/^sv_/),
+    });
+
+    h.tyler("leader-1", "go with B", T0 + 90 * MINUTE);
+    h.tyler("leader-2", "Option A please", T0 + 91 * MINUTE);
+    h.at(T0 + 95 * MINUTE);
+    await h.job.tick();
+
+    const byAgent = new Map(jev.savings.events({ range: "all" }).events.map((e) => [e.agentId, e]));
+    expect(byAgent.get("leader-1")).toMatchObject({
+      pending: false,
+      tokensSavedEstimate: null,
+      otherBenefit: { unit: "minutes", value: 28 },
+      validation: { outcome: "held", signal: "same-choice" },
+    });
+    expect(byAgent.get("leader-2")).toMatchObject({
+      otherBenefit: { unit: "minutes", value: 0 },
+      validation: { outcome: "contradicted" },
+    });
+    await jev.stop();
   });
 
   it("fills in whether Tyler made the same choice when he answers", async () => {

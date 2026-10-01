@@ -261,6 +261,167 @@ describe("jev.decisions.list", () => {
   });
 });
 
+describe("jev.decisions.list savings fields", () => {
+  test("carries mode, wouldBe and savingsId, and parses a record without them", () => {
+    const base = {
+      agentId: "agent-1",
+      callId: "call-1",
+      feature: "remediationTriage",
+      question: "Should a fixer start?",
+      verdict: "person (0.88)",
+      confidence: 0.88,
+      action: "started the fixer",
+      applied: false,
+      at: "2026-09-30T12:00:00.000Z",
+      costUsd: null,
+    };
+    const message = {
+      type: "jev.decisions.list.response",
+      payload: {
+        requestId: "req-1",
+        agentId: "agent-1",
+        decisions: [{ ...base, mode: "shadow", wouldBe: "skip-fixer", savingsId: "sv_1" }, base],
+      },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
+});
+
+const modeTotals = { involvements: 3, changed: 1, tokens: 1200, otherBenefit: null, pending: 1 };
+
+const savingsSummary = {
+  range: "7d",
+  from: "2026-09-24T07:00:00.000Z",
+  to: "2026-09-30T19:00:00.000Z",
+  unit: "opus-equivalent-weighted-tokens",
+  live: { involvements: 3, tokensSaved: 1200 },
+  shadow: { involvements: 5, tokensWouldSave: 9000 },
+  jevSpend: { calls: 8, usd: 0.0008, tokensEquivalent: 200 },
+  net: { live: 1000, ifLive: 10000 },
+  features: [
+    {
+      feature: "notificationTriage",
+      state: "shadow",
+      benefit: "attention",
+      asked: 4,
+      notAsked: { inactive: 2 },
+      live: modeTotals,
+      shadow: { ...modeTotals, tokens: 0, otherBenefit: { unit: "pushes-held", value: 3 } },
+      validation: { checked: 2, held: 2, wrong: 0 },
+      jevUsd: 0.0004,
+      evidence: { rule: "50 would-be notices, 80% held", observed: "2 of 50", met: null },
+    },
+  ],
+  topAgents: [
+    { id: "agent-1", label: "Fix the parser", involvements: 2, liveTokens: 0, shadowTokens: 4000 },
+  ],
+  topWorkspaces: [],
+  days: [
+    { day: "2026-09-30", involvements: 8, liveTokens: 1200, shadowTokens: 9000, jevUsd: 0.0008 },
+  ],
+};
+
+describe("jev.savings.summary", () => {
+  test("routes a request through the session inbound union", () => {
+    const parsed = SessionInboundMessageSchema.parse({
+      type: "jev.savings.summary.request",
+      requestId: "req-1",
+      range: "7d",
+    });
+
+    expect(parsed.type).toBe("jev.savings.summary.request");
+  });
+
+  test("routes a summary through the session outbound union", () => {
+    const message = {
+      type: "jev.savings.summary.response",
+      payload: { requestId: "req-1", summary: savingsSummary },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
+});
+
+describe("jev.savings.events", () => {
+  test("routes a filtered, paged request through the session inbound union", () => {
+    const parsed = SessionInboundMessageSchema.parse({
+      type: "jev.savings.events.request",
+      requestId: "req-1",
+      range: "all",
+      feature: "readCheck",
+      agentId: "agent-1",
+      cursor: "sv_2",
+      limit: 50,
+    });
+
+    expect(parsed.type).toBe("jev.savings.events.request");
+  });
+
+  test("routes events, pending and validated, through the session outbound union", () => {
+    const event = {
+      id: "sv_1",
+      at: "2026-09-30T12:00:00.000Z",
+      feature: "remediationTriage",
+      agentId: "agent-1",
+      agentTitle: null,
+      workspaceId: null,
+      mode: "shadow",
+      outcome: "shadow",
+      involvement: "Should a fixer start for this stalled agent?",
+      decision: {
+        did: "start-agent",
+        wouldBe: "person",
+        changed: false,
+        detail: { episode: "ep-1", agentTotalTokens: 52000, fixed: false, model: null },
+      },
+      benefit: "tokens",
+      tokensSavedEstimate: 52000,
+      otherBenefit: null,
+      basis: { formula: "A x w(m)", inputs: { A: 52000, "w(m)": 1, model: "claude-opus-5-5" } },
+      pending: false,
+      validation: { outcome: "held", signal: null, afterMinutes: 42 },
+      jevCostUsd: 0.0001,
+    };
+    const message = {
+      type: "jev.savings.events.response",
+      payload: {
+        requestId: "req-1",
+        events: [
+          event,
+          {
+            ...event,
+            id: "sv_0",
+            tokensSavedEstimate: null,
+            basis: null,
+            pending: true,
+            validation: null,
+          },
+        ],
+        nextCursor: "sv_0",
+      },
+    };
+
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+  });
+
+  test("server_info carries the jevSavings capability, and an older daemon's omits it", () => {
+    const parsed = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { jev: true, jevAsk: true, jevSavings: true },
+    });
+    const older = ServerInfoStatusPayloadSchema.parse({
+      status: "server_info",
+      serverId: "srv",
+      features: { jev: true, jevAsk: true },
+    });
+
+    expect(parsed.features?.jevSavings).toBe(true);
+    expect(older.features?.jevSavings).toBeUndefined();
+  });
+});
+
 test("an older daemon's server_info parses without the jev capability", () => {
   const parsed = ServerInfoStatusPayloadSchema.parse({
     status: "server_info",

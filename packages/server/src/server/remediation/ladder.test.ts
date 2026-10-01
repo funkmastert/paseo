@@ -1,18 +1,25 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { NotifyPolicy, type NotifyDeliveryPreview } from "../notify-policy/notify-policy.js";
+import { NotifyPolicySettingsStore } from "../notify-policy/settings.js";
 import type { PushPayload, PushSendMeta } from "../push/index.js";
+import { PushLedger } from "../push/ledger.js";
 import type { RemediationConfig } from "./config.js";
 import type { RemediationObservation } from "./contract.js";
+import type { EscalationTriage, RemediationTriageEvent } from "./jev-triage.js";
 import {
   RemediationLadder,
+  remediationCreateAgentInput,
   type RemediationAgentRequest,
   type RemediationAgentView,
   type RemediationLadderDependencies,
+  type RemediationLadderOptions,
 } from "./ladder.js";
+import { loadLadderState } from "./ladder-state.js";
 
 const MINUTE = 60_000;
 const START = Date.parse("2026-09-24T12:00:00.000Z");
@@ -29,6 +36,12 @@ class FakeFleet implements RemediationLadderDependencies {
   readonly views = new Map<string, RemediationAgentView>();
   accountBlocker: string | null = null;
   createError: Error | null = null;
+  readonly triageCalls: string[] = [];
+  readonly triageEvents: RemediationTriageEvent[] = [];
+  triageEscalation?: RemediationLadderDependencies["triageEscalation"];
+  recordTriage = (event: RemediationTriageEvent): void => {
+    this.triageEvents.push(event);
+  };
   private next = 1;
 
   async createAgent(request: RemediationAgentRequest): Promise<{ agentId: string }> {
@@ -69,12 +82,29 @@ let pushes: SentPush[];
 let config: RemediationConfig | undefined;
 const ladders: RemediationLadder[] = [];
 
-function buildLadder(): RemediationLadder {
+/** A phone that gets every escalation now, unless a test says otherwise. */
+const REACHES_PHONE: NotifyDeliveryPreview = { outcome: "interrupt", devices: 1 };
+
+function buildLadder(
+  extra: {
+    previewPush?: RemediationLadderOptions["previewPush"] | null;
+    triageTimeoutMs?: number;
+    policy?: NotifyPolicy;
+  } = {},
+): RemediationLadder {
+  const policy = extra.policy;
   const ladder = new RemediationLadder({
+    previewPush:
+      extra.previewPush === null
+        ? undefined
+        : (extra.previewPush ??
+          (policy ? (meta) => policy.previewDelivery(meta) : () => REACHES_PHONE)),
+    triageTimeoutMs: extra.triageTimeoutMs,
     dependencies: fleet,
     getPushNotificationSender: () => ({
       send: async (payload, meta) => {
         pushes.push({ payload, meta });
+        await policy?.submit(payload, meta);
       },
     }),
     serverId: "srv",
@@ -564,5 +594,476 @@ describe("RemediationLadder advisory episodes", () => {
     fleet.accountBlocker = null;
     await ladder.observe(advisory({ key: "token-audit:next" }));
     expect(fleet.created[0]!.labels["paseo.budget"]).toBe("90000");
+  });
+});
+
+describe("RemediationLadder remediation agent create (week review D1b-03)", () => {
+  it("asks for an unattended agent, so no permission prompt runs out its clock", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created[0]!.unattended).toBe(true);
+    expect(remediationCreateAgentInput(fleet.created[0]!)).toEqual({
+      kind: "mcp",
+      provider: "claude",
+      title: "Remediate: Orphaned build daemons",
+      initialPrompt: fleet.created[0]!.prompt,
+      promptFailure: "throw",
+      cwd: fleet.created[0]!.cwd,
+      labels: fleet.created[0]!.labels,
+      unattended: true,
+      background: true,
+      notifyOnFinish: false,
+    });
+  });
+});
+
+describe("RemediationLadder JEV triage (feature 3a)", () => {
+  function scriptTriage(overrides: Partial<EscalationTriage>): void {
+    fleet.triageEscalation = async (input) => {
+      fleet.triageCalls.push(input.episodeKey);
+      return {
+        callId: "call-1",
+        outcome: "answered",
+        reason: null,
+        route: "agent_can_fix",
+        routeConfidence: 0.9,
+        evidenceCurrent: 0.9,
+        costUsd: 0.0001,
+        ...overrides,
+      };
+    };
+  }
+
+  const needsPerson = { route: "needs_person", routeConfidence: 0.84 };
+  const clearing = { route: "clearing_on_its_own", routeConfidence: 0.9, evidenceCurrent: 0.2 };
+
+  it("sends needs_person to a person without an agent when the escalation will push", async () => {
+    scriptTriage(needsPerson);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(0);
+    expect(fleet.triageCalls).toEqual(["orphan-build-daemons"]);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]!.meta).toEqual({
+      level: "alert",
+      dedupeKey: "remediation:orphan-build-daemons",
+    });
+    expect(alerts()[0]!.payload.body).toContain(
+      "No agent started: JEV judged this needs a person (0.84).",
+    );
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes[0]!.jevTriage).toMatchObject({
+      callId: "call-1",
+      outcome: "answered",
+      route: "needs_person",
+      confidence: 0.84,
+      action: "person",
+      applied: true,
+    });
+  });
+
+  it.each([
+    ["the notify rung is off", { notify: { enabled: false } }, {}, REACHES_PHONE],
+    [
+      "the condition's notify is off",
+      { conditions: { "orphan-build-daemons": { notify: false } } },
+      {},
+      REACHES_PHONE,
+    ],
+    ["the level is under the policy's post floor", undefined, {}, { outcome: "log", devices: 1 }],
+    ["the push cannot be previewed", undefined, {}, "throw"],
+    ["the ladder has no preview", undefined, {}, null],
+    [
+      "the push would fold into one sent inside the dedupe hour",
+      undefined,
+      {},
+      { outcome: "suppressed", devices: 1 },
+    ],
+    ["no phone is registered", undefined, {}, { outcome: "interrupt", devices: 0 }],
+    ["the push would wait for a digest", undefined, {}, { outcome: "digest", devices: 1 }],
+  ] as const)(
+    "starts the agent for needs_person when %s",
+    async (_label, remediation, overrides, preview) => {
+      config = remediation as RemediationConfig | undefined;
+      scriptTriage(needsPerson);
+      const ladder = buildLadder({
+        previewPush:
+          preview === null
+            ? null
+            : () => {
+                if (preview === "throw") throw new Error("no policy");
+                return preview;
+              },
+      });
+      await ladder.observe(observation({ graceMs: 0, ...overrides }));
+      expect(fleet.created).toHaveLength(1);
+      expect(alerts()).toHaveLength(0);
+      expect(fleet.triageEvents[0]).toMatchObject({
+        type: "triage",
+        willPush: false,
+        decision: { wouldBe: "start-agent", action: "start-agent" },
+      });
+    },
+  );
+
+  it("asks the preview about the push escalate will send: its level and dedupe key", async () => {
+    scriptTriage(needsPerson);
+    const asked: unknown[] = [];
+    const ladder = buildLadder({
+      previewPush: (meta) => {
+        asked.push(meta);
+        return REACHES_PHONE;
+      },
+    });
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(asked).toEqual([{ level: "alert", dedupeKey: "remediation:orphan-build-daemons" }]);
+    expect(fleet.triageEvents[0]).toMatchObject({ pushPreview: REACHES_PHONE });
+  });
+
+  it("starts the fixer for a recurrence the notify policy would fold into the first push (review finding 6)", async () => {
+    const logger = pino({ level: "silent" });
+    const policy = new NotifyPolicy({
+      logger,
+      ledger: new PushLedger(logger, path.join(dir, "push-ledger.json"), () => nowMs),
+      settings: new NotifyPolicySettingsStore(logger, path.join(dir, "notify-policy.json")),
+      transport: { activeTokens: () => ["ExponentPushToken[phone]"], deliver: async () => [] },
+      now: () => nowMs,
+    });
+    scriptTriage(needsPerson);
+    const ladder = buildLadder({ policy });
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(0);
+    expect(alerts()).toHaveLength(1);
+
+    nowMs += 5 * MINUTE;
+    await ladder.observe(observation({ active: false }));
+    nowMs += 10 * MINUTE;
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageEvents.findLast((event) => event.type === "triage")).toMatchObject({
+      willPush: false,
+      pushPreview: { outcome: "suppressed" },
+      decision: { wouldBe: "start-agent" },
+    });
+  });
+
+  it("starts the fixer for personFirst when the push would not reach a phone", async () => {
+    scriptTriage({});
+    const ladder = buildLadder({ previewPush: () => ({ outcome: "interrupt", devices: 0 }) });
+    await ladder.observe(
+      observation({
+        graceMs: 0,
+        escalation: {
+          task: "Recover it.",
+          personFirst: { reason: "waiting_on_human", confidence: 0.9 },
+        },
+      }),
+    );
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageEvents[0]).toMatchObject({
+      type: "person-first",
+      skipped: false,
+      willPush: false,
+    });
+  });
+
+  it("honours personFirst only when the escalation will push, and asks JEV nothing then", async () => {
+    scriptTriage({});
+    const ladder = buildLadder();
+    const personFirst = { reason: "waiting_on_human", confidence: 0.9 };
+    await ladder.observe(
+      observation({ graceMs: 0, escalation: { task: "Recover it.", personFirst } }),
+    );
+    expect(fleet.created).toHaveLength(0);
+    expect(fleet.triageCalls).toEqual([]);
+    expect(alerts()[0]!.payload.body).toContain(
+      "No agent started: the stall judgment says a person is needed (waiting_on_human, 0.90).",
+    );
+
+    config = { conditions: { "stalled-agent": { notify: false } } };
+    await ladder.observe(
+      observation({
+        key: "stalled-agent:a1",
+        kind: "stalled-agent",
+        graceMs: 0,
+        escalation: { task: "Recover it.", personFirst },
+      }),
+    );
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageEvents.filter((event) => event.type === "person-first")).toMatchObject([
+      { skipped: true, willPush: true },
+      { skipped: false, willPush: false },
+    ]);
+  });
+
+  it("defers clearing_on_its_own once, by the longer of the grace and 10 minutes, then starts the agent", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 5 * MINUTE }));
+    nowMs += 5 * MINUTE;
+    await ladder.observe(observation({ graceMs: 5 * MINUTE }));
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 9 * MINUTE;
+    await ladder.observe(observation({ graceMs: 5 * MINUTE }));
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 1 * MINUTE;
+    await ladder.observe(observation({ graceMs: 5 * MINUTE }));
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageCalls).toHaveLength(1);
+    expect(alerts()).toHaveLength(0);
+  });
+
+  it("does not hold an observation that turned urgent", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(0);
+    await ladder.observe(observation({ graceMs: 0, level: "urgent" }));
+    expect(fleet.created).toHaveLength(1);
+  });
+
+  /** The work-at-risk sweep's own observation (agent-work-snapshot-sweep.ts, buildObservation). */
+  function workAtRisk(active: boolean): RemediationObservation {
+    return active
+      ? {
+          key: "work-at-risk",
+          kind: "work-at-risk",
+          active: true,
+          remedy: "none",
+          title: "Work at risk in 2 worktree(s)",
+          summary:
+            "2 worktree(s) of dead, wedged or archived agents, or orphaned, hold uncommitted or unpushed work. Each is snapshotted; a judge decides which need follow-up.",
+          evidence: "Snapshots: /wt/a refs/backup/2026-09-24/a\n/wt/b refs/backup/2026-09-24/b",
+          attempts: [
+            {
+              remedy: "snapshot",
+              outcome: "acted",
+              detail: "snapshotted 2",
+              at: "2026-09-24T12:00Z",
+            },
+          ],
+          graceMs: 0,
+          level: "alert",
+          escalation: { task: "Judge each snapshot.", taskClass: "mechanical" },
+        }
+      : {
+          key: "work-at-risk",
+          kind: "work-at-risk",
+          active: false,
+          remedy: "none",
+          title: "Work at risk handed over",
+          summary: "The last batch of snapshots was handed to a judge agent.",
+        };
+  }
+
+  it("never holds a remedy-less condition: the work-at-risk observe then close still runs the judge (review finding 1)", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(workAtRisk(true));
+    expect(fleet.created).toHaveLength(1);
+    nowMs += 5 * MINUTE;
+    await ladder.observe(workAtRisk(false));
+    expect(fleet.triageEvents).toMatchObject([
+      { type: "triage", decision: { wouldBe: "start-agent", action: "start-agent" } },
+      { type: "closed", duringDeferral: false, clearedDuringHold: false, agentRan: true },
+    ]);
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes[0]!.jevDeferredUntil).toBeUndefined();
+  });
+
+  it("starts the held agent from the poll once the hold lapses, when the monitor went quiet", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 9 * MINUTE;
+    await ladder.tick();
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 1 * MINUTE;
+    await ladder.tick();
+    expect(fleet.created).toHaveLength(1);
+    await ladder.tick();
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageCalls).toHaveLength(1);
+  });
+
+  it("caps a hold at 15 minutes past the grace, however long the grace (review finding 7)", async () => {
+    config = { conditions: { "orphan-build-daemons": { graceMinutes: 60 } } };
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation());
+    nowMs += 60 * MINUTE;
+    await ladder.observe(observation());
+    expect(fleet.triageCalls).toHaveLength(1);
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 15 * MINUTE;
+    await ladder.observe(observation());
+    expect(fleet.created).toHaveLength(1);
+  });
+
+  it("ends a hold read back from an older state file 15 minutes after the triage", async () => {
+    scriptTriage(clearing);
+    await buildLadder().observe(observation({ graceMs: 0 }));
+    const raw = JSON.parse(await readFile(statePath, "utf8")) as {
+      episodes: Array<{ jevDeferredUntil?: string }>;
+    };
+    raw.episodes[0]!.jevDeferredUntil = new Date(START + 120 * MINUTE).toISOString();
+    await writeFile(statePath, JSON.stringify(raw));
+    const restarted = buildLadder();
+    nowMs += 15 * MINUTE;
+    await restarted.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+  });
+
+  it("drops a hold when the observation's level rises at all, not only to urgent", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0, level: "notice" }));
+    expect(fleet.created).toHaveLength(0);
+    await ladder.observe(observation({ graceMs: 0, level: "notice" }));
+    expect(fleet.created).toHaveLength(0);
+    await ladder.observe(observation({ graceMs: 0, level: "alert" }));
+    expect(fleet.created).toHaveLength(1);
+  });
+
+  it("keeps the triage and the deferral across a restart and never asks twice", async () => {
+    scriptTriage(clearing);
+    await buildLadder().observe(observation({ graceMs: 0 }));
+    const restarted = buildLadder();
+    nowMs += 5 * MINUTE;
+    await restarted.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(0);
+    nowMs += 5 * MINUTE;
+    await restarted.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+    expect(fleet.triageCalls).toHaveLength(1);
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes[0]!.jevDeferredUntil).toBe(new Date(START + 10 * MINUTE).toISOString());
+  });
+
+  it("records a shadow answer and starts the agent", async () => {
+    scriptTriage({ ...needsPerson, outcome: "shadow" });
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    expect(fleet.created).toHaveLength(1);
+    expect(alerts()).toHaveLength(0);
+    const state = await loadLadderState(statePath, pino({ level: "silent" }));
+    expect(state.episodes[0]!.jevTriage).toMatchObject({ action: "person", applied: false });
+  });
+
+  it("starts the agent when the triage throws or never settles", async () => {
+    fleet.triageEscalation = async () => {
+      throw new Error("boom");
+    };
+    await buildLadder().observe(observation({ key: "a", graceMs: 0 }));
+    fleet.triageEscalation = () => new Promise<EscalationTriage>(() => undefined);
+    await buildLadder({ triageTimeoutMs: 20 }).observe(observation({ key: "b", graceMs: 0 }));
+    expect(fleet.created).toHaveLength(2);
+    expect(fleet.triageEvents.map((event) => event.type === "triage" && event.triage)).toEqual([
+      expect.objectContaining({ outcome: "error", reason: "threw" }),
+      expect.objectContaining({ outcome: "error", reason: "timeout" }),
+    ]);
+  });
+
+  it("never triages an urgent or an advisory observation", async () => {
+    scriptTriage(needsPerson);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ key: "a", graceMs: 0, level: "urgent" }));
+    await ladder.observe(
+      observation({
+        key: "b",
+        graceMs: 0,
+        escalation: { task: "Recommend one change.", advice: true },
+      }),
+    );
+    expect(fleet.triageCalls).toEqual([]);
+    expect(fleet.created).toHaveLength(2);
+  });
+
+  it("records what the pays-if measurement needs: the triage, the agent's end and tokens, the close", async () => {
+    scriptTriage({ ...needsPerson, outcome: "shadow" });
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    nowMs += 20 * MINUTE;
+    fleet.views.set("agent-1", {
+      status: "idle",
+      finalText: "REMEDIATION: NOT_FIXED — only a person can sign in",
+      totalTokens: 640_000,
+      model: "claude-sonnet-5",
+    });
+    await ladder.tick();
+    nowMs += 1 * MINUTE;
+    await ladder.observe(observation({ active: false }));
+
+    const episode = `orphan-build-daemons@${new Date(START).toISOString()}`;
+    expect(fleet.triageEvents).toMatchObject([
+      {
+        type: "triage",
+        episode,
+        willPush: true,
+        triage: { callId: "call-1", costUsd: 0.0001 },
+        decision: { wouldBe: "person", action: "start-agent", applied: false },
+      },
+      {
+        type: "agent-ended",
+        episode,
+        agentId: "agent-1",
+        result: "not-fixed",
+        cause: "report",
+        agentTotalTokens: 640_000,
+        agentModel: "claude-sonnet-5",
+        minutesRunning: 20,
+        triageCallId: "call-1",
+        triageWouldBe: "person",
+        triageApplied: false,
+      },
+      {
+        type: "closed",
+        episode,
+        minutesOpen: 21,
+        minutesSinceTriage: 21,
+        duringDeferral: false,
+        clearedDuringHold: false,
+        agentRan: true,
+        escalated: true,
+        triageWouldBe: "person",
+      },
+    ]);
+  });
+
+  it("records an untriaged agent's end too, for the typical agent cost", async () => {
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    fleet.views.set("agent-1", { status: "running", totalTokens: 2_100_000 });
+    await ladder.tick();
+    expect(fleet.triageEvents).toMatchObject([
+      {
+        type: "agent-ended",
+        cause: "budget",
+        agentTotalTokens: 2_100_000,
+        triageCallId: null,
+        triageWouldBe: null,
+      },
+    ]);
+  });
+
+  it("marks a close inside a deferral", async () => {
+    scriptTriage(clearing);
+    const ladder = buildLadder();
+    await ladder.observe(observation({ graceMs: 0 }));
+    nowMs += 4 * MINUTE;
+    await ladder.observe(observation({ active: false }));
+    expect(fleet.created).toHaveLength(0);
+    expect(fleet.triageEvents.at(-1)).toMatchObject({
+      type: "closed",
+      duringDeferral: true,
+      clearedDuringHold: true,
+      agentRan: false,
+      escalated: false,
+      minutesSinceTriage: 4,
+      triageWouldBe: "defer",
+      triageApplied: true,
+    });
   });
 });

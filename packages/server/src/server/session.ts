@@ -165,6 +165,7 @@ import {
   type WorkspaceMutation,
   type WorkspaceMutationContext,
   type WorkspaceRegistry,
+  type WorkspaceTitleSource,
 } from "./workspace-registry.js";
 import { wrapSpokenInput } from "./voice-config.js";
 import { isVoicePermissionAllowed } from "./voice-permission-policy.js";
@@ -2288,6 +2289,10 @@ export class Session {
         return this.jevSession.handleDecisionsList(msg);
       case "jev.ask.request":
         return this.jevSession.handleAsk(msg);
+      case "jev.savings.summary.request":
+        return this.jevSession.handleSavingsSummary(msg);
+      case "jev.savings.events.request":
+        return this.jevSession.handleSavingsEvents(msg);
       default:
         return undefined;
     }
@@ -6636,14 +6641,17 @@ export class Session {
 
     const explicitTitle = request.title?.trim() || null;
     const promptTitle = resolveFirstAgentPromptTitle(request.firstAgentContext);
+    // A title a person typed is theirs; an agent's (a CLI run under PASEO_AGENT_ID) and one
+    // derived from the first prompt may be refreshed.
+    const titleSource: WorkspaceTitleSource =
+      explicitTitle && !request.callerAgentId ? "manual" : "auto";
     const createdWorkspace = await this.workspaceProvisioning.createWorkspaceForDirectory(
       cwd,
       explicitTitle ?? promptTitle,
       request.source.projectId,
       {
         expectsInitialAgent: Boolean(request.firstAgentContext),
-        // A title the requester typed is theirs; one derived from the first prompt is ours.
-        titleSource: explicitTitle ? "manual" : "auto",
+        titleSource,
       },
     );
     // This RPC is only reachable over a client connection (app or CLI), never from the
@@ -6726,6 +6734,7 @@ export class Session {
         githubPrNumber: source.githubPrNumber,
         firstAgentContext: request.firstAgentContext,
         title: request.title,
+        ...(request.callerAgentId ? { titleSource: "auto" as const } : {}),
       },
       source.baseBranch
         ? { resolveDefaultBranch: async () => source.baseBranch as string }

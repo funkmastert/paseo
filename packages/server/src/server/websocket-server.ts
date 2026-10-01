@@ -72,6 +72,13 @@ import {
   attentionPushLevel,
 } from "./agent-attention-policy.js";
 import {
+  FINISH_TRIAGE_FILE_MAX_BYTES,
+  finishTriageRecorderFor,
+  readFinishFacts,
+  sendAttentionPush,
+} from "./attention-push-triage.js";
+import { createJsonlAppender } from "./jsonl-appender.js";
+import {
   buildAgentAttentionNotificationPayload,
   findLatestPermissionRequest,
 } from "@getpaseo/protocol/agent-attention-notification";
@@ -795,6 +802,13 @@ export class VoiceAssistantWebSocketServer {
           // A config the daemon cannot parse is reported where it loads; this row just stays off.
           return undefined;
         }
+      },
+      // JEV's spend and features, from memory. A daemon built without JEV reports no row.
+      readJevStatus: () => this.jev?.status() ?? null,
+      readJevDecisions: () => {
+        const service = this.jev;
+        if (!service) return [];
+        return this.agentManager.listAgents().flatMap((agent) => service.listDecisions(agent.id));
       },
     });
 
@@ -1748,6 +1762,8 @@ export class VoiceAssistantWebSocketServer {
         jev: true,
         // COMPAT(jevAsk): added in v0.8.x, remove gate after 2027-03-29.
         jevAsk: true,
+        // COMPAT(jevSavings): added in v0.8.x, remove gate after 2027-03-30.
+        jevSavings: true,
         // COMPAT(checkoutForgeSetAutoMerge): added in v0.2.0-beta.1. Remove the
         // feature gate and legacy fallback after 2027-01-17 once the supported
         // daemon floor is >= v0.2.0.
@@ -2678,9 +2694,35 @@ export class VoiceAssistantWebSocketServer {
     });
 
     if (plan.shouldPush) {
-      const level = attentionPushLevel(params.reason, agent.labels);
-      void this.pushNotificationSender.send(notification, { level }).catch((err) => {
-        this.logger.warn({ err, agentId: params.agentId }, "Failed to send push notification");
+      // Feature 3b (docs/jev.md): a root's finish may go out as a digest notice after JEV reads
+      // it. Detached, so the in-app messages below never wait on JEV. It never rejects; the catch
+      // stays because the daemon exits on an unhandled rejection.
+      const jev = this.jev;
+      void sendAttentionPush({
+        reason: params.reason,
+        base: attentionPushLevel(params.reason, agent.labels),
+        agentId: params.agentId,
+        finalMessage: assistantMessage,
+        jev,
+        readFacts: () => readFinishFacts(this.agentManager, params.agentId),
+        readPostFloor: () => this.pushNotifications.policy.getStatus().settings.minPostLevel,
+        readAvailability: () => this.getAvailabilityMode(),
+        send: (level) => this.pushNotificationSender.send(notification, { level }),
+        record: jev
+          ? finishTriageRecorderFor({
+              agentManager: this.agentManager,
+              savings: jev.savings,
+              file: () =>
+                createJsonlAppender({
+                  filePath: join(this.paseoHome, "jev", "finish-triage.jsonl"),
+                  maxBytes: FINISH_TRIAGE_FILE_MAX_BYTES,
+                  logger: this.logger,
+                }),
+            })
+          : null,
+        logger: this.logger,
+      }).catch((error: unknown) => {
+        this.logger.warn({ err: error, agentId: params.agentId }, "Attention push failed");
       });
     }
 
