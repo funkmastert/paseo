@@ -1986,6 +1986,14 @@ export const zhCN: TranslationResources = {
     },
     blocked_one: "{{count}} 次最近的拒绝",
     blocked_other: "{{count}} 次最近的拒绝",
+    physical: {
+      sectionTitle: "实体设备",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "已断开 — 将在 {{duration}} 后释放",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

@@ -2059,6 +2059,14 @@ export const fr: TranslationResources = {
     },
     blocked_one: "{{count}} refus récent",
     blocked_other: "{{count}} refus récents",
+    physical: {
+      sectionTitle: "Physique",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Déconnecté — se libère dans {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

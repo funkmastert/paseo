@@ -2040,6 +2040,14 @@ export const ptBR: TranslationResources = {
     },
     blocked_one: "{{count}} recusa recente",
     blocked_other: "{{count}} recusas recentes",
+    physical: {
+      sectionTitle: "Físico",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Desconectado — libera em {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

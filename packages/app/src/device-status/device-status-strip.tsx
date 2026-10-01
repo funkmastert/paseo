@@ -26,7 +26,12 @@ import { useIsCompactFormFactor } from "@/constants/layout";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import type { Theme } from "@/styles/theme";
 import { useDeviceActions, useDeviceStatus } from "./use-device-status";
-import type { DeviceStatusMode, DeviceStatusRow, DeviceStatusTone } from "./device-status-model";
+import type {
+  DeviceStatusMode,
+  DeviceStatusRow,
+  DeviceStatusTone,
+  PhysicalDeviceStatusRow,
+} from "./device-status-model";
 
 const ThemedSmartphone = withUnistyles(Smartphone);
 const ThemedChevronUp = withUnistyles(ChevronUp);
@@ -293,6 +298,131 @@ function DeviceRow({
   );
 }
 
+/** No Shut down for a physical device (docs/device-leases.md) — Release and Reserve only. */
+function PhysicalDeviceActionsMenu({
+  row,
+  onRelease,
+  onSetReservation,
+}: {
+  row: PhysicalDeviceStatusRow;
+  onRelease: (deviceId: string) => Promise<void>;
+  onSetReservation: (deviceId: string, reserved: boolean) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const [busy, setBusy] = useState<"release" | "reserve" | null>(null);
+  const reserved = row.reserved;
+
+  const run = useCallback((key: "release" | "reserve", action: () => Promise<void>) => {
+    void (async () => {
+      setBusy(key);
+      try {
+        await action();
+      } finally {
+        setBusy(null);
+      }
+    })();
+  }, []);
+  const handleRelease = useCallback(() => {
+    run("release", () => onRelease(row.id));
+  }, [run, onRelease, row.id]);
+  const handleToggleReservation = useCallback(() => {
+    run("reserve", () => onSetReservation(row.id, !reserved));
+  }, [run, onSetReservation, row.id, reserved]);
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        hitSlop={8}
+        style={styles.kebabTrigger}
+        testID={`device-status-physical-actions-${row.key}`}
+        accessibilityLabel={t("deviceStatus.actions.menuLabel")}
+      >
+        {kebabIcon}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" width={200}>
+        {row.agentId ? (
+          <DropdownMenuItem
+            leading={releaseLeading}
+            status={busy === "release" ? "pending" : "idle"}
+            onSelect={handleRelease}
+            testID={`device-status-physical-release-${row.key}`}
+          >
+            {t("deviceStatus.actions.release")}
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem
+          leading={reserved ? unreserveLeading : reserveLeading}
+          status={busy === "reserve" ? "pending" : "idle"}
+          onSelect={handleToggleReservation}
+          testID={`device-status-physical-reserve-${row.key}`}
+        >
+          {t(reserved ? "deviceStatus.actions.unreserve" : "deviceStatus.actions.reserve")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+function PhysicalDeviceRow({
+  row,
+  canManage,
+  onRelease,
+  onSetReservation,
+}: {
+  row: PhysicalDeviceStatusRow;
+  canManage: boolean;
+  onRelease: (deviceId: string) => Promise<void>;
+  onSetReservation: (deviceId: string, reserved: boolean) => Promise<void>;
+}) {
+  const { t } = useTranslation();
+  const isCompact = useIsCompactFormFactor();
+  const [isHovered, setIsHovered] = useState(false);
+  const actionsVisible = isHovered || isNative || isCompact;
+  const handlePointerEnter = useCallback(() => setIsHovered(true), []);
+  const handlePointerLeave = useCallback(() => setIsHovered(false), []);
+
+  const holder = row.agentId
+    ? t("deviceStatus.heldBy", { agent: row.agentLabel ?? row.agentId })
+    : t(row.reserved ? "deviceStatus.reservedForYou" : "deviceStatus.free");
+  const heldFor =
+    row.heldForSeconds === undefined
+      ? ""
+      : ` · ${t("deviceStatus.runningFor", { duration: formatHeldFor(row.heldForSeconds) })}`;
+  const connection = row.connected
+    ? t(`deviceStatus.physical.transport.${row.transport}`)
+    : t("deviceStatus.physical.disconnected", {
+        duration: formatHeldFor(row.graceRemainingSeconds ?? 0),
+      });
+
+  return (
+    <View
+      style={styles.row}
+      onPointerEnter={handlePointerEnter}
+      onPointerLeave={handlePointerLeave}
+      testID={`device-status-physical-row-${row.key}`}
+    >
+      <View style={styles.rowTextGroup}>
+        <Text style={styles.rowName} numberOfLines={1}>
+          {t(`deviceStatus.platform.${row.platform}`)}
+          {row.name ? ` · ${row.name}` : ""} · {row.shortId}
+          {row.reserved && row.agentId ? ` · ${t("deviceStatus.reservedForYou")}` : ""}
+        </Text>
+        <Text style={styles.rowStatus} numberOfLines={1}>
+          {connection} · {holder}
+          {heldFor}
+        </Text>
+      </View>
+      {canManage && actionsVisible ? (
+        <PhysicalDeviceActionsMenu
+          row={row}
+          onRelease={onRelease}
+          onSetReservation={onSetReservation}
+        />
+      ) : null}
+    </View>
+  );
+}
+
 /**
  * Host-scoped Devices section, mounted beside McpStatusStrip in the sidebar. A management
  * surface, not only a readout: it says how many simulators and emulators are running against
@@ -400,6 +530,20 @@ export function DeviceStatusStrip() {
               onShutdown={handleShutdown}
             />
           ))}
+          {model.physicalRows.length > 0 ? (
+            <>
+              <Text style={styles.sectionHeader}>{t("deviceStatus.physical.sectionTitle")}</Text>
+              {model.physicalRows.map((row) => (
+                <PhysicalDeviceRow
+                  key={row.key}
+                  row={row}
+                  canManage={supportsDeviceManagement}
+                  onRelease={handleRelease}
+                  onSetReservation={handleSetReservation}
+                />
+              ))}
+            </>
+          ) : null}
           {model.waiting.length > 0 ? (
             <Text style={styles.footnote} testID="device-status-waiting">
               {t("deviceStatus.waiting", { count: model.waiting.length })}
@@ -447,6 +591,14 @@ const styles = StyleSheet.create((theme) => ({
     color: theme.colors.foreground,
   },
   rowList: {
+    paddingBottom: theme.spacing[1],
+  },
+  sectionHeader: {
+    fontSize: theme.fontSize.sm,
+    fontWeight: theme.fontWeight.medium,
+    color: theme.colors.foregroundMuted,
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[2],
     paddingBottom: theme.spacing[1],
   },
   modeHeader: {

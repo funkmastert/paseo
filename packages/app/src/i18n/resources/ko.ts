@@ -2018,6 +2018,14 @@ export const ko: TranslationResources = {
     },
     blocked_one: "최근 거부 {{count}}건",
     blocked_other: "최근 거부 {{count}}건",
+    physical: {
+      sectionTitle: "실기기",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "연결 끊김 — {{duration}} 후 해제됩니다",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

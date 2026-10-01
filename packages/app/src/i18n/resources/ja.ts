@@ -2027,6 +2027,14 @@ export const ja: TranslationResources = {
     },
     blocked_one: "最近の拒否 {{count}} 件",
     blocked_other: "最近の拒否 {{count}} 件",
+    physical: {
+      sectionTitle: "実機",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "切断済み — {{duration}} 後に解放されます",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

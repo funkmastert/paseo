@@ -2039,6 +2039,14 @@ export const ru: TranslationResources = {
     },
     blocked_one: "{{count}} недавний отказ",
     blocked_other: "{{count}} недавних отказов",
+    physical: {
+      sectionTitle: "Физическое",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Отключено — освободится через {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

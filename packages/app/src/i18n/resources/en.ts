@@ -2018,6 +2018,14 @@ export const en = {
     },
     blocked_one: "{{count}} recent refusal",
     blocked_other: "{{count}} recent refusals",
+    physical: {
+      sectionTitle: "Physical",
+      transport: {
+        usb: "USB",
+        network: "Wi-Fi",
+      },
+      disconnected: "Disconnected — releases in {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {

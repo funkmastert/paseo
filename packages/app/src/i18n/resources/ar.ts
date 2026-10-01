@@ -2008,6 +2008,14 @@ export const ar: TranslationResources = {
     },
     blocked_one: "{{count}} رفض حديث",
     blocked_other: "{{count}} رفض حديث",
+    physical: {
+      sectionTitle: "فعلي",
+      transport: {
+        usb: "USB",
+        network: "واي فاي",
+      },
+      disconnected: "غير متصل — سيُحرَّر خلال {{duration}}",
+    },
   },
   mcpStatus: {
     collapsedSummary: {
