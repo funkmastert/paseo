@@ -1314,42 +1314,51 @@ The call never blocks the screen. Cancel drops the answer when it arrives; the d
 
 ## Feature 16: file-read check
 
-Tyler's ask (D11): every time an agent loads a file into its context, JEV is asked whether the agent needs it. Every Claude `Read` and every Bash command line that only reads files is seen, and the large ones are judged. In shadow, the default, the check runs beside the read, never delays it, and records whether JEV would have skipped it and what the read cost. In live mode JEV may deny a large read once; the agent can read it again and the second read goes through.
+Tyler's ask (D11): every time an agent loads a file into its context, JEV is asked whether the agent needs it. Every Claude `Read` and every Bash command line that only reads files is seen, and the large ones are judged. In shadow, the default, the check runs after the read, never delays it, and records whether JEV would have skipped it and what the read cost. In live mode JEV may deny a large read once; the agent can read it again and the second read goes through.
 
 ### Seam
 
-The daemon's Claude hooks, where the catastrophe gate lives (`buildHooks`, `providers/claude/agent.ts:5186`). Research 03 (`~/bozeo-ops/jev-research/03-paseo-integration-surface.md` §1) found it is the only place in Paseo that sees a `Read` before it runs: plugins, the permission system and the MCP gateway cannot, and `canUseTool` is never called under `bypassPermissions`, which every fleet agent runs.
+The daemon's Claude hooks, where the catastrophe gate lives (`buildHooks`, `providers/claude/agent.ts`). Research 03 (`~/bozeo-ops/jev-research/03-paseo-integration-surface.md` §1) found it is the only place in Paseo that sees a `Read` before it runs: plugins, the permission system and the MCP gateway cannot, and `canUseTool` is never called under `bypassPermissions`, which every fleet agent runs.
 
-- `buildHooks` adds `PreToolUse` matchers for `Read` and `Bash`, plus `Edit`, `Write`, `MultiEdit` and `NotebookEdit`, whose calls feed the [validation window](#did-the-agent-use-it), and `PostToolUse` matchers for `Read` and `Bash`, which measure what the read loaded. `HookCallbackMatcher.matcher` filters by tool name (`@anthropic-ai/claude-agent-sdk` 0.3.246, `sdk.d.ts:851-856`); each callback re-checks the name, as the gates do.
-- The hook input carries everything the check needs: `tool_name`, `tool_input`, `tool_use_id` and `cwd` (`sdk.d.ts:2380-2385`, `:170`), `tool_response` on PostToolUse (`:2345-2355`), and `agent_id` inside a subagent (`:179`). `tool_use_id` pairs a read's PreToolUse with its PostToolUse.
-- The callbacks hand the input to a `FileReadObserver`, a new optional dependency plumbed the way `deviceLaunchGate` is: the Claude provider's options (`agent.ts:447`, `:479`), the client (`:1581`, `:1595`, `:1646`), `agent/provider-runtime.ts:30` and `bootstrap.ts:1869-1895`. The observer is daemon code in `jev/read-check/` with the agent manager, the timeline and the JEV service in reach. An agent launched without one registers no read-check matchers and behaves as today.
+- `buildHooks` adds, after the device and catastrophe gates, `PreToolUse` matchers for `Read` and `Bash`, plus `Edit`, `Write`, `MultiEdit` and `NotebookEdit`, whose calls feed the [validation window](#did-the-agent-use-it) and live mode's edit rule, and `PostToolUse` matchers for `Read` and `Bash`, which measure what the read loaded. One matcher per tool name, each with a 3-second timeout; the observer re-checks the name.
+- The hook input carries everything the check needs: `tool_name`, `tool_input`, `tool_use_id` and `cwd`, `tool_response` on PostToolUse, and `agent_id` inside a subagent (`@anthropic-ai/claude-agent-sdk` 0.3.246, `sdk.d.ts`). `tool_use_id` pairs a live read's PreToolUse with its PostToolUse.
+- The callbacks hand the input to a `FileReadObserver` (`jev/read-check/observer.ts`), plumbed beside `isCatastropheGateEnabled`: the Claude client and session options, `provider-snapshot-manager.ts`, `provider-registry.ts`, and `createDaemonReadCheckObserver` in `bootstrap.ts`. A session launched without one registers no read-check matcher. `PASEO_READ_CHECK_HOOKS=off` in the daemon's environment at start launches every session without one: the latency baseline, and a way out that needs no config change.
 
-**Zero latency in shadow.** A shadow callback copies the fields it needs, queues the work with `setImmediate`, and returns `{}` in the same tick. The CLI waits on the callback, not on the queued work. It runs the matching hooks of one event in parallel (`sdk.d.ts:2361`), and the matcherless observation hook already costs every tool call a PreToolUse and a PostToolUse round trip (`agent.ts:5310-5311`), so a callback that answers at once adds nothing to the read's wall clock. `AsyncHookJSONOutput` (`sdk.d.ts:129-132`) is not needed. A throw anywhere in the callback returns `{}`. The matcher's `timeout` is 3 seconds, which only live mode can approach; on timeout the SDK proceeds, as it does for the catastrophe gate (`agent.ts:380-384`).
+**Zero latency in shadow.** A shadow PreToolUse callback reads one cached field and returns `{}`. The read is judged after it ran: the PostToolUse callback copies the input, queues the work with `setImmediate` and returns `{}` in the same tick. The CLI waits on the callbacks, never on the queued work, so nothing JEV does can reach the read, whether the CLI runs a tool's hooks in parallel or one after another. Judging after the read also means a `file_unchanged` dedup is never judged, the size floor is the exact size, and the excerpt is what the agent saw. A throw anywhere in a callback returns `{}`. Measured with JEV slowed to 2 seconds on the fake (`PASEO_JEV_FAKE_DELAY_MS`):
 
-**Other providers.** Every fleet agent in the 7 days to 2026-09-28 was Claude (research 03: 536 of 536 agent records), so v1 covers the fleet. The rest are [deferred](#deferred): OpenCode's bridge plugin has `tool.execute.before` (`providers/opencode/bridge.test.ts:232`), which could carry the same check; Codex asks only for commands that need approval; the ACP client advertises `readTextFile: false` (`providers/acp-agent.ts:257`), so ACP agents read files themselves; Pi reports and never asks.
+| Where                                                                | Reads per arm | Median per read, off → shadow | Tail, off → shadow             |
+| -------------------------------------------------------------------- | ------------- | ----------------------------- | ------------------------------ |
+| The provider's hooks in-process (`agent.read-check.test.ts`)         | 200           | 0.2–1.0 ms, either side ahead | p99 4–15 ms, either side ahead |
+| The real Claude CLI 2.1.284 (`agent.read-check.latency.e2e.test.ts`) | 200           | 12.51 → 13.17 ms              | p90 24.5 → 24.8 ms             |
+| A scratch daemon, `PASEO_READ_CHECK_HOOKS=off` → shadow              | 120           | 12.45 → 12.66 ms              | p90 27.6 → 20.2 ms             |
+
+Per-round medians of one arm vary by 2–4 ms, so the differences are noise. The CLI measurement's positive control, a hook that holds each read 300 ms, shows up as +308 ms, so the method sees a wait when there is one. In-process, every read had started its 2-second judgment and none had an answer when the reads ended. Raw numbers: `~/bozeo-ops/read-check-latency/`.
+
+**Other providers.** Every fleet agent in the 7 days to 2026-09-28 was Claude (research 03: 536 of 536 agent records), so v1 covers the fleet. The rest are [deferred](#deferred): OpenCode's bridge plugin has `tool.execute.before` (`providers/opencode/bridge.test.ts`), which could carry the same check; Codex asks only for commands that need approval; the ACP client advertises `readTextFile: false` (`providers/acp-agent.ts`), so ACP agents read files themselves; Pi reports and never asks.
 
 ### What counts as a read
 
-- **`Read`** of a text file. An image, a PDF (`pages`) or a notebook is counted as `not-text` and not judged.
-- **A Bash command line that only reads files.** `walkShellCommands` (`agent/shell-commands.ts:36`), the catastrophe gate's parser, visits every command the line runs with wrappers peeled, and `resolvePath` (`:954`) resolves each operand against the walk's cwd. A line counts when every command it runs is `cd` or a reader — `cat`, `head`, `tail`, `sed -n`, `less`, `more`, `bat`, `nl` — at least one names a file, and the visitor's `outputRedirect` never fires. Its whole output is then what those files loaded, split evenly between them when there are several; the basis says so. Anything else (`rg`, `grep`, `npm test`) is not a file read: research 03 counts its output as search or command output.
-- **Tokens a read loaded,** measured at PostToolUse: for `Read`, the characters of `tool_response.file.content` (`sdk-tools.d.ts:224-250`) plus 7 per line for the line-number prefix Read adds; for Bash, the characters of `stdout` and `stderr` (`sdk-tools.d.ts:3166-3174`). Tokens are characters ÷ 2.35, the fleet's calibrated median for tool results (p10 2.10, p90 2.62, n = 1,463; `~/bozeo-ops/jev-research/results-168h.json`). JEV's 2.5 bytes a token is a different tokenizer, and the tools track's `estimateReadTokens` (3.5 bytes a token) undercounts Claude's by about a third; the savings ledger uses 2.35 for every feature (`estimateContextTokens`, `jev/savings-formulas.ts`). A read whose PostToolUse never arrives (the tool failed, the turn was cancelled) is estimated from the requested range of the file and marked so in its basis.
-- A `file_unchanged` result (`sdk-tools.d.ts:372`), the CLI's read dedup, loaded nothing: counted as `dedup`, never judged.
+- **`Read`** of a text file. An image, a PDF (`pages`) or a notebook, by its extension or its result type, is counted as `not-text` and not judged.
+- **A Bash command line that only reads files** (`jev/read-check/recognize.ts`). `walkShellCommands` (`agent/shell-commands.ts`), the catastrophe gate's parser, visits every command the line runs with wrappers peeled, and `resolvePath` resolves each operand against the walk's cwd. A line counts when every command it runs is `cd` or a reader — `cat`, `head`, `tail`, `sed -n`, `less`, `more`, `bat`, `nl` — at least one names a file, and nothing is written. A reader with no file operand is a filter on what came before (`cat big.log | head -100`). `2>/dev/null` and descriptor dups write nothing. Not reads: a redirect into a file, `tail -f`, `sed -i`, a `sed` script that writes or substitutes, `less -o`, a glob or brace operand, a command the walk cannot name (`$EDITOR x`, reported by the walker's `unresolvedCommand`), a background run, and anything else (`rg`, `grep`, `npm test`), which research 03 counts as search or command output. Several files in one line split the output evenly; the record says `split`.
+- **Tokens a read loaded,** measured at PostToolUse: for `Read`, the characters of `tool_response.file.content`, each line cut at 2,000, plus 7 per line for the line-number prefix Read adds; for Bash, the characters of `stdout` and `stderr`. Tokens are characters ÷ 2.35 (`estimateContextTokens`, `jev/savings-formulas.ts`), the fleet's calibrated median for tool results (p10 2.10, p90 2.62, n = 1,463; `~/bozeo-ops/jev-research/results-168h.json`). JEV's 2.5 bytes a token is a different tokenizer. A read whose PostToolUse never arrives (the tool failed, the turn was cancelled) loaded nothing the check can see and is not counted; a live deny's `T` is estimated from the file's range, and its record says `estimated`.
+- A `file_unchanged` result, the CLI's read dedup, loaded nothing: counted as `dedup`, never judged.
 
 ### When JEV is asked
 
-Every read is counted. JEV is asked only when all of these hold, checked in order; the first that fails is the read's not-asked reason, a daily counter (`JevNotAskedReason` in `contract.ts`):
+Every read is reported through `jev.savings.noteRead`. JEV is asked only when all of these hold, checked in order; the first that fails is the read's not-asked reason, a daily counter (`JevNotAskedReason` in `contract.ts`):
 
-1. `isActive("readCheck")` (`inactive`).
-2. The estimated size of the requested range is at least `minTokens`, 2,000 (`below-floor`). Below about 1,700 tokens one wrong skip costs more than a right one saves (research 03 §3), so judging those can never pay. That is 54% of `Read` results and 70% of Bash file reads.
-3. The file is text (`not-text`), inside the agent's cwd (`outside-cwd`), and passes the file tools' rules: no denied root and no secret-shaped name (`agent/tools/jev-file-state.ts`, `secret-path`).
-4. `checkScope` answers `ok` (`excluded`). D7: a Wonderly file is never opened by the observer and never sent, and the dashboard counts it as not judged.
-5. The same agent, path and range were not judged in the last 30 minutes (`repeat`). A repeat makes no call and no record; while the earlier verdict's validation window is open, it is that window's `reread`.
+1. The read loaded something (`dedup`) and `isActive("readCheck")` (`inactive`).
+2. The result is text (`not-text`). Before the floor: an image's text length says nothing about its tokens.
+3. The read loaded at least `minTokens`, 2,000 (`below-floor`). Below about 1,700 tokens one wrong skip costs more than a right one saves (research 03 §3), so judging those can never pay. That is 54% of `Read` results and 70% of Bash file reads.
+4. The same agent, path and range were not judged in the last 30 minutes (`repeat`). A repeat makes no call and no record; inside the earlier verdict's validation window it is that window's `reread`. This runs before the path rules and the scope check because it is a map lookup and the scope check runs git; a read that passes claims its `path|range`, so a burst of the same read is one call.
+5. The file is inside the agent's cwd (`outside-cwd`) and passes the file tools' rules: no denied root and no secret-shaped name (`secret-path`). The rules are a copy of the tools track's `agent/tools/jev-file-state.ts` in `read-check/paths.ts`, because that module had not merged; import it once it has.
+6. `checkScope` answers `ok` (`excluded`). D7: a Wonderly file is never opened by the observer and never sent. One file's content comes from the hook's result; the observer opens a file only for a line that read several, and only after this check.
 
 A read inside an in-process subagent is judged against the parent agent's task, and its record says `subagent: true`.
 
 ### State and question
 
-The observer builds the state after the hook has answered, from the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 8 })`) and the file. At most 10,000 bytes:
+The observer builds the state after the read ran, from the agent record, its timeline tail (`agentManager.fetchTimeline(id, { direction: "tail", limit: 16 })`, the read's own call removed and each tool call listed once) and what the read loaded (`read-check/state.ts`). At most 10,000 bytes; the excerpt shrinks first, then `recent`:
 
 ```json
 {
@@ -1367,11 +1376,11 @@ The observer builds the state after the hook has answered, from the agent record
 }
 ```
 
-The audit treats `excerpt` and `outline` as file content, as it does the agent tools' `content`: it keeps their SHA-256 and sizes, never the text ([Audit](#audit)).
+The audit treats `excerpt` and `outline` as file content, as it does the agent tools' `content`: on the `reads` lane it keeps their SHA-256 and sizes, never the text ([Audit](#audit)).
 
 Enough of the file is the excerpt and the outline. Whether a file matters to a task depends on its subject — imports, names, doc comments — which the head of the range and its declarations carry. The whole range would cost up to ten times more per call, on the lane with the most calls, for a question that does not need the body. A call is about 3,500 JEV tokens, $0.00015.
 
-`recent` is the only view of intent: a `Read` carries no question, only `file_path`, `offset`, `limit` and `pages` (research 03, headline 5). The CLI emits each completed content block as it streams (`sdk.d.ts:3084`), so the text before a tool call is in the timeline when the observer reads it; the observer tests pin that ordering. An Opus 5.5 thinking block has no readable text, so `recent` often shows tool calls only.
+`recent` is the only view of intent: a `Read` carries no question, only `file_path`, `offset`, `limit` and `pages` (research 03, headline 5). An Opus 5.5 thinking block has no readable text, so `recent` often shows tool calls only.
 
 ```json
 {
@@ -1390,7 +1399,7 @@ Enough of the file is the excerpt and the outline. Whether a file matters to a t
 
 ### Decision
 
-`decideReadCheck` (`read-check/decision.ts`) is pure:
+`readCheckAnswerOf` and `decideLiveDeny` (`read-check/decision.ts`) are pure:
 
 | Answer                      | Shadow records | Live does                                                                    |
 | --------------------------- | -------------- | ---------------------------------------------------------------------------- |
@@ -1402,14 +1411,14 @@ Enough of the file is the excerpt and the outline. Whether a file matters to a t
 
 ### Live mode (D11)
 
-Off until Tyler sets `agents.jev.readCheck.shadow: false`, after the dashboard shows the evidence below. Live applies to the share `liveShare` (0.5) of agents chosen by a hash of the agent id; the rest stay in shadow on the same days, so live's regret rate and shadow's false-skip rate compare like with like.
+Off until Tyler sets `agents.jev.readCheck.shadow: false`, after the dashboard shows the evidence below. Live applies to the share `liveShare` (0.5) of agents chosen by a hash of the agent id; the rest stay in shadow on the same days, so live's regret rate and shadow's false-skip rate compare like with like. Their calls, and a live agent's smaller reads, go out with `shadow: true` on `JevDecideInput`, so their outcome, and their savings record's mode, is shadow while the feature is live. The flag can make a call shadow, never live.
 
-For an agent in the live share, a read that code estimates at `liveMinTokens` (8,000) or more is held while the observer judges it: the PreToolUse callback awaits the verdict for at most `liveTimeoutMs` (1,000 ms). That budget covers the scope check, reading the excerpt, the timeline tail and the JEV call; JEV's warm median is about 300 ms and a cold connection about 900 ms. Past it, or on any outcome but `answered`, the callback returns `{}` and the read runs. The agent's smaller reads are judged as in shadow. Research 03 §3 found 8,000 tokens the smallest read worth gating: a wrong deny costs one extra model step, about 25,000 weighted tokens at the fleet's median context, while a right one saves about 14.5 times the read. About 980 reads a week were that large (research 03, all sessions), so about 140 a day wait up to a second.
+For an agent in the live share, a `Read`, or a Bash line that reads one file, that code estimates at `liveMinTokens` (8,000) or more is held while the observer judges it: the PreToolUse callback awaits the verdict for at most `liveTimeoutMs` (1,000 ms). That budget covers the repeat rule, the path rules and scope check, reading the range from the file, the timeline tail and the JEV call; JEV's warm median is about 300 ms and a cold connection about 900 ms. Past it, or on any outcome but `answered`, the callback returns `{}` and the read runs, and a deny that lands after the deadline is never given. A read that ran after a live judgment is not judged again: its PostToolUse settles the record's measured `T`. A line that reads several files is judged in shadow only.
 
 The callback denies (`permissionDecision: "deny"`) only when all of these hold:
 
 - the answer is `not_needed` at ≥ 0.85;
-- the call is a `Read`, or a Bash line that only reads files;
+- the call is a `Read`, or a Bash line that reads only this file;
 - this agent was not denied this path before in its session: the second read of a path always goes through, unchecked;
 - the agent has not edited the path in this session;
 - the agent had fewer than `maxDeniesPerAgentPerHour` (5) denials and fewer than 2 regrets in the last hour.
@@ -1418,7 +1427,7 @@ The reason the agent reads:
 
 > JEV judged src/server/session.ts (about 14,300 tokens) not needed for your task (0.91). If you need it, run the same Read again; it goes through without a check. To ask about it without loading it, use mcp**paseo**ask_jev_file_bool or mcp**paseo**ask_jev_file_choice.
 
-The last sentence goes only to agents labelled `paseo.jev-tools: on`, the only ones with the file tools.
+The last sentence goes only to agents labelled `paseo.jev-tools: on`, the only ones with the file tools. A deny also writes a decision note, so the agent's JEV decisions list shows it.
 
 It denies; it never substitutes. A PostToolUse `updatedToolOutput` replaces a read after the CLI has recorded it, and the CLI's read dedup then answers the agent's retry with `file_unchanged`, locking it out of the file (research 03 §2). A PreToolUse deny never runs the tool, so the CLI records nothing and the retry reads the file.
 
@@ -1428,11 +1437,11 @@ D1 holds everywhere else. No tool is removed (D2), the deny is advice one call o
 
 ### Did the agent use it
 
-A would-skip is a saving only if the agent did not need the file. For each `not_needed` verdict the observer watches the agent for the rest of that turn and its next two, at most 60 minutes, and records the first sign it used the file:
+A would-skip is a saving only if the agent did not need the file. For each `not_needed` verdict the observer (`read-check/validation.ts`) watches the agent from the read for the rest of that turn and its next two, at most 60 minutes, and records the first sign it used the file:
 
-- `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path;
-- `reread`: a `Read` or a Bash read of the path, any range; in live, the retry after a deny;
-- `quoted`: a line of 40 or more characters from the range appears in a later assistant message or tool input. The observer keeps a hash set of the range's lines, at most 2,000, taken from the PostToolUse result, and drops it when the window closes;
+- `edited`: an Edit, Write, MultiEdit or NotebookEdit on the path, from the hooks;
+- `reread`: a `Read` or a Bash read of the path, any range, from the hooks; in live, the retry after a deny;
+- `quoted`: a line of 40 or more characters from the range appears in a later assistant message or tool input. The observer keeps a hash set of the range's lines, at most 2,000, and its 60-second sweep scans the agent's later timeline rows, which also count the turns;
 - in live, an `ask_jev_file_*` call on the path is `redirected`: the deny worked as meant, and it is not a regret.
 
 With none seen, the verdict `held`. In shadow a use is a `false-skip`; in live it is a `regret`. Either lands as a `validated` line on the read's savings record.
@@ -1443,22 +1452,23 @@ The observer reports every read it sees, judged or not, through `jev.savings.not
 
 ### Fail open
 
-In shadow nothing the check does can reach the read: the callback answered before the work began. In live any outcome but `answered`, a timeout, an error or a failed condition lets the read run, exactly as today.
+In shadow nothing the check does can reach the read: the read has already run. In live any outcome but `answered`, a timeout, an error or a failed condition lets the read run, exactly as today. Shutdown waits at most a second for queued checks.
 
 ### Cost, cache, latency
 
-- About 900 reads a day of 2,000 tokens or more across all sessions (research 03: 1,945 `Read` results and 4,344 Bash file reads in 7 days), at about $0.00015 each: about $0.13 a day. The `reads` lane and its $0.25 cap are its own, so read checks can never spend the budget that steers the daemon, and never enter the agent tools' D8 comparison.
+- About 900 reads a day of 2,000 tokens or more across all sessions (research 03: 1,945 `Read` results and 4,344 Bash file reads in 7 days), at about $0.00015 each: about $0.13 a day. The `reads` lane and its $0.25 cap are its own, and it takes a rate token only when no other lane is waiting, so read checks can never spend the budget that steers the daemon, and never enter the agent tools' D8 comparison. Two slots: a burst of large reads queues and gives up as `saturated` after its 5-second deadline, counted `inactive`.
 - Hooks are CLI-side callbacks that never reach the API, so registering them costs no cache (research 03 §3). A live deny is a short tool result at the tail, which is cache-neutral.
-- Shadow adds nothing to a read. Live holds a read of 8,000 tokens or more for about 0.3–0.5 s, at most `liveTimeoutMs`.
+- Shadow adds nothing to a read (the measurements above). Live holds a read of 8,000 tokens or more for about 0.3–0.5 s, at most `liveTimeoutMs`.
 - **Pays if,** once live, the tokens its held denies kept out of context, priced over their residency, exceed its regrets' extra steps plus its JEV spend. Shadow saves nothing by itself; it is the measurement. **Measured by** the `validated` lines on its savings records, per mode ([Formulas](#formulas)).
 
 ### Tests and verification
 
-- `read-check/recognize.test.ts`: each reader and its flags; `cd` then a read; a pipe into `head`; a redirect, `rg`, and a read mixed with any other command are not reads; operands resolve against the walk's cwd.
-- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path and the regret cooldown.
-- `read-check/observer.test.ts`, against the fake: each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's caps; a repeat reuses the verdict with no call; each validation signal and the window's close; the record's mode comes from the outcome.
-- `providers/claude/agent.read-check.test.ts`: a shadow callback resolves `{}` before the observer's work starts, with an observer whose judgment never resolves; a throwing observer returns `{}`; live denies once, lets the second read through, and returns `{}` past `liveTimeoutMs`; with no observer, no read-check matcher is registered.
-- Verify: `npx vitest run packages/server/src/server/jev/read-check --bail=1`.
+- `read-check/recognize.test.ts`: each reader and its flags; `cd` then a read; a pipe into `head`; `2>/dev/null`; a redirect, `rg`, `tail -f`, `sed -i`, a glob, an unnameable command, and a read mixed with any other command are not reads. `agent/shell-commands.test.ts`: the walker's `unresolvedCommand`.
+- `read-check/decision.test.ts`: every row of the decision table and every live condition, including the second read of a path and the regret cooldown. `read-check/state.test.ts`: ranges, sizes, the outline and the state's 10,000-byte cap. `read-check/validation.test.ts`: each signal and the window's close by turns and by time.
+- `read-check/observer.test.ts`, on the real service over the fake: each not-asked reason in order; an excluded file is never opened and nothing is sent; the state's fields; a repeat makes no call; each validation signal; the control arm answers shadow on a live feature; live denies once, settles a read that ran, and gives no late deny.
+- `providers/claude/agent.read-check.test.ts`: no observer, no matcher; the gates keep theirs; a shadow callback resolves `{}` before the observer's work starts; a throwing observer returns `{}`; live denies once and returns `{}` past its timeout; and the in-process latency arms.
+- Verify: `npx vitest run packages/server/src/server/jev/read-check packages/server/src/server/agent/providers/claude/agent.read-check.test.ts`.
+- Real CLI latency, which spends nothing (the CLI talks to a local fake of the Messages API): `env -i PATH=… HOME=<scratch> PASEO_READ_CHECK_LATENCY_CLAUDE_BIN=~/.local/share/claude/versions/<v> PASEO_READ_CHECK_LATENCY_OUT=<file> npx vitest run src/server/agent/providers/claude/agent.read-check.latency.e2e.test.ts` from `packages/server`.
 
 ## Savings
 
