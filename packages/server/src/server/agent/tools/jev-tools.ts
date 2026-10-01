@@ -23,6 +23,7 @@ import {
   deterministicTriggers,
   DIFF_RISK_QUESTIONS,
   scoreDiffRisk,
+  secretPathsInPatch,
   type DiffRiskResult,
 } from "./jev-diff-risk.js";
 import {
@@ -78,6 +79,8 @@ export interface JevToolsDependencies {
   /** `createCatastropheCommandGate` from `jev/command-gate.ts`. Null refuses every `command`. */
   commandGate: CommandGate | null;
   paseoHome: string;
+  /** `worktreesRoot` from the daemon config: Paseo worktrees are readable inside `$PASEO_HOME`. */
+  worktreesRoot?: string | undefined;
   /** The D8 record. Absent in tests that do not measure. */
   useLog?: JevToolUseLog | null;
   homeDir?: string;
@@ -416,6 +419,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       cwd: caller.cwd,
       homeDir,
       paseoHome: deps.paseoHome,
+      ...(deps.worktreesRoot ? { worktreesRoot: deps.worktreesRoot } : {}),
       platform,
       denials: denials.read,
       runGit: deps.runGit,
@@ -1089,6 +1093,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     const ruled = diff.paths.find(
       (entry) => scope.deniedReason(path.join(diff.top, entry.path)) !== null,
     );
+    const secretInPatch = secretPathsInPatch(diff.diff)[0];
     let unansweredReason: string | undefined;
     let answers: Record<string, JevAnswer> | null = null;
     let callId: string | null = null;
@@ -1096,6 +1101,8 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       unansweredReason = "the diff is over 60 KB, so it was not sent";
     } else if (ruled) {
       unansweredReason = `${ruled.path} is a file the JEV tools never send, so the diff was not sent`;
+    } else if (secretInPatch) {
+      unansweredReason = `${secretInPatch} is secret-shaped, so the diff was not sent`;
     } else {
       const inactive = inactiveOutcome();
       if (inactive) {

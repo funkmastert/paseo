@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
@@ -10,6 +10,7 @@ import {
   deterministicTriggers,
   DIFF_RISK_MAX_DIFF_BYTES,
   scoreDiffRisk,
+  secretPathsInPatch,
   type CollectedDiff,
 } from "./jev-diff-risk.js";
 
@@ -148,6 +149,114 @@ describe("collectDiff", () => {
     expect(diff.commitMessage).toBe("signed-looking change");
     expect(existsSync(marker)).toBe(false);
     rmSync(program);
+  });
+
+  // A promisor remote plus a missing blob: `git diff` fetches the blob, and the fetch runs a
+  // program the repository names, as the daemon. Both transports were confirmed against the
+  // unhardened runner. The test setup sets GIT_SSH_COMMAND, which would mask core.sshCommand,
+  // so that case clears it the way the daemon's own environment has it.
+  test.skipIf(process.platform === "win32").each([
+    ["core.sshCommand over ssh", "ssh"],
+    ["an ext:: remote helper", "ext"],
+  ] as const)("a lazy fetch cannot run %s", async (_name, transport) => {
+    const marker = path.join(repo, "..", `${path.basename(repo)}-${transport}-ran`);
+    const program = path.join(repo, "..", `${path.basename(repo)}-${transport}.sh`);
+    writeFileSync(program, `#!/bin/sh\ntouch '${marker}'\nexit 1\n`, { mode: 0o755 });
+    write("src/app.ts", "export const app = 2;\n");
+    commitAll("change");
+    const blob = git("rev-parse", "main:src/app.ts").trim();
+    rmSync(path.join(repo, ".git", "objects", blob.slice(0, 2), blob.slice(2)));
+    git("config", "core.repositoryformatversion", "1");
+    git("config", "extensions.partialClone", "origin");
+    git("config", "remote.origin.promisor", "true");
+    git("config", "credential.helper", `!${program}`);
+    if (transport === "ssh") {
+      git("config", "remote.origin.url", "ssh://example.invalid/repo.git");
+      git("config", "core.sshCommand", program);
+      git("config", "protocol.ssh.allow", "always");
+    } else {
+      git("config", "remote.origin.url", `ext::${program}`);
+      git("config", "protocol.ext.allow", "always");
+    }
+    const inherited = process.env["GIT_SSH_COMMAND"];
+    delete process.env["GIT_SSH_COMMAND"];
+    try {
+      const result = await collectDiff({ cwd: repo, base: "main" });
+      expect(result.ok).toBe(false);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      if (inherited !== undefined) process.env["GIT_SSH_COMMAND"] = inherited;
+      rmSync(marker, { force: true });
+      rmSync(program, { force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")(
+    "filter, textconv and diff drivers, fsmonitor, hooks and the pager never run",
+    async () => {
+      const markers = path.join(repo, "..", `${path.basename(repo)}-markers`);
+      mkdirSync(markers, { recursive: true });
+      const program = path.join(repo, "..", `${path.basename(repo)}-hostile.sh`);
+      writeFileSync(program, `#!/bin/sh\ntouch '${markers}/'"$1"\nexit 1\n`, { mode: 0o755 });
+      write(".gitattributes", "*.ts filter=evil diff=evil\n");
+      write("src/app.ts", "export const app = 2;\n");
+      commitAll("change");
+      git("config", "filter.evil.process", `${program} filter-process`);
+      git("config", "filter.evil.clean", `${program} filter-clean`);
+      git("config", "filter.evil.smudge", `${program} filter-smudge`);
+      git("config", "diff.evil.textconv", `${program} textconv`);
+      git("config", "diff.evil.command", `${program} diff-command`);
+      git("config", "diff.external", `${program} diff-external`);
+      git("config", "core.fsmonitor", `${program} fsmonitor`);
+      git("config", "core.pager", `${program} pager`);
+      git("config", "pager.diff", `${program} pager-diff`);
+      git("config", "pager.log", `${program} pager-log`);
+      git("config", "core.hooksPath", markers);
+      try {
+        const diff = await collect();
+        expect(diff.paths.map((entry) => entry.path)).toEqual([".gitattributes", "src/app.ts"]);
+        expect(readdirSync(markers)).toEqual([]);
+      } finally {
+        rmSync(markers, { recursive: true, force: true });
+        rmSync(program, { force: true });
+      }
+    },
+  );
+
+  test("secret-shaped files in any case never enter the diff text", async () => {
+    write("Credentials.json", '{"token":"CRED-VALUE"}\n');
+    write("certs/server.PEM", "PEM-VALUE\n");
+    write("cfg/.ENV", "ENV-VALUE=1\n");
+    write("ID_RSA", "RSA-VALUE\n");
+    write(".ssh/id_ecdsa", "ECDSA-VALUE\n");
+    write("infra/terraform.tfstate", '{"secret":"TFSTATE-VALUE"}\n');
+    write(".pypirc", "PYPI-VALUE\n");
+    write("src/app.ts", "export const app = 2;\n");
+    commitAll("add files");
+    const diff = await collect();
+    expect(diff.paths).toHaveLength(8);
+    for (const value of ["CRED", "PEM", "ENV", "RSA", "ECDSA", "TFSTATE", "PYPI"]) {
+      expect(diff.diff, value).not.toContain(`${value}-VALUE`);
+    }
+    expect(diff.diff).toContain("export const app = 2;");
+    expect(secretPathsInPatch(diff.diff)).toEqual([]);
+    expect(deterministicTriggers(diff).filter((t) => t.startsWith("secret-shaped"))).toHaveLength(
+      7,
+    );
+  });
+
+  test("a patch that still carries a secret-shaped file is caught by its headers", () => {
+    const patch = [
+      "diff --git a/src/app.ts b/src/app.ts",
+      "--- a/src/app.ts",
+      "+++ b/src/app.ts",
+      "@@ -1 +1 @@",
+      "-a",
+      "+b",
+      "diff --git a/Config/Server.Key b/Config/Server.Key",
+      "new file mode 100644",
+    ].join("\n");
+    expect(secretPathsInPatch(patch)).toEqual(["Config/Server.Key"]);
   });
 
   test("with no upstream and no origin/HEAD, it asks for a base", async () => {

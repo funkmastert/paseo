@@ -154,7 +154,9 @@ export async function collectDiff(input: {
   const common = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
   const nameStatus = await git([...common, "--name-status", "-z", range], { cwd });
   const numstat = await git([...common, "--numstat", "-z", range], { cwd });
-  const excludes = SECRET_PATHSPEC_GLOBS.map((glob) => `:(exclude,glob)**/${glob}`);
+  // `icase`: pathspecs match case-sensitively even under `core.ignorecase`, and the name check
+  // they mirror does not.
+  const excludes = SECRET_PATHSPEC_GLOBS.map((glob) => `:(exclude,glob,icase)**/${glob}`);
   const patch = await git([...common, range, "--", ".", ...excludes], { cwd });
   // `log.showSignature` in a repository's config would run its `gpg.program`.
   const log = await git(
@@ -214,6 +216,20 @@ async function resolveBase(
     return { ok: false, reason: `no commit named ${base}; pass base` };
   }
   return { ok: true, base, baseSha: sha };
+}
+
+/**
+ * The secret-shaped files a patch carries, read off its `diff --git` headers. The pathspecs keep
+ * them out; this is the check that they did, so a gap in either list never ships a secret.
+ */
+export function secretPathsInPatch(patch: string): string[] {
+  const found = new Set<string>();
+  for (const match of patch.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+    for (const side of [match[1]!, match[2]!]) {
+      if (isSecretShapedPath(side)) found.add(side);
+    }
+  }
+  return [...found];
 }
 
 function parseNameStatus(stdout: string): Array<{ status: string; path: string }> {

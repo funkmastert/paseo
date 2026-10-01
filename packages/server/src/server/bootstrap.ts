@@ -2526,6 +2526,7 @@ export async function createPaseoDaemon(
       isEnabled: () => daemonConfigStore.get().catastropheGate?.enabled !== false,
     }),
     paseoHome: config.paseoHome,
+    worktreesRoot: config.worktreesRoot,
     useLog: new JevToolUseLog({ dir: path.join(config.paseoHome, "jev"), logger }),
   };
   const createAgentToolHostDependencies = (

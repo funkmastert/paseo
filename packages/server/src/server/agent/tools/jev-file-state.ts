@@ -3,7 +3,9 @@ import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { createExternalProcessEnv } from "../../paseo-env.js";
 import { isSameOrDescendantPath, resolvePathFromBase } from "../../path-utils.js";
+import { resolvePaseoWorktreesBaseRoot } from "../../../utils/worktree.js";
 
 /**
  * How the JEV agent tools read files (docs/jev.md, "Reading files safely"). A JEV tool never
@@ -35,30 +37,11 @@ const LOCK_FILE_NAMES = new Set([
 
 /**
  * Secret-shaped names (docs/jev.md, "Reading files safely"). The agent can still Read any of
- * them; the tools only decline to send them to a third party.
+ * them; the tools only decline to send them to a third party. One list feeds both checks: the
+ * name check here and the `:(exclude,glob,icase)` pathspecs `git diff` gets, so a diff leaves out
+ * exactly what a read refuses. Matched case-insensitively both ways: macOS and Windows volumes
+ * fold case, and `Credentials.json` is the same secret as `credentials.json`.
  */
-const SECRET_NAME_RES = [
-  /^\.env$/i,
-  /^\.env\..+$/i,
-  /\.env$/i,
-  /\.(pem|key|p12|pfx|p8|jks|keystore|mobileprovision|tfvars)$/i,
-  /^id_rsa/i,
-  /^id_ed25519/i,
-  /^\.npmrc$/i,
-  /^\.netrc$/i,
-  /^\.pgpass$/i,
-  /^\.git-credentials$/i,
-  /^credentials/i,
-  /^\.credentials/i,
-  /^hosts\.yml$/i,
-  /^kubeconfig$/i,
-  /^google-services\.json$/i,
-  /^GoogleService-Info\.plist$/i,
-  /^local\.properties$/i,
-  /^keystore\.properties$/i,
-];
-
-/** The same list as `:(exclude)` pathspecs for `git diff`, so a diff never carries these files. */
 export const SECRET_PATHSPEC_GLOBS = [
   ".env",
   ".env.*",
@@ -72,10 +55,15 @@ export const SECRET_PATHSPEC_GLOBS = [
   "*.keystore",
   "*.mobileprovision",
   "*.tfvars",
+  "*.tfstate",
+  "*.tfstate.*",
   "id_rsa*",
+  "id_dsa*",
+  "id_ecdsa*",
   "id_ed25519*",
   ".npmrc",
   ".netrc",
+  ".pypirc",
   ".pgpass",
   ".git-credentials",
   "credentials*",
@@ -87,14 +75,22 @@ export const SECRET_PATHSPEC_GLOBS = [
   "GoogleService-Info.plist",
   "local.properties",
   "keystore.properties",
-];
+] as const;
+
+/** A glob's `*` matches any run of characters within one path segment, dots included, as in git. */
+function globToRegExp(glob: string): RegExp {
+  const body = glob
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[^/]*");
+  return new RegExp(`(^|/)${body}$`, "i");
+}
+
+const SECRET_NAME_RES = SECRET_PATHSPEC_GLOBS.map(globToRegExp);
 
 export function isSecretShapedPath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/");
-  const base = path.posix.basename(normalized);
-  if (SECRET_NAME_RES.some((re) => re.test(base))) return true;
-  const parent = path.posix.basename(path.posix.dirname(normalized));
-  return base.toLowerCase() === "config.json" && parent.toLowerCase() === ".docker";
+  return SECRET_NAME_RES.some((re) => re.test(normalized));
 }
 
 export function isBinaryOrLockPath(filePath: string): boolean {
@@ -113,15 +109,84 @@ export type JevGitRunner = (
   options: { cwd: string; input?: string },
 ) => Promise<JevGitResult>;
 
-/** Argv only, no shell, `LC_ALL=C` so "not a git repository" reads the same everywhere. */
-export const runJevGit: JevGitRunner = (args, options) =>
-  new Promise((resolve) => {
+/** Git for Windows maps `/dev/null` to `NUL`, so one spelling serves both. */
+const NULL_DEVICE = "/dev/null";
+
+/**
+ * The config keys a repository could set to make these read-only git calls run a program, each
+ * overridden on the command line, which outranks the repository's own config. Most cannot fire
+ * on `rev-parse`, `ls-files`, `check-ignore`, a tree-to-tree `diff --no-ext-diff --no-textconv`
+ * or `log --no-show-signature`; they are listed so a future flag or git version does not quietly
+ * reopen one. An agent that can Edit `.git/config` would otherwise run code as the daemon,
+ * outside its sandbox, its Bash denial and the catastrophe gate.
+ */
+const NEUTRAL_GIT_CONFIG = [
+  // A lazy fetch of a missing blob (`extensions.partialClone`) is the one confirmed path: it runs
+  // the transport, which runs `core.sshCommand`, an `ext::` helper or a credential helper.
+  // GIT_NO_LAZY_FETCH and GIT_ALLOW_PROTOCOL in the env close it; these are the second guard. A
+  // repository's `protocol.<name>.allow` outranks `protocol.allow`, so the env is the real one.
+  "protocol.allow=never",
+  "core.sshCommand=",
+  "core.gitProxy=",
+  "core.askPass=",
+  "credential.helper=",
+  "core.alternateRefsCommand=",
+  "core.fsmonitor=false",
+  `core.hooksPath=${NULL_DEVICE}`,
+  "core.pager=cat",
+  `core.attributesFile=${NULL_DEVICE}`,
+  "diff.external=",
+  "log.showSignature=false",
+  "gpg.program=",
+  "gpg.openpgp.program=",
+  "gpg.x509.program=",
+  "gpg.ssh.program=",
+];
+
+/** Per-driver and per-name keys, found by a read of the repository's config before each call. */
+const DRIVER_KEY_RE =
+  /^(?:(?:filter|diff|merge)\..+\.(?:process|clean|smudge|textconv|command|driver)|credential\..+\.helper|protocol\..+\.allow|gpg\..+\.program)$/i;
+const DRIVER_KEY_PATTERN =
+  "^(filter|diff|merge)\\..*\\.(process|clean|smudge|textconv|command|driver)$|^credential\\..*\\.helper$|^protocol\\..*\\.allow$|^gpg\\..*\\.program$|^core\\.excludesfile$";
+
+/**
+ * The environment every JEV git call runs with: the daemon's, minus the JEV key and every
+ * inherited `GIT_*` variable (a parent git process or hook sets `GIT_DIR` and friends, and
+ * `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF` or `GIT_CONFIG_PARAMETERS` would name programs), with
+ * lazy fetch and every transport off and only the repository's own config read.
+ */
+export function jevGitEnv(baseEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = createExternalProcessEnv(baseEnv);
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith("GIT_")) delete env[key];
+  }
+  return {
+    ...env,
+    LC_ALL: "C",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_NO_LAZY_FETCH: "1",
+    // A list overrides every `protocol.*.allow` in config; no transport has this name.
+    GIT_ALLOW_PROTOCOL: "paseo-jev-no-transport",
+    GIT_PROTOCOL_FROM_USER: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: NULL_DEVICE,
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_PAGER: "cat",
+  };
+}
+
+function execGit(
+  args: string[],
+  options: { cwd: string; input?: string; env: NodeJS.ProcessEnv },
+): Promise<JevGitResult> {
+  return new Promise((resolve) => {
     const child = execFile(
       "git",
-      ["-c", "core.fsmonitor=false", ...args],
+      args,
       {
         cwd: options.cwd,
-        env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" },
+        env: options.env,
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: GIT_MAX_BUFFER,
         windowsHide: true,
@@ -139,6 +204,74 @@ export const runJevGit: JevGitRunner = (args, options) =>
       child.stdin?.end(options.input);
     }
   });
+}
+
+/**
+ * Reads the keys the overrides must also cover, with the hardened env (reading config runs
+ * nothing), plus the user's global `core.excludesFile`: `GIT_CONFIG_GLOBAL` drops the global
+ * file, and with it a person's global ignores, which decide what the tools treat as ignored.
+ */
+async function readConfigOverrides(
+  cwd: string,
+  baseEnv: NodeJS.ProcessEnv,
+): Promise<string[] | { refused: string }> {
+  const env = jevGitEnv(baseEnv);
+  delete env["GIT_CONFIG_GLOBAL"];
+  const listed = await execGit(
+    ["config", "--null", "--show-scope", "--get-regexp", DRIVER_KEY_PATTERN],
+    { cwd, env },
+  );
+  // 1: no key matched. Anything else but 0 is a config git cannot read; the call then fails too.
+  if (listed.code !== 0) return [];
+  const overrides: string[] = [];
+  // `--null --show-scope`: scope NUL key LF value NUL, per entry.
+  const fields = listed.stdout.split("\0");
+  for (let i = 0; i + 1 < fields.length; i += 2) {
+    const scope = fields[i]!;
+    const entry = fields[i + 1]!;
+    const newline = entry.indexOf("\n");
+    const key = newline < 0 ? entry : entry.slice(0, newline);
+    const value = newline < 0 ? "" : entry.slice(newline + 1);
+    if (key.toLowerCase() === "core.excludesfile") {
+      if (scope === "global" && value) {
+        overrides.push(`core.excludesFile=${expandHome(value, baseEnv)}`);
+      }
+      continue;
+    }
+    if (!DRIVER_KEY_RE.test(key)) continue;
+    // `-c` splits at the first `=`; a key holding one cannot be overridden, so git is not run.
+    if (key.includes("=")) {
+      return { refused: `a config key git cannot override: ${key.slice(0, 80)}` };
+    }
+    overrides.push(`${key}=${/^protocol\./i.test(key) ? "never" : ""}`);
+  }
+  return overrides;
+}
+
+function expandHome(file: string, env: NodeJS.ProcessEnv): string {
+  if (file !== "~" && !file.startsWith("~/")) return file;
+  return path.join(env["HOME"] ?? os.homedir(), file.slice(1));
+}
+
+/**
+ * A git runner for the JEV tools: argv only, no shell, `LC_ALL=C` so "not a git repository"
+ * reads the same everywhere, and nothing a repository's config names ever runs.
+ */
+export function createJevGitRunner(options: { baseEnv?: NodeJS.ProcessEnv } = {}): JevGitRunner {
+  return async (args, runOptions) => {
+    const baseEnv = options.baseEnv ?? process.env;
+    const overrides = await readConfigOverrides(runOptions.cwd, baseEnv);
+    if (!Array.isArray(overrides)) return { code: 128, stdout: "", stderr: overrides.refused };
+    const config = [...NEUTRAL_GIT_CONFIG, ...overrides].flatMap((entry) => ["-c", entry]);
+    return execGit(["--no-pager", ...config, ...args], {
+      cwd: runOptions.cwd,
+      input: runOptions.input,
+      env: jevGitEnv(baseEnv),
+    });
+  };
+}
+
+export const runJevGit: JevGitRunner = createJevGitRunner();
 
 /** What the agent's own configuration says it may not read. */
 export interface JevReadDenials {
@@ -153,6 +286,8 @@ export interface JevFileAccessOptions {
   cwd: string;
   homeDir?: string;
   paseoHome: string;
+  /** `worktreesRoot` from the daemon config; defaults to `$PASEO_HOME/worktrees`. */
+  worktreesRoot?: string;
   platform?: NodeJS.Platform;
   denials?: JevReadDenials;
   runGit?: JevGitRunner;
@@ -188,10 +323,29 @@ function foldsCase(platform: NodeJS.Platform): boolean {
   return platform === "darwin" || platform === "win32";
 }
 
+const DATA_VOLUME = "/system/volumes/data";
+
+/**
+ * The spelling every comparison uses. `fs.realpath` keeps macOS's `/System/Volumes/Data` firmlink
+ * prefix, so `/System/Volumes/Data/Users/x` and `/Users/x` are one directory with two names; and
+ * macOS and Windows volumes fold case. Without both, a cwd spelled the other way slips past the
+ * home refusal and every denied root.
+ */
+export function canonicalJevPath(value: string, platform: NodeJS.Platform): string {
+  let out = value;
+  if (platform === "darwin") {
+    const lower = out.toLowerCase();
+    if (lower === DATA_VOLUME || lower === `${DATA_VOLUME}/`) out = "/";
+    else if (lower.startsWith(`${DATA_VOLUME}/`)) out = out.slice(DATA_VOLUME.length);
+  }
+  return foldsCase(platform) ? out.toLowerCase() : out;
+}
+
 function samePathOrBelow(base: string, candidate: string, platform: NodeJS.Platform): boolean {
-  if (isSameOrDescendantPath(base, candidate)) return true;
-  if (!foldsCase(platform)) return false;
-  return isSameOrDescendantPath(base.toLowerCase(), candidate.toLowerCase());
+  return isSameOrDescendantPath(
+    canonicalJevPath(base, platform),
+    canonicalJevPath(candidate, platform),
+  );
 }
 
 async function realpathOrNull(target: string): Promise<string | null> {
@@ -218,7 +372,8 @@ export class JevFileScope {
     },
     readonly realCwd: string,
     readonly gitTop: string | null,
-    private readonly deniedRoots: string[],
+    private readonly deniedRoots: DeniedRoot[],
+    private readonly worktreeRoots: string[],
     private readonly realHome: string,
   ) {}
 
@@ -236,9 +391,9 @@ export class JevFileScope {
     const realCwd = await realpathOrNull(options.cwd);
     if (!realCwd) return { ok: false, reason: "your working directory does not exist" };
     const realHome = (await realpathOrNull(homeDir)) ?? homeDir;
-    const root = path.parse(realCwd).root;
+    const canonicalCwd = canonicalJevPath(realCwd, platform);
     if (
-      realCwd === root ||
+      canonicalCwd === canonicalJevPath(path.parse(realCwd).root, platform) ||
       samePathOrBelow(realCwd, realHome, platform) ||
       samePathOrBelow(realCwd, homeDir, platform)
     ) {
@@ -249,15 +404,25 @@ export class JevFileScope {
       };
     }
     const deniedRoots = await resolveDeniedRoots(homeDir, options.paseoHome);
+    const worktreeRoots = await resolveWorktreeRoots(options.paseoHome, options.worktreesRoot);
     const top = await runGit(["rev-parse", "--show-toplevel"], { cwd: realCwd });
     const gitTop = top.code === 0 && top.stdout.trim() ? top.stdout.trim() : null;
     return {
       ok: true,
       scope: new JevFileScope(
-        { cwd: options.cwd, homeDir, paseoHome: options.paseoHome, platform, denials, runGit },
+        {
+          cwd: options.cwd,
+          homeDir,
+          paseoHome: options.paseoHome,
+          worktreesRoot: options.worktreesRoot ?? "",
+          platform,
+          denials,
+          runGit,
+        },
         realCwd,
         gitTop,
         deniedRoots,
+        worktreeRoots,
         realHome,
       ),
     };
@@ -458,25 +623,31 @@ export class JevFileScope {
 
   private inDeniedRoot(candidate: string): boolean {
     const { platform, homeDir } = this.options;
-    if (this.deniedRoots.some((root) => samePathOrBelow(root, candidate, platform))) return true;
+    const inWorktree = this.worktreeRoots.some((root) =>
+      samePathOrBelow(root, candidate, platform),
+    );
+    const denied = this.deniedRoots.some(
+      (root) =>
+        samePathOrBelow(root.path, candidate, platform) && !(root.worktreesCarveOut && inWorktree),
+    );
+    if (denied) return true;
     // `~/.claude*`: every Claude config dir, one per account.
+    const canonical = canonicalJevPath(candidate, platform);
     return [homeDir, this.realHome].some((home) => {
-      const relative = path.relative(home, candidate);
+      const relative = path.relative(canonicalJevPath(home, platform), canonical);
       if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return false;
       const first = relative.split(/[\\/]/)[0] ?? "";
-      return (foldsCase(platform) ? first.toLowerCase() : first).startsWith(".claude");
+      return first.toLowerCase().startsWith(".claude");
     });
   }
 
   private deniedByAgent(candidate: string): boolean {
     const { denials, homeDir, platform } = this.options;
-    const target = toPosix(candidate);
+    const a = toPosix(canonicalJevPath(candidate, platform));
     return denials.patterns.some((raw) => {
-      const pattern = toPosix(normalizeDenyPattern(raw, { cwd: this.cwd, homeDir }));
+      const pattern = normalizeDenyPattern(raw, { cwd: this.cwd, homeDir });
       if (!pattern) return false;
-      const fold = foldsCase(platform);
-      const a = fold ? target.toLowerCase() : target;
-      const p = fold ? pattern.toLowerCase() : pattern;
+      const p = toPosix(canonicalJevPath(pattern, platform));
       if (!GLOB_CHARS_RE.test(p)) return samePathOrBelow(p, a, platform);
       // `matchesGlob` never lets `*` match a leading dot. Denying too much is the safe side here,
       // so the path is also tried with each segment's leading dot dropped.
@@ -537,8 +708,13 @@ export class JevFileScope {
   /** Real paths git reports as ignored. Outside a work tree nothing is. Any git error is "error". */
   private async ignoredByGit(candidates: JevFileRef[]): Promise<Set<string> | "error"> {
     if (!this.gitTop || candidates.length === 0) return new Set();
+    // Relative to cwd, which git resolves itself: an absolute path in another spelling of the
+    // same directory (the `/System/Volumes/Data` firmlink, a Windows drive letter's case) is
+    // "outside the repository" to git.
     const byInput = new Map<string, string>();
-    for (const candidate of candidates) byInput.set(candidate.realPath, candidate.realPath);
+    for (const candidate of candidates) {
+      byInput.set(toPosix(path.relative(this.realCwd, candidate.realPath)), candidate.realPath);
+    }
     const result = await this.options.runGit(["check-ignore", "--stdin", "-z"], {
       cwd: this.realCwd,
       input: `${[...byInput.keys()].join("\0")}\0`,
@@ -549,7 +725,7 @@ export class JevFileScope {
     const ignored = new Set<string>();
     for (const entry of result.stdout.split("\0")) {
       if (!entry) continue;
-      const real = byInput.get(entry) ?? byInput.get(path.resolve(this.realCwd, entry));
+      const real = byInput.get(toPosix(entry));
       if (real) ignored.add(real);
     }
     return ignored;
@@ -578,19 +754,39 @@ function tooLarge(bytes: number): string {
   return `over ${JEV_FILE_MAX_BYTES.toLocaleString("en-US")} bytes (${bytes.toLocaleString("en-US")}); use Read or grep`;
 }
 
-async function resolveDeniedRoots(homeDir: string, paseoHome: string): Promise<string[]> {
-  const lexical = [
-    paseoHome,
-    ...[".config", ".ssh", ".aws", ".gnupg", ".docker", ".kube", "Library"].map((name) =>
-      path.join(homeDir, name),
-    ),
-  ];
-  const roots = new Set<string>(lexical);
-  for (const root of lexical) {
-    const real = await realpathOrNull(root);
-    if (real) roots.add(real);
+interface DeniedRoot {
+  path: string;
+  /** `$PASEO_HOME`: its worktrees are repositories an agent works in, not the daemon's state. */
+  worktreesCarveOut: boolean;
+}
+
+async function withRealPaths(paths: string[]): Promise<string[]> {
+  const out = new Set<string>(paths);
+  for (const entry of paths) {
+    const real = await realpathOrNull(entry);
+    if (real) out.add(real);
   }
-  return [...roots];
+  return [...out];
+}
+
+async function resolveDeniedRoots(homeDir: string, paseoHome: string): Promise<DeniedRoot[]> {
+  const home = [".config", ".ssh", ".aws", ".gnupg", ".docker", ".kube", "Library"].map((name) =>
+    path.join(homeDir, name),
+  );
+  return [
+    ...(await withRealPaths([paseoHome])).map((root) => ({ path: root, worktreesCarveOut: true })),
+    ...(await withRealPaths(home)).map((root) => ({ path: root, worktreesCarveOut: false })),
+  ];
+}
+
+/** `worktreesRoot` when configured, else `$PASEO_HOME/worktrees` (`resolvePaseoWorktreesBaseRoot`). */
+async function resolveWorktreeRoots(
+  paseoHome: string,
+  worktreesRoot: string | undefined,
+): Promise<string[]> {
+  return withRealPaths([
+    resolvePaseoWorktreesBaseRoot({ paseoHome, ...(worktreesRoot ? { worktreesRoot } : {}) }),
+  ]);
 }
 
 /**

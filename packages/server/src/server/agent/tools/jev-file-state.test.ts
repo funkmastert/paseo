@@ -1,14 +1,26 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
+  canonicalJevPath,
+  createJevGitRunner,
   JEV_FILE_MAX_BYTES,
   JevFileScope,
   isSecretShapedPath,
+  jevGitEnv,
   readCallerDenials,
+  SECRET_PATHSPEC_GLOBS,
   type JevFileAccessOptions,
 } from "./jev-file-state.js";
 
@@ -342,4 +354,265 @@ test("secret-shaped names", () => {
   for (const name of ["src/env.ts", "config.json", "docs/credential-rotation.md", "keys.ts"]) {
     expect(isSecretShapedPath(name), name).toBe(false);
   }
+});
+
+test("secret-shaped names match in any case, and the list covers keys, state and package-manager credentials", () => {
+  for (const name of [
+    "Credentials.json",
+    "certs/server.PEM",
+    "cfg/.ENV",
+    "ID_RSA",
+    ".ssh/id_ecdsa",
+    "id_ecdsa.pub",
+    "id_ed25519",
+    "id_dsa",
+    "infra/terraform.tfstate",
+    "infra/terraform.tfstate.backup",
+    "bundle.P12",
+    "cert.pfx",
+    "tls.KEY",
+    ".npmrc",
+    ".netrc",
+    ".pypirc",
+    "KubeConfig",
+    "app/.Docker/Config.json",
+  ]) {
+    expect(isSecretShapedPath(name), name).toBe(true);
+  }
+});
+
+test("every secret-shaped name has a pathspec glob, so a diff leaves out what a read refuses", () => {
+  // The pathspecs are matched by git, the name check by code: one list feeds both.
+  for (const glob of SECRET_PATHSPEC_GLOBS) {
+    const sample = glob.replace(/\*/g, "x");
+    expect(isSecretShapedPath(sample), glob).toBe(true);
+    expect(isSecretShapedPath(sample.toUpperCase()), glob).toBe(true);
+  }
+  const globs: readonly string[] = SECRET_PATHSPEC_GLOBS;
+  for (const name of ["id_ecdsa*", "id_dsa*", "*.tfstate", ".pypirc"]) {
+    expect(globs.includes(name), name).toBe(true);
+  }
+});
+
+describe("canonical paths (macOS firmlinks and case)", () => {
+  test.skipIf(process.platform !== "darwin")(
+    "the /System/Volumes/Data spelling of home is still home, and still holds the denied roots",
+    async () => {
+      const firmlinked = (value: string) => `/System/Volumes/Data${value}`;
+      const homeRefused = await JevFileScope.open({
+        cwd: firmlinked(home),
+        homeDir: home,
+        paseoHome,
+      });
+      expect(homeRefused.ok).toBe(false);
+      const caseRefused = await JevFileScope.open({
+        cwd: home.toUpperCase(),
+        homeDir: home,
+        paseoHome,
+      });
+      expect(caseRefused.ok).toBe(false);
+
+      write(path.join(home, ".config", "gh", "hosts.ts"), "export const token = 1;\n");
+      const configDir = path.join(home, ".config", "gh");
+      const opened = await JevFileScope.open({
+        cwd: firmlinked(configDir),
+        homeDir: home,
+        paseoHome,
+      });
+      if (!opened.ok) throw new Error(opened.reason);
+      const { files, skipped } = await opened.scope.prune(["hosts.ts"], 10);
+      expect(files).toEqual([]);
+      expect(skipped[0]?.reason).toMatch(/private directory/);
+    },
+  );
+
+  test.skipIf(process.platform !== "darwin")(
+    "a firmlinked project cwd still works and is still confined",
+    async () => {
+      const opened = await JevFileScope.open({
+        cwd: `/System/Volumes/Data${project}`,
+        homeDir: home,
+        paseoHome,
+      });
+      if (!opened.ok) throw new Error(opened.reason);
+      const { files } = await opened.scope.prune(["src/a.ts", "../outside.txt"], 10);
+      expect(files.map((file) => file.path)).toEqual(["src/a.ts"]);
+    },
+  );
+
+  test("canonicalJevPath strips the data volume and folds case where the filesystem does", () => {
+    expect(canonicalJevPath("/System/Volumes/Data/Users/x/Repo", "darwin")).toBe("/users/x/repo");
+    expect(canonicalJevPath("/system/volumes/data", "darwin")).toBe("/");
+    expect(canonicalJevPath("/System/Volumes/Data/Users/x", "linux")).toBe(
+      "/System/Volumes/Data/Users/x",
+    );
+    expect(canonicalJevPath("C:\\Users\\X\\Repo", "win32")).toBe("c:\\users\\x\\repo");
+  });
+});
+
+describe("Paseo worktrees", () => {
+  test("the file tools read a worktree under $PASEO_HOME/worktrees and still refuse the rest of $PASEO_HOME", async () => {
+    const worktree = path.join(paseoHome, "worktrees", "1rlfnz6g", "feature");
+    mkdirSync(worktree, { recursive: true });
+    git(worktree, "init", "-q");
+    write(path.join(worktree, "src", "app.ts"), "export const app = 1;\n");
+    write(path.join(paseoHome, "agents", "x.json"), '{"secret":true}\n');
+    symlinkSync(path.join(paseoHome, "agents"), path.join(worktree, "agents-link"));
+
+    const opened = await JevFileScope.open({ cwd: worktree, homeDir: home, paseoHome });
+    if (!opened.ok) throw new Error(opened.reason);
+    const { files, skipped } = await opened.scope.prune(["src/app.ts", "agents-link/x.json"], 10);
+    expect(files.map((file) => file.path)).toEqual(["src/app.ts"]);
+    expect(skipped).toEqual([
+      { path: "agents-link/x.json", reason: "outside your working directory" },
+    ]);
+    expect(opened.scope.deniedReason(path.join(worktree, "src", "app.ts"))).toBeNull();
+    expect(opened.scope.deniedReason(path.join(paseoHome, "agents", "x.json"))).toMatch(
+      /private directory/,
+    );
+
+    const agentsDir = await JevFileScope.open({
+      cwd: path.join(paseoHome, "agents"),
+      homeDir: home,
+      paseoHome,
+    });
+    if (!agentsDir.ok) throw new Error(agentsDir.reason);
+    expect((await agentsDir.scope.prune(["x.json"], 10)).skipped[0]?.reason).toMatch(
+      /private directory/,
+    );
+  });
+
+  test("a configured worktrees root is the one carved out", async () => {
+    const custom = path.join(paseoHome, "trees");
+    const worktree = path.join(custom, "repo");
+    mkdirSync(worktree, { recursive: true });
+    write(path.join(worktree, "a.ts"), "export const a = 1;\n");
+    const opened = await JevFileScope.open({
+      cwd: worktree,
+      homeDir: home,
+      paseoHome,
+      worktreesRoot: custom,
+    });
+    if (!opened.ok) throw new Error(opened.reason);
+    expect((await opened.scope.prune(["a.ts"], 10)).files.map((file) => file.path)).toEqual([
+      "a.ts",
+    ]);
+    const unconfigured = await JevFileScope.open({ cwd: worktree, homeDir: home, paseoHome });
+    if (!unconfigured.ok) throw new Error(unconfigured.reason);
+    expect((await unconfigured.scope.prune(["a.ts"], 10)).skipped[0]?.reason).toMatch(
+      /private directory/,
+    );
+  });
+});
+
+describe("git never runs a program a repository's config names", () => {
+  // Each case is a hostile `.git/config` (and `.gitattributes`) that points git at a program
+  // which leaves a marker. The file tools' git calls (rev-parse, ls-files, check-ignore) must
+  // run none of them.
+  let markers: string;
+  let program: string;
+
+  beforeEach(() => {
+    markers = path.join(root, "markers");
+    mkdirSync(markers, { recursive: true });
+    program = path.join(root, "hostile.sh");
+    writeFileSync(program, `#!/bin/sh\ntouch '${markers}/'"$1"\nexit 1\n`, { mode: 0o755 });
+  });
+
+  function ran(): string[] {
+    return readdirSync(markers).sort();
+  }
+
+  const HOSTILE: Array<[string, (repo: string, program: string, markers: string) => void]> = [
+    ["core.fsmonitor", (repo, prog) => git(repo, "config", "core.fsmonitor", `${prog} fsmonitor`)],
+    [
+      "core.hooksPath",
+      (repo, _prog, out) => {
+        const hooks = path.join(repo, "..", "hostile-hooks");
+        mkdirSync(hooks, { recursive: true });
+        for (const hook of ["post-index-change", "post-checkout", "reference-transaction"]) {
+          writeFileSync(path.join(hooks, hook), `#!/bin/sh\ntouch '${out}/${hook}'\n`, {
+            mode: 0o755,
+          });
+        }
+        git(repo, "config", "core.hooksPath", hooks);
+      },
+    ],
+    [
+      "filter and diff drivers",
+      (repo, prog) => {
+        write(path.join(repo, ".gitattributes"), "*.ts filter=evil diff=evil\n");
+        git(repo, "config", "filter.evil.process", `${prog} filter-process`);
+        git(repo, "config", "filter.evil.clean", `${prog} filter-clean`);
+        git(repo, "config", "filter.evil.smudge", `${prog} filter-smudge`);
+        git(repo, "config", "diff.evil.textconv", `${prog} textconv`);
+        git(repo, "config", "diff.evil.command", `${prog} diff-command`);
+        git(repo, "config", "diff.external", `${prog} diff-external`);
+      },
+    ],
+    [
+      "pager and credential helper",
+      (repo, prog) => {
+        git(repo, "config", "core.pager", `${prog} pager`);
+        git(repo, "config", "credential.helper", `!${prog} credential`);
+      },
+    ],
+  ];
+
+  test.skipIf(process.platform === "win32").each(HOSTILE)("%s", async (_name, configure) => {
+    configure(project, program, markers);
+    const scope = await open();
+    await scope.expand(["**/*.ts"], { recursive: false });
+    await scope.prune(["src/a.ts", "src/b.ts", "ignored.txt"], 10);
+    expect(ran()).toEqual([]);
+  });
+
+  test("a user's global excludesFile still decides what is ignored", async () => {
+    const fakeHome = path.join(root, "git-home");
+    mkdirSync(fakeHome, { recursive: true });
+    const excludes = path.join(fakeHome, "global-ignore");
+    writeFileSync(excludes, "notes.local.md\n");
+    writeFileSync(path.join(fakeHome, ".gitconfig"), `[core]\n\texcludesFile = ${excludes}\n`);
+    write(path.join(project, "notes.local.md"), "private notes\n");
+    const runGit = createJevGitRunner({
+      baseEnv: { PATH: process.env["PATH"], HOME: fakeHome, XDG_CONFIG_HOME: fakeHome },
+    });
+    const scope = await open({ runGit });
+    const { files, skipped } = await scope.prune(["notes.local.md", "src/a.ts"], 10);
+    expect(files.map((file) => file.path)).toEqual(["src/a.ts"]);
+    expect(skipped).toEqual([
+      { path: "notes.local.md", reason: "ignored by git; Read it if you need it" },
+    ]);
+  });
+
+  test("git's environment drops inherited GIT_* variables and turns transports and lazy fetch off", () => {
+    const env = jevGitEnv({
+      GIT_DIR: "/elsewhere/.git",
+      GIT_WORK_TREE: "/elsewhere",
+      GIT_SSH_COMMAND: "touch /pwned",
+      GIT_EXTERNAL_DIFF: "touch /pwned",
+      GIT_CONFIG_PARAMETERS: "'core.fsmonitor'='touch /pwned'",
+      PATH: "/usr/bin",
+      PASEO_JEV_API_KEY: "sk-test",
+    });
+    expect(env).toMatchObject({
+      PATH: "/usr/bin",
+      LC_ALL: "C",
+      GIT_NO_LAZY_FETCH: "1",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_TERMINAL_PROMPT: "0",
+    });
+    expect(env["GIT_ALLOW_PROTOCOL"]).toBeDefined();
+    for (const key of [
+      "GIT_DIR",
+      "GIT_WORK_TREE",
+      "GIT_SSH_COMMAND",
+      "GIT_EXTERNAL_DIFF",
+      "GIT_CONFIG_PARAMETERS",
+      "PASEO_JEV_API_KEY",
+    ]) {
+      expect(env[key], key).toBeUndefined();
+    }
+  });
 });
