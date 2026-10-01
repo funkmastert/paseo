@@ -1143,14 +1143,14 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
 
 /**
  * Days the file holds completely, rebuilt from its records. The oldest day it holds may be partial
- * (a rotation or the prune cut it), so the persisted rollup wins there when it has the day. Not-asked
- * counts and spend are never in the file; they carry over from the persisted rollup.
+ * (a rotation or the prune cut it): there the persisted rollup wins, unless the file holds at least
+ * as many of that day's involvements, as after a crash between two rollup flushes. Not-asked counts
+ * and spend are never in the file; they carry over from the persisted rollup.
  */
 function rebuildDays(persisted: Map<string, DayAgg>, records: Folded[]): Map<string, DayAgg> {
   const oldestDay = records[0]?.day ?? null;
   const rebuilt = new Map<string, DayAgg>();
   for (const record of records) {
-    if (record.day === oldestDay && persisted.has(record.day)) continue;
     let agg = rebuilt.get(record.day);
     if (!agg) {
       agg = carriedOver(persisted.get(record.day));
@@ -1158,7 +1158,18 @@ function rebuildDays(persisted: Map<string, DayAgg>, records: Folded[]): Map<str
     }
     contribute(agg, record, 1);
   }
+  const oldestPersisted = oldestDay ? persisted.get(oldestDay) : undefined;
+  const oldestRebuilt = oldestDay ? rebuilt.get(oldestDay) : undefined;
+  if (oldestDay && oldestPersisted && oldestRebuilt) {
+    if (involvementsOf(oldestRebuilt) < involvementsOf(oldestPersisted)) rebuilt.delete(oldestDay);
+  }
   return rebuilt;
+}
+
+function involvementsOf(day: DayAgg): number {
+  let total = 0;
+  for (const f of Object.values(day.features)) total += f?.asked ?? 0;
+  return total;
 }
 
 function carriedOver(previous: DayAgg | undefined): DayAgg {

@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import pino from "pino";
@@ -374,6 +382,26 @@ describe("storage", () => {
     expect(before.features.find((f) => f.feature === "remediationTriage")?.notAsked).toEqual({
       inactive: 1,
     });
+  });
+
+  test("a crash between rollup flushes loses nothing on the file's only day (review m5)", async () => {
+    const dir = tempDir();
+    const first = await harness({ dir, calls: new Map([["c1", entry("c1")]]) });
+    first.ledger.record(skipInput("c1"));
+    await flushed(first);
+    // A second record reached the file, and the daemon died before the next rollup flush.
+    const [line] = lines(dir);
+    appendFileSync(
+      path.join(dir, "savings.jsonl"),
+      `${JSON.stringify({ ...line, id: `${String(line?.["id"])}z`, callId: "c2" })}\n`,
+    );
+
+    const second = await harness({ dir, calls: new Map() });
+
+    const triage = second.ledger
+      .summary("today")
+      .features.find((f) => f.feature === "remediationTriage");
+    expect(triage?.asked).toBe(2);
   });
 
   test("a settle after a restart reprices from the persisted facts", async () => {
