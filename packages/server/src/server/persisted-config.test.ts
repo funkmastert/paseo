@@ -9,6 +9,7 @@ import {
   savePersistedConfig,
 } from "./persisted-config.js";
 import { PRIVATE_FILE_MODE } from "./private-files.js";
+import { resolveCoordinationConfig } from "./coordination/config.js";
 
 const MODE_MASK = 0o777;
 const PERMISSIVE_FILE_MODE = 0o644;
@@ -112,6 +113,34 @@ describe("PersistedConfigSchema agents.providerUsage", () => {
         agents: { providerUsage: { openaiApi: { apiKey: "sk-proj-x" } } },
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("PersistedConfigSchema agents.coordination", () => {
+  test("accepts the retention knobs and rejects unknown keys", () => {
+    const parsed = PersistedConfigSchema.parse({
+      agents: {
+        coordination: {
+          enabled: true,
+          retention: { closedItemDays: 14, streamMaxEntries: 2000, streamMaxAgeDays: 7 },
+        },
+      },
+    });
+    expect(parsed.agents?.coordination?.retention?.closedItemDays).toBe(14);
+    expect(
+      PersistedConfigSchema.safeParse({ agents: { coordination: { enabeld: true } } }).success,
+    ).toBe(false);
+  });
+
+  test("resolves to off with conservative retention when absent", () => {
+    expect(resolveCoordinationConfig(undefined)).toEqual({
+      enabled: false,
+      retention: {
+        closedItemMaxAgeMs: 30 * 24 * 60 * 60 * 1000,
+        streamMaxEntries: 5000,
+        streamMaxAgeMs: 30 * 24 * 60 * 60 * 1000,
+      },
+    });
   });
 });
 

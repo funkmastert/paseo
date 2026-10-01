@@ -4,12 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { QueueValidationError } from "./state-machine.js";
-import {
-  QueueConflictError,
-  WorkQueueStore,
-  deriveSuccessorId,
-  type CommitStep,
-} from "./store.js";
+import { QueueConflictError, WorkQueueStore, deriveSuccessorId, type CommitStep } from "./store.js";
 
 const AT = "2026-09-30T12:00:00.000Z";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -141,7 +136,11 @@ describe("claim and transition", () => {
   it("stores the delivery result", async () => {
     const store = await openStore();
     await store.create({ id: "item-1", title: "t", owner: "agent-a" }, AT);
-    await store.update("item-1", { delivery: { state: "failed", reason: "closed", at: at(1) } }, at(1));
+    await store.update(
+      "item-1",
+      { delivery: { state: "failed", reason: "closed", at: at(1) } },
+      at(1),
+    );
     const reopened = await openStore();
     expect((await reopened.get("item-1"))?.item.delivery).toEqual({
       state: "failed",
@@ -281,11 +280,7 @@ describe("retention", () => {
     await store.create({ id: "old-done", title: "t", owner: "agent-a" }, AT);
     await store.create({ id: "new-done", title: "t", owner: "agent-a" }, AT);
     await store.create({ id: "old-blocked", title: "t", owner: "agent-a" }, AT);
-    await store.transition(
-      "old-done",
-      { to: "done", closure: { reason: "no-follow-on" } },
-      at(1),
-    );
+    await store.transition("old-done", { to: "done", closure: { reason: "no-follow-on" } }, at(1));
     await store.transition(
       "old-blocked",
       { to: "blocked", closure: { reason: "blocked_on", target: "human" } },
@@ -310,7 +305,10 @@ describe("retention", () => {
     expect(archived.item.id).toBe("old-done");
     expect(archived.transitions.map((t: { to: string }) => t.to)).toEqual(["pending", "done"]);
 
-    const next = await reopened.create({ id: "after", title: "t", owner: "agent-a" }, at(46 * DAY_MS));
+    const next = await reopened.create(
+      { id: "after", title: "t", owner: "agent-a" },
+      at(46 * DAY_MS),
+    );
     expect(next.transitions[0].seq).toBeGreaterThan(6);
   });
 });

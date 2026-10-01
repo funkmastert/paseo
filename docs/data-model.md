@@ -60,6 +60,10 @@ $PASEO_HOME/
 │   ├── workspace-labels.json            # Shared host-local label catalog
 │   ├── workspace-labels.transaction.json # Recoverable catalog/assignment compound commit
 │   └── icons/                           # Host-local custom project icon images
+├── coordination/                        # Work queue and fleet stream (docs/work-queue.md)
+│   ├── queue/items/{id}.json            # One file per work item
+│   ├── queue/journal.jsonl              # Transition journal and commit log
+│   └── stream/entries.jsonl             # Fleet event log, bounded
 ├── usage-history/
 │   ├── accounts.json                    # Account usage-window readings, bounded (docs/usage-history.md)
 │   └── agents/{agentId}.json            # One agent's cost-weighted spend over time

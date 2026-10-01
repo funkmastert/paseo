@@ -32,7 +32,12 @@ async function openStream(retention: StreamRetention = RETENTION) {
 async function appendN(stream: StreamStore, count: number, offsetMs = 0) {
   for (let i = 0; i < count; i += 1) {
     await stream.append(
-      { id: `e-${i}`, type: i % 2 ? "queue.transition" : "agent.note", source: "queue", summary: `${i}` },
+      {
+        id: `e-${i}`,
+        type: i % 2 ? "queue.transition" : "agent.note",
+        source: "queue",
+        summary: `${i}`,
+      },
       at(offsetMs + i),
     );
   }
@@ -61,7 +66,11 @@ describe("stream", () => {
     const reopened = await openStream();
     const page = await reopened.list({});
     expect(page.entries.map((entry) => entry.id)).toEqual(["e-2", "e-1"]);
-    expect(page.entries[1]).toMatchObject({ urgency: "high", tags: ["pending"], subject: "item-1" });
+    expect(page.entries[1]).toMatchObject({
+      urgency: "high",
+      tags: ["pending"],
+      subject: "item-1",
+    });
   });
 
   it("pages newest first with a cursor and filters by type", async () => {
@@ -109,7 +118,10 @@ describe("stream", () => {
 
     await stream.compact(at(31 * DAY_MS));
     expect((await stream.list({})).entries).toEqual([]);
-    const next = await stream.append({ id: "late", type: "t", source: "s", summary: "x" }, at(32 * DAY_MS));
+    const next = await stream.append(
+      { id: "late", type: "t", source: "s", summary: "x" },
+      at(32 * DAY_MS),
+    );
     expect(next.seq).toBeGreaterThan(10);
   });
 

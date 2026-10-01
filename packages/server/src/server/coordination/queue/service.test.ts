@@ -99,9 +99,9 @@ describe("work queue service", () => {
     queue.onItemChanged(() => {
       throw new Error("listener bug");
     });
-    await expect(queue.create({ id: "item-1", title: "Fix", owner: "agent-a" })).resolves.toMatchObject(
-      { changed: true },
-    );
+    await expect(
+      queue.create({ id: "item-1", title: "Fix", owner: "agent-a" }),
+    ).resolves.toMatchObject({ changed: true });
   });
 
   it("applies the configured retention window", async () => {

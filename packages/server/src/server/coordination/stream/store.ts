@@ -134,7 +134,10 @@ export class StreamStore {
       { kind: "header", nextSeq: this.nextSeq },
       ...kept.map((entry) => ({ kind: "entry" as const, entry })),
     ];
-    await writeFileAtomic(this.filePath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    await writeFileAtomic(
+      this.filePath,
+      `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`,
+    );
     this.entries = kept;
     this.fileLines = lines.length;
   }

@@ -19,7 +19,11 @@ export const WorkItemStateSchema = z.enum(WORK_ITEM_STATES);
 export type WorkItemState = z.infer<typeof WorkItemStateSchema>;
 
 // An item in one of these states still needs someone. Every other state is terminal.
-export const OPEN_WORK_ITEM_STATES: readonly WorkItemState[] = ["pending", "in-progress", "blocked"];
+export const OPEN_WORK_ITEM_STATES: readonly WorkItemState[] = [
+  "pending",
+  "in-progress",
+  "blocked",
+];
 
 export const WORK_ITEM_CLOSURE_REASONS = [
   "handed_off_to",

@@ -200,7 +200,11 @@ export class WorkQueueStore {
     });
   }
 
-  claim(id: string, input: { actor: string; note?: string }, at: string): Promise<WorkItemMutation> {
+  claim(
+    id: string,
+    input: { actor: string; note?: string },
+    at: string,
+  ): Promise<WorkItemMutation> {
     return this.serialize(async () => {
       const current = this.require(id);
       if (current.state === "in-progress") {
@@ -285,19 +289,12 @@ export class WorkQueueStore {
         }
       }
       if (!input.to.trim()) {
-        throw new QueueValidationError(
-          `Handoff needs a new owner: an agent id or "human".`,
-        );
+        throw new QueueValidationError(`Handoff needs a new owner: an agent id or "human".`);
       }
       const closure: WorkItemClosure = { reason: "handed_off_to", target: input.to };
-      validateTransition(
-        { from: current.state, to: "handed-off", closure },
-        { viaHandoff: true },
-      );
+      validateTransition({ from: current.state, to: "handed-off", closure }, { viaHandoff: true });
       if (this.items.has(successorId)) {
-        throw new QueueConflictError(
-          `Successor id "${successorId}" for "${id}" is already taken.`,
-        );
+        throw new QueueConflictError(`Successor id "${successorId}" for "${id}" is already taken.`);
       }
       const successorInput: CreateWorkItemInput = {
         id: successorId,
