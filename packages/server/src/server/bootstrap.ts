@@ -218,6 +218,7 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { migrateWorkspaceTitleSources } from "./workspace-title-source-migration.js";
 import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
 import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
 import { AutoPinExpiry } from "./workspace-auto-pin.js";
@@ -2193,6 +2194,16 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
     logger,
   });
+  // One-time: titles agents supplied at creation were stamped "manual" before "agent" existed,
+  // which kept the tracker off most workspaces. Never fatal; the marker makes it run once.
+  await migrateWorkspaceTitleSources({
+    workspaceRegistry,
+    listAgents: () => agentStorage.list(),
+    markerPath: path.join(config.paseoHome, "projects", "workspace-title-source-migration.json"),
+    logger,
+  }).catch((error: unknown) => {
+    logger.warn({ err: error }, "Workspace title provenance migration failed");
+  });
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
     workspaceRegistry,
@@ -2558,8 +2569,8 @@ export async function createPaseoDaemon(
         cwd,
         title,
         projectId,
-        // The caller named it deliberately; the tracker leaves it alone.
-        title ? { titleSource: "manual" } : undefined,
+        // Only agents reach this (create_workspace), so the title tracker may refresh it.
+        title ? { titleSource: "agent" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;

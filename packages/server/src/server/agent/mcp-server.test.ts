@@ -2758,6 +2758,7 @@ describe("create_agent MCP tool", () => {
         cwd: REPO_CWD,
         projectId: project.projectId,
         title: "Project workspace",
+        titleSource: "agent",
       }),
     ]);
   });
@@ -4142,8 +4143,8 @@ describe("rename_workspace MCP tool", () => {
       {
         ...workspace,
         title: "Payments flow",
-        // A deliberate rename: the workspace-title tracker leaves it alone from now on.
-        titleSource: "manual",
+        // An agent's rename: the title tracker may refresh it later; only a person's edit is frozen.
+        titleSource: "agent",
         updatedAt: expect.any(String),
       },
     ]);
@@ -4216,8 +4217,8 @@ describe("rename_workspace MCP tool", () => {
       {
         ...otherWorkspace,
         title: "Payments flow",
-        // A deliberate rename: the workspace-title tracker leaves it alone from now on.
-        titleSource: "manual",
+        // An agent's rename: the title tracker may refresh it later; only a person's edit is frozen.
+        titleSource: "agent",
         updatedAt: expect.any(String),
       },
     ]);
