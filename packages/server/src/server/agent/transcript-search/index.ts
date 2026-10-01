@@ -12,11 +12,12 @@ import {
   searchTranscripts,
   type AgentCoverage,
   type AgentSearchResult,
+  type SearchBackendLabel,
   type TranscriptExcerpt,
   type TranscriptSearchTarget,
 } from "./search-core.js";
 
-export type { AgentCoverage, AgentSearchResult, TranscriptExcerpt };
+export type { AgentCoverage, AgentSearchResult, SearchBackendLabel, TranscriptExcerpt };
 
 /** A tree larger than this is searched up to the cap; the rest are not attempted. */
 export const MAX_SEARCH_TARGETS = 50;
@@ -99,7 +100,7 @@ export interface SearchAgentTranscriptInput {
 }
 
 export interface SearchAgentTranscriptOutcome {
-  backend: "ripgrep" | "node";
+  backend: SearchBackendLabel;
   agents: AgentSearchResult[];
   /** True when the tree had more agents than `MAX_SEARCH_TARGETS`; the rest were never attempted. */
   targetSetTruncated: boolean;

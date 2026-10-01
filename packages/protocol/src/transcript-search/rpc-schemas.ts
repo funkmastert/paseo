@@ -10,7 +10,8 @@ import { z } from "zod";
 // Coverage is plain strings, not an enum, so a daemon can report a new reason without an older
 // client failing to parse it: "searched" (completed), "not_found" (no transcript file for this
 // agent), "unsupported" (this agent's provider has no known transcript location), "truncated"
-// (cut short by a per-agent or total-output cap).
+// (cut short by a per-agent or total-output cap), "timed_out" (a regex search on the Node fallback
+// backend ran past its deadline and was killed).
 
 export const AgentTranscriptSearchExcerptSchema = z.object({
   lineNumber: z.number().int().nonnegative(),
@@ -46,7 +47,7 @@ export const AgentTranscriptSearchResponseSchema = z.object({
   payload: z.object({
     requestId: z.string(),
     agentId: z.string(),
-    /** "ripgrep" or "node"; null when the request failed before a backend was chosen. */
+    /** "ripgrep", "ripgrep (claude)", or "node"; null when the request failed before a backend was chosen. */
     backend: z.string().nullable(),
     agents: z.array(AgentTranscriptSearchAgentResultSchema),
     /** True when the searched tree had more agents than the daemon will search in one request. */

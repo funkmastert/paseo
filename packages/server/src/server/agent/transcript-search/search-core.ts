@@ -3,14 +3,21 @@
  * whatever agent/tree the caller wants) and a query, locates each target's transcript file, greps
  * it, and reports coverage honestly. A partial search that claims "not found" is worse than none
  * (see packages/server/src/server/agent-history-search.ts), so every target gets one of exactly
- * four coverage answers: `searched`, `not_found`, `unsupported`, `truncated`.
+ * five coverage answers: `searched`, `not_found`, `unsupported`, `truncated`, `timed_out`.
  */
 
-import { detectBackend, searchWithNode, searchWithRipgrep } from "./backend.js";
+import {
+  detectBackend,
+  searchWithNode,
+  searchWithNodeRegexWorker,
+  searchWithRipgrep,
+  type BackendChoice,
+  type FileSearchResult,
+} from "./backend.js";
 import { extractExcerptText } from "./excerpt.js";
 import { locateAgentTranscript, type TranscriptLocateOverrides } from "./locate.js";
 
-export type AgentCoverage = "searched" | "not_found" | "unsupported" | "truncated";
+export type AgentCoverage = "searched" | "not_found" | "unsupported" | "truncated" | "timed_out";
 
 export interface TranscriptExcerpt {
   lineNumber: number;
@@ -44,8 +51,10 @@ export interface AgentSearchResult {
   excerpts: TranscriptExcerpt[];
 }
 
+export type SearchBackendLabel = BackendChoice["label"];
+
 export interface TranscriptSearchResult {
-  backend: "ripgrep" | "node";
+  backend: SearchBackendLabel;
   agents: AgentSearchResult[];
 }
 
@@ -78,13 +87,19 @@ export async function searchTranscripts(
       regex: query.regex,
       caseInsensitive: query.caseInsensitive,
     };
-    const { matches, truncated: fileTruncated } = await searchFile(
-      backend,
-      located.path,
-      compiled,
-      query.maxMatchesPerAgent,
-    );
+    const outcome = await searchFile(backend, located.path, compiled, query.maxMatchesPerAgent);
+    if (outcome.kind === "timed_out") {
+      agents.push({ ...base, coverage: "timed_out", matchCount: 0, excerpts: [] });
+      continue;
+    }
+    if (outcome.kind === "error") {
+      // The file was found a moment ago but became unreadable (race, permissions) or the search
+      // itself failed unexpectedly; this agent's transcript cannot be answered for right now.
+      agents.push({ ...base, coverage: "not_found", matchCount: 0, excerpts: [] });
+      continue;
+    }
 
+    const { matches, truncated: fileTruncated } = outcome;
     const excerpts: TranscriptExcerpt[] = [];
     let byteCapped = false;
     for (const match of matches) {
@@ -109,25 +124,46 @@ export async function searchTranscripts(
     });
   }
 
-  return { backend, agents };
+  return { backend: backend.label, agents };
 }
 
+type FileSearchOutcome =
+  | ({ kind: "ok" } & FileSearchResult)
+  | { kind: "timed_out" }
+  | { kind: "error" };
+
 async function searchFile(
-  backend: "ripgrep" | "node",
+  backend: BackendChoice,
   filePath: string,
   query: { pattern: string; regex: boolean; caseInsensitive: boolean },
   maxMatches: number,
-) {
-  if (backend === "ripgrep") {
+): Promise<FileSearchOutcome> {
+  if (backend.label !== "node") {
     try {
-      return await searchWithRipgrep(filePath, query, maxMatches);
+      const result = await searchWithRipgrep(filePath, query, maxMatches, backend.invocation);
+      return { kind: "ok", ...result };
     } catch {
       // The binary was there at the detection probe but failed on this file (permissions, a
       // transient spawn error). Fall back rather than losing the agent's coverage entirely.
-      return await searchWithNode(filePath, query, maxMatches);
     }
   }
-  return await searchWithNode(filePath, query, maxMatches);
+  return await searchOnNode(filePath, query, maxMatches);
+}
+
+/** Literal search stays on the main thread (linear). Regex runs in a worker with a deadline. */
+async function searchOnNode(
+  filePath: string,
+  query: { pattern: string; regex: boolean; caseInsensitive: boolean },
+  maxMatches: number,
+): Promise<FileSearchOutcome> {
+  if (!query.regex) {
+    const result = await searchWithNode(filePath, query, maxMatches);
+    return { kind: "ok", ...result };
+  }
+  const outcome = await searchWithNodeRegexWorker(filePath, query, maxMatches);
+  if (outcome.status === "timed_out") return { kind: "timed_out" };
+  if (outcome.status === "error") return { kind: "error" };
+  return { kind: "ok", matches: outcome.matches, truncated: outcome.truncated };
 }
 
 function validateQuery(query: TranscriptSearchQuery): void {

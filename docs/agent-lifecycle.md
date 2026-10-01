@@ -91,17 +91,33 @@ labels, the same relationship [Relationships](#relationships) describes.
 The coverage report is the point, not an afterthought: `packages/server/src/server/agent-history-search.ts`
 documents why a daemon that guesses at a partial search and answers "not found" is worse than one
 that admits it did not search at all. This tool never guesses. Every agent in the result carries
-one of exactly four coverage values — `searched`, `not_found` (no transcript file for that agent),
+one of exactly five coverage values — `searched`, `not_found` (no transcript file for that agent),
 `unsupported` (the agent's provider has no known transcript location), `truncated` (cut short by a
-per-agent match cap or the request's total output cap) — plus which `backend` ran. Compact by
+per-agent match cap or the request's total output cap), `timed_out` (a regex search on the Node
+fallback backend ran past its deadline and was killed) — plus which `backend` ran. Compact by
 default (few matches, short excerpts, a small total-output cap); `full: true` raises every cap.
 
-Backend selection tries ripgrep first, falling back to a streaming Node line-by-line scan when no
-`rg` binary resolves on PATH — including on Windows, where `rg.exe` is what resolves. Nothing here
-ships a vendored ripgrep binary, so a daemon with no system ripgrep always still searches, just
-slower. Excerpt text is pulled out of each matched JSONL row's known shape (Claude SDK message
-envelopes) with a generic string-harvesting fallback for anything else (Codex rollout rows
-included) — the raw JSON of a row is never returned as a match.
+Backend selection tries three tiers, in order: a real `rg` on PATH; failing that, the Claude Code
+CLI binary the daemon already resolves for the claude provider (`findExecutable`, honoring
+`CLAUDE_CODE_EXECPATH`), spawned with `argv0: "rg"` — Claude Code's own executable behaves as a
+full ripgrep when invoked that way, which is what the common `rg` shell function wrapping it
+relies on, and is the only ripgrep most Bozeo machines actually have; failing that, a streaming
+Node line-by-line scan. This covers Windows too (`rg.exe`, the same Claude binary trick). Nothing
+here ships a vendored ripgrep binary, so a daemon with neither real ripgrep nor a Claude binary
+still always searches, just slower. The reported `backend` is `"ripgrep"`, `"ripgrep (claude)"`, or
+`"node"`.
+
+A regex pattern only ever runs on the main thread when one of the two ripgrep forms is doing the
+matching (ripgrep's own engine is linear-time; no catastrophic backtracking). On the Node fallback,
+a regex search runs in a `worker_threads` worker with a deadline
+(`DEFAULT_REGEX_WORKER_TIMEOUT_MS`, 10 s) instead, so a pathological pattern gets
+`Worker#terminate()`'d instead of wedging the daemon's event loop — a synchronous `RegExp#test()` on
+the main thread cannot be interrupted once it starts. Literal (non-regex) search stays on the main
+thread either way; it is linear by construction.
+
+Excerpt text is pulled out of each matched JSONL row's known shape (Claude SDK message envelopes)
+with a generic string-harvesting fallback for anything else (Codex rollout rows included) — the raw
+JSON of a row is never returned as a match.
 
 ## Provider-managed child agents
 

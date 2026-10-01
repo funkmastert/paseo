@@ -5,14 +5,20 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { claudeProjectDirSync } from "../providers/claude/project-dir.js";
 import { searchTranscripts, type TranscriptSearchTarget } from "./search-core.js";
 
-const backendMocks = vi.hoisted(() => ({ detectBackend: vi.fn() }));
+const backendMocks = vi.hoisted(() => ({
+  detectBackend: vi.fn(),
+  searchWithNodeRegexWorker: vi.fn(),
+}));
 
-// Only the backend *choice* is mocked, so tests are deterministic regardless of whether the
-// machine running them happens to have a real `rg` on PATH. The actual line search (ripgrep or
-// node) and text extraction run for real against fixture files.
+// The backend *choice* and the regex-worker outcome are mocked, so tests are deterministic
+// regardless of whether the machine running them has a real `rg` on PATH, and without waiting out
+// a real worker deadline here (the worker itself, including a genuine timeout, is covered in
+// backend.test.ts). The actual line search (ripgrep or node literal) and text extraction run for
+// real against fixture files.
 vi.mock("./backend.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./backend.js")>()),
   detectBackend: backendMocks.detectBackend,
+  searchWithNodeRegexWorker: backendMocks.searchWithNodeRegexWorker,
 }));
 
 function baseQuery(overrides: Partial<Parameters<typeof searchTranscripts>[1]> = {}) {
@@ -39,6 +45,7 @@ describe("searchTranscripts", () => {
     root = await mkdtemp(join(tmpdir(), "paseo-transcript-search-core-"));
     claudeConfigDir = join(root, "claude-home");
     backendMocks.detectBackend.mockReset();
+    backendMocks.searchWithNodeRegexWorker.mockReset();
   });
 
   afterEach(async () => {
@@ -52,7 +59,7 @@ describe("searchTranscripts", () => {
   }
 
   test("searches a found transcript with the node backend and extracts readable excerpts", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     await writeClaudeTranscript("/work/proj", "sess-1", [
       row("user", "please find the auth bug"),
       row("assistant", "looking at auth.ts now"),
@@ -83,7 +90,10 @@ describe("searchTranscripts", () => {
   test("reports the ripgrep label honestly even when the run falls back internally", async () => {
     // No real rg binary is assumed present in this environment; search-core must fall back to a
     // working search without losing coverage, while still reporting what backend it chose.
-    backendMocks.detectBackend.mockResolvedValue("ripgrep");
+    backendMocks.detectBackend.mockResolvedValue({
+      label: "ripgrep",
+      invocation: { command: "rg" },
+    });
     await writeClaudeTranscript("/work/proj2", "sess-2", [row("user", "auth bug here")]);
     const targets: TranscriptSearchTarget[] = [
       { agentId: "a2", title: null, provider: "claude", cwd: "/work/proj2", sessionId: "sess-2" },
@@ -97,7 +107,7 @@ describe("searchTranscripts", () => {
   });
 
   test("coverage is not_found when the agent has a session id but no transcript file", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     const targets: TranscriptSearchTarget[] = [
       { agentId: "a3", title: null, provider: "claude", cwd: "/work/none", sessionId: "missing" },
     ];
@@ -106,7 +116,7 @@ describe("searchTranscripts", () => {
   });
 
   test("coverage is unsupported for a provider with no known transcript location", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     const targets: TranscriptSearchTarget[] = [
       { agentId: "a4", title: null, provider: "opencode", cwd: "/work/x", sessionId: "sess" },
     ];
@@ -119,7 +129,7 @@ describe("searchTranscripts", () => {
   });
 
   test("coverage is truncated when more matches exist than the per-agent cap", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     await writeClaudeTranscript(
       "/work/many",
       "sess-many",
@@ -138,7 +148,7 @@ describe("searchTranscripts", () => {
   });
 
   test("coverage is truncated by the total byte budget, and later agents are not attempted", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     await writeClaudeTranscript("/work/big1", "sess-big1", [row("user", "auth bug one")]);
     await writeClaudeTranscript("/work/big2", "sess-big2", [row("user", "auth bug two")]);
     const targets: TranscriptSearchTarget[] = [
@@ -160,7 +170,7 @@ describe("searchTranscripts", () => {
   });
 
   test("an invalid regex pattern throws a clear error instead of crashing per-file", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     const targets: TranscriptSearchTarget[] = [
       { agentId: "a6", title: null, provider: "claude", cwd: "/work/x", sessionId: "sess" },
     ];
@@ -170,7 +180,7 @@ describe("searchTranscripts", () => {
   });
 
   test("a line with no extractable text still counts as a match, marked unreadable", async () => {
-    backendMocks.detectBackend.mockResolvedValue("node");
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
     const projectDir = claudeProjectDirSync("/work/raw", { configDir: claudeConfigDir });
     await mkdir(projectDir, { recursive: true });
     // A row whose only string value matching the pattern lives nowhere extractText reaches:
@@ -188,5 +198,46 @@ describe("searchTranscripts", () => {
     });
     expect(result.agents[0]?.coverage).toBe("searched");
     expect(result.agents[0]?.excerpts[0]?.text).toBe("(no readable text on this line)");
+  });
+
+  test("a regex search on the node backend that times out reports coverage timed_out", async () => {
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
+    backendMocks.searchWithNodeRegexWorker.mockResolvedValue({ status: "timed_out" });
+    await writeClaudeTranscript("/work/slow", "sess-slow", [row("user", "auth bug")]);
+    const targets: TranscriptSearchTarget[] = [
+      { agentId: "a8", title: null, provider: "claude", cwd: "/work/slow", sessionId: "sess-slow" },
+    ];
+    const result = await searchTranscripts(targets, baseQuery({ pattern: "a+", regex: true }), {
+      claudeConfigDir,
+    });
+    expect(result.agents[0]).toMatchObject({ coverage: "timed_out", matchCount: 0, excerpts: [] });
+  });
+
+  test("a regex worker error is reported as not_found rather than crashing the whole search", async () => {
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
+    backendMocks.searchWithNodeRegexWorker.mockResolvedValue({
+      status: "error",
+      message: "boom",
+    });
+    await writeClaudeTranscript("/work/err", "sess-err", [row("user", "auth bug")]);
+    const targets: TranscriptSearchTarget[] = [
+      { agentId: "a9", title: null, provider: "claude", cwd: "/work/err", sessionId: "sess-err" },
+    ];
+    const result = await searchTranscripts(targets, baseQuery({ pattern: "a+", regex: true }), {
+      claudeConfigDir,
+    });
+    expect(result.agents[0]).toMatchObject({ coverage: "not_found", matchCount: 0, excerpts: [] });
+  });
+
+  test("literal search never consults the regex worker", async () => {
+    backendMocks.detectBackend.mockResolvedValue({ label: "node" });
+    await writeClaudeTranscript("/work/lit", "sess-lit", [row("user", "auth bug")]);
+    const targets: TranscriptSearchTarget[] = [
+      { agentId: "a10", title: null, provider: "claude", cwd: "/work/lit", sessionId: "sess-lit" },
+    ];
+    await searchTranscripts(targets, baseQuery({ pattern: "auth bug", regex: false }), {
+      claudeConfigDir,
+    });
+    expect(backendMocks.searchWithNodeRegexWorker).not.toHaveBeenCalled();
   });
 });

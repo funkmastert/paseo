@@ -777,11 +777,13 @@ const searchAgentTranscriptTool = defineCoordinationTool({
     "Grep an agent's own provider transcript (Claude JSONL, Codex rollout) for a pattern, without " +
     "loading its whole timeline. Set tree=true to also search every descendant (its children, " +
     "their children, and so on). Literal substring match by default; set regex=true for a regular " +
-    "expression, ignoreCase=true to fold case. Reports which backend ran (ripgrep or node) and, " +
-    "per agent, whether it was actually searched, had no transcript file, uses a provider this " +
-    "cannot read, or was cut short by a cap — a 'not found' only ever means what it says, never a " +
-    "guess from a partial search. Compact by default (fewer matches, shorter excerpts, total " +
-    "output capped); full=true raises every cap.",
+    "expression, ignoreCase=true to fold case. Reports which backend ran (ripgrep, ripgrep running " +
+    "as the Claude Code binary, or a Node fallback) and, per agent, whether it was actually " +
+    "searched, had no transcript file, uses a provider this cannot read, was cut short by a cap, " +
+    "or timed out (a regex on the Node fallback is killed after a deadline rather than risking the " +
+    "daemon) — a 'not found' only ever means what it says, never a guess from a partial search. " +
+    "Compact by default (fewer matches, shorter excerpts, total output capped); full=true raises " +
+    "every cap.",
   inputSchema: {
     agentId: z
       .string()
