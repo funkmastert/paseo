@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createTestLogger } from "../test-utils/test-logger.js";
 import {
@@ -125,8 +125,8 @@ describe("DiskGrowthSampler — measuring", () => {
     });
 
     expect(peak).toBe(1);
-    expect(order.map((root) => root.split("/").pop())).toEqual(["one", "two", "three"]);
-    expect(report.sample.roots.map((root) => root.path.split("/").pop())).toEqual(["one", "three"]);
+    expect(order.map((root) => basename(root))).toEqual(["one", "two", "three"]);
+    expect(report.sample.roots.map((root) => basename(root.path))).toEqual(["one", "three"]);
     expect(report.sample.unmeasured).toEqual([{ path: join(home, "two"), reason: "timeout" }]);
   });
 
@@ -381,7 +381,7 @@ describe("formatGrowthEvidence", () => {
     const text = formatGrowthEvidence(report, home);
 
     expect(text).toContain("since the sample at 2026-09-24T12:00:00.000Z");
-    expect(text).toMatch(/~\/root-a\/grows: \+(29|30|31)(\.\d)? MB/);
+    expect(text).toMatch(/~[/\\]root-a[/\\]grows: \+(29|30|31)(\.\d)? MB/);
   });
 
   test("says so when there is no earlier sample to compare against", async () => {

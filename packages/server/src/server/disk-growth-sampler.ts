@@ -1,5 +1,5 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { z } from "zod";
 import { execCommand } from "../utils/spawn.js";
 import { writeJsonFileAtomic } from "./atomic-file.js";
@@ -381,7 +381,7 @@ function compareSamples(
 }
 
 function abbreviateHome(path: string, homeDir: string): string {
-  return path === homeDir || path.startsWith(`${homeDir}/`)
+  return path === homeDir || path.startsWith(`${homeDir}${sep}`)
     ? `~${path.slice(homeDir.length)}`
     : path;
 }
