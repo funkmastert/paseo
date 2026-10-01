@@ -9,6 +9,7 @@ import { buildRestartRecoveryStripModel, type RestartRecoveryStripModel } from "
 
 export interface UseRestartRecoveryResult {
   model: RestartRecoveryStripModel | null;
+  serverId: string;
   resumeAll: () => void;
   dismissAll: () => void;
   busy: boolean;
@@ -54,6 +55,7 @@ export function useRestartRecovery(): UseRestartRecoveryResult {
 
   return {
     model: supported ? model : null,
+    serverId,
     resumeAll: () => action.mutate("apply"),
     dismissAll: () => action.mutate("dismiss"),
     busy: action.isPending,

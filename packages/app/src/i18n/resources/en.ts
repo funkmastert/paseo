@@ -1970,6 +1970,19 @@ export const en = {
     error: "Recovery failed: {{error}}",
     expand: "Expand restart recovery",
     collapse: "Collapse restart recovery",
+    reason: {
+      bozeo_quit: "Bozeo quit and stopped the daemon",
+      update: "The daemon restarted for an update",
+      crashed: "The daemon crashed",
+      power_loss: "The Mac restarted or lost power",
+      cli_stop: "Stopped from the command line",
+    },
+    age: "from {{when}}",
+    ranFor: "ran {{duration}}",
+    keepRunningHint:
+      "Quitting Bozeo stops the daemon — turn on Keep daemon running after quit to avoid this.",
+    resumeModeHint:
+      "Bozeo can resume agents cut off like this on its own: set agents.restartRecovery.mode to resume in config.json.",
   },
   deviceStatus: {
     summary: "{{used}} of {{total}} devices",

@@ -1989,6 +1989,19 @@ export const ptBR: TranslationResources = {
     },
     notRestorable: "Não é possível retomar",
     error: "A recuperação falhou: {{error}}",
+    reason: {
+      bozeo_quit: "O Bozeo saiu e parou o daemon",
+      update: "O daemon reiniciou para uma atualização",
+      crashed: "O daemon travou",
+      power_loss: "O Mac reiniciou ou ficou sem energia",
+      cli_stop: "Parado pela linha de comando",
+    },
+    age: "desde {{when}}",
+    ranFor: "executou por {{duration}}",
+    keepRunningHint:
+      'Sair do Bozeo para o daemon — ative "Manter o daemon em execução após saída" para evitar isso.',
+    resumeModeHint:
+      "O Bozeo pode retomar por conta própria agentes interrompidos assim: defina agents.restartRecovery.mode como resume no config.json.",
     expand: "Expandir recuperação após reinício",
     collapse: "Recolher recuperação após reinício",
   },
