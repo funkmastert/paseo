@@ -2,7 +2,7 @@ import { JSDOM } from "jsdom";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SidebarWorkspaceInlineTitleField } from "./sidebar-workspace-inline-title-field";
+import { InlineWorkspaceTitleField } from "./inline-workspace-title-field";
 import type { RenamableWorkspace } from "@/hooks/use-workspace-rename";
 
 const { theme, adaptiveInputState, rename, toastError } = vi.hoisted(() => ({
@@ -128,9 +128,10 @@ const WORKSPACE: RenamableWorkspace = {
 function render(onDone: () => void, workspace: RenamableWorkspace = WORKSPACE): void {
   act(() => {
     root?.render(
-      <SidebarWorkspaceInlineTitleField
+      <InlineWorkspaceTitleField
         workspace={workspace}
         onDone={onDone}
+        variant="row"
         testID="sidebar-inline-title"
       />,
     );
@@ -149,7 +150,7 @@ async function flush(): Promise<void> {
   });
 }
 
-describe("SidebarWorkspaceInlineTitleField", () => {
+describe("InlineWorkspaceTitleField", () => {
   it("mounts prefilled with the current title", async () => {
     const onDone = vi.fn();
     render(onDone);

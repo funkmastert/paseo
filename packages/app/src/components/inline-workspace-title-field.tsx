@@ -6,26 +6,32 @@ import type { EditingTextInputHandle } from "@/components/ui/text-input";
 import { useToast } from "@/contexts/toast-context";
 import { useWorkspaceRename, type RenamableWorkspace } from "@/hooks/use-workspace-rename";
 
-export interface SidebarWorkspaceInlineTitleFieldProps {
+export interface InlineWorkspaceTitleFieldProps {
   workspace: RenamableWorkspace;
-  /** Called on Enter, blur, or Escape — the row goes back to showing its name `Text`. */
+  /** Called once on Enter, blur, or Escape — the caller goes back to showing the name. */
   onDone: () => void;
+  /** `title` matches the workspace header's `ScreenTitle`; `row` matches a sidebar row's name. */
+  variant: "title" | "row";
   testID?: string;
 }
 
 /**
- * The active sidebar row's click-to-edit field (Part A, second click on the selected row). Saves
- * through the same `setWorkspaceTitle` path as the rename modal and the header's inline editor.
+ * Click-to-edit workspace name, shared by the workspace header and the active sidebar row. Saves
+ * through the same `setWorkspaceTitle` path as the rename modal; an empty value hands naming back
+ * to Paseo. Mounted only while editing, so it focuses and selects on mount.
  */
-export function SidebarWorkspaceInlineTitleField({
+export function InlineWorkspaceTitleField({
   workspace,
   onDone,
+  variant,
   testID,
-}: SidebarWorkspaceInlineTitleFieldProps) {
+}: InlineWorkspaceTitleFieldProps) {
   const { t } = useTranslation();
   const toast = useToast();
   const inputRef = useRef<EditingTextInputHandle>(null);
   const draftRef = useRef(workspace.title ?? "");
+  // Enter blurs the field and unmounting it can blur it too; only the first ending counts, so
+  // Enter saves once and Escape never turns into a save.
   const doneRef = useRef(false);
   const { rename } = useWorkspaceRename(workspace);
 
@@ -38,8 +44,6 @@ export function SidebarWorkspaceInlineTitleField({
       if (raw.length > 0) node.replaceText(raw, { start: 0, end: raw.length });
     }, 0);
     return () => clearTimeout(timeout);
-    // Intentionally runs once, on mount: `titleSlot` mounts this field only while editing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleChangeText = useCallback((value: string) => {
@@ -81,14 +85,27 @@ export function SidebarWorkspaceInlineTitleField({
       placeholder={t("sidebar.workspace.rename.autoPlaceholder")}
       autoCapitalize="none"
       autoCorrect={false}
-      style={styles.input}
+      style={variant === "title" ? styles.title : styles.row}
       testID={testID}
     />
   );
 }
 
 const styles = StyleSheet.create((theme) => ({
-  input: {
+  // Same typography as ScreenTitle, so the name doesn't jump when it turns into a field.
+  title: {
+    flex: 1,
+    minWidth: 0,
+    padding: 0,
+    borderWidth: 0,
+    fontSize: theme.fontSize.base,
+    fontWeight: {
+      xs: "400",
+      md: "300",
+    },
+    color: theme.colors.foreground,
+  },
+  row: {
     color: theme.colors.foreground,
     fontSize: theme.fontSize.base,
     fontWeight: "400",

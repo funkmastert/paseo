@@ -1,10 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { AdaptiveTextInput } from "@/components/adaptive-text-input";
+import { InlineWorkspaceTitleField } from "@/components/inline-workspace-title-field";
 import { ScreenTitle } from "@/components/headers/screen-title";
-import type { EditingTextInputHandle } from "@/components/ui/text-input";
-import { useWorkspaceRename, type RenamableWorkspace } from "@/hooks/use-workspace-rename";
-import { useToast } from "@/contexts/toast-context";
+import type { RenamableWorkspace } from "@/hooks/use-workspace-rename";
 
 export interface EditableWorkspaceHeaderTitleProps {
   /** The resolved label to show while not editing: `workspace.title ?? <fallback>`. */
@@ -15,9 +13,9 @@ export interface EditableWorkspaceHeaderTitleProps {
 }
 
 /**
- * Tap-to-edit workspace name in the workspace view's header (docs: "session names", Part A). Saves
- * through the same `setWorkspaceTitle` path the rename modal and the sidebar row use — clearing
- * the field hands naming back to Paseo, exactly like the modal's `allowEmpty`.
+ * Tap-to-edit workspace name in the workspace view's header. The field is the same one the
+ * sidebar row uses, so both save through the rename modal's path and clearing hands naming back
+ * to Paseo.
  */
 export function EditableWorkspaceHeaderTitle({
   title,
@@ -25,69 +23,19 @@ export function EditableWorkspaceHeaderTitle({
   testID,
 }: EditableWorkspaceHeaderTitleProps) {
   const { t } = useTranslation();
-  const toast = useToast();
   const [isEditing, setIsEditing] = useState(false);
-  const inputRef = useRef<EditingTextInputHandle>(null);
-  const draftRef = useRef(title);
-  const { rename } = useWorkspaceRename(
-    workspace ?? { serverId: "", workspaceId: "", name: title, title: null },
-  );
 
   const startEditing = useCallback(() => {
-    if (!workspace) return;
-    draftRef.current = workspace.title ?? "";
-    setIsEditing(true);
+    if (workspace) setIsEditing(true);
   }, [workspace]);
+  const stopEditing = useCallback(() => setIsEditing(false), []);
 
-  useEffect(() => {
-    if (!isEditing) return;
-    const raw = draftRef.current;
-    const timeout = setTimeout(() => {
-      const node = inputRef.current;
-      if (!node) return;
-      node.focus();
-      if (raw.length > 0) node.replaceText(raw, { start: 0, end: raw.length });
-    }, 0);
-    return () => clearTimeout(timeout);
-  }, [isEditing]);
-
-  const handleChangeText = useCallback((value: string) => {
-    draftRef.current = value;
-  }, []);
-
-  const commit = useCallback(() => {
-    if (!isEditing || !workspace) return;
-    setIsEditing(false);
-    const trimmed = draftRef.current.trim();
-    if (trimmed === (workspace.title ?? "")) return;
-    rename(trimmed).catch((error: unknown) => {
-      toast.error(error instanceof Error ? error.message : t("common.errors.unableToSave"));
-    });
-  }, [isEditing, workspace, rename, toast, t]);
-
-  const cancel = useCallback(() => {
-    setIsEditing(false);
-  }, []);
-
-  const handleKeyPress = useCallback(
-    (event: { nativeEvent: { key: string } }) => {
-      if (event.nativeEvent.key === "Escape") cancel();
-    },
-    [cancel],
-  );
-
-  if (isEditing) {
+  if (isEditing && workspace) {
     return (
-      <AdaptiveTextInput
-        ref={inputRef}
-        initialValue={draftRef.current}
-        onChangeText={handleChangeText}
-        onSubmitEditing={commit}
-        onBlur={commit}
-        onKeyPress={handleKeyPress}
-        placeholder={t("sidebar.workspace.rename.autoPlaceholder")}
-        autoCapitalize="none"
-        autoCorrect={false}
+      <InlineWorkspaceTitleField
+        workspace={workspace}
+        onDone={stopEditing}
+        variant="title"
         testID={testID ? `${testID}-input` : undefined}
       />
     );

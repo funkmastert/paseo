@@ -208,6 +208,30 @@ describe("EditableWorkspaceHeaderTitle", () => {
     expect(queryInput()).toBeNull();
   });
 
+  it("Enter followed by the blur it causes renames once", async () => {
+    render();
+    click(queryTitle());
+    const props = adaptiveInputState.latestProps;
+    props?.onChangeText?.("New name");
+    act(() => props?.onSubmitEditing?.());
+    act(() => props?.onBlur?.());
+    await flush();
+
+    expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it("Escape followed by a blur saves nothing", async () => {
+    render();
+    click(queryTitle());
+    const props = adaptiveInputState.latestProps;
+    props?.onChangeText?.("Should not save");
+    act(() => props?.onKeyPress?.({ nativeEvent: { key: "Escape" } }));
+    act(() => props?.onBlur?.());
+    await flush();
+
+    expect(rename).not.toHaveBeenCalled();
+  });
+
   it("an empty value hands naming back to Paseo", async () => {
     render();
     click(queryTitle());

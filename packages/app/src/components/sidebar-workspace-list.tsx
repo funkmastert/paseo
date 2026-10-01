@@ -36,7 +36,7 @@ import type { SidebarSurfaceBackdrop } from "@/styles/surface-backdrop";
 import { getSidebarRowBackdrop } from "@/components/sidebar/sidebar-row-backdrop";
 import { type GestureType } from "react-native-gesture-handler";
 import { WorkspaceRenameModal } from "@/components/workspace-rename-modal";
-import { SidebarWorkspaceInlineTitleField } from "@/components/sidebar/sidebar-workspace-inline-title-field";
+import { InlineWorkspaceTitleField } from "@/components/inline-workspace-title-field";
 import { useSidebarWorkspaceInlineRename } from "@/components/sidebar/use-sidebar-workspace-inline-rename";
 import { useWorkspaceClipboardActions } from "@/hooks/use-workspace-clipboard-actions";
 import { ExternalLink, Settings, MoreVertical, Plus, Trash2 } from "lucide-react-native";
@@ -273,7 +273,8 @@ interface WorkspaceRowInnerProps {
   selected: boolean;
   shortcutNumber: number | null;
   showShortcutBadge: boolean;
-  onPress: () => void;
+  /** Receives the press event so the inline-rename gesture can tell a double-click apart. */
+  onPress: (event?: GestureResponderEvent) => void;
   drag: () => void;
   isDragging: boolean;
   isArchiving: boolean;
@@ -1097,13 +1098,16 @@ function WorkspaceRowInner({
     ...dragAttributes
   } = dragHandleProps?.attributes ?? {};
 
-  const handlePress = useCallback(() => {
-    if (interaction.didLongPressRef.current) {
-      interaction.didLongPressRef.current = false;
-      return;
-    }
-    onPress();
-  }, [interaction.didLongPressRef, onPress]);
+  const handlePress = useCallback(
+    (event: GestureResponderEvent) => {
+      if (interaction.didLongPressRef.current) {
+        interaction.didLongPressRef.current = false;
+        return;
+      }
+      onPress(event);
+    },
+    [interaction.didLongPressRef, onPress],
+  );
   const handleWorkspacePressIn = useCallback(
     (event: GestureResponderEvent) => {
       setIsPressed(true);
@@ -1346,9 +1350,10 @@ function WorkspaceRowWithMenu({
   const titleSlot = useMemo(
     () =>
       inlineRenameEnabled && isInlineEditing ? (
-        <SidebarWorkspaceInlineTitleField
+        <InlineWorkspaceTitleField
           workspace={workspace}
           onDone={stopEditing}
+          variant="row"
           testID={`sidebar-workspace-row-${workspace.workspaceKey}-title-input`}
         />
       ) : undefined,

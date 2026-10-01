@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { View, Text } from "react-native";
 import { page } from "vitest/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SidebarWorkspaceInlineTitleField } from "./sidebar-workspace-inline-title-field";
+import { InlineWorkspaceTitleField } from "./inline-workspace-title-field";
 import { ToastProvider } from "@/contexts/toast-context";
 // Side-effecting: creating the instance is what registers it with react-i18next, so the field
 // renders real copy (its placeholder) rather than a raw key.
@@ -45,9 +45,10 @@ function SidebarRowShape({ editing, onDone }: { editing: boolean; onDone: () => 
       <View style={rowStyle} testID="row">
         <View style={dotStyle} />
         {editing ? (
-          <SidebarWorkspaceInlineTitleField
+          <InlineWorkspaceTitleField
             workspace={WORKSPACE}
             onDone={onDone}
+            variant="row"
             testID="sidebar-inline-title"
           />
         ) : (
@@ -92,7 +93,7 @@ afterEach(() => {
   }
 });
 
-describe("SidebarWorkspaceInlineTitleField screenshot", () => {
+describe("InlineWorkspaceTitleField screenshot", () => {
   it("captures the active row's inline title field at desktop sidebar width", async () => {
     const container = mount(280);
     const input = container.querySelector<HTMLInputElement>('[data-testid="sidebar-inline-title"]');
