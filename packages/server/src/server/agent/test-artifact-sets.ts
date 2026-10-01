@@ -8,11 +8,7 @@
  * See docs/artifact-janitor.md.
  */
 
-// This janitor only ever runs against a real macOS filesystem (XCTestDevices is a Simulator
-// concept Windows and Linux don't have), so its paths are always POSIX-shaped regardless of
-// what OS runs the test suite — path.posix, not the OS-native path module.
-import { posix } from "node:path";
-const { isAbsolute, join, sep } = posix;
+import { isAbsolute, join, sep } from "node:path";
 
 export type TestArtifactSetId = "xctest-devices";
 

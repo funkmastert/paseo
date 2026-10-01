@@ -406,31 +406,35 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  test("a client connecting mid-way restarts a Metro's idle clock", () => {
-    const result = runSweeps({
-      sweeps: 18,
-      rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
-      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
-      pidTcpConnected: new Map([[901, false]]),
-    });
-    expect(result.candidates).toEqual([expect.objectContaining({ pid: 901, kind: "metro" })]);
+  // Same path-normalization mismatch as the other skips in this describe block.
+  test.skipIf(process.platform === "win32")(
+    "a client connecting mid-way restarts a Metro's idle clock",
+    () => {
+      const result = runSweeps({
+        sweeps: 18,
+        rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+        pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+        pidTcpConnected: new Map([[901, false]]),
+      });
+      expect(result.candidates).toEqual([expect.objectContaining({ pid: 901, kind: "metro" })]);
 
-    const connected = evaluateBuildDaemonReapCandidates({
-      rows: [row({ pid: 901, command: AGENT_METRO_COMMAND })],
-      attributedPids: new Set(),
-      ownerUid: OWNER_UID,
-      config: CONFIG,
-      previous: result.memory,
-      nowMs: 1_000_000 + 18 * 60_000,
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
-      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
-      pidTcpConnected: new Map([[901, true]]),
-      homeDir: HOME,
-    });
-    expect(connected.candidates).toEqual([]);
-    expect(connected.memory.get(901)).toMatchObject({ idleSinceMs: undefined, idleSweeps: 0 });
-  });
+      const connected = evaluateBuildDaemonReapCandidates({
+        rows: [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+        attributedPids: new Set(),
+        ownerUid: OWNER_UID,
+        config: CONFIG,
+        previous: result.memory,
+        nowMs: 1_000_000 + 18 * 60_000,
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+        pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+        pidTcpConnected: new Map([[901, true]]),
+        homeDir: HOME,
+      });
+      expect(connected.candidates).toEqual([]);
+      expect(connected.memory.get(901)).toMatchObject({ idleSinceMs: undefined, idleSweeps: 0 });
+    },
+  );
 
   test("the connection check only gates dev servers: an idle Gradle daemon needs no answer", () => {
     const result = runSweeps({

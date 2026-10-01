@@ -1,3 +1,4 @@
+import { join, sep } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   evaluateRemovableArtifactPath,
@@ -6,15 +7,17 @@ import {
   TEST_ARTIFACT_SETS,
 } from "./test-artifact-sets.js";
 
-const ROOT = "/Users/t/Library/Developer/XCTestDevices";
+// Synthetic fixture paths exercising the join()/isAbsolute() logic in isolation — built with the
+// native path module (what the production code actually uses) rather than hardcoded "/" literals,
+// so the expectations hold on whatever host runs the suite.
+const HOME = join(sep, "Users", "t");
+const ROOT = join(HOME, "Library", "Developer", "XCTestDevices");
 const UDID = "1C56B10C-38C1-4547-ABDA-D36412FF01CA";
 
 describe("artifact set roots", () => {
   test("resolve below the home directory and nowhere else", () => {
     for (const set of TEST_ARTIFACT_SETS) {
-      expect(resolveTestArtifactSetRoot("/Users/t", set)).toBe(
-        `/Users/t/${set.segments.join("/")}`,
-      );
+      expect(resolveTestArtifactSetRoot(HOME, set)).toBe(join(HOME, ...set.segments));
       expect(set.segments).not.toContain("..");
     }
   });
@@ -52,9 +55,9 @@ describe("evaluateRemovableArtifactPath", () => {
       evaluateRemovableArtifactPath({
         resolvedRootPath: ROOT,
         entryName: UDID,
-        resolvedEntryPath: `${ROOT}/${UDID}`,
+        resolvedEntryPath: join(ROOT, UDID),
       }),
-    ).toEqual({ removable: true, path: `${ROOT}/${UDID}` });
+    ).toEqual({ removable: true, path: join(ROOT, UDID) });
   });
 
   test("refuses an entry that resolves outside the root", () => {
@@ -62,7 +65,7 @@ describe("evaluateRemovableArtifactPath", () => {
     const verdict = evaluateRemovableArtifactPath({
       resolvedRootPath: ROOT,
       entryName: UDID,
-      resolvedEntryPath: "/Users/t/Documents",
+      resolvedEntryPath: join(HOME, "Documents"),
     });
     expect(verdict.removable).toBe(false);
   });
@@ -71,7 +74,7 @@ describe("evaluateRemovableArtifactPath", () => {
     const verdict = evaluateRemovableArtifactPath({
       resolvedRootPath: ROOT,
       entryName: UDID,
-      resolvedEntryPath: `${ROOT}-old/${UDID}`,
+      resolvedEntryPath: join(`${ROOT}-old`, UDID),
     });
     expect(verdict.removable).toBe(false);
   });
@@ -80,7 +83,7 @@ describe("evaluateRemovableArtifactPath", () => {
     const verdict = evaluateRemovableArtifactPath({
       resolvedRootPath: ROOT,
       entryName: UDID,
-      resolvedEntryPath: `${ROOT}/${UDID}/data`,
+      resolvedEntryPath: join(ROOT, UDID, "data"),
     });
     expect(verdict.removable).toBe(false);
   });
@@ -89,7 +92,7 @@ describe("evaluateRemovableArtifactPath", () => {
     const verdict = evaluateRemovableArtifactPath({
       resolvedRootPath: ROOT,
       entryName: "data",
-      resolvedEntryPath: `${ROOT}/data`,
+      resolvedEntryPath: join(ROOT, "data"),
     });
     expect(verdict.removable).toBe(false);
   });
@@ -97,16 +100,16 @@ describe("evaluateRemovableArtifactPath", () => {
   test("refuses a relative path and the filesystem root", () => {
     expect(
       evaluateRemovableArtifactPath({
-        resolvedRootPath: "Library/Developer/XCTestDevices",
+        resolvedRootPath: join("Library", "Developer", "XCTestDevices"),
         entryName: UDID,
-        resolvedEntryPath: `Library/Developer/XCTestDevices/${UDID}`,
+        resolvedEntryPath: join("Library", "Developer", "XCTestDevices", UDID),
       }).removable,
     ).toBe(false);
     expect(
       evaluateRemovableArtifactPath({
-        resolvedRootPath: "/",
+        resolvedRootPath: sep,
         entryName: UDID,
-        resolvedEntryPath: `/${UDID}`,
+        resolvedEntryPath: join(sep, UDID),
       }).removable,
     ).toBe(false);
   });
