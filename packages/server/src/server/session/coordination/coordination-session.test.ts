@@ -146,6 +146,98 @@ describe("coordination session", () => {
     expect(stream).toMatchObject({ payload: { entries: [{ type: "queue.transition" }] } });
   });
 
+  it("applies an inbox verb as human and writes an audit line", async () => {
+    await send({
+      type: "coordination.queue.create.request",
+      requestId: "r1",
+      id: "wi-1",
+      title: "Review",
+      owner: "human",
+    });
+    const response = await send({
+      type: "coordination.inbox.act.request",
+      requestId: "r2",
+      id: "wi-1",
+      verb: "approve",
+    });
+    expect(response).toMatchObject({
+      type: "coordination.inbox.act.response",
+      payload: { requestId: "r2", changed: true, item: { id: "wi-1", state: "done" } },
+    });
+    await coordination.inboxAudit.flush();
+    const audit = await fs.readFile(path.join(paseoHome, "coordination", "audit.jsonl"), "utf8");
+    expect(audit).toContain('"verb":"approve"');
+    expect(audit).toContain('"outcome":"applied"');
+  });
+
+  it("routes an inbox item to an agent via handoff", async () => {
+    await send({
+      type: "coordination.queue.create.request",
+      requestId: "r1",
+      id: "wi-2",
+      title: "Review",
+      owner: "human",
+    });
+    const response = await send({
+      type: "coordination.inbox.act.request",
+      requestId: "r2",
+      id: "wi-2",
+      verb: "route",
+      to: "agent-a",
+    });
+    expect(response).toMatchObject({
+      payload: {
+        item: { id: "wi-2", state: "handed-off" },
+        successor: { owner: "agent-a", handedOffFrom: "wi-2" },
+      },
+    });
+  });
+
+  it("refuses an inbox verb on a closed item with a teaching error", async () => {
+    await send({
+      type: "coordination.queue.create.request",
+      requestId: "r1",
+      id: "wi-3",
+      title: "Review",
+      owner: "human",
+    });
+    await send({
+      type: "coordination.inbox.act.request",
+      requestId: "r2",
+      id: "wi-3",
+      verb: "approve",
+    });
+    const response = await send({
+      type: "coordination.inbox.act.request",
+      requestId: "r3",
+      id: "wi-3",
+      verb: "annotate",
+      note: "too late",
+    });
+    expect(response).toMatchObject({
+      payload: { errorCode: "invalid", error: expect.stringMatching(/already done/) },
+    });
+  });
+
+  it("refuses annotate with no note", async () => {
+    await send({
+      type: "coordination.queue.create.request",
+      requestId: "r1",
+      id: "wi-4",
+      title: "Review",
+      owner: "human",
+    });
+    const response = await send({
+      type: "coordination.inbox.act.request",
+      requestId: "r2",
+      id: "wi-4",
+      verb: "annotate",
+    });
+    expect(response).toMatchObject({
+      payload: { errorCode: "invalid", error: expect.stringMatching(/needs a note/) },
+    });
+  });
+
   it("answers every request as disabled when coordination is off", async () => {
     const off = new CoordinationSession({
       host: { emit: (msg) => emitted.push(msg) },

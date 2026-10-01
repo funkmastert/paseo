@@ -6,14 +6,21 @@ import {
   type CoordinationConfig,
   type CoordinationConfigInput,
 } from "./config.js";
+import { createJsonlAppender, type JsonlAppender } from "../jsonl-appender.js";
 import { WorkQueueService } from "./queue/service.js";
 import { WorkQueueStore, type WorkQueueStoreOptions } from "./queue/store.js";
 import { StreamStore } from "./stream/store.js";
+
+// Every Inbox act (OR-A5), win or lose, appends here: who, what verb, what happened. Separate
+// from the queue journal (the record of state) and the fleet stream (the feed); this is the
+// human-action audit trail. Rotates like every other jsonl-appender log.
+const INBOX_AUDIT_MAX_BYTES = 10 * 1024 * 1024;
 
 export interface Coordination {
   config: CoordinationConfig;
   queue: WorkQueueService;
   stream: StreamStore;
+  inboxAudit: JsonlAppender;
 }
 
 export interface OpenCoordinationOptions {
@@ -52,5 +59,10 @@ export async function openCoordination(options: OpenCoordinationOptions): Promis
     now: options.now ?? (() => new Date()),
     newId: options.newId ?? (() => `wi_${randomUUID()}`),
   });
-  return { config, queue, stream };
+  const inboxAudit = createJsonlAppender({
+    filePath: path.join(root, "audit.jsonl"),
+    maxBytes: INBOX_AUDIT_MAX_BYTES,
+    logger,
+  });
+  return { config, queue, stream, inboxAudit };
 }

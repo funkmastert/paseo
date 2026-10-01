@@ -25,6 +25,7 @@ function build(config: { enabled?: boolean }): CoordinationRuntime {
     logger: createTestLogger(),
     deliver: async () => undefined,
     turns: { onTurnEnded: () => () => undefined, getFinalMessage: async () => null },
+    serverId: "server-test",
   });
   return runtime;
 }

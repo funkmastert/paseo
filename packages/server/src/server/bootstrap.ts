@@ -1252,9 +1252,10 @@ function createCoordinationRuntime(input: {
   config: Pick<PaseoDaemonConfig, "paseoHome" | "coordination" | "coordinationOverrides">;
   agentManager: AgentManager;
   agentStorage: AgentStorage;
+  serverId: string;
   logger: Logger;
 }): CoordinationRuntime {
-  const { config, agentManager, agentStorage, logger } = input;
+  const { config, agentManager, agentStorage, serverId, logger } = input;
   const onCommitStep = config.coordinationOverrides?.onCommitStep;
   return new CoordinationRuntime({
     paseoHome: config.paseoHome,
@@ -1262,6 +1263,7 @@ function createCoordinationRuntime(input: {
     logger,
     deliver: createAgentPromptDeliverer({ agentManager, agentStorage, logger }),
     turns: createAgentTurnSource(agentManager),
+    serverId,
     ...(onCommitStep ? { onCommitStep } : {}),
   });
 }
@@ -2544,7 +2546,13 @@ export async function createPaseoDaemon(
 
   // Built here so the WebSocket server and the agent tools can hold it; opened by start() below,
   // after the monitors. See docs/work-queue.md#surfaces.
-  const coordination = createCoordinationRuntime({ config, agentManager, agentStorage, logger });
+  const coordination = createCoordinationRuntime({
+    config,
+    agentManager,
+    agentStorage,
+    serverId,
+    logger,
+  });
 
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
@@ -3344,6 +3352,7 @@ export async function createPaseoDaemon(
               logger,
             });
             restartRecovery.start();
+            coordination.setPushNotifications(wsServer.getPushNotificationSender());
             void coordination.start();
             relayRuntime = createRelayRuntime({
               config: {

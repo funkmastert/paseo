@@ -98,6 +98,7 @@ import {
   CoordinationQueueListRequestSchema,
   CoordinationQueueShowRequestSchema,
   CoordinationStreamListRequestSchema,
+  CoordinationInboxActRequestSchema,
   CoordinationQueueCreateResponseSchema,
   CoordinationQueueClaimResponseSchema,
   CoordinationQueueTransitionResponseSchema,
@@ -106,6 +107,7 @@ import {
   CoordinationQueueListResponseSchema,
   CoordinationQueueShowResponseSchema,
   CoordinationStreamListResponseSchema,
+  CoordinationInboxActResponseSchema,
 } from "./coordination/rpc-schemas.js";
 import {
   JevDecideRequestSchema,
@@ -3902,6 +3904,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   CoordinationQueueListRequestSchema,
   CoordinationQueueShowRequestSchema,
   CoordinationStreamListRequestSchema,
+  CoordinationInboxActRequestSchema,
   JevDecideRequestSchema,
   JevStatusRequestSchema,
   JevScopeCheckRequestSchema,
@@ -7614,6 +7617,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   CoordinationQueueListResponseSchema,
   CoordinationQueueShowResponseSchema,
   CoordinationStreamListResponseSchema,
+  CoordinationInboxActResponseSchema,
   JevDecideResponseSchema,
   JevStatusResponseSchema,
   JevScopeCheckResponseSchema,

@@ -5,6 +5,7 @@ import {
   CoordinationUnavailableError,
   type CoordinationRuntime,
 } from "../../coordination/runtime.js";
+import { applyInboxAct } from "../../coordination/inbox/act.js";
 import { QueueConflictError, QueueNotFoundError } from "../../coordination/queue/store.js";
 import { QueueValidationError } from "../../coordination/queue/state-machine.js";
 
@@ -30,7 +31,8 @@ type CoordinationRequestType =
   | "coordination.queue.handoff.request"
   | "coordination.queue.list.request"
   | "coordination.queue.show.request"
-  | "coordination.stream.list.request";
+  | "coordination.stream.list.request"
+  | "coordination.inbox.act.request";
 
 export type CoordinationRequest = Extract<SessionInboundMessage, { type: CoordinationRequestType }>;
 
@@ -45,6 +47,7 @@ const COORDINATION_REQUEST_TYPES = new Set<string>([
   "coordination.queue.list.request",
   "coordination.queue.show.request",
   "coordination.stream.list.request",
+  "coordination.inbox.act.request",
 ]);
 
 export function isCoordinationRequest(msg: SessionInboundMessage): msg is CoordinationRequest {
@@ -80,6 +83,8 @@ export class CoordinationSession {
         return this.handleShow(msg);
       case "coordination.stream.list.request":
         return this.handleStreamList(msg);
+      case "coordination.inbox.act.request":
+        return this.handleInboxAct(msg);
     }
   }
 
@@ -176,6 +181,26 @@ export class CoordinationSession {
       return {
         entries: page.entries,
         ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      };
+    });
+  }
+
+  private async handleInboxAct(msg: Request<"coordination.inbox.act.request">): Promise<void> {
+    await this.respond(msg, "coordination.inbox.act.response", async () => {
+      const { queue, stream, inboxAudit } = await this.options.coordination.require();
+      const result = await applyInboxAct(
+        { queue, stream, audit: inboxAudit, now: () => new Date() },
+        {
+          id: msg.id,
+          verb: msg.verb,
+          ...(msg.note !== undefined ? { note: msg.note } : {}),
+          ...(msg.to !== undefined ? { to: msg.to } : {}),
+        },
+      );
+      return {
+        item: result.item,
+        ...(result.successor ? { successor: result.successor } : {}),
+        changed: result.changed,
       };
     });
   }

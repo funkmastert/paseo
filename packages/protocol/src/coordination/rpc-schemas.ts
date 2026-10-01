@@ -87,6 +87,23 @@ export const CoordinationStreamListRequestSchema = z.object({
   filter: StreamListFilterSchema.optional(),
 });
 
+// OR-A5: the Inbox's one write RPC. Every verb acts as `human` and maps onto a queue transition
+// (or, for `annotate`, an update plus a stream entry), so it inherits the closure contract and
+// the state machine's teaching errors. See docs/work-queue.md#inbox.
+export const INBOX_ACT_VERBS = ["approve", "deny", "route", "hold", "drop", "annotate"] as const;
+export const InboxActVerbSchema = z.enum(INBOX_ACT_VERBS);
+export type InboxActVerb = z.infer<typeof InboxActVerbSchema>;
+
+export const CoordinationInboxActRequestSchema = z.object({
+  type: z.literal("coordination.inbox.act.request"),
+  requestId: z.string(),
+  id: z.string(),
+  verb: InboxActVerbSchema,
+  note: z.string().optional(),
+  // `route` only: the agent id to hand the item off to.
+  to: z.string().optional(),
+});
+
 // "disabled"  - coordination is off on this daemon, or its store failed to open
 // "not_found" - no item with that id
 // "conflict"  - a repeat create with different content, or a stale expectedRevision
@@ -165,6 +182,18 @@ export const CoordinationStreamListResponseSchema = z.object({
   }),
 });
 
+export const CoordinationInboxActResponseSchema = z.object({
+  type: z.literal("coordination.inbox.act.response"),
+  payload: z.object({
+    requestId: z.string(),
+    item: WorkItemSchema.optional(),
+    // `route` only: the new item the handoff created.
+    successor: WorkItemSchema.optional(),
+    changed: z.boolean().optional(),
+    ...CoordinationErrorFields,
+  }),
+});
+
 export type CoordinationQueueMutationPayload = z.infer<
   typeof CoordinationQueueMutationPayloadSchema
 >;
@@ -176,4 +205,7 @@ export type CoordinationQueueShowPayload = z.infer<
 >["payload"];
 export type CoordinationStreamListPayload = z.infer<
   typeof CoordinationStreamListResponseSchema
+>["payload"];
+export type CoordinationInboxActPayload = z.infer<
+  typeof CoordinationInboxActResponseSchema
 >["payload"];

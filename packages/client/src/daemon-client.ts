@@ -513,6 +513,10 @@ export type CoordinationStreamListPayload = Extract<
   SessionOutboundMessage,
   { type: "coordination.stream.list.response" }
 >["payload"];
+export type CoordinationInboxActPayload = Extract<
+  SessionOutboundMessage,
+  { type: "coordination.inbox.act.response" }
+>["payload"];
 
 export type AgentContextUsageReadPayload = Extract<
   SessionOutboundMessage,
@@ -5388,6 +5392,17 @@ export class DaemonClient {
     return this.sendNamespacedCorrelatedSessionRequest<"coordination.stream.list.response">({
       ...options,
       message: { type: "coordination.stream.list.request", ...input },
+    });
+  }
+
+  // OR-A5: the Inbox's one write RPC. See docs/work-queue.md#inbox.
+  async coordinationInboxAct(
+    input: CoordinationQueueInput<"coordination.inbox.act.request">,
+    options?: CoordinationRequestOptions,
+  ): Promise<CoordinationInboxActPayload> {
+    return this.sendNamespacedCorrelatedSessionRequest<"coordination.inbox.act.response">({
+      ...options,
+      message: { type: "coordination.inbox.act.request", ...input },
     });
   }
 

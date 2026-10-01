@@ -5,6 +5,8 @@ import {
   type Coordination,
   type OpenCoordinationOptions,
 } from "./coordination.js";
+import type { PushNotificationSender } from "../push/index.js";
+import { WorkQueueInboxPush } from "./inbox/push.js";
 import { WorkQueueDelivery, type DeliverPromptToAgent } from "./queue/delivery.js";
 import { WorkQueueFinishLink, type AgentTurnSource } from "./queue/finish-link.js";
 
@@ -30,6 +32,7 @@ export interface CoordinationRuntimeOptions {
   logger: Logger;
   deliver: DeliverPromptToAgent;
   turns: AgentTurnSource;
+  serverId: string;
   retentionIntervalMs?: number;
   /** Test seam passed to the queue store; see WorkQueueStoreOptions.onCommitStep. */
   onCommitStep?: OpenCoordinationOptions["onCommitStep"];
@@ -41,6 +44,8 @@ export class CoordinationRuntime {
   private coordination: Coordination | null = null;
   private delivery: WorkQueueDelivery | null = null;
   private finishLink: WorkQueueFinishLink | null = null;
+  private inboxPush: WorkQueueInboxPush | null = null;
+  private pushNotifications: PushNotificationSender | null = null;
   private retentionTimer: ReturnType<typeof setInterval> | null = null;
   private readonly logger: Logger;
   private resolveStarted!: () => void;
@@ -56,6 +61,12 @@ export class CoordinationRuntime {
 
   get status(): CoordinationStatus {
     return this.state;
+  }
+
+  /** Wired once the WebSocket server exists, which owns the push sender. Call before `start()`;
+   * a daemon with no push sender runs the Inbox without the one-push-per-item notice. */
+  setPushNotifications(sender: PushNotificationSender): void {
+    this.pushNotifications = sender;
   }
 
   /** What `server_info.features.coordinationQueue` reports. True while opening. */
@@ -89,6 +100,15 @@ export class CoordinationRuntime {
         logger: this.logger,
       });
       this.finishLink.start();
+      if (this.pushNotifications) {
+        this.inboxPush = new WorkQueueInboxPush({
+          queue: coordination.queue,
+          push: this.pushNotifications,
+          serverId: this.options.serverId,
+          logger: this.logger,
+        });
+        this.inboxPush.start();
+      }
       this.state = "open";
       this.logger.info("Coordination open: work queue and fleet stream");
     } catch (error) {
@@ -122,6 +142,7 @@ export class CoordinationRuntime {
     this.retentionTimer = null;
     this.delivery?.stop();
     this.finishLink?.stop();
+    this.inboxPush?.stop();
   }
 
   /**
@@ -149,6 +170,7 @@ export class CoordinationRuntime {
     await this.delivery?.idle();
     await this.finishLink?.idle();
     await this.delivery?.idle();
+    await this.inboxPush?.idle();
   }
 
   private async runRetention(): Promise<void> {
