@@ -49,7 +49,8 @@ import {
  */
 
 const FILE_NAME = "savings.jsonl";
-const ROTATED_FILE_NAME = "savings.1.jsonl";
+/** `createJsonlAppender` rotates to `<file>.1`. */
+const ROTATED_FILE_NAME = "savings.jsonl.1";
 const ROLLUP_FILE_NAME = "savings-days.json";
 const DAY_MS = 24 * 60 * 60_000;
 const DEFAULT_MAX_BYTES = 16_000_000;

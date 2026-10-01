@@ -5,6 +5,9 @@ import type {
   JevOutcome,
   JevQuestion,
   JevQuestions,
+  JevSavingsFeature,
+  JevSavingsRange,
+  JevSavingsReader,
   JevService,
   JevState,
 } from "../../jev/contract.js";
@@ -434,16 +437,24 @@ export class JevSession {
         deadlineMs: msg.deadlineMs,
       });
       const payload = askPayloadFor(outcome, startedAt);
+      const verdict = payload.answer ? formatAnswer(payload.answer) : null;
+      const savingsId = recordAskInvolvement(service, msg.agentId, outcome.callId, question, {
+        did: payload.outcome,
+        wouldBe: verdict,
+      });
       if (msg.agentId && payload.answer) {
         service.decisions.record({
           agentId: msg.agentId,
           callId: outcome.callId,
           feature: "askJev",
           question: questionLabel(question),
-          verdict: formatAnswer(payload.answer),
+          verdict: verdict ?? "",
           confidence: payload.answer.type === "noul" ? null : payload.answer.confidence,
           action: "asked by a person in the app",
           applied: true,
+          mode: "live",
+          wouldBe: verdict,
+          ...(savingsId ? { savingsId } : {}),
         });
       }
       respond(payload);
@@ -507,6 +518,45 @@ export class JevSession {
     host.emit({ type: "jev.scope.check.response", payload: { requestId: msg.requestId, scope } });
   }
 
+  /**
+   * `jev.savings.summary` (docs/jev.md, "Savings"). An unknown range or a failed read throws, and
+   * the session answers with an `rpc_error`: the dashboard shows the error, never a zero.
+   */
+  async handleSavingsSummary(
+    msg: Extract<SessionInboundMessage, { type: "jev.savings.summary.request" }>,
+  ): Promise<void> {
+    const reader = this.requireSavingsReader();
+    const summary = reader.summary(savingsRange(msg.range));
+    this.options.host.emit({
+      type: "jev.savings.summary.response",
+      payload: { requestId: msg.requestId, summary },
+    });
+  }
+
+  /** `jev.savings.events`: one page, newest first. */
+  async handleSavingsEvents(
+    msg: Extract<SessionInboundMessage, { type: "jev.savings.events.request" }>,
+  ): Promise<void> {
+    const reader = this.requireSavingsReader();
+    const page = reader.events({
+      range: savingsRange(msg.range),
+      ...(msg.feature ? { feature: msg.feature as JevSavingsFeature } : {}),
+      ...(msg.agentId ? { agentId: msg.agentId } : {}),
+      ...(msg.cursor ? { cursor: msg.cursor } : {}),
+      ...(msg.limit !== undefined ? { limit: msg.limit } : {}),
+    });
+    this.options.host.emit({
+      type: "jev.savings.events.response",
+      payload: { requestId: msg.requestId, events: page.events, nextCursor: page.nextCursor },
+    });
+  }
+
+  private requireSavingsReader(): JevSavingsReader {
+    const reader = savingsReaderOf(this.options.service);
+    if (!reader) throw new Error("the savings ledger is not available on this daemon");
+    return reader;
+  }
+
   async handleDecisionsList(
     msg: Extract<SessionInboundMessage, { type: "jev.decisions.list.request" }>,
   ): Promise<void> {
@@ -523,6 +573,47 @@ export class JevSession {
       payload: { requestId: msg.requestId, agentId: msg.agentId, decisions },
     });
   }
+}
+
+/**
+ * Feature 15 claims no savings; the ledger counts the involvement (docs/jev.md, "Savings"). Never
+ * throws: the person's answer never waits on, or fails with, the ledger.
+ */
+function recordAskInvolvement(
+  service: JevService,
+  agentId: string | undefined,
+  callId: string,
+  question: JevQuestion,
+  decision: { did: string; wouldBe: string | null },
+): string {
+  try {
+    return service.savings.record({
+      feature: "askJev",
+      callSite: "app.ask-jev",
+      callId,
+      agentId: agentId ?? null,
+      involvement: questionLabel(question),
+      decision: { ...decision, changed: false },
+      facts: {},
+    });
+  } catch {
+    return "";
+  }
+}
+
+const SAVINGS_RANGES = new Set<string>(["today", "7d", "all"]);
+
+function savingsRange(value: string): JevSavingsRange {
+  if (!SAVINGS_RANGES.has(value)) throw new Error(`unknown range "${value}": use today, 7d or all`);
+  return value as JevSavingsRange;
+}
+
+/** The service's savings ledger when it also reads (the daemon's always does); null otherwise. */
+function savingsReaderOf(service: JevService): JevSavingsReader | null {
+  const savings = service.savings as Partial<JevSavingsReader> | undefined;
+  return typeof savings?.summary === "function" && typeof savings.events === "function"
+    ? (savings as JevSavingsReader)
+    : null;
 }
 
 /** Null when the host did not give the session a service, so callers stay flat. */

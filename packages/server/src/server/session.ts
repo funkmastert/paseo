@@ -2288,6 +2288,10 @@ export class Session {
         return this.jevSession.handleDecisionsList(msg);
       case "jev.ask.request":
         return this.jevSession.handleAsk(msg);
+      case "jev.savings.summary.request":
+        return this.jevSession.handleSavingsSummary(msg);
+      case "jev.savings.events.request":
+        return this.jevSession.handleSavingsEvents(msg);
       default:
         return undefined;
     }
