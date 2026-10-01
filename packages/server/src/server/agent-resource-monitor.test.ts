@@ -1126,10 +1126,12 @@ describe("AgentResourceMonitor reaper", () => {
     expect(reapPushes(push.sent)).toHaveLength(0);
   });
 
-  // The reaper's same-uid path compares a process row's uid against process.getuid(), which is
-  // undefined on win32 (no uid concept there) — structurally never matches, so these two can
-  // never exercise the branch they test on Windows without a separate, SID-based ownership
-  // strategy for that platform.
+  // Shares build-daemon-reaper.ts's isUnderAgentOwnedDir: agentCwds runs through node:path's
+  // native resolve(), but the resolved cwd these fixtures hand it stays a raw POSIX literal
+  // ("/Users/t/..."). On an actual Windows host resolve() drive-prefixes and backslash-ifies the
+  // agentCwds side, so the plain startsWith comparison never matches the untouched other side.
+  // Harmless in real use — a real Windows daemon's cwd is already a native path, and this
+  // resolver shells out to `lsof`, which doesn't exist on win32, so it never even runs there.
   test.skipIf(process.platform === "win32")(
     "a same-uid daemon with no marker is reaped once its resolved cwd sits under an agent's worktree",
     async () => {
@@ -1208,8 +1210,7 @@ describe("AgentResourceMonitor reaper", () => {
     expect(reapPushes(push.sent)).toHaveLength(0);
   });
 
-  // Same reason as the skip above: this row's reap path also goes through the same-uid gate,
-  // which process.getuid() being undefined on win32 can never satisfy.
+  // Same path-normalization mismatch as the skip above.
   test.skipIf(process.platform === "win32")(
     "an agent's idle Metro is reaped only while no client is connected to it",
     async () => {

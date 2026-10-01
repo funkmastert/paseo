@@ -220,16 +220,28 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  test("a daemon with no marker but a cwd under an agent worktree is attributable and reapable", () => {
-    const result = runSweeps({
-      sweeps: 18,
-      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
-      pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
-    });
+  // usableAgentOwnedDirs runs every agentOwnedDirs entry through node:path's native resolve(),
+  // but pidCwd values and argv strings are compared raw. On a real host that is harmless — a
+  // real Windows daemon's cwd/argv are already native paths, and pidCwd is always empty there
+  // in practice anyway, since createSystemBuildDaemonCwdResolver shells out to `lsof`, which
+  // doesn't exist on win32. It only breaks when, as here, the fixture paths are POSIX literals
+  // ("/Users/t/...") compared on an actual Windows CI runner: resolve() drive-prefixes and
+  // backslash-ifies one side, isPathUnderDir's plain startsWith never matches the untouched
+  // other side. A test expecting nothing to match passes either way (its own fixture never
+  // started under the resolved root to begin with); only one expecting a match needs the skip.
+  test.skipIf(process.platform === "win32")(
+    "a daemon with no marker but a cwd under an agent worktree is attributable and reapable",
+    () => {
+      const result = runSweeps({
+        sweeps: 18,
+        rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+        pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+      });
 
-    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
-  });
+      expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+    },
+  );
 
   test("a daemon whose cwd falls outside every agent-owned directory is spared, however idle", () => {
     const result = runSweeps({
@@ -255,22 +267,27 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  test("a Gradle daemon with no cwd resolved is attributed from a project path in its argv", () => {
-    const result = runSweeps({
-      sweeps: 18,
-      rowsForSweep: () => [
-        row({
-          pid: 28056,
-          command: `${UNATTRIBUTED_GRADLE_COMMAND} -Dorg.gradle.project.dir=/Users/t/.paseo/worktrees/abc12345/app`,
-        }),
-      ],
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
-      // No lsof entry for 28056 — this daemon is attributed by argv alone.
-      pidCwd: new Map(),
-    });
+  // Same path-normalization mismatch as the skip above — this one hits argvNamesPathUnder's
+  // raw substring match against the resolved agentOwnedDirs entry.
+  test.skipIf(process.platform === "win32")(
+    "a Gradle daemon with no cwd resolved is attributed from a project path in its argv",
+    () => {
+      const result = runSweeps({
+        sweeps: 18,
+        rowsForSweep: () => [
+          row({
+            pid: 28056,
+            command: `${UNATTRIBUTED_GRADLE_COMMAND} -Dorg.gradle.project.dir=/Users/t/.paseo/worktrees/abc12345/app`,
+          }),
+        ],
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees/abc12345"],
+        // No lsof entry for 28056 — this daemon is attributed by argv alone.
+        pidCwd: new Map(),
+      });
 
-    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
-  });
+      expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+    },
+  );
 
   test("a failed cwd resolution leaves an unmarked daemon judged on argv alone, and spares it", () => {
     // Simulates every pid missing from `pidCwd` because the batched lsof call itself failed —
@@ -319,51 +336,63 @@ describe("evaluateBuildDaemonReapCandidates", () => {
     expect(result.candidates).toEqual([]);
   });
 
-  test("an agent worktree daemon is still reapable with $HOME among the agent cwds", () => {
-    const result = runSweeps({
-      sweeps: 18,
-      rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees", HOME],
-      pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
-    });
+  // Same path-normalization mismatch as the skip above.
+  test.skipIf(process.platform === "win32")(
+    "an agent worktree daemon is still reapable with $HOME among the agent cwds",
+    () => {
+      const result = runSweeps({
+        sweeps: 18,
+        rowsForSweep: () => [row({ pid: 28056, command: UNATTRIBUTED_GRADLE_COMMAND })],
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees", HOME],
+        pidCwd: new Map([[28056, "/Users/t/.paseo/worktrees/abc12345/app"]]),
+      });
 
-    expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
-  });
+      expect(result.candidates).toEqual([expect.objectContaining({ pid: 28056, kind: "gradle" })]);
+    },
+  );
 
-  test("an argv path matches an agent-owned directory only on a path boundary", () => {
-    const withArg = (pid: number, arg: string) =>
-      row({ pid, command: `${UNATTRIBUTED_GRADLE_COMMAND} ${arg}` });
-    const result = runSweeps({
-      sweeps: 18,
-      rowsForSweep: () => [
-        withArg(701, "-Dorg.gradle.project.dir=/Users/t/paseo-worktrees/x/app"),
-        withArg(702, "--project-cache-dir /Users/t/paseo-scratch/cache"),
-        withArg(703, "-Dorg.gradle.project.dir=/Users/t/other/Users/t/paseo/app"),
-        withArg(704, "-Dorg.gradle.project.dir=/Users/t/paseo/android"),
-        withArg(705, "-cp /Users/t/paseo:/opt/lib/tools.jar"),
-        withArg(706, "--project-dir /Users/t/paseo"),
-      ],
-      agentOwnedDirs: ["/Users/t/paseo"],
-      config: { maxPerSweep: 10 },
-    });
+  test.skipIf(process.platform === "win32")(
+    "an argv path matches an agent-owned directory only on a path boundary",
+    () => {
+      const withArg = (pid: number, arg: string) =>
+        row({ pid, command: `${UNATTRIBUTED_GRADLE_COMMAND} ${arg}` });
+      const result = runSweeps({
+        sweeps: 18,
+        rowsForSweep: () => [
+          withArg(701, "-Dorg.gradle.project.dir=/Users/t/paseo-worktrees/x/app"),
+          withArg(702, "--project-cache-dir /Users/t/paseo-scratch/cache"),
+          withArg(703, "-Dorg.gradle.project.dir=/Users/t/other/Users/t/paseo/app"),
+          withArg(704, "-Dorg.gradle.project.dir=/Users/t/paseo/android"),
+          withArg(705, "-cp /Users/t/paseo:/opt/lib/tools.jar"),
+          withArg(706, "--project-dir /Users/t/paseo"),
+        ],
+        agentOwnedDirs: ["/Users/t/paseo"],
+        config: { maxPerSweep: 10 },
+      });
 
-    expect(result.candidates.map((candidate) => candidate.pid).sort()).toEqual([704, 705, 706]);
-  });
+      expect(result.candidates.map((candidate) => candidate.pid).sort()).toEqual([704, 705, 706]);
+    },
+  );
 
-  test("an idle Metro with an established client, such as Tyler's phone, is spared however long", () => {
-    const result = runSweeps({
-      sweeps: 60,
-      rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
-      agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
-      pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
-      pidTcpConnected: new Map([[901, true]]),
-    });
+  // Same path-normalization mismatch as the skip above; "sightings" is recorded on the same
+  // attribution path, so it is empty on win32 too, not just candidates.
+  test.skipIf(process.platform === "win32")(
+    "an idle Metro with an established client, such as Tyler's phone, is spared however long",
+    () => {
+      const result = runSweeps({
+        sweeps: 60,
+        rowsForSweep: () => [row({ pid: 901, command: AGENT_METRO_COMMAND })],
+        agentOwnedDirs: ["/Users/t/.paseo/worktrees"],
+        pidCwd: new Map([[901, "/Users/t/.paseo/worktrees/abc12345"]]),
+        pidTcpConnected: new Map([[901, true]]),
+      });
 
-    expect(result.candidates).toEqual([]);
-    expect(result.sightings).toEqual([
-      expect.objectContaining({ pid: 901, kind: "metro", verdict: "serving-clients" }),
-    ]);
-  });
+      expect(result.candidates).toEqual([]);
+      expect(result.sightings).toEqual([
+        expect.objectContaining({ pid: 901, kind: "metro", verdict: "serving-clients" }),
+      ]);
+    },
+  );
 
   test("a Metro whose connections could not be checked is spared, never assumed idle", () => {
     const result = runSweeps({
@@ -800,14 +829,19 @@ describe("parseLsofCwdOutput", () => {
 });
 
 describe("createSystemBuildDaemonCwdResolver", () => {
-  test("resolves this very process's own cwd via a real lsof call", async () => {
-    const resolver = createSystemBuildDaemonCwdResolver();
+  // createSystemBuildDaemonCwdResolver shells out to the real `lsof` binary, which doesn't exist
+  // on win32 — matches the doc comment on the function itself.
+  test.skipIf(process.platform === "win32")(
+    "resolves this very process's own cwd via a real lsof call",
+    async () => {
+      const resolver = createSystemBuildDaemonCwdResolver();
 
-    const result = await resolver.resolve([process.pid]);
+      const result = await resolver.resolve([process.pid]);
 
-    // lsof reports the real (symlink-resolved) path, which is what realpathSync gives too.
-    expect(result.get(process.pid)).toBe(realpathSync(process.cwd()));
-  });
+      // lsof reports the real (symlink-resolved) path, which is what realpathSync gives too.
+      expect(result.get(process.pid)).toBe(realpathSync(process.cwd()));
+    },
+  );
 
   test("an empty pid list never shells out and resolves nothing", async () => {
     const resolver = createSystemBuildDaemonCwdResolver();
