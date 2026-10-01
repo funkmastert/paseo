@@ -16,6 +16,7 @@ import {
   readCheckAnswerOf,
   type ReadCheckAnswer,
 } from "./decision.js";
+import { JEV_CHARS_PER_TOKEN } from "../savings-formulas.js";
 import { isInside, isSecretShapedPath, readCheckDeniedRoots } from "./paths.js";
 import {
   editedPath,
@@ -30,7 +31,6 @@ import {
   buildReadCheckState,
   describeSize,
   estimateReadTokens,
-  READ_CHECK_CHARS_PER_TOKEN,
   READ_CHECK_QUESTIONS,
   readToolCharacters,
   sliceRange,
@@ -908,7 +908,7 @@ export class ReadCheckObserver implements FileReadObserver {
       choice: asked.answer.choice,
       confidence: asked.answer.confidence,
       verdict: asked.answer.verdict,
-      charsPerToken: READ_CHECK_CHARS_PER_TOKEN,
+      charsPerToken: JEV_CHARS_PER_TOKEN,
     };
     try {
       return this.options.savings.record({

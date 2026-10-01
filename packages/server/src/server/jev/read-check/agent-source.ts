@@ -1,6 +1,5 @@
 import type { AgentManager } from "../../agent/agent-manager.js";
 import { readRefocusBrief } from "../../agent/agent-refocus.js";
-import type { JevSavingsSink } from "../contract.js";
 import type { ReadCheckAgentSource } from "./observer.js";
 
 /** The first rows hold the assignment: the agent's first message. */
@@ -43,12 +42,3 @@ export function createReadCheckAgentSource(
     },
   };
 }
-
-/** Drops every line. The read check's sink until the savings seam provides `jev.savings`. */
-export const DROPPED_JEV_SAVINGS: JevSavingsSink = {
-  record: () => "",
-  settle: () => undefined,
-  validate: () => undefined,
-  countNotAsked: () => undefined,
-  noteRead: () => undefined,
-};

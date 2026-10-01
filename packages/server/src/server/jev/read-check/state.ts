@@ -1,5 +1,6 @@
 import type { AgentTimelineItem } from "../../agent/agent-sdk-types.js";
 import type { JevQuestions } from "../contract.js";
+import { estimateContextTokens } from "../savings-formulas.js";
 import { READ_CHECK_QUESTION_ID } from "./decision.js";
 import type { FileReadRange } from "./recognize.js";
 
@@ -8,8 +9,6 @@ import type { FileReadRange } from "./recognize.js";
  * counts as a read"). Pure.
  */
 
-/** The fleet's calibrated median for tool results (research 03); JEV's own 2.5 is another tokenizer. */
-export const READ_CHECK_CHARS_PER_TOKEN = 2.35;
 /** `Read` prefixes every line with its number and a tab: about 7 characters a line. */
 export const READ_TOOL_LINE_PREFIX_CHARS = 7;
 /** `Read` cuts any longer line. */
@@ -25,8 +24,9 @@ export const READ_CHECK_OUTLINE_CHARS = 2000;
 export const READ_CHECK_EXCERPT_CHARS = 6000;
 const MIN_EXCERPT_CHARS = 1500;
 
+/** Tokens a read loads, at the savings ledger's one rate (`savings-formulas.ts`). */
 export function estimateReadTokens(characters: number): number {
-  return Math.round(characters / READ_CHECK_CHARS_PER_TOKEN);
+  return estimateContextTokens(characters);
 }
 
 export interface RangeSlice {

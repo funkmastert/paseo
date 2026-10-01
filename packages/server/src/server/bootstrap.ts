@@ -338,7 +338,7 @@ import type { JevService, JevTransport } from "./jev/contract.js";
 import { createAwayReplyJob, type AwayReplyJob } from "./away-reply/job.js";
 import { createJevConfigReader } from "./jev/config.js";
 import { createFakeJevTransport, withJevTransportDelay } from "./jev/fake.js";
-import { createReadCheckAgentSource, DROPPED_JEV_SAVINGS } from "./jev/read-check/agent-source.js";
+import { createReadCheckAgentSource } from "./jev/read-check/agent-source.js";
 import { ReadCheckObserver } from "./jev/read-check/observer.js";
 import { captureJevKeyFromEnv } from "./jev/key.js";
 import { collectJevSecretValues, isSecretEnvName } from "./jev/secret-sources.js";
@@ -1907,9 +1907,7 @@ export async function createPaseoDaemon(
   });
   const readCheckObserver = new ReadCheckObserver({
     jev,
-    // COMPAT(read-check-savings-sink): the savings seam adds `jev.savings`; until it merges,
-    // read checks are counted in the ledger only. Replace with `jev.savings` at that merge.
-    savings: DROPPED_JEV_SAVINGS,
+    savings: jev.savings,
     readConfig: () => {
       const read = readCheckConfig.read();
       return read.ok && read.config.enabled ? read.config.readCheck : null;
