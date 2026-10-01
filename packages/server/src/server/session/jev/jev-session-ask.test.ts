@@ -17,9 +17,10 @@ import { JEV_ASK_QUESTION_ID, JevSession, type JevAskAgentThread } from "./jev-s
 type AskRequest = Extract<SessionInboundMessage, { type: "jev.ask.request" }>;
 type AskResponse = Extract<SessionOutboundMessage, { type: "jev.ask.response" }>;
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  for (const cleanup of cleanups.splice(0)) cleanup();
+const cleanups: Array<() => void | Promise<void>> = [];
+afterEach(async () => {
+  // Newest first: a service stops, and its last writes land, before its home is removed.
+  for (const cleanup of cleanups.splice(0).toReversed()) await cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -39,6 +40,7 @@ function harness(
   mkdirSync(path.join(home, "mobile-worktrees", "app"), { recursive: true });
   const { readAgentThread, ...serviceOptions } = options;
   const service = createTestJevService({ paseoHome: home, homeDir: home, ...serviceOptions });
+  cleanups.push(() => service.stop());
   const emitted: SessionOutboundMessage[] = [];
   const session = new JevSession({
     host: { emit: (msg) => emitted.push(msg) },
