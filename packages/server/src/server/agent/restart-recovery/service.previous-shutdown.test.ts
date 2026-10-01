@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { AgentStorage } from "../agent-storage.js";
 import type { AgentManager } from "../agent-manager.js";
@@ -84,7 +84,10 @@ describe("RestartRecoveryService previous-shutdown wiring", () => {
     });
 
     service.start();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.waitFor(async () => {
+      const plan = await service.getPlan();
+      return plan.previousShutdownInfo != null;
+    });
 
     const plan = await service.getPlan();
     expect(plan.previousShutdown).toBe("clean");
@@ -111,7 +114,10 @@ describe("RestartRecoveryService previous-shutdown wiring", () => {
     });
 
     service.start();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await vi.waitFor(async () => {
+      const plan = await service.getPlan();
+      return plan.previousShutdownInfo != null;
+    });
 
     const plan = await service.getPlan();
     expect(plan.previousShutdown).toBe("unknown");

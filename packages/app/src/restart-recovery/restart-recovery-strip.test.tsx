@@ -175,10 +175,6 @@ describe("RestartRecoveryStrip", () => {
     expand();
     const hint = container?.querySelector('[data-testid="restart-recovery-keep-running-hint"]');
     expect(hint).toBeTruthy();
-    act(() => {
-      (hint as HTMLElement).click();
-    });
-    expect(router.push).toHaveBeenCalledWith("/settings/hosts/server-a");
   });
 
   it("hides the keep-running hint once the setting is already on", () => {

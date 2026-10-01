@@ -3,13 +3,12 @@ import { Pressable, Text, View } from "react-native";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, ChevronUp, RotateCcw } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
-import { router, type Href } from "expo-router";
 import type { RestartRecoveryEntry } from "@getpaseo/protocol/restart-recovery/rpc-schemas";
 import type { Theme } from "@/styles/theme";
 import { Button } from "@/components/ui/button";
 import { getIsElectron } from "@/constants/platform";
 import { useDesktopSettings } from "@/desktop/settings/desktop-settings";
-import { buildSettingsHostRoute } from "@/utils/host-routes";
+import { openHostOverview } from "@/navigation/settings-navigation";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { formatDayRelativeTime, formatDuration } from "@/utils/time";
 import { useRestartRecovery } from "./use-restart-recovery";
@@ -78,7 +77,7 @@ export function RestartRecoveryStrip() {
   const handleToggle = useCallback(() => setExpanded((previous) => !previous), []);
   const { settings: desktopSettings } = useDesktopSettings();
   const handleOpenKeepRunningSetting = useCallback(() => {
-    router.push(buildSettingsHostRoute(serverId) as Href);
+    openHostOverview(serverId);
   }, [serverId]);
 
   if (!model) return null;

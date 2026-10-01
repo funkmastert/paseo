@@ -79,14 +79,14 @@ One owner per case, so no agent is resumed twice:
 
 `previousShutdownInfo` (`{ reason, at, detail? }`) is `RestartRecoveryPlan`'s plain-language account of the last daemon's shutdown, alongside the legacy `previousShutdown: "clean" | "crash" | "unknown"` string kept for old clients (COMPAT, `packages/protocol/src/restart-recovery/rpc-schemas.ts`). `daemon-worker.ts` computes it once at boot — before daemon vitals starts and overwrites the heartbeat file — and `describePreviousShutdown` (`packages/server/src/server/daemon-vitals/shutdown-reason.ts`) maps the shutdown receipt to one of:
 
-| Reason | When |
-| --- | --- |
+| Reason       | When                                                                                                                                                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `bozeo_quit` | The receipt's `signal` is `SIGTERM`, `SIGINT`, or `Supervisor shutdown request` — the worker was signaled directly, which is how the desktop app's supervisor tears down its child. **This also matches a bare `kill -TERM` from a terminal**; the worker cannot tell the two apart. |
-| `update` | The receipt's `reason` is `daemon_update` (the self-update restart). |
-| `cli_stop` | The receipt's `reason` is `client_shutdown_rpc` — a graceful shutdown requested over the websocket, which covers both `paseo daemon stop` and the desktop app's own CLI-driven stop path. |
-| `crashed` | The receipt's `outcome` is `crashed`, or there is no receipt at all and nothing points to a reboot. |
-| `power_loss` | No receipt, but this boot's system boot time (`Date.now() - os.uptime() * 1000`) is after the last heartbeat the previous daemon wrote to `daemon-vitals.json` — proof a reboot happened in between. |
-| `unknown` | An unreadable receipt, or a receipt whose signal/reason match none of the above. |
+| `update`     | The receipt's `reason` is `daemon_update` (the self-update restart).                                                                                                                                                                                                                 |
+| `cli_stop`   | The receipt's `reason` is `client_shutdown_rpc` — a graceful shutdown requested over the websocket, which covers both `paseo daemon stop` and the desktop app's own CLI-driven stop path.                                                                                            |
+| `crashed`    | The receipt's `outcome` is `crashed`, or there is no receipt at all and nothing points to a reboot.                                                                                                                                                                                  |
+| `power_loss` | No receipt, but this boot's system boot time (`Date.now() - os.uptime() * 1000`) is after the last heartbeat the previous daemon wrote to `daemon-vitals.json` — proof a reboot happened in between.                                                                                 |
+| `unknown`    | An unreadable receipt, or a receipt whose signal/reason match none of the above.                                                                                                                                                                                                     |
 
 Each plan entry also carries `stoppedAt` (the episode's shutdown time, `previousShutdownInfo.at`), so a client can show how long a run had been going when it was cut off.
 
