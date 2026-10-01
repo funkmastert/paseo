@@ -515,6 +515,80 @@ describe("the savings ledger (docs/jev.md, Savings)", () => {
     await jev.stop();
   });
 
+  it("a shadow defer whose condition outlasted the hold saves nothing, however the agent ended (review M3)", async () => {
+    const jev = createTestJevService({
+      paseoHome: home,
+      homeDir: home,
+      answers: {
+        route: { type: "choice" as const, choice: "clearing_on_its_own", confidence: 0.9 },
+        evidence_current: { type: "noul" as const, noul: 0.1 },
+      },
+    });
+    await jev.start();
+    const triage = await createEscalationTriage(jev)({
+      episodeKey: "system-memory",
+      observation: observation(),
+    });
+    const decision = decideTriageAction(triage, { willPush: true, graceMs: 0, remedy: "live" });
+    expect(decision).toMatchObject({
+      wouldBe: "defer",
+      action: "start-agent",
+      deferMs: 10 * 60_000,
+    });
+    const record = createRemediationTriageRecorder({
+      jev: { decisions: { record: () => undefined }, savings: jev.savings },
+      filePath: path.join(home, "jev", "remediation-triage.jsonl"),
+      logger: pino({ level: "silent" }),
+    });
+    const join = { triageCallId: triage.callId, triageWouldBe: "defer", triageApplied: false };
+    const base = { episode: "ep-1", key: "system-memory", kind: "system-memory" };
+    record({
+      type: "triage",
+      at: new Date().toISOString(),
+      ...base,
+      level: "alert",
+      willPush: true,
+      pushPreview: { outcome: "interrupt", devices: 1 },
+      linkedAgentId: null,
+      triage,
+      decision,
+    });
+    record({
+      type: "agent-ended",
+      at: new Date().toISOString(),
+      ...base,
+      agentId: "fixer-1",
+      result: "not-fixed",
+      cause: "report",
+      agentTotalTokens: 2_000_000,
+      agentModel: "claude-sonnet-5",
+      minutesRunning: 30,
+      ...join,
+    });
+    expect(jev.savings.events({ range: "today" }).events[0]).toMatchObject({ pending: true });
+    record({
+      type: "closed",
+      at: new Date().toISOString(),
+      ...base,
+      minutesOpen: 45,
+      minutesSinceTriage: 40,
+      duringDeferral: false,
+      clearedDuringHold: false,
+      agentRan: true,
+      escalated: true,
+      ...join,
+    });
+
+    const [event] = jev.savings.events({ range: "today" }).events;
+    expect(event).toMatchObject({
+      tokensSavedEstimate: 0,
+      pending: false,
+      validation: { outcome: "contradicted", signal: "outlasted-hold" },
+    });
+    expect(jev.savings.summary("today").shadow.tokensWouldSave).toBe(0);
+    await jev.stop();
+  });
+
   it("the agent's end settles it: NOT FIXED saves A x w(m) and holds; FIXED contradicts", async () => {
     const { jev, triage, record } = await shadowSkip();
 

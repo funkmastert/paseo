@@ -173,6 +173,63 @@ describe("feature 3a, remediation triage", () => {
     ).toBe(0);
   });
 
+  describe("a shadow defer (review M3): a live defer only holds the agent 10-15 minutes", () => {
+    const defer = { did: "start-agent", wouldBe: "defer" };
+    const notFixed = {
+      fixed: false,
+      agentRan: true,
+      agentTotalTokens: 2_000_000,
+      agentModel: "claude-sonnet-5",
+      deferMinutes: 10,
+    };
+
+    test("an agent that ended NOT FIXED while the condition outlasted the hold saves nothing", () => {
+      const result = price("remediationTriage", "shadow", defer, {
+        ...notFixed,
+        closed: true,
+        minutesSinceTriage: 40,
+      });
+      expect(result).toMatchObject({ tokens: 0, pending: false });
+    });
+
+    test("a condition that cleared inside the hold, the agent not fixing it, saves A x w(m)", () => {
+      const result = price("remediationTriage", "shadow", defer, {
+        ...notFixed,
+        closed: true,
+        minutesSinceTriage: 8,
+      });
+      expect(result).toMatchObject({ tokens: 1_000_000, pending: false });
+    });
+
+    test("an agent that fixed it saves nothing; an open episode waits for its close", () => {
+      expect(
+        price("remediationTriage", "shadow", defer, { ...notFixed, fixed: true }),
+      ).toMatchObject({ tokens: 0, pending: false });
+      expect(price("remediationTriage", "shadow", defer, notFixed).pending).toBe(true);
+    });
+
+    test("a shadow defer is not a would-be skip in the evidence; it has its own counters", () => {
+      const view = (validation: JevSavingsValidation | null) => ({
+        feature: "remediationTriage" as const,
+        mode: "shadow" as const,
+        decision: { did: "start-agent", wouldBe: "defer", changed: false },
+        facts: { ...notFixed, closed: true, minutesSinceTriage: 8 },
+        validation,
+        price: price(
+          "remediationTriage",
+          "shadow",
+          defer,
+          { ...notFixed, closed: true, minutesSinceTriage: 8 },
+          validation,
+        ),
+      });
+      expect(evidenceCounters(view(held))).toEqual({ wouldDefer: 1, wouldDeferCleared: 1 });
+      expect(
+        evidenceCounters(view({ outcome: "contradicted", signal: "fixed", afterMinutes: 3 })),
+      ).toEqual({ wouldDefer: 1 });
+    });
+  });
+
   test("an answer that keeps the agent saves nothing", () => {
     expect(
       price("remediationTriage", "shadow", { did: "start-agent", wouldBe: "start-agent" }, {})

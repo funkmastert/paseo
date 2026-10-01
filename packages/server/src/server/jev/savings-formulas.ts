@@ -249,31 +249,17 @@ function priceSpawnHint({ mode, facts }: JevSavingsPriceInput): JevSavingsPrice 
 
 /**
  * Feature 3a. `decision.wouldBe` is `person`, `defer` or `start-agent`. Facts: `agentTotalTokens`
- * (`A`), `agentModel`, `fixed` (from `agent-ended`), `closed`, `clearedDuringHold`, `agentRan`
- * (from `closed`), `medianTokens` (the median `A x w(m)` of the last 30 days' agents for the same
- * condition kind, for a live skip, whose agent never ran).
+ * (`A`), `agentModel`, `fixed` (from `agent-ended`), `closed`, `clearedDuringHold`, `agentRan`,
+ * `minutesSinceTriage` (from `closed`), `deferMinutes` (the hold a defer would have held),
+ * `medianTokens` (the median `A x w(m)` of the last 30 days' agents for the same condition kind,
+ * for a live skip, whose agent never ran).
  */
-function priceRemediationTriage({ mode, decision, facts }: JevSavingsPriceInput): JevSavingsPrice {
+function priceRemediationTriage(input: JevSavingsPriceInput): JevSavingsPrice {
+  const { mode, decision, facts } = input;
   const skip = decision.wouldBe === "person" || decision.wouldBe === "defer";
   if (!skip) return tokensPrice(0, "0: the answer keeps the agent", { wouldBe: decision.wouldBe });
   if (mode === "shadow") {
-    const fixed = bool(facts, "fixed");
-    if (fixed === null) {
-      if (facts["closed"] === true && facts["agentRan"] === false) {
-        return tokensPrice(0, "0: the episode closed with no agent", { closed: "true" });
-      }
-      return isPartial(facts)
-        ? partialPrice("tokens", "the agent's end")
-        : pendingPrice("tokens", "the remediation agent's end");
-    }
-    const A = num(facts, "agentTotalTokens");
-    const model = str(facts, "agentModel");
-    const w = priceWeight(model);
-    const inputs = { A, m: model, "w(m)": w, fixed: String(fixed) };
-    if (fixed) return tokensPrice(0, "0: the agent fixed it (contradicted)", inputs);
-    if (A === null || w === null)
-      return tokensPrice(null, "A x w(m): the agent's tokens or model is unknown", inputs);
-    return tokensPrice(A * w, "A x w(m), would-have: the agent ended NOT FIXED", inputs);
+    return decision.wouldBe === "defer" ? priceShadowDefer(facts) : priceShadowPerson(facts);
   }
   const median = num(facts, "medianTokens");
   const medianInputs = {
@@ -310,6 +296,95 @@ function priceRemediationTriage({ mode, decision, facts }: JevSavingsPriceInput)
     );
   }
   return tokensPrice(0, "0: the agent started", { did: decision.did });
+}
+
+/** A shadow `person`: the agent ran, so its tokens and result are known. */
+function priceShadowPerson(facts: JevSavingsFacts): JevSavingsPrice {
+  const fixed = bool(facts, "fixed");
+  if (fixed === null) {
+    if (facts["closed"] === true && facts["agentRan"] === false) {
+      return tokensPrice(0, "0: the episode closed with no agent", { closed: "true" });
+    }
+    return isPartial(facts)
+      ? partialPrice("tokens", "the agent's end")
+      : pendingPrice("tokens", "the remediation agent's end");
+  }
+  const A = num(facts, "agentTotalTokens");
+  const model = str(facts, "agentModel");
+  const w = priceWeight(model);
+  const inputs = { A, m: model, "w(m)": w, fixed: String(fixed) };
+  if (fixed) return tokensPrice(0, "0: the agent fixed it (contradicted)", inputs);
+  if (A === null || w === null)
+    return tokensPrice(null, "A x w(m): the agent's tokens or model is unknown", inputs);
+  return tokensPrice(A * w, "A x w(m), would-have: the agent ended NOT FIXED", inputs);
+}
+
+/** `MAX_DEFER_MS` in `remediation/jev-triage.ts`: the hold of a record that names none. */
+const DEFAULT_DEFER_MINUTES = 15;
+
+/**
+ * Whether a shadow defer would have avoided the agent. Live, a defer holds rung 2 once, 10-15
+ * minutes, then starts the agent unless the condition cleared (`decideTriageAction`). So it saves
+ * the agent only when the episode closed inside that hold and the agent that ran did not fix it:
+ * the condition cleared by itself. Otherwise the live agent would have started and spent `A`.
+ */
+function priceShadowDefer(facts: JevSavingsFacts): JevSavingsPrice {
+  const verdict = shadowDeferVerdict(facts);
+  const A = num(facts, "agentTotalTokens");
+  const model = str(facts, "agentModel");
+  const w = priceWeight(model);
+  const inputs = {
+    A,
+    m: model,
+    "w(m)": w,
+    hold: `${deferMinutesOf(facts)} min`,
+    closedAfter: num(facts, "minutesSinceTriage"),
+  };
+  switch (verdict) {
+    case "pending":
+      return isPartial(facts)
+        ? partialPrice("tokens", "the episode's close or the agent's end")
+        : pendingPrice("tokens", "the episode's close and the agent's end");
+    case "agent-fixed":
+      return tokensPrice(0, "0: the agent fixed it, so the condition was not clearing", inputs);
+    case "outlasted-hold":
+      return tokensPrice(
+        0,
+        "0: the condition outlasted the hold; a live defer would have started the agent",
+        inputs,
+      );
+    case "no-agent":
+      return tokensPrice(0, "0: no agent ran", inputs);
+    case "cleared-within-hold":
+      if (A === null || w === null)
+        return tokensPrice(null, "A x w(m): the agent's tokens or model is unknown", inputs);
+      return tokensPrice(
+        A * w,
+        "A x w(m), would-have: cleared inside the hold and the agent did not fix it",
+        inputs,
+      );
+  }
+}
+
+export type JevShadowDeferVerdict =
+  | "pending"
+  | "agent-fixed"
+  | "outlasted-hold"
+  | "no-agent"
+  | "cleared-within-hold";
+
+function deferMinutesOf(facts: JevSavingsFacts): number {
+  return num(facts, "deferMinutes") ?? DEFAULT_DEFER_MINUTES;
+}
+
+/** A shadow defer's outcome from its facts; the savings hook validates it with the same answer. */
+export function shadowDeferVerdict(facts: JevSavingsFacts): JevShadowDeferVerdict {
+  if (bool(facts, "fixed") === true) return "agent-fixed";
+  if (facts["closed"] !== true) return "pending";
+  const closedAfter = num(facts, "minutesSinceTriage");
+  if (closedAfter === null || closedAfter > deferMinutesOf(facts)) return "outlasted-hold";
+  if (facts["agentRan"] === false) return "no-agent";
+  return bool(facts, "fixed") === false ? "cleared-within-hold" : "pending";
 }
 
 /**
@@ -559,11 +634,15 @@ const EVIDENCE_COUNTERS: Partial<Record<JevSavingsFeature, CounterRule>> = {
     add("settledShadow");
     add("settledShadowTokens", price.tokens ?? 0);
   },
-  remediationTriage: ({ mode, decision, validation }, add) => {
-    if (mode !== "shadow" || (decision.wouldBe !== "person" && decision.wouldBe !== "defer"))
-      return;
-    add("wouldSkip");
-    if (validation?.outcome === "contradicted") add("wouldSkipContradicted");
+  remediationTriage: ({ mode, decision, validation, price }, add) => {
+    if (mode !== "shadow") return;
+    if (decision.wouldBe === "person") {
+      add("wouldSkip");
+      if (validation?.outcome === "contradicted") add("wouldSkipContradicted");
+    } else if (decision.wouldBe === "defer" && !price.pending) {
+      add("wouldDefer");
+      if (validation?.outcome === "held") add("wouldDeferCleared");
+    }
   },
   notificationTriage: ({ mode, decision, validation }, add) => {
     if (mode !== "shadow" || decision.wouldBe !== "notice" || !validation) return;
@@ -646,9 +725,11 @@ export function evaluateEvidence(
     case "remediationTriage": {
       const n = c("wouldSkip");
       const wrong = c("wouldSkipContradicted");
+      const defers = c("wouldDefer");
+      const cleared = c("wouldDeferCleared");
       return {
-        rule: "shadow -> live: 20 would-be skips or deferrals, at most 1 in 5 contradicted (the agent fixed it)",
-        observed: `${n} would-be skips, ${wrong} contradicted (${pct(wrong, n)})`,
+        rule: "shadow -> live: 20 would-be skips to a person, at most 1 in 5 contradicted (the agent fixed it); deferrals are judged live",
+        observed: `${n} would-be skips, ${wrong} contradicted (${pct(wrong, n)}); ${defers} would-be deferrals, ${cleared} cleared inside the hold`,
         met: n < 20 ? null : wrong * 5 <= n,
       };
     }

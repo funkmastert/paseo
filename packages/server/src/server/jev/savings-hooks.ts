@@ -5,7 +5,7 @@ import type { AwayReplyDecisionLine } from "../away-reply/decision-file.js";
 import type { RemediationTriageEvent } from "../remediation/jev-triage.js";
 import type { JevSavingsFeature, JevSavingsSink } from "./contract.js";
 import { JevSavingsLedger, savingsIdForCall } from "./savings.js";
-import { priceWeight, type JevSavingsFacts } from "./savings-formulas.js";
+import { priceWeight, shadowDeferVerdict, type JevSavingsFacts } from "./savings-formulas.js";
 
 /**
  * How the features already built report to the savings ledger (docs/jev.md, "Savings", "Hooking in
@@ -136,7 +136,11 @@ export function createRemediationSavingsHook(options: {
               clearedDuringHold: event.clearedDuringHold,
               agentRan: event.agentRan,
               escalated: event.escalated,
+              minutesSinceTriage: event.minutesSinceTriage,
             });
+            if (event.triageWouldBe === "defer" && event.triageApplied === false) {
+              validateShadowDefer(savings, triageId, event.minutesSinceTriage);
+            }
           }
           return;
         }
@@ -183,6 +187,7 @@ function recordTriage(
       route: triage.route,
       confidence: triage.routeConfidence,
       willPush: event.willPush,
+      deferMinutes: Math.round(decision.deferMs / 60_000),
       medianTokens: median,
       medianSamples: samples,
     }),
@@ -224,13 +229,15 @@ function settleAgentEnded(
   const id = savingsIdForCall(savings, event.triageCallId);
   if (id) {
     savings.settle(id, facts);
-    const skipped = event.triageWouldBe === "person" || event.triageWouldBe === "defer";
-    if (skipped && event.triageApplied === false) {
+    if (event.triageWouldBe === "person" && event.triageApplied === false) {
       savings.validate(id, {
         outcome: fixed ? "contradicted" : "held",
         signal: fixed ? "fixed" : "not-fixed",
         afterMinutes: event.minutesRunning,
       });
+    }
+    if (event.triageWouldBe === "defer" && event.triageApplied === false) {
+      validateShadowDefer(savings, id, event.minutesRunning);
     }
   }
   if (!event.key.startsWith(STALLED_AGENT_KEY_PREFIX)) return;
@@ -243,6 +250,23 @@ function settleAgentEnded(
       afterMinutes: event.minutesRunning,
     });
   }
+}
+
+/**
+ * A shadow defer bets that the condition clears by itself inside the hold, not that the agent
+ * fails: `held` when it cleared inside the hold and the agent did not fix it, `contradicted` when
+ * the agent fixed it or the condition outlasted the hold. Waits while either fact is missing.
+ */
+function validateShadowDefer(savings: JevSavingsSink, id: string, afterMinutes: number | null) {
+  const facts = savings instanceof JevSavingsLedger ? savings.factsOf(id) : null;
+  if (!facts) return;
+  const verdict = shadowDeferVerdict(facts);
+  if (verdict === "pending" || verdict === "no-agent") return;
+  savings.validate(id, {
+    outcome: verdict === "cleared-within-hold" ? "held" : "contradicted",
+    signal: verdict,
+    afterMinutes,
+  });
 }
 
 function settleStallPersonFirst(
