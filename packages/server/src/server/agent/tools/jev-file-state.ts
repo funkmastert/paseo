@@ -615,6 +615,8 @@ export class JevFileScope {
     const stat = await fs.stat(realPath).catch(() => null);
     if (!stat) return { path: shown, reason: "not found" };
     if (!stat.isFile()) return { path: shown, reason: "not a file" };
+    // A hard link's real path is inside cwd whatever the other name is: it could be anything.
+    if (stat.nlink > 1) return { path: shown, reason: HARD_LINK_REASON };
     if (stat.size === 0) return { path: shown, reason: "empty" };
     if (stat.size > JEV_FILE_MAX_BYTES) return { path: shown, reason: tooLarge(stat.size) };
     const relative = toPosix(path.relative(this.realCwd, realPath));
@@ -747,6 +749,7 @@ class CandidateListing {
 const DENIED_ROOT_REASON = "a private directory the JEV tools never read";
 const AGENT_DENIED_REASON = "your own read rules deny it";
 const CHANGED_REASON = "changed while being read; Read it instead";
+const HARD_LINK_REASON = "a hard link, whose other names could be anywhere; Read it if you need it";
 const SECRET_NAME_REASON =
   "secret-shaped name; Read it if you need it, the JEV tools do not send it";
 

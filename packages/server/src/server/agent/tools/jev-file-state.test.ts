@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -181,6 +182,15 @@ describe("prune", () => {
       "empty",
       expect.stringMatching(/^over 60,000 bytes/),
     ]);
+  });
+
+  test("a hard link to a file outside cwd is refused (L7)", async () => {
+    write(path.join(home, "private.txt"), "private\n");
+    linkSync(path.join(home, "private.txt"), path.join(project, "linked.txt"));
+    const scope = await open();
+    const { files, skipped } = await scope.prune(["linked.txt"], 10);
+    expect(files).toEqual([]);
+    expect(skipped[0]?.reason).toMatch(/hard link/);
   });
 
   test("a symlink onto a secret-shaped name is refused by its real name", async () => {

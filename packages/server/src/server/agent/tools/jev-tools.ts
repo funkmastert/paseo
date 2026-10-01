@@ -81,6 +81,8 @@ const ASK_FILES_BUDGET_MS = 60_000;
 const PICK_FIRST_FLOOR = 0.3;
 const PICK_FIRST_MAX_CANDIDATES = 254;
 const SKIPPED_SHOWN = 20;
+/** A path, glob or note past this is not one the agent meant; it would only fill the result. */
+const MAX_PATH_CHARS = 1_024;
 const MAX_CHOICE_OPTIONS = 255;
 
 const COMMAND_HOOKED_REASON =
@@ -654,7 +656,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
         arm: "on",
         tool,
         outcome: answer.outcome,
-        reason: answer.reason,
+        reason: recordedReason(answer.reason),
         jevCalls: call.jevCalls,
         jevAnswered: call.jevAnswered,
         jevUsd: call.jevUsd,
@@ -840,7 +842,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
         USE_READ,
       inputSchema: {
         paths_or_globs: z
-          .array(z.string().min(1))
+          .array(z.string().min(1).max(MAX_PATH_CHARS))
           .min(1)
           .max(50)
           .describe("Files, directories or globs relative to your working directory."),
@@ -963,7 +965,12 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       inputSchema: {
         question: z.string().min(1).describe("The goal, e.g. which file handles token refresh."),
         candidates: z
-          .array(z.object({ path: z.string().min(1), note: z.string().optional() }))
+          .array(
+            z.object({
+              path: z.string().min(1).max(MAX_PATH_CHARS),
+              note: z.string().max(MAX_PATH_CHARS).optional(),
+            }),
+          )
           .min(1)
           .max(PICK_FIRST_MAX_CANDIDATES),
         include_probabilities: z.boolean().optional(),
@@ -1031,7 +1038,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
           .optional()
           .describe("What only you can say, up to 8 KB. Not file contents or command output."),
         paths: z
-          .array(z.string().min(1))
+          .array(z.string().min(1).max(MAX_PATH_CHARS))
           .max(50)
           .optional()
           .describe("Files for code to read into files[path]; up to 20."),
@@ -1128,14 +1135,18 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       if (ran.kind === "refused") return refused(ran.reason);
       output = ran.output;
       parts.push({
-        name: `output of \`${truncate(command, 80)}\``,
+        name: "the command's output",
         bytes: stateBytes(output),
         kind: "output",
       });
     }
     if (parts.length === 0) {
-      const reasons = files.skipped.map((skip) => `${skip.path}: ${skip.reason}`).join("; ");
-      return refused(`ask_jev: nothing left to judge; every path was skipped (${reasons})`);
+      const shown = files.skipped.slice(0, SKIPPED_SHOWN);
+      const reasons = shown.map((skip) => `${skip.path}: ${skip.reason}`).join("; ");
+      const rest = files.skipped.length - shown.length;
+      return refused(
+        `ask_jev: nothing left to judge; every path was skipped (${reasons}${rest > 0 ? `; and ${rest} more` : ""})`,
+      );
     }
     const total = parts.reduce((sum, part) => sum + part.bytes, 0);
     if (total > STATE_MAX_BYTES) return refused(overflowMessage(parts, STATE_MAX_BYTES));
@@ -1220,11 +1231,15 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
   );
 
   async function diffRisk(call: ToolCall, input: { base?: string }): Promise<ToolAnswer> {
+    // Which commits were judged, from git, not the agent's `base`: a later reader can tell a
+    // diff against HEAD itself ("no changes") from a real one.
+    let shas: { baseSha?: string; mergeBaseSha?: string; headSha?: string } = {};
     const finish = (result: DiffRiskResult, callId: string | null): ToolAnswer => {
       call.diffRisk = {
         risk: result.risk,
         needsFullReview: result.needs_full_review,
         forcedBy: result.forced_by,
+        ...shas,
       };
       if (callId) {
         jev.decisions.record({
@@ -1254,6 +1269,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     });
     if (!collected.ok) return failed(`git: ${collected.reason}`);
     const diff = collected.diff;
+    shas = { baseSha: diff.baseSha, mergeBaseSha: diff.mergeBaseSha, headSha: diff.headSha };
     const stats = {
       base: diff.base,
       files: diff.paths.length,
@@ -1492,6 +1508,15 @@ export function rankResults(
     if (valueA !== valueB) return valueB - valueA;
     return a.path.localeCompare(b.path);
   });
+}
+
+/**
+ * The reason as `tool-use.jsonl` keeps it: its first line, cut at 200 characters. The gate's
+ * denial quotes the command on its second line, and the record never holds command text.
+ */
+function recordedReason(reason: string | null): string | null {
+  if (reason === null) return null;
+  return truncate(reason.split("\n")[0] ?? "", 200);
 }
 
 function normalizeReason(reason: string): string {

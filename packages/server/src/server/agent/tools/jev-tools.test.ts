@@ -726,7 +726,7 @@ describe("feature 6b: ask_jev_diff_risk", () => {
       action: expect.stringMatching(/^no review added/),
     });
     const [record] = await records(useLog);
-    expect(record!.diffRisk).toEqual({ risk: 0, needsFullReview: false, forcedBy: [] });
+    expect(record!.diffRisk).toMatchObject({ risk: 0, needsFullReview: false, forcedBy: [] });
   });
 
   test("a sensitive path forces review whatever JEV says, hostile commit message included", async () => {
@@ -1034,5 +1034,72 @@ describe("the D8 record's token estimate", () => {
       avoidedOutputBytes: "ok\nwarn\n".length,
       readTokensAvoided: Math.ceil("ok\nwarn\n".length / 2.35),
     });
+  });
+});
+
+describe("what stays in the agent's context and the D8 record (L2, L3)", () => {
+  const questions = { q: { type: "noul", instructions: "Did `output` pass?" } };
+
+  test("every path skipped: the refusal names 20 and counts the rest, under the default cap", async () => {
+    const names = Array.from({ length: 30 }, (_, i) => `ignored-${String(i).padStart(2, "0")}.log`);
+    write(".gitignore", "ignored.txt\n*.log\n");
+    for (const name of names) write(name, "x\n");
+    const { catalog } = await setup();
+    const result = await catalog.executeTool("ask_jev", {
+      questions_json: questions,
+      paths: names,
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain("ignored-19.log");
+    expect(text(result)).not.toContain("ignored-20.log");
+    expect(text(result)).toContain("and 10 more");
+    expect(text(result).length).toBeLessThanOrEqual(JEV_TOOL_RESULT_CAP);
+  });
+
+  test("a path or glob longer than 1,024 characters is refused by the schema", async () => {
+    const { catalog, jev } = await setup();
+    await expect(
+      catalog.executeTool("ask_jev_files", {
+        paths_or_globs: [`src/${"x".repeat(1100)}`],
+        questions_json: questions,
+      }),
+    ).rejects.toThrow(/1024/);
+    expect(sent(jev)).toEqual([]);
+  });
+
+  test("the record's reason never carries the command's text", async () => {
+    const command = "echo do-not-record-this-command";
+    const gate: CommandGate = async () => ({
+      allowed: false,
+      reason: `Blocked by the catastrophe gate (rule: test): a test.\nCommand: ${command}`,
+    });
+    const refusedSetup = await setup({ deps: { commandGate: gate } });
+    await refusedSetup.catalog.executeTool("ask_jev", { questions_json: questions, command });
+    const big = `head -c 70000 /dev/zero | tr '\\0' 'a'; echo do-not-record-this-command`;
+    const overflowSetup = await setup();
+    const overflow = await overflowSetup.catalog.executeTool("ask_jev", {
+      questions_json: questions,
+      command: big,
+    });
+    expect(text(overflow)).toMatch(/the limit per call/);
+    for (const useLog of [refusedSetup.useLog, overflowSetup.useLog]) {
+      const [record] = await records(useLog);
+      expect(record!.reason).toBeTruthy();
+      expect(record!.reason).not.toContain("do-not-record-this-command");
+    }
+  });
+});
+
+describe("diff risk records which commits it judged (L6)", () => {
+  test("the record carries the base, merge-base and head shas", async () => {
+    git(project, "checkout", "-q", "-b", "feature");
+    write("src/util.ts", "export const add = (a: number, b: number) => b + a;\n");
+    git(project, "commit", "-q", "-am", "Swap operands in add");
+    const { catalog, useLog } = await setup();
+    json(await catalog.executeTool("ask_jev_diff_risk", { base: "main" }));
+    const [record] = await records(useLog);
+    const main = git(project, "rev-parse", "main").trim();
+    const head = git(project, "rev-parse", "HEAD").trim();
+    expect(record!.diffRisk).toMatchObject({ baseSha: main, mergeBaseSha: main, headSha: head });
   });
 });

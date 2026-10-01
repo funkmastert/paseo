@@ -124,6 +124,9 @@ export interface CollectedDiff {
   top: string;
   base: string;
   baseSha: string;
+  /** What `base...HEAD` diffs from; empty when the histories share no commit. */
+  mergeBaseSha: string;
+  headSha: string;
   paths: Array<{ status: string; path: string }>;
   lines: number;
   diff: string;
@@ -151,6 +154,8 @@ export async function collectDiff(input: {
   if (!resolved.ok) return resolved;
   const { base, baseSha } = resolved;
   const range = `${baseSha}...HEAD`;
+  const head = await git(["rev-parse", "--verify", "HEAD"], { cwd });
+  const mergeBase = await git(["merge-base", baseSha, "HEAD"], { cwd });
   const common = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames"];
   const nameStatus = await git([...common, "--name-status", "-z", range], { cwd });
   const numstat = await git([...common, "--numstat", "-z", range], { cwd });
@@ -176,6 +181,8 @@ export async function collectDiff(input: {
       top: cwd,
       base,
       baseSha,
+      mergeBaseSha: mergeBase.code === 0 ? mergeBase.stdout.trim() : "",
+      headSha: head.stdout.trim(),
       paths: parseNameStatus(nameStatus.stdout),
       lines: countChangedLines(numstat.stdout),
       diff: patch.stdout,

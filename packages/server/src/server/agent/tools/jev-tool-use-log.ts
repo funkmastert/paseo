@@ -74,7 +74,15 @@ export interface JevToolUseRecord {
   /** SHA-256 of `ask_jev`'s command, so the report can match a later Bash call without storing it. */
   commandSha256: string | null;
   /** `ask_jev_diff_risk` only. */
-  diffRisk: { risk: number | null; needsFullReview: boolean; forcedBy: string[] } | null;
+  diffRisk: {
+    risk: number | null;
+    needsFullReview: boolean;
+    forcedBy: string[];
+    /** The commits judged, resolved by git; absent when git could not produce the diff. */
+    baseSha?: string;
+    mergeBaseSha?: string;
+    headSha?: string;
+  } | null;
   elapsedMs: number;
 }
 
