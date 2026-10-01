@@ -35,6 +35,9 @@ export function jevFeatureLabel(feature: string): string {
   return JEV_FEATURE_LABELS[feature] ?? feature;
 }
 
+// TODO(jev-ui-fix F5): read the mode off the note itself once the savings track adds it to
+// JevDecisionNote, instead of the host's current status, which can disagree with the mode the
+// decision was actually made under.
 function tagFor(record: JevDecisionRecord, status: JevStatus | null): JevDecisionTag | null {
   if (record.applied) return null;
   if (status === null) return null;
