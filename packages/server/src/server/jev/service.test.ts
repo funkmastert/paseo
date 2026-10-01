@@ -336,6 +336,20 @@ describe("JevService: lanes, budgets and circuits", () => {
     expect(service.status().lanes.control.exhausted).toBe(false);
   });
 
+  it("status says the agent tools are served only once bootstrap says it registers them", () => {
+    const { service } = makeHarness({});
+    expect(service.status().agentTools.served).toBe(false);
+    let served = true;
+    service.setAgentToolsServed(() => served);
+    expect(service.status().agentTools.served).toBe(true);
+    served = false;
+    expect(service.status().agentTools.served).toBe(false);
+    service.setAgentToolsServed(() => {
+      throw new Error("config unreadable");
+    });
+    expect(service.status().agentTools.served).toBe(false);
+  });
+
   it("a full agentTools lane leaves a spawn hint answered", async () => {
     const { service, home, transport } = makeHarness({
       config: { agentTools: { maxConcurrent: 1 } },
@@ -635,6 +649,24 @@ describe("JevService: spend is reserved before a call is sent", () => {
     expect(kindAndReason(await triage())).toBe("unavailable:daily-budget");
     expect(service.status().lanes.control.exhausted).toBe(true);
     expect(transport.sends).toBeLessThanOrEqual(20);
+  });
+
+  it("isActive with a caller answers false once that caller's hour is spent, and only for it", async () => {
+    const transport = costReportingTransport(0.05);
+    const { service, home } = makeHarness({
+      transport,
+      key: FAKE_KEY,
+      extra: { scopeChecker: OPEN_SCOPE },
+    });
+    expect(service.isActive("agentTools", { callerAgentId: "agent-A" })).toBe(true);
+    expect((await service.decide(toolsCall(home, 1, { callerAgentId: "agent-A" }))).kind).toBe(
+      "answered",
+    );
+    expect(service.isActive("agentTools", { callerAgentId: "agent-A" })).toBe(false);
+    expect(service.isActive("agentTools", { callerAgentId: "agent-B" })).toBe(true);
+    expect(service.isActive("agentTools")).toBe(true);
+    // Other lanes never read the caller's tools budget.
+    expect(service.isActive("spawnHint", { callerAgentId: "agent-A" })).toBe(true);
   });
 
   it("agentTools calls that name no agent share one unattributed hourly cap", async () => {

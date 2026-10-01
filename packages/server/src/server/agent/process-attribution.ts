@@ -115,9 +115,19 @@ function findOrphanBuildDaemons(
   return { count: daemonRows.length, rssBytes, pids };
 }
 
+export interface AttributeProcessTreesOptions {
+  /**
+   * Processes the daemon itself started on an agent's behalf (`ask_jev`'s command), by agent.
+   * They are the daemon's children, not the agent CLI's, so no marker or ppid walk finds them;
+   * each is a second root of the agent's tree (agent/agent-side-processes.ts).
+   */
+  extraRoots?: ReadonlyMap<string, readonly number[]>;
+}
+
 export function attributeProcessTrees(
   rows: readonly ProcessSampleRow[],
   agentIds: readonly string[],
+  options: AttributeProcessTreesOptions = {},
 ): AttributeProcessTreesResult {
   const rowsByPid = new Map(rows.map((row) => [row.pid, row] as const));
   const childrenByPpid = buildChildrenByPpid(rows);
@@ -125,9 +135,21 @@ export function attributeProcessTrees(
 
   const agentTrees: AgentProcessTree[] = [];
   for (const agentId of agentIds) {
-    const rootPid = findRootPid(rows, agentId);
-    if (rootPid === undefined) continue;
-    const treeRows = collectDescendants(rootPid, rowsByPid, childrenByPpid);
+    const markerRoot = findRootPid(rows, agentId);
+    const roots = [
+      ...(markerRoot === undefined ? [] : [markerRoot]),
+      ...(options.extraRoots?.get(agentId) ?? []),
+    ];
+    const treeRows: ProcessSampleRow[] = [];
+    const inTree = new Set<number>();
+    for (const root of roots) {
+      for (const row of collectDescendants(root, rowsByPid, childrenByPpid)) {
+        if (inTree.has(row.pid)) continue;
+        inTree.add(row.pid);
+        treeRows.push(row);
+      }
+    }
+    if (treeRows.length === 0) continue;
     for (const row of treeRows) attributedPids.add(row.pid);
     const { rssBytes, cpuPercent, pids } = summarize(treeRows);
     agentTrees.push({ agentId, rssBytes, cpuPercent, pids });

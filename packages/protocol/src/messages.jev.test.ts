@@ -182,6 +182,22 @@ describe("jev.status", () => {
     expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
   });
 
+  test("carries agentTools.served from a daemon with the tools, and parses one without it", () => {
+    const served = { ...status, agentTools: { assignShare: 0.5, served: true } };
+    const message = {
+      type: "jev.status.response",
+      payload: { requestId: "req-1", status: served },
+    };
+    expect(SessionOutboundMessageSchema.parse(message)).toEqual(message);
+    const parsed = SessionOutboundMessageSchema.parse({
+      type: "jev.status.response",
+      payload: { requestId: "req-1", status },
+    });
+    expect(parsed.type === "jev.status.response" && parsed.payload.status.agentTools).toEqual({
+      assignShare: 0.5,
+    });
+  });
+
   test("accepts a lane and a circuit state this client does not know", () => {
     const message = {
       type: "jev.status.response",

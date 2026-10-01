@@ -47,10 +47,21 @@ export interface JevToolUseRecord {
   /** Characters of the tool result the agent received: what stays in its context. */
   resultChars: number;
   /**
-   * What reading the same content would have cost the agent, in tokens (`estimateReadTokens`):
-   * every file sent to JEV, plus a command's output. Zero when nothing was read.
+   * What reading the same content would have cost the agent, in tokens (`estimateReadTokens` for
+   * files, `estimateOutputTokens` for a command's output): every file sent to JEV, plus a
+   * command's output. Zero when nothing was read.
    */
   readTokensAvoided: number;
+  /**
+   * The raw counts behind `readTokensAvoided`, so a later formula can recompute it at another
+   * rate. Absent from records written before they existed. Files: characters, UTF-8 bytes and
+   * lines of every file sent. Output: characters and UTF-8 bytes of stdout plus stderr.
+   */
+  avoidedFileChars?: number;
+  avoidedFileBytes?: number;
+  avoidedFileLines?: number;
+  avoidedOutputChars?: number;
+  avoidedOutputBytes?: number;
   /**
    * The caller's context size when it called: the tokens the extra model step re-reads. Null when
    * the provider has not reported usage yet.
@@ -68,19 +79,37 @@ export interface JevToolUseRecord {
 }
 
 /**
- * Tokens the agent would have spent reading `content` with Read: about 3.5 bytes a token for code
- * and prose, plus one token a line for Read's line-number prefix. An estimate, recorded the same
- * way for every call, so the arms compare like with like.
+ * Characters per Claude token in a tool result: the fleet's calibrated median (p10 2.10, p90
+ * 2.62, n = 1,463; docs/jev.md, "The savings ledger"). The one place this track keeps the rate;
+ * the savings ledger uses the same number for every feature.
+ */
+export const CLAUDE_CHARS_PER_TOKEN = 2.35;
+/** Read prefixes every line with its number and a tab: about 7 characters a line. */
+export const READ_LINE_PREFIX_CHARS = 7;
+
+export function countLines(content: string): number {
+  if (content.length === 0) return 0;
+  let lines = 1;
+  for (let i = 0; i < content.length; i += 1) if (content.charCodeAt(i) === 10) lines += 1;
+  return lines;
+}
+
+/**
+ * Tokens the agent would have spent reading `content` with Read: its characters plus Read's
+ * line-number prefix, at `CLAUDE_CHARS_PER_TOKEN`. An estimate, recorded the same way for every
+ * call, so the arms compare like with like.
  */
 export function estimateReadTokens(content: string): number {
   if (content.length === 0) return 0;
-  const bytes = Buffer.byteLength(content, "utf8");
-  let lines = 1;
-  for (let i = 0; i < content.length; i += 1) if (content.charCodeAt(i) === 10) lines += 1;
-  return Math.ceil(bytes / READ_BYTES_PER_TOKEN) + lines;
+  const chars = content.length + READ_LINE_PREFIX_CHARS * countLines(content);
+  return Math.ceil(chars / CLAUDE_CHARS_PER_TOKEN);
 }
 
-const READ_BYTES_PER_TOKEN = 3.5;
+/** Tokens a command's output would have cost the agent through Bash: its characters alone. */
+export function estimateOutputTokens(output: string): number {
+  return Math.ceil(output.length / CLAUDE_CHARS_PER_TOKEN);
+}
+
 const DEFAULT_MAX_BYTES = 4_000_000;
 export const JEV_TOOL_USE_FILE = "tool-use.jsonl";
 export const JEV_TOOL_USE_ROTATED_FILE = "tool-use.1.jsonl";

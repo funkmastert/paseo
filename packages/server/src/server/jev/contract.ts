@@ -303,8 +303,11 @@ export interface JevStatus {
   lanes: Record<JevLane, JevLaneStatus>;
   /** Read by the account-pool plugin on its 60-second poll. */
   spawnHint: { applyHard: boolean; applyRole: boolean };
-  /** Read by the account-pool plugin to split eligible creates into the D8 arms. */
-  agentTools: { assignShare: number };
+  /**
+   * Read by the account-pool plugin to split eligible creates into the D8 arms. `served`: this
+   * daemon registers the JEV agent tools for agents labelled `on`.
+   */
+  agentTools: { assignShare: number; served: boolean };
   todayByFeature: Record<JevFeatureId, JevSpendTotals>;
   last7Days: JevDaySpend[];
 }
@@ -323,7 +326,7 @@ export interface JevService {
    * the lane's budget and circuit). Call sites use it to skip building state when the answer would
    * be `unavailable`.
    */
-  isActive(feature: JevFeatureId): boolean;
+  isActive(feature: JevFeatureId, options?: { callerAgentId?: string }): boolean;
   /**
    * The D7 check alone, for call sites that would otherwise read files or a timeline for an
    * excluded subject. Any error answers `excluded`.

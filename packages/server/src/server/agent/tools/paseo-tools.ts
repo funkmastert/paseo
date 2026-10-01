@@ -91,7 +91,7 @@ import {
 } from "../../worktree/commands.js";
 import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
-import { hasJevToolsLabel, registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
+import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
 import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
@@ -1307,13 +1307,14 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     });
   }
 
-  // Only for callers labelled `paseo.jev-tools: on` at create, so a reload or resume lists the same
-  // tools. The labels are read without `resolveCallerAgent`, which throws for an agent missing from
-  // the manager: a failed lookup withholds the JEV tools, never the rest of the catalog.
+  // Only for callers `JevToolsEligibility` decided at first sight (labelled `on`, Read allowed,
+  // D7 ok), primed before this build, so a reload, resume or relabel lists the same tools. The
+  // caller is read without `resolveCallerAgent`, which throws for an agent missing from the
+  // manager: a failed lookup withholds the JEV tools, never the rest of the catalog.
   if (options.jevTools && callerAgentId) {
     const jevTools = options.jevTools;
     try {
-      if (hasJevToolsLabel(agentManager.getAgent(callerAgentId)?.labels)) {
+      if (jevTools.eligibility.eligible(callerAgentId)) {
         registerJevTools({
           registerTool,
           deps: jevTools,
@@ -1323,7 +1324,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
             if (!agent) return null;
             return {
               id: agent.id,
+              provider: agent.provider,
               cwd: agent.cwd,
+              launchEnv: agentManager.getAgentLaunchEnv(agent.id) ?? null,
               labels: agent.labels,
               providerOptions: agent.config?.providerOptions,
               contextTokens: agent.lastUsage?.contextWindowUsedTokens ?? null,

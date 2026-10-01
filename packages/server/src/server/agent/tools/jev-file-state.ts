@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants as fsConstants, promises as fs } from "node:fs";
+import { existsSync, constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -807,44 +807,170 @@ function normalizeDenyPattern(raw: string, context: { cwd: string; homeDir: stri
   return path.join(context.cwd, pattern);
 }
 
+/** One Claude settings file: its parsed JSON, and the project root it governs when it is a project's. */
+export interface ClaudeSettingsFile {
+  path: string;
+  /** `<root>/.claude/settings*.json` governs `root`; account and managed settings govern no root. */
+  root: string | null;
+  settings: unknown;
+}
+
+export interface CallerDenials {
+  read: JevReadDenials;
+  bashDenied: boolean;
+  sandboxed: boolean;
+  /** A PreToolUse hook in a settings file matches Bash: it runs on the agent's Bash, not here. */
+  bashHooked: boolean;
+}
+
 /**
  * Collects what the caller's configuration denies: `paseo.tools-denied`, and for Claude agents
  * `disallowedTools`, `settings.permissions.deny`, both `sandbox.filesystem.denyRead` lists, and
- * whether either sandbox is on.
+ * whether either sandbox is on; then the same keys, plus PreToolUse hooks on Bash, from the
+ * Claude settings files the CLI itself reads (`readClaudeSettingsFiles`).
  * Anything it cannot parse is ignored; the agent's own tools enforce those rules either way.
  */
 export function readCallerDenials(input: {
   toolsDeniedLabel: string | undefined;
   providerOptions: unknown;
-}): { read: JevReadDenials; bashDenied: boolean; sandboxed: boolean } {
-  const toolRules = [
+  settingsFiles?: readonly ClaudeSettingsFile[];
+}): CallerDenials {
+  const files = input.settingsFiles ?? [];
+  const toolRules: Array<{ rule: string; root: string | null }> = [
     ...(input.toolsDeniedLabel ?? "").split(","),
     ...stringArray(pick(input.providerOptions, ["disallowedTools"])),
     ...stringArray(pick(input.providerOptions, ["settings", "permissions", "deny"])),
-  ]
-    .map((rule) => rule.trim())
-    .filter((rule) => rule.length > 0);
+  ].map((rule) => ({ rule, root: null }));
   const patterns = [
     ...stringArray(pick(input.providerOptions, ["sandbox", "filesystem", "denyRead"])),
     ...stringArray(pick(input.providerOptions, ["settings", "sandbox", "filesystem", "denyRead"])),
   ];
+  let sandboxed =
+    pick(input.providerOptions, ["sandbox", "enabled"]) === true ||
+    pick(input.providerOptions, ["settings", "sandbox", "enabled"]) === true;
+  let bashHooked = false;
+  for (const file of files) {
+    for (const rule of stringArray(pick(file.settings, ["permissions", "deny"]))) {
+      toolRules.push({ rule, root: file.root });
+    }
+    for (const entry of stringArray(pick(file.settings, ["sandbox", "filesystem", "denyRead"]))) {
+      patterns.push(rootedPattern(entry, file.root));
+    }
+    if (pick(file.settings, ["sandbox", "enabled"]) === true) sandboxed = true;
+    if (hooksBash(pick(file.settings, ["hooks", "PreToolUse"]))) bashHooked = true;
+  }
   let all = false;
   let bashDenied = false;
-  for (const rule of toolRules) {
+  for (const { rule: raw, root } of toolRules) {
+    const rule = raw.trim();
     if (rule === "Read") all = true;
     const scoped = /^Read\((.*)\)$/s.exec(rule);
     if (scoped) {
       const spec = scoped[1]!.trim();
       if (spec === "" || spec === "*" || spec === "**" || spec === "//**") all = true;
-      else patterns.push(spec);
+      else patterns.push(rootedPattern(spec, root));
     }
     // A command-scoped Bash rule is refused whole: code cannot tell which commands it covers.
     if (rule === "Bash" || rule.startsWith("Bash(")) bashDenied = true;
   }
-  const sandboxed =
-    pick(input.providerOptions, ["sandbox", "enabled"]) === true ||
-    pick(input.providerOptions, ["settings", "sandbox", "enabled"]) === true;
-  return { read: { all, patterns }, bashDenied, sandboxed };
+  return { read: { all, patterns }, bashDenied, sandboxed, bashHooked };
+}
+
+/**
+ * A project settings file's relative rule is relative to the project it sits in, which is not
+ * always the agent's cwd; it becomes absolute (`//…`). Bare names, `~/` and `//` stay as written.
+ */
+function rootedPattern(spec: string, root: string | null): string {
+  const pattern = spec.trim();
+  if (!root || pattern.startsWith("//") || pattern === "~" || pattern.startsWith("~/")) {
+    return pattern;
+  }
+  if (!pattern.includes("/")) return pattern;
+  const absolute = path.join(root, pattern.replace(/^\.?\//, ""));
+  return absolute.startsWith("/") ? `/${absolute}` : absolute;
+}
+
+/** A PreToolUse matcher that is empty, `*`, or a pattern `Bash` matches, as the CLI reads it. */
+function hooksBash(value: unknown): boolean {
+  if (!Array.isArray(value)) return false;
+  return value.some((entry) => {
+    const matcher = pick(entry, ["matcher"]);
+    if (matcher === undefined || matcher === null || matcher === "" || matcher === "*") return true;
+    if (typeof matcher !== "string") return true;
+    try {
+      return new RegExp(`^(?:${matcher})$`).test("Bash");
+    } catch {
+      // A matcher the CLI might read differently: assume it covers Bash.
+      return true;
+    }
+  });
+}
+
+/** Where the CLI reads managed settings, per platform. */
+export function defaultClaudeManagedSettingsPaths(platform: NodeJS.Platform): string[] {
+  if (platform === "darwin")
+    return ["/Library/Application Support/ClaudeCode/managed-settings.json"];
+  if (platform === "win32") {
+    return [
+      "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+      "C:\\ProgramData\\ClaudeCode\\managed-settings.json",
+    ];
+  }
+  return ["/etc/claude-code/managed-settings.json"];
+}
+
+/**
+ * The Claude settings files whose deny rules, sandbox and hooks bind the agent's own tools:
+ * `.claude/settings.json` and `settings.local.json` in its cwd and each parent up to the git
+ * work tree's top (all of them, so a rule is never missed for the cwd it was launched from),
+ * the account's `settings.json` in `CLAUDE_CONFIG_DIR`, and managed settings. A missing or
+ * unparsable file contributes nothing.
+ */
+export async function readClaudeSettingsFiles(input: {
+  cwd: string;
+  configDir: string;
+  managedPaths: readonly string[];
+  homeDir: string;
+}): Promise<ClaudeSettingsFile[]> {
+  const candidates: Array<{ path: string; root: string | null }> = [];
+  for (const root of projectRoots(input.cwd, input.homeDir)) {
+    for (const name of ["settings.json", "settings.local.json"]) {
+      candidates.push({ path: path.join(root, ".claude", name), root });
+    }
+  }
+  candidates.push({ path: path.join(input.configDir, "settings.json"), root: null });
+  for (const managed of input.managedPaths) candidates.push({ path: managed, root: null });
+  const files: ClaudeSettingsFile[] = [];
+  for (const candidate of candidates) {
+    let text: string;
+    try {
+      text = await fs.readFile(candidate.path, "utf8");
+    } catch {
+      continue;
+    }
+    try {
+      files.push({ ...candidate, settings: JSON.parse(text) as unknown });
+    } catch {
+      continue;
+    }
+  }
+  return files;
+}
+
+/** The cwd, then each parent up to the first holding `.git`; never home or above it. */
+function projectRoots(cwd: string, homeDir: string): string[] {
+  const roots: string[] = [];
+  let current = path.resolve(cwd);
+  const home = path.resolve(homeDir);
+  for (let depth = 0; depth < 32; depth += 1) {
+    if (current === home || isSameOrDescendantPath(current, home)) break;
+    roots.push(current);
+    if (existsSync(path.join(current, ".git"))) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return roots;
 }
 
 function pick(value: unknown, keys: string[]): unknown {

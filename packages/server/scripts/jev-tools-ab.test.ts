@@ -237,8 +237,9 @@ describe("the report", () => {
       agents: 2,
       jevToolCalls: 3,
       toolSearchSteps: 1,
-      readTokens: 100,
-      bashReadTokens: 200,
+      // Tool results are counted at the fleet's 2.35 characters a token.
+      readTokens: Math.ceil(400 / 2.35),
+      bashReadTokens: Math.ceil(800 / 2.35),
     });
     expect(control.agents).toBe(2);
     expect(on.meanWeightedPerHour).toBeLessThan(control.meanWeightedPerHour);

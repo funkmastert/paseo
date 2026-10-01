@@ -90,6 +90,40 @@ describe("attributeProcessTrees", () => {
     ]);
   });
 
+  test("a process the daemon runs for an agent (an ask_jev command) is charged to that agent", () => {
+    const rows: ProcessSampleRow[] = [
+      row({ pid: 100, ppid: 1, command: "node daemon.js" }),
+      row({
+        pid: 200,
+        ppid: 100,
+        rssKb: 50_000,
+        cpuPercent: 10,
+        command: "claude --mcp-config url=http://localhost/mcp/agents?callerAgentId=agent-1",
+      }),
+      // The daemon's child, not the agent's: no marker, parent is the daemon.
+      row({ pid: 300, ppid: 100, rssKb: 10_000, cpuPercent: 40, command: "/bin/bash -c npm test" }),
+      row({ pid: 301, ppid: 300, rssKb: 90_000, cpuPercent: 300, command: "node vitest" }),
+      row({ pid: 400, ppid: 100, rssKb: 5_000, cpuPercent: 1, command: "/bin/bash -c ls" }),
+    ];
+
+    const result = attributeProcessTrees(rows, ["agent-1", "agent-2"], {
+      extraRoots: new Map([
+        ["agent-1", [300]],
+        ["agent-2", [400, 999]],
+      ]),
+    });
+
+    expect(result.agentTrees).toEqual([
+      {
+        agentId: "agent-1",
+        rssBytes: (50_000 + 10_000 + 90_000) * 1024,
+        cpuPercent: 350,
+        pids: [200, 300, 301],
+      },
+      { agentId: "agent-2", rssBytes: 5_000 * 1024, cpuPercent: 1, pids: [400] },
+    ]);
+  });
+
   test("an agent with no matching process is omitted rather than reported as zero", () => {
     const rows: ProcessSampleRow[] = [row({ pid: 10, command: "unrelated" })];
 

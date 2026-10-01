@@ -1286,6 +1286,7 @@ export class AgentManager {
   private paseoToolsEnabled = true;
   private paseoToolCatalogFactory: PaseoToolCatalogFactory | null = null;
   private readonly paseoToolPolicies = new Map<string, ProviderPaseoToolsPolicy | undefined>();
+  private readonly launchEnvs = new Map<string, Readonly<Record<string, string>>>();
   /** Per agent, the gateway servers its current launch was given (docs/mcp-gateway.md). */
   private readonly brokeredMcpServerNames = new Map<string, ReadonlySet<string>>();
   private readonly resolvePaseoToolPolicy: (
@@ -1714,6 +1715,15 @@ export class AgentManager {
 
   getPaseoToolPolicy(agentId: string): ProviderPaseoToolsPolicy | undefined {
     return this.paseoToolPolicies.get(agentId);
+  }
+
+  /**
+   * The env the agent's provider was last launched with (`buildLaunchContext`): its create env
+   * after the plugins' `agent.session_open` transform, plus `PASEO_AGENT_ID` and `PASEO_AGENT_CWD`.
+   * What `ask_jev`'s command runs with, so it sees what the agent's own Bash sees.
+   */
+  getAgentLaunchEnv(agentId: string): Readonly<Record<string, string>> | undefined {
+    return this.launchEnvs.get(agentId);
   }
 
   /**
@@ -2575,7 +2585,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       options?.env,
-      { reason: "create", purpose: "interactive", workspaceId: options.workspaceId ?? null },
+      {
+        reason: "create",
+        purpose: "interactive",
+        workspaceId: options.workspaceId ?? null,
+        ...(options.labels ? { labels: options.labels } : {}),
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     const createOptions = this.buildCreateSessionOptions(options);
@@ -2700,6 +2715,7 @@ export class AgentManager {
         reason: "resume",
         purpose: resumeOptions?.purpose ?? "interactive",
         workspaceId: options?.workspaceId ?? null,
+        ...(options?.labels ? { labels: options.labels } : {}),
       },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
@@ -2869,7 +2885,12 @@ export class AgentManager {
       storedConfig.cwd,
       paseoToolPolicy,
       undefined,
-      { reason: "refresh", purpose: "interactive", workspaceId: existing.workspaceId },
+      {
+        reason: "refresh",
+        purpose: "interactive",
+        workspaceId: existing.workspaceId,
+        labels: existing.labels,
+      },
     );
     const providerLaunchConfig = this.resolveProviderLaunchConfig(launchConfig, launchContext);
     if (
@@ -5571,6 +5592,7 @@ export class AgentManager {
   private discardRetainedAgentState(agentId: string): void {
     this.timelineStore.delete(agentId);
     this.paseoToolPolicies.delete(agentId);
+    this.launchEnvs.delete(agentId);
     for (const event of this.providerSubagents.deleteParent(agentId)) {
       this.dispatch({ type: "provider_subagent", event });
     }
@@ -7317,6 +7339,8 @@ export class AgentManager {
       reason: PluginSessionOpenRequest["reason"];
       purpose: PluginSessionOpenRequest["purpose"];
       workspaceId?: string | null;
+      /** The agent's labels: at create the agent is not in the manager yet for the catalog to read. */
+      labels?: Readonly<Record<string, string>>;
     },
   ): Promise<AgentLaunchContext> {
     if (this.pluginLifecycle) {
@@ -7340,6 +7364,7 @@ export class AgentManager {
         PASEO_AGENT_CWD: cwd,
       },
     };
+    this.launchEnvs.set(agentId, { ...context.env });
     if (
       this.paseoToolsEnabled &&
       isPaseoToolPolicyEnabled(paseoToolPolicy) &&
@@ -7349,6 +7374,8 @@ export class AgentManager {
       context.paseoTools = await this.paseoToolCatalogFactory({
         callerAgentId: agentId,
         paseoToolPolicy,
+        callerCwd: cwd,
+        ...(opening?.labels ? { callerLabels: opening.labels } : {}),
       });
     }
     return context;

@@ -17,6 +17,12 @@ import type {
   JevUnavailableReason,
 } from "../../jev/contract.js";
 import { choice, noul, score, validateJevRequest } from "../../jev/wire.js";
+import type { AgentSideProcesses } from "../agent-side-processes.js";
+import type { DeviceLaunchGate } from "../device-lease-manager.js";
+import {
+  createProviderEnv,
+  type AgentProviderRuntimeSettingsMap,
+} from "../provider-launch-config.js";
 import { runJevCommand, type JevCommandOutput } from "./jev-command.js";
 import {
   collectDiff,
@@ -27,15 +33,20 @@ import {
   type DiffRiskResult,
 } from "./jev-diff-risk.js";
 import {
+  defaultClaudeManagedSettingsPaths,
   JEV_FILES_CAP,
   JevFileScope,
   readCallerDenials,
+  readClaudeSettingsFiles,
+  type CallerDenials,
   type JevFileContent,
   type JevFileRef,
   type JevFileSkip,
   type JevGitRunner,
 } from "./jev-file-state.js";
 import {
+  countLines,
+  estimateOutputTokens,
   estimateReadTokens,
   type JevToolName,
   type JevToolUseLog,
@@ -54,6 +65,7 @@ import type { PaseoToolConfig, PaseoToolExecutionContext, PaseoToolResult } from
 
 export const JEV_TOOLS_LABEL_ON = "on";
 const TOOLS_DENIED_LABEL = "paseo.tools-denied";
+const PARENT_AGENT_LABEL = "paseo.parent-agent-id";
 
 /** A result stays in the agent's context for the rest of its session; ~2K tokens by default. */
 export const JEV_TOOL_RESULT_CAP = 8_000;
@@ -71,6 +83,9 @@ const PICK_FIRST_MAX_CANDIDATES = 254;
 const SKIPPED_SHOWN = 20;
 const MAX_CHOICE_OPTIONS = 255;
 
+const COMMAND_HOOKED_REASON =
+  "a PreToolUse hook in your Claude settings checks your Bash commands, and ask_jev cannot run it; run it with Bash";
+
 const USE_READ =
   "Use Read when you need the code itself, to edit or quote it. Use grep for exact strings.";
 
@@ -78,6 +93,16 @@ export interface JevToolsDependencies {
   jev: JevService;
   /** `createCatastropheCommandGate` from `jev/command-gate.ts`. Null refuses every `command`. */
   commandGate: CommandGate | null;
+  /** The device cap's launch gate, the one the agent's own Bash goes through. Null: no cap. */
+  deviceGate: DeviceLaunchGate | null;
+  /** Which agents are listed the tools, decided once per agent (`JevToolsEligibility`). */
+  eligibility: JevToolsEligibility;
+  /** Where `command`'s process tree is charged to its agent for the resource monitor. */
+  agentSideProcesses?: AgentSideProcesses | null;
+  /** `agentProviderSettings`: each provider's configured env, part of what its agents' Bash gets. */
+  providerRuntimeSettings?: AgentProviderRuntimeSettingsMap;
+  /** Test seam: managed settings files; defaults to the CLI's per-platform paths. */
+  claudeManagedSettingsPaths?: readonly string[];
   paseoHome: string;
   /** `worktreesRoot` from the daemon config: Paseo worktrees are readable inside `$PASEO_HOME`. */
   worktreesRoot?: string | undefined;
@@ -87,14 +112,24 @@ export interface JevToolsDependencies {
   platform?: NodeJS.Platform;
   runGit?: JevGitRunner;
   now?: () => number;
-  /** Test seam: the environment `command` starts from; the JEV key is stripped from it either way. */
+  /**
+   * Test seam: the daemon environment the agent's launch env is laid over, as the provider does;
+   * the JEV key is stripped from it either way.
+   */
   commandBaseEnv?: NodeJS.ProcessEnv;
 }
 
 /** What a tool needs to know about its caller, read fresh at every call. */
 export interface JevToolCaller {
   id: string;
+  provider: string;
   cwd: string;
+  /**
+   * The env the daemon launched the agent's provider with (`AgentManager.getAgentLaunchEnv`): its
+   * create env after the plugins' `agent.session_open` transform, plus `PASEO_AGENT_ID` and
+   * `PASEO_AGENT_CWD`. Null when the daemon has none for it.
+   */
+  launchEnv: Readonly<Record<string, string>> | null;
   labels: Readonly<Record<string, string>>;
   providerOptions?: unknown;
   /** The context the extra model step re-reads (`lastUsage.contextWindowUsedTokens`). */
@@ -123,6 +158,85 @@ export function hasJevToolsLabel(
   labels: Readonly<Record<string, string>> | null | undefined,
 ): boolean {
   return labels?.[JEV_TOOLS_LABEL] === JEV_TOOLS_LABEL_ON;
+}
+
+/** What a catalog build knows about its caller before the agent is in the manager. */
+export interface JevToolsRuntimeCaller {
+  callerAgentId?: string;
+  callerLabels?: Readonly<Record<string, string>>;
+  callerCwd?: string;
+}
+
+/**
+ * Which agents are listed the JEV tools (docs/jev.md, "Which agents get them"). The label is
+ * ordinary and `update_agent` can rewrite it, so the label alone is not eligibility: an agent is
+ * eligible when it carries `on`, its tool profile (`paseo.tools-denied`) does not deny Read, and
+ * the D7 check answers `ok` for its cwd and parent, as the classifier asked at create. The
+ * answer is pinned the first time an agent is seen with its labels, so a relabel later changes
+ * neither its arm nor its tool list (a changed list breaks the prompt cache). Pins last for the
+ * daemon's life; after a restart the agent is decided again from its stored labels.
+ */
+export class JevToolsEligibility {
+  private readonly pinned = new Map<string, boolean>();
+  private readonly pending = new Map<string, Promise<void>>();
+
+  constructor(private readonly options: { jev: Pick<JevService, "checkScope"> }) {}
+
+  /** Decides `callerAgentId` once, before a catalog for it is built. Never throws. */
+  async primeFromRuntime(
+    runtime: JevToolsRuntimeCaller,
+    lookup: (
+      agentId: string,
+    ) => { labels?: Readonly<Record<string, string>>; cwd?: string } | null | undefined,
+  ): Promise<void> {
+    const agentId = runtime.callerAgentId;
+    if (!agentId || this.pinned.has(agentId)) return;
+    let labels = runtime.callerLabels;
+    let cwd = runtime.callerCwd;
+    try {
+      const agent = labels && cwd ? null : lookup(agentId);
+      labels ??= agent?.labels;
+      cwd ??= agent?.cwd;
+    } catch {
+      return;
+    }
+    if (!labels || !cwd) return;
+    const inFlight = this.pending.get(agentId);
+    if (inFlight) return inFlight;
+    const decided = this.decide(agentId, labels, cwd).finally(() => this.pending.delete(agentId));
+    this.pending.set(agentId, decided);
+    return decided;
+  }
+
+  /** Synchronous, for the catalog build: false for an agent never primed. */
+  eligible(agentId: string): boolean {
+    return this.pinned.get(agentId) === true;
+  }
+
+  private async decide(
+    agentId: string,
+    labels: Readonly<Record<string, string>>,
+    cwd: string,
+  ): Promise<void> {
+    if (
+      !hasJevToolsLabel(labels) ||
+      readCallerDenials({
+        toolsDeniedLabel: labels[TOOLS_DENIED_LABEL],
+        providerOptions: undefined,
+      }).read.all
+    ) {
+      this.pinned.set(agentId, false);
+      return;
+    }
+    const parent = labels[PARENT_AGENT_LABEL];
+    let scope: "ok" | "excluded";
+    try {
+      scope = await this.options.jev.checkScope({ cwds: [cwd], agentIds: parent ? [parent] : [] });
+    } catch {
+      scope = "excluded";
+    }
+    if (!this.pinned.has(agentId)) this.pinned.set(agentId, scope === "ok");
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -267,6 +381,11 @@ class ToolCall {
   jevUsd = 0;
   jevInputTokens = 0;
   readTokensAvoided = 0;
+  avoidedFileChars = 0;
+  avoidedFileBytes = 0;
+  avoidedFileLines = 0;
+  avoidedOutputChars = 0;
+  avoidedOutputBytes = 0;
   paths: string[] = [];
   commandSha256: string | null = null;
   diffRisk: JevToolUseRecord["diffRisk"] = null;
@@ -291,8 +410,18 @@ class ToolCall {
   sent(files: JevFileContent[]): void {
     for (const file of files) {
       this.readTokensAvoided += estimateReadTokens(file.content);
+      this.avoidedFileChars += file.content.length;
+      this.avoidedFileBytes += file.bytes;
+      this.avoidedFileLines += countLines(file.content);
       if (this.paths.length < JEV_FILES_CAP) this.paths.push(file.absolutePath);
     }
+  }
+
+  sentOutput(output: JevCommandOutput): void {
+    const text = `${output.stdout}${output.stderr}`;
+    this.readTokensAvoided += estimateOutputTokens(text);
+    this.avoidedOutputChars += text.length;
+    this.avoidedOutputBytes += Buffer.byteLength(text, "utf8");
   }
 }
 
@@ -356,8 +485,11 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
   }
 
   /** Why JEV cannot answer right now, or null when it can. Checked before reading anything. */
-  function inactiveOutcome(): Extract<JevOutcome, { kind: "unavailable" }> | null {
-    if (jev.isActive("agentTools")) return null;
+  /** Includes the caller's own hourly budget, so a spent hour reads and runs nothing. */
+  function inactiveOutcome(
+    caller: JevToolCaller,
+  ): Extract<JevOutcome, { kind: "unavailable" }> | null {
+    if (jev.isActive("agentTools", { callerAgentId: caller.id })) return null;
     let reason: JevUnavailableReason = "disabled";
     try {
       const status = jev.status();
@@ -366,6 +498,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       else if (!status.features.agentTools.enabled) reason = "feature-disabled";
       else if (lane.exhausted) reason = "daily-budget";
       else if (lane.circuit === "open") reason = "circuit-open";
+      else reason = "agent-budget";
     } catch {
       reason = "disabled";
     }
@@ -394,7 +527,9 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       questions: input.questions,
       scope: input.scope,
       subject: { callerAgentId: call.caller.id },
-      callGroup: call.id,
+      // One group per agent, not per tool call: two parallel calls from one agent share its
+      // 2 slots, so no agent holds the whole lane.
+      callGroup: call.caller.id,
       signal: input.signal ?? call.signal,
     });
     call.count(outcome);
@@ -410,11 +545,38 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     return { cwds: [], files, baseCwd: caller.cwd, agentIds: [caller.id] };
   }
 
-  async function openScope(caller: JevToolCaller): Promise<JevFileScope | string> {
-    const denials = readCallerDenials({
+  /** The caller's own rules: labels, provider options, and the Claude settings files it runs under. */
+  async function callerDenials(caller: JevToolCaller): Promise<CallerDenials> {
+    const baseEnv = deps.commandBaseEnv ?? process.env;
+    const configDir =
+      caller.launchEnv?.["CLAUDE_CONFIG_DIR"] ??
+      baseEnv["CLAUDE_CONFIG_DIR"] ??
+      path.join(homeDir, ".claude");
+    const settingsFiles = await readClaudeSettingsFiles({
+      cwd: caller.cwd,
+      configDir,
+      managedPaths: deps.claudeManagedSettingsPaths ?? defaultClaudeManagedSettingsPaths(platform),
+      homeDir,
+    });
+    return readCallerDenials({
       toolsDeniedLabel: caller.labels[TOOLS_DENIED_LABEL],
       providerOptions: caller.providerOptions,
+      settingsFiles,
     });
+  }
+
+  /** The env the caller's own Bash gets: its launch env over the daemon's, as its provider builds it. */
+  function commandEnv(caller: JevToolCaller): NodeJS.ProcessEnv | null {
+    if (!caller.launchEnv) return null;
+    return createProviderEnv({
+      baseEnv: deps.commandBaseEnv ?? process.env,
+      runtimeSettings: deps.providerRuntimeSettings?.[caller.provider],
+      overlays: [caller.launchEnv],
+    });
+  }
+
+  async function openScope(caller: JevToolCaller): Promise<JevFileScope | string> {
+    const denials = await callerDenials(caller);
     const opened = await JevFileScope.open({
       cwd: caller.cwd,
       homeDir,
@@ -499,6 +661,11 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
         jevInputTokens: call.jevInputTokens,
         resultChars,
         readTokensAvoided: call.readTokensAvoided,
+        avoidedFileChars: call.avoidedFileChars,
+        avoidedFileBytes: call.avoidedFileBytes,
+        avoidedFileLines: call.avoidedFileLines,
+        avoidedOutputChars: call.avoidedOutputChars,
+        avoidedOutputBytes: call.avoidedOutputBytes,
         callerContextTokens: caller.contextTokens,
         cwd: caller.cwd,
         paths: call.paths,
@@ -531,7 +698,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     },
     (input: { path: string; question: string; yes?: string; no?: string }, context) =>
       run("ask_jev_file_bool", context, async (call) => {
-        const inactive = inactiveOutcome();
+        const inactive = inactiveOutcome(call.caller);
         if (inactive) return fellBack(inactive, outcomeText(inactive));
         const file = await loadOneFile(call, input.path);
         if ("error" in file) return refused(file.error);
@@ -594,7 +761,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
             `options needs 1 to ${MAX_CHOICE_OPTIONS - 1} entries besides "other" (got ${Object.keys(input.options).length})`,
           );
         }
-        const inactive = inactiveOutcome();
+        const inactive = inactiveOutcome(call.caller);
         if (inactive) return fellBack(inactive, outcomeText(inactive));
         const file = await loadOneFile(call, input.path);
         if ("error" in file) return refused(file.error);
@@ -638,7 +805,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     },
     (input: { path: string; question: string; levels: string[] }, context) =>
       run("ask_jev_file_score", context, async (call) => {
-        const inactive = inactiveOutcome();
+        const inactive = inactiveOutcome(call.caller);
         if (inactive) return fellBack(inactive, outcomeText(inactive));
         const file = await loadOneFile(call, input.path);
         if ("error" in file) return refused(file.error);
@@ -704,7 +871,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
       run("ask_jev_files", context, async (call) => {
         const parsed = parseQuestionsJson(input.questions_json);
         if (!parsed.ok) return refused(parsed.reason);
-        const inactive = inactiveOutcome();
+        const inactive = inactiveOutcome(call.caller);
         if (inactive) return fellBack(inactive, outcomeText(inactive));
         const scope = await openScope(call.caller);
         if (typeof scope === "string") return refused(scope);
@@ -820,7 +987,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
         const paths = Object.keys(criteria);
         if (paths.length === 0) return refused("no usable candidate paths");
         criteria["none"] = "No file in the list fits";
-        const inactive = inactiveOutcome();
+        const inactive = inactiveOutcome(call.caller);
         if (inactive) return fellBack(inactive, outcomeText(inactive));
         const outcome = await decide(call, {
           state: { question: input.question, files: paths },
@@ -891,8 +1058,21 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     if (Object.keys(own.base).length === 0 && !input.paths?.length && !command) {
       return refused("ask_jev: nothing to judge. Pass state, paths or command");
     }
-    const inactive = inactiveOutcome();
+    const inactive = inactiveOutcome(call.caller);
     if (inactive) return fellBack(inactive, outcomeText(inactive));
+    if (command) {
+      // D7 before the command runs: company code never runs here only to be refused after.
+      const scoped = await jev.checkScope({
+        cwds: [call.caller.cwd],
+        files: [],
+        baseCwd: call.caller.cwd,
+        agentIds: [call.caller.id],
+      });
+      if (scoped === "excluded") {
+        const excluded = { kind: "unavailable", callId: "", reason: "excluded" } as const;
+        return fellBack(excluded, outcomeText(excluded));
+      }
+    }
     const assembled = await assembleAskJev(call, own.base, input.paths, command);
     if ("isError" in assembled) return assembled;
     const { files, output } = assembled;
@@ -908,7 +1088,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     });
     if (unanswered(outcome)) return fellBack(outcome, outcomeText(outcome));
     call.sent(files.sent);
-    if (output) call.readTokensAvoided += estimateReadTokens(`${output.stdout}${output.stderr}`);
+    if (output) call.sentOutput(output);
     return ok(
       askJevPayload({
         answers: outcome.answers,
@@ -995,21 +1175,25 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     return result;
   }
 
-  function askJevCommand(call: ToolCall, command: string) {
-    const denials = readCallerDenials({
-      toolsDeniedLabel: call.caller.labels[TOOLS_DENIED_LABEL],
-      providerOptions: call.caller.providerOptions,
-    });
+  async function askJevCommand(call: ToolCall, command: string) {
+    const denials = await callerDenials(call.caller);
     call.commandSha256 = createHash("sha256").update(command, "utf8").digest("hex");
+    if (denials.bashHooked && !denials.bashDenied) {
+      return { kind: "refused" as const, reason: COMMAND_HOOKED_REASON };
+    }
+    const sides = deps.agentSideProcesses;
     return runJevCommand({
       command,
+      agentId: call.caller.id,
       cwd: call.caller.cwd,
       gate: deps.commandGate,
+      deviceGate: deps.deviceGate,
+      env: commandEnv(call.caller),
       bashDenied: denials.bashDenied,
       unattended: call.caller.unattended,
       sandboxed: denials.sandboxed,
+      ...(sides ? { onSpawn: (pid: number) => sides.add(call.caller.id, pid) } : {}),
       platform,
-      baseEnv: deps.commandBaseEnv,
       signal: call.signal,
     });
   }
@@ -1104,7 +1288,7 @@ export function registerJevTools(options: RegisterJevToolsOptions): void {
     } else if (secretInPatch) {
       unansweredReason = `${secretInPatch} is secret-shaped, so the diff was not sent`;
     } else {
-      const inactive = inactiveOutcome();
+      const inactive = inactiveOutcome(call.caller);
       if (inactive) {
         unansweredReason = outcomeText(inactive);
       } else {

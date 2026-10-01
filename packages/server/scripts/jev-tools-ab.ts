@@ -17,6 +17,7 @@ import { pathToFileURL } from "node:url";
 import { TOKEN_BURN_WEIGHTS, weighTokenUsage } from "../src/server/agent/token-rate-tracker.js";
 import {
   JEV_TOOL_NAMES,
+  CLAUDE_CHARS_PER_TOKEN,
   JEV_TOOL_USE_FILE,
   JEV_TOOL_USE_ROTATED_FILE,
   type JevToolName,
@@ -29,8 +30,6 @@ const TASK_CLASS_LABEL = "paseo.task-class";
 export const KILL_RULE_MIN_AGENTS = 50;
 /** An `ask_jev` command repeated in Bash within this many tool steps is a regret. */
 const COMMAND_REGRET_STEPS = 5;
-/** Tool results and JEV results are counted at about 4 characters a token. */
-const CHARS_PER_TOKEN = 4;
 const SINGLE_FILE_TOOLS = new Set<JevToolName>([
   "ask_jev_file_bool",
   "ask_jev_file_choice",
@@ -402,12 +401,12 @@ export function measureAgent(
   for (const step of transcript.steps) {
     if (jevNames.has(step.name)) metrics.transcriptJevToolCalls += 1;
     if (step.name === "ToolSearch") metrics.toolSearchSteps += 1;
-    const tokens = Math.ceil(step.resultChars / CHARS_PER_TOKEN);
+    const tokens = Math.ceil(step.resultChars / CLAUDE_CHARS_PER_TOKEN);
     if (step.name === "Read") metrics.readTokens += tokens;
     else if (step.name === "Bash" && readPathsOf(step).length > 0) metrics.bashReadTokens += tokens;
   }
   for (const record of records) {
-    const resultTokens = Math.ceil(record.resultChars / CHARS_PER_TOKEN);
+    const resultTokens = Math.ceil(record.resultChars / CLAUDE_CHARS_PER_TOKEN);
     metrics.jevResultTokens += resultTokens;
     const stepCost = (record.callerContextTokens ?? 0) * TOKEN_BURN_WEIGHTS.cacheRead;
     metrics.netReadTokensAvoided += record.readTokensAvoided - resultTokens - stepCost;
