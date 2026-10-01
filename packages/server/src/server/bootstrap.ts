@@ -336,7 +336,10 @@ import { buildJevBudgetExhaustedNotificationPayload } from "@getpaseo/protocol/j
 import { resolveJevAgentCwds } from "./jev/agent-cwds.js";
 import type { JevService, JevTransport } from "./jev/contract.js";
 import { createAwayReplyJob, type AwayReplyJob } from "./away-reply/job.js";
-import { createFakeJevTransport } from "./jev/fake.js";
+import { createJevConfigReader } from "./jev/config.js";
+import { createFakeJevTransport, withJevTransportDelay } from "./jev/fake.js";
+import { createReadCheckAgentSource, DROPPED_JEV_SAVINGS } from "./jev/read-check/agent-source.js";
+import { ReadCheckObserver } from "./jev/read-check/observer.js";
 import { captureJevKeyFromEnv } from "./jev/key.js";
 import { collectJevSecretValues, isSecretEnvName } from "./jev/secret-sources.js";
 import {
@@ -1386,10 +1389,16 @@ function captureDaemonJevKey(config: PaseoDaemonConfig): {
   };
 }
 
-/** Tests inject a transport; `PASEO_JEV_BACKEND=fake` picks the fake on a scratch daemon. */
+/**
+ * Tests inject a transport; `PASEO_JEV_BACKEND=fake` picks the fake on a scratch daemon, and
+ * `PASEO_JEV_FAKE_DELAY_MS` slows it, to measure what a slow JEV costs a caller.
+ */
 function resolveJevTransportOverride(config: PaseoDaemonConfig): JevTransport | undefined {
   if (config.jevOverrides?.transport) return config.jevOverrides.transport;
-  return process.env.PASEO_JEV_BACKEND === "fake" ? createFakeJevTransport() : undefined;
+  if (process.env.PASEO_JEV_BACKEND !== "fake") return undefined;
+  const delayMs = Number(process.env.PASEO_JEV_FAKE_DELAY_MS ?? 0);
+  const fake = createFakeJevTransport();
+  return Number.isFinite(delayMs) && delayMs > 0 ? withJevTransportDelay(fake, delayMs) : fake;
 }
 
 export async function createPaseoDaemon(
@@ -1889,6 +1898,28 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "artifact-janitor" }),
   });
 
+  // Feature 16, the file-read check (docs/jev.md). The Claude hooks hand it every Read, Bash and
+  // edit call; in shadow, the default, it answers in the same tick and judges after the read ran.
+  const readCheckConfig = createJevConfigReader({
+    paseoHome: config.paseoHome,
+    homeDir: homedir(),
+    logger,
+  });
+  const readCheckObserver = new ReadCheckObserver({
+    jev,
+    // COMPAT(read-check-savings-sink): the savings seam adds `jev.savings`; until it merges,
+    // read checks are counted in the ledger only. Replace with `jev.savings` at that merge.
+    savings: DROPPED_JEV_SAVINGS,
+    readConfig: () => {
+      const read = readCheckConfig.read();
+      return read.ok && read.config.enabled ? read.config.readCheck : null;
+    },
+    agents: createReadCheckAgentSource(() => agentManager),
+    homeDir: homedir(),
+    paseoHome: config.paseoHome,
+    logger,
+  });
+
   // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
   // `agents.catastropheGate.enabled` reaches running agents without restarting them.
   const isCatastropheGateEnabled = () => daemonConfigStore.get().catastropheGate?.enabled !== false;
@@ -1911,6 +1942,7 @@ export async function createPaseoDaemon(
       managedProcesses,
       deviceLaunchGate,
       isCatastropheGateEnabled,
+      fileReadObserver: readCheckObserver,
       isDev: config.isDev === true,
       extraClients: config.agentClients,
     },
@@ -3425,6 +3457,7 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
+    await readCheckObserver.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");

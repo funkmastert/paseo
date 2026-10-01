@@ -170,96 +170,91 @@ const parseCat: ReaderParser = (args) => {
   return operands ? { range: { kind: "all" }, operands } : null;
 };
 
+interface CountSetting {
+  unit: "lines" | "bytes";
+  /** Null prints up to the whole file: GNU `head -n -5` and anything unparsed. */
+  amount: number | null;
+  /** `tail -n +N`: from line N to the end. */
+  fromStart: boolean;
+}
+
+/** A `-n`/`-c`/`--lines`/`--bytes`/`-N`/`+N` option at `index`, or null for any other flag. */
+function countOption(
+  args: ExpandedWord[],
+  index: number,
+  which: "head" | "tail",
+): { unit: "lines" | "bytes"; value: string | undefined; width: number } | null {
+  const text = args[index]!.text;
+  const lines = longValue(args, index, "--lines");
+  if (lines) return { unit: "lines", value: lines.value, width: lines.width };
+  const bytes = longValue(args, index, "--bytes");
+  if (bytes) return { unit: "bytes", value: bytes.value, width: bytes.width };
+  const unit = text[1] === "c" ? "bytes" : "lines";
+  if (/^-[nc]$/.test(text)) return { unit, value: args[index + 1]?.text, width: 2 };
+  if (/^-[nc]./.test(text)) return { unit, value: text.slice(2), width: 1 };
+  if (/^-\d+$/.test(text)) return { unit: "lines", value: text.slice(1), width: 1 };
+  if (which === "tail" && /^\+\d+$/.test(text)) return { unit: "lines", value: text, width: 1 };
+  return null;
+}
+
+function countSetting(
+  unit: "lines" | "bytes",
+  value: string,
+  which: "head" | "tail",
+): CountSetting | null {
+  if (which === "tail" && value.startsWith("+")) {
+    const from = count(value.slice(1));
+    return from === null ? null : { unit, amount: from, fromStart: true };
+  }
+  return { unit, amount: count(value), fromStart: false };
+}
+
+function countRange(setting: CountSetting, which: "head" | "tail"): FileReadRange {
+  const { unit, amount } = setting;
+  if (amount === null) return { kind: "all" };
+  if (setting.fromStart) {
+    return unit === "lines"
+      ? { kind: "lines", first: Math.max(1, amount), last: null }
+      : { kind: "all" };
+  }
+  if (which === "head") {
+    return unit === "lines"
+      ? { kind: "lines", first: 1, last: amount }
+      : { kind: "first-bytes", count: amount };
+  }
+  return unit === "lines"
+    ? { kind: "last-lines", count: amount }
+    : { kind: "last-bytes", count: amount };
+}
+
+const TAIL_FOLLOW_RE = /^(-[fF]|--follow|--retry|--pid|-s|--sleep-interval)/;
+
 function parseHeadTail(args: ExpandedWord[], which: "head" | "tail"): ReaderParse | null {
-  let lines: number | null = 10;
-  let bytes: number | null = null;
-  let fromLine: number | null = null;
+  let setting: CountSetting = { unit: "lines", amount: 10, fromStart: false };
   const operands: ExpandedWord[] = [];
   let optionsDone = false;
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
-    const text = arg.text;
-    if (optionsDone || !arg.resolved || text === "-" || !/^[-+]/.test(text)) {
+    if (optionsDone || !arg.resolved || arg.text === "-" || !/^[-+]/.test(arg.text)) {
       operands.push(arg);
       continue;
     }
-    if (text === "--") {
+    if (arg.text === "--") {
       optionsDone = true;
       continue;
     }
-    if (which === "tail" && /^(-[fF]|--follow|--retry|--pid|-s|--sleep-interval)/.test(text)) {
-      return null;
-    }
-    const linesValue = longValue(args, index, "--lines");
-    const bytesValue = longValue(args, index, "--bytes");
-    let value: string | undefined;
-    let unit: "lines" | "bytes" | null = null;
-    if (linesValue) {
-      value = linesValue.value;
-      unit = "lines";
-      index += linesValue.width - 1;
-    } else if (bytesValue) {
-      value = bytesValue.value;
-      unit = "bytes";
-      index += bytesValue.width - 1;
-    } else if (/^-[nc]$/.test(text)) {
-      value = args[index + 1]?.text;
-      unit = text === "-n" ? "lines" : "bytes";
-      index += 1;
-    } else if (/^-[nc]./.test(text)) {
-      value = text.slice(2);
-      unit = text[1] === "n" ? "lines" : "bytes";
-    } else if (/^-\d+$/.test(text)) {
-      value = text.slice(1);
-      unit = "lines";
-    } else if (which === "tail" && /^\+\d+$/.test(text)) {
-      value = text;
-      unit = "lines";
-    } else {
-      // -q, -v, -r, --quiet, --verbose: print nothing extra worth counting.
-      continue;
-    }
-    if (value === undefined) return null;
-    if (which === "tail" && value.startsWith("+")) {
-      const from = count(value.slice(1));
-      if (from === null) return null;
-      if (unit === "bytes") return { range: { kind: "all" }, operands: [] };
-      fromLine = Math.max(1, from);
-      lines = null;
-      bytes = null;
-      continue;
-    }
-    const amount = count(value);
-    // GNU `head -n -5` (all but the last 5) and anything unparsed print up to the whole file.
-    if (amount === null) {
-      lines = null;
-      bytes = null;
-      fromLine = null;
-      continue;
-    }
-    if (unit === "lines") {
-      lines = amount;
-      bytes = null;
-    } else {
-      bytes = amount;
-      lines = null;
-    }
-    fromLine = null;
+    // `tail -f` never ends: not a read the agent waits on.
+    if (which === "tail" && TAIL_FOLLOW_RE.test(arg.text)) return null;
+    // -q, -v, -r, --quiet, --verbose: print nothing extra worth counting.
+    const option = countOption(args, index, which);
+    if (!option) continue;
+    if (option.value === undefined) return null;
+    index += option.width - 1;
+    const next = countSetting(option.unit, option.value, which);
+    if (!next) return null;
+    setting = next;
   }
-  let range: FileReadRange;
-  if (fromLine !== null) range = { kind: "lines", first: fromLine, last: null };
-  else if (bytes !== null)
-    range =
-      which === "head"
-        ? { kind: "first-bytes", count: bytes }
-        : { kind: "last-bytes", count: bytes };
-  else if (lines !== null)
-    range =
-      which === "head"
-        ? { kind: "lines", first: 1, last: lines }
-        : { kind: "last-lines", count: lines };
-  else range = { kind: "all" };
-  return { range, operands };
+  return { range: countRange(setting, which), operands };
 }
 
 /**
@@ -313,67 +308,86 @@ const SED_HARMLESS_LONG = new Set([
   "--sandbox",
 ]);
 
-const parseSed: ReaderParser = (args) => {
-  let quiet = false;
-  const scripts: string[] = [];
-  const operands: ExpandedWord[] = [];
-  let optionsDone = false;
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = args[index]!;
-    const text = arg.text;
-    if (optionsDone || !arg.resolved || text === "-" || !text.startsWith("-")) {
-      operands.push(arg);
+interface SedOptions {
+  quiet: boolean;
+  scripts: string[];
+  operands: ExpandedWord[];
+}
+
+/**
+ * A short cluster: `-n`, `-nE`, `-ne SCRIPT`, `-n -e SCRIPT`. Returns how many words it took, or
+ * null for `-i` (edits in place), `-f` (a script file) and anything unknown.
+ */
+function readSedCluster(args: ExpandedWord[], index: number, into: SedOptions): number | null {
+  const text = args[index]!.text;
+  for (let letter = 1; letter < text.length; letter += 1) {
+    const flag = text[letter]!;
+    if (flag === "n") {
+      into.quiet = true;
       continue;
     }
-    if (text === "--") {
-      optionsDone = true;
-    } else if (text === "--quiet" || text === "--silent") {
-      quiet = true;
-    } else if (text === "--expression" || text.startsWith("--expression=")) {
-      const value = longValue(args, index, "--expression");
-      if (!value) return null;
-      scripts.push(value.value);
-      index += value.width - 1;
-    } else if (text === "--line-length") {
-      index += 1;
-    } else if (text.startsWith("--")) {
-      // `--in-place` and `--file` write a file or run a script we cannot see.
-      if (!SED_HARMLESS_LONG.has(text.split("=")[0]!)) return null;
-    } else {
-      // A short cluster: `-n`, `-nE`, `-ne SCRIPT`, `-n -e SCRIPT`.
-      for (let letter = 1; letter < text.length; letter += 1) {
-        const flag = text[letter]!;
-        if (flag === "n") {
-          quiet = true;
-        } else if ("Erszu".includes(flag)) {
-          continue;
-        } else if (flag === "e" || flag === "l") {
-          const rest = text.slice(letter + 1);
-          const value = rest || (args[index + 1]?.resolved ? args[index + 1]!.text : undefined);
-          if (value === undefined) return null;
-          if (!rest) index += 1;
-          if (flag === "e") scripts.push(value);
-          break;
-        } else {
-          // `-i` edits in place, `-f` reads a script file: not a plain read.
-          return null;
-        }
-      }
-    }
+    if ("Erszu".includes(flag)) continue;
+    if (flag !== "e" && flag !== "l") return null;
+    const rest = text.slice(letter + 1);
+    const next = args[index + 1];
+    const value = rest || (next?.resolved ? next.text : undefined);
+    if (value === undefined) return null;
+    if (flag === "e") into.scripts.push(value);
+    return rest ? 1 : 2;
   }
-  if (!quiet) return null;
-  if (scripts.length === 0) {
-    const script = operands.shift();
+  return 1;
+}
+
+/** A long option. Returns how many words it took, or null for `--in-place`, `--file` and unknowns. */
+function readSedLong(args: ExpandedWord[], index: number, into: SedOptions): number | null {
+  const text = args[index]!.text;
+  if (text === "--quiet" || text === "--silent") {
+    into.quiet = true;
+    return 1;
+  }
+  const expression = longValue(args, index, "--expression");
+  if (expression) {
+    into.scripts.push(expression.value);
+    return expression.width;
+  }
+  if (text === "--line-length") return 2;
+  return SED_HARMLESS_LONG.has(text.split("=")[0]!) ? 1 : null;
+}
+
+const parseSed: ReaderParser = (args) => {
+  const options: SedOptions = { quiet: false, scripts: [], operands: [] };
+  let optionsDone = false;
+  for (let index = 0; index < args.length; ) {
+    const arg = args[index]!;
+    if (optionsDone || !arg.resolved || arg.text === "-" || !arg.text.startsWith("-")) {
+      options.operands.push(arg);
+      index += 1;
+      continue;
+    }
+    if (arg.text === "--") {
+      optionsDone = true;
+      index += 1;
+      continue;
+    }
+    const width = arg.text.startsWith("--")
+      ? readSedLong(args, index, options)
+      : readSedCluster(args, index, options);
+    if (width === null) return null;
+    index += width;
+  }
+  if (!options.quiet) return null;
+  if (options.scripts.length === 0) {
+    const script = options.operands.shift();
     if (!script?.resolved) return null;
-    scripts.push(script.text);
+    options.scripts.push(script.text);
   }
   let range: FileReadRange | null = null;
-  for (const script of scripts) {
+  for (const script of options.scripts) {
     const next = sedPrintRange(script);
     if (!next) return null;
     range = range === null ? next : { kind: "all" };
   }
-  return range ? { range, operands } : null;
+  return range ? { range, operands: options.operands } : null;
 };
 
 const LESS_WITH_VALUE = new Set([

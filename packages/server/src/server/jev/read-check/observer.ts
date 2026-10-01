@@ -5,13 +5,7 @@ import type { Logger } from "pino";
 import { JEV_TOOLS_LABEL } from "@getpaseo/protocol/agent-labels";
 
 import type { AgentTimelineItem } from "../../agent/agent-sdk-types.js";
-import type {
-  JevDecideInput,
-  JevNotAskedReason,
-  JevOutcome,
-  JevSavingsSink,
-  JevService,
-} from "../contract.js";
+import type { JevNotAskedReason, JevOutcome, JevSavingsSink, JevService } from "../contract.js";
 import type { ResolvedJevConfig } from "../config.js";
 import {
   decideLiveDeny,
@@ -214,46 +208,46 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function measure(read: RecognizedRead, response: unknown): Measured | null {
+const NOTHING_MEASURED = { charactersPerFile: 0, text: null, dedup: false, lines: null } as const;
+
+function measureReadTool(
+  read: RecognizedRead,
+  result: Record<string, unknown> | null,
+): Measured | null {
+  if (!result) return null;
+  if (result["type"] === "file_unchanged")
+    return { ...NOTHING_MEASURED, notText: false, dedup: true };
+  const file = record(result["file"]);
+  const content = file?.["content"];
+  // An image, a PDF, a notebook: counted, never judged.
+  if (result["type"] !== "text" || typeof content !== "string") {
+    return { ...NOTHING_MEASURED, notText: true };
+  }
+  const count = typeof file?.["numLines"] === "number" ? file["numLines"] : 0;
+  return {
+    charactersPerFile: readToolCharacters(content),
+    text: content,
+    notText: read.notText || content.includes("\u0000"),
+    dedup: false,
+    lines: {
+      first: typeof file?.["startLine"] === "number" ? file["startLine"] : 1,
+      count,
+      total: typeof file?.["totalLines"] === "number" ? file["totalLines"] : count,
+    },
+  };
+}
+
+function measureBash(read: RecognizedRead, response: unknown): Measured | null {
   const result = record(response);
-  if (read.tool === "Read") {
-    if (result?.["type"] === "file_unchanged") {
-      return { charactersPerFile: 0, text: null, notText: false, dedup: true, lines: null };
-    }
-    const file = record(result?.["file"]);
-    const content = file?.["content"];
-    if (result?.["type"] !== "text" || typeof content !== "string") {
-      // An image, a PDF, a notebook: counted, never judged.
-      return result
-        ? { charactersPerFile: 0, text: null, notText: true, dedup: false, lines: null }
-        : null;
-    }
-    const first = typeof file?.["startLine"] === "number" ? file["startLine"] : 1;
-    const count = typeof file?.["numLines"] === "number" ? file["numLines"] : 0;
-    const total = typeof file?.["totalLines"] === "number" ? file["totalLines"] : count;
-    return {
-      charactersPerFile: readToolCharacters(content),
-      text: content,
-      notText: read.notText || content.includes("\u0000"),
-      dedup: false,
-      lines: { first, count, total },
-    };
-  }
+  let stdout: string;
+  let stderr = "";
   if (typeof response === "string") {
-    return {
-      charactersPerFile: response.length / read.files.length,
-      text: read.files.length === 1 ? response : null,
-      notText: response.slice(0, BINARY_PROBE_BYTES).includes("\u0000"),
-      dedup: false,
-      lines: null,
-    };
-  }
-  const stdout = typeof result?.["stdout"] === "string" ? result["stdout"] : "";
-  const stderr = typeof result?.["stderr"] === "string" ? result["stderr"] : "";
-  if (!result || result["isImage"] === true) {
-    return result
-      ? { charactersPerFile: 0, text: null, notText: true, dedup: false, lines: null }
-      : null;
+    stdout = response;
+  } else if (result && result["isImage"] !== true) {
+    stdout = typeof result["stdout"] === "string" ? result["stdout"] : "";
+    stderr = typeof result["stderr"] === "string" ? result["stderr"] : "";
+  } else {
+    return result ? { ...NOTHING_MEASURED, notText: true } : null;
   }
   return {
     charactersPerFile: (stdout.length + stderr.length) / read.files.length,
@@ -262,6 +256,13 @@ function measure(read: RecognizedRead, response: unknown): Measured | null {
     dedup: false,
     lines: null,
   };
+}
+
+/** What one read loaded, from its PostToolUse `tool_response`. */
+function measure(read: RecognizedRead, response: unknown): Measured | null {
+  return read.tool === "Read"
+    ? measureReadTool(read, record(response))
+    : measureBash(read, response);
 }
 
 function hasTextBody(buffer: Buffer): boolean {
@@ -289,6 +290,46 @@ function notAskedReasonFor(
   outcome: Extract<JevOutcome, { kind: "unavailable" }>,
 ): JevNotAskedReason {
   return outcome.reason === "excluded" ? "excluded" : "inactive";
+}
+
+type RangeText = ReturnType<typeof sliceRange>;
+
+interface ShadowReadInput {
+  event: FileReadHookEvent;
+  /** When the read's result arrived. */
+  at: number;
+  hook: HookFields;
+  read: RecognizedRead;
+  file: RecognizedFile;
+  realPath: string;
+  measured: Measured | null;
+  contextTokens: number | null;
+  config: ReadCheckConfig | null;
+  state: AgentReadState;
+}
+
+interface LiveReadInput {
+  event: FileReadHookEvent;
+  hook: HookFields;
+  read: RecognizedRead;
+  file: RecognizedFile;
+  config: ReadCheckConfig;
+  /** False once the read was let through: a deny then is never given. */
+  settleVerdict: (value: { denyReason: string } | null) => boolean;
+}
+
+/** One JEV call that came back with something worth a record. */
+interface Asked {
+  callId: string;
+  kind: "answered" | "shadow" | "failed";
+  answer: ReadCheckAnswer;
+  agent: ReadCheckAgentInfo | null;
+  displayPath: string;
+  around: {
+    recent: AgentTimelineItem[];
+    cursor: { epoch: string; seq: number } | null;
+    turnId: string | null;
+  };
 }
 
 const defaultFs: ReadCheckFileSystem = {
@@ -384,11 +425,11 @@ export class ReadCheckObserver implements FileReadObserver {
     try {
       const now = this.now();
       this.refreshLiveSnapshot();
-      for (const [id, pending] of [...this.pending]) {
+      for (const [id, pending] of this.pending) {
         if (now - pending.at >= PENDING_MS) this.pending.delete(id);
       }
-      for (const [agentId, state] of [...this.agents]) {
-        for (const [key, at] of [...state.judged]) {
+      for (const [agentId, state] of this.agents) {
+        for (const [key, at] of state.judged) {
           if (now - at >= REPEAT_MS) state.judged.delete(key);
         }
         state.denies = state.denies.filter((at) => now - at < HOUR_MS);
@@ -408,7 +449,7 @@ export class ReadCheckObserver implements FileReadObserver {
   async stop(): Promise<void> {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     this.sweepTimer = null;
-    await Promise.allSettled([...this.inFlight]);
+    await Promise.allSettled(this.inFlight);
   }
 
   /** Test seam: resolves once every queued piece of work has finished. */
@@ -416,7 +457,7 @@ export class ReadCheckObserver implements FileReadObserver {
     for (let round = 0; round < 20; round += 1) {
       await new Promise((resolve) => setImmediate(resolve));
       if (this.inFlight.size === 0) return;
-      await Promise.allSettled([...this.inFlight]);
+      await Promise.allSettled(this.inFlight);
     }
   }
 
@@ -554,17 +595,13 @@ export class ReadCheckObserver implements FileReadObserver {
     const index = toolUseId
       ? page.rows.findIndex((row) => row.item.type === "tool_call" && row.item.callId === toolUseId)
       : -1;
-    const own = index >= 0 ? page.rows[index] : undefined;
     const before = index >= 0 ? page.rows.slice(0, index) : page.rows;
-    const last = page.rows[page.rows.length - 1];
+    // The read's own row when it is there, else the newest: later rows are scanned from it.
+    const anchor = index >= 0 ? page.rows[index] : page.rows[page.rows.length - 1];
     return {
       recent: before.map((row) => row.item),
-      cursor: own
-        ? { epoch: page.epoch, seq: own.seq }
-        : last
-          ? { epoch: page.epoch, seq: last.seq }
-          : null,
-      turnId: own?.turnId ?? last?.turnId ?? null,
+      cursor: anchor ? { epoch: page.epoch, seq: anchor.seq } : null,
+      turnId: anchor?.turnId ?? null,
     };
   }
 
@@ -594,32 +631,6 @@ export class ReadCheckObserver implements FileReadObserver {
       })
       .catch(() => "excluded" as const);
     return scope === "ok" ? null : "excluded";
-  }
-
-  private decideInput(input: {
-    agentId: string;
-    agentCwd: string;
-    realPath: string;
-    state: ReturnType<typeof buildReadCheckState>;
-    deadlineMs: number;
-    shadow: boolean;
-    callSite: string;
-  }): JevDecideInput {
-    return {
-      feature: "readCheck",
-      callSite: input.callSite,
-      state: { ...input.state },
-      questions: READ_CHECK_QUESTIONS,
-      scope: {
-        cwds: [input.agentCwd],
-        files: [input.realPath],
-        baseCwd: input.agentCwd,
-        agentIds: [input.agentId],
-      },
-      subject: { agentId: input.agentId },
-      deadlineMs: input.deadlineMs,
-      ...(input.shadow ? { shadow: true as const } : {}),
-    };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -655,6 +666,7 @@ export class ReadCheckObserver implements FileReadObserver {
       if (pending?.retryOfDeny) continue;
       await this.judgeShadow({
         event,
+        at,
         hook,
         read,
         file,
@@ -667,95 +679,30 @@ export class ReadCheckObserver implements FileReadObserver {
     }
   }
 
-  private async judgeShadow(input: {
-    event: FileReadHookEvent;
-    hook: HookFields;
-    read: RecognizedRead;
-    file: RecognizedFile;
-    realPath: string;
-    measured: Measured | null;
-    contextTokens: number | null;
-    config: ReadCheckConfig | null;
-    state: AgentReadState;
-  }): Promise<void> {
-    const { event, read, file, realPath, measured, config, state } = input;
-    if (measured?.dedup) return this.countNotAsked("dedup");
-    if (!config || !this.options.jev.isActive("readCheck")) return this.countNotAsked("inactive");
+  private async judgeShadow(input: ShadowReadInput): Promise<void> {
+    const reason = await this.shadowGate(input);
+    if (reason) return this.countNotAsked(reason);
+    const { event, read, file, realPath, state } = input;
+    const slice = await this.shadowSlice(input);
+    if (!slice) return this.countNotAsked("not-text");
+    state.judged.set(`${realPath}|${rangeKey(file.range)}`, this.now());
     const tokens = input.contextTokens ?? 0;
-    if (!measured || tokens < config.minTokens) return this.countNotAsked("below-floor");
-    if (measured.notText || read.notText) return this.countNotAsked("not-text");
-    const ineligible = await this.eligibility({
-      agentId: event.agentId,
-      agentCwd: event.agentCwd,
+    const asked = await this.ask({
+      event,
+      read,
       realPath,
+      slice,
+      tokens,
+      toolUseId: input.hook.toolUseId,
+      deadlineMs: input.config?.timeoutMs ?? 5000,
+      live: false,
     });
-    if (ineligible) return this.countNotAsked(ineligible);
-    const key = `${realPath}|${rangeKey(file.range)}`;
-    const judgedAt = state.judged.get(key);
-    if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) {
-      return this.countNotAsked("repeat");
-    }
-
-    // The scope check passed, so the file may be opened now. One file: what the agent saw.
-    let rangeText = measured.text;
-    let lines = measured.lines;
-    if (rangeText === null) {
-      // Several files in one Bash line: each is judged on its own range, read here.
-      const loaded = await this.loadRange(realPath, file, []);
-      if (!loaded) return this.countNotAsked("not-text");
-      rangeText = loaded.text;
-      lines = {
-        first: loaded.firstLine,
-        count: loaded.lastLine - loaded.firstLine + 1,
-        total: loaded.totalLines,
-      };
-    }
-    const totalLines = lines?.total ?? rangeText.split("\n").length;
-    const firstLine = lines?.first ?? 1;
-    const lastLine = lines ? lines.first + lines.count - 1 : totalLines;
-    state.judged.set(key, this.now());
-
-    const agent = this.options.agents.agent(event.agentId);
-    const around = this.timelineAround(event.agentId, input.hook.toolUseId);
-    const displayPath = displayPathOf(realPath, event.agentCwd);
-    const jevState = buildReadCheckState({
-      title: agent?.title ?? null,
-      assignment: this.assignmentOf(event.agentId, state),
-      recent: around.recent,
-      why: read.why,
-      displayPath,
-      size: describeSize({ firstLine, lastLine, totalLines, tokens }),
-      rangeText,
-    });
-    const outcome = await this.options.jev.decide(
-      this.decideInput({
-        agentId: event.agentId,
-        agentCwd: event.agentCwd,
-        realPath,
-        state: jevState,
-        deadlineMs: config.timeoutMs,
-        shadow: true,
-        callSite: CALL_SITE_SHADOW,
-      }),
-    );
-    if (outcome.kind === "unavailable") {
-      return this.countNotAsked(notAskedReasonFor(outcome));
-    }
-    if (outcome.kind === "failed" && outcome.meta === null) return;
-
-    const answer =
-      outcome.kind === "failed"
-        ? readCheckAnswerOf(undefined)
-        : readCheckAnswerOf(outcome.answers[READ_CHECK_QUESTION_ID]);
+    if (!asked) return;
     const savingsId = this.recordInvolvement({
-      callId: outcome.callId,
+      asked,
       agentId: event.agentId,
-      agent,
-      displayPath,
       did: "read",
-      wouldBe: outcome.kind === "failed" ? null : wouldBeOf(answer),
       changed: false,
-      answer,
       facts: {
         contextTokens: tokens,
         estimated: false,
@@ -763,28 +710,122 @@ export class ReadCheckObserver implements FileReadObserver {
         subagent: input.hook.subagentId !== null,
       },
       tool: read.tool,
-      pending: answer.verdict === "would-skip",
+      pending: asked.answer.verdict === "would-skip",
     });
-    if (savingsId && answer.verdict === "would-skip") {
+    if (savingsId && asked.answer.verdict === "would-skip") {
       this.validation.open({
         savingsId,
         agentId: event.agentId,
         path: realPath,
-        spellings: [realPath, displayPath, file.path],
+        spellings: [realPath, asked.displayPath, file.path],
         mode: "shadow",
-        openedAt: this.now(),
-        rangeText,
-        after: around.cursor,
-        turnId: around.turnId,
+        // From the read, not the verdict: a use while JEV was answering still counts.
+        openedAt: input.at,
+        rangeText: slice.text,
+        after: asked.around.cursor,
+        turnId: asked.around.turnId,
       });
     }
+  }
+
+  /** The not-asked reason for a read that ran, in the order of "When JEV is asked"; null to ask. */
+  private async shadowGate(input: ShadowReadInput): Promise<JevNotAskedReason | null> {
+    const { measured, config, read } = input;
+    if (measured?.dedup) return "dedup";
+    if (!config || !this.options.jev.isActive("readCheck")) return "inactive";
+    if (!measured || (input.contextTokens ?? 0) < config.minTokens) return "below-floor";
+    if (measured.notText || read.notText) return "not-text";
+    const ineligible = await this.eligibility({
+      agentId: input.event.agentId,
+      agentCwd: input.event.agentCwd,
+      realPath: input.realPath,
+    });
+    if (ineligible) return ineligible;
+    const judgedAt = input.state.judged.get(`${input.realPath}|${rangeKey(input.file.range)}`);
+    return judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS ? "repeat" : null;
+  }
+
+  /**
+   * The range's text after the scope check passed. One file: exactly what the agent saw. Several
+   * files in one Bash line: each is judged on its own range, read here.
+   */
+  private async shadowSlice(input: ShadowReadInput): Promise<RangeText | null> {
+    const { measured } = input;
+    if (measured?.text == null) return this.loadRange(input.realPath, input.file, []);
+    const text = measured.text;
+    const lines = measured.lines;
+    const totalLines = lines?.total ?? text.split("\n").length;
+    return {
+      text,
+      firstLine: lines?.first ?? 1,
+      lastLine: lines ? lines.first + lines.count - 1 : totalLines,
+      totalLines,
+    };
+  }
+
+  /** Builds the state and asks. Null when nothing came back worth a record. */
+  private async ask(input: {
+    event: FileReadHookEvent;
+    read: RecognizedRead;
+    realPath: string;
+    slice: RangeText;
+    tokens: number;
+    toolUseId: string | null;
+    deadlineMs: number;
+    live: boolean;
+  }): Promise<Asked | null> {
+    const { event, realPath, slice } = input;
+    const agent = this.options.agents.agent(event.agentId);
+    const around = this.timelineAround(event.agentId, input.toolUseId);
+    const displayPath = displayPathOf(realPath, event.agentCwd);
+    const state = buildReadCheckState({
+      title: agent?.title ?? null,
+      assignment: this.assignmentOf(event.agentId, this.stateFor(event.agentId)),
+      recent: around.recent,
+      why: input.read.why,
+      displayPath,
+      size: describeSize({ ...slice, tokens: input.tokens }),
+      rangeText: slice.text,
+    });
+    const outcome = await this.options.jev.decide({
+      feature: "readCheck",
+      callSite: input.live ? CALL_SITE_LIVE : CALL_SITE_SHADOW,
+      state: { ...state },
+      questions: READ_CHECK_QUESTIONS,
+      scope: {
+        cwds: [event.agentCwd],
+        files: [realPath],
+        baseCwd: event.agentCwd,
+        agentIds: [event.agentId],
+      },
+      subject: { agentId: event.agentId },
+      deadlineMs: input.deadlineMs,
+      ...(input.live ? {} : { shadow: true as const }),
+    });
+    if (outcome.kind === "unavailable") {
+      this.countNotAsked(notAskedReasonFor(outcome));
+      return null;
+    }
+    // Nothing was sent: no record (docs/jev.md, "The record").
+    if (outcome.kind === "failed" && outcome.meta === null) return null;
+    return {
+      callId: outcome.callId,
+      kind: outcome.kind,
+      answer:
+        outcome.kind === "failed"
+          ? readCheckAnswerOf(undefined)
+          : readCheckAnswerOf(outcome.answers[READ_CHECK_QUESTION_ID]),
+      agent,
+      displayPath,
+      around,
+    };
   }
 
   private async loadRange(
     realPath: string,
     file: RecognizedFile,
     filters: RecognizedRead["filters"],
-  ): Promise<ReturnType<typeof sliceRange> | null> {
+  ): Promise<RangeText | null> {
     let buffer: Buffer;
     try {
       buffer = await this.fs.readFile(realPath);
@@ -825,39 +866,38 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   private recordInvolvement(input: {
-    callId: string;
+    asked: Asked;
     agentId: string;
-    agent: ReadCheckAgentInfo | null;
-    displayPath: string;
-    did: string;
-    wouldBe: string | null;
+    did: "read" | "deny";
     changed: boolean;
-    answer: ReadCheckAnswer;
     facts: Record<string, string | number | boolean | null>;
     tool: "Read" | "Bash";
     pending: boolean;
+    /** Overrides the answer's own mapping, e.g. a deny the deadline overtook. */
+    wouldBe?: string;
   }): string | null {
+    const { asked } = input;
     const facts = {
       ...input.facts,
       tool: input.tool,
-      model: input.agent?.model ?? null,
-      agentContextTokens: input.agent?.contextTokens ?? null,
-      choice: input.answer.choice,
-      confidence: input.answer.confidence,
-      verdict: input.answer.verdict,
+      model: asked.agent?.model ?? null,
+      agentContextTokens: asked.agent?.contextTokens ?? null,
+      choice: asked.answer.choice,
+      confidence: asked.answer.confidence,
+      verdict: asked.answer.verdict,
       charsPerToken: READ_CHECK_CHARS_PER_TOKEN,
     };
     try {
       return this.options.savings.record({
         feature: "readCheck",
-        callSite: input.did === "deny" ? CALL_SITE_LIVE : CALL_SITE_SHADOW,
-        callId: input.callId,
+        callSite: asked.kind === "shadow" ? CALL_SITE_SHADOW : CALL_SITE_LIVE,
+        callId: asked.callId,
         agentId: input.agentId,
-        workspaceId: input.agent?.workspaceId ?? null,
-        involvement: `Does this agent need ${input.displayPath}?`,
+        workspaceId: asked.agent?.workspaceId ?? null,
+        involvement: `Does this agent need ${asked.displayPath}?`,
         decision: {
           did: input.did,
-          wouldBe: input.wouldBe,
+          wouldBe: input.wouldBe ?? (asked.kind === "failed" ? null : wouldBeOf(asked.answer)),
           changed: input.changed,
           detail: facts,
         },
@@ -933,17 +973,63 @@ export class ReadCheckObserver implements FileReadObserver {
   }
 
   /** Resolves the savings id of a live record whose read ran, for Post to settle; else null. */
-  private async judgeLive(input: {
-    event: FileReadHookEvent;
-    hook: HookFields;
-    read: RecognizedRead;
-    file: RecognizedFile;
-    config: ReadCheckConfig;
-    /** False once the read was let through: a deny then is never given. */
-    settleVerdict: (value: { denyReason: string } | null) => boolean;
-  }): Promise<string | null> {
-    const { event, hook, read, file, config } = input;
+  private async judgeLive(input: LiveReadInput): Promise<string | null> {
     const startedAt = this.now();
+    const prepared = await this.prepareLive(input);
+    if (!prepared) return null;
+    const { event, read, config } = input;
+    const asked = await this.ask({
+      event,
+      read,
+      realPath: prepared.realPath,
+      slice: prepared.slice,
+      tokens: prepared.tokens,
+      toolUseId: null,
+      deadlineMs: Math.max(1, config.liveTimeoutMs - (this.now() - startedAt)),
+      live: true,
+    });
+    if (!asked) return null;
+    const state = this.stateFor(event.agentId);
+    const now = this.now();
+    const decision = decideLiveDeny({
+      answer: asked.answer,
+      answered: asked.kind === "answered",
+      plainRead: read.files.length === 1,
+      deniedBefore: state.denied.has(prepared.realPath),
+      editedBefore: state.edited.has(prepared.realPath),
+      deniesLastHour: state.denies.filter((t) => now - t < HOUR_MS).length,
+      regretsLastHour: state.regrets.filter((t) => now - t < HOUR_MS).length,
+      maxDeniesPerAgentPerHour: config.maxDeniesPerAgentPerHour,
+    });
+    const facts = {
+      contextTokens: prepared.tokens,
+      estimated: true,
+      split: false,
+      subagent: input.hook.subagentId !== null,
+      liveReason: decision.deny ? null : decision.reason,
+    };
+    if (!decision.deny) {
+      return this.recordInvolvement({
+        asked,
+        agentId: event.agentId,
+        did: "read",
+        changed: false,
+        facts,
+        tool: read.tool,
+        pending: false,
+      });
+    }
+    return this.deny({ input, asked, prepared, facts });
+  }
+
+  /**
+   * Everything code checks before a live read is worth holding: the switch, the path rules and
+   * scope, the size (smaller reads are judged after they run, as in shadow) and the repeat rule.
+   */
+  private async prepareLive(
+    input: LiveReadInput,
+  ): Promise<{ realPath: string; slice: RangeText; tokens: number } | null> {
+    const { event, read, file, config } = input;
     if (!this.options.jev.isActive("readCheck")) return null;
     const realPath = await this.realpathOf(file.path);
     const state = this.stateFor(event.agentId);
@@ -951,137 +1037,72 @@ export class ReadCheckObserver implements FileReadObserver {
     if (await this.eligibility({ agentId: event.agentId, agentCwd: event.agentCwd, realPath })) {
       return null;
     }
-    const loaded = await this.loadRange(realPath, file, read.filters);
-    if (!loaded) return null;
-    const characters = read.tool === "Read" ? readToolCharacters(loaded.text) : loaded.text.length;
+    const slice = await this.loadRange(realPath, file, read.filters);
+    if (!slice) return null;
+    const characters = read.tool === "Read" ? readToolCharacters(slice.text) : slice.text.length;
     const tokens = estimateReadTokens(characters);
-    // Smaller reads are judged after they run, as in shadow.
     if (tokens < config.liveMinTokens) return null;
     const key = `${realPath}|${rangeKey(file.range)}`;
     const judgedAt = state.judged.get(key);
     if (judgedAt !== undefined && this.now() - judgedAt < REPEAT_MS) return null;
     state.judged.set(key, this.now());
+    return { realPath, slice, tokens };
+  }
 
-    const agent = this.options.agents.agent(event.agentId);
-    const around = this.timelineAround(event.agentId, null);
-    const displayPath = displayPathOf(realPath, event.agentCwd);
-    const jevState = buildReadCheckState({
-      title: agent?.title ?? null,
-      assignment: this.assignmentOf(event.agentId, state),
-      recent: around.recent,
-      why: read.why,
-      displayPath,
-      size: describeSize({
-        firstLine: loaded.firstLine,
-        lastLine: loaded.lastLine,
-        totalLines: loaded.totalLines,
-        tokens,
-      }),
-      rangeText: loaded.text,
-    });
-    const remaining = Math.max(1, config.liveTimeoutMs - (this.now() - startedAt));
-    const outcome = await this.options.jev.decide(
-      this.decideInput({
-        agentId: event.agentId,
-        agentCwd: event.agentCwd,
-        realPath,
-        state: jevState,
-        deadlineMs: remaining,
-        shadow: false,
-        callSite: CALL_SITE_LIVE,
-      }),
-    );
-    if (outcome.kind === "unavailable") {
-      this.countNotAsked(notAskedReasonFor(outcome));
-      return null;
-    }
-    if (outcome.kind === "failed" && outcome.meta === null) return null;
-    const answer =
-      outcome.kind === "failed"
-        ? readCheckAnswerOf(undefined)
-        : readCheckAnswerOf(outcome.answers[READ_CHECK_QUESTION_ID]);
-    const now = this.now();
-    const decision = decideLiveDeny({
-      answer,
-      answered: outcome.kind === "answered",
-      plainRead: read.files.length === 1,
-      deniedBefore: state.denied.has(realPath),
-      editedBefore: state.edited.has(realPath),
-      deniesLastHour: state.denies.filter((t) => now - t < HOUR_MS).length,
-      regretsLastHour: state.regrets.filter((t) => now - t < HOUR_MS).length,
-      maxDeniesPerAgentPerHour: config.maxDeniesPerAgentPerHour,
-    });
-    const facts = {
-      contextTokens: tokens,
-      estimated: true,
-      split: false,
-      subagent: hook.subagentId !== null,
-      liveReason: decision.deny ? null : decision.reason,
-    };
-    if (!decision.deny) {
-      return this.recordInvolvement({
-        callId: outcome.callId,
-        agentId: event.agentId,
-        agent,
-        displayPath,
-        did: "read",
-        wouldBe: outcome.kind === "failed" ? null : wouldBeOf(answer),
-        changed: false,
-        answer,
-        facts,
-        tool: read.tool,
-        pending: false,
-      });
-    }
-
+  /** Denies the held read once, unless the deadline let it through first. */
+  private deny(args: {
+    input: LiveReadInput;
+    asked: Asked;
+    prepared: { realPath: string; slice: RangeText; tokens: number };
+    facts: Record<string, string | number | boolean | null>;
+  }): string | null {
+    const { input, asked, prepared } = args;
+    const { event, read, file } = input;
+    const confidence = asked.answer.confidence ?? 0;
     const denyReason = formatReadDenial({
-      displayPath,
-      tokens,
-      confidence: answer.confidence ?? 0,
+      displayPath: asked.displayPath,
+      tokens: prepared.tokens,
+      confidence,
       tool: read.tool,
-      hasJevFileTools: agent?.labels[JEV_TOOLS_LABEL] === "on",
+      hasJevFileTools: asked.agent?.labels[JEV_TOOLS_LABEL] === "on",
     });
     if (!input.settleVerdict({ denyReason })) {
       // The deadline passed first and the read ran: a live answer that changed nothing.
       return this.recordInvolvement({
-        callId: outcome.callId,
+        asked,
         agentId: event.agentId,
-        agent,
-        displayPath,
         did: "read",
-        wouldBe: "deny",
         changed: false,
-        answer,
-        facts: { ...facts, liveReason: "deadline" },
+        facts: { ...args.facts, liveReason: "deadline" },
         tool: read.tool,
         pending: false,
+        wouldBe: "deny",
       });
     }
-    state.denied.add(realPath);
+    const now = this.now();
+    const state = this.stateFor(event.agentId);
+    state.denied.add(prepared.realPath);
     state.denied.add(path.resolve(file.path));
     state.denies.push(now);
     const savingsId = this.recordInvolvement({
-      callId: outcome.callId,
+      asked,
       agentId: event.agentId,
-      agent,
-      displayPath,
       did: "deny",
-      wouldBe: "deny",
       changed: true,
-      answer,
-      facts,
+      facts: args.facts,
       tool: read.tool,
       pending: true,
+      wouldBe: "deny",
     });
     try {
       this.options.jev.decisions.record({
         agentId: event.agentId,
-        callId: outcome.callId,
+        callId: asked.callId,
         feature: "readCheck",
-        question: `Does this agent need ${displayPath}?`,
-        verdict: `not_needed (${(answer.confidence ?? 0).toFixed(2)})`,
-        confidence: answer.confidence,
-        action: `denied the read once (about ${tokens.toLocaleString("en-US")} tokens)`,
+        question: `Does this agent need ${asked.displayPath}?`,
+        verdict: `not_needed (${confidence.toFixed(2)})`,
+        confidence: asked.answer.confidence,
+        action: `denied the read once (about ${prepared.tokens.toLocaleString("en-US")} tokens)`,
         applied: true,
         mode: "live",
         wouldBe: "deny",
@@ -1094,13 +1115,13 @@ export class ReadCheckObserver implements FileReadObserver {
       this.validation.open({
         savingsId,
         agentId: event.agentId,
-        path: realPath,
-        spellings: [realPath, displayPath, file.path],
+        path: prepared.realPath,
+        spellings: [prepared.realPath, asked.displayPath, file.path],
         mode: "live",
         openedAt: now,
-        rangeText: loaded.text,
-        after: around.cursor,
-        turnId: around.turnId,
+        rangeText: prepared.slice.text,
+        after: asked.around.cursor,
+        turnId: asked.around.turnId,
       });
     }
     // Denied: the read never runs, so there is no PostToolUse to settle.

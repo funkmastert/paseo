@@ -20,6 +20,11 @@ import {
 import type { Logger } from "pino";
 import type { DeviceLaunchGate } from "../../device-lease-manager.js";
 import {
+  READ_CHECK_POST_TOOLS,
+  READ_CHECK_PRE_TOOLS,
+  type FileReadObserver,
+} from "../../../jev/read-check/observer.js";
+import {
   checkCatastrophe,
   formatCatastropheDenial,
   resolveCurrentBranchWithGit,
@@ -386,6 +391,13 @@ const CATASTROPHE_GATE_TIMEOUT_SECONDS = 10;
 /** The tools whose input is a shell command line. Monitor runs `command` in a shell too. */
 const CATASTROPHE_GATED_TOOLS = ["Bash", "Monitor"] as const;
 
+/**
+ * The read check's hook timeout (docs/jev.md, "Feature 16"). Shadow answers in the same tick;
+ * only live mode waits, and the observer caps that at `readCheck.liveTimeoutMs` (at most 2 s).
+ * On timeout the SDK proceeds and the read runs.
+ */
+const READ_CHECK_TIMEOUT_SECONDS = 3;
+
 const REWIND_COMMAND_NAME = "rewind";
 const REWIND_COMMAND: AgentSlashCommand = {
   name: REWIND_COMMAND_NAME,
@@ -450,6 +462,8 @@ interface ClaudeAgentClientOptions {
    * call so a reload reaches running agents. Absent means on.
    */
   isCatastropheGateEnabled?: () => boolean;
+  /** Feature 16. Absent: no read-check hook is registered and every read runs as today. */
+  fileReadObserver?: FileReadObserver;
 }
 
 function resolveClaudeProviderParams(raw: unknown, logger: Logger): ClaudeProviderParams {
@@ -478,6 +492,7 @@ interface ClaudeAgentSessionOptions {
   resolveBinary: () => Promise<string>;
   deviceLaunchGate?: DeviceLaunchGate;
   isCatastropheGateEnabled?: () => boolean;
+  fileReadObserver?: FileReadObserver;
 }
 
 type ClaudeThinkingEffort = "low" | "medium" | "high" | "xhigh" | "max";
@@ -1580,6 +1595,7 @@ export class ClaudeAgentClient implements AgentClient {
   private readonly configDir?: string;
   private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly isCatastropheGateEnabled?: () => boolean;
+  private readonly fileReadObserver?: FileReadObserver;
 
   constructor(options: ClaudeAgentClientOptions) {
     this.defaults = options.defaults;
@@ -1594,6 +1610,7 @@ export class ClaudeAgentClient implements AgentClient {
     this.configDir = options.configDir;
     this.deviceLaunchGate = options.deviceLaunchGate;
     this.isCatastropheGateEnabled = options.isCatastropheGateEnabled;
+    this.fileReadObserver = options.fileReadObserver;
   }
 
   resolveConfiguredModel(model: AgentModelDefinition): AgentModelDefinition {
@@ -1645,6 +1662,7 @@ export class ClaudeAgentClient implements AgentClient {
       resolveBinary: this.resolveBinary,
       deviceLaunchGate: this.deviceLaunchGate,
       isCatastropheGateEnabled: this.isCatastropheGateEnabled,
+      fileReadObserver: this.fileReadObserver,
     });
   }
 
@@ -1676,6 +1694,7 @@ export class ClaudeAgentClient implements AgentClient {
       resolveBinary: this.resolveBinary,
       deviceLaunchGate: this.deviceLaunchGate,
       isCatastropheGateEnabled: this.isCatastropheGateEnabled,
+      fileReadObserver: this.fileReadObserver,
     });
   }
 
@@ -2346,6 +2365,7 @@ class ClaudeAgentSession implements AgentSession {
 
   private readonly deviceLaunchGate?: DeviceLaunchGate;
   private readonly isCatastropheGateEnabled: () => boolean;
+  private readonly fileReadObserver?: FileReadObserver;
 
   constructor(config: ClaudeAgentConfig, options: ClaudeAgentSessionOptions) {
     this.config = config;
@@ -2361,6 +2381,7 @@ class ClaudeAgentSession implements AgentSession {
     this.resolveBinary = options.resolveBinary;
     this.deviceLaunchGate = options.deviceLaunchGate;
     this.isCatastropheGateEnabled = options.isCatastropheGateEnabled ?? (() => true);
+    this.fileReadObserver = options.fileReadObserver;
     this.contextUsage = new ClaudeContextUsageState(
       findClaudeModel(this.config.model)?.contextWindowMaxTokens,
     );
@@ -5204,11 +5225,74 @@ class ClaudeAgentSession implements AgentSession {
       hooks: [this.gateCatastrophe],
       timeout: CATASTROPHE_GATE_TIMEOUT_SECONDS,
     }));
+    // Feature 16, the read check: after the gates, so it never changes their matchers or order.
+    const readCheck = this.fileReadObserver && this.agentId;
+    const readCheckPre = readCheck
+      ? READ_CHECK_PRE_TOOLS.map((tool) => ({
+          matcher: tool,
+          hooks: [this.checkFileReadPre],
+          timeout: READ_CHECK_TIMEOUT_SECONDS,
+        }))
+      : [];
+    const readCheckPost = readCheck
+      ? READ_CHECK_POST_TOOLS.map((tool) => ({
+          matcher: tool,
+          hooks: [this.observeFileReadPost],
+          timeout: READ_CHECK_TIMEOUT_SECONDS,
+        }))
+      : [];
     return {
       ...hooks,
-      PreToolUse: [...(hooks.PreToolUse ?? []), ...deviceGate, ...catastropheGate],
+      PreToolUse: [...(hooks.PreToolUse ?? []), ...deviceGate, ...catastropheGate, ...readCheckPre],
+      PostToolUse: [...(hooks.PostToolUse ?? []), ...readCheckPost],
     };
   }
+
+  /**
+   * Feature 16's PreToolUse (docs/jev.md, "Feature 16"). In shadow, the default, the observer
+   * answers in the same tick and the call runs. In live mode it may hold a large read for at most
+   * its own timeout and deny it once. Every error, and every wait past the timeout, lets it run.
+   */
+  private checkFileReadPre = async (input: unknown): Promise<Record<string, unknown>> => {
+    const observer = this.fileReadObserver;
+    const agentId = this.agentId;
+    if (!observer || !agentId) return {};
+    try {
+      const hold = observer.preToolUse({ agentId, agentCwd: this.config.cwd, input });
+      if (!hold) return {};
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const deadline = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), hold.timeoutMs);
+      });
+      const verdict = await Promise.race([hold.verdict, deadline]).finally(() =>
+        clearTimeout(timer),
+      );
+      if (!verdict) return {};
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "deny",
+          permissionDecisionReason: verdict.denyReason,
+        },
+      };
+    } catch (error) {
+      this.logger.debug({ err: error }, "Read check failed; the read runs");
+      return {};
+    }
+  };
+
+  /** Feature 16's PostToolUse: hands the result to the observer, which never waits on it. */
+  private observeFileReadPost = async (input: unknown): Promise<Record<string, never>> => {
+    const observer = this.fileReadObserver;
+    const agentId = this.agentId;
+    if (!observer || !agentId) return {};
+    try {
+      observer.postToolUse({ agentId, agentCwd: this.config.cwd, input });
+    } catch (error) {
+      this.logger.debug({ err: error }, "Read check failed to note a result");
+    }
+    return {};
+  };
 
   /**
    * Refuses a shell command that rewrites or deletes `main` on a remote, or wipes a disk, a

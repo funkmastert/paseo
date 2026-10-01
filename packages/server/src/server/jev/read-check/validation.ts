@@ -177,8 +177,12 @@ export class ReadCheckValidation {
     const window = this.windows.get(savingsId);
     if (!window) return;
     for (const row of rows) {
-      if (window.after?.epoch === epoch && row.seq <= window.after.seq) continue;
-      if (!window.after && Date.parse(row.timestamp) < window.openedAt) continue;
+      // By position when the cursor is from this timeline; by time after a reset.
+      const seen =
+        window.after !== null && window.after.epoch === epoch
+          ? row.seq <= window.after.seq
+          : Date.parse(row.timestamp) <= window.openedAt;
+      if (seen) continue;
       if (row.turnId && !window.turns.includes(row.turnId)) {
         if (window.turns.length >= READ_CHECK_WINDOW_TURNS) {
           this.close(savingsId, null, null);
@@ -201,13 +205,13 @@ export class ReadCheckValidation {
 
   /** Closes every window past 60 minutes as held. */
   expire(now: number): void {
-    for (const [savingsId, window] of [...this.windows]) {
+    for (const [savingsId, window] of this.windows) {
       if (now - window.openedAt >= READ_CHECK_WINDOW_MS) this.close(savingsId, null, null);
     }
   }
 
   private signalPath(agentId: string, path: string, signal: ReadCheckSignal, at: number): void {
-    for (const [savingsId, window] of [...this.windows]) {
+    for (const [savingsId, window] of this.windows) {
       if (window.agentId === agentId && window.path === path && at >= window.openedAt) {
         this.close(savingsId, signal, at);
       }
