@@ -165,7 +165,9 @@ def commit_ranges(remote):
             continue  # a deletion publishes nothing
         known = remote_sha != ZERO and subprocess.run(
             ["git", "cat-file", "-e", remote_sha + "^{commit}"], capture_output=True).returncode == 0
-        yield [f"{remote_sha}..{local_sha}"] if known else [local_sha, "--not", f"--remotes={remote}"]
+        # Commits already on any of the remote's branches publish nothing new: a branch that merges
+        # main would otherwise re-scan every main commit since the branch last pushed.
+        yield ([f"{remote_sha}..{local_sha}"] if known else [local_sha]) + ["--not", f"--remotes={remote}"]
 
 
 def scan(remote, own_emails):
