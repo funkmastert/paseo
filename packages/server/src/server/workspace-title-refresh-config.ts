@@ -14,6 +14,8 @@ export interface ResolvedWorkspaceTitleRefreshConfig extends ResolvedJevFeatureC
    * drifted enough to spend a regeneration. Code owns this threshold; JEV only answers.
    */
   staleScoreThreshold: number;
+  /** An answer below this confidence (0-1) is ignored and the cadence decides instead. */
+  minConfidence: number;
   /** Without JEV, or for a D7-excluded workspace: minimum new user turns before regenerating. */
   cadenceMinUserTurns: number;
   /** Without JEV, or for a D7-excluded workspace: minimum minutes since the title was last set. */
@@ -29,6 +31,7 @@ export const TITLE_REFRESH_DEFAULTS: ResolvedWorkspaceTitleRefreshConfig = {
   shadow: false,
   timeoutMs: 3000,
   staleScoreThreshold: 2,
+  minConfidence: 0.6,
   cadenceMinUserTurns: 3,
   cadenceMinMinutes: 60,
   ceilingUserTurns: 8,
@@ -53,6 +56,12 @@ function positiveInt(value: unknown, fallback: number): number {
   return Math.floor(positive(value, fallback)) || fallback;
 }
 
+function fraction(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : fallback;
+}
+
 function scoreLevel(value: unknown, fallback: number): number {
   const n = typeof value === "number" && Number.isFinite(value) ? value : fallback;
   return Math.min(3, Math.max(0, Math.floor(n)));
@@ -70,6 +79,7 @@ export function resolveWorkspaceTitleRefreshConfig(
       section["staleScoreThreshold"],
       TITLE_REFRESH_DEFAULTS.staleScoreThreshold,
     ),
+    minConfidence: fraction(section["minConfidence"], TITLE_REFRESH_DEFAULTS.minConfidence),
     cadenceMinUserTurns: positiveInt(
       section["cadenceMinUserTurns"],
       TITLE_REFRESH_DEFAULTS.cadenceMinUserTurns,

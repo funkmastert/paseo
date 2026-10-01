@@ -1,17 +1,20 @@
 import type { Logger } from "pino";
 
-import { confidentScore } from "./jev/answers.js";
 import type { JevEgressScope, JevOutcome, JevQuestions, JevService } from "./jev/contract.js";
 import { createJsonlAppender } from "./jsonl-appender.js";
-import type { WorkspaceTitleTrackerAgentSummary } from "./agent/agent-manager.js";
+import type {
+  WorkspaceTitleConversation,
+  WorkspaceTitleTrackerAgentSummary,
+} from "./agent/agent-manager.js";
 import type { ResolvedWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
 
 /**
  * Feature 17, session title refresh (docs/jev.md). Before `WorkspaceTitleTracker` spends a
  * structured-generation call re-titling a workspace, JEV answers one question: does the current
- * name still describe what its sessions are doing now? A "still fits" answer skips the generation
- * call, which is the saving; a "stale" answer, no key, an outage, or a D7-excluded workspace all
- * fall back to the tracker's own cadence, exactly as if JEV did not exist.
+ * name still describe what its sessions are doing now? A confident "still fits" skips the call,
+ * which is the saving. A "stale" answer generates. Everything else (no key, an outage, a
+ * low-confidence answer, a D7-excluded workspace) falls to a deterministic cadence, and a ceiling
+ * regenerates regardless, so a wrong "still fits" cannot freeze a name.
  */
 
 export const TITLE_REFRESH_CALL_SITE = "workspace-title.refresh";
@@ -20,7 +23,7 @@ export const TITLE_REFRESH_QUESTIONS: JevQuestions = {
   fit: {
     type: "score",
     instructions:
-      "`current_title` names a workspace — one checkout or worktree. `sessions` lists the coding-agent sessions running in it now, newest first, with a short summary of what each is doing. Does `current_title` still describe what these sessions are doing?",
+      "`current_title` names a workspace — one checkout or worktree. `sessions` lists the coding-agent sessions working in it now, newest first: what each was first asked, what it was asked most recently, and what it is doing. `latest_reply` is the newest session's last answer. Does `current_title` still describe the work these sessions are doing now?",
     criteria: [
       "Still describes exactly what these sessions are doing",
       "Mostly still fits; the work has drifted only a little",
@@ -30,27 +33,52 @@ export const TITLE_REFRESH_QUESTIONS: JevQuestions = {
   },
 };
 
-function describeAgentForJev(agent: WorkspaceTitleTrackerAgentSummary): string {
-  const lines = [`${agent.title ?? "(untitled session)"} [${agent.lifecycle}]`];
-  if (agent.lastActivitySummary) lines.push(`doing: ${agent.lastActivitySummary}`);
-  return lines.join(" — ");
+/** Per-message cap on what is sent to JEV; the foundation's state limit is 60 KB. */
+const MESSAGE_MAX_CHARS = 1_200;
+
+function trimMessage(text: string | null): string | null {
+  if (!text) return null;
+  return text.length > MESSAGE_MAX_CHARS ? `${text.slice(0, MESSAGE_MAX_CHARS)}…` : text;
+}
+
+/** One recent agent and what it was asked and said. */
+export interface TitleRefreshSession {
+  agent: WorkspaceTitleTrackerAgentSummary;
+  conversation: WorkspaceTitleConversation;
 }
 
 /**
- * The state sent to JEV. `PersistedWorkspaceRecord` keeps no separate "first prompt" field once a
- * title is set (`workspace-auto-name.ts` only compares against it transiently), so the current
- * title plus each session's title and latest activity — the same material the generator itself
- * reads — stands in for it.
+ * The state sent to JEV: what the work is now, taken from the conversation itself. Agent titles
+ * are left out on purpose: the current name was generated from them, so asking whether it fits
+ * them is circular and biased toward "fits".
  */
 export function buildTitleRefreshState(input: {
   currentTitle: string;
   branch: string | null;
-  agents: readonly WorkspaceTitleTrackerAgentSummary[];
-}): { current_title: string; branch: string | null; sessions: string[] } {
+  sessions: readonly TitleRefreshSession[];
+}): {
+  current_title: string;
+  branch: string | null;
+  sessions: {
+    status: string;
+    first_request: string | null;
+    recent_requests: string[];
+    doing: string | null;
+  }[];
+  latest_reply: string | null;
+} {
   return {
     current_title: input.currentTitle,
     branch: input.branch,
-    sessions: input.agents.map(describeAgentForJev),
+    sessions: input.sessions.map(({ agent, conversation }) => ({
+      status: agent.lifecycle,
+      first_request: trimMessage(conversation.firstUserMessage),
+      recent_requests: conversation.recentUserMessages
+        .map((message) => trimMessage(message))
+        .filter((message): message is string => message !== null),
+      doing: agent.lastActivitySummary,
+    })),
+    latest_reply: trimMessage(input.sessions[0]?.conversation.lastAssistantMessage ?? null),
   };
 }
 
@@ -63,13 +91,12 @@ export function titleRefreshScope(input: {
 
 /** What the tracker does about one workspace's check, for the jsonl record and the decision note. */
 export type TitleRefreshAction =
-  | "anchored"
   | "no-new-activity"
+  /** The title was cleared (the hand-back gesture): name it now rather than at the next look. */
+  | "untitled"
   | "ceiling"
   | "jev-stale"
   | "jev-fits"
-  /** D7-excluded: sent nothing to JEV, generates exactly as it would with no JEV at all. */
-  | "d7-excluded"
   | "cadence"
   | "cadence-not-ready";
 
@@ -80,21 +107,26 @@ export interface TitleRefreshDecision {
   outcome: JevOutcome["kind"] | null;
   /** Joins the audit and the ledger. Null unless JEV actually answered. */
   callId: string | null;
+  /** Why the cadence ran instead of JEV: "excluded" (D7), "low-confidence", an outage reason. */
   reason: string | null;
   score: number | null;
-  userTurnsSinceCheck: number;
-  minutesSinceLastAttempt: number | null;
+  confidence: number | null;
+  userTurnsSinceLook: number;
+  userTurnsSinceGeneration: number;
+  minutesSinceGeneration: number;
 }
 
 /**
- * Per-workspace counters the tracker keeps, reset whenever a check actually looks (ceiling, a JEV
- * answer, or a cadence attempt) — not merely whenever the sweep ticks. In memory only: a restart
- * starts every workspace's counters over, the same trade every JEV feature without a persisted
- * decision store makes.
+ * Per-workspace counters the tracker keeps. In memory only: a restart starts every workspace
+ * over from first sight, the same trade every JEV feature without a persisted store makes.
  */
 export interface TitleRefreshCounters {
-  userTurnsSinceCheck: number;
-  lastAttemptAtMs: number | null;
+  /** New user turns since the title was last looked at (a JEV answer, the cadence, the ceiling). */
+  userTurnsSinceLook: number;
+  /** New user turns since a title was last generated. The cadence and the ceiling count these. */
+  userTurnsSinceGeneration: number;
+  /** When a title was last generated, or when the tracker first saw the workspace. */
+  lastGenerationAtMs: number;
 }
 
 /**
@@ -110,140 +142,89 @@ export async function decideTitleRefresh(input: {
   currentTitle: string;
   branch: string | null;
   cwd: string;
-  agents: readonly WorkspaceTitleTrackerAgentSummary[];
+  sessions: readonly TitleRefreshSession[];
 }): Promise<TitleRefreshDecision> {
-  const { config, counters, nowMs } = input;
-  const userTurnsSinceCheck = counters.userTurnsSinceCheck;
+  const { config, counters } = input;
+  const base = {
+    gatedByJev: false,
+    outcome: null,
+    callId: null,
+    reason: null,
+    score: null,
+    confidence: null,
+    userTurnsSinceLook: counters.userTurnsSinceLook,
+    userTurnsSinceGeneration: counters.userTurnsSinceGeneration,
+    minutesSinceGeneration: (input.nowMs - counters.lastGenerationAtMs) / 60_000,
+  } satisfies Omit<TitleRefreshDecision, "generate" | "action">;
 
-  if (counters.lastAttemptAtMs === null) {
-    // First time this workspace has ever been eligible: anchor the clock here rather than
-    // judging it stale against a "since forever" elapsed time.
-    return {
-      generate: false,
-      action: "anchored",
-      gatedByJev: false,
-      outcome: null,
-      callId: null,
-      reason: null,
-      score: null,
-      userTurnsSinceCheck,
-      minutesSinceLastAttempt: null,
-    };
-  }
-
-  const minutesSinceLastAttempt = (nowMs - counters.lastAttemptAtMs) / 60_000;
-
-  if (userTurnsSinceCheck < 1) {
-    return {
-      generate: false,
-      action: "no-new-activity",
-      gatedByJev: false,
-      outcome: null,
-      callId: null,
-      reason: null,
-      score: null,
-      userTurnsSinceCheck,
-      minutesSinceLastAttempt,
-    };
+  if (counters.userTurnsSinceLook < 1) {
+    return { ...base, generate: false, action: "no-new-activity" };
   }
 
   const ceilingReached =
-    userTurnsSinceCheck >= config.ceilingUserTurns ||
-    minutesSinceLastAttempt >= config.ceilingHours * 60;
+    counters.userTurnsSinceGeneration >= config.ceilingUserTurns ||
+    base.minutesSinceGeneration >= config.ceilingHours * 60;
   if (ceilingReached) {
-    return {
-      generate: true,
-      action: "ceiling",
-      gatedByJev: false,
-      outcome: null,
-      callId: null,
-      reason: null,
-      score: null,
-      userTurnsSinceCheck,
-      minutesSinceLastAttempt,
-    };
+    return { ...base, generate: true, action: "ceiling" };
   }
 
-  if (input.jev) {
-    const outcome = await input.jev.decide({
-      feature: "titleRefresh",
-      callSite: TITLE_REFRESH_CALL_SITE,
-      state: buildTitleRefreshState({
-        currentTitle: input.currentTitle,
-        branch: input.branch,
-        agents: input.agents,
-      }),
-      questions: TITLE_REFRESH_QUESTIONS,
-      scope: titleRefreshScope({ cwd: input.cwd, agents: input.agents }),
-      deadlineMs: config.timeoutMs,
-    });
-    if (outcome.kind === "answered") {
-      const score = confidentScore(outcome, "fit", 0);
-      const stale = score === null || score >= config.staleScoreThreshold;
-      return {
-        generate: stale,
-        action: stale ? "jev-stale" : "jev-fits",
-        gatedByJev: true,
-        outcome: outcome.kind,
-        callId: outcome.callId,
-        reason: null,
-        score,
-        userTurnsSinceCheck,
-        minutesSinceLastAttempt,
-      };
-    }
-    if (outcome.kind === "unavailable" && outcome.reason === "excluded") {
-      // D7: nothing was sent. Generate exactly as this workspace would with no JEV wired at
-      // all — the existing fingerprint-and-interval gate the tracker already applies is the
-      // only cadence a Wonderly-scoped workspace gets.
-      return {
-        generate: true,
-        action: "d7-excluded",
-        gatedByJev: false,
-        outcome: outcome.kind,
-        callId: null,
-        reason: outcome.reason,
-        score: null,
-        userTurnsSinceCheck,
-        minutesSinceLastAttempt,
-      };
-    }
-    return cadenceDecision({
-      config,
-      userTurnsSinceCheck,
-      minutesSinceLastAttempt,
+  if (!input.jev || !config.enabled) {
+    return cadenceDecision(config, base);
+  }
+
+  const agents = input.sessions.map((session) => session.agent);
+  const outcome = await input.jev.decide({
+    feature: "titleRefresh",
+    callSite: TITLE_REFRESH_CALL_SITE,
+    state: buildTitleRefreshState({
+      currentTitle: input.currentTitle,
+      branch: input.branch,
+      sessions: input.sessions,
+    }),
+    questions: TITLE_REFRESH_QUESTIONS,
+    scope: titleRefreshScope({ cwd: input.cwd, agents }),
+    deadlineMs: config.timeoutMs,
+  });
+  if (outcome.kind !== "answered") {
+    // D7 ("excluded": nothing was sent), no key, an outage or a timeout: the cadence decides.
+    const reason =
+      outcome.kind === "unavailable" || outcome.kind === "failed" ? outcome.reason : null;
+    return cadenceDecision(config, { ...base, outcome: outcome.kind, reason });
+  }
+  const answer = outcome.answers["fit"];
+  if (answer?.type !== "score" || answer.confidence < config.minConfidence) {
+    return cadenceDecision(config, {
+      ...base,
       outcome: outcome.kind,
-      reason: outcome.kind === "unavailable" || outcome.kind === "failed" ? outcome.reason : null,
+      callId: outcome.callId,
+      reason: "low-confidence",
+      confidence: answer?.type === "score" ? answer.confidence : null,
     });
   }
-
-  return cadenceDecision({ config, userTurnsSinceCheck, minutesSinceLastAttempt });
-}
-
-function cadenceDecision(input: {
-  config: ResolvedWorkspaceTitleRefreshConfig;
-  userTurnsSinceCheck: number;
-  minutesSinceLastAttempt: number;
-  outcome?: JevOutcome["kind"];
-  reason?: string | null;
-}): TitleRefreshDecision {
-  const ready =
-    input.userTurnsSinceCheck >= input.config.cadenceMinUserTurns &&
-    input.minutesSinceLastAttempt >= input.config.cadenceMinMinutes;
+  const stale = answer.score >= config.staleScoreThreshold;
   return {
-    generate: ready,
-    action: ready ? "cadence" : "cadence-not-ready",
-    gatedByJev: false,
-    outcome: input.outcome ?? null,
-    callId: null,
-    reason: input.reason ?? null,
-    score: null,
-    userTurnsSinceCheck: input.userTurnsSinceCheck,
-    minutesSinceLastAttempt: input.minutesSinceLastAttempt,
+    ...base,
+    generate: stale,
+    action: stale ? "jev-stale" : "jev-fits",
+    gatedByJev: true,
+    outcome: outcome.kind,
+    callId: outcome.callId,
+    score: answer.score,
+    confidence: answer.confidence,
   };
 }
 
-/** One line per check worth recording — every decision except `anchored` and `no-new-activity`. */
+function cadenceDecision(
+  config: ResolvedWorkspaceTitleRefreshConfig,
+  base: Omit<TitleRefreshDecision, "generate" | "action">,
+): TitleRefreshDecision {
+  const ready =
+    base.userTurnsSinceGeneration >= config.cadenceMinUserTurns &&
+    base.minutesSinceGeneration >= config.cadenceMinMinutes;
+  return { ...base, generate: ready, action: ready ? "cadence" : "cadence-not-ready" };
+}
+
+/** One line per look: every decision the tracker reaches, plus the untitled hand-back. */
 export interface TitleRefreshCheckEvent {
   at: string;
   workspaceId: string;
@@ -253,18 +234,20 @@ export interface TitleRefreshCheckEvent {
   callId: string | null;
   reason: string | null;
   score: number | null;
+  confidence: number | null;
   staleScoreThreshold: number;
   generationCalled: boolean;
-  userTurnsSinceCheck: number;
-  minutesSinceLastAttempt: number | null;
+  userTurnsSinceLook: number;
+  userTurnsSinceGeneration: number;
+  minutesSinceGeneration: number | null;
 }
 
 const TITLE_REFRESH_FILE_MAX_BYTES = 1_000_000;
 
 /**
- * Appends one line per non-trivial check to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one
- * rotation at 1 MB) and puts a line in the JEV decision store when JEV was actually asked. This is
- * how "generation calls avoided" gets counted later by the savings ledger.
+ * Appends one line per look to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one rotation at
+ * 1 MB) and puts a line in the JEV decision store when JEV's answer decided the look. This is how
+ * "generation calls avoided" gets counted later by the savings ledger.
  */
 export function createTitleRefreshRecorder(options: {
   jev: Pick<JevService, "decisions"> | null;
@@ -285,23 +268,27 @@ export function createTitleRefreshRecorder(options: {
     try {
       logger.info({ titleRefresh: { ...event, at } }, "workspace-title-refresh");
       if (options.jev && event.gatedByJev && context.agentId && event.callId) {
+        const fits = event.action === "jev-fits";
         options.jev.decisions.record({
           agentId: context.agentId,
           callId: event.callId,
           feature: "titleRefresh",
           question: `Does "${context.currentTitle}" still describe what this session is doing?`,
           verdict: event.score === null ? "no answer" : `fit ${event.score.toFixed(1)}`,
-          confidence: null,
-          action:
-            event.action === "jev-stale"
-              ? "workspace title regenerated"
-              : "workspace title kept — JEV said it still fits",
-          applied: event.action === "jev-stale",
+          confidence: event.confidence,
+          action: fits
+            ? "kept the workspace title, skipping the regeneration"
+            : "regenerated the workspace title",
+          // `applied` means JEV changed what code did (contract.ts): a "fits" answer skipped the
+          // call; a "stale" answer let it through, which is what would have happened anyway.
+          applied: fits,
+          mode: "live",
+          wouldBe: "regenerate title",
         });
       }
     } catch {
       // Recording never breaks the tracker.
     }
-    file.append({ v: 1, ...event, at });
+    file.append({ v: 2, ...event, at });
   };
 }

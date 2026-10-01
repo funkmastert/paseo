@@ -1,6 +1,9 @@
-import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { AgentManager, WorkspaceTitleTrackerAgentSummary } from "./agent/agent-manager.js";
+import type {
+  AgentManager,
+  WorkspaceTitleConversation,
+  WorkspaceTitleTrackerAgentSummary,
+} from "./agent/agent-manager.js";
 import {
   StructuredAgentFallbackError,
   StructuredAgentResponseError,
@@ -22,7 +25,8 @@ import {
 import {
   decideTitleRefresh,
   type TitleRefreshCheckEvent,
-  type TitleRefreshCounters,
+  type TitleRefreshDecision,
+  type TitleRefreshSession,
 } from "./workspace-title-refresh-jev.js";
 import {
   TITLE_REFRESH_DEFAULTS,
@@ -38,6 +42,10 @@ const DEFAULT_ACTIVITY_WINDOW_MINUTES = 60;
  * and a long tail of older sessions would only drag the name back toward history.
  */
 const RECENT_AGENTS_PER_WORKSPACE = 4;
+/** How many of each agent's newest user messages describe what it is doing now. */
+const RECENT_USER_MESSAGES_PER_AGENT = 3;
+/** Generation-prompt cap per message, so one pasted log can't crowd out the rest. */
+const PROMPT_MESSAGE_MAX_CHARS = 400;
 
 export const WorkspaceTitleRefreshSchema = z.object({
   title: z.string().min(1).max(80),
@@ -60,8 +68,8 @@ export interface WorkspaceTitleTrackerOptions {
   sweepIntervalMs?: number;
   now?: () => number;
   /**
-   * Feature 17 (docs/jev.md). Absent: every check falls straight to the cadence fallback, exactly
-   * as if JEV had no key.
+   * Feature 17 (docs/jev.md). Absent: every look falls to the cadence, exactly as if JEV had no
+   * key.
    */
   jev?: Pick<JevService, "decide"> | null;
   readTitleRefreshConfig?: () => ResolvedWorkspaceTitleRefreshConfig;
@@ -80,8 +88,18 @@ interface WorkspaceActivity {
   agents: WorkspaceTitleTrackerAgentSummary[];
 }
 
-function describeAgent(agent: WorkspaceTitleTrackerAgentSummary): string {
+function clip(text: string): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length > PROMPT_MESSAGE_MAX_CHARS
+    ? `${oneLine.slice(0, PROMPT_MESSAGE_MAX_CHARS)}…`
+    : oneLine;
+}
+
+function describeSession({ agent, conversation }: TitleRefreshSession): string {
   const lines = [`- ${agent.title ?? "(untitled session)"} [${agent.lifecycle}]`];
+  for (const message of conversation.recentUserMessages) {
+    lines.push(`  asked: ${clip(message)}`);
+  }
   if (agent.lastActivitySummary) {
     lines.push(`  doing: ${agent.lastActivitySummary}`);
   }
@@ -93,7 +111,7 @@ async function buildWorkspaceTitlePrompt(input: {
   workspaceGitService?: Pick<WorkspaceGitService, "resolveRepoRoot">;
   currentName: string;
   branch: string | null;
-  agents: readonly WorkspaceTitleTrackerAgentSummary[];
+  sessions: readonly TitleRefreshSession[];
 }): Promise<string> {
   return buildMetadataPrompt({
     cwd: input.cwd,
@@ -122,9 +140,58 @@ async function buildWorkspaceTitlePrompt(input: {
     trailing: [
       `<current-name>\n${input.currentName}\n</current-name>`,
       `<branch>\n${input.branch ?? "(none)"}\n</branch>`,
-      `<sessions>\n${input.agents.map(describeAgent).join("\n")}\n</sessions>`,
+      `<sessions>\n${input.sessions.map(describeSession).join("\n")}\n</sessions>`,
     ].join("\n\n"),
   });
+}
+
+const TITLE_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "for",
+  "in",
+  "into",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+]);
+
+function titleTokens(title: string): Set<string> {
+  return new Set(
+    title
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}#]+/u)
+      .filter((token) => token.length > 0 && !TITLE_STOPWORDS.has(token)),
+  );
+}
+
+/**
+ * Whether two names say the same thing: equal after case, punctuation and filler words are
+ * dropped, or sharing at least 80% of their words. "Files to web" and "Files on web" are one
+ * name; a rename between them is churn the user notices and gains nothing from.
+ */
+export function isNearEqualTitle(left: string, right: string): boolean {
+  const a = titleTokens(left);
+  const b = titleTokens(right);
+  if (a.size === 0 || b.size === 0) return left.trim() === right.trim();
+  let shared = 0;
+  for (const token of a) if (b.has(token)) shared += 1;
+  return shared / (a.size + b.size - shared) >= 0.8;
+}
+
+/** Feature 17's per-workspace pacing; see TitleRefreshCounters. */
+interface WorkspaceRefreshState {
+  /** When the title was last looked at, or first seen. Paces looks to the refresh interval. */
+  lastLookAtMs: number;
+  userTurnsSinceLook: number;
+  userTurnsSinceGeneration: number;
+  lastGenerationAtMs: number;
+  /** Set once an untitled workspace got its immediate generation; cleared when it has a title. */
+  untitledAttempted: boolean;
 }
 
 /**
@@ -135,20 +202,18 @@ async function buildWorkspaceTitlePrompt(input: {
  * unrelated tasks under that first name. This sweep is the other half: the same
  * shape as AgentTitleTracker one level up, over workspaces instead of agents.
  *
- * Three gates keep it cheap and keep the name stable:
+ * What keeps it cheap and the name stable:
  *
- * 1. **Provenance.** Only a workspace Paseo itself named is eligible
- *    (isAutoTitledWorkspace). A hand-set name, or one from before provenance was
- *    recorded, is never touched.
+ * 1. **Provenance.** Only a title Paseo generated or an agent supplied is eligible
+ *    (isAutoTitledWorkspace). A person's own edit is never touched.
  * 2. **Recent activity.** A workspace with no running-or-idle agent active inside
  *    `activityWindowMinutes` is not swept at all, so a dormant checkout costs
- *    nothing and keeps the name describing what last happened in it — which is
- *    the true answer.
- * 3. **Fingerprint.** The hash covers the workspace's current name and its recent
- *    agents' ids and titles — deliberately not their activity summaries, which
- *    change on every tool call. An agent's title only moves when its own work
- *    materially moves on, so the workspace only costs an LLM call when something
- *    at that altitude changed.
+ *    nothing and keeps the name describing what last happened in it.
+ * 3. **Pacing.** A workspace is looked at no more than once per refresh interval, and only
+ *    after at least one new user turn since the last look. Each look asks JEV whether the
+ *    name still fits (feature 17); without a confident answer a cadence decides, and a ceiling
+ *    regenerates however JEV answers, so the name can't freeze.
+ * 4. **No churn.** A generated name equal or near-equal to the current one writes nothing.
  */
 export class WorkspaceTitleTracker {
   private readonly agentManager: AgentManager;
@@ -167,16 +232,11 @@ export class WorkspaceTitleTracker {
     event: Omit<TitleRefreshCheckEvent, "at">,
     context: { agentId: string | null; currentTitle: string },
   ) => void;
-  // Same live-only shape as AgentTitleTracker's two maps: a fingerprint of what the
-  // last name was generated from, and the pacing clock for the sweep. Evicted for
-  // workspaces the registry no longer reports as active.
-  private readonly lastGeneratedFromByWorkspaceId = new Map<string, string>();
-  private readonly lastRefreshedAtByWorkspaceId = new Map<string, number>();
-  // Feature 17's own counters: new user turns and the clock since this workspace's title was
-  // last actually looked at (a JEV answer, a ceiling regeneration, or a cadence attempt) — reset
-  // on every look, not on every sweep tick. In memory only; a restart starts them over.
-  private readonly turnsSinceLastAttemptByWorkspaceId = new Map<string, number>();
-  private readonly lastAttemptAtByWorkspaceId = new Map<string, number>();
+  // Live only: a restart starts every workspace over from first sight. Evicted for workspaces
+  // the registry no longer reports as active.
+  private readonly stateByWorkspaceId = new Map<string, WorkspaceRefreshState>();
+  // Turns counted before the sweep first saw the workspace; folded in at first sight.
+  private readonly pendingTurnsByWorkspaceId = new Map<string, number>();
   private timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: WorkspaceTitleTrackerOptions) {
@@ -198,16 +258,23 @@ export class WorkspaceTitleTracker {
   }
 
   /**
-   * Feeds feature 17's per-workspace user-turn counter. Bootstrap calls this from the same
-   * `onAgentTurnFinished` hook that feeds `AgentTitleTracker`, so a workspace's counter only moves
-   * on a real user turn, never on the tracker's own periodic sweep.
+   * Feeds the per-workspace user-turn counters. Bootstrap calls this from the same
+   * `onAgentTurnFinished` hook that feeds `AgentTitleTracker`, so the counters only move on a
+   * real turn, never on the tracker's own sweep.
    */
   recordAgentTurnFinished(params: { agentId: string; cwd: string }): void {
-    const agent = this.agentManager.getAgent(params.agentId);
-    const workspaceId = agent?.workspaceId;
+    const workspaceId = this.agentManager.getAgent(params.agentId)?.workspaceId;
     if (!workspaceId) return;
-    const count = this.turnsSinceLastAttemptByWorkspaceId.get(workspaceId) ?? 0;
-    this.turnsSinceLastAttemptByWorkspaceId.set(workspaceId, count + 1);
+    const state = this.stateByWorkspaceId.get(workspaceId);
+    if (!state) {
+      this.pendingTurnsByWorkspaceId.set(
+        workspaceId,
+        (this.pendingTurnsByWorkspaceId.get(workspaceId) ?? 0) + 1,
+      );
+      return;
+    }
+    state.userTurnsSinceLook += 1;
+    state.userTurnsSinceGeneration += 1;
   }
 
   start(): void {
@@ -230,10 +297,7 @@ export class WorkspaceTitleTracker {
     }
   }
 
-  /**
-   * Periodic sweep tick. Never calls the LLM on its own — that only happens inside
-   * attemptRefresh(), and only when the fingerprint actually changed.
-   */
+  /** Periodic sweep tick. Only attemptRefresh() ever asks JEV or calls the generator. */
   async tick(): Promise<void> {
     const tracking = this.readDaemonConfig().metadataGeneration?.workspaceTitleTracking;
     if (tracking?.enabled === false) {
@@ -249,39 +313,52 @@ export class WorkspaceTitleTracker {
       (workspace) => !workspace.archivedAt,
     );
     const liveWorkspaceIds = new Set(workspaces.map((workspace) => workspace.workspaceId));
-    for (const workspaceId of this.lastRefreshedAtByWorkspaceId.keys()) {
+    for (const workspaceId of [
+      ...this.stateByWorkspaceId.keys(),
+      ...this.pendingTurnsByWorkspaceId.keys(),
+    ]) {
       if (!liveWorkspaceIds.has(workspaceId)) {
-        this.evictWorkspaceState(workspaceId);
+        this.stateByWorkspaceId.delete(workspaceId);
+        this.pendingTurnsByWorkspaceId.delete(workspaceId);
       }
     }
 
     for (const candidate of this.collectActivity(workspaces, nowMs, activityWindowMs)) {
-      const lastRefreshedAt = this.lastRefreshedAtByWorkspaceId.get(
-        candidate.workspace.workspaceId,
-      );
-      if (lastRefreshedAt === undefined) {
-        // First tick to see this workspace active — anchor the interval here rather
-        // than renaming on sight.
-        this.lastRefreshedAtByWorkspaceId.set(candidate.workspace.workspaceId, nowMs);
-        continue;
+      const workspaceId = candidate.workspace.workspaceId;
+      let state = this.stateByWorkspaceId.get(workspaceId);
+      const untitled = !candidate.workspace.title?.trim();
+      if (!state) {
+        // First sight anchors the clocks here rather than judging the workspace against a
+        // "since forever" elapsed time. Turns seen before now still count.
+        const pending = this.pendingTurnsByWorkspaceId.get(workspaceId) ?? 0;
+        this.pendingTurnsByWorkspaceId.delete(workspaceId);
+        state = {
+          lastLookAtMs: nowMs,
+          userTurnsSinceLook: pending,
+          userTurnsSinceGeneration: pending,
+          lastGenerationAtMs: nowMs,
+          untitledAttempted: false,
+        };
+        this.stateByWorkspaceId.set(workspaceId, state);
+        if (!untitled) continue;
       }
-      if (nowMs - lastRefreshedAt < refreshIntervalMs) {
-        continue;
+      if (!untitled) {
+        state.untitledAttempted = false;
       }
-      // Re-anchor before attempting, not only on success, so an unchanged workspace
-      // waits a full interval instead of being reconsidered every tick forever.
-      this.lastRefreshedAtByWorkspaceId.set(candidate.workspace.workspaceId, nowMs);
-      await this.attemptRefresh(candidate).catch((error) => {
-        this.logger.error(
-          { err: error, workspaceId: candidate.workspace.workspaceId },
-          "Workspace title refresh failed",
-        );
+      const nameNow = untitled && !state.untitledAttempted;
+      if (!nameNow) {
+        if (nowMs - state.lastLookAtMs < refreshIntervalMs) continue;
+        if (state.userTurnsSinceLook < 1) continue;
+      }
+      state.lastLookAtMs = nowMs;
+      await this.attemptRefresh(candidate, state, { nameNow }).catch((error) => {
+        this.logger.error({ err: error, workspaceId }, "Workspace title refresh failed");
       });
     }
   }
 
   /**
-   * The workspaces worth an LLM call this tick: auto-named, and holding at least one
+   * The workspaces worth looking at this tick: auto-named, and holding at least one
    * non-internal running-or-idle agent that did something inside the activity window.
    */
   private collectActivity(
@@ -334,109 +411,102 @@ export class WorkspaceTitleTracker {
     return candidates;
   }
 
-  private evictWorkspaceState(workspaceId: string): void {
-    this.lastGeneratedFromByWorkspaceId.delete(workspaceId);
-    this.lastRefreshedAtByWorkspaceId.delete(workspaceId);
-    this.turnsSinceLastAttemptByWorkspaceId.delete(workspaceId);
-    this.lastAttemptAtByWorkspaceId.delete(workspaceId);
-  }
-
-  private fingerprint(
-    title: string | null,
+  private async loadSessions(
     agents: readonly WorkspaceTitleTrackerAgentSummary[],
-  ): string {
-    const rows = agents
-      .map((agent) => `${agent.id}:${agent.title ?? ""}`)
-      .sort()
-      .join("\n");
-    return createHash("sha256")
-      .update(`${title ?? ""}\n${rows}`)
-      .digest("hex");
+  ): Promise<TitleRefreshSession[]> {
+    return Promise.all(
+      agents.map(async (agent) => {
+        const conversation: WorkspaceTitleConversation = (await this.agentManager
+          .getWorkspaceTitleConversation(agent.id, RECENT_USER_MESSAGES_PER_AGENT)
+          .catch(() => null)) ?? {
+          firstUserMessage: null,
+          recentUserMessages: [],
+          lastAssistantMessage: null,
+        };
+        return { agent, conversation };
+      }),
+    );
   }
 
-  /**
-   * Feature 17's gate. Absent `jev`, or the feature's own switch off, is exactly today's
-   * behaviour: generate whenever the fingerprint changed, unchanged from before this feature
-   * existed. With JEV wired, a "still fits" answer skips the call (the saving); a stale answer,
-   * a D7-excluded workspace, or any other outcome generates, the last two through the same
-   * cadence gate JEV screens for otherwise.
-   */
-  private async shouldGenerate(candidate: WorkspaceActivity): Promise<boolean> {
-    if (!this.jev) return true;
+  /** Feature 17's gate for one look. `nameNow` skips it: a cleared title is named at once. */
+  private async decide(
+    candidate: WorkspaceActivity,
+    state: WorkspaceRefreshState,
+    sessions: readonly TitleRefreshSession[],
+    nameNow: boolean,
+  ): Promise<TitleRefreshDecision> {
     const config = this.readTitleRefreshConfig?.() ?? TITLE_REFRESH_DEFAULTS;
-    if (!config.enabled) return true;
-
-    const workspaceId = candidate.workspace.workspaceId;
     const nowMs = this.now();
-    const counters: TitleRefreshCounters = {
-      userTurnsSinceCheck: this.turnsSinceLastAttemptByWorkspaceId.get(workspaceId) ?? 0,
-      lastAttemptAtMs: this.lastAttemptAtByWorkspaceId.get(workspaceId) ?? null,
-    };
-    const decision = await decideTitleRefresh({
-      jev: this.jev,
+    if (nameNow) {
+      return {
+        generate: true,
+        action: "untitled",
+        gatedByJev: false,
+        outcome: null,
+        callId: null,
+        reason: null,
+        score: null,
+        confidence: null,
+        userTurnsSinceLook: state.userTurnsSinceLook,
+        userTurnsSinceGeneration: state.userTurnsSinceGeneration,
+        minutesSinceGeneration: (nowMs - state.lastGenerationAtMs) / 60_000,
+      };
+    }
+    return decideTitleRefresh({
+      jev: this.jev ?? null,
       config,
-      counters,
+      counters: {
+        userTurnsSinceLook: state.userTurnsSinceLook,
+        userTurnsSinceGeneration: state.userTurnsSinceGeneration,
+        lastGenerationAtMs: state.lastGenerationAtMs,
+      },
       nowMs,
       currentTitle: candidate.workspace.title ?? candidate.workspace.displayName,
       branch: candidate.workspace.branch,
       cwd: candidate.workspace.cwd,
-      agents: candidate.agents,
+      sessions,
     });
+  }
 
-    if (decision.action === "anchored") {
-      // First time this workspace was ever eligible: anchor the clock here rather than
-      // judging it against a "since forever" elapsed time, mirroring the outer sweep's own
-      // first-sight anchoring in `tick()`.
-      this.lastAttemptAtByWorkspaceId.set(workspaceId, nowMs);
-      return false;
-    }
-
+  private async attemptRefresh(
+    candidate: WorkspaceActivity,
+    state: WorkspaceRefreshState,
+    options: { nameNow: boolean },
+  ): Promise<void> {
+    const { workspace } = candidate;
+    const sessions = await this.loadSessions(candidate.agents);
+    const decision = await this.decide(candidate, state, sessions, options.nameNow);
+    const config = this.readTitleRefreshConfig?.() ?? TITLE_REFRESH_DEFAULTS;
     this.recordTitleRefreshCheck?.(
       {
-        workspaceId,
+        workspaceId: workspace.workspaceId,
         action: decision.action,
         gatedByJev: decision.gatedByJev,
         outcome: decision.outcome,
         callId: decision.callId,
         reason: decision.reason,
         score: decision.score,
+        confidence: decision.confidence,
         staleScoreThreshold: config.staleScoreThreshold,
         generationCalled: decision.generate,
-        userTurnsSinceCheck: decision.userTurnsSinceCheck,
-        minutesSinceLastAttempt: decision.minutesSinceLastAttempt,
+        userTurnsSinceLook: decision.userTurnsSinceLook,
+        userTurnsSinceGeneration: decision.userTurnsSinceGeneration,
+        minutesSinceGeneration: decision.minutesSinceGeneration,
       },
       {
         agentId: candidate.agents[0]?.id ?? null,
-        currentTitle: candidate.workspace.title ?? candidate.workspace.displayName,
+        currentTitle: workspace.title ?? workspace.displayName,
       },
     );
-
+    // Every look resets this counter, so JEV is never re-asked without a new turn. The ceiling's
+    // counters keep running until a generation actually happens.
+    state.userTurnsSinceLook = 0;
     if (!decision.generate) {
-      // Not stale, or the cadence fallback says it is too soon: leave the counters running so
-      // the next look (whenever the fingerprint next changes) measures from the same point,
-      // which is what lets the ceiling trip after enough consecutive "still fits" answers.
-      return false;
-    }
-
-    this.turnsSinceLastAttemptByWorkspaceId.set(workspaceId, 0);
-    this.lastAttemptAtByWorkspaceId.set(workspaceId, nowMs);
-    return true;
-  }
-
-  private async attemptRefresh(candidate: WorkspaceActivity): Promise<void> {
-    const { workspace } = candidate;
-    const fingerprint = this.fingerprint(workspace.title, candidate.agents);
-    if (this.lastGeneratedFromByWorkspaceId.get(workspace.workspaceId) === fingerprint) {
       return;
     }
-    // Record the fingerprint before deciding, so a workspace that JEV or the cadence gate
-    // decides not to touch this round is not re-considered every tick until something new
-    // happens to it (a new agent turn changes `fingerprint` again).
-    this.lastGeneratedFromByWorkspaceId.set(workspace.workspaceId, fingerprint);
-
-    if (!(await this.shouldGenerate(candidate))) {
-      return;
-    }
+    if (options.nameNow) state.untitledAttempted = true;
+    state.userTurnsSinceGeneration = 0;
+    state.lastGenerationAtMs = this.now();
 
     const daemonConfig = this.readDaemonConfig();
     let result: { title: string };
@@ -456,7 +526,7 @@ export class WorkspaceTitleTracker {
           workspaceGitService: this.workspaceGitService,
           currentName: workspace.title ?? workspace.displayName,
           branch: workspace.branch,
-          agents: candidate.agents,
+          sessions,
         }),
         schema: WorkspaceTitleRefreshSchema,
         schemaName: "WorkspaceTitleRefresh",
@@ -482,23 +552,20 @@ export class WorkspaceTitleTracker {
     }
 
     const title = result.title.trim();
-    // Record the fingerprint of the name this workspace ends up with, not the one it
-    // arrived with: otherwise every successful rename changes the fingerprint and buys
-    // itself a second call at the next interval. Keeping the title in the hash at all is
-    // what lets a cleared title (the hand-back-to-Paseo gesture) re-trigger generation.
-    this.lastGeneratedFromByWorkspaceId.set(
-      workspace.workspaceId,
-      this.fingerprint(title || workspace.title, candidate.agents),
-    );
-    if (!title || title === workspace.title) {
+    if (!title || (workspace.title && isNearEqualTitle(title, workspace.title))) {
       return;
     }
 
-    // Re-read provenance at write time: a rename that landed while the LLM was
-    // running wins, exactly as agent-storage's skipIfTitleManuallySet does.
+    // Re-read at write time: a rename that landed while JEV or the LLM was running wins, whether
+    // it changed the title or only who owns it.
     let wrote = false;
     await this.workspaceRegistry.update(workspace.workspaceId, (current) => {
-      if (current.archivedAt || !isAutoTitledWorkspace(current) || current.title === title) {
+      if (
+        current.archivedAt ||
+        !isAutoTitledWorkspace(current) ||
+        current.title !== workspace.title ||
+        current.titleSource !== workspace.titleSource
+      ) {
         return current;
       }
       wrote = true;
