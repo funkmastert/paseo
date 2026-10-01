@@ -7,6 +7,7 @@ import type {
   JevSavingsValidation,
 } from "./contract.js";
 import {
+  JEV_RESIDENCY,
   estimateContextTokens,
   evaluateEvidence,
   evidenceCounters,
@@ -266,6 +267,12 @@ describe("feature 3b, finish triage: attention, never tokens", () => {
   });
 });
 
+describe("R, residency", () => {
+  test("is in the fleet unit: one cache write at 1.25, then about 125 later calls at 0.1", () => {
+    expect(JEV_RESIDENCY).toBe(1.25 + 0.1 * 125);
+  });
+});
+
 describe("features 4-6, agent tools", () => {
   const facts = {
     tool: "ask_jev_file_bool",
@@ -277,7 +284,7 @@ describe("features 4-6, agent tools", () => {
   };
 
   test("held: (T_avoided - T_result) x R x w(m) - S(C) x w(m)", () => {
-    expect(price("agentTools", "live", { did: "answered" }, facts, held).tokens).toBe(64_950);
+    expect(price("agentTools", "live", { did: "answered" }, facts, held).tokens).toBe(61_275);
   });
 
   test("pending until the regret window closes; no figure when nothing watched it", () => {
@@ -298,7 +305,7 @@ describe("features 4-6, agent tools", () => {
       signal: "reread",
       afterMinutes: 3,
     });
-    expect(result.tokens).toBe(-7_550);
+    expect(result.tokens).toBe(-7_475);
   });
 
   test("ask_jev_diff_risk claims nothing; an unanswered call saves nothing", () => {
@@ -399,7 +406,7 @@ describe("feature 16, read check", () => {
     expect(
       price("readCheck", "shadow", skip, { contextTokens: 10_000, model: "claude-opus-5-5" }, held)
         .tokens,
-    ).toBe(145_000);
+    ).toBe(137_500);
   });
 
   test("a false skip saves nothing, and no validation yet is pending", () => {
@@ -534,6 +541,6 @@ describe("evidence rules", () => {
         validation: held,
         price: priced,
       }),
-    ).toEqual({ bigWouldSkip: 1, bigWouldSkipProjected: 130_500 });
+    ).toEqual({ bigWouldSkip: 1, bigWouldSkipProjected: 123_750 });
   });
 });

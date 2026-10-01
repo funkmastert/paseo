@@ -138,7 +138,7 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     expect(savings.events({ range: "today" }).events[0]).toMatchObject({
       validation: { outcome: "regret" },
       pending: false,
-      tokensSavedEstimate: -7_550,
+      tokensSavedEstimate: -7_475,
     });
   });
 
@@ -158,9 +158,9 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
     const [record] = savings.events({ range: "today" }).events;
     expect(record?.validation).toMatchObject({ outcome: "held" });
     expect(record?.basis?.inputs).toMatchObject({ T_avoided: 9_703, T_result: 200, C: 150_000 });
-    // (9,703 - 200) x 14.5 x 0.5 - (0.1 x 150,000 + 2,200) x 0.5
-    expect(record?.tokensSavedEstimate).toBe(60_297);
-    expect(savings.summary("today").live.tokensSaved).toBe(60_297);
+    // (9,703 - 200) x 13.75 x 0.5 - (0.1 x 150,000 + 2,200) x 0.5
+    expect(record?.tokensSavedEstimate).toBe(56_733);
+    expect(savings.summary("today").live.tokensSaved).toBe(56_733);
   });
 
   test("a window nothing watched gives no figure, and neither does a call that sent no path", async () => {
@@ -211,7 +211,7 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
       contextTokens: 4_000,
     });
     const [event] = second.events({ range: "today" }).events;
-    expect(event).toMatchObject({ validation: { outcome: "regret" }, tokensSavedEstimate: -7_550 });
+    expect(event).toMatchObject({ validation: { outcome: "regret" }, tokensSavedEstimate: -7_475 });
     expect(event?.decision.detail).not.toHaveProperty("regretPaths");
   });
 

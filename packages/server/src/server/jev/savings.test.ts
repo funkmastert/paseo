@@ -307,11 +307,11 @@ describe("settling and validating", () => {
     );
     expect(byId.get(regretId)).toMatchObject({
       validation: { outcome: "regret" },
-      tokensSavedEstimate: -7_550,
+      tokensSavedEstimate: -7_475,
     });
     expect(byId.get(heldId)).toMatchObject({
       validation: { outcome: "held" },
-      tokensSavedEstimate: 64_950,
+      tokensSavedEstimate: 61_275,
     });
   });
 

@@ -31,10 +31,11 @@ export function estimateContextTokens(characters: number): number {
 }
 
 /**
- * `R`: what one token loaded into context costs over its life, in weighted tokens. A one-hour
- * cache write at 2, then 0.1 on each later call; measured 14.1-15.0 on the fleet (research 03 §3).
+ * `R`: what one token loaded into context costs over its life, in weighted tokens. One cache write
+ * at the fleet unit's 1.25, then 0.1 on each of about 125 later calls (research 03 §3, which
+ * priced the write at the one-hour 2 and measured 14.1-15.0; 13.35-14.25 in this unit).
  */
-export const JEV_RESIDENCY = 14.5;
+export const JEV_RESIDENCY = 13.75;
 
 /** `S(C) = 0.1 x C + 2,200`: the context re-read plus the median 440 output tokens at 5. */
 export const JEV_STEP_OUTPUT_TOKENS = 2_200;
