@@ -679,6 +679,9 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
         else this.watches.set(agentId, open);
       }
       this.trimMemory();
+      // Copies the JEV ledger's spend into the rollup at least hourly, before it ages out of
+      // `ledger.json`, even on a day with no involvement.
+      this.dirty = true;
     } catch (error) {
       this.logger.warn({ err: error }, "jev savings: sweep failed");
     }

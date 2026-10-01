@@ -126,10 +126,11 @@ describe("the agent tools adapter (tool-use.jsonl)", () => {
 
     adapt(toolLine({ outcome: "refused", jevCalls: 0 }));
     adapt(toolLine({ outcome: "unavailable", jevCalls: 1 }));
+    adapt(toolLine({ outcome: "unavailable", reason: "unavailable: excluded", jevCalls: 1 }));
     adapt(toolLine({ tool: "ask_jev_diff_risk", at: new Date(NOON + 1).toISOString() }));
 
     const tools = savings.summary("today").features.find((f) => f.feature === "agentTools");
-    expect(tools?.notAsked).toEqual({ inactive: 1 });
+    expect(tools?.notAsked).toEqual({ inactive: 1, excluded: 1 });
     expect(savings.events({ range: "today" }).events).toMatchObject([
       { benefit: "none", tokensSavedEstimate: null },
     ]);

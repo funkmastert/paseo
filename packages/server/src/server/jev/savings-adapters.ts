@@ -129,7 +129,7 @@ export function recordToolUseSavings(
   const outcome = str(line, "outcome");
   if (line["v"] !== 1 || !agentId || !tool || !at || !outcome || outcome === "refused") return "";
   if (outcome === "unavailable") {
-    savings.countNotAsked("agentTools", "inactive");
+    savings.countNotAsked("agentTools", notAskedReason(str(line, "reason")));
     return "";
   }
   if ((num(line, "jevCalls") ?? 0) === 0) return "";
@@ -167,6 +167,10 @@ export function recordToolUseSavings(
     : [];
   if (answered && id) savings.watchReads(id, agentId, paths, TOOL_REGRET_WINDOW_MS);
   return id;
+}
+
+function notAskedReason(reason: string | null): "excluded" | "inactive" {
+  return reason?.includes("excluded") ? "excluded" : "inactive";
 }
 
 /** The `tool-use.jsonl` adapter, until the tools code calls `recordToolUseSavings` itself. */
