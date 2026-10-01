@@ -88,6 +88,8 @@ const WAITS_ON_PERSON =
 
 /** A table row or a list item: a status line about something, not what the agent does next. */
 const TABLE_OR_LIST = /^\s*(?:\||[-*+•]\s|\d+[.)]\s)/;
+/** "got stuck waiting", "was waiting": a report about a wait, not the agent's next step. */
+const NARRATED_WAIT = /\b(?:stuck|sat|sitting|was|were|had been)\s+waiting\b/i;
 
 export interface BackgroundWaitMatch {
   /** The sentence that says it is waiting, clipped, for the prompt and the log. */
@@ -123,32 +125,42 @@ function endsWithQuestion(message: string): boolean {
   return last.includes("?");
 }
 
+/** Double-quoted text is a name or a citation ("the \"don't wait on background work\" rule"). */
+const QUOTED = /"[^"\n]*"|“[^”\n]*”/g;
+
+interface WaitSentence {
+  /** As written, for the quote. */
+  text: string;
+  /** With quoted text blanked, for the patterns. */
+  plain: string;
+}
+
 /** The tail's sentences that can carry a wait, or none when the message ends on a question. */
-function waitSentences(message: string): string[] {
+function waitSentences(message: string): WaitSentence[] {
   const trimmed = message.trim();
   if (!trimmed || endsWithQuestion(trimmed)) return [];
-  return sentences(trimmed.slice(-TAIL_CHARS)).filter(
-    (sentence) => !WAITS_ON_PERSON.test(sentence),
-  );
+  return sentences(trimmed.slice(-TAIL_CHARS))
+    .map((text) => ({ text, plain: text.replace(QUOTED, '""') }))
+    .filter(({ plain }) => !WAITS_ON_PERSON.test(plain) && !NARRATED_WAIT.test(plain));
 }
 
 /** Whether a final message says the agent is waiting on background work. Pure. */
 export function findBackgroundWait(message: string): BackgroundWaitMatch | null {
-  for (const sentence of waitSentences(message)) {
+  for (const { text, plain } of waitSentences(message)) {
     const waits =
-      WAIT_PATTERNS.some((pattern) => pattern.test(sentence)) ||
-      (IN_BACKGROUND.some((pattern) => pattern.test(sentence)) && !REPORTS_DONE.test(sentence));
-    if (waits) return { quote: clipQuote(sentence) };
+      WAIT_PATTERNS.some((pattern) => pattern.test(plain)) ||
+      (IN_BACKGROUND.some((pattern) => pattern.test(plain)) && !REPORTS_DONE.test(plain));
+    if (waits) return { quote: clipQuote(text) };
   }
   return null;
 }
 
 /** Whether a final message says the agent is waiting on CI, a PR, a deploy or a review. Pure. */
 export function findExternalWait(message: string): ExternalWaitMatch | null {
-  for (const sentence of waitSentences(message)) {
+  for (const { text, plain } of waitSentences(message)) {
     for (const pattern of EXTERNAL_PATTERNS) {
-      const target = sentence.match(pattern)?.[1];
-      if (target) return { quote: clipQuote(sentence), target };
+      const target = plain.match(pattern)?.[1];
+      if (target) return { quote: clipQuote(text), target };
     }
   }
   return null;

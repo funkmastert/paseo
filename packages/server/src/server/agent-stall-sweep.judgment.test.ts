@@ -983,6 +983,28 @@ describe("an idle agent nothing will wake", () => {
       expect(h.linesOf("background-wait")).toEqual([]);
     });
 
+    test("an external wait of a child: its parent got the finish report", async () => {
+      const h = new Harness();
+      h.add("lead", { lifecycle: "idle", busy: false });
+      h.addIdle(
+        "worker",
+        "I'm now waiting for the follow-up PR's merge commit and final strings.",
+        43,
+        { labels: { "paseo.parent-agent-id": "lead" } },
+        FOREGROUND(),
+      );
+      await h.sweep.tick();
+      expect(h.linesOf("background-wait")).toEqual([]);
+    });
+
+    test("but not the child's own work, which its parent cannot see end", async () => {
+      const h = new Harness();
+      h.add("lead", { lifecycle: "idle", busy: false });
+      h.addIdle("worker", WAIT, 12, { labels: { "paseo.parent-agent-id": "lead" } });
+      await h.sweep.tick();
+      expect(agentIds(h.linesOf("background-wait"))).toEqual(["worker"]);
+    });
+
     test("a schedule or heartbeat targets it", async () => {
       const h = new Harness();
       h.scheduled.add("a1");

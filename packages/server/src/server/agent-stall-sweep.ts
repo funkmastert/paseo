@@ -876,10 +876,13 @@ export class AgentStallSweep {
     // Cannot tell which agents a schedule wakes: look again next sweep.
     if (!scheduled) return [];
 
+    const hasLiveParent = liveParentCheck(agents);
     const waits: IdleWaitCandidate[] = [];
     for (const { agent, quietForMs } of quiet) {
       // A schedule or heartbeat wakes it; the next check is after it does.
-      const candidate = scheduled.has(agent.id) ? null : this.readIdleWait(agent, quietForMs);
+      const candidate = scheduled.has(agent.id)
+        ? null
+        : this.readIdleWait(agent, quietForMs, hasLiveParent(agent));
       if (candidate) waits.push(candidate);
       else this.markIdleChecked(agent);
     }
@@ -926,10 +929,14 @@ export class AgentStallSweep {
     }
   }
 
-  /** The agent's final turn as one of the two classes, or null when it is neither. */
+  /**
+   * The agent's final turn as one of the two classes, or null when it is neither. A child's
+   * external wait has a watcher: its parent got the child's finish report and owns what comes next.
+   */
   private readIdleWait(
     agent: StallSweepAgentSummary,
     quietForMs: number,
+    hasLiveParent: boolean,
   ): IdleWaitCandidate | null {
     try {
       // A failed last turn is not a wait, and a limit failure is account failover's: a prompt row
@@ -951,7 +958,7 @@ export class AgentStallSweep {
       const quote = (wait ?? external)?.quote ?? "";
       return { ...base, waitClass: "own-work", quote, launched: work.launched, target: null };
     }
-    if (work.launched.length === 0 && external) {
+    if (work.launched.length === 0 && external && !hasLiveParent) {
       return {
         ...base,
         waitClass: "external-wait",
@@ -1569,6 +1576,20 @@ function followSuccessors(agentId: string, successors: ReadonlyMap<string, strin
     current = successors.get(current);
   }
   return chain;
+}
+
+/** Whether an agent's parent, followed through `migrated-to`, is still loaded and not closed. */
+function liveParentCheck(
+  agents: readonly StallSweepAgentSummary[],
+): (agent: StallSweepAgentSummary) => boolean {
+  const byId = new Map(agents.map((agent) => [agent.id, agent] as const));
+  const successors = successorsOf(agents);
+  return (agent) => {
+    const parentId = getParentAgentIdFromLabels(agent.labels);
+    if (parentId === null) return false;
+    const parent = byId.get(followSuccessors(parentId, successors).at(-1) ?? parentId);
+    return parent !== undefined && parent.lifecycle !== "closed" && parent.lifecycle !== "error";
+  };
 }
 
 /** Each idle wait's idle children, through `migrated-to`: their live shells count as its own. */

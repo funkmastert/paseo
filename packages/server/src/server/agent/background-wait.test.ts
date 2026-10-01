@@ -68,6 +68,15 @@ describe("a final message that waits on background work", () => {
       "When you say bundle 3 has landed, I'll rebase. Then I'll run `gate:quick`, wait for them in the same turn, and report the SHA.",
     ],
     ["a generic noun (findings)", "I'm waiting for the review findings."],
+    [
+      "a narrated wait",
+      "The roles agent stalled. That's the third agent today to get stuck waiting on background work.",
+    ],
+    ["a wait in the past", "The leader was waiting on the build when it compacted."],
+    [
+      "a quoted rule name",
+      "I've also added background helper agents to the \"don't wait on background work\" rule every agent gets.",
+    ],
     ["an empty message", "   "],
   ])("does not match %s", (_name, message) => {
     expect(findBackgroundWait(message)).toBeNull();
