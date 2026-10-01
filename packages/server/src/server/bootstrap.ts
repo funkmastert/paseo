@@ -140,6 +140,7 @@ import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
+import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
@@ -2720,6 +2721,7 @@ export async function createPaseoDaemon(
           void server.close();
         });
 
+        normalizeMcpProtocolVersionHeader(req);
         await transport.handleRequest(
           req as unknown as IncomingMessage,
           res as unknown as ServerResponse,
