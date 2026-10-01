@@ -205,6 +205,7 @@ describe("JevDashboardReadyContent", () => {
       "jev-dashboard-feature-awayReply",
       "jev-dashboard-feature-askJev",
       "jev-dashboard-feature-readCheck",
+      "jev-dashboard-feature-titleRefresh",
     ]);
     expect(
       container.querySelector('[data-testid="jev-dashboard-feature-compactionTiming"]')

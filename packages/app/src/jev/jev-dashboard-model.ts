@@ -21,6 +21,7 @@ export const JEV_SAVINGS_FEATURE_ORDER: readonly string[] = [
   "awayReply",
   "askJev",
   "readCheck",
+  "titleRefresh",
 ];
 
 export function jevFeatureLabel(feature: string): string {
@@ -55,19 +56,33 @@ export interface JevDashboardTile {
   tone: "live" | "shadow" | "neutral";
 }
 
+function sumEstimatedTokens(summary: JevSavingsSummary, mode: "live" | "shadow"): number {
+  return summary.features.reduce((sum, entry) => sum + (entry[mode].estimatedTokens ?? 0), 0);
+}
+
+function withEstimatedCaption(caption: string, estimatedTokens: number): string {
+  return estimatedTokens > 0 ? `${caption} · ~${formatTokens(estimatedTokens)} estimated` : caption;
+}
+
 /**
  * The four headline tiles. Saved (live) and would-have-saved (shadow) are never added: each is
  * its own tile, its own tone, so the dashboard can't be read as "JEV saved N tokens" when half of
- * N never left shadow (docs/jev.md, "The JEV dashboard").
+ * N never left shadow (docs/jev.md, "The JEV dashboard"). A tile whose total includes a median
+ * estimate (not measured tokens) names the estimated part in its caption, never silently.
  */
 export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboardTile[] {
+  const liveEstimated = sumEstimatedTokens(summary, "live");
+  const shadowEstimated = sumEstimatedTokens(summary, "shadow");
   return [
     {
       id: "saved",
       label: "Saved",
       tokens: summary.live.tokensSaved,
       usd: null,
-      caption: `${summary.live.involvements} involvement${summary.live.involvements === 1 ? "" : "s"}`,
+      caption: withEstimatedCaption(
+        `${summary.live.involvements} involvement${summary.live.involvements === 1 ? "" : "s"}`,
+        liveEstimated,
+      ),
       tone: "live",
     },
     {
@@ -75,7 +90,7 @@ export function buildJevDashboardTiles(summary: JevSavingsSummary): JevDashboard
       label: "Would have saved",
       tokens: summary.shadow.tokensWouldSave,
       usd: null,
-      caption: `${summary.shadow.involvements} in shadow`,
+      caption: withEstimatedCaption(`${summary.shadow.involvements} in shadow`, shadowEstimated),
       tone: "shadow",
     },
     {
@@ -111,6 +126,12 @@ export function formatTokens(tokens: number): string {
   return Math.round(tokens).toLocaleString("en-US");
 }
 
+/** A token figure with its estimated part named, never folded in silently. */
+export function formatTokensWithEstimate(tokens: number, estimatedTokens: number): string {
+  if (estimatedTokens <= 0) return formatTokens(tokens);
+  return `${formatTokens(tokens)} (~${formatTokens(estimatedTokens)} est.)`;
+}
+
 export function formatUsd(usd: number): string {
   if (usd === 0) return "$0";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
@@ -137,6 +158,9 @@ export interface JevDashboardFeatureRow {
   notAskedTotal: number;
   liveTokens: number | null;
   shadowTokens: number | null;
+  /** The part of the live/shadow tokens above that is a median estimate, not measured. */
+  liveEstimatedTokens: number;
+  shadowEstimatedTokens: number;
   otherBenefitText: string | null;
   wrongRatePct: number | null;
   jevUsd: number;
@@ -195,6 +219,8 @@ function buildFeatureRow(entry: JevSavingsFeatureSummary): JevDashboardFeatureRo
     notAskedTotal,
     liveTokens: entry.benefit === "tokens" ? entry.live.tokens : null,
     shadowTokens: entry.benefit === "tokens" ? entry.shadow.tokens : null,
+    liveEstimatedTokens: entry.live.estimatedTokens ?? 0,
+    shadowEstimatedTokens: entry.shadow.estimatedTokens ?? 0,
     otherBenefitText,
     wrongRatePct,
     jevUsd: entry.jevUsd,

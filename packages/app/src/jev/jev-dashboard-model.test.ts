@@ -6,6 +6,7 @@ import {
   formatOtherBenefit,
   formatSignedTokens,
   formatTokens,
+  formatTokensWithEstimate,
   formatUsd,
   jevFeatureStateLabel,
 } from "@/jev/jev-dashboard-model";
@@ -95,6 +96,66 @@ describe("buildJevDashboardTiles", () => {
     expect(cost?.tokens).toBe(7500);
     expect(cost?.caption).toBe("3 calls");
   });
+
+  it("names the estimated share in the caption, summed across every feature", () => {
+    const tiles = buildJevDashboardTiles(
+      summary({
+        live: { involvements: 10, tokensSaved: 1000 },
+        shadow: { involvements: 5, tokensWouldSave: 9000 },
+        features: [
+          featureSummary({
+            feature: "spawnHint",
+            live: {
+              involvements: 6,
+              changed: 0,
+              tokens: 600,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 200,
+            },
+            shadow: {
+              involvements: 2,
+              changed: 0,
+              tokens: 4000,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 1000,
+            },
+          }),
+          featureSummary({
+            feature: "readCheck",
+            live: {
+              involvements: 4,
+              changed: 0,
+              tokens: 400,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 50,
+            },
+            shadow: {
+              involvements: 3,
+              changed: 0,
+              tokens: 5000,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 0,
+            },
+          }),
+        ],
+      }),
+    );
+    expect(tiles.find((tile) => tile.id === "saved")?.caption).toBe(
+      "10 involvements · ~250 estimated",
+    );
+    expect(tiles.find((tile) => tile.id === "would-have-saved")?.caption).toBe(
+      "5 in shadow · ~1,000 estimated",
+    );
+  });
+
+  it("leaves the caption plain when nothing is estimated", () => {
+    const tiles = buildJevDashboardTiles(summary({ live: { involvements: 1, tokensSaved: 100 } }));
+    expect(tiles.find((tile) => tile.id === "saved")?.caption).toBe("1 involvement");
+  });
 });
 
 describe("buildJevDashboardFeatureRows", () => {
@@ -110,6 +171,7 @@ describe("buildJevDashboardFeatureRows", () => {
       "awayReply",
       "askJev",
       "readCheck",
+      "titleRefresh",
     ]);
     expect(rows[0]?.involvements).toBe(0);
     expect(rows[0]?.evidenceMet).toBeNull();
@@ -157,6 +219,46 @@ describe("buildJevDashboardFeatureRows", () => {
     expect(unchecked.find((entry) => entry.feature === "agentTools")?.wrongRatePct).toBeNull();
   });
 
+  it("carries each side's estimated tokens separately from the measured total", () => {
+    const rows = buildJevDashboardFeatureRows(
+      summary({
+        features: [
+          featureSummary({
+            feature: "titleRefresh",
+            live: {
+              involvements: 5,
+              changed: 2,
+              tokens: 300,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 120,
+            },
+            shadow: {
+              involvements: 1,
+              changed: 0,
+              tokens: 60,
+              otherBenefit: null,
+              pending: 0,
+              estimatedTokens: 0,
+            },
+          }),
+        ],
+      }),
+    );
+    const row = rows.find((entry) => entry.feature === "titleRefresh");
+    expect(row?.liveEstimatedTokens).toBe(120);
+    expect(row?.shadowEstimatedTokens).toBe(0);
+  });
+
+  it("defaults estimated tokens to zero when the ledger omits them", () => {
+    const rows = buildJevDashboardFeatureRows(
+      summary({ features: [featureSummary({ feature: "spawnHint" })] }),
+    );
+    const row = rows.find((entry) => entry.feature === "spawnHint");
+    expect(row?.liveEstimatedTokens).toBe(0);
+    expect(row?.shadowEstimatedTokens).toBe(0);
+  });
+
   it("sums the not-asked reasons into one total", () => {
     const rows = buildJevDashboardFeatureRows(
       summary({
@@ -197,6 +299,16 @@ describe("formatTokens", () => {
     expect(formatTokens(284)).toBe("284");
     expect(formatTokens(12400)).toBe("12.4k");
     expect(formatTokens(3_100_000)).toBe("3.1M");
+  });
+});
+
+describe("formatTokensWithEstimate", () => {
+  it("names the estimated share in parentheses", () => {
+    expect(formatTokensWithEstimate(1000, 200)).toBe("1,000 (~200 est.)");
+  });
+
+  it("falls back to the plain figure when nothing is estimated", () => {
+    expect(formatTokensWithEstimate(1000, 0)).toBe("1,000");
   });
 });
 

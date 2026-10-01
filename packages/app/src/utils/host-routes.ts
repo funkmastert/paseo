@@ -433,12 +433,17 @@ export function buildAskJevRoute() {
 }
 
 /** JEV belongs to a host, not a workspace (docs/jev.md, "The JEV dashboard"). */
-export function buildJevDashboardRoute(serverId?: string) {
-  const normalized = trimNonEmpty(serverId);
-  if (!normalized) {
+export function buildJevDashboardRoute(serverId?: string, agentId?: string) {
+  const params = new URLSearchParams();
+  const normalizedServerId = trimNonEmpty(serverId);
+  if (normalizedServerId) params.set("host", normalizedServerId);
+  const normalizedAgentId = trimNonEmpty(agentId);
+  if (normalizedAgentId) params.set("agent", normalizedAgentId);
+  const query = params.toString();
+  if (!query) {
     return "/jev" as const;
   }
-  return `/jev?host=${encodeSegment(normalized)}` as const;
+  return `/jev?${query}` as const;
 }
 
 export function buildPinnedGridRoute() {

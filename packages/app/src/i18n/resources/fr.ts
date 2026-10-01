@@ -2138,6 +2138,7 @@ export const fr: TranslationResources = {
     jevShadow: "Mode fantôme",
     jevDryRun: "Simulation",
     jevOlder: "{{count}} plus anciennes",
+    jevAllActivity: "Toute l'activité JEV",
   },
   review: {
     comment: {

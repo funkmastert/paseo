@@ -2134,6 +2134,7 @@ export const es: TranslationResources = {
     jevShadow: "Sombra",
     jevDryRun: "Simulación",
     jevOlder: "{{count}} anteriores",
+    jevAllActivity: "Toda la actividad de JEV",
   },
   review: {
     comment: {

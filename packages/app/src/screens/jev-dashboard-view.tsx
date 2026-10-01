@@ -17,6 +17,7 @@ import {
   buildJevDashboardTiles,
   formatOtherBenefit,
   formatTokens,
+  formatTokensWithEstimate,
   formatUsd,
   type JevDashboardDayBar,
   type JevDashboardFeatureRow,
@@ -355,9 +356,13 @@ function FeatureRow({
       </Text>
       {row.liveTokens !== null || row.shadowTokens !== null ? (
         <Text style={styles.featureMeta}>
-          {row.liveTokens !== null ? `Live ${formatTokens(row.liveTokens)}` : null}
+          {row.liveTokens !== null
+            ? `Live ${formatTokensWithEstimate(row.liveTokens, row.liveEstimatedTokens)}`
+            : null}
           {row.liveTokens !== null && row.shadowTokens !== null ? " · " : null}
-          {row.shadowTokens !== null ? `Would have ${formatTokens(row.shadowTokens)}` : null}
+          {row.shadowTokens !== null
+            ? `Would have ${formatTokensWithEstimate(row.shadowTokens, row.shadowEstimatedTokens)}`
+            : null}
         </Text>
       ) : null}
       {row.otherBenefitText ? <Text style={styles.featureMeta}>{row.otherBenefitText}</Text> : null}
@@ -531,7 +536,10 @@ function RecentEvents({
 
 function formatEventTokenOrPending(event: JevSavingsEvent): string | null {
   if (event.pending) return "pending";
-  if (event.tokensSavedEstimate !== null) return formatTokens(event.tokensSavedEstimate);
+  if (event.tokensSavedEstimate !== null) {
+    const figure = formatTokens(event.tokensSavedEstimate);
+    return event.estimated ? `~${figure} est.` : figure;
+  }
   if (event.otherBenefit) return formatOtherBenefit(event.otherBenefit);
   return null;
 }

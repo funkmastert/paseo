@@ -2085,6 +2085,7 @@ export const ar: TranslationResources = {
     jevShadow: "وضع الظل",
     jevDryRun: "تشغيل تجريبي",
     jevOlder: "{{count}} أقدم",
+    jevAllActivity: "كل نشاط JEV",
   },
   review: {
     comment: {

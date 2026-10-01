@@ -14,11 +14,9 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
 /**
- * Stands in for the real `JevSavingsReader` (a `jev.savings.summary` / `jev.savings.events`
- * round trip through `DaemonClient`) until the savings ledger's handlers land on
- * `multi-account-orchestrator` (its seam is merged; `JevService.savings` still drops everything —
- * docs/design-notes/jev-tracks.md, "The seam commit"). At merge, delete this and call the client
- * directly from the hooks.
+ * A `JevSavingsReader` over fixture data, for tests and captures that don't want a live host. The
+ * hooks (`use-jev-savings-summary.ts`, `use-jev-savings-events.ts`) call `DaemonClient` directly in
+ * the app; this is not on that path.
  */
 export function createFakeJevSavingsReader(): JevSavingsReader {
   return {

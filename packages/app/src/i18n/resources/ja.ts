@@ -2105,6 +2105,7 @@ export const ja: TranslationResources = {
     jevShadow: "シャドー",
     jevDryRun: "ドライラン",
     jevOlder: "ほか {{count}} 件",
+    jevAllActivity: "すべての JEV アクティビティ",
   },
   review: {
     comment: {

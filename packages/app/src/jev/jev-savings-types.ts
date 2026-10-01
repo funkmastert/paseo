@@ -33,9 +33,9 @@ export interface JevSavingsEventsPage {
 }
 
 /**
- * What the dashboard's hooks call: a real `jev.savings.summary`/`jev.savings.events` round trip
- * through `DaemonClient` once the savings ledger's handlers land, a local fake until then
- * (`fake-jev-savings-reader.ts`).
+ * The shape the dashboard's hooks read: a real `jev.savings.summary`/`jev.savings.events` round
+ * trip through `DaemonClient`. `fake-jev-savings-reader.ts` implements this same shape over fixture
+ * data for tests and captures that don't want a live host.
  */
 export interface JevSavingsReader {
   summary(range: JevSavingsRange): Promise<JevSavingsSummary>;

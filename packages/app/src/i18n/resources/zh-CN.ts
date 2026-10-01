@@ -2059,6 +2059,7 @@ export const zhCN: TranslationResources = {
     jevShadow: "影子模式",
     jevDryRun: "试运行",
     jevOlder: "更早的 {{count}} 条",
+    jevAllActivity: "所有 JEV 活动",
   },
   review: {
     comment: {

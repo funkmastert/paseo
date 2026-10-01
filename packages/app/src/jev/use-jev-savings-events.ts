@@ -1,5 +1,5 @@
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useCallback, useMemo, useState } from "react";
-import { createFakeJevSavingsReader } from "@/jev/fake-jev-savings-reader";
 import type {
   JevSavingsEvent,
   JevSavingsEventsPage,
@@ -7,7 +7,7 @@ import type {
 } from "@/jev/jev-savings-types";
 import { useFetchQueries } from "@/data/query";
 import { useHostFeature } from "@/runtime/host-features";
-import { useHostRuntimeIsConnected } from "@/runtime/host-runtime";
+import { useHostRuntimeClient, useHostRuntimeIsConnected } from "@/runtime/host-runtime";
 
 export interface JevSavingsEventsState {
   events: JevSavingsEvent[];
@@ -58,11 +58,37 @@ function useFilteredCursors(filterKey: string): {
   return { cursors, appendCursor };
 }
 
+interface PageResultLike {
+  data?: JevSavingsEventsPage;
+  isPending: boolean;
+  error: Error | null;
+}
+
+function derivePagingState(cursors: (string | null)[], pageResults: PageResultLike[]) {
+  const lastResult = pageResults[pageResults.length - 1];
+  const nextCursor = lastResult?.data?.nextCursor ?? null;
+  return {
+    nextCursor,
+    hasMore: nextCursor !== null,
+    isLoadingFirstPage: cursors.length === 1 && (pageResults[0]?.isPending ?? false),
+    isLoadingMore: cursors.length > 1 && (lastResult?.isPending ?? false),
+    error: lastResult?.error ?? null,
+  };
+}
+
+async function fetchEventsPage(
+  client: DaemonClient | null,
+  query: { range: JevSavingsRange; feature?: string; agentId?: string },
+  cursor: string | null,
+): Promise<JevSavingsEventsPage> {
+  if (!client) throw new Error("JEV savings events requested without a host client");
+  const payload = await client.jevSavingsEvents({ ...query, cursor: cursor ?? undefined });
+  return { events: payload.events, nextCursor: payload.nextCursor };
+}
+
 /**
- * `jev.savings.events`, paged by cursor, filterable by feature and agent. The savings track's seam
- * already landed a real `DaemonClient.jevSavingsEvents`, but its handler drops everything until
- * the ledger merges — so this reads a local fake until then (`fake-jev-savings-reader.ts`); swap
- * the `queryFn` for a client call at that point, same shape.
+ * `jev.savings.events`, paged by cursor, filterable by feature and agent, gated on
+ * `server_info.features.jevSavings`.
  *
  * Each fetched cursor is its own cached query (`useFetchQueries`, not `useInfiniteQuery`, which
  * app code may not call directly — `no-restricted-imports`). "Load more" appends the previous
@@ -73,10 +99,12 @@ export function useJevSavingsEvents(
   query: { range: JevSavingsRange; feature?: string; agentId?: string },
   options: { enabled?: boolean } = {},
 ): JevSavingsEventsState {
+  const client = useHostRuntimeClient(serverId ?? "");
   const isConnected = useHostRuntimeIsConnected(serverId ?? "");
   const isSupported = useHostFeature(serverId, "jevSavings");
-  const reader = useMemo(() => createFakeJevSavingsReader(), []);
-  const enabled = Boolean((options.enabled ?? true) && serverId && isConnected && isSupported);
+  const enabled = Boolean(
+    (options.enabled ?? true) && serverId && client && isConnected && isSupported,
+  );
 
   const filterKey = jevSavingsEventsQueryKey(serverId, query).join("\u0000");
   const { cursors, appendCursor } = useFilteredCursors(filterKey);
@@ -87,13 +115,7 @@ export function useJevSavingsEvents(
       dataShape: "value",
       staleTimeMs: 30_000,
       enabled,
-      queryFn: () =>
-        reader.events({
-          range: query.range,
-          feature: query.feature,
-          agentId: query.agentId,
-          cursor: cursor ?? undefined,
-        }),
+      queryFn: () => fetchEventsPage(client, query, cursor),
     })),
   );
 
@@ -101,11 +123,10 @@ export function useJevSavingsEvents(
     () => pageResults.flatMap((result) => result.data?.events ?? []),
     [pageResults],
   );
-  const lastResult = pageResults[pageResults.length - 1];
-  const nextCursor = lastResult?.data?.nextCursor ?? null;
-  const hasMore = nextCursor !== null;
-  const isLoadingFirstPage = cursors.length === 1 && (pageResults[0]?.isPending ?? false);
-  const isLoadingMore = cursors.length > 1 && (lastResult?.isPending ?? false);
+  const { nextCursor, hasMore, isLoadingFirstPage, isLoadingMore, error } = derivePagingState(
+    cursors,
+    pageResults,
+  );
 
   const loadMore = useCallback(() => {
     if (!hasMore || isLoadingMore) return;
@@ -118,6 +139,6 @@ export function useJevSavingsEvents(
     isLoadingMore,
     hasMore,
     loadMore,
-    error: lastResult?.error ?? null,
+    error,
   };
 }

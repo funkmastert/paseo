@@ -2118,6 +2118,7 @@ export const ptBR: TranslationResources = {
     jevShadow: "Sombra",
     jevDryRun: "Simulação",
     jevOlder: "{{count}} anteriores",
+    jevAllActivity: "Toda a atividade do JEV",
   },
   review: {
     comment: {

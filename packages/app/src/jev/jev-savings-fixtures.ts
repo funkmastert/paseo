@@ -6,11 +6,12 @@ import type {
 } from "@/jev/jev-savings-types";
 
 /**
- * Canned savings data standing in for `jev.savings.summary` / `jev.savings.events` until the
- * savings ledger's handlers land. Shapes a believable story across the three ranges: `spawnHint`,
- * `notificationTriage`, `stallJudgment` and `readCheck` are shadow and not yet past their evidence
- * rule; `remediationTriage` is shadow and past it, ready for Tyler to flip; `agentTools` and
- * `askJev` are live; `compactionTiming` is dormant; `awayReply` is dry run.
+ * Canned `jev.savings.summary` / `jev.savings.events` shapes, for tests and captures that don't
+ * want a live host (`fake-jev-savings-reader.ts`). Shapes a believable story across the three
+ * ranges: `spawnHint`, `notificationTriage`, `stallJudgment` and `readCheck` are shadow and not yet
+ * past their evidence rule; `remediationTriage` is shadow and past it, ready for Tyler to flip;
+ * `agentTools` and `askJev` are live; `compactionTiming` is dormant; `awayReply` is dry run;
+ * `titleRefresh` is live with a median-estimated share of its tokens.
  */
 
 function zeroTotals() {
@@ -165,6 +166,25 @@ const TODAY_FEATURES: JevSavingsFeatureSummary[] = [
       observed: "180 checked, 38 false skips (21.1%), projected net +41,200 tokens",
       met: false,
     },
+  },
+  {
+    feature: "titleRefresh",
+    state: "live",
+    benefit: "tokens",
+    asked: 48,
+    notAsked: { "no-change": 9 },
+    live: {
+      involvements: 48,
+      changed: 0,
+      tokens: 2100,
+      otherBenefit: null,
+      pending: 0,
+      estimatedTokens: 1400,
+    },
+    shadow: zeroTotals(),
+    validation: { checked: 0, held: 0, wrong: 0 },
+    jevUsd: 0.0012,
+    evidence: { rule: "—", observed: "Skips the rename call on a confident still-fits", met: null },
   },
 ];
 
@@ -321,6 +341,7 @@ function eventFromFeature(
   involvement: string,
   decisionDid: string,
   decisionWouldBe: string | null,
+  estimated = false,
 ): JevSavingsEvent {
   const totals = entry[mode];
   return {
@@ -344,6 +365,7 @@ function eventFromFeature(
       entry.benefit === "tokens"
         ? Math.round(totals.tokens / Math.max(totals.involvements, 1))
         : null,
+    estimated,
     otherBenefit: totals.otherBenefit,
     basis:
       entry.benefit === "tokens"
@@ -401,5 +423,15 @@ export const JEV_SAVINGS_EVENTS_FIXTURE: JevSavingsEvent[] = [
     "Does this finish notice need an alert?",
     "sent as alert",
     "would hold for the digest",
+  ),
+  eventFromFeature(
+    "sv_006",
+    "2026-09-30T19:20:00.000Z",
+    TODAY_FEATURES.find((entry) => entry.feature === "titleRefresh")!,
+    "live",
+    "Does 'fix sidebar hover regression' still fit this workspace's recent agents?",
+    "still fits (0.93), rename skipped",
+    "still fits (0.93), rename skipped",
+    true,
   ),
 ];

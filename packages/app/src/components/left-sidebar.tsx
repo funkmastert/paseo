@@ -460,6 +460,7 @@ function SidebarFooter({
   labels,
   handleAddHost,
   handleOpenHostSettings,
+  closeSidebar,
 }: {
   theme: SidebarTheme;
   handleOpenProject: () => void;
@@ -474,6 +475,8 @@ function SidebarFooter({
   };
   handleAddHost: () => void;
   handleOpenHostSettings: (serverId: string) => void;
+  /** Present only on the phone overlay: the two buttons below navigate and close it behind them. */
+  closeSidebar?: () => void;
 }) {
   const newAgentKeys = useShortcutKeys("new-agent");
   const settingsKeys = useShortcutKeys("toggle-settings");
@@ -500,8 +503,8 @@ function SidebarFooter({
           icon={Import}
           theme={theme}
         />
-        <SidebarJevDashboardSlot theme={theme} />
-        <SidebarSupportSlot theme={theme} />
+        <SidebarJevDashboardSlot theme={theme} closeSidebar={closeSidebar} />
+        <SidebarSupportSlot theme={theme} closeSidebar={closeSidebar} />
         <FooterIconButton
           onPress={handleSettings}
           testID="sidebar-settings"
@@ -523,12 +526,19 @@ const JEV_DASHBOARD_LABEL = "JEV dashboard";
  * footer never shows a dead one for a stock host, an older daemon, or a disconnected one
  * (docs/jev.md, "The JEV dashboard" → "Where it lives").
  */
-function SidebarJevDashboardSlot({ theme }: { theme: SidebarTheme }) {
+function SidebarJevDashboardSlot({
+  theme,
+  closeSidebar,
+}: {
+  theme: SidebarTheme;
+  closeSidebar?: () => void;
+}) {
   const jevTarget = useSidebarJevDashboardTarget();
   const openJevDashboard = useCallback(() => {
     if (!jevTarget) return;
+    closeSidebar?.();
     router.push(buildJevDashboardRoute(jevTarget.serverId));
-  }, [jevTarget]);
+  }, [jevTarget, closeSidebar]);
 
   if (!jevTarget) return null;
 
@@ -551,14 +561,21 @@ const AGENT_ROLES_LABEL = "Agent roles";
  * and Support menu. Keeps the footer from ever showing a dead button for a
  * stock host, an older daemon, or a disconnected one.
  */
-function SidebarSupportSlot({ theme }: { theme: SidebarTheme }) {
+function SidebarSupportSlot({
+  theme,
+  closeSidebar,
+}: {
+  theme: SidebarTheme;
+  closeSidebar?: () => void;
+}) {
   const rolesTarget = useSidebarAgentRolesTarget();
   const openAgentRoles = useCallback(() => {
     if (!rolesTarget) return;
+    closeSidebar?.();
     router.push(
       buildPluginSettingsRoute(rolesTarget.serverId, rolesTarget.pluginId, rolesTarget.screenId),
     );
-  }, [rolesTarget]);
+  }, [rolesTarget, closeSidebar]);
 
   if (!rolesTarget) return <SidebarHelpMenu />;
 
@@ -684,6 +701,7 @@ function MobileSidebar({
           labels={labels}
           handleAddHost={handleAddHost}
           handleOpenHostSettings={handleOpenHostSettings}
+          closeSidebar={closeSidebar}
         />
       </View>
     </MobilePanelOverlay>
