@@ -121,6 +121,8 @@ export interface JevSavingsPrice {
   basis: JevSavingsBasis | null;
   /** Waits on a later fact. A record whose facts say `partial` is never pending. */
   pending: boolean;
+  /** The figure stands in for tokens nobody measured: a skipped agent priced at its kind's median. */
+  estimated?: boolean;
 }
 
 const WEIGHT_NOTE = "w: Opus 5.5 1, Opus 5 1.25, Sonnet 0.5, Haiku 0.25";
@@ -161,6 +163,11 @@ function tokensPrice(
     basis: { formula, inputs: { ...inputs, weights: WEIGHT_NOTE } },
     pending,
   };
+}
+
+/** A median standing in for an agent that never ran: shown as estimated, never as measured. */
+function estimatedPrice(price: JevSavingsPrice): JevSavingsPrice {
+  return price.tokens === null ? price : { ...price, estimated: true };
 }
 
 function pendingPrice(benefit: JevBenefitKind, waitingOn: string): JevSavingsPrice {
@@ -276,10 +283,12 @@ function priceRemediationTriage(input: JevSavingsPriceInput): JevSavingsPrice {
   if (decision.did === "person") {
     if (median === null)
       return tokensPrice(null, "median(A x w(m)): no agents of this kind in 30 days", medianInputs);
-    return tokensPrice(
-      median,
-      "median(A x w(m)) of the kind's agents: the skipped agent never ran",
-      medianInputs,
+    return estimatedPrice(
+      tokensPrice(
+        median,
+        "estimate: median(A x w(m)) of the kind's agents; the skipped agent never ran",
+        medianInputs,
+      ),
     );
   }
   if (decision.did === "defer") {
@@ -295,10 +304,12 @@ function priceRemediationTriage(input: JevSavingsPriceInput): JevSavingsPrice {
     }
     if (median === null)
       return tokensPrice(null, "median(A x w(m)): no agents of this kind in 30 days", medianInputs);
-    return tokensPrice(
-      median,
-      "median(A x w(m)): cleared during the hold, no agent ran",
-      medianInputs,
+    return estimatedPrice(
+      tokensPrice(
+        median,
+        "estimate: median(A x w(m)); cleared during the hold, no agent ran",
+        medianInputs,
+      ),
     );
   }
   return tokensPrice(0, "0: the agent started", { did: decision.did });
@@ -511,10 +522,12 @@ function priceStallJudgment({ mode, facts }: JevSavingsPriceInput): JevSavingsPr
     const inputs = { "median(A x w(m))": median, samples: num(facts, "medianSamples") };
     if (median === null)
       return tokensPrice(null, "median(A x w(m)): no stalled-agent agents in 30 days", inputs);
-    return tokensPrice(
-      median,
-      "median(A x w(m)): the ladder honoured personFirst and started no agent",
-      inputs,
+    return estimatedPrice(
+      tokensPrice(
+        median,
+        "estimate: median(A x w(m)); the ladder honoured personFirst and started no agent",
+        inputs,
+      ),
     );
   }
   const fixed = bool(facts, "fixed");

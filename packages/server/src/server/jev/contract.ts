@@ -572,6 +572,11 @@ export interface JevSavingsModeTotals {
   /** Live: answers that changed what code did. Shadow: answers that would have. */
   changed: number;
   tokens: number;
+  /**
+   * The part of `tokens` that is an estimate (a skipped agent priced at its kind's median), for the
+   * dashboard to label "estimated", not "saved". Absent from an older daemon.
+   */
+  estimatedTokens?: number;
   otherBenefit: JevOtherBenefit | null;
   /** Involvements whose figure is still pending. */
   pending: number;
@@ -650,6 +655,8 @@ export interface JevSavingsEvent {
   otherBenefit: JevOtherBenefit | null;
   basis: JevSavingsBasis | null;
   pending: boolean;
+  /** The figure is an estimate, not measured tokens. Absent from an older daemon. */
+  estimated?: boolean;
   validation: JevSavingsValidation | null;
   jevCostUsd: number | null;
 }

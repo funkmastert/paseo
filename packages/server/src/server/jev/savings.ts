@@ -87,6 +87,8 @@ interface ModeAgg {
   involvements: number;
   changed: number;
   tokens: number;
+  /** The part of `tokens` that is a median estimate, not measured. */
+  estimatedTokens: number;
   other: JevOtherBenefit | null;
   pending: number;
 }
@@ -181,7 +183,7 @@ export interface JevSavingsLedgerOptions {
 }
 
 function emptyMode(): ModeAgg {
-  return { involvements: 0, changed: 0, tokens: 0, other: null, pending: 0 };
+  return { involvements: 0, changed: 0, tokens: 0, estimatedTokens: 0, other: null, pending: 0 };
 }
 
 function emptyFeature(): FeatureAgg {
@@ -964,6 +966,7 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
       otherBenefit: record.price.otherBenefit,
       basis: record.price.basis,
       pending: record.price.pending,
+      estimated: record.price.estimated === true,
       validation: record.validation,
       jevCostUsd: record.jevCostUsd,
     };
@@ -1226,6 +1229,7 @@ function contribute(day: DayAgg, record: Folded, sign: 1 | -1): void {
   mode.involvements += sign;
   if (changedOf(record)) mode.changed += sign;
   mode.tokens += sign * tokens;
+  if (record.price.estimated) mode.estimatedTokens += sign * tokens;
   if (record.price.pending) mode.pending += sign;
   const other = record.price.otherBenefit;
   if (other) {
@@ -1270,6 +1274,7 @@ function modeTotals(mode: ModeAgg, tokenFeature: boolean): JevSavingsModeTotals 
     involvements: mode.involvements,
     changed: mode.changed,
     tokens: tokenFeature ? Math.round(mode.tokens) : 0,
+    estimatedTokens: tokenFeature ? Math.round(mode.estimatedTokens) : 0,
     otherBenefit: mode.other
       ? { unit: mode.other.unit, value: Math.round(mode.other.value * 10) / 10 }
       : null,
@@ -1290,6 +1295,7 @@ function mergeFeature(into: Map<string, FeatureAgg>, feature: string, f: Feature
     to.involvements += from.involvements;
     to.changed += from.changed;
     to.tokens += from.tokens;
+    to.estimatedTokens += from.estimatedTokens;
     to.pending += from.pending;
     if (from.other) {
       const value =
@@ -1334,6 +1340,7 @@ function reviveMode(value: unknown): ModeAgg {
     involvements: reviveNumber(v["involvements"]),
     changed: reviveNumber(v["changed"]),
     tokens: reviveNumber(v["tokens"]),
+    estimatedTokens: reviveNumber(v["estimatedTokens"]),
     other: other
       ? { unit: other["unit"] as JevOtherBenefit["unit"], value: reviveNumber(other["value"]) }
       : null,

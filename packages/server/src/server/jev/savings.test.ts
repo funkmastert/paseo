@@ -384,6 +384,35 @@ describe("storage", () => {
     });
   });
 
+  test("a live skip priced at its kind's median is marked an estimate, apart from measured tokens (review m6)", async () => {
+    const calls = new Map([
+      ["c1", entry("c1")],
+      ["c2", entry("c2", { outcome: "answered" })],
+    ]);
+    const h = await harness({ calls });
+    const measured = h.ledger.record(skipInput("c1"));
+    h.ledger.settle(measured, {
+      fixed: false,
+      agentTotalTokens: 40_000,
+      agentModel: "claude-opus-5-5",
+    });
+    const estimated = h.ledger.record(
+      skipInput("c2", {
+        decision: { did: "person", wouldBe: "person", changed: true },
+        facts: { medianTokens: 9_000, medianSamples: 4 },
+      }),
+    );
+
+    const triage = h.ledger
+      .summary("today")
+      .features.find((f) => f.feature === "remediationTriage");
+    expect(triage?.live).toMatchObject({ tokens: 9_000, estimatedTokens: 9_000 });
+    expect(triage?.shadow).toMatchObject({ tokens: 40_000, estimatedTokens: 0 });
+    const byId = new Map(h.ledger.events({ range: "today" }).events.map((e) => [e.id, e]));
+    expect(byId.get(estimated)).toMatchObject({ estimated: true });
+    expect(byId.get(measured)).toMatchObject({ estimated: false });
+  });
+
   test("a crash between rollup flushes loses nothing on the file's only day (review m5)", async () => {
     const dir = tempDir();
     const first = await harness({ dir, calls: new Map([["c1", entry("c1")]]) });
