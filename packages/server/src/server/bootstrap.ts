@@ -219,6 +219,9 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { migrateWorkspaceTitleSources } from "./workspace-title-source-migration.js";
+import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
+import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
 import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
@@ -275,6 +278,7 @@ import {
   createRemediationTriageRecorder,
 } from "./remediation/jev-triage.js";
 import { RemediationLadder, remediationCreateAgentInput } from "./remediation/ladder.js";
+import { jevConfigSection } from "./jev/config.js";
 import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
@@ -2191,9 +2195,16 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
     logger,
   });
-  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
-  agentTitleTracker.start();
-
+  // One-time: titles agents supplied at creation used to be stamped "manual", which kept the
+  // tracker off most workspaces. Never fatal; the marker makes it run once.
+  await migrateWorkspaceTitleSources({
+    workspaceRegistry,
+    listAgents: () => agentStorage.list(),
+    markerPath: path.join(config.paseoHome, "projects", "workspace-title-source-migration.json"),
+    logger,
+  }).catch((error: unknown) => {
+    logger.warn({ err: error }, "Workspace title provenance migration failed");
+  });
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
     workspaceRegistry,
@@ -2203,8 +2214,28 @@ export async function createPaseoDaemon(
     emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
       await emitWorkspaceUpdatesExternal([workspaceId]);
     },
+    // Feature 17 (docs/jev.md): gate a regeneration on whether JEV thinks the name still fits.
+    jev,
+    readTitleRefreshConfig: () =>
+      resolveWorkspaceTitleRefreshConfig(
+        (
+          jevConfigSection(readRawConfig(config.paseoHome).rawConfig) as
+            | Record<string, unknown>
+            | undefined
+        )?.["titleRefresh"],
+      ),
+    recordTitleRefreshCheck: createTitleRefreshRecorder({
+      jev,
+      filePath: path.join(config.paseoHome, "jev", "title-refresh.jsonl"),
+      logger,
+    }),
     logger,
   });
+  handleAgentTurnFinished = (params) => {
+    agentTitleTracker.scheduleRefresh(params);
+    workspaceTitleTracker.recordAgentTurnFinished(params);
+  };
+  agentTitleTracker.start();
   workspaceTitleTracker.start();
 
   // Auto pins last while their workspace is active (workspace-auto-pin.ts). Sessions report uses.
@@ -2539,8 +2570,8 @@ export async function createPaseoDaemon(
         cwd,
         title,
         projectId,
-        // The caller named it deliberately; the tracker leaves it alone.
-        title ? { titleSource: "manual" } : undefined,
+        // Only agents reach this (create_workspace), so the title tracker may refresh it.
+        title ? { titleSource: "auto" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;

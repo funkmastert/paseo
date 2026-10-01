@@ -54,6 +54,7 @@ Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Ever
 | 14 Away auto-reply    | A waiting leader's last message, last 4,000 characters (2,000 with a request pending), which can quote code and diffs; its listed options; a pending question and its options; a pending plan, 4,000 characters; a pending tool call's name and input, 1,000 characters                                                                       |
 | 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text                                                             |
 | 16 Read check         | For each judged file read: the agent's title; the first 800 characters of its assignment; its last 8 timeline rows, clipped, which carry Bash command lines and assistant text; the file's path relative to the agent's cwd, its size, up to 2,000 characters of its declaration lines and the first 6,000 characters of the range being read |
+| 17 Title refresh      | The workspace's current title and branch; for up to 4 recent sessions, their status, latest activity summary, first request and last 3 requests (each cut to 1,200 characters); the newest session's last reply (cut to 1,200 characters), which can quote code and command output                                                            |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -300,6 +301,7 @@ An excluded call sends nothing and audits nothing. The ledger records it with th
 | 14                    | `cwds: [leader cwd]`, `agentIds: [leader]`, which covers its descendants. The job asks `checkScope` first and builds no state for an excluded leader                                                                                                                                           |
 | 15                    | `agentIds: [the attached agent]`, or no paths at all: pasted text has no path to check, so the text scan is its only D7 check                                                                                                                                                                  |
 | 16                    | `agentIds: [the reading agent]`, `files: [the path]`, `baseCwd: its cwd`. The observer asks `checkScope` first and reads nothing from an excluded file; the read is counted as `excluded`                                                                                                      |
+| 17                    | `cwds: [workspace.cwd]`, `agentIds: [its recent sessions, up to 4]`. Excluded: the tracker generates exactly as it would with no JEV at all                                                                                                                                                    |
 
 The plugin decides the `paseo.jev-tools` label before the agent exists, so it asks `jev.scope.check` with the new agent's cwd and parent; an excluded agent never gets the tools.
 
@@ -1642,6 +1644,79 @@ The dashboard never flips a mode. The evidence is how Tyler decides; the switch 
 - `jev/jev-dashboard.browser.test.tsx`: the screen with fixture data, paging, the feature filter, the agent filter, an older daemon, a host with no key.
 - `components/sidebar/use-sidebar-jev-dashboard-target.test.ts`: null for no host, a disconnected host and an older daemon.
 - Verify: `npx vitest run packages/app/src/jev --bail=1`.
+
+## Feature 17: session title refresh
+
+Tyler: "i never see the session names updated.. but if the session name is edited it shouldnt be updated by this mechanism.. (bonus points if we can use JEV to make it cost less)." `WorkspaceTitleTracker` (`packages/server/src/server/workspace-title-tracker.ts`) re-titles a workspace from what its recent agents are doing, on a 60-second sweep. Before it spends a structured-generation call, it asks JEV one `score` question; a confident "still fits" skips the call, which is the saving. A ceiling and a cadence make sure JEV can only make renames cheaper, never stop them.
+
+Which workspaces are eligible, and the one-time provenance migration, are in [agent-lifecycle.md](agent-lifecycle.md#workspace-names) ("Provenance decides scope"). Only a person's own edit is never refreshed.
+
+### Seam
+
+`WorkspaceTitleTracker.tick` decides when to look; `decideTitleRefresh` (`workspace-title-refresh-jev.ts`, never throws) decides whether a look generates.
+
+A workspace is looked at when its refresh interval (`metadataGeneration.workspaceTitleTracking.refreshIntervalMinutes`, 30) has passed since the last look **and** at least one user turn finished since then. The first sweep to see a workspace only starts its clocks; each restart starts them over. Each look, in order:
+
+1. **The ceiling.** `ceilingUserTurns` (8) turns or `ceilingHours` (6) hours since the last generation regenerates without asking JEV, so a JEV that always answers "fits" cannot freeze a name.
+2. **JEV.** The `fit` question. A score at or over `staleScoreThreshold` (2 of 0-3) generates; a lower score skips the call. An answer below `minConfidence` (0.6) is ignored.
+3. **The cadence.** No JEV, the gate switched off, an outage, a low-confidence answer, or a D7-excluded workspace: generate once `cadenceMinUserTurns` (3) turns and `cadenceMinMinutes` (60) minutes have passed since the last generation. D7-excluded workspaces send nothing.
+
+Every look resets the since-look turn count, so JEV is not re-asked without a new turn. Only a generation resets the ceiling and cadence counters. A cleared title is named at the next sweep without waiting for the interval, once.
+
+A generated name equal or near-equal to the current one writes nothing: same words after case, punctuation and filler words are dropped, or a word overlap of 0.8 or more. The write is discarded if the title or its source changed while JEV or the generator was running.
+
+### State and questions
+
+The title was generated from the agents' titles, so asking JEV whether it fits those titles is circular. The state is the conversation instead: per recent agent (up to 4, newest first) its status, first request, last 3 requests and activity summary, plus the newest agent's last reply. Each message is cut to 1,200 characters. Requests come from the live timeline, so they are empty after a restart until the agent's next turn.
+
+```json
+{
+  "current_title": "<workspace.title>",
+  "branch": "<workspace.branch, or null>",
+  "sessions": [
+    { "status": "running", "first_request": "…", "recent_requests": ["…"], "doing": "…" }
+  ],
+  "latest_reply": "…"
+}
+```
+
+The `fit` question's criteria run from "Still describes exactly what these sessions are doing" (0) to "Describes something unrelated to what is happening now" (3). The scope is `cwds: [workspace.cwd]`, `agentIds: [the recent agents]`. The generation prompt gets the same recent requests next to each agent's title.
+
+### Config
+
+`agents.jev.titleRefresh` (`workspace-title-refresh-config.ts`). No shadow mode: a shadow gate would ask JEV and never skip anything, which saves nothing, and the ceiling already bounds a wrong "fits". It is live by default because Tyler wants to see names change.
+
+| Key                   | Default | What it does                                                           |
+| --------------------- | ------- | ---------------------------------------------------------------------- |
+| `enabled`             | `true`  | The JEV gate. Off: every look uses the cadence                         |
+| `timeoutMs`           | `3000`  | Off the agent's path; the sweep runs every 60 s                        |
+| `staleScoreThreshold` | `2`     | A `fit` score at or over this level (0-3) regenerates                  |
+| `minConfidence`       | `0.6`   | Below this, the answer is ignored and the cadence decides              |
+| `cadenceMinUserTurns` | `3`     | Cadence: turns since the last generation                               |
+| `cadenceMinMinutes`   | `60`    | Cadence: minutes since the last generation                             |
+| `ceilingUserTurns`    | `8`     | Regenerate after this many turns since the last generation, any answer |
+| `ceilingHours`        | `6`     | Regenerate after this many hours since the last generation, any answer |
+
+`metadataGeneration.workspaceTitleTracking.enabled` turns re-titling off entirely.
+
+### Measurement
+
+Every look writes one line to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one rotation at 1 MB): the action (`untitled`, `ceiling`, `jev-stale`, `jev-fits`, `cadence`, `cadence-not-ready`), `gatedByJev`, the outcome and reason (`excluded`, `low-confidence`, an outage reason), score and confidence, whether the generation was called, and the counters. A `jev-fits` or `jev-stale` look also lands in the decision store against the workspace's most recent agent: `applied` is true for `jev-fits` (JEV skipped a call code would have made) and false for `jev-stale`, with `mode: "live"` and `wouldBe: "regenerate title"`.
+
+### Fail open
+
+No key, the switch off, an outage, a low-confidence answer or D7 all land on the cadence, and the ceiling applies in every case. JEV changes how many generation calls a workspace costs, not whether its name keeps up.
+
+### Cost, cache, latency
+
+- A few KB per look at most: four sessions' requests and one reply, each capped. Off the agent's path; the sweep is a timer.
+- **Pays if** most looks on an actively worked workspace answer "still fits", since each is a generation call avoided. **Measured by** `title-refresh.jsonl`: `jev-fits` lines against looks that generated.
+
+### Tests and verification
+
+- `workspace-title-refresh-jev.test.ts`: each action, low confidence, D7 sending nothing, the state leaving out agent titles, and the decision-store record.
+- `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and an agent-supplied (`auto`) title.
+- `workspace-title-source-migration.test.ts`: each reclassification rule, the run-once marker, and a `workspaces.json` written after the migration parsing with the previous build's `auto | manual` schema.
 
 ## Testing
 

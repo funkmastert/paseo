@@ -1224,6 +1224,7 @@ export const zhCN: TranslationResources = {
         title: "重命名 workspace",
         submit: "重命名",
         invalidBranchName: "无效的分支名称",
+        autoPlaceholder: "自动命名",
       },
       toasts: {
         workspacePathUnavailable: "Workspace 路径不可用",

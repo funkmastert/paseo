@@ -1269,6 +1269,7 @@ export const fr: TranslationResources = {
         title: "Renommer l'espace de travail",
         submit: "Rebaptiser",
         invalidBranchName: "Nom de succursale invalide",
+        autoPlaceholder: "Nommer automatiquement",
       },
       toasts: {
         workspacePathUnavailable: "CheminWorkspacenon disponible",

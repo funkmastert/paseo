@@ -4485,6 +4485,7 @@ export class DaemonClient {
     input: {
       source: WorkspaceCreateRequest["source"];
       title?: string;
+      callerAgentId?: string;
       firstAgentContext?: WorkspaceCreateRequest["firstAgentContext"];
     },
     requestId?: string,
@@ -4495,6 +4496,7 @@ export class DaemonClient {
         type: "workspace.create.request",
         source: input.source,
         ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.callerAgentId ? { callerAgentId: input.callerAgentId } : {}),
         ...(input.firstAgentContext !== undefined
           ? { firstAgentContext: input.firstAgentContext }
           : {}),
