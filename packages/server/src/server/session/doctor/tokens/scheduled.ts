@@ -152,7 +152,7 @@ function readHead(file: string): string {
 
 function absolutePathTokens(tokens: readonly string[], ctx: DoctorContext): string[] {
   return tokens
-    .filter((t) => t.startsWith("/") || t.startsWith("~/"))
+    .filter((t) => path.isAbsolute(t) || t.startsWith("~/") || t.startsWith("~\\"))
     .map((t) => expandPathLike(t, ctx.home, ctx.env));
 }
 
