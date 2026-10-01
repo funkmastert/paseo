@@ -99,6 +99,9 @@ export const JEV_SAVINGS_BENEFIT: Readonly<Record<JevSavingsFeature, JevBenefitK
   stallJudgment: "tokens",
   awayReply: "time",
   askJev: "none",
+  // Feature 17 merged after the ledger; it counts involvements until its formula (generation
+  // calls avoided) is written. See docs/jev.md, feature 17.
+  titleRefresh: "none",
   readCheck: "tokens",
 };
 
@@ -222,6 +225,8 @@ export function priceSavings(input: JevSavingsPriceInput): JevSavingsPrice {
       return noTokensPrice("none", "none: dormant, and it spends for quality");
     case "askJev":
       return noTokensPrice("none", "none: a person's own question, counted as an involvement");
+    case "titleRefresh":
+      return noTokensPrice("none", "none yet: counted as an involvement until its formula lands");
   }
 }
 
@@ -812,6 +817,12 @@ export function evaluateEvidence(
     case "askJev":
       return {
         rule: "none: a person's own questions, claims no savings",
+        observed: "-",
+        met: null,
+      };
+    case "titleRefresh":
+      return {
+        rule: "none yet: claims no savings until its formula lands",
         observed: "-",
         met: null,
       };
