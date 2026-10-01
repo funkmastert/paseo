@@ -9,6 +9,13 @@ export const JEV_TOOLS_LABEL_VALUES = ["on", "control"] as const;
 /** The `callId` of the JEV decision behind a create, so `jev.decisions.list` can attach it. */
 export const JEV_CALL_LABEL = "paseo.jev-call";
 
+/**
+ * The spawn hint's durable record, written beside `paseo.jev-call` by the role router:
+ * `v1;base=<class>/<model>;would=<class>/<model>;move=<down|up|none>;applied=<0|1>`. The savings
+ * ledger reads it when the agent is created (docs/jev.md, "Savings").
+ */
+export const JEV_SPAWN_LABEL = "paseo.jev-spawn";
+
 /** How `paseo.task-class` was set: "declared" | "jev" | "classified" | "default". */
 export const TASK_CLASS_SOURCE_LABEL = "paseo.task-class-source";
 

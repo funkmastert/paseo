@@ -350,6 +350,9 @@ import {
   type JevBudgetExhaustedEvent,
   type JevServiceRuntime,
 } from "./jev/service.js";
+import { startSavingsAdapters } from "./jev/savings-adapters.js";
+import { createSavingsLookups } from "./jev/savings-lookups.js";
+import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
@@ -1533,6 +1536,18 @@ export async function createPaseoDaemon(
         jevKey,
       ),
     readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+    // "Where agents use it" on the JEV dashboard. The storage and the registry are built below;
+    // the lookups only read them once a record asks.
+    savingsLookups: createSavingsLookups({
+      liveAgent: (agentId) => {
+        const agent = agentManager.getAgent(agentId);
+        return agent
+          ? { title: agent.config.title ?? null, workspaceId: agent.workspaceId ?? null }
+          : null;
+      },
+      listStoredAgents: async () => agentStorage.list(),
+      listWorkspaces: async () => (await workspaceRegistry?.list()) ?? [],
+    }),
   });
   await jev.start();
 
@@ -1957,6 +1972,18 @@ export async function createPaseoDaemon(
     mcpAuthToken: agentMcpAuthToken,
     resolvePaseoToolPolicy: (provider) =>
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
+    logger,
+  });
+  // Feature 2's savings record: the spawn hint's label, priced when the child closes (docs/jev.md).
+  const spawnHintSavings = startSpawnHintSavings({ savings: jev.savings, agentManager });
+  // Features still on their own branches report through their measurement files until they merge.
+  const savingsAdapters = startSavingsAdapters({
+    jevDir: path.join(config.paseoHome, "jev"),
+    savings: jev.savings,
+    readAgentModel: (agentId) => {
+      const agent = agentManager.getAgent(agentId);
+      return agent ? (agent.runtimeInfo?.model ?? agent.config.model ?? null) : null;
+    },
     logger,
   });
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
@@ -3466,6 +3493,8 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
+    spawnHintSavings.stop();
+    await savingsAdapters.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");

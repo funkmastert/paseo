@@ -18,6 +18,7 @@ import {
 } from "./attention-push-triage.js";
 import type { JevDecideInput, JevDecisionNote, JevOutcome } from "./jev/contract.js";
 import { createTestJevService } from "./jev/fake.js";
+import { validateFinishFollowup } from "./jev/savings-hooks.js";
 import type { NotifyLevel } from "./notify-policy/levels.js";
 
 const CLEAN: FinishFacts = {
@@ -547,5 +548,59 @@ describe("readFinishFacts", () => {
       owesChildReport: true,
       pendingPermissionCount: 1,
     });
+  });
+});
+
+describe("the savings ledger (docs/jev.md, Savings)", () => {
+  it("records a shadow would-be notice as one push held, and its follow-up validates it", async () => {
+    const jev = createTestJevService({
+      answers: ROUTINE,
+      service: { resolveAgentCwds: async () => [tmpdir()] },
+    });
+    await jev.start();
+    const notes: JevDecisionNote[] = [];
+    vi.spyOn(jev.decisions, "record").mockImplementation((note) => {
+      notes.push(note);
+    });
+    let now = Date.parse("2026-09-30T12:00:00Z");
+    const lines: FinishTriageLine[] = [];
+    const followups = new FinishFollowups({
+      write: (line) => {
+        lines.push(line);
+        validateFinishFollowup(jev.savings, line);
+      },
+      now: () => now,
+    });
+    const { input } = harness({
+      jev,
+      record: { line: (line) => lines.push(line), followups },
+      now: () => now,
+    });
+
+    await sendAttentionPush(input);
+    const [recorded] = jev.savings.events({ range: "all" }).events;
+    expect(recorded).toMatchObject({
+      feature: "notificationTriage",
+      mode: "shadow",
+      decision: { did: "alert", wouldBe: "notice", changed: false },
+      benefit: "attention",
+      tokensSavedEstimate: null,
+      otherBenefit: { unit: "pushes-held", value: 1 },
+    });
+    expect(notes[0]).toMatchObject({ mode: "shadow", wouldBe: "notice", savingsId: recorded?.id });
+
+    now += 10 * 60_000;
+    followups.onSignal({
+      kind: "human-prompt",
+      agentId: "agent-1",
+      at: new Date(now),
+    } as AgentOperatorSignal);
+
+    const [validated] = jev.savings.events({ range: "all" }).events;
+    expect(validated).toMatchObject({
+      validation: { outcome: "contradicted", signal: "messaged-within-30m", afterMinutes: 10 },
+      otherBenefit: { unit: "pushes-held", value: 0 },
+    });
+    await jev.stop();
   });
 });

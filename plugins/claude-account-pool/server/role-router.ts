@@ -2,6 +2,7 @@ import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/s
 import {
   AGENT_TYPE_LABEL,
   JEV_CALL_LABEL,
+  JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_SOURCE_LABEL,
@@ -620,7 +621,9 @@ function applyMcpDecision(
  *
  * `paseo.task-class-source` and `paseo.jev-call` go on a create JEV answered
  * or shadowed, so `jev.decisions.list` can attach the decision and say
- * whether it applied.
+ * whether it applied. `paseo.jev-spawn` goes beside them: the class and model
+ * the create runs without JEV and with every answer applied, which the
+ * daemon's savings ledger prices once the child's spend is known.
  *
  * `paseo.jev-tools` is this hook's alone whenever the arm was evaluated: the
  * drawn arm on an eligible create, and no label on an ineligible one, whatever
@@ -645,6 +648,10 @@ function applyJevLabels(
   if ((jev?.status === "answered" || jev?.status === "shadow") && typeof jev.callId === "string") {
     extra[TASK_CLASS_SOURCE_LABEL] = decision.taskClass.source;
     extra[JEV_CALL_LABEL] = jev.callId;
+    const spawn = formatJevSpawnLabel(jev);
+    if (spawn) {
+      extra[JEV_SPAWN_LABEL] = spawn;
+    }
   }
   const arm = decision.jevTools?.arm;
   if (arm) {
@@ -656,6 +663,26 @@ function applyJevLabels(
   }
   const { [JEV_TOOLS_LABEL]: _callerArm, ...kept } = base.labels ?? {};
   return { ...base, labels: { ...(dropCallerArm ? kept : base.labels), ...extra } };
+}
+
+/**
+ * `v1;base=standard/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0`.
+ * A missing class or model is `-`; each part is URI-encoded so a `;`, `/` or `=` in a model id
+ * cannot shift the fields. Null when the decision carries no would-be.
+ */
+export function formatJevSpawnLabel(jev: NonNullable<AgentDecision["jev"]>): string | null {
+  if (!jev.wouldBe || !jev.base) {
+    return null;
+  }
+  const part = (taskClass: string | null, model: string | null) =>
+    `${encodeURIComponent(taskClass ?? "-")}/${encodeURIComponent(model ?? "-")}`;
+  return [
+    "v1",
+    `base=${part(jev.base.taskClass, jev.base.model)}`,
+    `would=${part(jev.wouldBe.taskClass, jev.wouldBe.model)}`,
+    `move=${jev.wouldBe.move}`,
+    `applied=${jev.applied ? 1 : 0}`,
+  ].join(";");
 }
 
 /** The classifier's input for a create, read structurally off the request. */

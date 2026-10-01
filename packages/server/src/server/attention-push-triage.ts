@@ -3,8 +3,15 @@ import type { Logger } from "pino";
 
 import type { AgentManager, AgentOperatorSignal } from "./agent/agent-manager.js";
 import { confidentChoice } from "./jev/answers.js";
-import type { JevOutcome, JevQuestions, JevService } from "./jev/contract.js";
+import type {
+  JevDecisionNote,
+  JevOutcome,
+  JevQuestions,
+  JevSavingsSink,
+  JevService,
+} from "./jev/contract.js";
 import type { JsonlAppender } from "./jsonl-appender.js";
+import { recordFinishSavings, validateFinishFollowup } from "./jev/savings-hooks.js";
 import { levelAtLeast, type NotifyLevel } from "./notify-policy/levels.js";
 
 /**
@@ -544,6 +551,17 @@ function recordTriagedUnguarded(
     shadow: result.shadow,
   });
   if (callId === null) return;
+  // The savings ledger (docs/jev.md, "Savings"); its record never affects the push.
+  const savingsId = recordFinishSavings(input.jev?.savings, {
+    agentId: input.agentId,
+    callId,
+    base: result.base,
+    sent: result.sent,
+    wouldBe,
+    choice,
+    confidence,
+    shadow: result.shadow,
+  });
   try {
     input.jev?.decisions.record({
       agentId: input.agentId,
@@ -557,6 +575,7 @@ function recordTriagedUnguarded(
       confidence,
       action: describeFinishAction(result.sent, wouldBe, result.base),
       applied: !result.shadow && result.sent !== result.base,
+      ...noteSavingsFields(outcome, wouldBe, savingsId),
     });
     if (choice !== null) {
       input.record?.followups?.track({
@@ -572,6 +591,21 @@ function recordTriagedUnguarded(
   } catch {
     // The record never affects the push.
   }
+}
+
+/** The decision note's `mode`, `wouldBe` and `savingsId` (docs/jev.md, "Decision store"). */
+function noteSavingsFields(
+  outcome: JevOutcome | "error",
+  wouldBe: NotifyLevel,
+  savingsId: string,
+): Pick<JevDecisionNote, "mode" | "wouldBe" | "savingsId"> {
+  const answered =
+    outcome !== "error" && (outcome.kind === "answered" || outcome.kind === "shadow");
+  return {
+    ...(answered ? { mode: outcome.kind === "shadow" ? "shadow" : "live" } : {}),
+    wouldBe,
+    ...(savingsId ? { savingsId } : {}),
+  };
 }
 
 function recordFinish(
@@ -635,11 +669,16 @@ const recorders = new WeakMap<object, FinishTriageRecorder>();
 export function finishTriageRecorderFor(input: {
   agentManager: Pick<AgentManager, "subscribeOperatorSignals">;
   file: () => JsonlAppender;
+  /** The savings ledger validates a would-be or held notice from its follow-up line. */
+  savings?: JevSavingsSink | null;
 }): FinishTriageRecorder {
   const existing = recorders.get(input.agentManager);
   if (existing) return existing;
   const file = input.file();
-  const line = (entry: FinishTriageLine): void => file.append({ v: 1, ...entry });
+  const line = (entry: FinishTriageLine): void => {
+    file.append({ v: 1, ...entry });
+    validateFinishFollowup(input.savings, entry);
+  };
   const followups = new FinishFollowups({ write: line });
   if (typeof input.agentManager.subscribeOperatorSignals === "function") {
     input.agentManager.subscribeOperatorSignals((signal) => followups.onSignal(signal));
