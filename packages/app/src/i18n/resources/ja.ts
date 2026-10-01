@@ -1170,6 +1170,7 @@ export const ja: TranslationResources = {
       search: "検索",
       schedules: "スケジュール",
       askJev: "JEV に質問",
+      jevDashboard: "JEV ダッシュボード",
     },
     worktreeSetup: {
       title: "ワークツリースクリプトを設定",

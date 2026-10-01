@@ -1165,6 +1165,7 @@ export const ko: TranslationResources = {
       search: "검색",
       schedules: "일정",
       askJev: "JEV에게 묻기",
+      jevDashboard: "JEV 대시보드",
     },
     worktreeSetup: {
       title: "워크트리 스크립트 설정",

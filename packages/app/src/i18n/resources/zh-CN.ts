@@ -1150,6 +1150,7 @@ export const zhCN: TranslationResources = {
       search: "搜索",
       schedules: "计划",
       askJev: "询问 JEV",
+      jevDashboard: "JEV 仪表盘",
     },
     worktreeSetup: {
       title: "设置 worktree scripts",

@@ -1167,6 +1167,7 @@ export const en = {
       search: "Search",
       schedules: "Schedules",
       askJev: "Ask JEV",
+      jevDashboard: "JEV dashboard",
     },
     worktreeSetup: {
       title: "Set up worktree scripts",
