@@ -349,6 +349,28 @@ describe("JevService: lanes, budgets and circuits", () => {
     expect((await held).kind).toBe("answered");
   });
 
+  it("readCheck is shadow by default on its own reads lane and cap", async () => {
+    expect(JEV_FEATURE_LANES.readCheck).toBe("reads");
+    const { service, home } = makeHarness({ config: { maxUsdPerDay: 0.000_000_1 } });
+    const readCheck = spawnHint(home, { feature: "readCheck", callSite: "read-check.shadow" });
+    // The control lane's cap is spent; the reads lane's is not.
+    expect(kindAndReason(await service.decide(spawnHint(home)))).toBe("unavailable:daily-budget");
+    expect((await service.decide(readCheck)).kind).toBe("shadow");
+    expect(service.status().lanes.reads.maxUsdPerDay).toBe(0.25);
+  });
+
+  it("shadow: true answers shadow on a live feature, and never makes a shadow feature live", async () => {
+    const live = makeHarness({ config: { readCheck: { shadow: false } } });
+    const input = spawnHint(live.home, { feature: "readCheck", callSite: "read-check.shadow" });
+    expect((await live.service.decide(input)).kind).toBe("answered");
+    expect((await live.service.decide({ ...input, shadow: true })).kind).toBe("shadow");
+
+    const shadow = makeHarness();
+    expect((await shadow.service.decide({ ...spawnHint(shadow.home), shadow: true })).kind).toBe(
+      "shadow",
+    );
+  });
+
   it("an away-reply decision and an Ask JEV question never share a lane's slots", async () => {
     expect(JEV_FEATURE_LANES.awayReply).toBe("control");
     expect(JEV_FEATURE_LANES.askJev).toBe("interactive");
@@ -798,7 +820,13 @@ describe("JevService: ledger, audit, status", () => {
     expect(status.features.agentTools.shadow).toBe(false);
     expect(status.features.askJev.shadow).toBe(false);
     expect(status.features.awayReply.shadow).toBe(true);
-    expect(Object.keys(status.lanes).sort()).toEqual(["agentTools", "control", "interactive"]);
+    expect(status.features.readCheck.shadow).toBe(true);
+    expect(Object.keys(status.lanes).sort()).toEqual([
+      "agentTools",
+      "control",
+      "interactive",
+      "reads",
+    ]);
     const everyFeature = Object.keys(JEV_FEATURE_LANES).sort();
     expect(everyFeature).toEqual([
       "agentTools",
@@ -806,6 +834,7 @@ describe("JevService: ledger, audit, status", () => {
       "awayReply",
       "compactionTiming",
       "notificationTriage",
+      "readCheck",
       "remediationTriage",
       "spawnHint",
       "stallJudgment",

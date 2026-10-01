@@ -14,6 +14,7 @@ import {
   JEV_MIN_INPUT_USD_PER_MILLION,
   JEV_PROVIDER_DEFAULTS,
   jevConfigSection,
+  jevConfigIssues,
   resolveJevConfig,
   resolveJevProvider,
 } from "./config.js";
@@ -370,6 +371,35 @@ describe("resolveJevConfig clamps", () => {
     expect(
       resolveJevConfig({ askJev: { maxUsdPerDay: -1, enabled: false } }, { homeDir: HOME }).askJev,
     ).toMatchObject({ enabled: false, maxUsdPerDay: 0.25 });
+  });
+
+  test("readCheck: shadow by default, live waits clamped to 300–2,000 ms, share in [0, 1]", () => {
+    expect(resolveJevConfig({}, { homeDir: HOME }).readCheck).toEqual({
+      enabled: true,
+      shadow: true,
+      timeoutMs: 5000,
+      minTokens: 2000,
+      liveMinTokens: 8000,
+      liveTimeoutMs: 1000,
+      liveShare: 0.5,
+      maxDeniesPerAgentPerHour: 5,
+      maxConcurrent: 2,
+      maxUsdPerDay: 0.25,
+    });
+    const clamped = (readCheck: Record<string, unknown>) =>
+      resolveJevConfig({ readCheck }, { homeDir: HOME }).readCheck;
+    expect(clamped({ liveTimeoutMs: 60_000 }).liveTimeoutMs).toBe(2000);
+    expect(clamped({ liveTimeoutMs: 1 }).liveTimeoutMs).toBe(300);
+    expect(clamped({ liveShare: 3 }).liveShare).toBe(1);
+    expect(clamped({ minTokens: -5, shadow: false }).minTokens).toBe(2000);
+    expect(clamped({ shadow: false }).shadow).toBe(false);
+  });
+
+  test("readCheck keys pass the schema; an unknown one does not", () => {
+    expect(jevConfigIssues({ readCheck: { shadow: false, liveShare: 0.5 } })).toEqual([]);
+    expect(jevConfigIssues({ readCheck: { deny: true } })).toEqual([
+      "agents.jev.readCheck: unknown key(s) deny",
+    ]);
   });
 
   test("agentTools.assignShare is clamped into [0, 1]", () => {
