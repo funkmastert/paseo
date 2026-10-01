@@ -488,12 +488,22 @@ export class JevSavingsLedger implements JevSavingsSink, JevSavingsReader {
   }
 
   /** In-memory records still pending, for a hook rebuilding its joins after a restart. */
-  pendingRecords(
-    feature: JevSavingsFeature,
-  ): Array<{ id: string; callId: string; facts: Readonly<JevSavingsFacts> }> {
+  pendingRecords(feature: JevSavingsFeature): Array<{
+    id: string;
+    callId: string;
+    agentId: string | null;
+    atMs: number;
+    facts: Readonly<JevSavingsFacts>;
+  }> {
     return this.records
       .filter((record) => record.feature === feature && record.price.pending)
-      .map((record) => ({ id: record.id, callId: record.callId, facts: record.facts }));
+      .map((record) => ({
+        id: record.id,
+        callId: record.callId,
+        agentId: record.agentId,
+        atMs: record.atMs,
+        facts: record.facts,
+      }));
   }
 
   /**
