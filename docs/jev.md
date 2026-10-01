@@ -54,7 +54,7 @@ Nothing is sent for a subject inside the [D7 exclusion](#the-d7-exclusion). Ever
 | 14 Away auto-reply    | A waiting leader's last message, last 4,000 characters (2,000 with a request pending), which can quote code and diffs; its listed options; a pending question and its options; a pending plan, 4,000 characters; a pending tool call's name and input, 1,000 characters                                                                       |
 | 15 Ask JEV            | What a person pastes as context (60 KB cap), their question and the options or levels they typed. With an agent attached: its title and the last 8,000 characters of its recent activity, which carries tool calls with full Bash command lines, their output, and assistant text                                                             |
 | 16 Read check         | For each judged file read: the agent's title; the first 800 characters of its assignment; its last 8 timeline rows, clipped, which carry Bash command lines and assistant text; the file's path relative to the agent's cwd, its size, up to 2,000 characters of its declaration lines and the first 6,000 characters of the range being read |
-| 17 Title refresh      | The workspace's current title; its branch; up to 4 recent sessions' titles and latest activity summaries                                                                                                                                                                                                                                      |
+| 17 Title refresh      | The workspace's current title and branch; for up to 4 recent sessions, their status, latest activity summary, first request and last 3 requests (each cut to 1,200 characters); the newest session's last reply (cut to 1,200 characters), which can quote code and command output                                                            |
 
 Before the first live call, confirm that prompt logging is off on the OpenRouter account and check whether the decisions endpoint accepts a per-request data-collection or zero-retention field; if it does, the transport sends it. Once TypeSafe grants direct access, prefer `provider: "typesafe"`: one party fewer.
 
@@ -1635,83 +1635,76 @@ The dashboard never flips a mode. The evidence is how Tyler decides; the switch 
 
 ## Feature 17: session title refresh
 
-Tyler: "if the session name is edited it shouldn't be updated by this mechanism.. if we do not yet have this, lets build it (bonus points if we can use JEV to make it cost less)." `WorkspaceTitleTracker` (`packages/server/src/server/workspace-title-tracker.ts`) already re-titles an auto-named workspace from its recent agents' titles on a 60-second sweep, gated on provenance, a 30-minute-by-default interval, an activity window and a fingerprint of what it last generated from — that part predates this feature and is unchanged. Feature 17 is the "make it cost less" half: before that tracker spends a structured-generation call, it asks JEV one `score` question, and a "still fits" answer skips the call.
+Tyler: "i never see the session names updated.. but if the session name is edited it shouldnt be updated by this mechanism.. (bonus points if we can use JEV to make it cost less)." `WorkspaceTitleTracker` (`packages/server/src/server/workspace-title-tracker.ts`) re-titles a workspace from what its recent agents are doing, on a 60-second sweep. Before it spends a structured-generation call, it asks JEV one `score` question; a confident "still fits" skips the call, which is the saving. A ceiling and a cadence make sure JEV can only make renames cheaper, never stop them.
+
+Which workspaces are eligible, and the one-time provenance migration, are in [agent-lifecycle.md](agent-lifecycle.md#workspace-names) ("Provenance decides scope"). Only a person's own edit is never refreshed.
 
 ### Seam
 
-`WorkspaceTitleTracker.attemptRefresh`, right after the existing fingerprint check and before building the generation prompt. `shouldGenerate` (`workspace-title-tracker.ts`) calls `decideTitleRefresh` (`workspace-title-refresh-jev.ts`), a pure async function that never throws.
+`WorkspaceTitleTracker.tick` decides when to look; `decideTitleRefresh` (`workspace-title-refresh-jev.ts`, never throws) decides whether a look generates.
 
-**No JEV, or the feature's own switch off, is exactly today's behaviour**: generate whenever the fingerprint changed, unchanged from before this feature existed. This is what keeps the tracker's 14 pre-existing tests passing untouched. With JEV wired and on, a new per-workspace gate sits in front of every fingerprint-changed check:
+A workspace is looked at when its refresh interval (`metadataGeneration.workspaceTitleTracking.refreshIntervalMinutes`, 30) has passed since the last look **and** at least one user turn finished since then. The first sweep to see a workspace only starts its clocks; each restart starts them over. Each look, in order:
 
-1. **At least one new user turn.** The tracker's `recordAgentTurnFinished` feeds a per-workspace counter from the same `onAgentTurnFinished` hook `AgentTitleTracker` uses (`bootstrap.ts`). A workspace with no new turn since its last look is skipped without asking JEV.
-2. **The ceiling.** `ceilingUserTurns` (8) new turns or `ceilingHours` (6) hours since the last real look forces a regeneration without asking JEV — a miscalibrated JEV that always says "fits" cannot freeze a name forever, which is the failure Tyler reported in the first place.
-3. **JEV.** Below the ceiling, `titleRefresh.decide` asks the `fit` question. `answered` and stale (score at or over `staleScoreThreshold`, 2 of 0-3) generates; `answered` and fitting skips the call, which is the saving. A D7-excluded workspace sends nothing and generates exactly as it would with no JEV at all — the exclusion never changes what happens, only whether JEV was asked. Any other outcome (no key, disabled, an outage, a spent budget) falls back to a deterministic cadence: `cadenceMinUserTurns` (3) new turns and `cadenceMinMinutes` (60) minutes since the last look.
+1. **The ceiling.** `ceilingUserTurns` (8) turns or `ceilingHours` (6) hours since the last generation regenerates without asking JEV, so a JEV that always answers "fits" cannot freeze a name.
+2. **JEV.** The `fit` question. A score at or over `staleScoreThreshold` (2 of 0-3) generates; a lower score skips the call. An answer below `minConfidence` (0.6) is ignored.
+3. **The cadence.** No JEV, the gate switched off, an outage, a low-confidence answer, or a D7-excluded workspace: generate once `cadenceMinUserTurns` (3) turns and `cadenceMinMinutes` (60) minutes have passed since the last generation. D7-excluded workspaces send nothing.
 
-A look that does not generate still resets nothing; the counters keep accruing so the ceiling can trip on a streak of "fits" answers. A look that does generate (ceiling, stale, or the cadence) resets both counters, whether or not the generated title actually changed.
+Every look resets the since-look turn count, so JEV is not re-asked without a new turn. Only a generation resets the ceiling and cadence counters. A cleared title is named at the next sweep without waiting for the interval, once.
+
+A generated name equal or near-equal to the current one writes nothing: same words after case, punctuation and filler words are dropped, or a word overlap of 0.8 or more. The write is discarded if the title or its source changed while JEV or the generator was running.
 
 ### State and questions
 
-`PersistedWorkspaceRecord` keeps no separate "first prompt" field once a title is set — `workspace-auto-name.ts` only compares against one transiently, to decide provenance at write time, and does not persist it. The state reuses what the tracker already builds for the generation prompt itself: the current title and each recent session's title and latest activity summary, newest first.
+The title was generated from the agents' titles, so asking JEV whether it fits those titles is circular. The state is the conversation instead: per recent agent (up to 4, newest first) its status, first request, last 3 requests and activity summary, plus the newest agent's last reply. Each message is cut to 1,200 characters. Requests come from the live timeline, so they are empty after a restart until the agent's next turn.
 
 ```json
 {
   "current_title": "<workspace.title>",
   "branch": "<workspace.branch, or null>",
-  "sessions": ["<agent title> [<lifecycle>] — doing: <lastActivitySummary>", "…"]
+  "sessions": [
+    { "status": "running", "first_request": "…", "recent_requests": ["…"], "doing": "…" }
+  ],
+  "latest_reply": "…"
 }
 ```
 
-```json
-{
-  "fit": {
-    "type": "score",
-    "instructions": "`current_title` names a workspace...does it still describe what these sessions are doing?",
-    "criteria": [
-      "Still describes exactly what these sessions are doing",
-      "Mostly still fits; the work has drifted only a little",
-      "Noticeably stale; the sessions have moved on to something the name does not mention",
-      "Describes something unrelated to what is happening now"
-    ]
-  }
-}
-```
-
-The scope is `cwds: [workspace.cwd]`, `agentIds: [the tracker's own recent-agents list, up to 4]`.
+The `fit` question's criteria run from "Still describes exactly what these sessions are doing" (0) to "Describes something unrelated to what is happening now" (3). The scope is `cwds: [workspace.cwd]`, `agentIds: [the recent agents]`. The generation prompt gets the same recent requests next to each agent's title.
 
 ### Config
 
-`agents.jev.titleRefresh` (`workspace-title-refresh-config.ts`, following `away-reply/config.ts`'s shape). No shadow mode, like `agentTools` and `askJev`: a shadow gate here would ask JEV and never regenerate anything, which saves nothing and shows Tyler no change, the opposite of what he asked for. D6's shadow-first default does not apply for the same reason feature 14's dry run does not apply to `agentTools` — there is no safe "would have" to observe when the only side effect is skipping a call.
+`agents.jev.titleRefresh` (`workspace-title-refresh-config.ts`). No shadow mode: a shadow gate would ask JEV and never skip anything, which saves nothing, and the ceiling already bounds a wrong "fits". It is live by default because Tyler wants to see names change.
 
-| Key                   | Default | What it does                                                                               |
-| --------------------- | ------- | ------------------------------------------------------------------------------------------ |
-| `enabled`             | `true`  | The JEV gate itself. Off: exactly today's behaviour (generate on every fingerprint change) |
-| `timeoutMs`           | `3000`  | Off the agent's path; the sweep runs every 60 s                                            |
-| `staleScoreThreshold` | `2`     | A `fit` score at or over this level (0-3) regenerates                                      |
-| `cadenceMinUserTurns` | `3`     | Without JEV, or for a D7-excluded workspace: minimum new turns first                       |
-| `cadenceMinMinutes`   | `60`    | Without JEV, or for a D7-excluded workspace: minimum minutes first                         |
-| `ceilingUserTurns`    | `8`     | Force a look even mid-streak of "fits"                                                     |
-| `ceilingHours`        | `6`     | Force a look even mid-streak of "fits"                                                     |
+| Key                   | Default | What it does                                                           |
+| --------------------- | ------- | ---------------------------------------------------------------------- |
+| `enabled`             | `true`  | The JEV gate. Off: every look uses the cadence                         |
+| `timeoutMs`           | `3000`  | Off the agent's path; the sweep runs every 60 s                        |
+| `staleScoreThreshold` | `2`     | A `fit` score at or over this level (0-3) regenerates                  |
+| `minConfidence`       | `0.6`   | Below this, the answer is ignored and the cadence decides              |
+| `cadenceMinUserTurns` | `3`     | Cadence: turns since the last generation                               |
+| `cadenceMinMinutes`   | `60`    | Cadence: minutes since the last generation                             |
+| `ceilingUserTurns`    | `8`     | Regenerate after this many turns since the last generation, any answer |
+| `ceilingHours`        | `6`     | Regenerate after this many hours since the last generation, any answer |
 
-The tracker's own switch, `metadataGeneration.workspaceTitleTracking.enabled` (unchanged, predates this feature), turns off re-titling entirely; `agents.jev.titleRefresh.enabled` only turns off the JEV gate in front of it, live by default (the same "live, not shadow" reasoning as above) — Tyler wants to see names change, and a shadow JEV gate here would be invisible either way.
+`metadataGeneration.workspaceTitleTracking.enabled` turns re-titling off entirely.
 
 ### Measurement
 
-Every look past the "at least one new turn" pre-check writes one line to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one rotation at 1 MB, via the same `createJsonlAppender` the audit and other measurement files use): the action (`ceiling`, `jev-stale`, `jev-fits`, `d7-excluded`, `cadence`, `cadence-not-ready`), whether JEV gated the decision, the outcome and reason, the score, whether the generation call was made, and the turn/minute counters at that point. A `jev-stale` or `jev-fits` line also lands in the JEV decision store (`jev.decisions.record`), keyed to the workspace's most recently active agent, so feature 11's per-agent popover shows it. `gatedByJev` on each line is how a later savings-ledger pass counts "generation calls avoided" without re-deriving it from the action string.
+Every look writes one line to `$PASEO_HOME/jev/title-refresh.jsonl` (0600, one rotation at 1 MB): the action (`untitled`, `ceiling`, `jev-stale`, `jev-fits`, `cadence`, `cadence-not-ready`), `gatedByJev`, the outcome and reason (`excluded`, `low-confidence`, an outage reason), score and confidence, whether the generation was called, and the counters. A `jev-fits` or `jev-stale` look also lands in the decision store against the workspace's most recent agent: `applied` is true for `jev-fits` (JEV skipped a call code would have made) and false for `jev-stale`, with `mode: "live"` and `wouldBe: "regenerate title"`.
 
 ### Fail open
 
-No key, the feature disabled, an outage, a spent budget, or a D7-excluded workspace all fall back to the tracker's existing cadence — not to "never regenerate": JEV can only make this feature cheaper, never change whether a workspace eventually gets renamed.
+No key, the switch off, an outage, a low-confidence answer or D7 all land on the cadence, and the ceiling applies in every case. JEV changes how many generation calls a workspace costs, not whether its name keeps up.
 
 ### Cost, cache, latency
 
-- Under 300 input tokens per look (four short session summaries and a title). Off the agent's path entirely; the sweep is a 60-second timer, not a request handler.
-- **Pays if** most looks answer "still fits" on an actively-worked workspace whose subject has not moved on, since each one is a generation call (a structured-generation agent turn) avoided. **Measured by** `title-refresh.jsonl`: the count of `gatedByJev: true` lines with `generationCalled: false` against the count that would otherwise have generated on the tracker's plain fingerprint-changed rule.
+- A few KB per look at most: four sessions' requests and one reply, each capped. Off the agent's path; the sweep is a timer.
+- **Pays if** most looks on an actively worked workspace answer "still fits", since each is a generation call avoided. **Measured by** `title-refresh.jsonl`: `jev-fits` lines against looks that generated.
 
 ### Tests and verification
 
-- `workspace-title-refresh-jev.test.ts`: every action the decision function can reach — anchoring, no new activity, `jev-stale`, `jev-fits`, both ceilings, the D7 text-scan exclusion sending nothing to the transport, the cadence fallback both ready and not ready, and no JEV wired at all.
-- `workspace-title-tracker.test.ts`, `feature 17: the JEV gate`: a fits answer skipping the generated call, a stale answer letting it through, and the gate's own switch off matching the tracker's pre-existing (and still-passing) behaviour exactly.
-- Verify: `npx vitest run packages/server/src/server/workspace-title-refresh-jev.test.ts packages/server/src/server/workspace-title-tracker.test.ts --bail=1`.
+- `workspace-title-refresh-jev.test.ts`: each action, low confidence, D7 sending nothing, the state leaving out agent titles, and the decision-store record.
+- `workspace-title-tracker.test.ts`: hours of "fits" renaming at both ceilings, JEV down renaming on the cadence, no look without a new turn, near-equal names, the rename race, a cleared title, and `agent` provenance.
+- `workspace-title-source-migration.test.ts`: each reclassification rule and the run-once marker.
 
 ## Testing
 

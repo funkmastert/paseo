@@ -233,43 +233,49 @@ A workspace is named once, when its first agent is created, from that agent's op
 (`workspace-auto-name.ts`). That is right for a worktree cut for one task and wrong for a
 long-lived checkout, which goes on hosting unrelated work for months under the name of whatever
 was asked first. `WorkspaceTitleTracker` is the same machine as the agent tracker one level up:
-a 60-second sweep, a changed-fingerprint gate, the same structured-generation fallback. It
-defaults **on**.
+a 60-second sweep and the same structured-generation fallback. It defaults **on**.
 
 **What it reads.** A workspace is described by its recent agents — the four most recently active,
-newest first — and each one contributes its title and its current activity summary. Agent titles
-are the unit deliberately: the agent tracker already keeps them describing what a session is
-doing now, so the workspace tracker gets a curated summary for free instead of re-reading four
-timelines. Membership is `workspaceId` only; an agent created before ownership stamping has none
-and never names a workspace.
+newest first — and each one contributes its title, its last three requests and its current
+activity summary. Membership is `workspaceId` only; an agent created before ownership stamping has
+none and never names a workspace.
 
-**What makes a rename worth doing.** The fingerprint covers the workspace's current name plus its
-recent agents' ids and titles — **not** their activity summaries, which change on every tool call.
-An agent's title only moves when that session's own work materially moves on, so the workspace
-only costs a call when something at the workspace's altitude changed. The prompt then asks for the
-durable subject and to keep the current name through continuations and refinements. Between the
-default 30-minute interval and that instruction, a name changes a few times a day in a busy
-workspace, not every few minutes.
+**When it looks.** At most once per interval (default 30 minutes), and only after at least one user
+turn finished in the workspace since the last look. Agent titles alone can't pace it: a
+leader-created agent's title is set once and never moves. Whether a look regenerates is feature 17
+in [jev.md](jev.md#feature-17-session-title-refresh): a JEV "still fits" skips the call, and a
+cadence and a ceiling make sure the name keeps up regardless. The prompt asks for the durable
+subject and to keep the current name through continuations and refinements, and a near-equal
+result writes nothing, so a busy workspace's name changes a few times a day, not every look.
 
-**Provenance decides scope, not workspace kind.** `titleSource` on the workspace record is `"auto"`
-when Paseo generated the name and `"manual"` when a person or an agent chose it — through the
-rename field or `rename_workspace`. Only `"auto"` is eligible. **Absent means hand-set**: every
-record written before provenance existed reads as manual, because silently renaming something the
-user named is worse than leaving a stale name. A workspace created without a name carries no
-provenance at all — "nobody named this" and "Paseo owns naming this" are different states.
-Renaming a workspace to **empty** produces the second, and is how an existing workspace hands
-naming back to Paseo: the row falls back to the branch or directory name the rename field shows
-as its placeholder, and the tracker names it from there. Provenance is re-read inside the registry write, so a rename that lands
-while the LLM is running wins.
+**Provenance decides scope, not workspace kind.** `titleSource` on the workspace record says who
+named it, and only a person's own edit is protected:
 
-**Cost.** A refresh is one small structured call: about 700 input tokens and 20 output — under a
-tenth of a cent on Haiku. Two gates keep the count down. A workspace with no running-or-idle agent
-active inside `activityWindowMinutes` (default 60) is never swept, so a dormant checkout costs
-nothing and keeps the name of what last happened in it, which is the true answer. And the
-fingerprint means an active workspace whose agents are still on the same work costs nothing
-either. Across a fleet of ~120 workspaces with ~20 active on a given day, expect a few hundred
-calls — well under a dollar a day. The ceiling, every eligible workspace changing subject at every
-interval around the clock, is 48 calls per workspace per day.
+| Source   | Written by                                                                                                  | Refreshed |
+| -------- | ----------------------------------------------------------------------------------------------------------- | --------- |
+| `manual` | The app's rename (inline or the modal) and a title typed in the app's create form                           | Never     |
+| `agent`  | `create_workspace` and `rename_workspace` over MCP, `paseo workspace create --title` under `PASEO_AGENT_ID` | Yes       |
+| `auto`   | The auto-namer, the tracker, and renaming to empty                                                          | Yes       |
+| absent   | Records written before provenance existed                                                                   | Never     |
+
+**Absent means hand-set**, because silently renaming something the user named is worse than
+leaving a stale name. Renaming a workspace to **empty** hands naming back to Paseo: the row falls
+back to the branch or directory name, and the tracker names it at its next sweep. The title and its
+source are re-read inside the registry write, so a rename that lands while the LLM is running wins.
+
+Before `agent` existed, every title supplied at creation was stamped `manual`, which kept the
+tracker off most orchestrated workspaces. `workspace-title-source-migration.ts` reclassifies once
+per `PASEO_HOME` (marker `projects/workspace-title-source-migration.json`, counts in the daemon
+log). A `manual` or absent record becomes `agent` only if it was never edited after creation
+(`createdAt` equals `updatedAt`) and its first agent carries `paseo.parent-agent-id`. An absent
+record with no title, or a title equal to its branch or display name, becomes `auto`. Every other
+absent record becomes `manual`. The pass never changes a title.
+
+**Cost.** A refresh is one small structured call: about 700 input tokens and 20 output. A workspace
+with no running-or-idle agent active inside `activityWindowMinutes` (default 60) is never swept, so
+a dormant checkout costs nothing and keeps the name of what last happened in it. The worst case,
+a turn in every interval around the clock with JEV unavailable, is one call per hour per
+workspace (the cadence).
 
 Config sits beside the agent title settings; every key is optional and absent means the default.
 
