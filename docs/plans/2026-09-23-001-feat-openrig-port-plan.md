@@ -650,7 +650,7 @@ These files are hot spots. Each agent touches them only as described. The merge 
 | `packages/protocol/src/messages.ts`                     | One export line per agent. Schemas live in `packages/protocol/src/<feature>/`. One `server_info.features.<feature>` flag each.                        |
 | `packages/server/src/server/session.ts`                 | No new handlers inline. Add a controller under `session/<feature>/`, following `session/schedule/`.                                                   |
 | App settings screens                                    | One new section component per agent, mounted with one line.                                                                                           |
-| `plugins/claude-account-pool/server/classifier.ts`      | Only W3.4 edits it in this plan.                                                                                                                      |
+| `plugins/claude-account-pool/server/classifier.ts`      | Nothing in this plan edits it (W3.4 was dropped 2026-09-30).                                                                                          |
 
 Each agent works in its own worktree, labelled `paseo.task-class` (standard unless noted), with a `paseo.budget` sized to its S/M/L. Each merge runs typecheck, lint and the unit's targeted tests. Monitors ship with `enabled: false, dryRun: true`.
 
@@ -674,60 +674,77 @@ Leader compaction, durable finish, model divergence, refocus. Merge `failover-re
 - **Merge order:** W1.1, then W1.5, then W1.2 (reads the receipt), W1.3, W1.4, W1.6, W1.7, W1.8.
 - **Boot-order contract W1.2 ↔ durable-finish:** whichever merges second implements "recovery resumes first; durable-finish skips agents recovery will resume".
 - **Acceptance (chaos, from OR-D13):** kill the daemon while a leader and two children are mid-turn. On restart, `paseo recover --plan` lists all three with correct outcomes, and `--apply` resumes leader first. A conditional heartbeat on an idle leader with nothing due fires zero turns across one hour of ticks. A forced event-loop stall of 30 s is reported after recovery.
+- **Status 2026-09-30:** merged except W1.7, which is rescheduled below.
 - **Deferred under rapid mode:** Windows run of W1.1 and W1.7, and Android and iOS screenshots of the new app sections. These are paid down at wave exit.
 
-### Wave 2: durable work (after durable-finish merges)
+### Re-check against the code, 2026-09-30
 
-| Agent                    | Items                                         | Owns                                                                                                                                                                                               | Class      | Size |
-| ------------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ---- |
-| W2.1 Work queue          | OR-A1, OR-A2, OR-A3, OR-J1                    | new `server/coordination/{queue,stream}/`; `packages/protocol/src/coordination/`; queue tools in `coordination-tools.ts`; CLI `queue`; re-point durable-finish's ledger per OR-A1's decision point | hard       | L    |
-| W2.2 Inbox               | OR-A5, OR-H1 feed                             | new `packages/app/src/inbox/`; sidebar entry; `session/coordination/` read and write controllers                                                                                                   | standard   | M    |
-| W2.3 Sweep and guards    | OR-D10, OR-F3, OR-B2 (item conditions), OR-B5 | durable-finish sweep module; `agent-archive.ts` guard; `done-janitor-detector.ts` check; `schedule/conditions.ts` item conditions                                                                  | standard   | S    |
-| W2.4 Chat rooms          | OR-E2                                         | revive `server/chat/` from `94bda1f92^`, query-shaped store; chat tools file; CLI `chat`; app room tab; remove the `COMPAT(chatRooms)` tag once live                                               | standard   | M    |
-| W2.5 Failover gates      | OR-D8                                         | `account-failover-detector.ts`, `services/quota-fetcher/service.ts`                                                                                                                                | standard   | S    |
-| W2.6 Activity vocabulary | OR-D1                                         | protocol optional fields; `agent-projections.ts`; app row badges                                                                                                                                   | mechanical | S    |
+Wave 1 is merged except W1.7: `daemon-vitals/`, `agent/restart-recovery/`, `schedule/conditions.ts`, `notify-policy/`, `agent/tools/coordination-tools.ts` (whoami, broadcast, lean outputs), `paseo doctor` and `usage-history/` are all in the tree. Durable finish (`agent/finish-obligation*.ts`, [docs/finish-reports.md](../finish-reports.md)), leader compaction (`agent-leader-compaction-monitor.ts`, [docs/leader-compaction.md](../leader-compaction.md)), model divergence, refocus, context usage, `failover-return` and `flexible-placement` have all landed, so every Wave 0 dependency is met. Nothing from Wave 2 on exists yet (`server/coordination/`, `server/team/`, `server/context/`, `agent/handover/`, `agent/restore-packet/`, `daemon-vitals/health.ts`, `forkFromAgentId` are all absent).
 
-- **Sequencing inside the wave:** W2.1 lands its protocol schemas as its first unit and pushes them. W2.2 and W2.3 start from that commit. W2.4, W2.5 and W2.6 run from the wave start. W2.5 also needs `failover-return` and `flexible-placement` merged.
-- **Acceptance (chaos):** `kill-daemon-mid-handoff` (kill between successor create and source close; after restart there is exactly one open successor and no dropped item) and `queue-baton-survives-restart`. A chat line without an @mention causes zero agent turns.
+Changes from the 09-23 waves:
+
+- **W2.1 does not replace durable finish.** The finish obligation is stored on the child's agent record and tracks one delegated turn, not owned work. The queue is a new store; finish reports stay the wake path and are not re-pointed at queue items. An item records the agent that owns it, and a finish moves the item only when the finish text carries an explicit closure.
+- **W2.3's archive guard no longer blocks.** Tyler's 09-28 rule is that only catastrophic actions are gated ([docs/catastrophe-gate.md](../catastrophe-gate.md)). Archiving an agent that owns open items hands them to its parent (or `human` for a root) with a journal row, instead of requiring `--force`. The done janitor still treats open items as unfinished.
+- **W2.3 gains `contextAbove`.** Context usage now exists ([docs/context-usage.md](../context-usage.md)), so the heartbeat condition ships with the item conditions.
+- **W3.4 (OR-F7 semantic deny vocabulary) is dropped.** It adds Bash deny patterns for `git push --force*` and `npm publish*`, which is the broader gating Tyler rejected on 09-28. The catastrophe gate already covers force-push to `main`.
+- **W4.1's hook moves.** The compaction trigger is `agent-leader-compaction-monitor.ts` with `leader-compaction-planner.ts`, not `claude-compaction-enforcer.ts`.
+- **W5.2 changes home.** `orchestrated-build` is a personal skill outside this repo. Doctrine ships in the repo's `skills/` with W3.3's context-pack skill; edits to personal skills are proposed in the wave report, not made.
+- **L items are split** so each child agent is one bounded unit. At most two children run at once.
+
+### Wave 1 remainder
+
+| Unit                   | Items | Owns                                                                                                   | Class    |
+| ---------------------- | ----- | ------------------------------------------------------------------------------------------------------ | -------- |
+| W1.7 Transcript search | OR-E3 | new `agent/transcript-search/`; `search_agent_transcript` in `coordination-tools.ts`; CLI `agent grep` | standard |
+
+### Wave 2: durable work
+
+| Unit                     | Items                                                     | Owns                                                                                                                                                                                                                                                | Class    |
+| ------------------------ | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| W2.1a Queue core         | OR-A1 (store), OR-A2, OR-A3, OR-J1                        | `packages/protocol/src/coordination/`; `server/coordination/{queue,stream}/`: item store, transition journal, closure validator, idempotent create, retention; `server_info.features.coordinationQueue`                                             | hard     |
+| W2.1b Queue surfaces     | OR-A1 (tools, CLI, delivery)                              | queue tools in `coordination-tools.ts`; `session/coordination/` controller; CLI `paseo queue`; delivery through `sendPromptToAgent` with the result on the item; chaos e2e `kill-daemon-mid-handoff`, `queue-baton-survives-restart`                | hard     |
+| W2.2 Inbox               | OR-A5, OR-H1 feed                                         | `packages/app/src/inbox/`; sidebar entry; Inbox read and write RPCs in `session/coordination/`                                                                                                                                                      | standard |
+| W2.3 Sweep and guards    | OR-D10, OR-F3, OR-B2 (item and context conditions), OR-B5 | queue items in `agent-stall-sweep.ts`; archive hand-back in `agent-archive.ts`; open-items check in `done-janitor-detector.ts`; `ownsOpenItems`, `itemOverdue`, `idleWithClaimableGate`, `contextAbove` in `schedule/conditions.ts`; parked classes | standard |
+| W2.4 Chat rooms          | OR-E2                                                     | revive `server/chat/` from `94bda1f92^` with a query-shaped store; chat tools; CLI `paseo chat`; app room tab; pull-only unless @mentioned                                                                                                          | standard |
+| W2.5 Failover gates      | OR-D8                                                     | `account-failover-detector.ts` usage-row staleness bound; "auth unknown" kept apart from "healthy" in the target check                                                                                                                              | standard |
+| W2.6 Activity vocabulary | OR-D1                                                     | optional `needsInput` and `resumability` on agent snapshots; `agent-projections.ts`; app row badges                                                                                                                                                 | standard |
+
+Order: W2.1a with W2.5, then W2.1b with W2.6, then W2.2 with W2.3, then W2.4. Acceptance: a handoff killed between successor create and source close leaves exactly one open successor after restart; a chat line without an @mention causes zero agent turns.
 
 ### Wave 3: leaders stop relaying
 
-| Agent                         | Items                                                                           | Owns                                                                                                                                   | Class    | Size |
-| ----------------------------- | ------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---- |
-| W3.1 Workflow runtime         | OR-B1 (and `loop-service.ts` revival)                                           | new `server/coordination/workflow/` with compiled-in built-ins; workflow tools file; CLI `workflow`; orchestration-panel workflow rows | hard     | L    |
-| W3.2 Team specs               | OR-F1, OR-F6, OR-G4                                                             | new `server/team/` with templates; CLI `team`; app library screen                                                                      | hard     | L    |
-| W3.3 Context by address       | OR-E8 (packs, `get_context`, walk)                                              | new `server/context/`; context tool file; CLI `context`                                                                                | standard | M    |
-| W3.4 Semantic deny vocabulary | OR-F7                                                                           | `plugins/claude-account-pool/shared/tool-profiles.ts`, `server/classifier.ts`                                                          | standard | S    |
-| W3.5 Health surface           | OR-D2 (monitors plus wake-lineage; context pressure once compaction exposes it) | `daemon-vitals/health.ts`; app Health screen; `paseo status --watch`                                                                   | standard | M    |
+| Unit                    | Items            | Owns                                                                                                                                                                                         | Class    |
+| ----------------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| W3.1a Workflow engine   | OR-B1 (engine)   | `server/coordination/workflow/`: spec schema and validator (closed keysets, reachability, cycles), compiled-in built-ins, scribe projection, trails, `max_hops`, branch, gate, resume, route | hard     |
+| W3.1b Workflow surfaces | OR-B1 (surfaces) | workflow tools; CLI `paseo workflow run\|watch\|status\|trace\|resume\|route`; orchestration-panel workflow rows                                                                             | hard     |
+| W3.2a Team specs        | OR-F1, OR-F6     | `server/team/` (parse, validate, instantiate, export) with compiled-in templates; CLI `paseo team up\|down\|ls`                                                                              | hard     |
+| W3.2b Library screen    | OR-G4            | app library listing team templates, user specs and workflow specs, with preview and run                                                                                                      | standard |
+| W3.3 Context by address | OR-E8, OR-G6     | `server/context/` (address parser, pack index, recap store); `get_context` tool; CLI `paseo context`; the context-pack skill                                                                 | standard |
+| W3.5 Health surface     | OR-D2            | `daemon-vitals/health.ts` aggregation; app Health screen; `paseo status --watch`                                                                                                             | standard |
 
-- **Dependencies:** W3.1 needs W2.1 and W1.3. W3.2 restore-by-name needs W1.2. W3.3's recap store waits for refocus.
-- **Acceptance:** a `linear-build` workflow (plan, implement, review) runs to completion with the leader receiving exactly one prompt: the completion. A review `failed` branches back to implement, and a trip of `max_hops` pages Tyler once. `paseo team up adversarial-review` spawns members whose models match the classifier's preview for their labels. An upgrade (reinstalling the build) leaves every built-in workflow and template listed, the regression OpenRig v0.5.14 admits.
+### Wave 4: continuity
 
-### Wave 4: continuity (after compaction, refocus and model-divergence land)
-
-| Agent                    | Items        | Owns                                                                                                           | Class    | Size |
-| ------------------------ | ------------ | -------------------------------------------------------------------------------------------------------------- | -------- | ---- |
-| W4.1 Leader handover     | OR-C6, OR-C7 | new `agent/handover/`; recap store (shared with W3.3's `context/`); a strategy hook in the compaction enforcer | hard     | M    |
-| W4.2 Native fork         | OR-C9        | `create-agent/` `forkFromAgentId`; `providers/claude/` fork path; image pins; prune in the done janitor        | standard | M    |
-| W4.3 Cross-family packet | OR-C5        | new `agent/restore-packet/`; failover `crossFamilyFallback`                                                    | hard     | M    |
-| W4.4 Apprentice handover | OR-C8        | built on W4.1 and W2.1; behind `agents.continuity.apprentice` with `dryRun`                                    | hard     | L    |
-
-- **Acceptance (real provider):** a leader handed over mid-task names its task and its open children, and the old session is released only after the startup proof passes. A forked worker's first turn needs no file re-reads to answer a question about the parent's findings. With every Claude account forced to capped, a stuck agent continues on Codex marked `rebuilt`.
+| Unit                     | Items        | Owns                                                                                                                        | Class    |
+| ------------------------ | ------------ | --------------------------------------------------------------------------------------------------------------------------- | -------- |
+| W4.1 Leader handover     | OR-C6, OR-C7 | `agent/handover/`; startup proof; recap from W3.3's store; a `paseo.continuity=handover` strategy in the compaction monitor | hard     |
+| W4.2 Native fork         | OR-C9        | `create-agent/` `forkFromAgentId`; Claude provider fork path; image pins; prune through the done janitor's pin rules        | standard |
+| W4.3 Cross-family packet | OR-C5        | `agent/restore-packet/`; opt-in failover `crossFamilyFallback`                                                              | hard     |
+| W4.4 Apprentice handover | OR-C8        | on W4.1 and W2.1; `agents.continuity.apprentice` with `dryRun: true` and no auto-cutover                                    | hard     |
 
 ### Wave 5: review and doctrine
 
-| Agent                   | Items                      | Owns                                                                        | Class      | Size     |
-| ----------------------- | -------------------------- | --------------------------------------------------------------------------- | ---------- | -------- | -------- | --- |
-| W5.1 Review surface     | OR-G2, OR-G1 thin          | new `packages/app/src/review/`; proof records on items; CLI `plan progress` | standard   | M        |
-| W5.2 Doctrine skills    | OR-G6                      | skill content only                                                          | mechanical | S        |
-| W5.3 Bundles            | OR-F2                      | `server/team/bundle.ts`; CLI `team pack                                     | inspect    | install` | standard | S   |
-| W5.4 Views and topology | OR-B4, OR-H1 topology mode | app orchestration panel filters and graph mode                              | standard   | S        |
+| Unit                    | Items                      | Owns                                                                                         | Class      |
+| ----------------------- | -------------------------- | -------------------------------------------------------------------------------------------- | ---------- |
+| W5.1 Review surface     | OR-G2, OR-G1 thin          | `packages/app/src/review/`; proof records on items; plan unit ids; CLI `paseo plan progress` | standard   |
+| W5.2 Doctrine           | OR-G6                      | repo `skills/` content only                                                                  | mechanical |
+| W5.3 Bundles            | OR-F2                      | `server/team/bundle.ts`; CLI `paseo team pack\|inspect\|install`                             | standard   |
+| W5.4 Views and topology | OR-B4, OR-H1 topology mode | orchestration panel saved filters and graph mode                                             | standard   |
 
 ### Wave 6: multi-host
 
-| Agent                      | Items         | Owns                                                                                                      | Class | Size |
-| -------------------------- | ------------- | --------------------------------------------------------------------------------------------------------- | ----- | ---- |
-| W6.1 Cross-host delegation | OR-F10, OR-A4 | `coordination/queue/remote.ts`; cross-host create_agent via the client package; app host picker on create | hard  | L    |
+| Unit                       | Items         | Owns                                                                                                          | Class |
+| -------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------- | ----- |
+| W6.1 Cross-host delegation | OR-F10, OR-A4 | `coordination/queue/remote.ts`; cross-host create_agent through the client package; app host picker on create | hard  |
 
 ### Dependency graph
 
