@@ -37,6 +37,12 @@ export interface RecognizedRead {
   filters: FileReadRange[];
   /** An image, a PDF page range or a notebook: counted as `not-text`, never judged. */
   notText: boolean;
+  /**
+   * The line can print something besides one file's range: several files, stdin (`-`,
+   * `/dev/stdin`), an input redirect, a heredoc or a here-string. Counted as `compound`, never
+   * judged: what it printed cannot be told apart from the file's text.
+   */
+  compound: boolean;
   /** The Bash call's `description`, when it has one. */
   why: string | null;
 }
@@ -92,6 +98,7 @@ function recognizeReadTool(input: RecognizeReadInput): RecognizedRead | null {
     files: [{ path: absolute, range: { kind: "lines", first, last: first + limit - 1 } }],
     filters: [],
     notText,
+    compound: false,
     why: null,
   };
 }
@@ -535,6 +542,11 @@ function isHarmlessRedirect(target: ExpandedWord): boolean {
   return target.resolved && target.text === "/dev/null";
 }
 
+/** An operand that reads a stream, not a file: `-`, `/dev/stdin`, `/dev/fd/0`, `/proc/self/fd/0`. */
+function isStreamOperand(resolved: string): boolean {
+  return /^\/(?:dev|proc)(?:\/|$)/.test(resolved.replace(/\\/g, "/"));
+}
+
 /** A word the shell would expand into other names: `src/*.ts`, `a.{ts,js}`, `file?.txt`. */
 function isPattern(word: ExpandedWord): boolean {
   return word.globsDirectory || /[*?]/.test(word.text) || /\{[^}]*,[^}]*\}/.test(word.text);
@@ -551,6 +563,7 @@ function recognizeBash(input: RecognizeReadInput): RecognizedRead | null {
   const files: RecognizedFile[] = [];
   const filters: FileReadRange[] = [];
   let plain = true;
+  let compound = false;
   walkShellCommands(
     command,
     { cwd: input.cwd, home: input.home },
@@ -562,6 +575,7 @@ function recognizeBash(input: RecognizeReadInput): RecognizedRead | null {
           plain = false;
           return true;
         }
+        if (parsed.operands.some((word) => word.text === "-")) compound = true;
         const named = parsed.operands.filter((word) => word.text !== "-");
         if (named.length === 0) {
           filters.push(parsed.range);
@@ -573,8 +587,13 @@ function recognizeBash(input: RecognizeReadInput): RecognizedRead | null {
             plain = false;
             return true;
           }
+          if (isStreamOperand(resolved)) compound = true;
           files.push({ path: resolved, range: parsed.range });
         }
+        return false;
+      },
+      inputRedirect() {
+        compound = true;
         return false;
       },
       outputRedirect(target) {
@@ -589,11 +608,14 @@ function recognizeBash(input: RecognizeReadInput): RecognizedRead | null {
     },
   );
   if (!plain || files.length === 0) return null;
+  // The same file twice prints only that file; two files are two sources.
+  if (new Set(files.map((file) => file.path)).size > 1) compound = true;
   return {
     tool: "Bash",
     files,
     filters: filters.filter((range) => range.kind !== "all"),
     notText: false,
+    compound,
     why: typeof description === "string" && description.trim() ? description.trim() : null,
   };
 }

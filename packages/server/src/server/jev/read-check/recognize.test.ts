@@ -31,6 +31,7 @@ describe("recognizeRead: the Read tool", () => {
       files: [{ path: "/repo/src/a.ts", range: { kind: "lines", first: 1, last: 2000 } }],
       filters: [],
       notText: false,
+      compound: false,
       why: null,
     });
   });
@@ -70,11 +71,32 @@ describe("recognizeRead: Bash lines that only read files", () => {
     ]);
   });
 
-  test("cat with several files reads each", () => {
-    expect(files(bash("cat -n a.ts b.ts"))?.map((file) => file.path)).toEqual([
-      "/repo/a.ts",
-      "/repo/b.ts",
-    ]);
+  test("cat with several files reads each, and is compound", () => {
+    const read = bash("cat -n a.ts b.ts");
+    expect(files(read)?.map((file) => file.path)).toEqual(["/repo/a.ts", "/repo/b.ts"]);
+    expect(read?.compound).toBe(true);
+  });
+
+  test("one file, alone or piped through a filter, is not compound", () => {
+    expect(bash("cat a.ts")?.compound).toBe(false);
+    expect(bash("cat a.ts | head -5")?.compound).toBe(false);
+    expect(bash("cat a.ts a.ts")?.compound).toBe(false);
+    expect(bash("cat a.ts 2>/dev/null")?.compound).toBe(false);
+  });
+
+  test("stdin, an input redirect, a heredoc or a here-string makes a read compound", () => {
+    for (const command of [
+      "cat a.ts; cat < .env",
+      "cat a.ts - < .env",
+      "cat a.ts 0<.env",
+      'head -100 a.ts && cat <<< "$TOKEN"',
+      "cat a.ts <<EOF\nsecret\nEOF",
+      "cat a.ts /dev/stdin",
+      "cat /dev/fd/3 3<.env",
+      "cat .env | cat a.ts -",
+    ]) {
+      expect(bash(command)?.compound, command).toBe(true);
+    }
   });
 
   test("head and its count spellings", () => {

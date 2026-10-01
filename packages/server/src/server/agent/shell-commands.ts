@@ -31,6 +31,11 @@ export interface ShellVisitor {
   /** The file an output redirection (`>`, `>>`, `&>`, …) writes. Returning true stops the walk. */
   outputRedirect(target: ExpandedWord, context: ShellContext): boolean;
   /**
+   * An input redirection (`<`, `<&`, `<<`, `<<-`, `<<<`): the command reads something besides
+   * its operands. Returning true stops the walk. Absent: input redirections are not reported.
+   */
+  inputRedirect?(context: ShellContext): boolean;
+  /**
    * A command whose name the walk cannot know (`$EDITOR x`, `$(which cat) x`), which `command`
    * never sees. Returning true stops the walk. Absent: such commands are skipped silently.
    */
@@ -107,6 +112,7 @@ const REDIRECT_OPERATORS = [
   "<",
 ];
 const OUTPUT_REDIRECTS = new Set([">", ">>", ">|", "&>", "&>>", "<>", ">&"]);
+const INPUT_REDIRECTS = new Set(["<", "<&", "<<<"]);
 
 function isBlank(char: string | undefined): boolean {
   return char === " " || char === "\t";
@@ -683,6 +689,13 @@ function evalSimple(
 
   let stdin = pipedStdin;
   for (const redirect of node.redirects) {
+    if (
+      (redirect.heredoc || INPUT_REDIRECTS.has(redirect.op)) &&
+      state.visitor.inputRedirect?.(context)
+    ) {
+      state.stopped = true;
+      return;
+    }
     if (redirect.heredoc) {
       const body = redirect.heredoc.body ?? "";
       // An unquoted heredoc still runs its $(…) and backticks, whatever reads it.
