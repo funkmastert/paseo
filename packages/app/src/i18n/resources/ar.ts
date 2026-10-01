@@ -2010,6 +2010,10 @@ export const ar: TranslationResources = {
     blocked_other: "{{count}} رفض حديث",
     physical: {
       sectionTitle: "فعلي",
+      platform: {
+        ios: "آيفون",
+        android: "هاتف أندرويد",
+      },
       transport: {
         usb: "USB",
         network: "واي فاي",

@@ -2020,6 +2020,10 @@ export const en = {
     blocked_other: "{{count}} recent refusals",
     physical: {
       sectionTitle: "Physical",
+      platform: {
+        ios: "iPhone",
+        android: "Android phone",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

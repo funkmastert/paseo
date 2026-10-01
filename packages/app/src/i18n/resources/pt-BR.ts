@@ -2042,6 +2042,10 @@ export const ptBR: TranslationResources = {
     blocked_other: "{{count}} recusas recentes",
     physical: {
       sectionTitle: "Físico",
+      platform: {
+        ios: "iPhone",
+        android: "Celular Android",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

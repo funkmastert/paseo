@@ -2041,6 +2041,10 @@ export const ru: TranslationResources = {
     blocked_other: "{{count}} недавних отказов",
     physical: {
       sectionTitle: "Физическое",
+      platform: {
+        ios: "iPhone",
+        android: "Телефон Android",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

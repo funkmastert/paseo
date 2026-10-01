@@ -1988,6 +1988,10 @@ export const zhCN: TranslationResources = {
     blocked_other: "{{count}} 次最近的拒绝",
     physical: {
       sectionTitle: "实体设备",
+      platform: {
+        ios: "iPhone",
+        android: "Android 手机",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

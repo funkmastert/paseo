@@ -2020,6 +2020,10 @@ export const ko: TranslationResources = {
     blocked_other: "최근 거부 {{count}}건",
     physical: {
       sectionTitle: "실기기",
+      platform: {
+        ios: "아이폰",
+        android: "안드로이드 휴대폰",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

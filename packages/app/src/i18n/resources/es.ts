@@ -2056,6 +2056,10 @@ export const es: TranslationResources = {
     blocked_other: "{{count}} rechazos recientes",
     physical: {
       sectionTitle: "Físico",
+      platform: {
+        ios: "iPhone",
+        android: "Teléfono Android",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",

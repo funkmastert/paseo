@@ -403,7 +403,7 @@ function PhysicalDeviceRow({
     >
       <View style={styles.rowTextGroup}>
         <Text style={styles.rowName} numberOfLines={1}>
-          {t(`deviceStatus.platform.${row.platform}`)}
+          {t(`deviceStatus.physical.platform.${row.platform}`)}
           {row.name ? ` · ${row.name}` : ""} · {row.shortId}
           {row.reserved && row.agentId ? ` · ${t("deviceStatus.reservedForYou")}` : ""}
         </Text>

@@ -2061,6 +2061,10 @@ export const fr: TranslationResources = {
     blocked_other: "{{count}} refus récents",
     physical: {
       sectionTitle: "Physique",
+      platform: {
+        ios: "iPhone",
+        android: "Téléphone Android",
+      },
       transport: {
         usb: "USB",
         network: "Wi-Fi",
