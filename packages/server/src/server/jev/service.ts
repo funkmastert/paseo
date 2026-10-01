@@ -16,6 +16,7 @@ import type {
   JevFeatureId,
   JevLane,
   JevOutcome,
+  JevSavingsSink,
   JevService,
   JevStatus,
   JevTransport,
@@ -67,6 +68,15 @@ export const JEV_FEATURE_LANES: Record<JevFeatureId, JevLane> = {
 const JEV_FEATURES_WITHOUT_SHADOW = new Set<JevFeatureId>(["agentTools", "askJev"]);
 
 const JEV_FEATURES = Object.keys(JEV_FEATURE_LANES) as JevFeatureId[];
+
+/** A savings sink that drops everything: test fakes, and the service until the ledger is wired. */
+export const DROP_JEV_SAVINGS: JevSavingsSink = {
+  record: () => "",
+  settle: () => undefined,
+  validate: () => undefined,
+  countNotAsked: () => undefined,
+  noteRead: () => undefined,
+};
 
 /** Bytes, not tokens: JEV's tokenizer is unknown, so 60 KB assumes about 2.5 bytes a token. */
 export const JEV_MAX_STATE_BYTES = 60_000;
@@ -1046,6 +1056,7 @@ export function createJevService(options: JevServiceOptions): JevServiceRuntime 
     checkScope,
     status,
     decisions,
+    savings: DROP_JEV_SAVINGS,
     listDecisions: (agentId) => {
       let labels: Readonly<Record<string, string>> | null = null;
       try {
