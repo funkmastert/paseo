@@ -280,6 +280,8 @@ export const JevSavingsModeTotalsSchema = z.object({
   // Live: answers that changed what code did. Shadow: answers that would have.
   changed: z.number(),
   tokens: z.number(),
+  // The part of `tokens` that is a median estimate, not measured. Optional: absent from an older daemon.
+  estimatedTokens: z.number().optional(),
   otherBenefit: JevSavingsOtherBenefitSchema.nullable(),
   pending: z.number(),
 });
@@ -375,6 +377,8 @@ export const JevSavingsEventSchema = z.object({
   otherBenefit: JevSavingsOtherBenefitSchema.nullable(),
   basis: JevSavingsBasisSchema.nullable(),
   pending: z.boolean(),
+  // The figure is an estimate, not measured tokens. Optional: absent from an older daemon.
+  estimated: z.boolean().optional(),
   validation: JevSavingsValidationSchema.nullable(),
   jevCostUsd: z.number().nullable(),
 });

@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 
 import type { JevEgressScope, JevOutcome, JevQuestions, JevService } from "../jev/contract.js";
 import { createJsonlAppender } from "../jsonl-appender.js";
+import { remediationSavingsHookFor } from "../jev/savings-hooks.js";
 import { levelAtLeast, type NotifyLevel } from "../notify-policy/levels.js";
 import { reachesPhoneNow, type NotifyDeliveryPreview } from "../notify-policy/notify-policy.js";
 import type { RemediationObservation, RemedyState } from "./contract.js";
@@ -335,7 +336,7 @@ const TRIAGE_FILE_MAX_BYTES = 1_000_000;
  * decision store. Never throws; the write happens off the ladder's path.
  */
 export function createRemediationTriageRecorder(options: {
-  jev: Pick<JevService, "decisions">;
+  jev: Pick<JevService, "decisions"> & Partial<Pick<JevService, "savings">>;
   filePath: string;
   logger: Logger;
 }): (event: RemediationTriageEvent) => void {
@@ -345,9 +346,12 @@ export function createRemediationTriageRecorder(options: {
     maxBytes: TRIAGE_FILE_MAX_BYTES,
     logger,
   });
+  // The savings ledger (docs/jev.md, "Savings"): records, settles and validates from these events.
+  const recordSavings = remediationSavingsHookFor(options.jev.savings, options.filePath);
   return (event) => {
     try {
       logger.info({ remediationTriage: event }, "remediation-triage");
+      const savingsId = recordSavings?.(event) ?? "";
       if (event.type === "triage" && event.linkedAgentId && event.triage.callId) {
         options.jev.decisions.record({
           agentId: event.linkedAgentId,
@@ -358,12 +362,26 @@ export function createRemediationTriageRecorder(options: {
           confidence: event.triage.routeConfidence,
           action: describeAction(event.decision),
           applied: event.decision.applied,
+          ...decisionNoteSavings(event, savingsId),
         });
       }
     } catch {
       // Recording never breaks the ladder.
     }
     file.append({ v: 1, ...event });
+  };
+}
+
+/** The note's `mode`, `wouldBe` and `savingsId`, so the popover reads mode, not `applied`. */
+function decisionNoteSavings(
+  event: Extract<RemediationTriageEvent, { type: "triage" }>,
+  savingsId: string,
+): { mode?: "shadow" | "live"; wouldBe?: string | null; savingsId?: string } {
+  const answered = event.triage.outcome === "answered" || event.triage.outcome === "shadow";
+  return {
+    ...(answered ? { mode: event.triage.outcome === "shadow" ? "shadow" : "live" } : {}),
+    wouldBe: answered ? event.decision.wouldBe : null,
+    ...(savingsId ? { savingsId } : {}),
   };
 }
 

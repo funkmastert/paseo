@@ -88,6 +88,7 @@ export const Plus = StubIcon;
 export const QrCode = StubIcon;
 export const RefreshCcw = StubIcon;
 export const RefreshCw = StubIcon;
+export const RotateCcw = StubIcon;
 export const RotateCw = StubIcon;
 export const Scan = StubIcon;
 export const Search = StubIcon;

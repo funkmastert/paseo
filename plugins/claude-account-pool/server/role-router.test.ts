@@ -6,6 +6,7 @@ import {
   AGENT_TYPE_LABEL,
   DEFAULT_POLICY as SHIPPED_POLICY,
   JEV_CALL_LABEL,
+  JEV_SPAWN_LABEL,
   JEV_TOOLS_LABEL,
   MODEL_OVERRIDDEN_LABEL,
   TASK_CLASS_LABEL,
@@ -2366,6 +2367,9 @@ describe("JEV's labels", () => {
 
     expect(result?.config.model).toBe("claude-haiku-4-5");
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "jev", [JEV_CALL_LABEL]: "jev-call-7" });
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=1",
+    );
   });
 
   it("a shadowed hint changes no model and still names the call, with the source that decided", () => {
@@ -2373,6 +2377,10 @@ describe("JEV's labels", () => {
 
     expect(result?.config.model).toBe("claude-sonnet-5");
     expect(result?.labels).toMatchObject({ [TASK_CLASS_SOURCE_LABEL]: "default", [JEV_CALL_LABEL]: "jev-call-7" });
+    // The durable record: the model it runs without JEV, and the model the answer would run.
+    expect(result?.labels?.[JEV_SPAWN_LABEL]).toBe(
+      "v1;base=-/claude-sonnet-5;would=mechanical/claude-haiku-4-5;move=down;applied=0",
+    );
   });
 
   it("a hint that is not an answer writes nothing", () => {
@@ -2386,6 +2394,7 @@ describe("JEV's labels", () => {
 
     expect(withFailure).toEqual(without);
     expect(withFailure?.labels?.[JEV_CALL_LABEL]).toBeUndefined();
+    expect(withFailure?.labels?.[JEV_SPAWN_LABEL]).toBeUndefined();
   });
 
   it("a hint that makes classification throw passes the request through untouched", () => {

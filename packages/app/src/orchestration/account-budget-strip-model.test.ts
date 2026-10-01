@@ -14,6 +14,7 @@ import {
   resolveAccountLabel,
   selectBudgetWindows,
   selectAccountWorstWindow,
+  type AccountBudgetRowViewModel,
 } from "./account-budget-strip-model";
 
 const getProviderIconMock = vi.hoisted(() => vi.fn(() => () => null));
@@ -442,6 +443,10 @@ describe("resolveOtherAccountIds", () => {
   });
 });
 
+function balanceAmounts(row: AccountBudgetRowViewModel): string[] {
+  return row.kind === "available" ? row.balances.map(({ amount }) => amount) : [];
+}
+
 describe("buildAccountBudgetRows for a non-Claude account", () => {
   const build = (u: ProviderUsage, entries?: ProviderSnapshotEntry[]) =>
     buildAccountBudgetRows([u], [u.providerId], entries, {
@@ -593,6 +598,63 @@ describe("buildAccountBudgetRows for a non-Claude account", () => {
       resolveAccountIcon("openai-api", "server-1");
       expect(getProviderIconMock).toHaveBeenLastCalledWith("codex", "server-1");
     });
+  });
+
+  describe("JEV", () => {
+    const jevUsage = (overrides: Partial<ProviderUsage> = {}): ProviderUsage => ({
+      providerId: "jev",
+      displayName: "JEV",
+      status: "available",
+      planLabel: "fake backend",
+      windows: [],
+      balances: [
+        { id: "control-today", label: "Control today", used: 0.0123, limit: 1, unit: "usd" },
+        { id: "calls-today", label: "Calls today", used: 42, unit: "requests" },
+      ],
+      details: [
+        { id: "lane:control:spent", label: "Control budget spent", value: "off", tone: "warning" },
+        { id: "feature:spawnHint", label: "Spawn hint", value: "Shadow" },
+      ],
+      ...overrides,
+    });
+
+    it("is listed after the Claude accounts, named by its vendor", () => {
+      expect(resolveOtherAccountIds([jevUsage()], undefined)).toEqual(["jev"]);
+      expect(build(jevUsage())).toMatchObject({
+        section: "other",
+        label: "TypeSafe (JEV)",
+        plan: "Fake backend",
+      });
+    });
+
+    it("keeps the sub-cent digits of a day's spend", () => {
+      const row = build(jevUsage());
+      expect(balanceAmounts(row)).toEqual(["$0.0123 / $1.00", "42"]);
+    });
+
+    it("carries its details onto the strip, with their tone", () => {
+      const row = build(jevUsage());
+      expect(row.kind === "available" && row.details).toEqual([
+        { id: "lane:control:spent", label: "Control budget spent", value: "off", tone: "warning" },
+        { id: "feature:spawnHint", label: "Spawn hint", value: "Shadow", tone: "default" },
+      ]);
+    });
+
+    it("is absent when the daemon reports JEV unavailable, as a host without a key does", () => {
+      expect(
+        resolveOtherAccountIds(
+          [jevUsage({ status: "unavailable", balances: [], details: [] })],
+          undefined,
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  it("leaves another provider's details off the strip", () => {
+    const row = build(
+      codexUsage({ details: [{ id: "status", label: "Status", value: "active" }] }),
+    );
+    expect(row.kind === "available" && row.details).toEqual([]);
   });
 
   it("shows unavailable when its usage fetch failed", () => {

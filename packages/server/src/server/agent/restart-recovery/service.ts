@@ -23,6 +23,10 @@ import {
 } from "../agent-prompt.js";
 import { isLimitShapedError } from "../account-failover-detector.js";
 import { unpacedResume, type PaceResume } from "../resume-pacer.js";
+import {
+  legacyPreviousShutdownString,
+  type PreviousShutdownInfo,
+} from "../../daemon-vitals/shutdown-reason.js";
 import { isRunMarkerOpen, settleRunMarker } from "./run-marker.js";
 import {
   computeRecoveryDepths,
@@ -80,11 +84,11 @@ export interface RestartRecoveryServiceOptions {
   logger: Logger;
   now?: () => Date;
   /**
-   * The previous daemon's shutdown receipt, read once at boot: `crash`, `clean` or `unknown`.
-   * OR-C11 (W1.1) owns the receipt; until it lands every stop reads as `unknown`, which changes
-   * nothing here: a mid-turn agent was interrupted whichever way the daemon went down.
+   * The previous daemon's shutdown receipt, mapped to a plain-language reason and read once at
+   * boot. Omit to read as `unknown`, which changes nothing here: a mid-turn agent was interrupted
+   * whichever way the daemon went down.
    */
-  readPreviousShutdown?: () => Promise<string>;
+  readPreviousShutdown?: () => Promise<PreviousShutdownInfo>;
   /**
    * Whether child admission holds this agent's turn: queued for a slot when the daemon stopped,
    * and re-sent by admission after the restart (docs/resource-monitor.md). Such a turn never
@@ -110,7 +114,7 @@ export class RestartRecoveryService {
   private readonly outcomes = new Map<string, Outcome>();
   private readonly resuming = new Set<string>();
   private queued = new Set<string>();
-  private previousShutdown = "unknown";
+  private previousShutdown: PreviousShutdownInfo = { reason: "unknown", at: null };
   private applying = false;
   private stopped = false;
 
@@ -158,8 +162,12 @@ export class RestartRecoveryService {
     if (this.episode.length === 0) return;
     const logger = this.options.logger;
     void (async () => {
-      this.previousShutdown =
-        (await this.options.readPreviousShutdown?.().catch(() => "unknown")) ?? "unknown";
+      this.previousShutdown = (await this.options
+        .readPreviousShutdown?.()
+        .catch(() => ({ reason: "unknown", at: null }) as PreviousShutdownInfo)) ?? {
+        reason: "unknown",
+        at: null,
+      };
       if (this.mode === "off") {
         logger.info(
           { interrupted: this.episode.length },
@@ -208,7 +216,8 @@ export class RestartRecoveryService {
     return {
       mode: this.mode,
       capturedAt: this.capturedAt,
-      previousShutdown: this.previousShutdown,
+      previousShutdown: legacyPreviousShutdownString(this.previousShutdown),
+      previousShutdownInfo: this.previousShutdown,
       applying: this.applying,
       entries: orderForRecovery(entries),
     };
@@ -408,6 +417,7 @@ export class RestartRecoveryService {
       parentAgentId: record ? getParentAgentIdFromLabels(record.labels) : run.parentAgentId,
       depth,
       runStartedAt: run.runStartedAt,
+      stoppedAt: this.previousShutdown.at,
     };
     const outcome = this.outcomes.get(run.agentId);
     if (outcome && outcome.state !== "failed") {

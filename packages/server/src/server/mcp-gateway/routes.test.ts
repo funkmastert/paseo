@@ -60,11 +60,12 @@ function jsonRpcBody(): string {
 
 // StreamableHTTPServerTransport 406s any POST whose Accept header doesn't list both
 // content types (application/json for direct responses, text/event-stream for streaming).
-function jsonRpcHeaders(authorization?: string): Record<string, string> {
+function jsonRpcHeaders(authorization?: string, protocolVersion?: string): Record<string, string> {
   return {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
     ...(authorization ? { authorization } : {}),
+    ...(protocolVersion ? { "mcp-protocol-version": protocolVersion } : {}),
   };
 }
 
@@ -172,6 +173,39 @@ describe("MCP gateway proxy route", () => {
     const payload = await readJsonRpcResponse(response);
     expect(payload.error?.code).toBe(-32010);
     expect(payload.error?.message).toContain('MCP gateway server "github" needs authentication');
+  });
+
+  // This route is stateless (a fresh StreamableHTTPServerTransport per request), so an
+  // Mcp-Protocol-Version header from a prior negotiation is checked again on every call.
+  // A version the SDK doesn't recognize must negotiate down rather than 400 outright.
+  test("a request announcing an unrecognized protocol version is still handled, not rejected with 400", async () => {
+    const gateway = new McpGateway({
+      paseoHome: createTempHome(),
+      config: {
+        enabled: true,
+        servers: { github: { url: "http://127.0.0.1:1/mcp", transport: "http", auth: "oauth" } },
+      },
+    });
+    await gateway.start();
+
+    const capabilityToken = randomUUID();
+    const { url } = await startTestApp({
+      gateway,
+      capabilityToken,
+      password: hashDaemonPassword("x"),
+    });
+
+    const response = await fetch(`${url}/mcp/gateway/github`, {
+      method: "POST",
+      headers: jsonRpcHeaders(`Bearer ${capabilityToken}`, "2026-07-28"),
+      body: jsonRpcBody(),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = await readJsonRpcResponse(response);
+    // Reaching the gateway's own needs-auth error proves the request got past protocol
+    // version validation, not short-circuited by a 400.
+    expect(payload.error?.code).toBe(-32010);
   });
 
   test("a request with no daemon password configured succeeds without a bearer token", async () => {

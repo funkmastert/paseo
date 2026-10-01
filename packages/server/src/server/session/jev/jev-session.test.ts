@@ -229,6 +229,7 @@ describe("JevSession.handleDecide", () => {
         confidence: 0.91,
         action: "classifier input at create",
         applied: false,
+        mode: "live",
       },
     ]);
     expect(emitted).toEqual([

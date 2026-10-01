@@ -140,6 +140,7 @@ import { attachAgentStoragePersistence } from "./persistence-hooks.js";
 import { createAgentMcpServer } from "./agent/mcp-server.js";
 import { McpGateway, type McpGatewayConfig } from "./mcp-gateway/gateway.js";
 import { installMcpGatewayRoutes } from "./mcp-gateway/routes.js";
+import { normalizeMcpProtocolVersionHeader } from "./mcp-protocol-compat.js";
 import {
   createPaseoToolCatalog,
   type PaseoToolHostDependencies,
@@ -218,6 +219,9 @@ import {
 import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { WorkspaceTitleTracker } from "./workspace-title-tracker.js";
+import { migrateWorkspaceTitleSources } from "./workspace-title-source-migration.js";
+import { createTitleRefreshRecorder } from "./workspace-title-refresh-jev.js";
+import { resolveWorkspaceTitleRefreshConfig } from "./workspace-title-refresh-config.js";
 import { AutoPinExpiry } from "./workspace-auto-pin.js";
 import { AgentTitleTracker } from "./agent-title-tracker.js";
 import { AgentBudgetPacingMonitor } from "./agent-budget-pacing-monitor.js";
@@ -240,6 +244,7 @@ import {
   RestartRecoveryService,
   type RestartRecoveryConfig,
 } from "./agent/restart-recovery/service.js";
+import type { PreviousShutdownInfo } from "./daemon-vitals/shutdown-reason.js";
 import {
   AgentDoneJanitor,
   askAgentWhetherDone,
@@ -274,6 +279,7 @@ import {
   createRemediationTriageRecorder,
 } from "./remediation/jev-triage.js";
 import { RemediationLadder, remediationCreateAgentInput } from "./remediation/ladder.js";
+import { jevConfigSection } from "./jev/config.js";
 import { buildDoctorContext, readRawConfig } from "./session/doctor/index.js";
 import { resolveTokenAuditConfig, tokenAuditSection } from "./token-audit/config.js";
 import { TokenAuditJob } from "./token-audit/token-audit-job.js";
@@ -347,6 +353,9 @@ import {
   type JevBudgetExhaustedEvent,
   type JevServiceRuntime,
 } from "./jev/service.js";
+import { startSavingsAdapters } from "./jev/savings-adapters.js";
+import { createSavingsLookups } from "./jev/savings-lookups.js";
+import { startSpawnHintSavings } from "./jev/savings-spawn.js";
 import { McpGatewayTokenStore } from "./mcp-gateway/token-store.js";
 
 const MCP_DEBUG_BATCH_LIMIT = 10;
@@ -534,6 +543,11 @@ export interface PaseoDaemonConfig {
   listen: string;
   paseoHome: string;
   daemonVersion?: string;
+  /**
+   * The previous daemon's shutdown, mapped to a plain-language reason before the daemon object
+   * exists (`daemon-worker.ts`, docs/restart-recovery.md). Omit to read as `unknown`.
+   */
+  previousShutdownInfo?: PreviousShutdownInfo;
   desktopManaged?: boolean;
   worktreesRoot?: string;
   corsAllowedOrigins: string[];
@@ -1565,6 +1579,18 @@ export async function createPaseoDaemon(
         jevKey,
       ),
     readAgentLabels: (agentId) => agentManager.getAgent(agentId)?.labels ?? null,
+    // "Where agents use it" on the JEV dashboard. The storage and the registry are built below;
+    // the lookups only read them once a record asks.
+    savingsLookups: createSavingsLookups({
+      liveAgent: (agentId) => {
+        const agent = agentManager.getAgent(agentId);
+        return agent
+          ? { title: agent.config.title ?? null, workspaceId: agent.workspaceId ?? null }
+          : null;
+      },
+      listStoredAgents: async () => agentStorage.list(),
+      listWorkspaces: async () => (await workspaceRegistry?.list()) ?? [],
+    }),
   });
   await jev.start();
 
@@ -2001,6 +2027,18 @@ export async function createPaseoDaemon(
       resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
+  // Feature 2's savings record: the spawn hint's label, priced when the child closes (docs/jev.md).
+  const spawnHintSavings = startSpawnHintSavings({ savings: jev.savings, agentManager });
+  // Features still on their own branches report through their measurement files until they merge.
+  const savingsAdapters = startSavingsAdapters({
+    jevDir: path.join(config.paseoHome, "jev"),
+    savings: jev.savings,
+    readAgentModel: (agentId) => {
+      const agent = agentManager.getAgent(agentId);
+      return agent ? (agent.runtimeInfo?.model ?? agent.config.model ?? null) : null;
+    },
+    logger,
+  });
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
   // before AgentManager because the providers need its gate, and it only reads the agent list.
   listDeviceLeaseAgents = () =>
@@ -2074,6 +2112,8 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "restart-recovery" }),
     isTurnHeld: (agentId) => childAdmission.holdsTurnFor(agentId),
     paceResume: (resume, fn) => resumePacer.run(resume, fn),
+    readPreviousShutdown: async () =>
+      config.previousShutdownInfo ?? { reason: "unknown", at: null },
   });
   // Before anything can arm or load an agent: the ledger rebuilds every owed finish report from
   // the records, so a restart still knows who is waiting to hear back. Recovery decides who was
@@ -2243,9 +2283,16 @@ export async function createPaseoDaemon(
     readDaemonConfig: () => ({ metadataGeneration: daemonConfigStore.get().metadataGeneration }),
     logger,
   });
-  handleAgentTurnFinished = (params) => agentTitleTracker.scheduleRefresh(params);
-  agentTitleTracker.start();
-
+  // One-time: titles agents supplied at creation used to be stamped "manual", which kept the
+  // tracker off most workspaces. Never fatal; the marker makes it run once.
+  await migrateWorkspaceTitleSources({
+    workspaceRegistry,
+    listAgents: () => agentStorage.list(),
+    markerPath: path.join(config.paseoHome, "projects", "workspace-title-source-migration.json"),
+    logger,
+  }).catch((error: unknown) => {
+    logger.warn({ err: error }, "Workspace title provenance migration failed");
+  });
   const workspaceTitleTracker = new WorkspaceTitleTracker({
     agentManager,
     workspaceRegistry,
@@ -2255,8 +2302,28 @@ export async function createPaseoDaemon(
     emitWorkspaceUpdateForWorkspaceId: async (workspaceId) => {
       await emitWorkspaceUpdatesExternal([workspaceId]);
     },
+    // Feature 17 (docs/jev.md): gate a regeneration on whether JEV thinks the name still fits.
+    jev,
+    readTitleRefreshConfig: () =>
+      resolveWorkspaceTitleRefreshConfig(
+        (
+          jevConfigSection(readRawConfig(config.paseoHome).rawConfig) as
+            | Record<string, unknown>
+            | undefined
+        )?.["titleRefresh"],
+      ),
+    recordTitleRefreshCheck: createTitleRefreshRecorder({
+      jev,
+      filePath: path.join(config.paseoHome, "jev", "title-refresh.jsonl"),
+      logger,
+    }),
     logger,
   });
+  handleAgentTurnFinished = (params) => {
+    agentTitleTracker.scheduleRefresh(params);
+    workspaceTitleTracker.recordAgentTurnFinished(params);
+  };
+  agentTitleTracker.start();
   workspaceTitleTracker.start();
 
   // Auto pins last while their workspace is active (workspace-auto-pin.ts). Sessions report uses.
@@ -2591,8 +2658,8 @@ export async function createPaseoDaemon(
         cwd,
         title,
         projectId,
-        // The caller named it deliberately; the tracker leaves it alone.
-        title ? { titleSource: "manual" } : undefined,
+        // Only agents reach this (create_workspace), so the title tracker may refresh it.
+        title ? { titleSource: "auto" } : undefined,
       );
       await emitWorkspaceUpdatesExternal([workspace.workspaceId]);
       return workspace;
@@ -2773,6 +2840,7 @@ export async function createPaseoDaemon(
           void server.close();
         });
 
+        normalizeMcpProtocolVersionHeader(req);
         await transport.handleRequest(
           req as unknown as IncomingMessage,
           res as unknown as ServerResponse,
@@ -3478,7 +3546,10 @@ export async function createPaseoDaemon(
     // After the monitor stops: its last sweep's readings are still in memory, not on disk.
     await wsServer?.getUsageHistoryStore().close();
     stopMonitorsAndSweeps();
+    // Before the savings callers: the observer's queued judgments still land their records.
     await readCheckObserver.observer.stop();
+    spawnHintSavings.stop();
+    await savingsAdapters.stop();
     // After every JEV caller has stopped: the ledger's day totals and the audit queue go to disk.
     await jev.stop().catch((error: unknown) => {
       logger.warn({ err: error }, "Failed to flush the JEV ledger");

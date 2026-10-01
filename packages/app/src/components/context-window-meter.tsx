@@ -4,9 +4,15 @@ import Svg, { Circle } from "react-native-svg";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { FloatingScrollView } from "@/components/ui/floating";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+  TOOLTIP_CONTENT_FRAME_X,
+} from "@/components/ui/tooltip";
 import { useDaemonConfig } from "@/hooks/use-daemon-config";
 import { ContextUsageBreakdownSection } from "@/context-usage/context-usage-breakdown-section";
+import { JevDecisionsSection } from "@/jev/jev-decisions-section";
 import {
   resolveContextMeterThresholds,
   resolveContextMeterTone,
@@ -240,7 +246,13 @@ export function ContextWindowMeter({
           ) : null}
         </Pressable>
       </TooltipTrigger>
-      <TooltipContent side="top" align="center" offset={8} maxWidth={TOOLTIP_MAX_WIDTH} interactive>
+      <TooltipContent
+        side="top"
+        align="center"
+        offset={8}
+        maxWidth={tooltipWidth + TOOLTIP_CONTENT_FRAME_X}
+        interactive
+      >
         <FloatingScrollView style={tooltipScrollStyle} showsVerticalScrollIndicator={false}>
           <View style={[styles.tooltipContent, { width: tooltipWidth }]}>
             <Text style={styles.tooltipTitle}>{t("contextWindow.title")}</Text>
@@ -267,6 +279,7 @@ export function ContextWindowMeter({
               tone={tone}
               thresholds={thresholds}
             />
+            <JevDecisionsSection serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
             <AgentSpendSparkline serverId={serverId} agentId={agentId} enabled={isTooltipOpen} />
           </View>
         </FloatingScrollView>

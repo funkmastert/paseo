@@ -143,6 +143,24 @@ class PushScan(unittest.TestCase):
         r = self.git("push", "-q", "origin", "feature", check=False)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_merging_already_published_commits_scans_only_the_new_ones(self):
+        # A feature branch that merges main re-pushes main's commits; they are on the remote already,
+        # so pushing them again publishes nothing. Only the feature's own new lines are scanned.
+        self.git("checkout", "-q", "-b", "feature")
+        self.commit("f.txt", "feature\n")
+        self.git("push", "-q", "origin", "feature")
+        self.git("checkout", "-q", "-")
+        self.commit("old.txt", "published long ago by jordan.smith@gmail.com\n")  # push-scan:allow
+        self.git("push", "-q", "--no-verify", "origin", "HEAD")  # stands in for a pre-scan publish
+        self.git("checkout", "-q", "feature")
+        self.git("merge", "-q", "--no-edit", "-")
+        r = self.git("push", "-q", "origin", "feature", check=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.commit("g.txt", "new line by casey.jones@gmail.com\n")  # push-scan:allow
+        r = self.git("push", "-q", "origin", "feature", check=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("real-looking email address", r.stderr)
+
     def test_wonderly_remote_is_not_scanned(self):
         company = os.path.join(self.tmp, "git.wonderly.info", "repo.git")
         os.makedirs(os.path.dirname(company))

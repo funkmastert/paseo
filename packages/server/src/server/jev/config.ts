@@ -4,6 +4,10 @@ import type { Logger } from "pino";
 import { resolveAwayReplyConfig, type ResolvedAwayReplyConfig } from "../away-reply/config.js";
 import { AgentJevSchema } from "../persisted-config.js";
 import { readRawConfig } from "../session/doctor/facts.js";
+import {
+  resolveWorkspaceTitleRefreshConfig,
+  type ResolvedWorkspaceTitleRefreshConfig,
+} from "../workspace-title-refresh-config.js";
 
 /**
  * `agents.jev` (docs/jev.md, "Config"). Read through a 5-second cache over `readRawConfig`, and a
@@ -58,6 +62,8 @@ export interface ResolvedJevConfig {
   stallJudgment: ResolvedJevFeatureConfig & { loopWatch: boolean };
   /** Feature 14. Dry run by default (D6); `dryRun` is its `shadow`. */
   awayReply: ResolvedAwayReplyConfig;
+  /** Feature 17. No shadow mode: see `workspace-title-refresh-config.ts`. */
+  titleRefresh: ResolvedWorkspaceTitleRefreshConfig;
   /** Feature 15, the `interactive` lane. No shadow mode: a person asked, so they get the answer. */
   askJev: {
     enabled: boolean;
@@ -346,6 +352,7 @@ export function resolveJevConfig(
       loopWatch: bool(stallJudgment["loopWatch"], true),
     },
     awayReply: resolveAwayReplyConfig(section["awayReply"]),
+    titleRefresh: resolveWorkspaceTitleRefreshConfig(section["titleRefresh"]),
     askJev: {
       enabled: bool(askJev["enabled"], true),
       shadow: false,

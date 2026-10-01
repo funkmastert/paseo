@@ -1,7 +1,7 @@
 import type { PluginBeforeRequests, PluginHookContext } from "@getpaseo/plugin/server";
 import { ACCOUNT_REROUTED_LABEL } from "../shared/role-policy-schema";
 import type { AccountIdentity } from "./account-identity";
-import { relevantWindows, type HealthTracker } from "./health";
+import { gatingWindowIds, type HealthTracker } from "./health";
 import {
   describeRootSelection,
   isValidDate,
@@ -234,7 +234,8 @@ type LadderHealth = RouterOptions["health"];
 function earliestReset(health: LadderHealth, providerIds: readonly string[], modelId: string): Date | null {
   let earliest: Date | null = null;
   for (const providerId of providerIds) {
-    for (const window of modelId ? relevantWindows(modelId) : health.windowIds(providerId)) {
+    const observed = health.windowIds(providerId);
+    for (const window of modelId ? gatingWindowIds(modelId, observed) : observed) {
       const state = health.describeWindow(providerId, window);
       if (state?.status !== "capped" || !isValidDate(state.resetsAt)) continue;
       if (earliest === null || state.resetsAt.getTime() < earliest.getTime()) {

@@ -292,6 +292,20 @@ export class JevLedger {
     return toPublicTotals(this.days.get(this.today())?.byFeature[feature]);
   }
 
+  /** Every retained day's spend, every lane summed, shadow calls included. For the savings ledger. */
+  daySpends(): JevDaySpend[] {
+    return [...this.days.entries()]
+      .map(([day, record]) => {
+        const lanes = Object.values(record.byLane);
+        return {
+          day,
+          calls: lanes.reduce((sum, totals) => sum + (totals?.calls ?? 0), 0),
+          usd: lanes.reduce((sum, totals) => sum + (totals?.usd ?? 0), 0),
+        };
+      })
+      .sort((a, b) => a.day.localeCompare(b.day));
+  }
+
   last7Days(): JevDaySpend[] {
     const result: JevDaySpend[] = [];
     const today = new Date(this.now());

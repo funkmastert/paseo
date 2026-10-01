@@ -100,6 +100,7 @@ export const SidebarWorkspaceRowContent = memo(function SidebarWorkspaceRowConte
   shortcutNumber = null,
   showShortcutBadge = false,
   reserveIdleStatusIndicatorSpace = true,
+  titleSlot = null,
   children,
 }: {
   workspace: SidebarWorkspaceEntry;
@@ -117,6 +118,8 @@ export const SidebarWorkspaceRowContent = memo(function SidebarWorkspaceRowConte
   showShortcutBadge?: boolean;
   /** Keep the empty leading slot when the workspace has no active status. */
   reserveIdleStatusIndicatorSpace?: boolean;
+  /** Replaces the name `Text` in place — the active row's click-to-edit inline field. */
+  titleSlot?: ReactNode;
   children?: ReactNode;
 }) {
   const {
@@ -158,9 +161,11 @@ export const SidebarWorkspaceRowContent = memo(function SidebarWorkspaceRowConte
         )}
         <View style={styles.workspaceContentColumn}>
           <View style={styles.workspaceTitleRow}>
-            <Text style={workspaceBranchTextStyle} numberOfLines={1}>
-              {workspaceLabel}
-            </Text>
+            {titleSlot ?? (
+              <Text style={workspaceBranchTextStyle} numberOfLines={1}>
+                {workspaceLabel}
+              </Text>
+            )}
             <View style={sidebarWorkspaceRowStyles.rowRight}>{children}</View>
           </View>
           <WorkspaceMetaRow

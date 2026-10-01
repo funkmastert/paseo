@@ -341,6 +341,35 @@ describe("classifyAgent — JEV's spawn hint (D2: it may pick a model, never rem
     expect(decision.jev).toMatchObject({ status: "answered", callId: "call-1", applied: true });
   });
 
+  it("records the class and model the create runs without JEV beside what the answer would run", () => {
+    const hint = jevHint("advisor", "mechanical");
+    if (hint?.status !== "answered") throw new Error("expected an answered hint");
+    const shadow: ClassifierInput["jevHint"] = { ...hint, status: "shadow" };
+    const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+
+    const decision = classifyAgent({ ...implementation, jevHint: shadow }, world({ policy: LIVE_POLICY }));
+
+    // Shadow applies nothing, so the base is exactly today's decision.
+    expect(decision.model).toEqual(without.model);
+    expect(decision.jev?.base).toEqual({
+      taskClass: without.taskClass.taskClass ?? null,
+      model: without.model.model ?? null,
+    });
+    expect(decision.jev?.wouldBe).toMatchObject({ taskClass: "mechanical", move: "down" });
+  });
+
+  it("the base ignores a role JEV applied: it is the jevless role's model", () => {
+    const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
+
+    const decision = classifyAgent(
+      { ...implementation, jevHint: jevHint("reviewer") },
+      world({ policy: LIVE_POLICY }),
+    );
+
+    expect(decision.role.role.id).toBe("reviewer");
+    expect(decision.jev?.base?.model).toBe(without.model.model ?? null);
+  });
+
   it("a hint that is not an answer is today's decision, recorded", () => {
     const without = classifyAgent(implementation, world({ policy: LIVE_POLICY }));
     const withFailure = classifyAgent(

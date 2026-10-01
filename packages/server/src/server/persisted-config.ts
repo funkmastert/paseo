@@ -831,6 +831,20 @@ export const AgentJevSchema = z
       })
       .strict()
       .optional(),
+    // Feature 17. No shadow mode, like agentTools and askJev; the key is accepted and ignored.
+    titleRefresh: z
+      .object({
+        enabled: z.boolean().optional(),
+        shadow: z.boolean().optional(),
+        timeoutMs: z.number().optional(),
+        staleScoreThreshold: z.number().min(0).max(3).optional(),
+        cadenceMinUserTurns: z.number().int().positive().optional(),
+        cadenceMinMinutes: z.number().positive().optional(),
+        ceilingUserTurns: z.number().int().positive().optional(),
+        ceilingHours: z.number().positive().optional(),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 
