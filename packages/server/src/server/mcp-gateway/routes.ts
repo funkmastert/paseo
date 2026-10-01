@@ -181,7 +181,7 @@ export function installMcpGatewayRoutes(
           void server.close();
         });
         await server.connect(transport);
-        normalizeMcpProtocolVersionHeader(req.headers);
+        normalizeMcpProtocolVersionHeader(req);
         await transport.handleRequest(
           req as unknown as IncomingMessage,
           res as unknown as ServerResponse,
