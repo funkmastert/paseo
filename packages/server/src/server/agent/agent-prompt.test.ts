@@ -64,6 +64,8 @@ interface FinishNotificationScenarioOptions {
   callerLabels?: Record<string, string>;
   /** More live, idle agents by id, with their labels: a caller's successor, its orchestrator. */
   liveAgents?: Record<string, Record<string, string>>;
+  /** Agents that exist only as stored records, such as an archived successor. */
+  storedRecords?: Record<string, { labels?: Record<string, string>; archivedAt?: string }>;
 }
 
 interface FinishNotificationScenario {
@@ -196,6 +198,10 @@ function createFinishNotificationScenario(
         title: "Child Agent",
         labels: parentAgentId ? { "paseo.parent-agent-id": parentAgentId } : {},
       };
+    }
+    const stored = options?.storedRecords?.[agentId];
+    if (stored) {
+      return { id: agentId, labels: stored.labels ?? {}, archivedAt: stored.archivedAt ?? null };
     }
     return null;
   });
@@ -684,6 +690,62 @@ describe("a caller account failover moved", () => {
 
     expect(scenario.promptedAgentIds()).toEqual(["orchestrator-agent"]);
     expect(report).toContain("caller-agent → caller-successor → caller-agent");
+  });
+
+  test("whose moves loop sends the report to where its orchestrator's conversation moved", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: {
+        [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor",
+        [PARENT_AGENT_ID_LABEL]: "orchestrator-old",
+      },
+      liveAgents: {
+        "caller-successor": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-agent" },
+        "orchestrator-old": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-new" },
+        "orchestrator-new": {},
+      },
+    });
+    scenario.startWatchingChild();
+
+    await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["orchestrator-new"]);
+  });
+
+  test("passes over an orchestrator whose own moves loop, for the agent above it", async () => {
+    const scenario = createFinishNotificationScenario({
+      callerLabels: {
+        [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor",
+        [PARENT_AGENT_ID_LABEL]: "orchestrator-a",
+      },
+      liveAgents: {
+        "caller-successor": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-agent" },
+        "orchestrator-a": {
+          [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-b",
+          [PARENT_AGENT_ID_LABEL]: "grandparent",
+        },
+        "orchestrator-b": { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "orchestrator-a" },
+        grandparent: {},
+      },
+    });
+    scenario.startWatchingChild();
+
+    await scenario.finishChildAndReadParentPrompt();
+
+    expect(scenario.promptedAgentIds()).toEqual(["grandparent"]);
+  });
+
+  test("whose successor was archived still gets the report, at the handle it left", async () => {
+    // A report never unarchives anything, so it stops at the last agent it can reach. Following
+    // the label again at send time would land on the archived successor and drop it silently.
+    const scenario = createFinishNotificationScenario({
+      callerLabels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "caller-successor" },
+      storedRecords: { "caller-successor": { archivedAt: "2026-10-01T00:00:00.000Z" } },
+    });
+    scenario.startWatchingChild();
+
+    scenario.finishChild();
+
+    await vi.waitFor(() => expect(scenario.promptedAgentIds()).toEqual(["caller-agent"]));
   });
 });
 
