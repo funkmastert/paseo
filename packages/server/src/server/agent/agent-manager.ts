@@ -1,5 +1,6 @@
 import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
-import type { DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { DeviceShutdownResult, DeviceStatusSnapshot } from "./device-lease-manager.js";
+import type { PhysicalDeviceStatusSnapshot } from "./physical-device-lease-manager.js";
 import type { PromptInterception } from "./agent-refocus.js";
 import {
   describeHookAgent,
@@ -181,12 +182,37 @@ function submittedPromptText(prompt: AgentPromptInput): string {
 }
 
 /**
- * How the AgentManager reaches the device cap: read a snapshot, hear about changes. Narrow on
- * purpose — nothing here can acquire or release a slot.
+ * How the AgentManager reaches the device cap: read a snapshot, hear about changes, and the
+ * three actions the Devices UI takes on a device — release, reserve, shut down. Everything an
+ * agent itself does (checkout, checkin, the launch gate) goes through the MCP tools and the
+ * provider gate directly; this is only the human-initiated surface.
  */
 export interface DeviceLeaseStatusSource {
   getSnapshot(): Promise<DeviceStatusSnapshot>;
   subscribe(listener: () => void): () => void;
+  /** Pushes a fresh `device_status_update` now, instead of waiting for the next resource-monitor
+   * sweep — for a config writer (the dry-run switch) whose effect nothing else would notice. */
+  refreshSnapshot(): void;
+  releaseLeaseForDevice(deviceId: string): Promise<boolean>;
+  reserveDevice(deviceId: string): Promise<void>;
+  unreserveDevice(deviceId: string): Promise<void>;
+  shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult>;
+}
+
+/**
+ * The physical-device analog of DeviceLeaseStatusSource. Separate rather than folded into it:
+ * physical devices have no slot cap and no shutdown action, and their reservation store is the
+ * same instance the emulator cap uses — reserve/unreserve above already reach a physical device
+ * id without this interface's help, which is why it's narrower (no reserve/unreserve of its own).
+ */
+export interface PhysicalDeviceLeaseStatusSource {
+  getSnapshot(): Promise<PhysicalDeviceStatusSnapshot>;
+  subscribe(listener: () => void): () => void;
+  releaseLeaseForDevice(deviceId: string): boolean;
+  refreshSnapshot(): void;
 }
 
 export class AgentManagerShuttingDownError extends Error {
@@ -394,6 +420,8 @@ export interface ResourceMonitorAgentSummary {
   isRunning: boolean;
   /** The `paseo.parent-agent-id` label: set on a child agent, null on a root. */
   parentAgentId: string | null;
+  /** What Tyler sees in the sidebar; the device cap names agents by it. */
+  title?: string | null;
 }
 
 /**
@@ -1290,6 +1318,7 @@ export class AgentManager {
   private mcpGatewayAuthToken: string | null = null;
   private mcpGatewayBaseUrl: string | null = null;
   private deviceLeaseStatusSource: DeviceLeaseStatusSource | null = null;
+  private physicalDeviceLeaseStatusSource: PhysicalDeviceLeaseStatusSource | null = null;
   private finishObligations: FinishObligationService | null = null;
   private childAdmission: ChildAdmissionController | null = null;
   /** What each admitted stream started with, for a caller that has to retry the same turn. */
@@ -1520,6 +1549,10 @@ export class AgentManager {
     this.deviceLeaseStatusSource = source;
   }
 
+  setPhysicalDeviceLeaseStatusSource(source: PhysicalDeviceLeaseStatusSource | null): void {
+    this.physicalDeviceLeaseStatusSource = source;
+  }
+
   /**
    * The durable finish-report ledger (docs/finish-reports.md), set by bootstrap. Hung off the
    * manager so `setupFinishNotification` reaches it from every call site without a new
@@ -1607,6 +1640,50 @@ export class AgentManager {
   /** Subscribes to device-cap changes; returns an unsubscribe function. No-ops when unwired. */
   onDeviceStatusChange(listener: () => void): () => void {
     return this.deviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Called after a daemon-config patch touches `agents.deviceLeases`, so the dry-run switch
+   * (or any other writer) is reflected without waiting on the next sweep. */
+  refreshDeviceStatus(): void {
+    this.deviceLeaseStatusSource?.refreshSnapshot();
+    this.physicalDeviceLeaseStatusSource?.refreshSnapshot();
+  }
+
+  /** Current physical-device snapshot, or null when no detection is wired. */
+  async getPhysicalDeviceStatusSnapshot(): Promise<PhysicalDeviceStatusSnapshot | null> {
+    return (await this.physicalDeviceLeaseStatusSource?.getSnapshot()) ?? null;
+  }
+
+  /** Subscribes to physical-device changes; returns an unsubscribe function. No-ops when unwired. */
+  onPhysicalDeviceStatusChange(listener: () => void): () => void {
+    return this.physicalDeviceLeaseStatusSource?.subscribe(listener) ?? (() => {});
+  }
+
+  /** Releases whoever's lease is bound to this device — tries the emulator cap first, then
+   * physical devices, since the Devices UI's "Release" action doesn't know which kind a row is.
+   * False when nobody held it in either, or neither is wired. */
+  async releaseDeviceLease(deviceId: string): Promise<boolean> {
+    const released = (await this.deviceLeaseStatusSource?.releaseLeaseForDevice(deviceId)) ?? false;
+    if (released) return true;
+    return this.physicalDeviceLeaseStatusSource?.releaseLeaseForDevice(deviceId) ?? false;
+  }
+
+  async setDeviceReservation(deviceId: string, reserved: boolean): Promise<void> {
+    if (!this.deviceLeaseStatusSource) return;
+    if (reserved) await this.deviceLeaseStatusSource.reserveDevice(deviceId);
+    else await this.deviceLeaseStatusSource.unreserveDevice(deviceId);
+  }
+
+  async shutdownDevice(input: {
+    deviceId: string;
+    confirmMidTurnHolder?: boolean;
+  }): Promise<DeviceShutdownResult> {
+    return (
+      (await this.deviceLeaseStatusSource?.shutdownDevice(input)) ?? {
+        status: "failed",
+        message: "The device cap is not wired up.",
+      }
+    );
   }
 
   /** The daemon's own reachable base URL for brokered gateway routes (KTD1), known once listening. */
@@ -1892,6 +1969,7 @@ export class AgentManager {
       internal: agent.internal ?? false,
       isRunning: agent.lifecycle === "running",
       parentAgentId: getParentAgentIdFromLabels(agent.labels),
+      title: agent.config.title ?? null,
     }));
   }
 

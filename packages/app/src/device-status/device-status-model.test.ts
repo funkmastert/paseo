@@ -48,10 +48,13 @@ describe("buildDeviceStatusStripModel", () => {
     expect(model.rows).toEqual([
       {
         key: "A0A912ED-C766-4778-957C-F9680C7309F3",
+        deviceId: "A0A912ED-C766-4778-957C-F9680C7309F3",
         platform: "ios",
         // A UDID is 36 characters of noise in a sidebar.
         label: "A0A912ED",
         holderKey: "heldBy",
+        reserved: false,
+        isRunning: true,
         agentId: "agent-1",
         agentLabel: "iOS review",
         heldForSeconds: 8040,
@@ -100,6 +103,58 @@ describe("buildDeviceStatusStripModel", () => {
 
     expect(model.rows[0]).toMatchObject({ holderKey: "starting", label: "", platform: "android" });
     expect(model.unleasedCount).toBe(0);
+  });
+
+  test("a reserved device carries `reserved` even while it still shows a holder", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 1,
+        devices: [
+          {
+            platform: "ios",
+            deviceId: "A0A912ED-C766-4778-957C-F9680C7309F3",
+            state: "running",
+            attribution: "lease",
+            agentId: "agent-1",
+            reserved: true,
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({ holderKey: "heldBy", reserved: true });
+  });
+
+  test("reports the mode: off, dry run, or enforcing", () => {
+    expect(buildDeviceStatusStripModel(payload({ enabled: false })).mode).toBe("off");
+    expect(buildDeviceStatusStripModel(payload({ enabled: true, dryRun: true })).mode).toBe(
+      "dryRun",
+    );
+    expect(buildDeviceStatusStripModel(payload({ enabled: true, dryRun: false })).mode).toBe(
+      "enforcing",
+    );
+  });
+
+  test("passes recent refusals through for the panel to render", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 0,
+        waiting: [{ agentId: "agent-3", platform: "ios", waitingForSeconds: 12 }],
+        blocked: [
+          {
+            agentId: "agent-2",
+            platform: "ios",
+            command: "xcrun simctl boot",
+            message: "no slot free",
+            dryRun: false,
+            at: "2026-09-30T12:00:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    expect(model.blocked).toHaveLength(1);
+    expect(model.blocked[0]).toMatchObject({ agentId: "agent-2", dryRun: false });
   });
 
   test("tone warns at the cap and flags going over it", () => {
@@ -170,5 +225,176 @@ describe("buildDeviceStatusStripModel and the provider asymmetry", () => {
     const model = buildDeviceStatusStripModel(payload({ used: 1 }));
     expect(model.unenforcedProviders).toEqual([]);
     expect(model.rows.every((row) => row.enforcement === undefined)).toBe(true);
+  });
+});
+
+describe("buildDeviceStatusStripModel and physical devices", () => {
+  test("a connected physical device becomes a row with its last-4-character short id", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            name: "Fake Pixel",
+            transport: "usb",
+            connected: true,
+            reserved: false,
+            agentId: "agent-1",
+            heldForSeconds: 120,
+          },
+        ],
+      }),
+      { "agent-1": "Android build" },
+    );
+
+    expect(model.physicalRows).toEqual([
+      {
+        key: "FAKESERIAL45291",
+        id: "FAKESERIAL45291",
+        shortId: "5291",
+        platform: "android",
+        name: "Fake Pixel",
+        transport: "usb",
+        connected: true,
+        reserved: false,
+        agentId: "agent-1",
+        agentLabel: "Android build",
+        heldForSeconds: 120,
+      },
+    ]);
+  });
+
+  test("a physical device with no simulator/emulator running still keeps the panel visible", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        used: 0,
+        physicalDevices: [
+          {
+            id: "00000000-000FAKE00E0001",
+            platform: "ios",
+            transport: "network",
+            connected: true,
+            reserved: false,
+          },
+        ],
+      }),
+    );
+
+    expect(model.hasData).toBe(true);
+    expect(model.rows).toEqual([]);
+  });
+
+  test("a disconnected physical device carries the grace countdown", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "FAKESERIAL45291",
+            platform: "android",
+            transport: "usb",
+            connected: false,
+            reserved: false,
+            agentId: "agent-1",
+            graceRemainingSeconds: 900,
+          },
+        ],
+      }),
+    );
+
+    expect(model.physicalRows[0]).toMatchObject({ connected: false, graceRemainingSeconds: 900 });
+  });
+
+  test("no physicalDevices field at all (an older daemon) is an empty list, not an error", () => {
+    const model = buildDeviceStatusStripModel(payload({ used: 1 }));
+    expect(model.physicalRows).toEqual([]);
+  });
+
+  test("a simulator row shows its simctl name, with the short UDID after it", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        devices: [
+          {
+            platform: "ios",
+            deviceId: "00000000-0000-0000-0000-000000000001",
+            name: "iPhone 17 Pro",
+            state: "running",
+            attribution: "none",
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({
+      name: "iPhone 17 Pro",
+      label: "iPhone 17 Pro · 00000000",
+    });
+  });
+
+  test("a held row carries how long it has been held and how long the device has run", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        devices: [
+          {
+            platform: "android",
+            deviceId: "yonderly_pixel",
+            state: "running",
+            attribution: "lease",
+            agentId: "agent-1",
+            heldForSeconds: 120,
+            runningForSeconds: 7_200,
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({ heldForSeconds: 120, runningForSeconds: 7_200 });
+  });
+
+  test("physical refusals count with the rest, and dry-run-only records say so", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        blocked: [
+          {
+            agentId: "agent-2",
+            platform: "ios",
+            command: "xcrun simctl boot X",
+            message: "m",
+            dryRun: true,
+            at: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+        physicalBlocked: [
+          {
+            agentId: "agent-3",
+            command: "adb install",
+            message: "m",
+            dryRun: true,
+            at: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    expect(model.blockedCount).toBe(2);
+    expect(model.blockedDryRunOnly).toBe(true);
+  });
+
+  test("a wireless-debugging serial shows the phone's own last four, not _tcp", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "adb-FAKESERIAL45291-AbCdEf._adb-tls-connect._tcp",
+            platform: "android",
+            transport: "network",
+            connected: true,
+            reserved: false,
+          },
+        ],
+      }),
+    );
+
+    expect(model.physicalRows[0]?.shortId).toBe("5291");
   });
 });

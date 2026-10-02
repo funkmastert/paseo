@@ -91,8 +91,10 @@ export function tokenizeCommandSegments(command: string): string[][] {
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const SIMULATOR_UDID = /^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$/;
 
-function basename(token: string): string {
-  return token.split("/").pop() ?? token;
+/** The program name, on any OS: `C:\\sdk\\emulator\\emulator.exe` is `emulator`. */
+export function basename(token: string): string {
+  const last = token.split(/[\\/]/).pop() ?? token;
+  return last.replace(/\.(exe|cmd|bat)$/i, "");
 }
 
 /**
@@ -166,20 +168,37 @@ function matchEmulator(tokens: readonly string[]): DeviceLaunchIntent | undefine
 }
 
 /**
- * The cross-platform runners each boot a device when none is connected. The platform comes from
- * the subcommand, so `flutter run -d <id>` against an already-running device is still gated —
- * it may boot one when that id is not up. `target` is left unset: their device selectors are not
- * UDIDs or AVD names, so claiming a match would bind the wrong device.
+ * The cross-platform runners. With no device named they USE what is already running — a booted
+ * simulator, the connected emulator — and boot one only when nothing is up. With a device named
+ * (`--device`, `--udid`, `--simulator`, `--deviceId`) that name is the target: a simulator or
+ * AVD name, a UDID, an adb serial, or a physical device's id or name. The gate resolves it
+ * against what is running and what is connected; a selector it can't resolve is a new device.
  */
 const RUNNER_SUBCOMMANDS: ReadonlyArray<{
   program: string;
   subcommand: RegExp;
   platform: DevicePlatform;
+  deviceFlags: readonly string[];
 }> = [
-  { program: "expo", subcommand: /^run:ios$/, platform: "ios" },
-  { program: "expo", subcommand: /^run:android$/, platform: "android" },
-  { program: "react-native", subcommand: /^run-ios$/, platform: "ios" },
-  { program: "react-native", subcommand: /^run-android$/, platform: "android" },
+  { program: "expo", subcommand: /^run:ios$/, platform: "ios", deviceFlags: ["--device", "-d"] },
+  {
+    program: "expo",
+    subcommand: /^run:android$/,
+    platform: "android",
+    deviceFlags: ["--device", "-d"],
+  },
+  {
+    program: "react-native",
+    subcommand: /^run-ios$/,
+    platform: "ios",
+    deviceFlags: ["--udid", "--simulator", "--device"],
+  },
+  {
+    program: "react-native",
+    subcommand: /^run-android$/,
+    platform: "android",
+    deviceFlags: ["--deviceId", "--device"],
+  },
 ];
 
 function matchRunner(tokens: readonly string[]): DeviceLaunchIntent | undefined {
@@ -192,7 +211,22 @@ function matchRunner(tokens: readonly string[]): DeviceLaunchIntent | undefined 
   const match = RUNNER_SUBCOMMANDS.find(
     (entry) => entry.program === program && entry.subcommand.test(subcommand),
   );
-  return match ? { platform: match.platform, command: `${program} ${subcommand}` } : undefined;
+  if (!match) return undefined;
+  const target = match.deviceFlags
+    .map((flag) => readFlagValue(skipped, flag) ?? readInlineFlagValue(skipped, flag))
+    .find((value) => value !== undefined);
+  return {
+    platform: match.platform,
+    command: `${program} ${subcommand}`,
+    ...(target ? { target } : {}),
+  };
+}
+
+/** `--device=<value>`, the other way every one of these CLIs accepts a flag. */
+function readInlineFlagValue(tokens: readonly string[], flag: string): string | undefined {
+  const token = tokens.find((entry) => entry.startsWith(`${flag}=`));
+  const value = token?.slice(flag.length + 1);
+  return value ? value : undefined;
 }
 
 const MATCHERS = [

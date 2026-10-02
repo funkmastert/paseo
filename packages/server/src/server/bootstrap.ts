@@ -302,9 +302,24 @@ import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
 import { isPaseoOwnedWorktreeCwd, resolvePaseoWorktreesBaseRoot } from "../utils/worktree.js";
 import { createSystemProcessSampler } from "./agent/process-sampler.js";
 import { createSaturationLedger } from "./agent/saturation-ledger.js";
-import { DeviceLeaseManager, type DeviceLeaseAgentSummary } from "./agent/device-lease-manager.js";
+import {
+  DeviceLeaseManager,
+  type DeviceLaunchGate,
+  type DeviceLeaseAgentSummary,
+} from "./agent/device-lease-manager.js";
+import { resolveProviderExtends } from "./agent/device-launch-enforcement.js";
+import { DeviceReservationStore } from "./agent/device-reservation-store.js";
 import { TestArtifactJanitor } from "./agent/test-artifact-janitor.js";
 import { createArtifactAwareLaunchGate } from "./agent/test-artifact-launch-gate.js";
+import { PhysicalDeviceLeaseManager } from "./agent/physical-device-lease-manager.js";
+import { physicalDeviceMatches, type PhysicalDevice } from "./agent/physical-device-registry.js";
+import {
+  AdbTrackDevicesService,
+  createAdbTrackDevicesPidFile,
+} from "./agent/adb-track-devices-service.js";
+import { toPhysicalAndroidDevices } from "./agent/device-adb-track.js";
+import { PhysicalDeviceDetection } from "./agent/physical-device-detection.js";
+import { DevicectlPollingService } from "./agent/devicectl-polling-service.js";
 import {
   createPromptQueue,
   formatSystemNotificationPrompt,
@@ -1990,11 +2005,25 @@ export async function createPaseoDaemon(
   let listDeviceLeaseAgents: () => readonly DeviceLeaseAgentSummary[] = () => [];
   let sendDeviceLeaseMessageToAgent: (agentId: string, body: string) => Promise<void> = async () =>
     undefined;
+  const deviceReservationStore = new DeviceReservationStore(
+    logger,
+    path.join(config.paseoHome, "device-reservations.json"),
+  );
+  // What physical detection (below) currently sees. Read by the cap too: a runner that names a
+  // connected phone boots no simulator.
+  let androidPhysicalDevices: PhysicalDevice[] = [];
+  let androidEmulatorCount = 0;
+  let iosPhysicalDevices: PhysicalDevice[] = [];
   const deviceLeaseManager = new DeviceLeaseManager({
     processSampler,
     readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
     listAgents: () => listDeviceLeaseAgents(),
     sendSystemMessageToAgent: (agentId, body) => sendDeviceLeaseMessageToAgent(agentId, body),
+    reservations: deviceReservationStore,
+    isPhysicalDeviceTarget: (target) =>
+      [...androidPhysicalDevices, ...iosPhysicalDevices].some((device) =>
+        physicalDeviceMatches(device, target),
+      ),
     logger: logger.child({ module: "device-leases" }),
   });
   deviceLeaseManager.reportMode();
@@ -2017,7 +2046,7 @@ export async function createPaseoDaemon(
     logger: logger.child({ module: "work-snapshots" }),
   });
   const agentSideProcesses = new AgentSideProcesses();
-  const deviceLaunchGate = createArtifactAwareLaunchGate({
+  const emulatorLaunchGate = createArtifactAwareLaunchGate({
     janitor: testArtifactJanitor,
     inner: deviceLeaseManager,
     logger: logger.child({ module: "artifact-janitor" }),
@@ -2031,6 +2060,72 @@ export async function createPaseoDaemon(
     logger,
     getAgentManager: () => agentManager,
   });
+  // Physical devices (docs/device-leases.md, Physical devices): leased outside the slot cap and
+  // headroom entirely — a phone costs the Mac no memory — so this is a separate manager, not
+  // another job inside DeviceLeaseManager. Live detection feeds it rather than a `ps` sample:
+  // a daemon-owned `adb track-devices -l` child for Android, `devicectl list devices
+  // --json-output` polling for iOS. Both share the same enabled/dryRun toggle and reservation
+  // store as the emulator cap — one feature, one switch. Detection runs only while that switch
+  // is on, and only once the daemon is up (`syncPhysicalDetection` in start()).
+  const physicalDeviceLeaseManager = new PhysicalDeviceLeaseManager({
+    listConnectedDevices: () => [...androidPhysicalDevices, ...iosPhysicalDevices],
+    countAndroidEmulators: () => androidEmulatorCount,
+    listAgents: () => listDeviceLeaseAgents(),
+    reservations: deviceReservationStore,
+    readDaemonConfig: () => ({ deviceLeases: daemonConfigStore.get().deviceLeases }),
+    logger: logger.child({ module: "physical-devices" }),
+  });
+  const adbTrackDevicesService = new AdbTrackDevicesService({
+    onDevicesChanged: (devices) => {
+      androidPhysicalDevices = toPhysicalAndroidDevices(devices);
+      androidEmulatorCount = devices.filter(
+        (device) => !device.physical && device.state === "device",
+      ).length;
+    },
+    pidFile: createAdbTrackDevicesPidFile(path.join(config.paseoHome, "adb-track-devices.pid")),
+    logger: logger.child({ module: "adb-track-devices" }),
+  });
+  const devicectlPollingService = new DevicectlPollingService({
+    onDevicesChanged: (devices) => {
+      iosPhysicalDevices = devices.map((device) => ({
+        id: device.udid,
+        platform: "ios",
+        transport: device.transport === "network" ? "network" : "usb",
+        name: device.name,
+        aliases: [device.identifier, device.deviceName].filter(
+          (alias): alias is string => alias !== undefined,
+        ),
+      }));
+    },
+    logger: logger.child({ module: "devicectl-polling" }),
+  });
+  const physicalDeviceDetection = new PhysicalDeviceDetection({
+    adb: adbTrackDevicesService,
+    devicectl: devicectlPollingService,
+    isEnabled: () => daemonConfigStore.get().deviceLeases?.enabled === true,
+    onStopped: () => {
+      androidPhysicalDevices = [];
+      androidEmulatorCount = 0;
+      iosPhysicalDevices = [];
+    },
+    logger: logger.child({ module: "physical-devices" }),
+  });
+  daemonConfigStore.onChange(() => physicalDeviceDetection.sync());
+
+  // The gate a provider's PreToolUse hook actually calls: the emulator/simulator slot cap (plus
+  // the artifact janitor's disk guard) first, then the physical-device install gate — disjoint
+  // command shapes in practice (booting a device vs. installing on one that already exists), so
+  // order only matters for which denial wins when a chained command line hits both.
+  const deviceLaunchGate: DeviceLaunchGate = {
+    async gateLaunch(input) {
+      const capDecision = await emulatorLaunchGate.gateLaunch(input);
+      if (capDecision.decision === "deny") return capDecision;
+      return await physicalDeviceLeaseManager.gateInstall(input);
+    },
+    async explainRefusalToAgent(input) {
+      await deviceLeaseManager.explainRefusalToAgent(input);
+    },
+  };
 
   // The catastrophe gate (docs/catastrophe-gate.md). Read on every gated call, so a reload of
   // `agents.catastropheGate.enabled` reaches running agents without restarting them.
@@ -2107,11 +2202,19 @@ export async function createPaseoDaemon(
   // Same reassignable-closure trick as handleAgentTurnFinished above: the device cap was built
   // before AgentManager because the providers need its gate, and it only reads the agent list.
   listDeviceLeaseAgents = () =>
-    agentManager.listAgentsForResourceMonitor().map((agent) => ({
-      agentId: agent.id,
-      provider: agent.provider,
-      isRunning: agent.isRunning,
-    }));
+    agentManager.listAgentsForResourceMonitor().map((agent) => {
+      const summary: DeviceLeaseAgentSummary = {
+        agentId: agent.id,
+        provider: agent.provider,
+        isRunning: agent.isRunning,
+        extendsProviderId: resolveProviderExtends(
+          agent.provider,
+          daemonConfigStore.get().providers,
+        ),
+      };
+      if (agent.title) summary.title = agent.title;
+      return summary;
+    });
   // The cap's only lever over a provider it cannot refuse: tell the agent about a device it
   // took without asking. Same steer path the resource monitor uses (agent-prompt.ts).
   sendDeviceLeaseMessageToAgent = async (agentId, body) => {
@@ -2130,6 +2233,17 @@ export async function createPaseoDaemon(
   agentManager.setDeviceLeaseStatusSource({
     getSnapshot: () => deviceLeaseManager.getSnapshot(),
     subscribe: (listener) => deviceLeaseManager.subscribe(listener),
+    refreshSnapshot: () => deviceLeaseManager.refreshSnapshot(),
+    releaseLeaseForDevice: (deviceId) => deviceLeaseManager.releaseLeaseForDevice(deviceId),
+    reserveDevice: async (deviceId) => deviceLeaseManager.reserveDevice(deviceId),
+    unreserveDevice: async (deviceId) => deviceLeaseManager.unreserveDevice(deviceId),
+    shutdownDevice: (input) => deviceLeaseManager.shutdownDevice(input),
+  });
+  agentManager.setPhysicalDeviceLeaseStatusSource({
+    getSnapshot: () => physicalDeviceLeaseManager.getSnapshot(),
+    subscribe: (listener) => physicalDeviceLeaseManager.subscribe(listener),
+    releaseLeaseForDevice: (deviceId) => physicalDeviceLeaseManager.releaseLeaseForDevice(deviceId),
+    refreshSnapshot: () => physicalDeviceLeaseManager.refreshSnapshot(),
   });
   const syncPluginProviders = () => {
     agentManager.updateProviderRegistry(
@@ -2778,6 +2892,7 @@ export async function createPaseoDaemon(
     browserToolsBroker,
     deviceLeaseManager,
     jevTools: jevToolsDependencies,
+    physicalDeviceLeaseManager,
     paseoToolPolicy:
       runtime.paseoToolPolicy ??
       (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
@@ -3578,6 +3693,8 @@ export async function createPaseoDaemon(
       // model loading doesn't block the server from accepting connections.
       speechService.start();
       scriptHealthMonitor.start();
+      // After listening, so a bootstrap that fails (port in use) never leaves an adb child.
+      await physicalDeviceDetection.start();
     } catch (error) {
       unsubscribePluginProviders();
       await pluginRuntime.stopAllPlugins().catch(() => undefined);
@@ -3597,6 +3714,7 @@ export async function createPaseoDaemon(
     agentModelDivergenceMonitor?.stop();
     agentResourceMonitor?.stop();
     deviceLeaseManager.stop();
+    physicalDeviceDetection.stop();
     pluginConnectionMonitor?.stop();
     accountFailoverMonitor?.stop();
     budgetPacingMonitor?.stop();

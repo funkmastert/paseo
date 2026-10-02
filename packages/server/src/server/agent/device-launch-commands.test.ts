@@ -76,6 +76,37 @@ describe("detectDeviceLaunchIntents", () => {
       { platform: "android", command: "react-native run-android" },
     ]);
   });
+
+  test("reads a runner's device selector as its target", () => {
+    expect(detectDeviceLaunchIntents("npx expo run:ios --device 'iPhone 17 Pro'")).toEqual([
+      { platform: "ios", command: "expo run:ios", target: "iPhone 17 Pro" },
+    ]);
+    expect(detectDeviceLaunchIntents("npx expo run:android --device=emulator-5554")).toEqual([
+      { platform: "android", command: "expo run:android", target: "emulator-5554" },
+    ]);
+    expect(
+      detectDeviceLaunchIntents(
+        "npx react-native run-ios --udid 00000000-0000-0000-0000-000000000001",
+      ),
+    ).toEqual([
+      {
+        platform: "ios",
+        command: "react-native run-ios",
+        target: "00000000-0000-0000-0000-000000000001",
+      },
+    ]);
+    expect(
+      detectDeviceLaunchIntents("npx react-native run-android --deviceId emulator-5554"),
+    ).toEqual([
+      { platform: "android", command: "react-native run-android", target: "emulator-5554" },
+    ]);
+  });
+
+  test("recognizes a Windows emulator.exe", () => {
+    expect(detectDeviceLaunchIntents("emulator.exe -avd Pixel_7")).toEqual([
+      { platform: "android", command: "emulator", target: "Pixel_7" },
+    ]);
+  });
 });
 
 describe("targetMatchesRunningDevice", () => {

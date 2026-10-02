@@ -93,6 +93,7 @@ import { registerBrowserTools } from "../../browser-tools/tools.js";
 import { registerDeviceLeaseTools } from "./device-lease-tools.js";
 import { registerJevTools, type JevToolsDependencies } from "./jev-tools.js";
 import { isDefaultAgentCreateConfigUnattended } from "../create-agent-mode.js";
+import { resolveProviderExtends } from "../device-launch-enforcement.js";
 import { registerCoordinationTools } from "./coordination-tools.js";
 import {
   COMPACT_ACTIVITY_LIMIT,
@@ -101,6 +102,7 @@ import {
 } from "./tool-output-projection.js";
 import type { BrowserToolsBroker } from "../../browser-tools/broker.js";
 import type { DeviceLeaseManager } from "../device-lease-manager.js";
+import type { PhysicalDeviceLeaseManager } from "../physical-device-lease-manager.js";
 import type {
   PaseoToolCatalog,
   PaseoToolConfig,
@@ -162,6 +164,12 @@ export interface PaseoToolHostDependencies {
   deviceLeaseManager?: Pick<DeviceLeaseManager, "checkout" | "checkin" | "getSnapshot"> | null;
   /** The JEV agent tools (docs/jev.md, "Features 4–6"). Absent means no JEV tools are offered. */
   jevTools?: JevToolsDependencies | null;
+  /** Physical devices (docs/device-leases.md, Physical devices). Absent means `device_checkout`
+   * only offers simulators/emulators. */
+  physicalDeviceLeaseManager?: Pick<
+    PhysicalDeviceLeaseManager,
+    "checkout" | "checkin" | "getSnapshot"
+  > | null;
   paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
@@ -1300,10 +1308,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     registerDeviceLeaseTools({
       registerTool,
       manager: options.deviceLeaseManager,
+      ...(options.physicalDeviceLeaseManager
+        ? { physicalManager: options.physicalDeviceLeaseManager }
+        : {}),
       callerAgentId,
       // The cap binds different providers to different degrees, and the agent asking is the
       // one that needs to know which it is (docs/device-leases.md).
       resolveCallerProvider: () => resolveCallerAgent()?.provider,
+      resolveCallerExtendsProviderId: () =>
+        resolveProviderExtends(resolveCallerAgent()?.provider, daemonConfigStore?.get().providers),
     });
   }
 
