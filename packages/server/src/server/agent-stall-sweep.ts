@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 
+import { HUMAN_WORK_ITEM_OWNER } from "@getpaseo/protocol/coordination/queue-schemas";
 import type { AgentManager, StallSweepAgentSummary } from "./agent/agent-manager.js";
 import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { AgentStorage } from "./agent/agent-storage.js";
@@ -21,6 +22,13 @@ import {
   type StallSignals,
   type UsageSignal,
 } from "./agent/stall-detector.js";
+import {
+  buildItemStallNudgePrompt,
+  notStalledItemReason,
+  recordItemObservation,
+  type StallItemMemory,
+  type StallItemView,
+} from "./agent/work-item-stall-detector.js";
 import type { ProviderHealth } from "./agent-done-janitor.js";
 import { MonitorModeLog } from "./monitor-mode-log.js";
 import {
@@ -45,9 +53,10 @@ const DEFAULT_SWEEP_INTERVAL_MS = 5 * 60_000;
  */
 const NUDGE_SETTLE_MS = 2 * 60_000;
 const MONITOR_NAME = "stalled-agent-sweep";
+const WORK_ITEM_MONITOR_NAME = "stalled-agent-sweep:work-items";
 
 export type StallNudgeResult =
-  | { kind: "sent"; via: "replace" | "reload" }
+  | { kind: "sent"; via: "replace" | "reload" | "wake" }
   | { kind: "failed"; error: string };
 
 export type StallHandoffResult =
@@ -67,6 +76,13 @@ export interface StallSweepDependencies {
   nudgeAgent(input: { agentId: string; prompt: string }): Promise<StallNudgeResult>;
   /** Cancels the stuck turn so it leaves a limit-shaped `lastError` for account failover. */
   handOffToFailover(agentId: string): Promise<StallHandoffResult>;
+  /**
+   * OR-D10's work-item leg: every open item (pending, in-progress or blocked), across every
+   * owner. Empty when coordination is off.
+   */
+  listOpenWorkItems(): Promise<readonly StallItemView[]>;
+  /** Wakes the idle owner with one prompt; never replaces a running turn, never a cancel. */
+  nudgeItemOwner(input: { agentId: string; prompt: string }): Promise<StallNudgeResult>;
 }
 
 export interface AgentStallSweepOptions {
@@ -79,7 +95,10 @@ export interface AgentStallSweepOptions {
 }
 
 export interface StallSweepReportEntry {
+  /** For an item finding, the item's owner. */
   agentId: string;
+  /** Set only on the work-item leg's entries. */
+  itemId?: string;
   action:
     | "nudged"
     | "handed-off"
@@ -88,7 +107,10 @@ export interface StallSweepReportEntry {
     | "would-hand-off"
     | "deferred"
     | "still-stalled"
-    | "resumed";
+    | "resumed"
+    | "item-nudged"
+    | "would-nudge-item"
+    | "item-deferred";
   detail: string;
 }
 
@@ -144,6 +166,9 @@ export class AgentStallSweep {
   private sweepInFlight = false;
   private cpuRateMemory: CpuRateMemory | undefined;
   private readonly memory = new Map<string, AgentStallMemory>();
+  private readonly itemMemory = new Map<string, StallItemMemory>();
+  /** The last verdict logged per item, so a steady "not stalled" is logged once, not every sweep. */
+  private readonly itemLastLogged = new Map<string, string>();
 
   constructor(options: AgentStallSweepOptions) {
     this.options = options;
@@ -175,6 +200,11 @@ export class AgentStallSweep {
     const config = resolveStalledAgentSweepConfig(this.options.readRemediationConfig());
     this.modeLog.report([
       { monitor: MONITOR_NAME, enabled: config.enabled, dryRun: config.dryRun },
+      {
+        monitor: WORK_ITEM_MONITOR_NAME,
+        enabled: config.workItemsEnabled,
+        dryRun: config.workItemsDryRun,
+      },
     ]);
   }
 
@@ -208,6 +238,9 @@ export class AgentStallSweep {
         await this.closeEpisode(report, latest, memory.episode, "left running");
       }
     }
+    // OR-D10: a work item's owner is typically idle, not stuck running, so this leg runs whether
+    // or not any agent is.
+    await this.sweepWorkItems(report, config, nowMs, agents);
     if (running.length === 0) return report;
 
     const sample = await this.sampleProcessTrees([...runningIds], nowMs);
@@ -244,6 +277,116 @@ export class AgentStallSweep {
       if (await this.handleCandidate(report, candidate, config, budget > 0)) budget -= 1;
     }
     return report;
+  }
+
+  /**
+   * OR-D10: an item `in-progress` whose owner is idle and whose revision has not moved across
+   * two consecutive sweeps, past `workItemStaleMinutes` since its last transition. One finding
+   * per item per episode — `work-item-stall-detector.ts` re-arms it only when the item changes.
+   * Human-owned items, and items whose owner this daemon cannot currently resolve to a loaded
+   * agent (unknown, or another host), are excluded. The action is this sweep's existing nudge
+   * shape — one prompt to the idle owner through `activeTurnBehavior: "steer"` — never a cancel.
+   */
+  private async sweepWorkItems(
+    report: StallSweepReport,
+    config: ResolvedStalledAgentSweepConfig,
+    nowMs: number,
+    agents: readonly StallSweepAgentSummary[],
+  ): Promise<void> {
+    const items = await this.deps.listOpenWorkItems();
+    const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+    const seenIds = new Set<string>();
+    // Longest-unchanged first, mirroring the agent leg's "longest stalled first".
+    const sorted = [...items].sort((a, b) => a.updatedAtMs - b.updatedAtMs);
+    let budget = config.maxItemNudgesPerSweep;
+    for (const item of sorted) {
+      seenIds.add(item.id);
+      const memory = recordItemObservation(this.itemMemory.get(item.id), item.revision);
+      this.itemMemory.set(item.id, memory);
+      const owner = item.owner === HUMAN_WORK_ITEM_OWNER ? undefined : agentsById.get(item.owner);
+      const ownerIsLocalAgent = item.owner !== HUMAN_WORK_ITEM_OWNER && owner !== undefined;
+      const ownerIdle =
+        owner !== undefined &&
+        !owner.busy &&
+        owner.pendingPermissionCount === 0 &&
+        owner.lifecycle !== "running" &&
+        owner.lifecycle !== "initializing";
+      const reason = notStalledItemReason({
+        item,
+        ownerIsLocalAgent,
+        ownerIdle,
+        memory,
+        nowMs,
+        thresholdMs: config.workItemStaleMinutes * 60_000,
+      });
+      this.logItemVerdict(item, reason);
+      if (reason !== null) continue;
+
+      const unchangedForMs = nowMs - item.updatedAtMs;
+      if (!config.workItemsEnabled || config.workItemsDryRun) {
+        report.entries.push({
+          agentId: item.owner,
+          itemId: item.id,
+          action: "would-nudge-item",
+          detail: `unchanged for ${formatDuration(unchangedForMs)}`,
+        });
+        continue;
+      }
+      if (budget <= 0) {
+        report.entries.push({
+          agentId: item.owner,
+          itemId: item.id,
+          action: "item-deferred",
+          detail: "this sweep's item-nudge budget is spent; next sweep",
+        });
+        continue;
+      }
+      budget -= 1;
+      const prompt = formatSystemNotificationPrompt(
+        buildItemStallNudgePrompt({ item, unchangedForMs }),
+      );
+      const result = await this.deps.nudgeItemOwner({ agentId: item.owner, prompt });
+      if (result.kind === "failed") {
+        report.entries.push({
+          agentId: item.owner,
+          itemId: item.id,
+          action: "cannot-nudge",
+          detail: result.error,
+        });
+        continue;
+      }
+      // One finding per item per episode: re-armed only when recordItemObservation sees a new
+      // revision, which resets `alreadyFound` to false.
+      this.itemMemory.set(item.id, { ...memory, alreadyFound: true });
+      report.entries.push({
+        agentId: item.owner,
+        itemId: item.id,
+        action: "item-nudged",
+        detail: `unchanged for ${formatDuration(unchangedForMs)}`,
+      });
+      this.options.logger.info(
+        { itemId: item.id, owner: item.owner, unchangedForMs },
+        "Stalled-agent sweep: nudged a stalled work item's owner",
+      );
+    }
+    // The item closed, or is gone: its episode is over, and a new one starts fresh if it reopens.
+    for (const id of this.itemMemory.keys()) {
+      if (!seenIds.has(id)) {
+        this.itemMemory.delete(id);
+        this.itemLastLogged.delete(id);
+      }
+    }
+  }
+
+  /** Logs only when this item's verdict differs from the last sweep's (the reaper's rule). */
+  private logItemVerdict(item: StallItemView, reason: string | null): void {
+    const key = `${reason ?? "finding"}`;
+    if (this.itemLastLogged.get(item.id) === key) return;
+    this.itemLastLogged.set(item.id, key);
+    this.options.logger.info(
+      { itemId: item.id, owner: item.owner, reason: reason ?? "a finding" },
+      "Stalled-agent sweep (work item)",
+    );
   }
 
   /** This sweep's process trees, CPU as a rate since the last sample; null when `ps` failed. */
@@ -744,6 +887,33 @@ async function nudgeNow(
         error: `replace: ${errorMessage(replaceError)}; reload: ${errorMessage(reloadError)}`,
       };
     }
+  }
+}
+
+/**
+ * OR-D10's production nudge for a stalled item's owner: `activeTurnBehavior: "steer"`, the
+ * finish-report delivery shape (docs/finish-reports.md#gating-on-lifecycle). The owner is idle
+ * by the time this is called, so it wakes a turn; it never replaces or cancels one, unlike
+ * {@link nudgeStalledAgent}.
+ */
+export async function nudgeStalledItemOwner(
+  deps: { agentManager: AgentManager; agentStorage: AgentStorage; logger: Logger },
+  input: { agentId: string; prompt: string },
+): Promise<StallNudgeResult> {
+  try {
+    await sendPromptToAgent({
+      agentManager: deps.agentManager,
+      agentStorage: deps.agentStorage,
+      agentId: input.agentId,
+      prompt: input.prompt,
+      messageId: randomUUID(),
+      activeTurnBehavior: "steer",
+      unarchive: false,
+      logger: deps.logger,
+    });
+    return { kind: "sent", via: "wake" };
+  } catch (error) {
+    return { kind: "failed", error: errorMessage(error) };
   }
 }
 

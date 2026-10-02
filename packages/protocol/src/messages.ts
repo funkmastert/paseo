@@ -571,6 +571,11 @@ const MutableRemediationConfigSchema = z
         idleCpuPercent: z.number().nonnegative().optional(),
         maxNudgesPerSweep: z.number().int().positive().optional(),
         snapshot: z.boolean().optional(),
+        // OR-D10: the same sweep's work-item leg. Off and dry by default (docs/stalled-agents.md).
+        workItemsEnabled: z.boolean().optional(),
+        workItemsDryRun: z.boolean().optional(),
+        workItemStaleMinutes: z.number().positive().optional(),
+        maxItemNudgesPerSweep: z.number().int().positive().optional(),
       })
       .passthrough()
       .optional(),

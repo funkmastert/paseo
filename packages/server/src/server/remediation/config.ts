@@ -75,6 +75,12 @@ export interface ResolvedStalledAgentSweepConfig {
   maxNudgesPerSweep: number;
   /** Snapshot the agent's worktree before nudging it. */
   snapshot: boolean;
+  /** OR-D10's work-item leg. Off and dry by default; see docs/stalled-agents.md. */
+  workItemsEnabled: boolean;
+  workItemsDryRun: boolean;
+  /** How long an open item may sit unchanged, past the owner-idle and two-sweep gates. */
+  workItemStaleMinutes: number;
+  maxItemNudgesPerSweep: number;
 }
 
 export function resolveStalledAgentSweepConfig(
@@ -90,6 +96,23 @@ export function resolveStalledAgentSweepConfig(
     idleCpuPercent: stalled?.idleCpuPercent ?? 5,
     maxNudgesPerSweep: stalled?.maxNudgesPerSweep ?? 4,
     snapshot: stalled?.snapshot ?? true,
+    ...resolveWorkItemStallConfig(config),
+  };
+}
+
+type WorkItemStallConfig = Pick<
+  ResolvedStalledAgentSweepConfig,
+  "workItemsEnabled" | "workItemsDryRun" | "workItemStaleMinutes" | "maxItemNudgesPerSweep"
+>;
+
+/** OR-D10's work-item leg, split out so its resolver stays under the complexity limit. */
+function resolveWorkItemStallConfig(config: RemediationConfig | undefined): WorkItemStallConfig {
+  const stalled = config?.stalledAgents;
+  return {
+    workItemsEnabled: (stalled?.workItemsEnabled ?? false) && isRemediesRungEnabled(config),
+    workItemsDryRun: stalled?.workItemsDryRun ?? true,
+    workItemStaleMinutes: stalled?.workItemStaleMinutes ?? 240,
+    maxItemNudgesPerSweep: stalled?.maxItemNudgesPerSweep ?? 4,
   };
 }
 

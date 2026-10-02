@@ -287,7 +287,9 @@ import {
   AgentStallSweep,
   handOffStalledAgentToFailover,
   nudgeStalledAgent,
+  nudgeStalledItemOwner,
 } from "./agent-stall-sweep.js";
+import type { StallItemView } from "./agent/work-item-stall-detector.js";
 import type { ProcessSampler } from "./agent/process-sampler.js";
 import { summarizeArtifactJanitorRun, summarizeDoneJanitorRun } from "./disk-remedies.js";
 import { sampleDirectorySizeBytes } from "../utils/directory-size-sampler.js";
@@ -1192,6 +1194,7 @@ function createAgentStallSweep(input: {
   paceResume: PaceResume;
   /** Feature 10 builds `judgeStall` from it (docs/jev.md). */
   jev: JevService;
+  coordination: Pick<CoordinationRuntime, "tryQueue">;
 }): AgentStallSweep {
   const { agentManager, agentStorage, logger } = input;
   return new AgentStallSweep({
@@ -1225,6 +1228,29 @@ function createAgentStallSweep(input: {
           nudge,
         ),
       handOffToFailover: (agentId) => handOffStalledAgentToFailover(agentManager, agentId),
+      listOpenWorkItems: async () => {
+        const queue = input.coordination.tryQueue();
+        if (!queue) return [];
+        const items: StallItemView[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await queue.list({ openOnly: true, cursor, limit: 500 });
+          for (const stored of page.items) {
+            items.push({
+              id: stored.id,
+              title: stored.title,
+              owner: stored.owner,
+              state: stored.state as "pending" | "in-progress" | "blocked",
+              revision: stored.revision,
+              updatedAtMs: Date.parse(stored.updatedAt),
+            });
+          }
+          cursor = page.nextCursor;
+        } while (cursor);
+        return items;
+      },
+      nudgeItemOwner: (nudge) =>
+        nudgeStalledItemOwner({ agentManager, agentStorage, logger }, nudge),
     },
     sink: input.sink,
     readRemediationConfig: () => input.daemonConfigStore.get().remediation,
@@ -3329,6 +3355,7 @@ export async function createPaseoDaemon(
               logger,
               paceResume: (resume, fn) => resumePacer.run(resume, fn),
               jev,
+              coordination,
             });
             agentStallSweep = stallSweep;
             stallSweep.start();

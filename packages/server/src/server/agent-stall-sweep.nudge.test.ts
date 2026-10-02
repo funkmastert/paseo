@@ -165,6 +165,8 @@ describe("a real agent stuck mid-turn", () => {
         nudgeAgent: (nudge) =>
           nudgeStalledAgent({ agentManager, agentStorage, logger, paceResume }, nudge),
         handOffToFailover: async () => ({ kind: "failed", error: "not expected" }),
+        listOpenWorkItems: async () => [],
+        nudgeItemOwner: async () => ({ kind: "failed", error: "not expected" }),
       },
       sink: { observe: async (observation) => void observations.push(observation) },
       readRemediationConfig: () => undefined,

@@ -7,6 +7,7 @@ import {
   type StallNudgeResult,
 } from "./agent-stall-sweep.js";
 import type { StallSweepAgentSummary } from "./agent/agent-manager.js";
+import type { StallItemView } from "./agent/work-item-stall-detector.js";
 import type { ProcessSampleRow } from "./agent/process-sampler.js";
 import type { ProviderHealth } from "./agent-done-janitor.js";
 import type { RemediationConfig } from "./remediation/config.js";
@@ -55,6 +56,9 @@ class Harness {
   });
   nudgeResult: StallNudgeResult = { kind: "sent", via: "replace" };
   handoffResult: StallHandoffResult = { kind: "handed-off", lastError: "usage limit" };
+  readonly items = new Map<string, StallItemView>();
+  readonly itemNudges: Array<{ agentId: string; prompt: string }> = [];
+  itemNudgeResult: StallNudgeResult = { kind: "sent", via: "wake" };
 
   readonly sink: RemediationSink = {
     observe: async (observation) => {
@@ -82,6 +86,11 @@ class Harness {
       handOffToFailover: async (agentId) => {
         this.handoffs.push(agentId);
         return this.handoffResult;
+      },
+      listOpenWorkItems: async () => [...this.items.values()].map((item) => structuredClone(item)),
+      nudgeItemOwner: async (input) => {
+        this.itemNudges.push(input);
+        return this.itemNudgeResult;
       },
     },
     sink: this.sink,
@@ -124,6 +133,20 @@ class Harness {
     };
     this.agents.set(id, agent);
     return agent;
+  }
+
+  addItem(id: string, overrides: Partial<StallItemView> = {}): StallItemView {
+    const item: StallItemView = {
+      id,
+      title: `Item ${id}`,
+      owner: "owner-1",
+      state: "in-progress",
+      revision: 1,
+      updatedAtMs: START - 5 * 60 * MINUTE,
+      ...overrides,
+    };
+    this.items.set(id, item);
+    return item;
   }
 
   private psRows(): ProcessSampleRow[] {
@@ -442,5 +465,130 @@ describe("modes and limits", () => {
     const [first, second] = await Promise.all([h.sweep.tick(), h.sweep.tick()]);
     expect(first).not.toBeNull();
     expect(second).toBeNull();
+  });
+});
+
+describe("work items (OR-D10)", () => {
+  const HOUR = 60 * MINUTE;
+
+  function addOwner(id = "owner-1", overrides: Partial<StallSweepAgentSummary> = {}) {
+    return h.add(id, { lifecycle: "idle", busy: false, pendingPermissionCount: 0, ...overrides });
+  }
+
+  test("ships off and dry by default: reports would-nudge-item, never calls nudgeItemOwner", async () => {
+    addOwner();
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    await h.tick();
+    const report = await h.tick();
+
+    expect(h.itemNudges).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ itemId: "wi-1", agentId: "owner-1", action: "would-nudge-item" }),
+    );
+  });
+
+  test("needs two consecutive sweeps at the same revision before it is a finding", async () => {
+    addOwner();
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    const first = await h.tick();
+    expect(first?.entries.some((entry) => entry.itemId === "wi-1")).toBe(false);
+
+    const second = await h.tick();
+    expect(second?.entries).toContainEqual(
+      expect.objectContaining({ itemId: "wi-1", action: "would-nudge-item" }),
+    );
+  });
+
+  test("nudges the idle owner once live, then re-arms only when the item changes", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    addOwner();
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    await h.tick();
+    expect(h.itemNudges).toEqual([{ agentId: "owner-1", prompt: expect.stringContaining("wi-1") }]);
+
+    // Same revision again: no second nudge this episode.
+    await h.tick();
+    expect(h.itemNudges).toHaveLength(1);
+
+    // The item moves: a new episode, and the two-sweep gate starts over.
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs, revision: 2 });
+    await h.tick();
+    expect(h.itemNudges).toHaveLength(1);
+    await h.tick();
+    // Still inside the new threshold window (updatedAtMs just moved), so still not overdue.
+    expect(h.itemNudges).toHaveLength(1);
+  });
+
+  test("excludes an item owned by a human", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    h.addItem("wi-1", { owner: "human", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    await h.tick();
+
+    expect(h.itemNudges).toEqual([]);
+  });
+
+  test("excludes an item whose owner this daemon cannot resolve locally", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    h.addItem("wi-1", { owner: "agent-on-another-host", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    await h.tick();
+
+    expect(h.itemNudges).toEqual([]);
+  });
+
+  test("never nudges while the owner is busy", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    addOwner("owner-1", { lifecycle: "running", busy: true });
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    await h.tick();
+
+    expect(h.itemNudges).toEqual([]);
+  });
+
+  test.each<["pending" | "blocked"]>([["pending"], ["blocked"]])(
+    "excludes a %s item: only in-progress is a stall candidate",
+    async (state) => {
+      h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+      addOwner();
+      h.addItem("wi-1", { owner: "owner-1", state, updatedAtMs: h.nowMs - 5 * HOUR });
+
+      await h.tick();
+      await h.tick();
+
+      expect(h.itemNudges).toEqual([]);
+    },
+  );
+
+  test("an item inside the stale threshold is not a finding yet", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    addOwner();
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - MINUTE });
+
+    await h.tick();
+    await h.tick();
+
+    expect(h.itemNudges).toEqual([]);
+  });
+
+  test("runs even with no agent in `running`", async () => {
+    h.config = { stalledAgents: { workItemsEnabled: true, workItemsDryRun: false } };
+    addOwner();
+    h.addItem("wi-1", { owner: "owner-1", updatedAtMs: h.nowMs - 5 * HOUR });
+
+    await h.tick();
+    const report = await h.tick();
+
+    expect(report).not.toBeNull();
+    expect(h.itemNudges).toHaveLength(1);
   });
 });
