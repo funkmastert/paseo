@@ -51,6 +51,7 @@ import { AgentProviderMoveError } from "./agent/provider-move.js";
 import { McpGatewayActionError } from "./mcp-gateway/action-failure.js";
 import type { McpGatewayRemedy } from "./mcp-gateway/action-failure.js";
 import {
+  resolvePromptTarget,
   sendPromptToAgent,
   waitForAgentRunStartWithTimeout,
   unarchiveAgentState,
@@ -3937,7 +3938,7 @@ export class Session {
     const prompt = buildAgentPrompt(promptText, images, attachments);
 
     try {
-      await sendPromptToAgent({
+      const delivered = await sendPromptToAgent({
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         agentId,
@@ -3949,7 +3950,7 @@ export class Session {
         clearPendingPermissions: true,
         logger: this.sessionLogger,
       });
-      this.recordHumanPrompt(agentId, messageId ?? null);
+      this.recordHumanPrompt(delivered.agentId, messageId ?? null);
       return { ok: true };
     } catch (error) {
       this.handleAgentRunError(agentId, error, "Failed to send agent message");
@@ -8123,7 +8124,14 @@ export class Session {
     }
 
     try {
-      const agentId = resolved.agentId;
+      // A handle account failover retired takes no turns: the message goes where its
+      // conversation lives now, and that agent is the one loaded, prompted and waited on.
+      const target = await resolvePromptTarget({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId: resolved.agentId,
+      });
+      let agentId = target.agentId;
 
       const prompt = buildAgentPrompt(msg.text, msg.images, msg.attachments);
       // Only an explicit "interrupt" may cancel the running turn. A client that sends no behavior
@@ -8149,13 +8157,15 @@ export class Session {
           clearPendingPermissions: true,
           logger: this.sessionLogger,
         });
+        agentId = result.agentId;
         if (result.disposition === "turn_started") {
           await waitForAgentRunStartWithTimeout(this.agentManager, agentId);
         }
       };
       if (msg.messageId) {
         await this.agentRequests.send({
-          agentId,
+          // Keyed on the agent the client addressed, so a retry dedupes however the move resolves.
+          agentId: resolved.agentId,
           messageId: msg.messageId,
           request: { prompt, activeTurnBehavior },
           prepare: async () => {
@@ -8176,9 +8186,10 @@ export class Session {
         type: "send_agent_message_response",
         payload: {
           requestId: msg.requestId,
-          agentId,
+          agentId: resolved.agentId,
           accepted: true,
           error: null,
+          ...(agentId !== resolved.agentId ? { deliveredToAgentId: agentId } : {}),
         },
       });
     } catch (error) {
