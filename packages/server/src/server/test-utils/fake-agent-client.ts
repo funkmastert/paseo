@@ -821,6 +821,22 @@ class FakeAgentSession implements AgentSession {
         return;
       }
 
+      // A Claude Task-tool subagent: started in a turn and left running in the background after
+      // the turn ends, until a later prompt finishes it.
+      const backgroundSubagent = /(start|finish) a background subagent "([^"]+)"/i.exec(textPrompt);
+      if (backgroundSubagent?.[1] && backgroundSubagent[2]) {
+        this.notifySubscribers({
+          type: "provider_subagent",
+          provider: this.providerName,
+          event: {
+            type: "upsert",
+            id: backgroundSubagent[2],
+            title: backgroundSubagent[2],
+            status: backgroundSubagent[1].toLowerCase() === "start" ? "running" : "completed",
+          },
+        });
+      }
+
       if (/keep working until interrupted/i.test(textPrompt)) {
         // A long task: no outcome until someone interrupts it or its runtime closes.
         await this.interruptSignal.promise;
