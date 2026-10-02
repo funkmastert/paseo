@@ -1,16 +1,17 @@
 import type { Agent } from "@/stores/session-store";
 import { isWorkspaceRootAgent } from "@/subagents/policies";
+import { resolveShownAgent } from "@/utils/agent-migration";
 import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 
 type CandidateAgent = Pick<
   Agent,
-  "id" | "workspaceId" | "parentAgentId" | "archivedAt" | "lastActivityAt" | "createdAt"
+  "id" | "workspaceId" | "parentAgentId" | "archivedAt" | "lastActivityAt" | "createdAt" | "labels"
 >;
 
 /**
  * The chat a pinned workspace shows in the grid: its most recently active root agent that is not
  * archived. A workspace can hold several agents; the grid shows one chat per pin, and the cell's
- * open action reaches the rest.
+ * open action reaches the rest. A handle account failover retired shows as its live end.
  */
 export function pickPinnedWorkspaceAgentId(input: {
   agents: Iterable<CandidateAgent>;
@@ -37,7 +38,11 @@ export function pickPinnedWorkspaceAgentId(input: {
       best = agent;
     }
   }
-  return best?.id ?? null;
+  if (!best) {
+    return null;
+  }
+  const shown = resolveShownAgent(best.id, (agentId) => agentsById.get(agentId));
+  return shown.kind === "moved" ? shown.agentId : best.id;
 }
 
 function compareRecency(a: CandidateAgent, b: CandidateAgent): number {

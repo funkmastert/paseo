@@ -8,8 +8,9 @@ Pinned is a workspace property (`workspace.pin.set`, `pinnedAt`), not an agent l
 section lists workspaces. `paseo.keep` is unrelated and does not put anything in the section.
 
 A workspace can hold several agents and the grid shows one chat per pin: the most recently active,
-non-archived root agent (`pinned-grid/resolve-pinned-agent.ts`). The open button in a cell's header
-reaches the rest of the workspace.
+non-archived root agent (`pinned-grid/resolve-pinned-agent.ts`), or the live end of its conversation
+when account failover retired it (see [Agent Targets](expo-router.md#agent-targets)). The open
+button in a cell's header reaches the rest of the workspace.
 
 ## What a cell is
 

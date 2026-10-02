@@ -17,6 +17,7 @@ import {
   collectAllPanes,
   collectAllTabs,
   convertDraftToAgentInLayout,
+  followMovedAgentInLayout,
   createTabInLayout,
   createDefaultLayout,
   DEFAULT_PANE_ID,
@@ -129,6 +130,8 @@ interface WorkspaceLayoutStore {
   ) => string | null;
   setTabState: (workspaceKey: string, tabId: string, state: JsonValue | undefined) => void;
   convertDraftToAgent: (workspaceKey: string, tabId: string, agentId: string) => string | null;
+  /** Shows a moved conversation's live end in place of its retired handle (`followMovedAgentInLayout`). */
+  followMovedAgent: (workspaceKey: string, fromAgentId: string, toAgentId: string) => void;
   reconcileTabs: (workspaceKey: string, snapshot: WorkspaceTabSnapshot) => void;
   resolvePendingAgent: (workspaceKey: string, agentId: string) => void;
   reorderTabs: (workspaceKey: string, tabIds: string[]) => void;
@@ -1191,6 +1194,44 @@ export function createWorkspaceLayoutStore(
           }));
 
           return result.tabId;
+        },
+        followMovedAgent: (workspaceKey, fromAgentId, toAgentId) => {
+          const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);
+          const from = trimNonEmpty(fromAgentId);
+          const to = trimNonEmpty(toAgentId);
+          if (!normalizedWorkspaceKey || !from || !to) {
+            return;
+          }
+          const layout = followMovedAgentInLayout({
+            layout: getWorkspaceLayout(get().layoutByWorkspace, normalizedWorkspaceKey),
+            fromAgentId: from,
+            toAgentId: to,
+          });
+          if (!layout) {
+            return;
+          }
+          set((state) => {
+            const wasPinned = state.pinnedAgentIdsByWorkspace[normalizedWorkspaceKey]?.has(from);
+            return {
+              layoutByWorkspace: { ...state.layoutByWorkspace, [normalizedWorkspaceKey]: layout },
+              pinnedAgentIdsByWorkspace: wasPinned
+                ? addAgentIdToWorkspaceSet(
+                    removeAgentIdFromWorkspaceSet(
+                      state.pinnedAgentIdsByWorkspace,
+                      normalizedWorkspaceKey,
+                      from,
+                    ),
+                    normalizedWorkspaceKey,
+                    to,
+                  )
+                : state.pinnedAgentIdsByWorkspace,
+              hiddenAgentIdsByWorkspace: removeAgentIdFromWorkspaceSet(
+                state.hiddenAgentIdsByWorkspace,
+                normalizedWorkspaceKey,
+                to,
+              ),
+            };
+          });
         },
         reconcileTabs: (workspaceKey, snapshot) => {
           const normalizedWorkspaceKey = trimNonEmpty(workspaceKey);

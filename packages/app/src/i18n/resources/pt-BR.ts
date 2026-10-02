@@ -245,6 +245,10 @@ export const ptBR: TranslationResources = {
       callout: "Este agente está arquivado",
       unarchive: "Desarquivar",
     },
+    moved: {
+      toAccount: "Movido para {{account}}",
+      toAgent: "Movido para o agente {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "ID do agente",

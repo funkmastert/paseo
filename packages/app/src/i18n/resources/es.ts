@@ -245,6 +245,10 @@ export const es: TranslationResources = {
       callout: "Este agente está archivado.",
       unarchive: "Desarchivar",
     },
+    moved: {
+      toAccount: "Movido a {{account}}",
+      toAgent: "Movido al agente {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "ID del agente",
