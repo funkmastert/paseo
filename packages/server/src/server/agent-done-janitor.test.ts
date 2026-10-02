@@ -164,6 +164,8 @@ function harness(input: {
   logger?: Logger;
   /** The directory archive-by-scope would delete; absent: its resolution, by path shape. */
   resolveArchiveDirectory?: (workspace: DoneJanitorWorkspace) => string | null;
+  /** OR-F3: agent ids the work queue shows owning an open item. Absent: coordination is off. */
+  openItemOwners?: string[];
 }): Harness {
   let now = NOW;
   const stored = input.stored ?? [record()];
@@ -205,6 +207,7 @@ function harness(input: {
       return stored;
     },
     listWorkspaces: async () => workspaces,
+    listOpenItemOwners: async () => new Set(input.openItemOwners ?? []),
     listScheduledAgentIds: async () => new Set(input.scheduled ?? []),
     listScheduledCwds: async () => input.scheduledCwds ?? [],
     getProviderHealth: async () => input.health ?? { askable: true },
@@ -420,6 +423,17 @@ describe("AgentDoneJanitor", () => {
       expect.objectContaining({ action: "not-done", reason: "quiet for 14h of the 3d required" }),
     );
     expect(h.pushes).toEqual([]);
+  });
+
+  test("an agent that owns an open work-queue item is not asked", async () => {
+    const h = harness({ config: ON, openItemOwners: ["agent-1"] });
+
+    const report = await h.janitor.tick();
+
+    expect(h.asked).toEqual([]);
+    expect(report?.entries).toContainEqual(
+      expect.objectContaining({ action: "not-done", reason: "owns an open work-queue item" }),
+    );
   });
 
   test("a leader whose subagent is still working is not asked", async () => {

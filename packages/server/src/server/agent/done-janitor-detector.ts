@@ -84,15 +84,23 @@ export function parentOf(view: Pick<DoneJanitorAgentView, "labels">): string | n
   return getParentAgentIdFromLabels(view.labels);
 }
 
+/** Empty by default: a caller that does not pass the open-owner set gets the old behavior. */
+const NO_OPEN_ITEM_OWNERS: ReadonlySet<string> = new Set();
+
 /**
  * Why this one agent is not finished, ignoring its tree. `quietMs` null skips the quiet check —
  * used for the re-check right after the agent answered, when the answer itself is the newest
- * activity.
+ * activity. `openItemOwners` is OR-F3's: the agent ids the work queue (OR-A1) currently shows
+ * owning an open item. It is the live janitor's check only — a live agent that still owns open
+ * work can finish it or hand it off itself, so it is not asked. The dead pass has no such
+ * opinion: archiving a dead owner hands its items back automatically (agent-archive.ts), which is
+ * the point of OR-F3 removing the block.
  */
 export function agentNotDoneReason(
   view: DoneJanitorAgentView,
   nowMs: number,
   quietMs: number | null,
+  openItemOwners: ReadonlySet<string> = NO_OPEN_ITEM_OWNERS,
 ): NotDoneReason | null {
   const pinned = pinReason(view);
   if (pinned) return pinned;
@@ -116,6 +124,7 @@ export function agentNotDoneReason(
   if (view.hasSchedule) return "has a schedule or heartbeat that will wake it";
   // Its successor carries the work on; the retired record is the failover's to manage.
   if (view.labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]) return "was retired by account failover";
+  if (openItemOwners.has(view.id)) return "owns an open work-queue item";
   if (quietMs === null) return null;
   if (view.lastActivityAtMs === null) return "has no readable last-activity time";
   const quietForMs = nowMs - view.lastActivityAtMs;
@@ -167,11 +176,12 @@ export function treeNotDoneReason(
   quietMs: number | null,
   /** Descendants are never the ones asked, so their quiet check always applies. */
   descendantQuietMs: number,
+  openItemOwners: ReadonlySet<string> = NO_OPEN_ITEM_OWNERS,
 ): NotDoneReason | null {
-  const own = agentNotDoneReason(root, nowMs, quietMs);
+  const own = agentNotDoneReason(root, nowMs, quietMs, openItemOwners);
   if (own) return own;
   for (const descendant of listDescendants(root.id, views)) {
-    const reason = agentNotDoneReason(descendant, nowMs, descendantQuietMs);
+    const reason = agentNotDoneReason(descendant, nowMs, descendantQuietMs, openItemOwners);
     if (reason) return `subagent ${descendant.id} ${reason}`;
   }
   return null;

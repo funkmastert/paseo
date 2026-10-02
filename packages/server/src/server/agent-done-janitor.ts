@@ -188,6 +188,13 @@ export interface DoneJanitorDependencies {
   listLiveAgents(): DoneJanitorAgentSummary[];
   listStoredAgents(): Promise<StoredAgentRecord[]>;
   listWorkspaces(): Promise<DoneJanitorWorkspace[]>;
+  /**
+   * OR-F3: agent ids the work queue currently shows owning an open item (pending, in-progress or
+   * blocked). Empty when coordination is off. A live owner of one is not finished — it can close
+   * or hand off the item itself — so it is spared the question; a dead one is archived anyway,
+   * and archiving hands its open items back automatically (agent-archive.ts).
+   */
+  listOpenItemOwners(): Promise<ReadonlySet<string>>;
   /** Agents a schedule or heartbeat that is not completed still targets. */
   listScheduledAgentIds(): Promise<ReadonlySet<string>>;
   /** The `cwd` of every schedule that is not completed and starts a new agent. */
@@ -460,7 +467,15 @@ export class AgentDoneJanitor {
       workspaces = await this.deps.listWorkspaces();
     }
 
-    const askable = await this.listAskable(report, views, workspaces, config, nowMs);
+    const openItemOwners = await this.deps.listOpenItemOwners();
+    const askable = await this.listAskable(
+      report,
+      views,
+      workspaces,
+      config,
+      nowMs,
+      openItemOwners,
+    );
     const budget = Math.min(config.maxQuestionsPerSweep, config.maxArchivesPerSweep);
     const reclaimedWorkspaceIds = new Set<string>(dead.deletedWorkspaceIds);
     let archivedCount = 0;
@@ -529,13 +544,21 @@ export class AgentDoneJanitor {
     workspaces: readonly DoneJanitorWorkspace[],
     config: ResolvedDoneJanitorConfig,
     nowMs: number,
+    openItemOwners: ReadonlySet<string>,
   ): Promise<AskCandidate[]> {
     const askable: AskCandidate[] = [];
     for (const root of config.askFinished ? listRootCandidates(views) : []) {
       // Asking a closed agent resumes it at cache-cold prices. With the dead pass on, a closed
       // agent is the dead pass's to archive or spare, never the question's.
       if (config.archiveDead && !root.live) continue;
-      const verdict = await this.evaluateRoot(root, views, workspaces, config, nowMs);
+      const verdict = await this.evaluateRoot(
+        root,
+        views,
+        workspaces,
+        config,
+        nowMs,
+        openItemOwners,
+      );
       if (verdict.kind !== "ask") {
         report.entries.push({
           ...describeAgent(root),
@@ -1338,11 +1361,19 @@ export class AgentDoneJanitor {
     workspaces: readonly DoneJanitorWorkspace[],
     config: ResolvedDoneJanitorConfig,
     nowMs: number,
+    openItemOwners: ReadonlySet<string>,
   ): Promise<
     | { kind: "not-done" | "cannot-ask"; reason: string }
     | { kind: "ask"; plan: WorkspacePlan; quietForMs: number }
   > {
-    const notDone = treeNotDoneReason(root, views, nowMs, config.quietMs, config.quietMs);
+    const notDone = treeNotDoneReason(
+      root,
+      views,
+      nowMs,
+      config.quietMs,
+      config.quietMs,
+      openItemOwners,
+    );
     if (notDone) return { kind: "not-done", reason: notDone };
     const record = this.memory.get(root.id);
     const nextAskAtMs = nextAskAllowedAtMs(record, config.quietMs);
@@ -1427,10 +1458,13 @@ export class AgentDoneJanitor {
 
     // The answer is the newest activity, so the root's quiet check is replaced by the rest of
     // the checks against fresh state. Its subagents were not asked and keep theirs.
-    const fresh = await this.loadViews();
+    const [fresh, openItemOwners] = await Promise.all([
+      this.loadViews(),
+      this.deps.listOpenItemOwners(),
+    ]);
     const freshRoot = fresh.find((view) => view.id === root.id);
     const changed = freshRoot
-      ? treeNotDoneReason(freshRoot, fresh, this.now(), null, config.quietMs)
+      ? treeNotDoneReason(freshRoot, fresh, this.now(), null, config.quietMs, openItemOwners)
       : "disappeared";
     if (changed) {
       recordProbeOutcome(this.memory, root.id, askedAtMs, "changed-after-answer");

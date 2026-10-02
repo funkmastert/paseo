@@ -97,6 +97,20 @@ describe("agentNotDoneReason", () => {
   ])("%s is not done", (_name, overrides, reason) => {
     expect(agentNotDoneReason(view(overrides), NOW, QUIET)).toBe(reason);
   });
+
+  test("owning an open work-queue item is not done", () => {
+    expect(agentNotDoneReason(view(), NOW, QUIET, new Set(["root"]))).toBe(
+      "owns an open work-queue item",
+    );
+  });
+
+  test("an open item owned by someone else does not spare it from the question", () => {
+    expect(agentNotDoneReason(view(), NOW, QUIET, new Set(["someone-else"]))).toBeNull();
+  });
+
+  test("open items are ignored when the caller passes none", () => {
+    expect(agentNotDoneReason(view(), NOW, QUIET)).toBeNull();
+  });
 });
 
 describe("treeNotDoneReason", () => {
@@ -133,6 +147,13 @@ describe("treeNotDoneReason", () => {
       }),
     ];
     expect(treeNotDoneReason(views[0], views, NOW, QUIET, QUIET)).toBeNull();
+  });
+
+  test("a subagent owning an open work-queue item keeps the whole tree not done", () => {
+    const views = [view(), view({ id: "child", labels: { "paseo.parent-agent-id": "root" } })];
+    expect(treeNotDoneReason(views[0], views, NOW, QUIET, QUIET, new Set(["child"]))).toBe(
+      "subagent child owns an open work-queue item",
+    );
   });
 
   test("the re-check after an answer skips only the root's quiet check", () => {

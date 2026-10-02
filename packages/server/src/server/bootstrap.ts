@@ -196,6 +196,8 @@ import type {
 } from "./agent/provider-launch-config.js";
 import { loadPersistedConfig, type PersistedConfig } from "./persisted-config.js";
 import { CoordinationRuntime } from "./coordination/runtime.js";
+import { handBackOpenItemsForArchivedAgent } from "./coordination/queue/archive-handback.js";
+import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
 import { createAgentPromptDeliverer, createAgentTurnSource } from "./coordination/agent-ports.js";
 import type { CoordinationConfigInput } from "./coordination/config.js";
 import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
@@ -1046,6 +1048,7 @@ function createDoneJanitor(input: {
   >;
   daemonConfigStore: Pick<DaemonConfigStore, "get">;
   worktreeSnapshotter: WorktreeSnapshotter;
+  coordination: Pick<CoordinationRuntime, "tryQueue">;
   serverId: string;
   logger: Logger;
 }): AgentDoneJanitor {
@@ -1056,6 +1059,18 @@ function createDoneJanitor(input: {
       listLiveAgents: () => agentManager.listAgentsForDoneJanitor(),
       listStoredAgents: () => agentStorage.list(),
       listWorkspaces: () => input.workspaceRegistry.list(),
+      listOpenItemOwners: async () => {
+        const queue = input.coordination.tryQueue();
+        if (!queue) return new Set<string>();
+        const owners = new Set<string>();
+        let cursor: string | undefined;
+        do {
+          const page = await queue.list({ openOnly: true, cursor, limit: 500 });
+          for (const item of page.items) owners.add(item.owner);
+          cursor = page.nextCursor;
+        } while (cursor);
+        return owners;
+      },
       listScheduledAgentIds: async () =>
         new Set(
           (await input.scheduleService.list()).flatMap((schedule) =>
@@ -2529,6 +2544,23 @@ export async function createPaseoDaemon(
     } catch (error) {
       logger.warn({ err: error, agentId }, "Failed to complete schedules for archived agent");
     }
+    // OR-F3: hand its open queue items to its parent (or `human` for a root) instead of blocking
+    // the archive. Every archive path, cascades included, runs through this one callback. Never
+    // lets a queue failure slow or fail the archive that already happened.
+    try {
+      const record = await agentStorage.get(agentId);
+      await handBackOpenItemsForArchivedAgent({
+        queue: coordination.tryQueue(),
+        agentId,
+        parentAgentId: record ? getParentAgentIdFromLabels(record.labels) : null,
+        logger,
+      });
+    } catch (error) {
+      logger.warn(
+        { err: error, agentId },
+        "Failed to hand back open queue items for an archived agent",
+      );
+    }
   });
   logger.info({ elapsed: elapsed() }, "Schedule service initialized");
   logger.info({ elapsed: elapsed() }, "Loading persisted agent registry");
@@ -3237,6 +3269,7 @@ export async function createPaseoDaemon(
               wsServer,
               daemonConfigStore,
               worktreeSnapshotter,
+              coordination,
               serverId,
               logger,
             });
