@@ -40,7 +40,7 @@ The dead pass runs first each sweep and considers root agents only. A root is de
 - **Not pinned** (below).
 - **No schedule or heartbeat that is not completed targets it.**
 
-Nothing else spares it. In particular an unread attention flag does not: a failed agent is flagged the moment it fails, so sparing flags would spare every errored agent until someone opened each one. The dry run says how many unread flags an archive will clear.
+Nothing else spares it. In particular an unread attention flag does not: a failed agent is flagged the moment it fails, so sparing flags would spare every errored agent until someone opened each one. The dry run says how many unread flags an archive will clear. Owning an open [work-queue](work-queue.md) item does not spare it either: archiving hands its open items back to its parent, or to `human` for a root, automatically ([Archive hand-back](work-queue.md#archive-hand-back)).
 
 **An idle live agent is never dead.** A leader waiting on its children or on Tyler looks the same as a forgotten one from outside, and archiving it costs far more than leaving it. Only the agent can say which, and that is the question below. With `archiveDead` on, the question is asked only of live agents: a closed agent is archived or spared by the dead pass and never resumed to be asked.
 
@@ -124,6 +124,7 @@ The question path considers live root agents only when `archiveDead` is on (all 
 - **No provider subagent still running.** A Claude Task subagent or workflow runs inside the parent's process and the parent can look idle while it does.
 - **No schedule or heartbeat that is not completed targets it.** Something is going to wake it.
 - **Not retired by account failover.** Its successor carries the work on.
+- **Owns no open [work-queue](work-queue.md) item.** It can close or hand the item off itself, so it is not asked to be archived out from under its own work (`openItemOwners` in `agent/done-janitor-detector.ts`, OR-F3). This is the question path's rule only: the dead pass below archives a dead owner regardless, and archiving hands its open items back automatically.
 - **Quiet for `quietHours`**, measured from the newest activity timestamp the daemon holds. An agent with no readable timestamp is not quiet.
 - **Not pinned** ([Pinned](#pinned)).
 

@@ -125,6 +125,16 @@ Read once at boot. Off unless `enabled` is true. Off means no `queue_*` tools, n
 
 The daemon opens coordination after its monitors start, then runs retention at once and every six hours. A store that fails to open (a corrupt journal, an unreadable directory) is logged as `COORDINATION DISABLED` and the daemon runs on without it: the flag drops and every request is answered as disabled. It never fails or delays boot.
 
+## Archive hand-back
+
+Archiving an agent that owns open items never blocks and never needs `--force`: every archive path, cascades included, hands each open item it owns to the agent's `paseo.parent-agent-id` label, or to `human` for a root, through the same [handoff](#storage) the queue already uses — journaled, idempotent on the successor id, delivered the normal way. `handBackOpenItemsForArchivedAgent` (`coordination/queue/archive-handback.ts`) runs from `AgentManager`'s `onAgentArchived` callback; coordination disabled, or any failure in the hand-back, is logged and never slows or fails the archive, which has already happened by the time it runs.
+
+The [done janitor](./done-janitor.md) still treats an agent that owns an open item as not finished — it can close or hand off the item itself, so it is not asked to be archived out from under its own work. A **dead** agent is archived either way: the hand-back is exactly what makes that safe.
+
+## The stalled-agent sweep's work-item leg
+
+[`AgentStallSweep`](./stalled-agents.md#the-work-item-leg) watches open items the same way it watches agent process trees: an item `in-progress`, idle owner, unchanged for two sweeps past a threshold, is a stall. It nudges the owner with the item's closure marker rather than cancelling anything — there is no turn to cancel on an idle owner.
+
 ## Relation to finish reports
 
 The queue does not replace [finish reports](./finish-reports.md). A finish obligation lives on the child's agent record and tracks one delegated turn until its report reaches the owner; it stays the wake path. A work item tracks owned work across turns, agents and handoffs. A finish moves an item only through a [closure marker](#closure-marker).

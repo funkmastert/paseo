@@ -42,6 +42,19 @@ Every stall is reported to the remediation ladder ([remediation.md](remediation.
 - Write to the agent's worktree, index or HEAD.
 - Act when `ps` fails.
 
+## The work-item leg
+
+A second leg of the same sweep (`AgentStallSweep.sweepWorkItems`, `work-item-stall-detector.ts`) watches the [work queue](work-queue.md), not an agent's process tree. It runs every sweep whether or not any agent is `running`, since an item's owner usually is not. An item `in-progress` is a finding when all of these hold:
+
+- **Its owner is idle.** Not `running` or `initializing`, no turn in flight, no pending permission — the owner the sweep can resolve to a loaded local agent, below. A leader that finished its own turn and simply forgot to close or hand off an item it claimed looks exactly like this, and no CPU check applies, because nothing is running.
+- **Owned by a resolvable local agent.** An item owned by `human`, or by an agent id this daemon cannot currently resolve to a loaded agent (unknown, or another host), is excluded.
+- **Unchanged across two consecutive sweeps.** Same `revision` both times; a claim or a transition between sweeps restarts the count.
+- **Past `workItemStaleMinutes` since its last transition.**
+
+One finding per item per episode: a nudge sets `alreadyFound`, and `recordItemObservation` only clears it once the item's revision moves, so the same stalled item is not renudged every sweep. The action reuses this sweep's own nudge shape — one prompt naming the item and teaching the closure marker (`queue: <id> done no-follow-on`, `blocked blocked_on=<id>`, and the rest) — sent through `sendPromptToAgent` with `activeTurnBehavior: "steer"` (`nudgeStalledItemOwner`). That wakes the idle owner rather than replacing a turn; unlike the agent leg's `interrupt`, there is no turn to cancel here. A failed send is reported `cannot-nudge` and tried again next sweep, since nothing was marked found.
+
+Dry run logs every verdict change, the same reaper's rule as the agent leg, through `logItemVerdict`.
+
 ## Config
 
 `agents.remediation.stalledAgents`, read fresh every sweep, so a `patchDaemonConfig` takes effect on the next one. Defaults live in `resolveStalledAgentSweepConfig` (`packages/server/src/server/remediation/config.ts`).
@@ -56,5 +69,9 @@ Every stall is reported to the remediation ladder ([remediation.md](remediation.
 | `idleCpuPercent`          | `5`     | Process-tree CPU at or below this is idle                                                             |
 | `maxNudgesPerSweep`       | `4`     | Nudges and handoffs per sweep, longest stalled first; the rest wait a sweep                           |
 | `snapshot`                | `true`  | Snapshot the worktree before acting                                                                   |
+| `workItemsEnabled`        | `false` | The work-item leg above. Off until a week of its `dryRun` log looks right                             |
+| `workItemsDryRun`         | `true`  | Report would-nudge-item instead of nudging                                                            |
+| `workItemStaleMinutes`    | `240`   | How long an open item may sit unchanged, past the owner-idle and two-sweep gates                      |
+| `maxItemNudgesPerSweep`   | `4`     | Item nudges per sweep, oldest-unchanged first; the rest wait a sweep                                  |
 
-`grep '"monitor":"stalled-agent-sweep"' daemon.log` shows the mode the sweep last resolved.
+`grep '"monitor":"stalled-agent-sweep"' daemon.log` shows the mode the sweep last resolved; the work-item leg logs under `"monitor":"stalled-agent-sweep:work-items"`.
