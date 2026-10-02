@@ -663,6 +663,7 @@ export interface PaseoDaemonConfig {
     migrationConcurrency?: number;
     notifyParent?: boolean;
     collapseToSharedAccount?: boolean;
+    settleBack?: boolean;
   };
   // Wire-shaped like mcpGateway above rather than restated as a literal: the monitor's own
   // settings interface would not carry the passthrough index signature this has to accept.

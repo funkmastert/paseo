@@ -48,7 +48,7 @@ function parseResetMs(resetsAt: string | null | undefined): number | null {
  * same list (`plugins/claude-account-pool/server/windows.ts`); failover and placement have to
  * agree on which windows stop which agents.
  */
-const MODEL_FAMILIES = ["opus", "sonnet", "haiku", "fable"] as const;
+export const MODEL_FAMILIES = ["opus", "sonnet", "haiku", "fable"] as const;
 
 // The Claude fetcher's id for a model-scoped weekly window (`scopedWindowId` in
 // services/quota-fetcher/providers/claude.ts). The suffix is the API's model id or a normalized
@@ -60,7 +60,7 @@ export function isModelWindow(windowId: string): boolean {
   return MODEL_WINDOW_ID.test(windowId);
 }
 
-function modelFamilyOf(text: string): string | undefined {
+export function modelFamilyOf(text: string): string | undefined {
   const lower = text.toLowerCase();
   return MODEL_FAMILIES.find((family) => lower.includes(family));
 }

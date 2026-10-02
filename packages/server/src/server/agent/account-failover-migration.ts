@@ -22,6 +22,7 @@ import {
   providersShareAccount,
   type AccountPoolProviderEntry,
 } from "./account-pool-providers.js";
+import { isQuietBetweenTurns } from "./account-failover-settle-back.js";
 import { AgentProviderMoveError } from "./provider-move.js";
 import { pacedResume, unpacedResume, type PaceResume } from "./resume-pacer.js";
 
@@ -143,8 +144,12 @@ export function stripMovedTitlePrefix(title: string): string {
 }
 
 /** Idempotent: a title that already carries a prefix (e.g. from a manual handoff) gets one, not two. */
-export function formatMovedTitle(title: string, successorId: string): string {
-  return `[MOVED → ${successorId}, out of budget] ${stripMovedTitlePrefix(title)}`;
+export function formatMovedTitle(
+  title: string,
+  successorId: string,
+  why: string = "out of budget",
+): string {
+  return `[MOVED → ${successorId}, ${why}] ${stripMovedTitlePrefix(title)}`;
 }
 
 function sessionHandlesOf(record: Pick<StoredAgentRecord, "persistence">): Set<string> {
@@ -246,11 +251,42 @@ async function retirePredecessor(
   agentManager: AgentManager,
   predecessor: StoredAgentRecord,
   successorId: string,
+  why?: string,
 ): Promise<void> {
   await agentManager.updateAgentMetadata(predecessor.id, {
-    title: formatMovedTitle(predecessor.title ?? predecessor.id, successorId),
+    title: formatMovedTitle(predecessor.title ?? predecessor.id, successorId, why),
     labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: successorId },
   });
+}
+
+type RetiredOutcome = Extract<AccountFailoverOutcome, { kind: "adopted" | "duplicate" }>;
+
+/**
+ * Retires this record when its conversation already lives elsewhere: it has a successor, or
+ * another live record holds its session. Null when this record is the live end.
+ */
+async function retireIfLiveElsewhere(input: {
+  self: StoredAgentRecord;
+  records: readonly StoredAgentRecord[];
+  agentManager: AgentManager;
+}): Promise<RetiredOutcome | null> {
+  const { self, records, agentManager } = input;
+  const existing = findExistingSuccessor(self, records);
+  if (existing) {
+    await retirePredecessor(agentManager, self, existing.id);
+    return { kind: "adopted", oldAgentId: self.id, newAgentId: existing.id };
+  }
+  const holder = findLiveSessionHolder(self, records);
+  if (holder) {
+    await retirePredecessor(agentManager, self, holder.id);
+    return {
+      kind: "duplicate",
+      oldAgentId: self.id,
+      holderId: holder.id,
+      holderProviderId: holder.persistence?.provider ?? holder.provider,
+    };
+  }
+  return null;
 }
 
 /** A retired handle on the target account becomes the live end of the conversation again. */
@@ -629,20 +665,9 @@ export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<Id
     throw new Error(`Agent ${agent.id} has no stored record`);
   }
   const records = await agentStorage.list();
-  const existing = findExistingSuccessor(self, records);
-  if (existing) {
-    await retirePredecessor(agentManager, self, existing.id);
-    return { kind: "adopted", oldAgentId: agent.id, newAgentId: existing.id };
-  }
-  const holder = findLiveSessionHolder(self, records);
-  if (holder) {
-    await retirePredecessor(agentManager, self, holder.id);
-    return {
-      kind: "duplicate",
-      oldAgentId: agent.id,
-      holderId: holder.id,
-      holderProviderId: holder.persistence?.provider ?? holder.provider,
-    };
+  const retired = await retireIfLiveElsewhere({ self, records, agentManager });
+  if (retired) {
+    return retired;
   }
 
   const handles = sessionHandlesOf(self);
@@ -667,6 +692,143 @@ export async function rehomeIdleAgent(input: MigrateStuckAgentInput): Promise<Id
       return duplicate;
     }
     return { kind: "refused", agentId: agent.id, targetProviderId, reason: getErrorMessage(error) };
+  }
+  return { kind: "moved", agentId: agent.id, oldProviderId: agent.provider, targetProviderId };
+}
+
+export type SettleBackOutcome =
+  | { kind: "moved"; agentId: string; oldProviderId: string; targetProviderId: string }
+  /**
+   * The leader account still held this conversation's retired handle, left behind by an earlier
+   * import. That handle is the live end again and the agent that settled back is retired.
+   */
+  | {
+      kind: "revived";
+      oldAgentId: string;
+      handleId: string;
+      oldProviderId: string;
+      targetProviderId: string;
+      /** The handle's limit error from before it was retired: history, not new evidence. */
+      staleError: { error: string; timelineSeq: number | null } | null;
+    }
+  | Extract<AccountFailoverOutcome, { kind: "adopted" | "duplicate" | "skipped" }>
+  /** The daemon would not move it, for a reason that is not a race. Backs off. */
+  | { kind: "refused"; agentId: string; targetProviderId: string; reason: string };
+
+export interface SettleBackAgentInput {
+  agent: AccountFailoverAgentSummary;
+  /** A leader account the planner found with room (account-failover-settle-back.ts). */
+  targetProviderId: string;
+  /** When the move runs, for the re-read's quiet check. */
+  nowMs: number;
+  agentManager: AgentManager;
+  agentStorage: AgentStorage;
+  logger: Logger;
+}
+
+/** Why a planned settle-back must not run now, read from the agent as it is. */
+function staleSettleBackReason(
+  planned: AccountFailoverAgentSummary,
+  current: AccountFailoverAgentSummary | null,
+  nowMs: number,
+): AccountFailoverSkipReason | null {
+  if (!current) return "unloaded";
+  if (current.provider !== planned.provider || getMigratedToFromLabels(current.labels)) {
+    return "moved";
+  }
+  if (!isQuietBetweenTurns(current, nowMs)) return "busy";
+  return null;
+}
+
+/**
+ * Put an idle root back on the leader account, in place, and send it nothing: it has nothing to
+ * resume, and Tyler's next message runs there. Never an import. When the leader account still
+ * holds the conversation's retired handle, that handle is revived instead, the way a rescue
+ * revives one, and the agent that settled back is retired in its favour; messages to the old id
+ * follow `migrated-to` to it.
+ */
+export async function settleBackAgent(input: SettleBackAgentInput): Promise<SettleBackOutcome> {
+  const { agent, targetProviderId, agentManager, agentStorage, logger } = input;
+  const stale = staleSettleBackReason(
+    agent,
+    agentManager.getAccountFailoverSummary(agent.id),
+    input.nowMs,
+  );
+  if (stale) {
+    return { kind: "skipped", agentId: agent.id, reason: stale };
+  }
+  const self = await agentStorage.get(agent.id);
+  if (!self) {
+    throw new Error(`Agent ${agent.id} has no stored record`);
+  }
+  const retired = await retireIfLiveElsewhere({
+    self,
+    records: await agentStorage.list(),
+    agentManager,
+  });
+  if (retired) {
+    return retired;
+  }
+
+  try {
+    await agentManager.moveAgentToProvider(agent.id, targetProviderId);
+  } catch (error) {
+    const refusal = error instanceof AgentProviderMoveError ? error : null;
+    const duplicate = await retireIfDuplicate({
+      refusal,
+      agentId: agent.id,
+      agentManager,
+      agentStorage,
+    });
+    if (duplicate?.kind === "duplicate") {
+      return duplicate;
+    }
+    const skip = skipReasonForRefusal(refusal);
+    if (skip) {
+      return { kind: "skipped", agentId: agent.id, reason: skip };
+    }
+    const handles = sessionHandlesOf(self);
+    const handle =
+      refusal?.code === "session_conflict"
+        ? (await agentStorage.list()).find(
+            (record) =>
+              record.id !== agent.id &&
+              !record.archivedAt &&
+              record.persistence?.provider === targetProviderId &&
+              getMigratedToFromLabels(record.labels) &&
+              sharesSession(record, handles),
+          )
+        : undefined;
+    if (!handle) {
+      return {
+        kind: "refused",
+        agentId: agent.id,
+        targetProviderId,
+        reason: getErrorMessage(error),
+      };
+    }
+    await ensureAgentLoaded(handle.id, { agentManager, agentStorage, logger });
+    await reactivateRevivedHandle({
+      agentManager,
+      agentStorage,
+      handleId: handle.id,
+      predecessorId: agent.id,
+    });
+    const revived = agentManager.getAccountFailoverSummary(handle.id);
+    await retirePredecessor(agentManager, self, handle.id, "back on the leader account");
+    // The agent that settled back is the one Tyler has been talking to: its settings win.
+    await restoreSessionSettings({ agentManager, agent, successorId: handle.id, logger });
+    return {
+      kind: "revived",
+      oldAgentId: agent.id,
+      handleId: handle.id,
+      oldProviderId: agent.provider,
+      targetProviderId,
+      staleError:
+        revived && isLimitShapedError(revived.lastError)
+          ? { error: revived.lastError, timelineSeq: revived.timelineSeq }
+          : null,
+    };
   }
   return { kind: "moved", agentId: agent.id, oldProviderId: agent.provider, targetProviderId };
 }
@@ -710,21 +872,9 @@ export async function migrateStuckAgent(
   }
 
   const records = await agentStorage.list();
-  const existing = findExistingSuccessor(predecessor, records);
-  if (existing) {
-    await retirePredecessor(agentManager, predecessor, existing.id);
-    return { kind: "adopted", oldAgentId: agent.id, newAgentId: existing.id };
-  }
-
-  const holder = findLiveSessionHolder(predecessor, records);
-  if (holder) {
-    await retirePredecessor(agentManager, predecessor, holder.id);
-    return {
-      kind: "duplicate",
-      oldAgentId: agent.id,
-      holderId: holder.id,
-      holderProviderId: holder.persistence?.provider ?? holder.provider,
-    };
+  const retired = await retireIfLiveElsewhere({ self: predecessor, records, agentManager });
+  if (retired) {
+    return retired;
   }
 
   const handles = sessionHandlesOf(predecessor);

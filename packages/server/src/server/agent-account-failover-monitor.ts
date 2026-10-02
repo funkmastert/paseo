@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { Logger } from "pino";
 import pLimit from "p-limit";
-import { buildAccountFailoverNotificationPayload } from "@getpaseo/protocol/account-failover-notification";
+import {
+  buildAccountFailoverNotificationPayload,
+  buildAccountFailoverReturnNotificationPayload,
+} from "@getpaseo/protocol/account-failover-notification";
 import type { ProviderUsage } from "@getpaseo/protocol/messages";
 import type { AccountFailoverAgentSummary, AgentManager } from "./agent/agent-manager.js";
 import type { AgentAccountAuth } from "./agent/agent-sdk-types.js";
@@ -28,9 +31,16 @@ import {
 import {
   migrateStuckAgent,
   rehomeIdleAgent,
+  settleBackAgent,
   type AccountFailoverOutcome,
+  type SettleBackOutcome,
 } from "./agent/account-failover-migration.js";
 import { planIdleRehomes } from "./agent/account-failover-rehome.js";
+import {
+  planSettleBacks,
+  type SettleBackCandidate,
+  type SettleBackEpisode,
+} from "./agent/account-failover-settle-back.js";
 import { formatSystemNotificationPrompt, sendPromptToAgent } from "./agent/agent-prompt.js";
 import { pacedResume, unpacedResume, type PaceResume } from "./agent/resume-pacer.js";
 import type { PushNotificationSender } from "./push/index.js";
@@ -54,9 +64,9 @@ const MAX_RESUME_ATTEMPTS = 3;
 /** The ladder key for "agents are stranded and no account can take them" (docs/remediation.md). */
 export const ACCOUNT_FAILOVER_STRANDED_KEY = "account-failover-stranded";
 
-/** Per-agent wait after a refused idle move. A refusal is structural, so retrying every sweep is
- * pointless work every sweep. */
-const IDLE_MOVE_BACKOFF_MS = 60 * 60 * 1000;
+/** Per-agent wait after a refused idle move or settle-back. A refusal is structural, so retrying
+ * every sweep is pointless work every sweep. */
+const REFUSED_MOVE_BACKOFF_MS = 60 * 60 * 1000;
 
 export interface AccountFailoverConfig {
   enabled?: boolean;
@@ -71,7 +81,13 @@ export interface AccountFailoverConfig {
    * accounts run out for the week one after the other.
    */
   collapseToSharedAccount?: boolean;
+  /**
+   * Whether an idle root on a worker goes back to the leader account once that account has room
+   * again. Default `true` (account-failover-settle-back.ts).
+   */
+  settleBack?: boolean;
   // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+  // `returnHome: false` does not turn settleBack off: an old config must not undo it silently.
   returnHome?: boolean;
   returnMaxHomeUsedPct?: number;
   returnMinIdleMinutes?: number;
@@ -113,6 +129,7 @@ interface ResolvedAccountFailoverConfig {
   migrationConcurrency: number;
   notifyParent: boolean;
   collapseToSharedAccount: boolean;
+  settleBack: boolean;
 }
 
 function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccountFailoverConfig {
@@ -121,6 +138,7 @@ function resolveConfig(config: AccountFailoverConfig | undefined): ResolvedAccou
     migrationConcurrency: config?.migrationConcurrency ?? DEFAULT_MIGRATION_CONCURRENCY,
     notifyParent: config?.notifyParent ?? true,
     collapseToSharedAccount: config?.collapseToSharedAccount ?? true,
+    settleBack: config?.settleBack ?? true,
   };
 }
 
@@ -165,6 +183,14 @@ export class AccountFailoverMonitor {
    * forgetting the backoff across a restart costs one more refused move.
    */
   private idleBackoffs = new Map<string, number>();
+  /**
+   * Settle-back state, all in memory: each leader account's recovery episode per model family,
+   * the episode each root already had its one attempt in, and the backoff after a refusal. A
+   * restart forgets them, which costs at most one more attempt per root.
+   */
+  private settleBackEpisodes = new Map<string, SettleBackEpisode>();
+  private settleBackAttempts = new Map<string, string>();
+  private settleBackBackoffs = new Map<string, number>();
 
   constructor(options: AccountFailoverMonitorOptions) {
     this.options = options;
@@ -217,6 +243,9 @@ export class AccountFailoverMonitor {
       this.sightings.clear();
       this.providerSightings.clear();
       this.idleBackoffs.clear();
+      this.settleBackEpisodes.clear();
+      this.settleBackAttempts.clear();
+      this.settleBackBackoffs.clear();
       await this.observeStranding({ stranded: [], deadPoolIds: [], usage: null });
       return;
     }
@@ -250,9 +279,10 @@ export class AccountFailoverMonitor {
       // agent's model, which would cap it again within a turn or two.
       unusable: new Set([...plan.deadProviderIds, ...saturatedProviderIds(rows, agent.model)]),
     });
-    // An account move rebuilds the agent's whole prompt cache, so only two kinds of agent move:
-    // one whose turn was cut off on a dead account (rescued and resumed here), and an idle root on
-    // one (moved below, unprompted). Nothing else moves, and nothing moves back.
+    // An account move rebuilds the agent's whole prompt cache, so only three kinds of agent move:
+    // one whose turn was cut off on a dead account (rescued and resumed here), an idle root on one
+    // (moved below, unprompted), and an idle root on a worker once the leader account has room
+    // again (settled back last). Children never move back.
     const limit = pLimit({ concurrency: config.migrationConcurrency });
     const outcomes = await Promise.all(
       plan.candidates.map((agent) =>
@@ -302,6 +332,133 @@ export class AccountFailoverMonitor {
         config,
       });
     }
+
+    // Episodes advance whether or not settle-back is on, so turning it on live finds them current.
+    const settleBacks = planSettleBacks({
+      agents: idle.length === 0 ? afterRescues : this.listUnclaimedAgents(),
+      poolEntries,
+      deadProviderIds: plan.deadProviderIds,
+      cappedModelWindows: plan.cappedModelWindows,
+      accounts,
+      usage,
+      episodes: this.settleBackEpisodes,
+      attempts: this.settleBackAttempts,
+      backoffs: this.settleBackBackoffs,
+      nowMs,
+    });
+    this.settleBackEpisodes = settleBacks.episodes;
+    if (!config.settleBack) {
+      return;
+    }
+    // One at a time through the shared resume pace, so a recovery that frees many roots moves
+    // them a few a minute.
+    for (const candidate of settleBacks.candidates) {
+      await this.settleBackOne(candidate);
+    }
+  }
+
+  /**
+   * An idle root goes back to the leader account: in place, unprompted, once per recovery
+   * episode whatever the outcome. A refusal also backs off for an hour. A move skipped because a
+   * turn started is not an attempt; the next quiet sweep tries again.
+   */
+  private async settleBackOne(candidate: SettleBackCandidate): Promise<void> {
+    const { agent, targetProviderId } = candidate;
+    const { logger } = this.options;
+    const paceResume = this.options.paceResume ?? unpacedResume;
+    let outcome: SettleBackOutcome;
+    try {
+      outcome = await paceResume(
+        pacedResume(agent.id, agent.labels, "account-failover-settle-back"),
+        () =>
+          settleBackAgent({
+            agent,
+            targetProviderId,
+            nowMs: this.now(),
+            agentManager: this.options.agentManager,
+            agentStorage: this.options.agentStorage,
+            logger,
+          }),
+      );
+    } catch (error) {
+      this.settleBackAttempts.set(agent.id, candidate.episode);
+      this.settleBackBackoffs.set(agent.id, this.now() + REFUSED_MOVE_BACKOFF_MS);
+      logger.warn(
+        { err: error, agentId: agent.id, from: agent.provider, to: targetProviderId },
+        "Account failover: could not settle the root back onto the leader account",
+      );
+      return;
+    }
+    switch (outcome.kind) {
+      case "skipped":
+        logger.info(
+          { agentId: agent.id, reason: outcome.reason },
+          "Account failover: the root changed since the sweep planned its settle-back; leaving it",
+        );
+        return;
+      case "adopted":
+      case "duplicate":
+        this.logDuplicate(outcome);
+        return;
+      case "refused":
+        this.settleBackAttempts.set(agent.id, candidate.episode);
+        this.settleBackBackoffs.set(agent.id, this.now() + REFUSED_MOVE_BACKOFF_MS);
+        logger.info(
+          { agentId: agent.id, to: targetProviderId, reason: outcome.reason },
+          "Account failover: the root's settle-back was refused; backing off",
+        );
+        return;
+      case "moved":
+      case "revived": {
+        this.settleBackAttempts.set(agent.id, candidate.episode);
+        this.settleBackBackoffs.delete(agent.id);
+        const liveId = outcome.kind === "moved" ? outcome.agentId : outcome.handleId;
+        if (outcome.kind === "revived" && outcome.staleError) {
+          // The handle's old cap is history; record it as already expired, as a rescue does.
+          this.sightings.set(liveId, {
+            ...outcome.staleError,
+            firstSeenMs: Number.NEGATIVE_INFINITY,
+          });
+        }
+        logger.info(
+          { agentId: agent.id, liveId, from: outcome.oldProviderId, to: targetProviderId },
+          "Account failover: settled the root back onto the leader account",
+        );
+        await this.notifySettledBack({
+          workspaceId: agent.workspaceId,
+          agentId: liveId,
+          title: agent.title,
+          fromProviderId: outcome.oldProviderId,
+          targetProviderId,
+        });
+        return;
+      }
+    }
+  }
+
+  private async notifySettledBack(input: {
+    workspaceId: string | undefined;
+    agentId: string;
+    title: string | null;
+    fromProviderId: string;
+    targetProviderId: string;
+  }): Promise<void> {
+    try {
+      await this.options.pushNotificationSender.send(
+        buildAccountFailoverReturnNotificationPayload({
+          serverId: this.options.serverId,
+          workspaceId: input.workspaceId,
+          agentId: input.agentId,
+          agentTitle: input.title,
+          homeProviderId: input.targetProviderId,
+          fromProviderId: input.fromProviderId,
+        }),
+        // The remedy working, like an idle move: the ledger, no push.
+        { level: "record", dedupeKey: `account-failover:${input.agentId}:settled-back` },
+      );
+    } catch (error) {
+      this.options.logger.warn({ err: error }, "Account failover: push notification failed");
+    }
   }
 
   /** Every loaded agent restart recovery has not claimed. */
@@ -341,7 +498,7 @@ export class AccountFailoverMonitor {
         logger,
       });
     } catch (error) {
-      this.idleBackoffs.set(agent.id, this.now() + IDLE_MOVE_BACKOFF_MS);
+      this.idleBackoffs.set(agent.id, this.now() + REFUSED_MOVE_BACKOFF_MS);
       logger.warn(
         { err: error, agentId: agent.id, provider: agent.provider },
         "Account failover: could not move an idle agent off its exhausted account",
@@ -364,7 +521,7 @@ export class AccountFailoverMonitor {
         });
         return;
       case "refused":
-        this.idleBackoffs.set(agent.id, this.now() + IDLE_MOVE_BACKOFF_MS);
+        this.idleBackoffs.set(agent.id, this.now() + REFUSED_MOVE_BACKOFF_MS);
         logger.info(
           { agentId: agent.id, to: outcome.targetProviderId, reason: outcome.reason },
           "Account failover: the idle agent's move was refused; backing off",

@@ -189,6 +189,29 @@ describe("PersistedConfigSchema agents.doneJanitor config", () => {
   });
 });
 
+describe("PersistedConfigSchema agents.accountFailover config", () => {
+  test("accepts settleBack, the switch for roots going back to the leader account", () => {
+    expect(
+      PersistedConfigSchema.parse({ agents: { accountFailover: { settleBack: false } } }).agents
+        ?.accountFailover,
+    ).toEqual({ settleBack: false });
+  });
+
+  test("still loads a config that sets the retired return keys", () => {
+    // COMPAT(failoverReturn): an old config.json must keep loading.
+    const accountFailover = { settleBack: true, returnHome: false, returnMinIdleMinutes: 20 };
+    expect(
+      PersistedConfigSchema.parse({ agents: { accountFailover } }).agents?.accountFailover,
+    ).toEqual(accountFailover);
+  });
+
+  test("rejects an unknown key, like its siblings", () => {
+    expect(() =>
+      PersistedConfigSchema.parse({ agents: { accountFailover: { settleHome: true } } }),
+    ).toThrow();
+  });
+});
+
 describe("PersistedConfigSchema daemon append system prompt config", () => {
   test("accepts optional append system prompt", () => {
     const parsed = PersistedConfigSchema.parse({
