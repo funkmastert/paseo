@@ -226,4 +226,15 @@ describe("evaluateScheduleCondition", () => {
     );
     expect(verdict.fire).toBe(true);
   });
+
+  test("children the target's conversation spawned under an id it moved from are its own", () => {
+    // Account failover moved "leader" to "leader-new"; its children still name the old id.
+    const successor = view({ id: "leader-new" });
+    const runningChild = child("c1", { lifecycle: "running" });
+    const verdict = evaluateScheduleCondition(
+      running,
+      input(successor, [runningChild], { formerTargetIds: ["leader"] }),
+    );
+    expect(verdict).toEqual({ fire: true, reason: "1 child agent(s) still running" });
+  });
 });

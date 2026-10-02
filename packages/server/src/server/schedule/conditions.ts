@@ -17,8 +17,16 @@ import { parentOf } from "../agent/done-janitor-detector.js";
 export type ConditionVerdict = { fire: true; reason: string } | { fire: false; reason: string };
 
 export interface ConditionInput {
-  /** The heartbeat's target as the daemon sees it. Null when it has no record at all. */
+  /**
+   * The heartbeat's target as the daemon sees it: where its conversation lives now, when account
+   * failover moved it. Null when it has no record at all.
+   */
   target: DoneJanitorAgentView | null;
+  /**
+   * The ids the target's conversation moved from (account failover's `migrated-to`). Children it
+   * spawned under them still carry them as their parent, and they are its children all the same.
+   */
+  formerTargetIds?: readonly string[];
   /** Every agent view, the target's children among them. */
   views: readonly DoneJanitorAgentView[];
   /** When the heartbeat was created. */
@@ -42,11 +50,12 @@ function isOccupied(view: DoneJanitorAgentView): boolean {
   return isRunning(view) || (view.live && view.pendingPermissionCount > 0);
 }
 
-function childrenOf(
-  targetId: string,
-  views: readonly DoneJanitorAgentView[],
-): DoneJanitorAgentView[] {
-  return views.filter((view) => !view.archived && parentOf(view) === targetId);
+function childrenOf(input: ConditionInput, target: DoneJanitorAgentView): DoneJanitorAgentView[] {
+  const parentIds = new Set([target.id, ...(input.formerTargetIds ?? [])]);
+  return input.views.filter((view) => {
+    const parentId = parentOf(view);
+    return !view.archived && parentId !== null && parentIds.has(parentId);
+  });
 }
 
 /**
@@ -68,7 +77,7 @@ function evaluateLeaf(
     case "always":
       return { fire: true, reason: "always" };
     case "hasActiveChildren": {
-      const running = childrenOf(target.id, input.views).filter(isRunning);
+      const running = childrenOf(input, target).filter(isRunning);
       if (running.length > 0) {
         return { fire: true, reason: `${running.length} child agent(s) still running` };
       }
@@ -82,7 +91,7 @@ function evaluateLeaf(
     }
     case "childFinishedSince": {
       const horizon = newsHorizonMs(input, target);
-      const finished = childrenOf(target.id, input.views).filter(
+      const finished = childrenOf(input, target).filter(
         (child) =>
           !isRunning(child) &&
           child.lifecycle !== "initializing" &&

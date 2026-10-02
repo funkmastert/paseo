@@ -908,6 +908,51 @@ test("agent handles delegate create, send, timeline refetch, archive, and local 
   await client.close();
 });
 
+test("agent run waits on the agent a moved message was delivered to", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_retired");
+
+  const runPromise = agent.run("pick it up", { messageId: "run-moved", timeoutMs: 30_000 });
+  const sendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(sendRequest).toMatchObject({
+    type: "send_agent_message_request",
+    agentId: "agent_retired",
+  });
+  // Account failover moved the conversation; the daemon delivered to where it lives now.
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: sendRequest.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const waitRequest = parseSentSessionMessage(ws.sent.at(-1));
+  expect(waitRequest).toMatchObject({
+    type: "wait_for_finish_request",
+    agentId: "agent_successor",
+  });
+  ws.message(
+    sessionMessage({
+      type: "wait_for_finish_response",
+      payload: {
+        requestId: waitRequest.requestId,
+        status: "idle",
+        final: createAgent({ id: "agent_successor" }),
+        error: null,
+        lastMessage: "DONE",
+      },
+    }),
+  );
+  await expect(runPromise).resolves.toMatchObject({ status: "idle", lastMessage: "DONE" });
+  await client.close();
+});
+
 test("agent handles list the session's own commands through the existing daemon RPC", async () => {
   const { client, ws } = await connectClient();
   const agent = client.agents.ref("agent_sdk");

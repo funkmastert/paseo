@@ -10,7 +10,12 @@ import type { AgentManager, ManagedAgent } from "./agent-manager.js";
 import type { AgentStorage } from "./agent-storage.js";
 import { ensureAgentLoaded } from "./agent-loading.js";
 import { isStaleProviderSessionError } from "./stale-provider-session-error.js";
-import { getParentAgentIdFromLabels } from "@getpaseo/protocol/agent-labels";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  followMigratedTo,
+  getParentAgentIdFromLabels,
+  type MigrationChainResult,
+} from "@getpaseo/protocol/agent-labels";
 import type { ActiveTurnBehavior } from "@getpaseo/protocol/messages";
 import type { FinishOutcomeReason } from "./finish-obligation.js";
 import { PromptQueue, type QueuedPrompt, type QueuedPromptDelivery } from "./prompt-queue.js";
@@ -394,6 +399,81 @@ export function isSystemInjectedEnvelope(text: string): boolean {
   return SYSTEM_ENVELOPE_PATTERN.test(text);
 }
 
+/**
+ * A prompt for a handle whose `migrated-to` pointers loop. No agent is the live end of the
+ * conversation, and any hop would be a guess, so nothing is sent.
+ */
+export class MigratedToLoopError extends Error {
+  readonly chain: readonly string[];
+
+  constructor(chain: readonly string[]) {
+    super(
+      `Agent ${chain[0]} was moved between accounts in a loop (${chain.join(" → ")}), so no ` +
+        `agent holds its conversation. Fix the ${ACCOUNT_FAILOVER_MIGRATED_TO_LABEL} labels.`,
+    );
+    this.name = "MigratedToLoopError";
+    this.chain = chain;
+  }
+}
+
+type AgentLabels = Record<string, unknown>;
+
+/**
+ * `followMigratedTo` over labels that cost a read. Each pass reads the one agent the walk stopped
+ * at for want of its labels, so a chain of n moves costs n + 1 reads.
+ */
+export async function followMigratedToAsync(
+  agentId: string,
+  readLabels: (agentId: string) => Promise<AgentLabels | null>,
+): Promise<MigrationChainResult> {
+  const known = new Map<string, AgentLabels | null>();
+  for (;;) {
+    const unread: string[] = [];
+    const result = followMigratedTo(agentId, (id) => {
+      if (known.has(id)) return known.get(id);
+      unread.push(id);
+      return null;
+    });
+    const next = unread[0];
+    if (next === undefined) return result;
+    known.set(next, await readLabels(next));
+  }
+}
+
+export interface PromptTarget {
+  /** Where the prompt goes: the agent asked for, or the live end of its `migrated-to` chain. */
+  agentId: string;
+  /** From the agent asked for to `agentId`, when it moved. Null when it did not. */
+  movedChain: string[] | null;
+}
+
+/**
+ * Where a prompt for `agentId` goes. Account failover retires a handle by pointing its
+ * `migrated-to` label at the agent that carries the conversation on, and a prompt for the handle
+ * goes there: to the end of the chain when that agent moved too. Live labels win for a loaded
+ * agent. An archived agent at the end is still where the conversation lives; whether a prompt may
+ * unarchive it is the sender's call. Throws {@link MigratedToLoopError} on a loop.
+ */
+export async function resolvePromptTarget(input: {
+  agentManager: Pick<AgentManager, "getAgent">;
+  agentStorage: Pick<AgentStorage, "get">;
+  agentId: string;
+}): Promise<PromptTarget> {
+  const result = await followMigratedToAsync(input.agentId, async (agentId) => {
+    const live = input.agentManager.getAgent(agentId);
+    if (live) return live.labels;
+    return (await input.agentStorage.get(agentId))?.labels ?? null;
+  });
+  switch (result.kind) {
+    case "self":
+      return { agentId: result.agentId, movedChain: null };
+    case "moved":
+      return { agentId: result.agentId, movedChain: result.chain };
+    case "loop":
+      throw new MigratedToLoopError(result.chain);
+  }
+}
+
 export interface SendPromptToAgentParams {
   agentManager: AgentManager;
   agentStorage: AgentStorage;
@@ -415,11 +495,23 @@ export interface SendPromptToAgentParams {
    * schedule fires, notify-on-finish).
    */
   unarchive?: boolean;
+  /**
+   * Default true: a handle account failover retired delivers to where its conversation lives now
+   * ({@link resolvePromptTarget}). False sends to exactly `agentId`, for a sender that resolved
+   * and gated the target itself under its own rule (finish reports).
+   */
+  followMigration?: boolean;
   /** See {@link StartAgentRunOptions.clearPendingPermissions}. */
   clearPendingPermissions?: boolean;
   /** See {@link StartAgentRunOptions.queuedAt}. */
   queuedAt?: string;
   logger: Logger;
+}
+
+export interface SendPromptResult {
+  disposition: PromptDispatchDisposition;
+  /** The agent the prompt went to. Not the one asked for when that one moved. */
+  agentId: string;
 }
 
 export interface StartCreatedAgentInitialPromptParams {
@@ -476,43 +568,66 @@ export async function waitForAgentRunStartWithTimeout(
  * chat mentions, notify-on-finish) MUST go through this so behavior can never
  * drift between them.
  *
+ * A prompt for a handle account failover retired goes to where the conversation lives now, which
+ * the result names; a `migrated-to` loop throws {@link MigratedToLoopError} and sends nothing.
+ *
  * When `unarchive` is false and the agent is archived, the call is a silent
  * no-op (returns the normal turn-start disposition) — the agent is not run.
  */
 export async function sendPromptToAgent(
   params: SendPromptToAgentParams,
-): Promise<{ disposition: PromptDispatchDisposition }> {
+): Promise<SendPromptResult> {
   const unarchive = params.unarchive ?? true;
+  const agentId =
+    params.followMigration === false ? params.agentId : await resolveAndLogPromptTarget(params);
 
-  const record = await params.agentStorage.get(params.agentId);
+  const record = await params.agentStorage.get(agentId);
   if (record?.archivedAt) {
     if (!unarchive) {
-      return { disposition: "turn_started" };
+      return { disposition: "turn_started", agentId };
     }
-    await unarchiveAgentState(params.agentStorage, params.agentManager, params.agentId);
+    await unarchiveAgentState(params.agentStorage, params.agentManager, agentId);
   }
 
-  await ensureAgentLoaded(params.agentId, {
+  await ensureAgentLoaded(agentId, {
     agentManager: params.agentManager,
     agentStorage: params.agentStorage,
     logger: params.logger,
   });
 
   if (params.sessionMode) {
-    await params.agentManager.setAgentMode(params.agentId, params.sessionMode);
+    await params.agentManager.setAgentMode(agentId, params.sessionMode);
   }
 
   const runOptions = params.messageId
     ? { ...params.runOptions, clientMessageId: params.messageId }
     : params.runOptions;
 
-  return await startAgentRun(params.agentManager, params.agentId, params.prompt, params.logger, {
-    replaceRunning: true,
-    activeTurnBehavior: params.activeTurnBehavior ?? "steer",
-    clearPendingPermissions: params.clearPendingPermissions,
-    ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
-    runOptions,
-  });
+  const { disposition } = await startAgentRun(
+    params.agentManager,
+    agentId,
+    params.prompt,
+    params.logger,
+    {
+      replaceRunning: true,
+      activeTurnBehavior: params.activeTurnBehavior ?? "steer",
+      clearPendingPermissions: params.clearPendingPermissions,
+      ...(params.queuedAt ? { queuedAt: params.queuedAt } : {}),
+      runOptions,
+    },
+  );
+  return { disposition, agentId };
+}
+
+async function resolveAndLogPromptTarget(params: SendPromptToAgentParams): Promise<string> {
+  const target = await resolvePromptTarget(params);
+  if (target.movedChain) {
+    params.logger.info(
+      { requestedAgentId: params.agentId, agentId: target.agentId, chain: target.movedChain },
+      "Prompt for a moved agent delivered to where its conversation lives now",
+    );
+  }
+  return target.agentId;
 }
 
 export async function startCreatedAgentInitialPrompt(

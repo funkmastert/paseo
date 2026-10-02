@@ -13,7 +13,10 @@ import {
 import type { PaseoToolHostDependencies } from "./types.js";
 
 const promptMocks = vi.hoisted(() => ({
-  sendPromptToAgent: vi.fn(async () => ({ disposition: "turn_started" })),
+  sendPromptToAgent: vi.fn(async (params: { agentId: string }) => ({
+    disposition: "turn_started",
+    agentId: params.agentId,
+  })),
   setupFinishNotification: vi.fn(),
 }));
 
@@ -419,6 +422,47 @@ describe("broadcast_agent_prompt", () => {
     );
     expect(promptMocks.setupFinishNotification).toHaveBeenCalledWith(
       expect.objectContaining({ childAgentId: "idle-1", callerAgentId: "boss" }),
+    );
+  });
+
+  test("reaches a moved child once, where its conversation lives now, and refuses a loop", async () => {
+    const MIGRATED_TO = "paseo.account-failover.migrated-to";
+    const harness = createHarness(
+      [
+        { id: "boss", status: "running" },
+        // Retired, and its successor is a child too: the successor takes it directly.
+        { id: "old-1", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "new-1" } },
+        { id: "new-1", status: "running", labels: { [PARENT_LABEL]: "boss" } },
+        // Retired into a successor made without the parent label.
+        { id: "old-2", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "new-2" } },
+        { id: "new-2", status: "idle" },
+        { id: "loop-a", stored: true, labels: { [PARENT_LABEL]: "boss", [MIGRATED_TO]: "loop-b" } },
+        { id: "loop-b", stored: true, labels: { [MIGRATED_TO]: "loop-a" } },
+      ],
+      "boss",
+    );
+
+    const result = await call(harness, "broadcast_agent_prompt", {
+      prompt: "Status?",
+      wakeIdle: true,
+    });
+
+    const byId = Object.fromEntries(result.results.map((r: Loose) => [r.agentId, r]));
+    expect(byId["new-1"].outcome).toBe("steered");
+    expect(byId["old-1"]).toMatchObject({ outcome: "skipped", deliveredToAgentId: "new-1" });
+    expect(byId["old-1"].reason).toContain("new-1");
+    expect(byId["old-2"]).toMatchObject({ outcome: "woken", deliveredToAgentId: "new-2" });
+    expect(byId["loop-a"].outcome).toBe("failed");
+    expect(byId["loop-a"].reason).toContain("loop-a → loop-b → loop-a");
+
+    expect(harness.steerAgentRun).toHaveBeenCalledTimes(1);
+    expect(harness.steerAgentRun).toHaveBeenCalledWith("new-1", expect.any(String));
+    expect(promptMocks.sendPromptToAgent).toHaveBeenCalledTimes(1);
+    expect(promptMocks.sendPromptToAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "new-2", unarchive: false }),
+    );
+    expect(promptMocks.setupFinishNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ childAgentId: "new-2", callerAgentId: "boss" }),
     );
   });
 

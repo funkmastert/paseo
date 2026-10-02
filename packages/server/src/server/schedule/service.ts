@@ -9,6 +9,7 @@ import { curateAgentActivity } from "../agent/activity-curator.js";
 import { ensureAgentLoaded } from "../agent/agent-loading.js";
 import {
   formatSystemNotificationPrompt,
+  resolvePromptTarget,
   startAgentRun,
   type AgentRunController,
 } from "../agent/agent-prompt.js";
@@ -21,6 +22,7 @@ import { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
 import { evaluateScheduleCondition } from "./conditions.js";
 import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
+import { followMigratedTo } from "@getpaseo/protocol/agent-labels";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -647,8 +649,17 @@ export class ScheduleService {
         new Set<string>(),
         new Set<string>(),
       );
+      // A target account failover retired is read where its conversation lives now, the agent the
+      // fire will reach (executeSchedule).
+      const byId = new Map(views.map((view) => [view.id, view]));
+      const moved = followMigratedTo(target.agentId, (id) => byId.get(id)?.labels ?? null);
+      if (moved.kind === "loop") {
+        // No live end to read. Fire, so the run fails on the loop where it can be seen.
+        return true;
+      }
       const verdict = evaluateScheduleCondition(condition, {
-        target: views.find((view) => view.id === target.agentId) ?? null,
+        target: byId.get(moved.agentId) ?? null,
+        formerTargetIds: moved.kind === "moved" ? moved.chain.slice(0, -1) : [],
         views,
         createdAtMs: Date.parse(schedule.createdAt),
         lastRunAtMs: schedule.lastRunAt ? Date.parse(schedule.lastRunAt) : null,
@@ -956,15 +967,22 @@ export class ScheduleService {
   ): Promise<ScheduleExecutionResult> {
     if (schedule.target.type === "agent") {
       const wrappedPrompt = formatSystemNotificationPrompt(buildScheduleFireBody(schedule, runId));
-      const record = await this.agentStorage.get(schedule.target.agentId);
+      // A target account failover retired fires where its conversation lives now; the run
+      // records that agent. A move loop throws, and the run fails naming it.
+      const { agentId } = await resolvePromptTarget({
+        agentManager: this.agentManager,
+        agentStorage: this.agentStorage,
+        agentId: schedule.target.agentId,
+      });
+      const record = await this.agentStorage.get(agentId);
       if (!record) {
-        throw new ScheduleTargetGoneError(`Agent ${schedule.target.agentId} no longer exists`);
+        throw new ScheduleTargetGoneError(`Agent ${agentId} no longer exists`);
       }
       if (record.archivedAt) {
-        throw new ScheduleTargetGoneError(`Agent ${schedule.target.agentId} is archived`);
+        throw new ScheduleTargetGoneError(`Agent ${agentId} is archived`);
       }
 
-      const agent = await ensureAgentLoaded(schedule.target.agentId, {
+      const agent = await ensureAgentLoaded(agentId, {
         agentManager: this.agentManager,
         agentStorage: this.agentStorage,
         logger: this.logger,

@@ -56,7 +56,10 @@ import type { GeneratedWorkspaceName } from "../worktree-branch-name-generator.j
 import type { ForgeService } from "../../services/forge-service.js";
 import { areEquivalentPaths } from "../../utils/path.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import { MutableDaemonConfigSchema, type AgentProfile } from "@getpaseo/protocol/messages";
 import type { DaemonConfigStore } from "../daemon-config-store.js";
 import type { BrowserToolsBroker, BrowserToolsExecuteInput } from "../browser-tools/broker.js";
@@ -3992,6 +3995,97 @@ describe("send_agent_prompt MCP tool", () => {
       "child-agent",
       expect.objectContaining({ waitForActive: true }),
     );
+  });
+
+  /** A child account failover retired into `child-successor`, which carries its conversation. */
+  function movedChild(spies: TestDeps["spies"]): void {
+    const agents: Record<string, ManagedAgent> = {
+      "parent-agent": {
+        id: "parent-agent",
+        cwd: existingCwd,
+        workspaceId: "wks_parent",
+        provider: "codex",
+        currentModeId: "full-access",
+        labels: {},
+      } as unknown as ManagedAgent,
+      "child-agent": {
+        id: "child-agent",
+        cwd: existingCwd,
+        lifecycle: "idle",
+        currentModeId: null,
+        availableModes: [],
+        config: { title: "Child" },
+        labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "child-successor" },
+      } as unknown as ManagedAgent,
+      "child-successor": {
+        id: "child-successor",
+        cwd: existingCwd,
+        lifecycle: "idle",
+        currentModeId: null,
+        availableModes: [],
+        config: { title: "Child" },
+        labels: {},
+      } as unknown as ManagedAgent,
+    };
+    spies.agentManager.getAgent.mockImplementation((agentId: string) => agents[agentId] ?? null);
+  }
+
+  it("prompts a moved child's successor, names it, and waits on it", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    movedChild(spies);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger,
+    });
+
+    const response = await invokeToolWithParsedInput(registeredTool(server, "send_agent_prompt"), {
+      agentId: "child-agent",
+      prompt: "Follow up",
+    });
+
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledTimes(1);
+    expect(spies.agentManager.streamAgent).toHaveBeenCalledWith(
+      "child-successor",
+      "Follow up",
+      undefined,
+      undefined,
+    );
+    expect(spies.agentManager.waitForAgentEvent).toHaveBeenCalledWith(
+      "child-successor",
+      expect.objectContaining({ waitForActive: true }),
+    );
+    expect(response.structuredContent).toMatchObject({
+      success: true,
+      deliveredToAgentId: "child-successor",
+    });
+    expect(response.structuredContent.guidance).toContain(
+      "child-agent moved to child-successor (account failover)",
+    );
+  });
+
+  it("watches a moved child's successor for the finish report", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    movedChild(spies);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    const response = await invokeToolWithParsedInput(registeredTool(server, "send_agent_prompt"), {
+      agentId: "child-agent",
+      prompt: "Follow up",
+    });
+
+    expect(spies.agentManager.subscribe).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ agentId: "child-successor" }),
+    );
+    expect(response.structuredContent.deliveredToAgentId).toBe("child-successor");
   });
 });
 

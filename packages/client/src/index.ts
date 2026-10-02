@@ -818,9 +818,10 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
       },
       run: async (text, options) => {
         const { timeoutMs, ...sendOptions } = options ?? {};
-        await daemonClient.sendAgentMessage(id, text, sendOptions);
+        const sent = await daemonClient.sendAgentMessage(id, text, sendOptions);
+        // The turn runs where the message was delivered: not `id` when that agent had moved.
         const result = await daemonClient.waitForFinish(
-          id,
+          sent.deliveredToAgentId ?? id,
           timeoutMs ?? DEFAULT_WAIT_FOR_FINISH_MS,
         );
         if (result.final) {
