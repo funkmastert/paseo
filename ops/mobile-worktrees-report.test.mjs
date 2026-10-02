@@ -37,6 +37,8 @@ before(() => {
   git(repo, "remote", "add", "origin", path.join(root, "origin.git"));
   git(repo, "push", "-q", "origin", "HEAD:refs/heads/main");
   for (const name of ["wt-safe", "wt-cwd", "wt-argv", "wt-agent"]) worktree(name);
+  mkdirSync(path.join(wts, "wt-broken"));
+  writeFileSync(path.join(wts, "wt-broken", ".git"), "gitdir: /nonexistent/worktrees/wt-broken\n");
   worktree("wt-recent", { idleMs: 1 * H });
   const dirty = worktree("wt-dirty");
   writeFileSync(path.join(dirty, "notes.txt"), "wip");
@@ -89,6 +91,7 @@ test("only a pushed, clean, idle worktree nothing uses is removable", async () =
       assert.match(verdict(out, "wt-argv"), /^keep: in use \(pid \d+ argv\)$/);
       assert.equal(verdict(out, "wt-agent"), "keep: live agent inside");
       assert.equal(verdict(out, "wt-recent"), "keep: touched 1h ago");
+      assert.equal(verdict(out, "wt-broken"), "keep: git activity unreadable");
       assert.match(verdict(out, "wt-dirty"), /^keep: it has 1 uncommitted or untracked file/);
       assert.match(verdict(out, "wt-unpushed"), /^keep: wt-unpushed has 1 commit\(s\) neither/);
       assert.match(out, /1 removable, /);
@@ -115,4 +118,12 @@ test("--apply removes the safe worktree and keeps its branch", async () => {
       for (const name of ["wt-cwd", "wt-argv", "wt-agent", "wt-recent", "wt-dirty", "wt-unpushed"]) assert.ok(existsSync(path.join(wts, name)), name);
     }),
   );
+});
+
+test("test overrides without both the root and the agents file refuse to run", () => {
+  for (const env of [{ MOBILE_REPORT_AGENTS: agentsFile }, { MOBILE_REPORT_ROOT: wts }, { MOBILE_REPORT_PS: "/usr/bin/true" }]) {
+    const r = spawnSync(process.execPath, [REPORT, "--apply"], { encoding: "utf8", env: { ...process.env, ...env } });
+    assert.equal(r.status, 2, JSON.stringify(env));
+    assert.match(r.stderr, /refusing to run/);
+  }
 });

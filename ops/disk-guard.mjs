@@ -20,13 +20,15 @@
 //  4. `xcrun simctl delete unavailable`, unless xcodebuild runs.
 //  5. ~/Library/Developer/XCTestDevices clones (canonical UDID dirs) unchanged for a day, that no
 //     process names, while no xcodebuild runs at all.
-//  6. mobile-worktrees-report.mjs --apply, at most hourly: ~/mobile-worktrees checkouts that are
-//     pushed or merged, clean, idle 48 h and not in use. Branches are kept. Their caches go as
-//     orphans in step 7.
-//  7. Orphaned caches as in 2, then WonderlyMobileCore caches of live worktrees idle 24 h (no git
-//     activity, no process with the worktree in argv or cwd, no live lease, no cache file written),
-//     oldest first, until free space reaches TARGET_GB. Primary checkouts are never evicted.
-// Below CRITICAL_GB ("critical") step 7's idle threshold drops to 6 h, and a sweep that ends still
+//  6. Orphaned caches as in 2, then WonderlyMobileCore caches of live worktrees idle 24 h (no git
+//     activity, no process with the worktree or the cache in argv or cwd, no live lease, no cache
+//     file written), oldest first, until free space reaches TARGET_GB. Primary checkouts are never
+//     evicted.
+//  7. Only if still under TARGET_GB, at most hourly: mobile-worktrees-report.mjs --apply removes
+//     ~/mobile-worktrees checkouts that are pushed or merged, clean, idle 48 h and not in use. Last,
+//     because a removed worktree also loses its ignored local config. Branches are kept. Their
+//     caches go as orphans next sweep.
+// Below CRITICAL_GB ("critical") step 6's idle threshold drops to 6 h, and a sweep that ends still
 // critical sends one macOS notification per 6 hours naming the top 5 consumers. The daemon has no push
 // an ops script can call, so it is a local notification.
 // Fails closed everywhere: a probe that can't answer keeps the item; a listing that can't be
@@ -82,9 +84,10 @@ const SANDBOX_VARS = [
   "DISK_GUARD_NOTIFY",
   "DISK_GUARD_CONSUMER_ROOTS",
 ];
-const SANDBOXED = [...SANDBOX_VARS, "DISK_GUARD_FREE_GB", "DISK_GUARD_FREE_STEP_GB"].some((v) => env[v] !== undefined);
+// A stub ps or lsof could hide a live process, so they count as sandbox vars too; an empty value counts as unset.
+const SANDBOXED = [...SANDBOX_VARS, "DISK_GUARD_FREE_GB", "DISK_GUARD_FREE_STEP_GB", "DISK_GUARD_PS", "DISK_GUARD_LSOF"].some((v) => env[v] !== undefined);
 if (SANDBOXED) {
-  const missing = SANDBOX_VARS.filter((v) => env[v] === undefined);
+  const missing = SANDBOX_VARS.filter((v) => !env[v]);
   if (missing.length) {
     console.error(`disk guard: partial test sandbox (missing ${missing.join(", ")}); refusing to run`);
     process.exit(2);
@@ -92,7 +95,7 @@ if (SANDBOXED) {
 }
 const list = (v) => v.split(":").filter(Boolean);
 const CACHE = env.DISK_GUARD_CACHE ?? path.join(HOME, "Library/Caches/WonderlyMobileCore/worktrees");
-const MOBILE_REPOS = env.DISK_GUARD_REPOS ? list(env.DISK_GUARD_REPOS) : [path.join(HOME, "mobile-worktrees/main"), path.join(HOME, "mobile")];
+const MOBILE_REPOS = env.DISK_GUARD_REPOS !== undefined ? list(env.DISK_GUARD_REPOS) : [path.join(HOME, "mobile-worktrees/main"), path.join(HOME, "mobile")];
 // hash -> worktree path, so a removal line can say whose cache it was after the worktree is gone.
 const KNOWN = env.DISK_GUARD_KNOWN ?? path.join(HOME, "bozeo-ops/disk-guard.known.json");
 const TMPDIR = env.DISK_GUARD_TMPDIR ?? os.tmpdir();
@@ -138,6 +141,15 @@ const hours = (ms) => (ms / H).toFixed(1);
 const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 const fmtKB = (kb) => (kb == null ? "size unknown" : `${(kb / 1024 ** 2).toFixed(2)} GB`);
 const keep = (text) => ({ keep: true, text });
+// Rules that couldn't run this sweep (a listing or probe failed, so they kept everything). Named in the
+// summary line and the critical notification: a rule that fails closed every sweep is otherwise a silent no-op.
+let failures = [];
+/** Log and record that a rule couldn't run; it removed 0. */
+const cantRun = (rule, why) => {
+  log(`${rule}: ${why}; skipping`);
+  failures.push(`${rule} (${why})`);
+  return 0;
+};
 /** Log why a rule did nothing; it removed 0. */
 const skipped = (msg) => {
   log(msg);
@@ -247,7 +259,7 @@ const xcodebuildPid = (snap) => snap.procs.find((p) => /(^|\/)xcodebuild(\s|$)/.
 /** Live worktrees of every repo, keyed by the mobile script's hash, plus the repos that failed to list. */
 function listLiveWorktrees() {
   const live = new Map();
-  const failed = [];
+  const failed = MOBILE_REPOS.length ? [] : ["no mobile repos configured"];
   for (const repo of MOBILE_REPOS) {
     let out;
     try {
@@ -297,7 +309,7 @@ function sweepBuildCache() {
   try {
     names = readdirSync(dir);
   } catch (e) {
-    if (e.code !== "ENOENT") log(`gradle build-cache-1: could not list ${dir}: ${firstLine(e)}; skipping`);
+    if (e.code !== "ENOENT") cantRun("gradle build-cache-1", `could not list ${dir}: ${firstLine(e)}`);
     return { removed: 0, bytes: 0 };
   }
   const now = Date.now();
@@ -420,12 +432,13 @@ function sweepGradleVersions() {
   try {
     names = readdirSync(caches);
   } catch (e) {
-    if (e.code !== "ENOENT") log(`gradle versions: could not list ${caches}: ${firstLine(e)}; skipping`);
+    if (e.code !== "ENOENT") cantRun("gradle versions", `could not list ${caches}: ${firstLine(e)}`);
     return { removed: 0 };
   }
   const dirs = names.filter((n) => GRADLE_VERSION.test(n));
   if (!dirs.length) return { removed: 0 };
   const wrappers = wrapperVersions();
+  if (!wrappers.ok) failures.push(`gradle versions (wrapper set unknown: ${wrappers.text})`);
   let removed = 0;
   for (const ver of dirs) {
     const dir = path.join(caches, ver);
@@ -450,7 +463,7 @@ function sweepDaemonLogs() {
   try {
     vers = readdirSync(root);
   } catch (e) {
-    if (e.code !== "ENOENT") log(`gradle daemon logs: could not list ${root}: ${firstLine(e)}; skipping`);
+    if (e.code !== "ENOENT") cantRun("gradle daemon logs", `could not list ${root}: ${firstLine(e)}`);
     return { removed: 0, bytes: 0 };
   }
   const now = Date.now();
@@ -602,7 +615,7 @@ function idleCacheDecision(dir, o, idleMs, primaries, snap) {
   const idleFor = Date.now() - act.ms;
   if (idleFor < idleMs) return keep(`git active ${hours(idleFor)} h ago`);
   if (!snap.ok) return keep(snap.text);
-  const user = usedBy(snap, [...new Set([o.worktree, o.listed])]);
+  const user = usedBy(snap, [...new Set([o.worktree, o.listed, dir])]);
   if (user) return keep(`in use (${user})`);
   const recent = recentFile(dir, Math.round(idleMs / 60_000), `${hours(idleMs)} h`);
   if (recent.keep) return recent;
@@ -622,6 +635,7 @@ function evictIdleCaches(hashes, live, mode) {
     }),
   );
   const snap = processSnapshot();
+  if (!snap.ok) failures.push(`idle cache eviction (${snap.text})`);
   const candidates = [];
   for (const h of hashes) {
     const dir = path.join(CACHE, h);
@@ -660,7 +674,7 @@ function evictIdleCaches(hashes, live, mode) {
     projected += (kb ?? 0) / 1024 ** 2;
     log(`removed ${c.dir} | worktree ${c.o.worktree} | ${fmtKB(kb)} | ${mode}: ${again.text} | ${freed}`);
   }
-  return evicted;
+  return { evicted, projected };
 }
 
 function sweepCaches(mode) {
@@ -673,6 +687,7 @@ function sweepCaches(mode) {
   const known = readKnown();
   if (failed.length) {
     log(`could not list ${failed.join("; ")}; deleting nothing this sweep`);
+    failures.push(`WonderlyMobileCore caches (could not list ${failed.join("; ")})`);
     if (DRY_RUN) {
       for (const h of entries) {
         const o = live.get(h);
@@ -705,10 +720,11 @@ function sweepCaches(mode) {
   }
   const liveHashes = entries.filter((h) => live.has(h));
   let evicted = 0;
+  let projectedFree = null;
   if (mode === "normal") {
     if (DRY_RUN) for (const h of liveHashes) cacheLine(h, `${live.get(h).repo}: ${live.get(h).worktree}`, leaseState(path.join(CACHE, h)).text, fmtKB(sizeKB(path.join(CACHE, h))), "keep:live");
   } else {
-    evicted = evictIdleCaches(liveHashes, live, mode);
+    ({ evicted, projected: projectedFree } = evictIdleCaches(liveHashes, live, mode));
   }
   if (!DRY_RUN) {
     const next = {};
@@ -718,7 +734,7 @@ function sweepCaches(mode) {
     }
     writeKnown(next);
   }
-  return { total: entries.length, live: liveHashes.length, leased, removed, evicted };
+  return { total: entries.length, live: liveHashes.length, leased, removed, evicted, projectedFree };
 }
 
 // ------------------------------------------------------------------------------- $TMPDIR iOS builds
@@ -765,7 +781,7 @@ function sweepTmpBuilds() {
   try {
     entries = readdirSync(TMPDIR);
   } catch (e) {
-    log(`could not list ${TMPDIR}: ${firstLine(e)}; skipping tmp build sweep`);
+    cantRun("tmp builds", `could not list ${TMPDIR}: ${firstLine(e)}`);
     return { total: 0, removed: 0, skipped: true };
   }
   const dirs = entries.filter((name) => TMP_BUILD_PATTERNS.some((re) => re.test(name))).map((name) => path.join(TMPDIR, name));
@@ -798,7 +814,7 @@ function sweepTmpBuilds() {
 /** `xcrun simctl delete unavailable`, after listing what it will take. Never while xcodebuild runs. */
 function deleteUnavailableSimulators() {
   const snap = processSnapshot();
-  if (!snap.ok) return skipped(`simctl: skipped, ${snap.text}`);
+  if (!snap.ok) return cantRun("simctl", snap.text);
   const xb = xcodebuildPid(snap);
   if (xb) return skipped(`simctl: skipped, xcodebuild pid ${xb} is running`);
   let devices;
@@ -806,7 +822,7 @@ function deleteUnavailableSimulators() {
     const json = JSON.parse(execFileSync(XCRUN, ["simctl", "list", "devices", "unavailable", "-j"], { encoding: "utf8", timeout: 2 * 60_000, stdio: ["ignore", "pipe", "pipe"] }));
     devices = Object.entries(json.devices ?? {}).flatMap(([runtime, list]) => list.filter((d) => d.isAvailable === false).map((d) => ({ ...d, runtime })));
   } catch (e) {
-    return skipped(`simctl: could not list unavailable devices (${firstLine(e)}); skipping`);
+    return cantRun("simctl", `could not list unavailable devices: ${firstLine(e)}`);
   }
   if (!devices.length) {
     if (DRY_RUN) log("simctl: no unavailable devices");
@@ -821,7 +837,7 @@ function deleteUnavailableSimulators() {
   try {
     execFileSync(XCRUN, ["simctl", "delete", "unavailable"], { timeout: 5 * 60_000, stdio: ["ignore", "pipe", "pipe"] });
   } catch (e) {
-    return skipped(`simctl delete unavailable failed: ${firstLine(e)}`);
+    return cantRun("simctl", `delete unavailable failed: ${firstLine(e)}`);
   }
   removals += devices.length;
   log(`removed ${devices.length} unavailable simulators (simctl delete unavailable) | ${names.join(", ")} | runtime not installed | freed ${(freeGB() - before).toFixed(2)} GB`);
@@ -858,17 +874,17 @@ function sweepTestClones() {
   try {
     root = realpathSync(XCTEST_DEVICES);
   } catch (e) {
-    if (e.code !== "ENOENT") log(`XCTestDevices: could not resolve ${XCTEST_DEVICES}: ${firstLine(e)}; skipping`);
+    if (e.code !== "ENOENT") cantRun("XCTestDevices", `could not resolve ${XCTEST_DEVICES}: ${firstLine(e)}`);
     return 0;
   }
   let names;
   try {
     names = readdirSync(root).filter((n) => UDID.test(n));
   } catch (e) {
-    return skipped(`XCTestDevices: could not list ${root}: ${firstLine(e)}; skipping`);
+    return cantRun("XCTestDevices", `could not list ${root}: ${firstLine(e)}`);
   }
   const snap = processSnapshot();
-  if (!snap.ok) return skipped(`XCTestDevices: skipped, ${snap.text}`);
+  if (!snap.ok) return cantRun("XCTestDevices", snap.text);
   const xb = xcodebuildPid(snap);
   if (xb) return skipped(`XCTestDevices: skipped, xcodebuild pid ${xb} is running`);
   let removed = 0;
@@ -906,7 +922,7 @@ function retireMobileWorktrees() {
     const partial = (e.stdout?.toString() ?? "").split("\n").filter((l) => /^(removed|git refused|kept) /.test(l));
     for (const l of partial) log(`mobile worktrees: ${l}`);
     const stderr = (e.stderr?.toString() ?? "").split("\n");
-    log(`mobile worktrees: report failed: ${stderr.find((l) => /^\w*Error\b/.test(l)) ?? stderr.find((l) => l.trim()) ?? firstLine(e)}`);
+    cantRun("mobile worktree report", `failed: ${stderr.find((l) => /^\w*Error\b/.test(l)) ?? stderr.find((l) => l.trim()) ?? firstLine(e)}`);
     return partial.filter((l) => l.startsWith("removed ")).length;
   }
   const lines = out.split("\n").filter(Boolean);
@@ -956,7 +972,7 @@ function topConsumers(n = 5) {
 function notifyCritical(free) {
   const { top, clones } = topConsumers();
   const title = "Bozeo: disk critical";
-  const body = `${free.toFixed(0)} GB free after cleanup. Top: ${top.join(", ") || "unmeasured"}`;
+  const body = `${free.toFixed(0)} GB free after cleanup. Top: ${top.join(", ") || "unmeasured"}${failures.length ? `. Couldn't run: ${failures.join("; ")}` : ""}`;
   const detail = `${body}${clones.length ? `; clone sets (du overstates, not sized): ${clones.join(", ")}` : ""}`;
   if (DRY_RUN) return log(`would notify: ${title}: ${detail}`);
   log(`CRITICAL: ${detail}`);
@@ -976,6 +992,7 @@ function notifyCritical(free) {
 // ---------------------------------------------------------------------------------------- sweep
 
 function sweep() {
+  failures = [];
   const tag = DRY_RUN ? "dry run: " : "";
   const before = freeGB();
   const g = sweepGradle();
@@ -986,23 +1003,30 @@ function sweep() {
   }
   const t = sweepTmpBuilds();
   const mode = modeFor(freeGB());
-  let tightText = "";
+  let sims = 0;
+  let clones = 0;
+  let worktreesText = "";
   if (mode !== "normal") {
     log(`${tag}${freeGB().toFixed(1)} GB free: ${mode} (tight below ${TIGHT_GB} GB, critical below ${CRITICAL_GB} GB, evicting to ${TARGET_GB} GB)`);
-    const sims = deleteUnavailableSimulators();
-    const clones = sweepTestClones();
-    let worktrees = 0;
-    if (ONCE || Date.now() - lastMobileReport >= MOBILE_REPORT_EVERY_MS) {
-      lastMobileReport = Date.now();
-      worktrees = retireMobileWorktrees();
-    }
-    tightText = `; ${mode}: ${sims} simulators, ${clones} test clones, ${worktrees} mobile worktrees removed`;
+    sims = deleteUnavailableSimulators();
+    clones = sweepTestClones();
   }
   const r = sweepCaches(mode);
+  if (mode !== "normal") {
+    // A dry run frees nothing, so ask whether the caches it would evict reach the target.
+    const reached = Math.max(freeGB(), r.projectedFree ?? 0) >= TARGET_GB;
+    if (reached) worktreesText = "not needed, free target reached";
+    else if (ONCE || Date.now() - lastMobileReport >= MOBILE_REPORT_EVERY_MS) {
+      lastMobileReport = Date.now();
+      worktreesText = `${retireMobileWorktrees()} removed`;
+    } else worktreesText = "not due (hourly)";
+  }
   const after = freeGB();
+  const tightText = mode === "normal" ? "" : `; ${mode}: ${sims} simulators, ${clones} test clones removed, mobile worktrees ${worktreesText}`;
   log(
     `${tag}${gradleText}; ${r.total} caches, ${r.skipped ? "sweep skipped" : `${r.live} live, ${r.leased} leased, ${r.removed} removed, ${r.evicted} idle evicted`}; ` +
-      `${t.total} tmp builds, ${t.skipped ? "sweep skipped" : `${t.removed} removed`}${tightText}; free ${before.toFixed(1)} -> ${after.toFixed(1)} GB`,
+      `${t.total} tmp builds, ${t.skipped ? "sweep skipped" : `${t.removed} removed`}${tightText}; free ${before.toFixed(1)} -> ${after.toFixed(1)} GB` +
+      `${failures.length ? `; couldn't run: ${failures.join("; ")}` : ""}`,
   );
   if (after < CRITICAL_GB && (DRY_RUN || Date.now() - lastCriticalNotice > NOTIFY_EVERY_MS)) {
     if (!DRY_RUN) lastCriticalNotice = Date.now();

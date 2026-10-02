@@ -108,7 +108,9 @@ async function main() {
     if (dirt.disposable.length) {
       // Delete the captures, then insist the tree is clean: anything that appeared meanwhile keeps it.
       try { deleteDisposable(dir, dirt.disposable); } catch (e) { keep(`could not delete test captures: ${e.message}`); continue; }
-      if (git(dir, "status", "--porcelain", "--untracked-files=all") !== "") { keep("dirty after deleting test captures"); continue; }
+      let clean = false;
+      try { clean = git(dir, "status", "--porcelain", "--untracked-files=all") === ""; } catch {}
+      if (!clean) { keep("not clean after deleting test captures (or git status failed)"); continue; }
     }
     for (const a of here) await c.archiveAgent(a.id).catch((e) => results.push(`  archive agent ${a.id.slice(0, 8)} failed: ${e.message}`));
     for (const w of wsHere) await c.archiveWorkspace(w.id).then(() => archivedWs.add(w.id), (e) => results.push(`  archive workspace ${w.id} failed: ${e.message}`));

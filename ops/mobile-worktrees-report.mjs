@@ -5,7 +5,8 @@
 // disk-guard.mjs runs it with --apply when free space is tight. If ps or lsof can't answer, nothing
 // is safe.
 // Test overrides: MOBILE_REPORT_ROOT (the directory to report on), MOBILE_REPORT_AGENTS (a JSON
-// file of agents instead of asking the daemon), MOBILE_REPORT_PS / MOBILE_REPORT_LSOF.
+// file of agents instead of asking the daemon), MOBILE_REPORT_PS / MOBILE_REPORT_LSOF. Setting any
+// of them requires both ROOT and AGENTS, so a test can't act on the real ~/mobile-worktrees.
 import { readdirSync, statSync, readFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -14,6 +15,11 @@ import { checkWorktreeDeletionSafety } from "/Users/tylerthackray/paseo-worktree
 import { fetchAll } from "./retire-merged-paseo-worktrees.mjs";
 
 const apply = process.argv.includes("--apply");
+const OVERRIDES = ["MOBILE_REPORT_ROOT", "MOBILE_REPORT_AGENTS", "MOBILE_REPORT_PS", "MOBILE_REPORT_LSOF"];
+if (OVERRIDES.some((v) => process.env[v] !== undefined) && !(process.env.MOBILE_REPORT_ROOT && process.env.MOBILE_REPORT_AGENTS)) {
+  console.error("mobile-worktrees-report: test overrides need both MOBILE_REPORT_ROOT and MOBILE_REPORT_AGENTS; refusing to run");
+  process.exit(2);
+}
 const QUIET_MS = 48 * 3600 * 1000;
 const root = process.env.MOBILE_REPORT_ROOT ?? path.join(os.homedir(), "mobile-worktrees");
 const PS = process.env.MOBILE_REPORT_PS ?? "ps";
@@ -96,6 +102,7 @@ for (const name of readdirSync(root).sort()) {
   const ageH = Math.round((Date.now() - touched) / 3600000);
   let verdict = "remove", why = "clean, pushed or merged, quiet " + ageH + "h";
   if (live) { verdict = "keep"; why = "live agent inside"; }
+  else if (!touched) { verdict = "keep"; why = "git activity unreadable"; }
   else if (!snap) { verdict = "keep"; why = "process probe failed"; }
   else if (user) { verdict = "keep"; why = `in use (${user})`; }
   else if (!safety.safe) { verdict = "keep"; why = safety.reason; }

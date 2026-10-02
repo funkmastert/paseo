@@ -187,8 +187,13 @@ test("a partial sandbox, an unknown flag, or --assume-free without --dry-run ref
   const partial = spawnSync(process.execPath, [GUARD, "--once"], { encoding: "utf8", env: { ...process.env, DISK_GUARD_CACHE: sb.cache } });
   assert.equal(partial.status, 2);
   assert.match(partial.stderr, /partial test sandbox .*DISK_GUARD_GRADLE_HOME/);
-  const freeOnly = spawnSync(process.execPath, [GUARD, "--once"], { encoding: "utf8", env: { ...process.env, DISK_GUARD_FREE_GB: "10" } });
-  assert.equal(freeOnly.status, 2);
+  for (const only of [{ DISK_GUARD_FREE_GB: "10" }, { DISK_GUARD_PS: "/usr/bin/true" }, { DISK_GUARD_LSOF: "/usr/bin/true" }]) {
+    const r = spawnSync(process.execPath, [GUARD, "--once"], { encoding: "utf8", env: { ...process.env, ...only } });
+    assert.equal(r.status, 2, JSON.stringify(only));
+  }
+  const emptyRepos = spawnSync(process.execPath, [GUARD, "--once"], { encoding: "utf8", env: sb.env({ DISK_GUARD_REPOS: "" }) });
+  assert.equal(emptyRepos.status, 2, "an empty value counts as unset");
+  assert.match(emptyRepos.stderr, /missing DISK_GUARD_REPOS/);
   for (const args of [["--dryrun"], ["--assume-free=20"], ["--dry-run", "--assume-free=lots"]]) {
     const r = spawnSync(process.execPath, [GUARD, ...args], { encoding: "utf8", env: sb.env() });
     assert.equal(r.status, 2, args.join(" "));
@@ -498,6 +503,7 @@ test("tight: simulators, test clones, mobile worktrees, then idle caches, each b
     lease: idleWorktree(sb, "wt-lease", 30 * H),
     written: idleWorktree(sb, "wt-written", 30 * H),
     eight: idleWorktree(sb, "wt-eight", 8 * H),
+    cacheArg: idleWorktree(sb, "wt-cachearg", 30 * H),
   };
   addLease(w.lease.dir, { ageMs: 10 * 60_000 });
   writeFileSync(path.join(w.written.dir, "build", "new"), "fresh");
@@ -505,13 +511,14 @@ test("tight: simulators, test clones, mobile worktrees, then idle caches, each b
   ageTree(path.join(sb.cache, primary), 30 * H);
 
   await withProcess({ cwd: w.cwd.wt }, () =>
-    withProcess({ argv: [`${w.argv.wt}/apps/mobile`, UDID(3)] }, () => {
+    withProcess({ argv: [`${w.argv.wt}/apps/mobile`, UDID(3), "-derivedDataPath", w.cacheArg.dir] }, () => {
       const dry = sb.run(["--dry-run"], { DISK_GUARD_FREE_GB: "40" });
       const c = (h) => decisionOf(dry, ` ${h.slice(0, 12)} -> `);
       assert.match(c(w.idle.h), /^DELETE \(idle 30\.0 h: no git activity, no process, no lease, no cache write\)$/);
       assert.match(c(w.active.h), /^keep:git active 2\.0 h ago$/);
       assert.match(c(w.cwd.h), /^keep:in use \(pid \d+ cwd\)$/);
       assert.match(c(w.argv.h), /^keep:in use \(pid \d+ argv\)$/);
+      assert.match(c(w.cacheArg.h), /^keep:in use \(pid \d+ argv\)$/);
       assert.equal(c(w.lease.h), "keep:lease");
       assert.equal(c(w.written.h), "keep:file written within 24.0 h");
       assert.match(c(w.eight.h), /^keep:git active 8\.0 h ago$/);
@@ -541,10 +548,10 @@ test("tight: simulators, test clones, mobile worktrees, then idle caches, each b
       assert.ok(existsSync(outside), "a symlinked clone's target is never touched");
       assert.ok(!existsSync(w.idle.dir));
       assert.match(out, new RegExp(`removed ${w.idle.dir} \\| worktree ${w.idle.wt} \\| [0-9.]+ GB \\| tight: idle 30\\.0 h`));
-      for (const k of ["active", "cwd", "argv", "lease", "written", "eight"]) assert.ok(existsSync(w[k].dir), k);
+      for (const k of ["active", "cwd", "argv", "lease", "written", "eight", "cacheArg"]) assert.ok(existsSync(w[k].dir), k);
       assert.ok(existsSync(path.join(sb.cache, primary)));
       assert.ok(existsSync(w.idle.wt), "evicting a cache never touches the worktree");
-      assert.match(out, /tight: 1 simulators, 1 test clones, 1 mobile worktrees removed/);
+      assert.match(out, /tight: 1 simulators, 1 test clones removed, mobile worktrees 1 removed; free 40\.0 -> 40\.0 GB$/m);
       assert.equal(sb.calls("notify"), "");
     }),
   );
@@ -562,6 +569,8 @@ test("tight: idle caches go oldest first and stop at the free-space target", () 
   assert.ok(removed[0].includes(w50.dir) && removed[1].includes(w40.dir), out);
   assert.ok(existsSync(w30.dir));
   assert.match(out, /2 idle evicted/);
+  assert.match(out, /mobile worktrees not needed, free target reached/);
+  assert.equal(sb.calls("report"), "", "worktrees go only while still under the target");
 });
 
 test("critical: the idle threshold drops to 6 h and the top consumers are named", () => {
@@ -600,12 +609,14 @@ test("tight: a process probe that fails keeps every cache and clone, and skips s
     const dry = sb.run(["--dry-run"], extra);
     assert.match(decisionOf(dry, ` ${idle.h.slice(0, 12)} -> `), /^keep:(ps|lsof) failed/);
     const out = sb.run(["--once"], extra);
-    assert.match(out, /XCTestDevices: skipped, (ps|lsof) failed/);
-    assert.match(out, /simctl: skipped, (ps|lsof) failed/);
+    assert.match(out, /XCTestDevices: (ps|lsof) failed.*; skipping/);
+    assert.match(out, /simctl: (ps|lsof) failed.*; skipping/);
+    assert.match(out, /couldn't run: simctl \((ps|lsof) failed.*\); XCTestDevices \(.*\); idle cache eviction \(/);
     assert.ok(existsSync(clone), probe);
     assert.ok(existsSync(idle.dir), probe);
   }
   assert.equal(sb.calls("xcrun"), "");
+  assert.match(sb.calls("notify"), /Couldn't run: simctl \(ps failed/, "the critical notification names rules that couldn't run");
 });
 
 test("tight: a running xcodebuild stops the clone and simulator rules", async () => {
@@ -627,9 +638,9 @@ test("tight: a failing mobile worktree report is logged and the sweep goes on", 
   writeFileSync(path.join(sb.root, "report.fail"), "");
   const idle = idleWorktree(sb, "wt-idle", 30 * H);
   const out = sb.run(["--once"], { DISK_GUARD_FREE_GB: "40" });
-  assert.match(out, /mobile worktrees: report failed: daemon unreachable/);
-  assert.ok(!existsSync(idle.dir), "later rules still run");
-  assert.match(out, /0 mobile worktrees removed/);
+  assert.match(out, /mobile worktree report: failed: daemon unreachable; skipping/);
+  assert.ok(!existsSync(idle.dir), "the caches were evicted first");
+  assert.match(out, /mobile worktrees 0 removed; .*couldn't run: mobile worktree report \(failed: daemon unreachable\)/);
 });
 
 test("a dry run at an assumed free space never changes anything", () => {
@@ -649,4 +660,12 @@ test("a dry run at an assumed free space never changes anything", () => {
   assert.equal(sb.calls("report"), "[]\n");
   assert.equal(sb.calls("notify"), "");
   assert.ok(!existsSync(sb.known));
+});
+
+test("a repo list that names no repo deletes no cache", () => {
+  const sb = sandbox();
+  const orphan = cacheDir(sb, sha("/gone"));
+  const out = sb.run(["--once"], { DISK_GUARD_REPOS: ":" });
+  assert.match(out, /could not list no mobile repos configured; deleting nothing this sweep/);
+  assert.ok(existsSync(path.join(sb.cache, orphan)));
 });
