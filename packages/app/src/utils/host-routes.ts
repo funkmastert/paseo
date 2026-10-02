@@ -428,6 +428,19 @@ export function buildSchedulesRoute() {
   return "/schedules" as const;
 }
 
+export function buildInboxRoute() {
+  return "/inbox" as const;
+}
+
+export function buildInboxItemRoute(serverId: string, itemId: string) {
+  const normalizedServerId = trimNonEmpty(serverId);
+  const normalizedItemId = trimNonEmpty(itemId);
+  if (!normalizedServerId || !normalizedItemId) {
+    return buildInboxRoute();
+  }
+  return `/inbox/${encodeSegment(normalizedItemId)}?serverId=${encodeSegment(normalizedServerId)}` as const;
+}
+
 export function buildAskJevRoute() {
   return "/ask-jev" as const;
 }

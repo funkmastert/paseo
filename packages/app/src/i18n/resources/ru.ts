@@ -1173,6 +1173,7 @@ export const ru: TranslationResources = {
       sessions: "История",
       search: "Поиск",
       schedules: "Расписания",
+      inbox: "Входящие",
       askJev: "Спросить JEV",
     },
     worktreeSetup: {

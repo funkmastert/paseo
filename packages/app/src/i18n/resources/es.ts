@@ -1191,6 +1191,7 @@ export const es: TranslationResources = {
       sessions: "Historial",
       search: "Buscar",
       schedules: "Horarios",
+      inbox: "Bandeja de entrada",
       askJev: "Preguntar a JEV",
     },
     worktreeSetup: {

@@ -14,6 +14,7 @@ describe("resolveNotificationTarget", () => {
       agentId: "agent-456",
       workspaceId: null,
       terminalId: null,
+      itemId: null,
     });
   });
 
@@ -23,12 +24,14 @@ describe("resolveNotificationTarget", () => {
       agentId: null,
       workspaceId: null,
       terminalId: null,
+      itemId: null,
     });
     expect(resolveNotificationTarget(undefined)).toEqual({
       serverId: null,
       agentId: null,
       workspaceId: null,
       terminalId: null,
+      itemId: null,
     });
   });
 
@@ -44,6 +47,17 @@ describe("resolveNotificationTarget", () => {
       agentId: "agent-1",
       workspaceId: null,
       terminalId: null,
+      itemId: null,
+    });
+  });
+
+  it("extracts a non-empty item id", () => {
+    expect(resolveNotificationTarget({ serverId: "srv-1", itemId: " wi-1 " })).toEqual({
+      serverId: "srv-1",
+      agentId: null,
+      workspaceId: null,
+      terminalId: null,
+      itemId: "wi-1",
     });
   });
 });
@@ -100,5 +114,16 @@ describe("buildNotificationRoute", () => {
         agentId: "agent with space",
       }),
     ).toBe("/h/srv%2Fwith%2Fslash/workspace/workspace-1?open=agent%3Aagent%20with%20space");
+  });
+
+  it("routes to the inbox item when serverId and itemId are present, ahead of an agent URL", () => {
+    expect(
+      buildNotificationRoute({
+        serverId: "srv-1",
+        itemId: "wi-1",
+        agentId: "agent-1",
+        workspaceId: "ws-main",
+      }),
+    ).toBe("/inbox/wi-1?serverId=srv-1");
   });
 });

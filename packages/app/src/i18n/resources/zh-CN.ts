@@ -1149,6 +1149,7 @@ export const zhCN: TranslationResources = {
       sessions: "历史",
       search: "搜索",
       schedules: "计划",
+      inbox: "收件箱",
       askJev: "询问 JEV",
     },
     worktreeSetup: {

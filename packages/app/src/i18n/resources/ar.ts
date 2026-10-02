@@ -1157,6 +1157,7 @@ export const ar: TranslationResources = {
       sessions: "السجل",
       search: "بحث",
       schedules: "الجداول",
+      inbox: "صندوق الوارد",
       askJev: "اسأل JEV",
     },
     worktreeSetup: {

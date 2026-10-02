@@ -915,6 +915,8 @@ function RootStack() {
         <Stack.Screen name="open-project" />
         <Stack.Screen name="sessions" />
         <Stack.Screen name="schedules" />
+        <Stack.Screen name="inbox/index" />
+        <Stack.Screen name="inbox/[itemId]" />
         <Stack.Screen name="ask-jev" />
         <Stack.Screen name="pinned-grid" />
         <Stack.Screen name="pair-scan" />

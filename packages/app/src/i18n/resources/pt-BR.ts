@@ -1182,6 +1182,7 @@ export const ptBR: TranslationResources = {
       sessions: "Histórico",
       search: "Buscar",
       schedules: "Agendamentos",
+      inbox: "Caixa de entrada",
       askJev: "Perguntar ao JEV",
     },
     worktreeSetup: {

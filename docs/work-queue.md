@@ -43,8 +43,9 @@ This is input validation of the queue API, not a gate on anything an agent can a
 | Surface     | Where                                                                                                                                                          |
 | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Agent tools | `queue_create`, `queue_claim`, `queue_update`, `queue_handoff`, `queue_list`, `queue_show` in `agent/tools/coordination-tools.ts`                              |
-| RPCs        | `coordination.queue.{create,claim,transition,update,handoff,list,show}` and `coordination.stream.list`, in `packages/protocol/src/coordination/rpc-schemas.ts` |
+| RPCs        | `coordination.queue.{create,claim,transition,update,handoff,list,show}`, `coordination.stream.list`, and `coordination.inbox.act` (below), in `packages/protocol/src/coordination/rpc-schemas.ts` |
 | CLI         | `paseo queue ls\|show\|create\|claim\|done\|block\|handoff`, with `--json`                                                                                     |
+| App         | The Inbox (below), `packages/app/src/inbox/` plus a sidebar entry                                                                                              |
 
 The calling agent is the actor for a tool. An RPC names its actor, and the daemon uses `human` when it does not. The CLI sends `--as`, else `$PASEO_AGENT_ID` (the daemon sets it in every agent's shell), else `human`.
 
@@ -80,8 +81,9 @@ $PASEO_HOME/coordination/
 │   ├── items/{id}.json      # one document per item, written atomically
 │   ├── journal.jsonl        # transition journal and commit log
 │   └── archive/{yyyy-mm}.jsonl
-└── stream/
-    └── entries.jsonl
+├── stream/
+│   └── entries.jsonl
+└── audit.jsonl              # every Inbox act (below), win or lose
 ```
 
 Every store method is one transaction (the rule in [data-model.md](./data-model.md#store-surface-rules)). A commit appends a `begin` line holding the after-image of each item it touches and the transition rows it adds, writes each item document, then appends `commit`. Opening the store redoes any `begin` that has no `commit`. A store instance that sees its own commit fail reloads from disk before its next call, so the same redo applies without a restart. This is the workspace-labels journaled commit ([architecture.md](./architecture.md)) applied to every method.
@@ -107,6 +109,28 @@ The stream (OR-A2) is the fleet event log: entries with a dotted `type`, `urgenc
 Archive is soft: an `archive` marker line hides the entry from default reads. Reads are newest first with an opaque cursor. The stream is bounded by `streamMaxEntries` and `streamMaxAgeDays`: compaction drops the oldest entries, and an append compacts on its own once the file holds twice the entry cap. The stream is a feed; the queue journal and its archive are the record.
 
 The stream and item-changed listeners run after the queue commit. A failure in either is logged and never fails or undoes the queue write.
+
+## Inbox
+
+The Inbox (OR-A5, OR-H1's For-You feed adapted) is the app surface for a human's open work: `packages/app/src/inbox/`, a sidebar entry with an open-requests count badge, gated once on `server_info.features.coordinationQueue`. Two sections, both read-only reuses of the surfaces above:
+
+- **Human requests**: open items (`pending`, `in-progress`, `blocked`) owned by `human`, oldest first (`coordination.queue.list`, `filter: { owner: "human", openOnly: true }`). `selectHumanRequests` in `inbox/model.ts`.
+- **Updates**: the fleet stream, newest first (`coordination.stream.list`), unfiltered — an entry kind the app does not recognize still renders with its `summary`. Nothing is silently dropped. `selectUpdates` in `inbox/model.ts`.
+
+Tapping a human request opens its detail with every transition. Six verbs act on it, each one RPC, `coordination.inbox.act.{request,response}`:
+
+| Verb       | Queue call                                                | Effect                                           |
+| ---------- | ----------------------------------------------------------- | ------------------------------------------------- |
+| `approve`  | `transition` to `done`, closure `no-follow-on`             | Done, nothing follows                             |
+| `deny`     | `transition` to `denied`                                   | Refused                                           |
+| `hold`     | `transition` to `blocked`, closure `blocked_on` → `human`   | Waiting on the human                              |
+| `drop`     | `transition` to `canceled`                                 | No longer wanted                                  |
+| `route`    | `handoff` to an agent id (`to`), chosen from the host's agents | Hands the item to that agent                   |
+| `annotate` | `update` (no field changes) plus a `coordination.inbox.annotate` stream entry carrying the note | A note, not a state change |
+
+Every verb acts as `human` — the Inbox is the only caller. Five of the six inherit the queue's closure contract and the state machine's teaching errors for free by calling `transition` or `handoff` directly; `annotate` does not transition, so `applyInboxAct` (`coordination/inbox/act.ts`) checks the item is still open before doing anything, the same refusal every other verb already gets from the state machine. Every call, win or lose, appends one line to `$PASEO_HOME/coordination/audit.jsonl` (append-only, via the generic `jsonl-appender.ts`): actor, verb, item id, note, target, and whether it applied or was refused and why.
+
+An item that lands on `human` — by create or by a `route`/handoff — pushes once, `alert` level, deep-linking to the item (`WorkQueueInboxPush`, `coordination/inbox/push.ts`). It rides the same item-changed listener as delivery, which fires only when a call changed something, so an idempotent repeat create never pushes twice.
 
 ## Configuration
 

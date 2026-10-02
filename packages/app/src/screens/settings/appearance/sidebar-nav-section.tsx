@@ -7,6 +7,7 @@ import {
   ArrowUp,
   CalendarClock,
   History,
+  Inbox,
   MessageCircleQuestion,
   Plus,
   Search,
@@ -42,6 +43,7 @@ const BUILTIN_ICONS: Record<BuiltinSidebarNavId, LucideIcon> = {
   history: History,
   search: Search,
   schedules: CalendarClock,
+  inbox: Inbox,
   "ask-jev": MessageCircleQuestion,
 };
 

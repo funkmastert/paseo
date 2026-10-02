@@ -1164,6 +1164,7 @@ export const ko: TranslationResources = {
       sessions: "기록",
       search: "검색",
       schedules: "일정",
+      inbox: "수신함",
       askJev: "JEV에게 묻기",
     },
     worktreeSetup: {

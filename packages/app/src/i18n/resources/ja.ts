@@ -1169,6 +1169,7 @@ export const ja: TranslationResources = {
       sessions: "履歴",
       search: "検索",
       schedules: "スケジュール",
+      inbox: "受信箱",
       askJev: "JEV に質問",
     },
     worktreeSetup: {
