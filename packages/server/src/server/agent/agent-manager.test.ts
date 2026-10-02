@@ -7687,6 +7687,162 @@ test("a delegated agent finishing raises no attention: its parent already has th
   expect(attentionReasons).toEqual(["finished"]);
 });
 
+const CAP_ERROR = "You've hit your weekly limit · resets 7am";
+
+function pushCappedTurn(session: TestAgentSession, turnId: string): void {
+  setTimeout(() => {
+    session.pushEvent({ type: "turn_started", provider: session.provider, turnId });
+    session.pushEvent({
+      type: "turn_failed",
+      provider: session.provider,
+      error: CAP_ERROR,
+      turnId,
+    });
+  }, 0);
+}
+
+/** Fails its first turn on an account cap, then finishes every turn after it. */
+class CappedThenFinishingSession extends TestAgentSession {
+  private capped = false;
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    if (this.capped) return super.startTurn();
+    this.capped = true;
+    pushCappedTurn(this, "capped-turn");
+    return { turnId: "capped-turn" };
+  }
+}
+
+class CappedThenFinishingClient extends TestAgentClient {
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    return new CappedThenFinishingSession(config);
+  }
+}
+
+/** Fails its first turn on an account cap; the next turn stays open until it is cancelled. */
+class CappedThenCancelableSession extends CancelableTestAgentSession {
+  private capped = false;
+
+  override async startTurn(): Promise<{ turnId: string }> {
+    if (this.capped) return super.startTurn();
+    this.capped = true;
+    pushCappedTurn(this, "capped-turn");
+    return { turnId: "capped-turn" };
+  }
+}
+
+class CappedThenCancelableClient extends TestAgentClient {
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    return new CappedThenCancelableSession(config);
+  }
+}
+
+test("a turn that finishes after an error clears the error badge", async () => {
+  // Three subagents that failover resumed after a cap kept red error badges for a day: the error
+  // attention short-circuited every later edge, and nobody opens a subagent to clear it.
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-recovered-error-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const attentionReasons: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new CappedThenFinishingClient() },
+    registry: storage,
+    logger,
+    onAgentAttention: ({ reason }) => attentionReasons.push(reason),
+    idFactory: () => randomUUID(),
+  });
+
+  const parent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Leader" },
+    undefined,
+    { workspaceId: undefined },
+  );
+  const child = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Worker" },
+    undefined,
+    { labels: { [PARENT_AGENT_ID_LABEL]: parent.id }, workspaceId: undefined },
+  );
+
+  await expect(manager.runAgent(child.id, "hit the cap")).rejects.toThrow(CAP_ERROR);
+  await expect(manager.runAgent(parent.id, "hit the cap")).rejects.toThrow(CAP_ERROR);
+  await manager.flush();
+  expect((await storage.get(child.id))?.attentionReason).toBe("error");
+  expect((await storage.get(parent.id))?.attentionReason).toBe("error");
+
+  await manager.runAgent(child.id, "resume");
+  await manager.runAgent(parent.id, "resume");
+  await manager.flush();
+
+  // A delegated agent's finish is not flagged, so the recovered child has nothing outstanding.
+  expect(manager.getAgent(child.id)?.attention).toEqual({ requiresAttention: false });
+  expect((await storage.get(child.id))?.requiresAttention).toBe(false);
+  expect((await storage.get(child.id))?.attentionReason).toBeNull();
+  // A root's finish is still news to the person who started it.
+  expect(manager.getAgent(parent.id)?.attention).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+  expect((await storage.get(parent.id))?.attentionReason).toBe("finished");
+  expect(attentionReasons).toEqual(["error", "finished"]);
+});
+
+test("a cancelled turn after an error keeps the error badge", async () => {
+  const workdir = mkdtempSync(join(tmpdir(), "agent-manager-canceled-after-error-"));
+  const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const finishedTurns: string[] = [];
+  const manager = new AgentManager({
+    clients: { codex: new CappedThenCancelableClient() },
+    registry: storage,
+    logger,
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
+    idFactory: () => randomUUID(),
+  });
+  const agent = await manager.createAgent(
+    { provider: "codex", cwd: workdir, title: "Leader" },
+    undefined,
+    { workspaceId: undefined },
+  );
+
+  await expect(manager.runAgent(agent.id, "hit the cap")).rejects.toThrow(CAP_ERROR);
+  void manager.streamAgent(agent.id, "resume").next();
+  await vi.waitFor(() => expect(manager.getAgent(agent.id)?.lifecycle).toBe("running"));
+  await manager.cancelAgentRun(agent.id, "user");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
+  expect((await storage.get(agent.id))?.attentionReason).toBe("error");
+  // The cancel above is its own (non-quiet) running -> idle edge, so it already raised one
+  // "finished" broadcast despite leaving the error badge alone; the janitor's question below
+  // must not raise a second one.
+  const finishedBeforeQuietTurn = finishedTurns.length;
+
+  // The done janitor's question finds the agent idle, with the error badge intact. The
+  // `!options?.quietTurn` guard in checkAndSetAttention has no other coverage: a quiet turn
+  // finishing after an error must not read as the recovery that clears it, and must raise no
+  // "finished" broadcast.
+  const question = manager.startQuietTurnIfIdle(agent.id, "are you done?");
+  if (!question) throw new Error("expected the idle agent to take the question");
+  expect((await question.outcome).status).toBe("completed");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "error",
+  });
+  expect((await storage.get(agent.id))?.attentionReason).toBe("error");
+  expect(finishedTurns).toHaveLength(finishedBeforeQuietTurn);
+
+  // A real turn right after still clears it and raises "finished".
+  await manager.runAgent(agent.id, "resume again");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+  expect(finishedTurns).toHaveLength(finishedBeforeQuietTurn + 1);
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
+});
+
 test("archiveSnapshot clears persisted attention and normalizes running status", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-archive-attention-"));
   const storagePath = join(workdir, "agents");

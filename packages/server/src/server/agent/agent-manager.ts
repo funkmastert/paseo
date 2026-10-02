@@ -4460,8 +4460,11 @@ export class AgentManager {
       stream = this.streamAgentInternal(held.agentId, held.prompt, held.runOptions, held.queuedAt);
     } catch (error) {
       // Registered in `running` for this turn; without it the agent has to come back to idle.
+      // No work ran, so this is a cancel, not a finish: without `turnCanceled`,
+      // `checkAndSetAttention` reads a clean `running` -> `idle` edge and clears a stale error.
       const agent = this.agents.get(held.agentId);
       if (agent && !agent.activeForegroundTurnId) {
+        agent.turnCanceled = true;
         agent.lifecycle = "idle";
         this.emitState(agent);
       }
@@ -7005,13 +7008,25 @@ export class AgentManager {
       return;
     }
 
+    const finishedTurn = previousStatus === "running" && currentStatus === "idle";
+
+    // A turn that finishes after an error means the agent recovered, so the error is stale. Without
+    // this, the early return below kept it forever on a subagent that failover or its leader
+    // resumed: nobody opens a subagent to clear it. A cancelled or janitor turn proves nothing.
+    const workFinished = finishedTurn && !canceled && !options?.quietTurn;
+    const errorFlagged =
+      agent.attention.requiresAttention && agent.attention.attentionReason === "error";
+    if (workFinished && errorFlagged) {
+      agent.attention = { requiresAttention: false };
+    }
+
     // Skip if already requires attention
     if (agent.attention.requiresAttention) {
       return;
     }
 
     // Check if agent transitioned from running to idle (finished)
-    if (previousStatus === "running" && currentStatus === "idle") {
+    if (finishedTurn) {
       if (canceled || options?.quietTurn) {
         return;
       }

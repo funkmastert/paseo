@@ -10,6 +10,7 @@ import type { PluginLifecycle } from "../plugins/lifecycle/index.js";
 import { AgentManager } from "./agent-manager.js";
 import { startAgentRun } from "./agent-prompt.js";
 import { toAgentPayload } from "./agent-projections.js";
+import { AgentStorage } from "./agent-storage.js";
 import {
   ChildAdmissionController,
   restoreHeldTurns,
@@ -95,7 +96,7 @@ class HeldTurnSession implements AgentSession {
     return () => this.subscribers.delete(callback);
   }
 
-  private push(event: AgentStreamEvent): void {
+  protected push(event: AgentStreamEvent): void {
     for (const cb of this.subscribers) cb(event);
   }
 
@@ -656,5 +657,155 @@ describe("AgentManager child admission", () => {
     admission.pump();
     await flush();
     expect(waiting.session.startedPrompts).toEqual(["queued task"]);
+  });
+});
+
+const REQUEUE_CAP_ERROR = "You've hit your weekly limit · resets 7am";
+
+/** Fails its first turn on an account cap (a real `turn_failed`), then holds every turn after it. */
+class CappedThenHeldTurnSession extends HeldTurnSession {
+  private capped = false;
+
+  override async startTurn(prompt: AgentPromptInput): Promise<{ turnId: string }> {
+    if (this.capped) return super.startTurn(prompt);
+    this.capped = true;
+    const turnId = `capped-turn-${randomUUID()}`;
+    setTimeout(() => {
+      this.push({ type: "turn_started", provider: "codex", turnId });
+      this.push({ type: "turn_failed", provider: "codex", error: REQUEUE_CAP_ERROR, turnId });
+    }, 0);
+    return { turnId };
+  }
+}
+
+/**
+ * A session whose `getRuntimeInfo` stalls until a test-controlled gate opens, so a test can land
+ * a concurrent call while a reload's `registerSession` is paused mid-registration (the new agent
+ * is already in `this.agents`, but `registerSession` has not returned to call `requeueHeldTurn`
+ * yet).
+ */
+class GatedHeldTurnSession extends HeldTurnSession {
+  constructor(
+    config: AgentSessionConfig,
+    private readonly gate: Promise<void>,
+    onOutOfBand?: () => void,
+  ) {
+    super(config, onOutOfBand);
+  }
+
+  override async getRuntimeInfo() {
+    await this.gate;
+    return super.getRuntimeInfo();
+  }
+}
+
+class GatedHeldTurnClient extends HeldTurnClient {
+  /** The next `createSession` produces a session that caps its first turn. */
+  nextSessionCapsFirstTurn = false;
+  /** The next `createSession` produces a session whose `getRuntimeInfo` stalls on the gate. */
+  nextSessionIsGated = false;
+
+  constructor(private readonly gate: Promise<void>) {
+    super();
+  }
+
+  override async createSession(config: AgentSessionConfig): Promise<AgentSession> {
+    if (this.nextSessionCapsFirstTurn) {
+      this.nextSessionCapsFirstTurn = false;
+      const session = new CappedThenHeldTurnSession(config, () => {
+        this.outOfBandRuns += 1;
+      });
+      this.sessions.push(session);
+      return session;
+    }
+    if (this.nextSessionIsGated) {
+      this.nextSessionIsGated = false;
+      const session = new GatedHeldTurnSession(config, this.gate, () => {
+        this.outOfBandRuns += 1;
+      });
+      this.sessions.push(session);
+      return session;
+    }
+    return super.createSession(config);
+  }
+}
+
+describe("a reload's requeue of a held turn", () => {
+  test("a run that lands mid-registration and forces the requeue to fail keeps a stale error badge", async () => {
+    // `requeueHeldTurn`'s catch brings the agent back to `idle` without `turnCanceled`, so
+    // `checkAndSetAttention` reads the edge as a clean finish and clears an error that was never
+    // touched. The only way `streamAgentInternal` throws there is a run that claims the agentId
+    // before `requeueHeldTurn` gets to it; `registerSession` makes the new agent addressable
+    // before it returns, so a run landing in that window is the real seam.
+    const workdir = mkdtempSync(join(tmpdir(), "agent-manager-requeue-throw-"));
+    const storage = new AgentStorage(join(workdir, "agents"), logger);
+    let resolveGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const client = new GatedHeldTurnClient(gate);
+    const manager = new AgentManager({
+      clients: { codex: client },
+      registry: storage,
+      logger,
+      idFactory: () => randomUUID(),
+    });
+    const admission = new ChildAdmissionController({
+      readConfig: () => ({ maxConcurrentChildTurns: 1 }),
+      listAgents: () => manager.listAgentsForAdmission(),
+      logger,
+    });
+    manager.setChildAdmission(admission);
+
+    async function create(parentAgentId: string | null) {
+      const agent = await manager.createAgent({ provider: "codex", cwd: workdir }, undefined, {
+        workspaceId: undefined,
+        labels: parentAgentId ? { [PARENT_AGENT_ID_LABEL]: parentAgentId } : {},
+      });
+      return { id: agent.id, session: client.sessions.at(-1)! };
+    }
+    async function prompt(agentId: string, text: AgentPromptInput) {
+      return await startAgentRun(manager, agentId, text, logger, { replaceRunning: true });
+    }
+
+    const root = await create(null);
+    client.nextSessionCapsFirstTurn = true;
+    const target = await create(root.id);
+
+    // The child errors on its own first turn, for real, before anything queues behind it.
+    await prompt(target.id, "hit the cap");
+    await flush();
+    expect((await storage.get(target.id))?.attentionReason).toBe("error");
+
+    // A sibling now takes the only slot, so the next prompt to the errored child queues behind
+    // it instead of starting — the errored child never ran again, so nothing should have cleared
+    // its error badge.
+    const running = await create(root.id);
+    await prompt(running.id, "task");
+    await prompt(target.id, "queued task");
+    await flush();
+    expect(admission.isQueued(target.id)).toBe(true);
+    expect((await storage.get(target.id))?.attentionReason).toBe("error");
+
+    client.nextSessionIsGated = true;
+    const reloadPromise = manager.reloadAgentSession(target.id);
+    await flush();
+    // Detached for the reload; `registerSession` is now stalled at the gate, with the freshly
+    // registered agent already addressable.
+    expect(admission.isQueued(target.id)).toBe(false);
+
+    // Claims the agentId's run slot before `registerSession` returns and calls `requeueHeldTurn`.
+    await prompt(target.id, "sneaky");
+    await flush();
+
+    resolveGate();
+    await reloadPromise;
+    await manager.flush();
+
+    expect(manager.getAgent(target.id)?.attention).toMatchObject({
+      requiresAttention: true,
+      attentionReason: "error",
+    });
+    expect((await storage.get(target.id))?.attentionReason).toBe("error");
   });
 });
