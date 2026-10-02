@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, 
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
-import { classifyDirt, deleteDisposable } from "./retire-merged-paseo-worktrees.mjs";
+import { classifyDirt, deleteDisposable, fetchAll } from "./retire-merged-paseo-worktrees.mjs";
 
 const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, "-c", "user.email=someone@example.com", "-c", "user.name=t", ...args], { stdio: "pipe", encoding: "utf8" });
 const roots = [];
@@ -111,4 +111,18 @@ test("deleteDisposable refuses a directory", () => {
 test("a worktree git can't read throws, which the sweep turns into keep", () => {
   const { root } = worktree();
   assert.throws(() => classifyDirt(path.join(root, "not-a-repo-dir")));
+});
+
+test("fetchAll reads every page, and refuses a listing it can't prove complete", async () => {
+  const pages = { "": { entries: [1, 2], pageInfo: { hasMore: true, nextCursor: "c1" } }, c1: { entries: [3], pageInfo: { hasMore: false, nextCursor: null } } };
+  const seen = [];
+  const read = async ({ page }) => {
+    seen.push(page);
+    return pages[page.cursor ?? ""];
+  };
+  assert.deepEqual(await fetchAll(read), [1, 2, 3]);
+  assert.deepEqual(seen, [{ limit: 200 }, { limit: 200, cursor: "c1" }]);
+  await assert.rejects(fetchAll(async () => ({ entries: [1] })), /no pageInfo/);
+  await assert.rejects(fetchAll(async () => ({ entries: [1], pageInfo: { hasMore: true, nextCursor: null } })), /without a cursor/);
+  await assert.rejects(fetchAll(async () => ({ entries: [1], pageInfo: { hasMore: true, nextCursor: "again" } })), /past 100 pages/);
 });

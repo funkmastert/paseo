@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 import { checkWorktreeDeletionSafety } from "/Users/tylerthackray/paseo-worktrees/bozeo/packages/server/dist/server/server/done-janitor-worktree.js";
+import { fetchAll } from "./retire-merged-paseo-worktrees.mjs";
 
 const apply = process.argv.includes("--apply");
 const QUIET_MS = 48 * 3600 * 1000;
@@ -23,7 +24,7 @@ async function loadAgents() {
   if (process.env.MOBILE_REPORT_AGENTS) return JSON.parse(readFileSync(process.env.MOBILE_REPORT_AGENTS, "utf8"));
   const { connectToDaemon } = await import("/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js");
   const c = await connectToDaemon({ host: "127.0.0.1:6767" });
-  const agents = (await c.fetchAgents({})).entries.map((e) => e.agent);
+  const agents = (await fetchAll((o) => c.fetchAgents(o))).map((e) => e.agent);
   await c.close();
   return agents;
 }

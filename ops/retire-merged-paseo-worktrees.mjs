@@ -58,15 +58,29 @@ export function deleteDisposable(dir, files) {
   for (const t of targets) unlinkSync(t);
 }
 
+/** Every entry of a paged directory read (fetchAgents, fetchWorkspaces): an unpaged call returns only the first 200. */
+export async function fetchAll(read) {
+  const entries = [];
+  let cursor = null;
+  for (let page = 0; page < 100; page++) {
+    const res = await read({ page: cursor ? { limit: 200, cursor } : { limit: 200 } });
+    entries.push(...(res.entries ?? []));
+    if (!res.pageInfo) throw new Error("directory read returned no pageInfo");
+    if (!res.pageInfo.hasMore) return entries;
+    cursor = res.pageInfo.nextCursor;
+    if (!cursor) throw new Error("directory read said hasMore without a cursor");
+  }
+  throw new Error("directory read ran past 100 pages");
+}
+
 async function main() {
   const { connectToDaemon } = await import("/Users/tylerthackray/paseo-worktrees/bozeo/packages/cli/dist/utils/client.js");
 
   git(MAIN, "fetch", "-q", "origin");
   const c = await connectToDaemon({ host: "127.0.0.1:6767" });
-  const agents = (await c.fetchAgents({})).entries.map((e) => e.agent).filter((a) => !a.archivedAt);
-  const wsResp = await c.fetchWorkspaces({});
+  const agents = (await fetchAll((o) => c.fetchAgents(o))).map((e) => e.agent).filter((a) => !a.archivedAt);
   // fetch_workspaces entries carry `id` and `workspaceDirectory` (not `cwd`).
-  const workspaces = (wsResp.entries ?? [])
+  const workspaces = (await fetchAll((o) => c.fetchWorkspaces(o)))
     .filter((w) => typeof w.id === "string" && typeof w.workspaceDirectory === "string" && !w.archivingAt)
     .map((w) => ({ id: w.id, cwd: w.workspaceDirectory }));
 
