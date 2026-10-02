@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
@@ -203,6 +203,10 @@ describe("isWorkspaceActiveForAutoPin", () => {
   });
 });
 
+test("the default recent-use window is 24 hours", () => {
+  expect(AUTO_PIN_RECENT_USE_MS).toBe(24 * 60 * 60 * 1000);
+});
+
 describe("AutoPinExpiry", () => {
   let tmpDir: string;
   let registry: FileBackedWorkspaceRegistry;
@@ -230,6 +234,7 @@ describe("AutoPinExpiry", () => {
     workspaceRegistry: ConstructorParameters<
       typeof AutoPinExpiry
     >[0]["workspaceRegistry"] = registry,
+    usesFilePath?: string,
   ): AutoPinExpiry {
     return new AutoPinExpiry({
       workspaceRegistry,
@@ -237,6 +242,7 @@ describe("AutoPinExpiry", () => {
       readConfig: () => config,
       logger,
       now: () => nowMs,
+      usesFilePath,
     });
   }
 
@@ -281,7 +287,8 @@ describe("AutoPinExpiry", () => {
     await seed("ws-1", { pinnedAt: new Date(START).toISOString(), pinSource: "auto" });
     const expiry = createExpiry();
     agents = [idleAgent("ws-1", { lifecycle: "running" })];
-    nowMs = START + 5 * HOUR;
+    // Well past the recent-use window: only the agent working keeps this pin alive.
+    nowMs = START + AUTO_PIN_RECENT_USE_MS + HOUR;
 
     expect(await expiry.sweep()).toEqual([]);
 
@@ -311,14 +318,159 @@ describe("AutoPinExpiry", () => {
     expect(await expiry.sweep()).toEqual(["ws-1"]);
   });
 
-  test("a restart gives every auto pin one window from daemon start", async () => {
-    await seed("ws-1", { pinnedAt: new Date(START - 10 * HOUR).toISOString(), pinSource: "auto" });
+  test("a restart never gives an auto pin a fresh window: an already-overdue pin expires on the first post-restart sweep", async () => {
+    const overdue = new Date(START - (AUTO_PIN_RECENT_USE_MS + HOUR)).toISOString();
+    await seed("ws-1", { pinnedAt: overdue, pinSource: "auto" });
+    // A fresh AutoPinExpiry instance, as a restarted daemon would construct, with no prior
+    // in-memory uses and no uses file to recover from.
     const expiry = createExpiry();
+    nowMs = START;
 
+    expect(await expiry.sweep()).toEqual(["ws-1"]);
+  });
+
+  test("a restart keeps a not-yet-overdue auto pin's real clock instead of resetting it from boot", async () => {
+    const recent = new Date(START - (AUTO_PIN_RECENT_USE_MS - HOUR)).toISOString();
+    await seed("ws-1", { pinnedAt: recent, pinSource: "auto" });
+    const expiry = createExpiry();
+    nowMs = START; // 1 hour short of the window measured from the pin, not from boot
+
+    expect(await expiry.sweep()).toEqual([]);
+
+    nowMs = START + 2 * HOUR; // now past the pin's real window
+    expect(await expiry.sweep()).toEqual(["ws-1"]);
+  });
+
+  test("a restart recovers a use recorded before it from the persisted uses file", async () => {
+    const usesFilePath = path.join(tmpDir, "auto-pin-uses.json");
+    const overdue = new Date(START - 10 * HOUR).toISOString();
+    await seed("ws-1", { pinnedAt: overdue, pinSource: "auto" });
+
+    const before = createExpiry(registry, usesFilePath);
+    before.noteWorkspaceUsed("ws-1", START - HOUR);
+    await before.flushPersistedUses();
+
+    // A fresh instance pointed at the same file, as a restarted daemon would construct.
+    const after = createExpiry(registry, usesFilePath);
+    await after.start();
+    await after.stop();
+
+    nowMs = START + (AUTO_PIN_RECENT_USE_MS - HOUR) - 1;
+    expect(await after.sweep()).toEqual([]);
+    nowMs = START + (AUTO_PIN_RECENT_USE_MS - HOUR) + 1;
+    expect(await after.sweep()).toEqual(["ws-1"]);
+  });
+
+  test("a restart tolerates a missing uses file", async () => {
+    await seed("ws-1", { pinnedAt: new Date(START).toISOString(), pinSource: "auto" });
+    const expiry = createExpiry(registry, path.join(tmpDir, "does-not-exist.json"));
+
+    await expect(expiry.start()).resolves.toBeUndefined();
+    await expiry.stop();
+  });
+
+  test("a restart tolerates a corrupt uses file", async () => {
+    await seed("ws-1", { pinnedAt: new Date(START).toISOString(), pinSource: "auto" });
+    const usesFilePath = path.join(tmpDir, "corrupt-uses.json");
+    writeFileSync(usesFilePath, "not json");
+    const expiry = createExpiry(registry, usesFilePath);
+
+    await expect(expiry.start()).resolves.toBeUndefined();
+    await expiry.stop();
+    // A use noted after a failed load still works: the bad file didn't poison state.
+    expiry.noteWorkspaceUsed("ws-1", START);
     nowMs = START + AUTO_PIN_RECENT_USE_MS - 1;
     expect(await expiry.sweep()).toEqual([]);
+  });
+
+  test("noteWorkspaceUsed debounces the write: a burst of uses persists once, after persistDebounceMs", async () => {
+    const usesFilePath = path.join(tmpDir, "debounced-uses.json");
+    // Real timers: the debounced write is a real setTimeout firing a real fs write, which
+    // a faked timer can advance past without the real I/O it kicked off landing in time.
+    const expiry = new AutoPinExpiry({
+      workspaceRegistry: registry,
+      listAgents: () => agents,
+      readConfig: () => config,
+      logger,
+      now: () => nowMs,
+      usesFilePath,
+      persistDebounceMs: 50,
+    });
+
+    // noteWorkspaceUsed clamps atMs to now(), so now() has to advance with each call for the
+    // later, larger timestamps to actually win over the first.
+    nowMs = START;
+    expiry.noteWorkspaceUsed("ws-1", START);
+    nowMs = START + 1;
+    expiry.noteWorkspaceUsed("ws-1", START + 1);
+    nowMs = START + 2;
+    expiry.noteWorkspaceUsed("ws-1", START + 2);
+    expect(existsSync(usesFilePath)).toBe(false);
+
+    await expect
+      .poll(
+        () => (existsSync(usesFilePath) ? JSON.parse(readFileSync(usesFilePath, "utf8")) : null),
+        {
+          timeout: 2_000,
+          interval: 10,
+        },
+      )
+      .toEqual({ "ws-1": START + 2 });
+  });
+
+  test("stop() flushes a still-pending debounced write before returning", async () => {
+    const usesFilePath = path.join(tmpDir, "stop-flush-uses.json");
+    const expiry = new AutoPinExpiry({
+      workspaceRegistry: registry,
+      listAgents: () => agents,
+      readConfig: () => config,
+      logger,
+      now: () => nowMs,
+      usesFilePath,
+      // Long enough that the real timer can't fire on its own before stop() clears it.
+      persistDebounceMs: 60_000,
+    });
+
+    expiry.noteWorkspaceUsed("ws-1", START);
+    expect(existsSync(usesFilePath)).toBe(false);
+
+    await expiry.stop();
+
+    expect(JSON.parse(readFileSync(usesFilePath, "utf8"))).toEqual({ "ws-1": START });
+  });
+
+  test("a sweep that prunes a stale use schedules a persist of the prune", async () => {
+    const usesFilePath = path.join(tmpDir, "prune-uses.json");
+    await seed("ws-1", { pinnedAt: new Date(START).toISOString(), pinSource: "auto" });
+    const expiry = new AutoPinExpiry({
+      workspaceRegistry: registry,
+      listAgents: () => agents,
+      readConfig: () => config,
+      logger,
+      now: () => nowMs,
+      usesFilePath,
+      persistDebounceMs: 50,
+    });
+    expiry.noteWorkspaceUsed("ws-1", START);
+    await expect
+      .poll(
+        () => (existsSync(usesFilePath) ? JSON.parse(readFileSync(usesFilePath, "utf8")) : null),
+        {
+          timeout: 2_000,
+          interval: 10,
+        },
+      )
+      .toEqual({ "ws-1": START });
+
     nowMs = START + AUTO_PIN_RECENT_USE_MS;
     expect(await expiry.sweep()).toEqual(["ws-1"]);
+
+    // ws-1 is no longer auto-pinned, so its stale use is dropped — a later restart can't
+    // resurrect a timestamp for a workspace the uses file has no business tracking anymore.
+    // The sweep itself schedules this debounced persist, with no explicit flush call here.
+    await expect
+      .poll(() => JSON.parse(readFileSync(usesFilePath, "utf8")), { timeout: 2_000, interval: 10 })
+      .toEqual({});
   });
 
   test("agents.autoPinRecentUseMinutes sets the window", async () => {

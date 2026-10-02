@@ -4224,10 +4224,12 @@ export class Session {
         agentId: snapshot.id,
         createdWorktree,
       });
-      if (!msg.callerAgentId) {
-        // No caller agent means this "session" create came straight from a client connection
-        // (app or CLI), not on behalf of another agent (docs/done-janitor.md#manual-pin-vs-auto-pin covers
-        // the known gap: a CLI invocation that clears PASEO_AGENT_ID looks the same as a human).
+      // No caller agent and no inherited parent-agent-id label means this "session" create came
+      // straight from a client connection (app or CLI), not on behalf of another agent. The label
+      // check covers a CLI invocation that clears PASEO_AGENT_ID: it looks like a human on
+      // callerAgentId alone, but still carries its creator's parent label through `labels`
+      // (docs/done-janitor.md#manual-pin-vs-auto-pin).
+      if (!msg.callerAgentId && !getParentAgentIdFromLabels(resolvedIntent.intent.labels)) {
         await this.maybeAutoPinWorkspace(resolvedIntent.intent.workspaceId);
         await this.emitWorkspaceUpdateForWorkspaceId(resolvedIntent.intent.workspaceId);
       }
@@ -6758,10 +6760,13 @@ export class Session {
       },
     );
     // This RPC is only reachable over a client connection (app or CLI), never from the
-    // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
-    await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId, {
-      expectsInitialAgent: Boolean(request.firstAgentContext),
-    });
+    // agent-scoped create_workspace MCP tool. But the CLI itself runs inside an agent sometimes
+    // (PASEO_AGENT_ID set) — that create is still agent-attributable, not Tyler's, and never pins.
+    if (!request.callerAgentId) {
+      await this.maybeAutoPinWorkspace(createdWorkspace.workspaceId, {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+      });
+    }
     const workspace =
       (await this.workspaceRegistry.get(createdWorkspace.workspaceId)) ?? createdWorkspace;
     await this.syncWorkspaceGitObserverForWorkspace(workspace);
@@ -6843,11 +6848,14 @@ export class Session {
         ? { resolveDefaultBranch: async () => source.baseBranch as string }
         : undefined,
     );
-    // This RPC is only reachable over a client connection (app or CLI), never from the
-    // agent-scoped create_workspace MCP tool, so every create here is human-attributable.
-    await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId, {
-      expectsInitialAgent: Boolean(request.firstAgentContext),
-    });
+    // This RPC is only reachable over a client connection (app or CLI). But the CLI itself runs
+    // inside an agent sometimes (PASEO_AGENT_ID set) — that create is still agent-attributable,
+    // not Tyler's, and never pins.
+    if (!request.callerAgentId) {
+      await this.maybeAutoPinWorkspace(workflowResult.workspace.workspaceId, {
+        expectsInitialAgent: Boolean(request.firstAgentContext),
+      });
+    }
     const refreshedWorkspace = await this.workspaceRegistry.get(
       workflowResult.workspace.workspaceId,
     );
