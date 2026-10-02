@@ -4454,8 +4454,11 @@ export class AgentManager {
       stream = this.streamAgentInternal(held.agentId, held.prompt, held.runOptions, held.queuedAt);
     } catch (error) {
       // Registered in `running` for this turn; without it the agent has to come back to idle.
+      // No work ran, so this is a cancel, not a finish: without `turnCanceled`,
+      // `checkAndSetAttention` reads a clean `running` -> `idle` edge and clears a stale error.
       const agent = this.agents.get(held.agentId);
       if (agent && !agent.activeForegroundTurnId) {
+        agent.turnCanceled = true;
         agent.lifecycle = "idle";
         this.emitState(agent);
       }

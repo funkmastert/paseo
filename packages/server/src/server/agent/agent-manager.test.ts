@@ -7754,10 +7754,12 @@ test("a turn that finishes after an error clears the error badge", async () => {
 test("a cancelled turn after an error keeps the error badge", async () => {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-canceled-after-error-"));
   const storage = new AgentStorage(join(workdir, "agents"), logger);
+  const finishedTurns: string[] = [];
   const manager = new AgentManager({
     clients: { codex: new CappedThenCancelableClient() },
     registry: storage,
     logger,
+    onAgentTurnFinished: ({ agentId }) => finishedTurns.push(agentId),
     idFactory: () => randomUUID(),
   });
   const agent = await manager.createAgent(
@@ -7774,6 +7776,37 @@ test("a cancelled turn after an error keeps the error badge", async () => {
 
   expect(manager.getAgent(agent.id)?.lifecycle).toBe("idle");
   expect((await storage.get(agent.id))?.attentionReason).toBe("error");
+  // The cancel above is its own (non-quiet) running -> idle edge, so it already raised one
+  // "finished" broadcast despite leaving the error badge alone; the janitor's question below
+  // must not raise a second one.
+  const finishedBeforeQuietTurn = finishedTurns.length;
+
+  // The done janitor's question finds the agent idle, with the error badge intact. The
+  // `!options?.quietTurn` guard in checkAndSetAttention has no other coverage: a quiet turn
+  // finishing after an error must not read as the recovery that clears it, and must raise no
+  // "finished" broadcast.
+  const question = manager.startQuietTurnIfIdle(agent.id, "are you done?");
+  if (!question) throw new Error("expected the idle agent to take the question");
+  expect((await question.outcome).status).toBe("completed");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "error",
+  });
+  expect((await storage.get(agent.id))?.attentionReason).toBe("error");
+  expect(finishedTurns).toHaveLength(finishedBeforeQuietTurn);
+
+  // A real turn right after still clears it and raises "finished".
+  await manager.runAgent(agent.id, "resume again");
+  await manager.flush();
+
+  expect(manager.getAgent(agent.id)?.attention).toMatchObject({
+    requiresAttention: true,
+    attentionReason: "finished",
+  });
+  expect(finishedTurns).toHaveLength(finishedBeforeQuietTurn + 1);
+  expect((await storage.get(agent.id))?.attentionReason).toBe("finished");
 });
 
 test("archiveSnapshot clears persisted attention and normalizes running status", async () => {
