@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ACCOUNT_FAILOVER_MIGRATED_TO_LABEL } from "@getpaseo/protocol/agent-labels";
-import {
-  heldAgentLookup,
-  resolveAgentMoveNoteTarget,
-  resolveShownAgent,
-} from "@/utils/agent-migration";
+import { decideAgentMoveNotice, heldAgentLookup, resolveShownAgent } from "@/utils/agent-migration";
 
 function held(agents: Record<string, string | null>) {
   const byId = new Map(
@@ -83,7 +79,7 @@ describe("heldAgentLookup", () => {
   });
 });
 
-describe("resolveAgentMoveNoteTarget", () => {
+describe("decideAgentMoveNotice", () => {
   const entries = [
     {
       provider: "claude-backup",
@@ -92,30 +88,51 @@ describe("resolveAgentMoveNoteTarget", () => {
       enabled: true,
     },
   ];
+  const notice = { id: 7, serverId: "server-a", agentId: "b" };
+  const ready = {
+    notice,
+    shownNoticeId: null,
+    agent: { provider: "claude-backup" },
+    providerEntries: entries,
+    providersLoading: false,
+  };
 
   it("names the account the successor runs on", () => {
-    expect(
-      resolveAgentMoveNoteTarget({
-        agentId: "b",
-        agent: { provider: "claude-backup" },
-        providerEntries: entries,
-      }),
-    ).toEqual({ kind: "account", label: "Claude Backup (work)" });
+    expect(decideAgentMoveNotice(ready)).toEqual({
+      kind: "show",
+      noticeId: 7,
+      target: { kind: "account", label: "Claude Backup (work)" },
+    });
   });
 
-  it("falls back to the provider id before the provider list arrives", () => {
+  it("waits for the account labels while they load", () => {
     expect(
-      resolveAgentMoveNoteTarget({
-        agentId: "b",
-        agent: { provider: "claude-backup" },
+      decideAgentMoveNotice({ ...ready, providerEntries: undefined, providersLoading: true }),
+    ).toEqual({ kind: "wait" });
+  });
+
+  it("falls back to the provider id when the host has no provider list", () => {
+    expect(
+      decideAgentMoveNotice({ ...ready, providerEntries: undefined, providersLoading: false }),
+    ).toEqual({ kind: "show", noticeId: 7, target: { kind: "account", label: "claude-backup" } });
+  });
+
+  it("names the agent id without waiting when the app does not hold the successor", () => {
+    expect(
+      decideAgentMoveNotice({
+        ...ready,
+        agent: null,
         providerEntries: undefined,
+        providersLoading: true,
       }),
-    ).toEqual({ kind: "account", label: "claude-backup" });
+    ).toEqual({ kind: "show", noticeId: 7, target: { kind: "agent", agentId: "b" } });
   });
 
-  it("names the agent id when the app does not hold the successor", () => {
-    expect(
-      resolveAgentMoveNoteTarget({ agentId: "gone", agent: undefined, providerEntries: entries }),
-    ).toEqual({ kind: "agent", agentId: "gone" });
+  it("shows each notice once", () => {
+    expect(decideAgentMoveNotice({ ...ready, shownNoticeId: 7 })).toEqual({ kind: "none" });
+  });
+
+  it("does nothing without a notice", () => {
+    expect(decideAgentMoveNotice({ ...ready, notice: null })).toEqual({ kind: "none" });
   });
 });
