@@ -47,3 +47,50 @@ export function hasOpenAgentTab(labels: Record<string, unknown> | null | undefin
     ([label, value]) => isOpenAgentTabLabel(label) && value === "true",
   );
 }
+
+/**
+ * Set by account failover on a handle it retired when the conversation moved to a new agent id
+ * (docs/account-failover.md). A blank value reads as unset: a revived handle is the live end again.
+ */
+export const ACCOUNT_FAILOVER_MIGRATED_TO_LABEL = "paseo.account-failover.migrated-to";
+
+export function getMigratedToFromLabels(
+  labels: Record<string, unknown> | null | undefined,
+): string | null {
+  const migratedTo = labels?.[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL];
+  return typeof migratedTo === "string" && migratedTo.trim().length > 0 ? migratedTo.trim() : null;
+}
+
+export type MigrationChainResult =
+  /** Never moved, or its pointer names an agent that no longer exists. */
+  | { kind: "self"; agentId: string }
+  /** `agentId` is the live end; `chain` runs from the handle asked about to it. */
+  | { kind: "moved"; agentId: string; chain: string[] }
+  /** The pointers loop, so there is no live end to deliver to. `chain` ends on the repeat. */
+  | { kind: "loop"; chain: string[] };
+
+/**
+ * Where a conversation that account failover moved lives now: follow `migrated-to` from `agentId`
+ * until an agent without one. `labelsOf` returns null for an agent that does not exist, which
+ * ends the walk at the last one that does.
+ */
+export function followMigratedTo(
+  agentId: string,
+  labelsOf: (agentId: string) => Record<string, unknown> | null | undefined,
+): MigrationChainResult {
+  const chain = [agentId];
+  let current = agentId;
+  for (;;) {
+    const next = getMigratedToFromLabels(labelsOf(current));
+    if (!next || labelsOf(next) == null) {
+      return chain.length === 1
+        ? { kind: "self", agentId: current }
+        : { kind: "moved", agentId: current, chain };
+    }
+    if (chain.includes(next)) {
+      return { kind: "loop", chain: [...chain, next] };
+    }
+    chain.push(next);
+    current = next;
+  }
+}
