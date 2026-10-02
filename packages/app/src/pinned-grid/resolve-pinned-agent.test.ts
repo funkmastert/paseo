@@ -39,6 +39,42 @@ describe("pickPinnedWorkspaceAgentId", () => {
     expect(id).toBe("successor");
   });
 
+  it("does not show a successor that lives in another workspace", () => {
+    const id = pickPinnedWorkspaceAgentId({
+      agents: [
+        agent({ id: "retired", lastActivityAt: 30, movedTo: "elsewhere" }),
+        agent({ id: "elsewhere", workspaceId: "ws-2", lastActivityAt: 40 }),
+        agent({ id: "local", lastActivityAt: 10 }),
+      ],
+      workspaceId: "ws-1",
+    });
+    expect(id).toBe("local");
+  });
+
+  it("does not show an archived successor", () => {
+    const id = pickPinnedWorkspaceAgentId({
+      agents: [
+        agent({ id: "retired", lastActivityAt: 30, movedTo: "archived" }),
+        agent({ id: "archived", archivedAt: new Date(1), lastActivityAt: 40 }),
+        agent({ id: "local", lastActivityAt: 10 }),
+      ],
+      workspaceId: "ws-1",
+    });
+    expect(id).toBe("local");
+  });
+
+  it("ranks a moved conversation by the most recent activity of any of its handles", () => {
+    const id = pickPinnedWorkspaceAgentId({
+      agents: [
+        agent({ id: "retired", lastActivityAt: 50, movedTo: "successor" }),
+        agent({ id: "successor", lastActivityAt: 5 }),
+        agent({ id: "other", lastActivityAt: 20, createdAt: 0 }),
+      ],
+      workspaceId: "ws-1",
+    });
+    expect(id).toBe("successor");
+  });
+
   it("keeps a handle whose successor this host does not list", () => {
     const id = pickPinnedWorkspaceAgentId({
       agents: [agent({ id: "retired", lastActivityAt: 30, movedTo: "gone" })],

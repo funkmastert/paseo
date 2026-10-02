@@ -1708,10 +1708,14 @@ export function followMovedAgentInLayout(input: {
         retargetTabInLayout({ layout, tabId: handleTab.tabId, target: to })?.layout ?? layout;
       continue;
     }
-    const wasFocused = findPaneById(root, layout.focusedPaneId)?.focusedTabId === handleTab.tabId;
+    const focusedPaneId = layout.focusedPaneId;
+    const wasFocused = findPaneById(root, focusedPaneId)?.focusedTabId === handleTab.tabId;
     layout = closeTabInLayout({ layout, tabId: handleTab.tabId }) ?? layout;
     if (wasFocused) {
       layout = focusTabInLayout({ layout, tabId: successorTab.tabId }) ?? layout;
+    } else if (focusedPaneId && findPaneById(asInternalNode(layout.root), focusedPaneId)) {
+      // Closing a pane's own focused tab focuses that pane; the user was looking elsewhere.
+      layout = { ...layout, focusedPaneId };
     }
   }
   return layout;

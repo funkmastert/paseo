@@ -50,17 +50,40 @@ export type AgentMoveNoteTarget =
   | { kind: "account"; label: string }
   | { kind: "agent"; agentId: string };
 
-/** "Moved to <account>" when the app holds the agent it went to, else its id. */
-export function resolveAgentMoveNoteTarget(input: {
-  agentId: string;
-  agent: { provider: string } | null | undefined;
+export type AgentMoveNoticeDecision =
+  | { kind: "none" }
+  | { kind: "wait" }
+  | { kind: "show"; noticeId: number; target: AgentMoveNoteTarget };
+
+/**
+ * Whether to raise the "Moved to <account>" note now, and what it names. Each notice shows once.
+ * It names the account by its display label, so it waits while the provider list loads; with no
+ * list at all it falls back to the provider id. A successor the app does not hold is named by id.
+ */
+export function decideAgentMoveNotice(input: {
+  notice: { id: number; agentId: string } | null;
+  shownNoticeId: number | null;
+  agent: { provider: string } | null;
   providerEntries: ProviderSnapshotEntry[] | undefined;
-}): AgentMoveNoteTarget {
-  if (!input.agent) {
-    return { kind: "agent", agentId: input.agentId };
+  providersLoading: boolean;
+}): AgentMoveNoticeDecision {
+  const { notice, agent } = input;
+  if (!notice || notice.id === input.shownNoticeId) {
+    return { kind: "none" };
+  }
+  if (!agent) {
+    return {
+      kind: "show",
+      noticeId: notice.id,
+      target: { kind: "agent", agentId: notice.agentId },
+    };
+  }
+  if (!input.providerEntries && input.providersLoading) {
+    return { kind: "wait" };
   }
   return {
-    kind: "account",
-    label: resolveProviderLabel(input.agent.provider, input.providerEntries),
+    kind: "show",
+    noticeId: notice.id,
+    target: { kind: "account", label: resolveProviderLabel(agent.provider, input.providerEntries) },
   };
 }

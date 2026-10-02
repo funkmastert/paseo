@@ -4,7 +4,7 @@ import { useToast } from "@/contexts/toast-context";
 import { useProvidersSnapshot } from "@/hooks/use-providers-snapshot";
 import { useAgentMoveNoticeStore } from "@/stores/agent-move-notice-store";
 import { useSessionStore } from "@/stores/session-store";
-import { heldAgentLookup, resolveAgentMoveNoteTarget } from "@/utils/agent-migration";
+import { decideAgentMoveNotice, heldAgentLookup } from "@/utils/agent-migration";
 
 const NOTICE_DURATION_MS = 4000;
 
@@ -25,20 +25,18 @@ export function AgentMoveNoticeToast() {
   const shownNoticeIdRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (!notice || shownNoticeIdRef.current === notice.id) {
-      return;
-    }
-    // The account's display name comes from the provider list; without it the note would show
-    // the raw provider id.
-    if (agent && !entries && isLoading) {
-      return;
-    }
-    shownNoticeIdRef.current = notice.id;
-    const target = resolveAgentMoveNoteTarget({
-      agentId: notice.agentId,
+    const decision = decideAgentMoveNotice({
+      notice,
+      shownNoticeId: shownNoticeIdRef.current,
       agent,
       providerEntries: entries,
+      providersLoading: isLoading,
     });
+    if (decision.kind !== "show") {
+      return;
+    }
+    shownNoticeIdRef.current = decision.noticeId;
+    const { target } = decision;
     toast.show(
       target.kind === "account"
         ? t("agentPanel.moved.toAccount", { account: target.label })
