@@ -2,7 +2,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import {
+  ACCOUNT_FAILOVER_MIGRATED_TO_LABEL,
+  PARENT_AGENT_ID_LABEL,
+} from "@getpaseo/protocol/agent-labels";
 import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import { AgentManager } from "../agent/agent-manager.js";
 import { AgentStorage } from "../agent/agent-storage.js";
@@ -229,6 +232,56 @@ describe("conditional heartbeats", () => {
     const second = await service.createOrReplace(base);
     expect(second.id).toBe(first.id);
     expect(second.condition).toBeUndefined();
+  });
+
+  /** What account failover writes when it moves `agentId`'s conversation to `successorId`. */
+  async function retire(agentId: string, successorId: string): Promise<void> {
+    await manager.updateAgentMetadata(agentId, {
+      labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: successorId },
+    });
+    await manager.closeAgent(agentId);
+  }
+
+  test("a heartbeat aimed at a handle account failover retired fires on where it moved", async () => {
+    const retired = await createLeader();
+    const successor = await createLeader();
+    await retire(retired.id, successor.id);
+    const heartbeat = await service.create({
+      prompt: "Tick",
+      cadence: { type: "every", everyMs: MINUTE },
+      target: { type: "agent", agentId: retired.id },
+    });
+
+    await advanceAndTick(MINUTE, MINUTE);
+
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(steer.mock.calls[0]?.[0]).toBe(successor.id);
+    const after = await service.inspect(heartbeat.id);
+    expect(after.runs).toHaveLength(1);
+    expect(after.runs[0]).toMatchObject({ status: "succeeded", agentId: successor.id });
+    // The retired handle is not resumed on the account it left.
+    expect(manager.getAgent(retired.id)).toBeNull();
+  });
+
+  test("a conditional heartbeat on a retired handle reads where it moved", async () => {
+    const retired = await createLeader();
+    const successor = await createLeader();
+    await retire(retired.id, successor.id);
+    const child = await createChild(successor.id);
+    await settle();
+    now = new Date();
+    await service.create({
+      prompt: "A child finished",
+      cadence: { type: "every", everyMs: MINUTE },
+      target: { type: "agent", agentId: retired.id },
+      condition: { type: "childFinishedSince" },
+    });
+    await manager.runAgent(child.id, "finish after the heartbeat exists");
+
+    await advanceAndTick(MINUTE, MINUTE);
+
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect(steer.mock.calls[0]?.[0]).toBe(successor.id);
   });
 
   test("a condition on a schedule that starts new agents is rejected", async () => {
