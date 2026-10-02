@@ -47,6 +47,7 @@ function input(
     views: leader ? [leader, ...children] : children,
     createdAtMs: T0 - 10 * MINUTE,
     lastRunAtMs: null,
+    nowMs: T0,
     ...overrides,
   };
 }
@@ -225,5 +226,106 @@ describe("evaluateScheduleCondition", () => {
       ]),
     );
     expect(verdict.fire).toBe(true);
+  });
+
+  describe("ownsOpenItems", () => {
+    const condition: ScheduleCondition = { type: "ownsOpenItems" };
+
+    test("fires when the target owns an open item", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        condition,
+        input(leader, [], { openItems: [{ id: "wi_1", state: "in-progress", updatedAtMs: T0 }] }),
+      );
+      expect(verdict.fire).toBe(true);
+    });
+
+    test("stays quiet when it owns none", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(condition, input(leader, [], { openItems: [] }));
+      expect(verdict.fire).toBe(false);
+    });
+
+    test("stays quiet when no queue source is wired", () => {
+      const leader = view({ id: "leader" });
+      expect(evaluateScheduleCondition(condition, input(leader, [])).fire).toBe(false);
+    });
+  });
+
+  describe("itemOverdue", () => {
+    test("fires once an open item has been unchanged past the default 4h threshold", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        { type: "itemOverdue" },
+        input(leader, [], {
+          nowMs: T0 + 5 * 60 * MINUTE,
+          openItems: [{ id: "wi_1", state: "in-progress", updatedAtMs: T0 }],
+        }),
+      );
+      expect(verdict.fire).toBe(true);
+    });
+
+    test("respects an explicit threshold override", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        { type: "itemOverdue", thresholdMinutes: 10 },
+        input(leader, [], {
+          nowMs: T0 + 9 * MINUTE,
+          openItems: [{ id: "wi_1", state: "in-progress", updatedAtMs: T0 }],
+        }),
+      );
+      expect(verdict.fire).toBe(false);
+    });
+  });
+
+  describe("idleWithClaimableGate", () => {
+    const condition: ScheduleCondition = { type: "idleWithClaimableGate" };
+
+    test("fires when a pending item is assigned to the idle target", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        condition,
+        input(leader, [], { openItems: [{ id: "wi_1", state: "pending", updatedAtMs: T0 }] }),
+      );
+      expect(verdict.fire).toBe(true);
+    });
+
+    test("stays quiet when its open items are all claimed", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        condition,
+        input(leader, [], { openItems: [{ id: "wi_1", state: "in-progress", updatedAtMs: T0 }] }),
+      );
+      expect(verdict.fire).toBe(false);
+    });
+  });
+
+  describe("contextAbove", () => {
+    test("fires at or above the default 70% threshold", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        { type: "contextAbove" },
+        input(leader, [], { contextUsagePercent: 71 }),
+      );
+      expect(verdict.fire).toBe(true);
+    });
+
+    test("respects an explicit percent override", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        { type: "contextAbove", percent: 90 },
+        input(leader, [], { contextUsagePercent: 80 }),
+      );
+      expect(verdict.fire).toBe(false);
+    });
+
+    test("stays quiet when nothing has been captured yet", () => {
+      const leader = view({ id: "leader" });
+      const verdict = evaluateScheduleCondition(
+        { type: "contextAbove" },
+        input(leader, [], { contextUsagePercent: null }),
+      );
+      expect(verdict.fire).toBe(false);
+    });
   });
 });

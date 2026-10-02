@@ -2546,6 +2546,21 @@ export async function createPaseoDaemon(
   // after the monitors. See docs/work-queue.md#surfaces.
   const coordination = createCoordinationRuntime({ config, agentManager, agentStorage, logger });
 
+  // OR-B2's item leaves read the queue through the same best-effort accessor the stall sweep and
+  // the done janitor use: null while coordination is off or still opening, never a throw.
+  scheduleService.setConditionDataSources({
+    getOpenItemsForOwner: async (owner) => {
+      const queue = coordination.tryQueue();
+      if (!queue) return [];
+      const page = await queue.list({ owner, openOnly: true });
+      return page.items.map((item) => ({
+        id: item.id,
+        state: item.state as "pending" | "in-progress" | "blocked",
+        updatedAtMs: Date.parse(item.updatedAt),
+      }));
+    },
+  });
+
   const createAgentToolHostDependencies = (
     runtime: PaseoToolRuntimeContext,
   ): PaseoToolHostDependencies => ({
@@ -2963,6 +2978,15 @@ export async function createPaseoDaemon(
               jev,
             );
             pluginRuntime.bindPaseoSessionHost(wsServer);
+            // OR-B2's `contextAbove` condition reads this instance's cache: no new capture, no
+            // second instance hitting the provider.
+            scheduleService.setConditionDataSources({
+              getContextUsagePercent: (agentId) => {
+                const usage = wsServer?.getContextUsageService().peek(agentId);
+                if (!usage || usage.maxTokens <= 0) return null;
+                return (usage.totalTokens / usage.maxTokens) * 100;
+              },
+            });
             const jevPushSender = wsServer.getPushNotificationSender();
             jev.setBudgetNoticeSender((event: JevBudgetExhaustedEvent) => {
               void jevPushSender

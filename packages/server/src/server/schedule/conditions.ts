@@ -16,6 +16,17 @@ import { parentOf } from "../agent/done-janitor-detector.js";
 
 export type ConditionVerdict = { fire: true; reason: string } | { fire: false; reason: string };
 
+/** The target's own open work items, read from the queue. See docs/work-queue.md. */
+export interface ConditionWorkItemView {
+  id: string;
+  state: "pending" | "in-progress" | "blocked";
+  /** The item's last transition. */
+  updatedAtMs: number;
+}
+
+const DEFAULT_ITEM_OVERDUE_MINUTES = 240;
+const DEFAULT_CONTEXT_ABOVE_PERCENT = 70;
+
 export interface ConditionInput {
   /** The heartbeat's target as the daemon sees it. Null when it has no record at all. */
   target: DoneJanitorAgentView | null;
@@ -25,6 +36,20 @@ export interface ConditionInput {
   createdAtMs: number;
   /** When it last fired. Null if it never has. */
   lastRunAtMs: number | null;
+  /** The clock, for `itemOverdue`. Only the leaves that need a clock read it. */
+  nowMs: number;
+  /**
+   * The target's own open items. Undefined when the caller has not wired a queue source (OR-A1
+   * off, or coordination disabled): `ownsOpenItems`, `itemOverdue` and `idleWithClaimableGate`
+   * then read as "no data" rather than guessing.
+   */
+  openItems?: readonly ConditionWorkItemView[];
+  /**
+   * The target's cached context-usage percent (0-100), read from the daemon's existing cache
+   * (docs/context-usage.md). Null: captured and the provider reports none, or unsupported.
+   * Undefined: no source wired. Never triggers a new capture.
+   */
+  contextUsagePercent?: number | null;
 }
 
 function isRunning(view: DoneJanitorAgentView): boolean {
@@ -93,6 +118,57 @@ function evaluateLeaf(
         return { fire: true, reason: `${finished.length} child agent(s) finished since last seen` };
       }
       return { fire: false, reason: "no child has finished since the target last acted" };
+    }
+    case "ownsOpenItems": {
+      if (input.openItems === undefined) {
+        return { fire: false, reason: "no work-queue source is wired" };
+      }
+      if (input.openItems.length > 0) {
+        return { fire: true, reason: `owns ${input.openItems.length} open work item(s)` };
+      }
+      return { fire: false, reason: "owns no open work item" };
+    }
+    case "itemOverdue": {
+      if (input.openItems === undefined) {
+        return { fire: false, reason: "no work-queue source is wired" };
+      }
+      const thresholdMs = (leaf.thresholdMinutes ?? DEFAULT_ITEM_OVERDUE_MINUTES) * 60_000;
+      const overdue = input.openItems.filter(
+        (item) => input.nowMs - item.updatedAtMs >= thresholdMs,
+      );
+      if (overdue.length > 0) {
+        return {
+          fire: true,
+          reason: `${overdue.length} open item(s) unchanged for ${thresholdMs / 60_000}m or more`,
+        };
+      }
+      return { fire: false, reason: "no open item is overdue" };
+    }
+    case "idleWithClaimableGate": {
+      if (input.openItems === undefined) {
+        return { fire: false, reason: "no work-queue source is wired" };
+      }
+      const claimable = input.openItems.filter((item) => item.state === "pending");
+      if (claimable.length > 0) {
+        return { fire: true, reason: `${claimable.length} pending item(s) assigned to it` };
+      }
+      return { fire: false, reason: "no pending item is assigned to it" };
+    }
+    case "contextAbove": {
+      if (input.contextUsagePercent === undefined) {
+        return { fire: false, reason: "no context-usage source is wired" };
+      }
+      if (input.contextUsagePercent === null) {
+        return { fire: false, reason: "context usage is not available for it" };
+      }
+      const percent = leaf.percent ?? DEFAULT_CONTEXT_ABOVE_PERCENT;
+      if (input.contextUsagePercent >= percent) {
+        return {
+          fire: true,
+          reason: `context usage ${input.contextUsagePercent.toFixed(0)}% is at or above ${percent}%`,
+        };
+      }
+      return { fire: false, reason: `context usage ${input.contextUsagePercent.toFixed(0)}% is below ${percent}%` };
     }
   }
 }

@@ -7,6 +7,7 @@ import {
 } from "./coordination.js";
 import { WorkQueueDelivery, type DeliverPromptToAgent } from "./queue/delivery.js";
 import { WorkQueueFinishLink, type AgentTurnSource } from "./queue/finish-link.js";
+import type { WorkQueueService } from "./queue/service.js";
 
 // The daemon's handle on coordination. Built before the WebSocket server and the agent tools so
 // both can hold it, opened once by `start()` after the monitors start. A store that fails to open
@@ -122,6 +123,16 @@ export class CoordinationRuntime {
     this.retentionTimer = null;
     this.delivery?.stop();
     this.finishLink?.stop();
+  }
+
+  /**
+   * Best-effort, synchronous access for passive integrations that must never block or throw:
+   * the stall sweep's work-item leg, the done janitor's open-items check, archive hand-back, and
+   * the schedule conditions. Null means "nothing to do here", not "something is wrong" — off,
+   * still opening, and failed to open all read the same way to a caller like this.
+   */
+  tryQueue(): WorkQueueService | null {
+    return this.state === "open" ? (this.coordination?.queue ?? null) : null;
   }
 
   /**

@@ -1,9 +1,12 @@
 import type pino from "pino";
+import { projectScheduleConditionForClient } from "@getpaseo/protocol/schedule/condition";
 import type { SessionInboundMessage, SessionOutboundMessage } from "../../messages.js";
 import type { ScheduleService } from "../../schedule/service.js";
 
 export interface ScheduleSessionHost {
   emit(msg: SessionOutboundMessage): void;
+  /** COMPAT(scheduleConditionItemLeaves): false downgrades the four new leaves to `always`. */
+  supportsScheduleConditionItemLeaves(): boolean;
 }
 
 export interface ScheduleSessionOptions {
@@ -23,13 +26,26 @@ export class ScheduleSession {
     this.logger = options.logger;
   }
 
+  /**
+   * COMPAT(scheduleConditionItemLeaves): every schedule this session sends out goes through this,
+   * so a client whose strict union predates the four item/context leaves never receives one.
+   */
+  private projectSchedule<T extends { condition?: unknown }>(schedule: T): T {
+    if (!schedule.condition) return schedule;
+    const condition = projectScheduleConditionForClient(
+      schedule.condition as Parameters<typeof projectScheduleConditionForClient>[0],
+      this.host.supportsScheduleConditionItemLeaves(),
+    );
+    return condition === schedule.condition ? schedule : { ...schedule, condition };
+  }
+
   private toScheduleSummary(
     schedule: Awaited<ReturnType<ScheduleService["inspect"]>>,
   ): Extract<
     SessionOutboundMessage,
     { type: "schedule/list/response" }
   >["payload"]["schedules"][number] {
-    const { runs: _runs, ...summary } = schedule;
+    const { runs: _runs, ...summary } = this.projectSchedule(schedule);
     return summary;
   }
 
@@ -122,7 +138,7 @@ export class ScheduleSession {
         type: "schedule/inspect/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: this.projectSchedule(schedule),
           error: null,
         },
       });
@@ -212,7 +228,7 @@ export class ScheduleSession {
         type: "schedule/run-once/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: this.projectSchedule(schedule),
           error: null,
         },
       });
@@ -239,7 +255,7 @@ export class ScheduleSession {
         type: "schedule/update/response",
         payload: {
           requestId: request.requestId,
-          schedule,
+          schedule: this.projectSchedule(schedule),
           error: null,
         },
       });

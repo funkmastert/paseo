@@ -2748,7 +2748,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           .min(1)
           .optional()
           .describe(
-            "Fire only when one of these holds; omit to fire on every tick. hasActiveChildren: an agent you spawned is still running. childFinishedSince: an agent you spawned finished after you last acted. always: fire on every tick. A busy caller is never woken.",
+            "Fire only when one of these holds; omit to fire on every tick. hasActiveChildren: an agent you spawned is still running. childFinishedSince: an agent you spawned finished after you last acted. ownsOpenItems: you own an open work-queue item. itemOverdue: you own an open item unchanged for 4h or more. idleWithClaimableGate: a pending item is assigned to you. contextAbove: your cached context usage is at or above 70%. always: fire on every tick. A busy caller is never woken.",
           ),
       },
       outputSchema: ScheduleSummarySchema.shape,

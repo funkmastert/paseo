@@ -104,6 +104,14 @@ export class AgentContextUsageService {
     this.entries.clear();
   }
 
+  /**
+   * The cached breakdown, with no capture and no I/O: `contextAbove` (schedule/conditions.ts)
+   * reads this so a heartbeat tick spends no tokens. Null when nothing has been captured yet.
+   */
+  peek(agentId: string): AgentContextUsage | null {
+    return this.entries.get(agentId)?.cached ?? null;
+  }
+
   async read(agentId: string): Promise<ContextUsageReadResult> {
     const agent = this.agents.getAgent(agentId);
     if (!agent) {

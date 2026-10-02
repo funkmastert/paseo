@@ -19,8 +19,8 @@ import type { CreatePaseoWorktreeWorkflowResult } from "../worktree-session.js";
 import { buildAgentViews } from "../agent-done-janitor.js";
 import { ScheduleStore } from "./store.js";
 import { computeNextRunAt, validateScheduleCadence } from "./cron.js";
-import { evaluateScheduleCondition } from "./conditions.js";
-import type { ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
+import { evaluateScheduleCondition, type ConditionWorkItemView } from "./conditions.js";
+import { conditionNames, type ScheduleCondition } from "@getpaseo/protocol/schedule/condition";
 import type {
   CreateScheduleInput,
   ScheduleExecutionResult,
@@ -273,6 +273,14 @@ export interface ScheduleServiceOptions {
   orphanedScheduleSweepIntervalMs?: number;
 }
 
+/** OR-B2's item and context leaves: data sources wired in after construction (bootstrap.ts),
+ * since coordination and the context-usage cache are built later. Absent until then, so an
+ * evaluation in that window reads as "no data" rather than guessing. See conditions.ts. */
+export interface ScheduleConditionDataSources {
+  getOpenItemsForOwner?: (owner: string) => Promise<readonly ConditionWorkItemView[]>;
+  getContextUsagePercent?: (agentId: string) => number | null;
+}
+
 export class ScheduleService {
   private readonly store: ScheduleStore;
   private readonly logger: Logger;
@@ -295,6 +303,7 @@ export class ScheduleService {
   private readonly orphanedScheduleSweepIntervalMs: number;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private orphanSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private conditionDataSources: ScheduleConditionDataSources = {};
 
   constructor(options: ScheduleServiceOptions) {
     this.store = new ScheduleStore(join(options.paseoHome, "schedules"));
@@ -309,6 +318,15 @@ export class ScheduleService {
     this.runner = options.runner ?? ((schedule, runId) => this.executeSchedule(schedule, runId));
     this.orphanedScheduleSweepIntervalMs =
       options.orphanedScheduleSweepIntervalMs ?? DEFAULT_ORPHANED_SCHEDULE_SWEEP_INTERVAL_MS;
+  }
+
+  /**
+   * OR-B2's item and context leaves. Called once from bootstrap.ts after coordination and the
+   * context-usage cache exist, which is after this service is constructed and started; a tick
+   * before then evaluates those leaves as "no data" rather than guessing.
+   */
+  setConditionDataSources(sources: ScheduleConditionDataSources): void {
+    this.conditionDataSources = { ...this.conditionDataSources, ...sources };
   }
 
   async start(): Promise<void> {
@@ -647,11 +665,26 @@ export class ScheduleService {
         new Set<string>(),
         new Set<string>(),
       );
+      const names = conditionNames(condition);
+      const needsItems = names.some(
+        (name) =>
+          name === "ownsOpenItems" || name === "itemOverdue" || name === "idleWithClaimableGate",
+      );
+      const needsContext = names.includes("contextAbove");
+      const openItems = needsItems
+        ? await this.conditionDataSources.getOpenItemsForOwner?.(target.agentId)
+        : undefined;
+      const getContextUsagePercent = this.conditionDataSources.getContextUsagePercent;
+      const contextUsagePercent =
+        needsContext && getContextUsagePercent ? getContextUsagePercent(target.agentId) : undefined;
       const verdict = evaluateScheduleCondition(condition, {
         target: views.find((view) => view.id === target.agentId) ?? null,
         views,
         createdAtMs: Date.parse(schedule.createdAt),
         lastRunAtMs: schedule.lastRunAt ? Date.parse(schedule.lastRunAt) : null,
+        nowMs: now.getTime(),
+        openItems,
+        contextUsagePercent,
       });
       if (!verdict.fire) {
         this.logger.debug(

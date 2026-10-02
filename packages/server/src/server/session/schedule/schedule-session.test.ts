@@ -6,10 +6,17 @@ import { findByType } from "../../test-utils/session-stubs.js";
 import type { SessionOutboundMessage } from "../../messages.js";
 import type { ScheduleService } from "../../schedule/service.js";
 
-function makeSession(schedule: { [K in keyof ScheduleService]?: unknown }) {
+function makeSession(
+  schedule: { [K in keyof ScheduleService]?: unknown },
+  options?: { supportsScheduleConditionItemLeaves?: boolean },
+) {
   const emitted: SessionOutboundMessage[] = [];
   const session = new ScheduleSession({
-    host: { emit: (message) => emitted.push(message) },
+    host: {
+      emit: (message) => emitted.push(message),
+      supportsScheduleConditionItemLeaves: () =>
+        options?.supportsScheduleConditionItemLeaves ?? true,
+    },
     scheduleService: createStub<ScheduleService>(schedule),
     logger: pino({ level: "silent" }),
   });
@@ -96,5 +103,68 @@ describe("ScheduleSession", () => {
 
     expect(received?.target).toEqual({ type: "agent", agentId: "agent-9" });
     expect(findByType(emitted, "schedule/create/response")?.payload.error).toBeNull();
+  });
+
+  it("downgrades a new condition leaf to always for a client without the capability", async () => {
+    const stored = {
+      id: "s3",
+      name: null,
+      prompt: "p",
+      cadence: { type: "every" as const, everyMs: 1000 },
+      target: { type: "agent" as const, agentId: "a" },
+      status: "active" as const,
+      condition: { type: "contextAbove" as const, percent: 80 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    };
+    const { session, emitted } = makeSession(
+      { inspect: async () => stored },
+      { supportsScheduleConditionItemLeaves: false },
+    );
+
+    await session.handleScheduleInspectRequest({
+      type: "schedule/inspect",
+      requestId: "si1",
+      scheduleId: "s3",
+    });
+
+    const response = findByType(emitted, "schedule/inspect/response");
+    expect(response?.payload.schedule?.condition).toEqual({ type: "always" });
+  });
+
+  it("leaves a new condition leaf alone for a client with the capability", async () => {
+    const stored = {
+      id: "s4",
+      name: null,
+      prompt: "p",
+      cadence: { type: "every" as const, everyMs: 1000 },
+      target: { type: "agent" as const, agentId: "a" },
+      status: "active" as const,
+      condition: { type: "ownsOpenItems" as const },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      nextRunAt: null,
+      lastRunAt: null,
+      pausedAt: null,
+      expiresAt: null,
+      maxRuns: null,
+      runs: [],
+    };
+    const { session, emitted } = makeSession({ inspect: async () => stored });
+
+    await session.handleScheduleInspectRequest({
+      type: "schedule/inspect",
+      requestId: "si2",
+      scheduleId: "s4",
+    });
+
+    const response = findByType(emitted, "schedule/inspect/response");
+    expect(response?.payload.schedule?.condition).toEqual({ type: "ownsOpenItems" });
   });
 });

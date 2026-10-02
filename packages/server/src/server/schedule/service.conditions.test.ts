@@ -231,6 +231,48 @@ describe("conditional heartbeats", () => {
     expect(second.condition).toBeUndefined();
   });
 
+  test("ownsOpenItems fires once the wired queue source reports an open item", async () => {
+    const leader = await createLeader();
+    await settle();
+    now = new Date();
+    const heartbeat = await service.create({
+      prompt: "You own open work",
+      cadence: { type: "every", everyMs: MINUTE },
+      target: { type: "agent", agentId: leader.id },
+      condition: { type: "ownsOpenItems" },
+    });
+    service.setConditionDataSources({
+      getOpenItemsForOwner: async (owner) =>
+        owner === leader.id
+          ? [{ id: "wi_1", state: "in-progress", updatedAtMs: now.getTime() }]
+          : [],
+    });
+
+    await advanceAndTick(MINUTE, MINUTE);
+
+    expect(steer).toHaveBeenCalledTimes(1);
+    expect((await service.inspect(heartbeat.id)).runs).toHaveLength(1);
+  });
+
+  test("contextAbove stays quiet with no context-usage source wired, then fires once one is", async () => {
+    const leader = await createLeader();
+    await settle();
+    now = new Date();
+    await service.create({
+      prompt: "Your context is full",
+      cadence: { type: "every", everyMs: MINUTE },
+      target: { type: "agent", agentId: leader.id },
+      condition: { type: "contextAbove", percent: 50 },
+    });
+
+    await advanceAndTick(MINUTE, MINUTE);
+    expect(steer).not.toHaveBeenCalled();
+
+    service.setConditionDataSources({ getContextUsagePercent: () => 75 });
+    await advanceAndTick(MINUTE, MINUTE);
+    expect(steer).toHaveBeenCalledTimes(1);
+  });
+
   test("a condition on a schedule that starts new agents is rejected", async () => {
     await expect(
       service.create({

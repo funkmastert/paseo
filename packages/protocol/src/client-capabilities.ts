@@ -40,6 +40,12 @@ export const CLIENT_CAPS = {
   pluginTimelineItems: "plugin_timeline_items",
   // COMPAT(workspaceSetupBlocked): added in v0.8.0, remove after 2027-03-07 once client floor >= v0.8.0.
   workspaceSetupBlocked: "workspace_setup_blocked",
+  // COMPAT(scheduleConditionItemLeaves): added in v0.9.0. A schedule's `condition` can carry
+  // `ownsOpenItems`, `itemOverdue`, `idleWithClaimableGate` or `contextAbove` (schedule/condition.ts).
+  // The daemon projects those leaves down to `always` for a client without this capability, whose
+  // strict discriminated union would otherwise reject the whole schedule. Remove the projection
+  // after 2027-10-01 once the supported client floor advertises it.
+  scheduleConditionItemLeaves: "schedule_condition_item_leaves",
   browserHost: "browser_host",
 } as const;
 

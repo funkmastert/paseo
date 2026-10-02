@@ -3,6 +3,7 @@ import {
   conditionFromNames,
   conditionNames,
   parseConditionNames,
+  projectScheduleConditionForClient,
   ScheduleConditionSchema,
 } from "./condition.js";
 import { StoredScheduleSchema } from "./types.js";
@@ -40,6 +41,33 @@ describe("schedule condition", () => {
         conditions: [{ type: "any", conditions: [{ type: "always" }] }],
       }).success,
     ).toBe(false);
+  });
+
+  it("projects a new leaf down to always for a client without the capability", () => {
+    expect(projectScheduleConditionForClient({ type: "ownsOpenItems" }, false)).toEqual({
+      type: "always",
+    });
+    expect(projectScheduleConditionForClient({ type: "contextAbove", percent: 80 }, false)).toEqual(
+      { type: "always" },
+    );
+  });
+
+  it("leaves an old leaf and a new leaf alone for a capable client", () => {
+    expect(projectScheduleConditionForClient({ type: "hasActiveChildren" }, false)).toEqual({
+      type: "hasActiveChildren",
+    });
+    expect(projectScheduleConditionForClient({ type: "ownsOpenItems" }, true)).toEqual({
+      type: "ownsOpenItems",
+    });
+  });
+
+  it("drops only the new leaves from an any-of list, collapsing to always if that empties it", () => {
+    const mixed = conditionFromNames(["hasActiveChildren", "ownsOpenItems"]);
+    expect(projectScheduleConditionForClient(mixed, false)).toEqual({
+      type: "hasActiveChildren",
+    });
+    const onlyNew = conditionFromNames(["ownsOpenItems", "itemOverdue"]);
+    expect(projectScheduleConditionForClient(onlyNew, false)).toEqual({ type: "always" });
   });
 
   it("leaves a stored schedule written before conditions valid", () => {

@@ -1019,6 +1019,13 @@ export class VoiceAssistantWebSocketServer {
     return this.usageHistoryStore;
   }
 
+  /** The context-usage cache this instance owns, so the schedule service's `contextAbove`
+   * condition (OR-B2) reads the same cache a connected client's popover does, with no new
+   * capture and no second instance hitting the provider. */
+  public getContextUsageService(): AgentContextUsageService {
+    return this.contextUsageService;
+  }
+
   /** Tyler's availability mode now (docs/notification-policy.md), read by the away auto-reply. */
   public getAvailabilityMode(): EffectiveAvailability["mode"] {
     return this.pushNotifications.policy.getStatus().effectiveAvailability.mode;
