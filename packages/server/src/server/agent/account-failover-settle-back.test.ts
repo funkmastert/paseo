@@ -37,6 +37,7 @@ function root(overrides: Partial<AccountFailoverAgentSummary> = {}): AccountFail
     title: "Orchestrator",
     busy: false,
     pendingPermissionCount: 0,
+    runningProviderSubagentCount: 0,
     lastActivityAt: new Date(NOW - 10 * MINUTE_MS).toISOString(),
     timelineSeq: 40,
     lastTimelineAt: new Date(NOW - 10 * MINUTE_MS).toISOString(),
@@ -120,6 +121,9 @@ describe("planSettleBacks", () => {
     ["closed", root({ lifecycle: "closed" })],
     ["busy with a pending run", root({ busy: true })],
     ["waiting on a permission", root({ pendingPermissionCount: 1 })],
+    // A Task-tool subagent still running in the background: the move closes the session, which
+    // cancels it.
+    ["still running a provider subagent", root({ runningProviderSubagentCount: 1 })],
     ["without a provider session", root({ sessionId: undefined })],
     ["retired", root({ labels: { [ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]: "root-2" } })],
   ])("leaves a root that is %s", (_state, agent) => {

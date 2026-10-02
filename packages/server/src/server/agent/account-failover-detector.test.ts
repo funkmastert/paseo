@@ -34,6 +34,7 @@ function agent(
     title: `Agent ${overrides.id}`,
     busy: false,
     pendingPermissionCount: 0,
+    runningProviderSubagentCount: 0,
     lastActivityAt: null,
     timelineSeq: 7,
     lastTimelineAt: null,

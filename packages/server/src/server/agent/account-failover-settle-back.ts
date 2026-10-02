@@ -96,11 +96,15 @@ export interface SettleBackPlan {
 
 /**
  * Whether a root is between turns and has been for a while: idle, nothing pending, nothing
- * waiting on a permission, and quiet for SETTLE_BACK_MIN_IDLE_MS. The monitor asks again right
+ * waiting on a permission, no provider subagent still running, and quiet for
+ * SETTLE_BACK_MIN_IDLE_MS. The monitor asks again right
  * before the move, since a turn can start while the move waits for its pace slot.
  */
 export function isQuietBetweenTurns(agent: AccountFailoverAgentSummary, nowMs: number): boolean {
   if (agent.lifecycle !== "idle" || agent.busy || agent.pendingPermissionCount > 0) return false;
+  // A Task-tool subagent still working in the background: the move closes the session, which
+  // cancels it.
+  if (agent.runningProviderSubagentCount > 0) return false;
   if (!agent.sessionId || getMigratedToFromLabels(agent.labels)) return false;
   // Cut off by a cap: the rescue leg moves it and resumes the turn it lost.
   if (isLimitShapedError(agent.lastError)) return false;

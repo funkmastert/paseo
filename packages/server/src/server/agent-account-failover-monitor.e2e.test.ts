@@ -431,6 +431,33 @@ async function queueTurnBehindHold(harness: Harness, agentId: string, text: stri
   await expect.poll(() => admission?.holdsTurnFor(agentId), { timeout: 10_000 }).toBe(true);
 }
 
+function subagentStatus(harness: Harness, agentId: string, subagentId: string) {
+  return harness.daemon.agentManager
+    .listProviderSubagents(agentId)
+    .find((subagent) => subagent.id === subagentId)?.status;
+}
+
+/** A Claude Task-tool subagent the agent starts in a turn and leaves running after it. */
+async function startBackgroundSubagent(
+  harness: Harness,
+  agentId: string,
+  subagentId: string,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `start a background subagent "${subagentId}"`);
+  await expect.poll(() => subagentStatus(harness, agentId, subagentId)).toBe("running");
+  await settle(harness, agentId);
+}
+
+async function finishBackgroundSubagent(
+  harness: Harness,
+  agentId: string,
+  subagentId: string,
+): Promise<void> {
+  await harness.client.sendMessage(agentId, `finish a background subagent "${subagentId}"`);
+  await expect.poll(() => subagentStatus(harness, agentId, subagentId)).toBe("completed");
+  await settle(harness, agentId);
+}
+
 async function endHeldTurn(harness: Harness, agentId: string): Promise<void> {
   await harness.client.cancelAgent(agentId);
   await expect
@@ -1616,5 +1643,45 @@ describe("AccountFailoverMonitor (e2e)", () => {
     expect(managed(harness, original).labels[ACCOUNT_FAILOVER_MIGRATED_TO_LABEL]).toBe("");
     expect(agentCount(harness)).toBe(agentsBefore);
     expect(harness.prompts.claude.some((prompt) => prompt.includes("Account handoff"))).toBe(true);
+  }, 60_000);
+
+  test("leaves a root whose background subagent is still running, and settles it once it finishes", async () => {
+    // Moving it closes the session, which cancels the Task-tool subagent still working for it.
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await startBackgroundSubagent(harness, root, "bg-review");
+    windowHasReset(harness);
+    harness.setUsage([RECOVERED_LEADER]);
+
+    await harness.sweep();
+
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(subagentStatus(harness, root, "bg-review")).toBe("running");
+
+    // Not an attempt: once the subagent finishes, the next quiet sweep moves it.
+    await finishBackgroundSubagent(harness, root, "bg-review");
+    harness.advanceClock(MINUTE_MS);
+    await harness.sweep();
+    expect(providerOf(harness, root)).toBe("claude");
+  }, 60_000);
+
+  test("leaves a planned settle-back alone when a background subagent started while it waited", async () => {
+    const root = await createAgent(harness, { provider: "claude-backup", title: "Root" });
+    await converse(harness, root, "PLANNED-MARKER");
+    const planned = harness.daemon.agentManager.getAccountFailoverSummary(root);
+    if (!planned) throw new Error(`agent ${root} is not loaded`);
+    await startBackgroundSubagent(harness, root, "bg-late");
+
+    const outcome = await settleBackAgent({
+      agent: planned,
+      targetProviderId: "claude",
+      nowMs: Date.now() + REACTIVE_TTL_MS,
+      agentManager: harness.daemon.agentManager,
+      agentStorage: harness.daemon.agentStorage,
+      logger: pino({ level: "silent" }),
+    });
+
+    expect(outcome).toMatchObject({ kind: "skipped", agentId: root, reason: "busy" });
+    expect(providerOf(harness, root)).toBe("claude-backup");
+    expect(subagentStatus(harness, root, "bg-late")).toBe("running");
   }, 60_000);
 });
