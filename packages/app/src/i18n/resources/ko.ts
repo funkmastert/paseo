@@ -243,6 +243,10 @@ export const ko: TranslationResources = {
       callout: "이 에이전트는 보관되었습니다",
       unarchive: "보관 해제",
     },
+    moved: {
+      toAccount: "{{account}}(으)로 이동됨",
+      toAgent: "에이전트 {{agentId}}(으)로 이동됨",
+    },
   },
   agentIdChip: {
     copiedLabel: "에이전트 ID",

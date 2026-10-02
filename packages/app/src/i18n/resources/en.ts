@@ -240,6 +240,10 @@ export const en = {
       callout: "This agent is archived",
       unarchive: "Unarchive",
     },
+    moved: {
+      toAccount: "Moved to {{account}}",
+      toAgent: "Moved to agent {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "Agent ID",

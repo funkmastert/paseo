@@ -242,6 +242,10 @@ export const zhCN: TranslationResources = {
       callout: "此 Agent 已归档",
       unarchive: "取消归档",
     },
+    moved: {
+      toAccount: "已移至 {{account}}",
+      toAgent: "已移至代理 {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "代理 ID",

@@ -246,6 +246,10 @@ export const fr: TranslationResources = {
       callout: "Cet agent est archivé",
       unarchive: "Désarchiver",
     },
+    moved: {
+      toAccount: "Déplacé vers {{account}}",
+      toAgent: "Déplacé vers l'agent {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "ID de l'agent",

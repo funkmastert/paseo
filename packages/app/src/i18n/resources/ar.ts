@@ -242,6 +242,10 @@ export const ar: TranslationResources = {
       callout: "تمت أرشفة هذا الوكيل",
       unarchive: "إلغاء الأرشفة",
     },
+    moved: {
+      toAccount: "نُقل إلى {{account}}",
+      toAgent: "نُقل إلى الوكيل {{agentId}}",
+    },
   },
   agentIdChip: {
     copiedLabel: "معرف الوكيل",

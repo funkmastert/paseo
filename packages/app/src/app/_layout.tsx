@@ -135,6 +135,7 @@ import {
 } from "@/utils/host-routes";
 import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
+import { AgentMoveNoticeToast } from "@/components/agent-move-notice-toast";
 import { PluginCatalogSync } from "@/plugins";
 import {
   ensureOsNotificationPermission,
@@ -945,6 +946,7 @@ function AppShell() {
       <HorizontalScrollProvider>
         <OpenProjectListener />
         <AgentNavigationListener />
+        <AgentMoveNoticeToast />
         <AppWithSidebar>
           <WorkspaceRouteNavigationBridge />
           <RootStack />

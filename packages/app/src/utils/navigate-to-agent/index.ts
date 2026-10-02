@@ -1,6 +1,8 @@
 import { router, type Href } from "expo-router";
+import { announceAgentMove } from "@/stores/agent-move-notice-store";
 import { navigateToWorkspace } from "@/stores/navigation-active-workspace-store";
 import { useSessionStore } from "@/stores/session-store";
+import { heldAgentLookup, resolveShownAgent } from "@/utils/agent-migration";
 import { resolveNavigateToAgent, type NavigateToAgentInput } from "./resolve";
 
 export type { NavigateToAgentInput } from "./resolve";
@@ -14,6 +16,9 @@ export function navigateToAgent(input: NavigateToAgentInput): string {
         agentWorkspaceId: agent?.workspaceId,
       };
     },
+    resolveShownAgent: ({ serverId, agentId }) =>
+      resolveShownAgent(agentId, heldAgentLookup(useSessionStore.getState().sessions[serverId])),
+    announceAgentMove,
     navigateToHostAgent: (route) => {
       router.navigate(route as Href);
     },

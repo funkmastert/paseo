@@ -245,6 +245,10 @@ export const ja: TranslationResources = {
       callout: "このエージェントはアーカイブされています",
       unarchive: "アーカイブ解除",
     },
+    moved: {
+      toAccount: "{{account}} に移動しました",
+      toAgent: "エージェント {{agentId}} に移動しました",
+    },
   },
   agentIdChip: {
     copiedLabel: "エージェントID",
