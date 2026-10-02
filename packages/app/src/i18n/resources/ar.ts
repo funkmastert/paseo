@@ -1982,6 +1982,10 @@ export const ar: TranslationResources = {
     free: "مجاني — سيحصل عليه أول وكيل يطلبه",
     reservedForYou: "محجوز لك",
     runningFor: "يعمل منذ {{duration}}",
+    heldFor: "محجوز منذ {{duration}}",
+    enforce: "فرض",
+    openAgent: "فتح {{agent}}",
+    actionFailed: "فشل إجراء الجهاز: {{message}}",
     mode: {
       off: "متوقف",
       offDescription: "لا شيء يُحسب أو يُرفض.",
@@ -2008,6 +2012,8 @@ export const ar: TranslationResources = {
     },
     blocked_one: "{{count}} رفض حديث",
     blocked_other: "{{count}} رفض حديث",
+    blockedDryRun_one: "كان سيُرفض {{count}} تشغيل",
+    blockedDryRun_other: "كان سيُرفض {{count}} تشغيلات",
     physical: {
       sectionTitle: "فعلي",
       platform: {

@@ -2014,6 +2014,10 @@ export const ptBR: TranslationResources = {
     free: "Livre — o próximo agente que pedir vai usá-lo",
     reservedForYou: "Reservado para você",
     runningFor: "Em execução há {{duration}}",
+    heldFor: "Reservado há {{duration}}",
+    enforce: "Aplicar",
+    openAgent: "Abrir {{agent}}",
+    actionFailed: "A ação no dispositivo falhou: {{message}}",
     mode: {
       off: "Desativado",
       offDescription: "Nada é contado ou recusado.",
@@ -2040,6 +2044,8 @@ export const ptBR: TranslationResources = {
     },
     blocked_one: "{{count}} recusa recente",
     blocked_other: "{{count}} recusas recentes",
+    blockedDryRun_one: "{{count}} inicialização teria sido recusada",
+    blockedDryRun_other: "{{count}} inicializações teriam sido recusadas",
     physical: {
       sectionTitle: "Físico",
       platform: {

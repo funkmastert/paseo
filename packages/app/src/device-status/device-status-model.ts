@@ -13,14 +13,19 @@ export interface DeviceStatusRow {
   /** Null only for a "starting" row — a checked-out slot with no device yet. */
   deviceId: string | null;
   platform: "ios" | "android";
-  /** The device's own name where there is one; never a lease id dressed up as a device. */
+  /** The device's own name where there is one; never a lease id dressed up as a device. A
+   * simulator reads "<simctl name> · <first UDID block>"; an emulator reads its AVD name. */
   label: string;
+  /** A simulator's simctl name, when the daemon resolved one. */
+  name?: string;
   /** "held by <agent>", "booting", "no lease" — who has it, in the strip's own words. */
   holderKey: "heldBy" | "unleased" | "starting";
   agentId?: string;
   /** The holding agent's title, resolved by the caller from its own agent list. */
   agentLabel?: string;
   heldForSeconds?: number;
+  /** How long the device itself has been running — distinct from how long it has been held. */
+  runningForSeconds?: number;
   reason?: string;
   /**
    * How strongly the cap binds the holder's provider. Present only where the daemon knows the
@@ -73,6 +78,10 @@ export interface DeviceStatusStripModel {
   waiting: DeviceStatusPayload["waiting"];
   /** Recent refusals (and, in dry run, what would have been refused or handed over). */
   blocked: DeviceStatusPayload["blocked"];
+  /** Simulator/emulator refusals plus the physical install gate's. */
+  blockedCount: number;
+  /** Every recorded refusal is a dry-run record: nothing was actually refused. */
+  blockedDryRunOnly: boolean;
   /** Devices running under nobody's lease. Called out because they are the cap's blind spot. */
   unleasedCount: number;
   /** Connected physical devices (USB/network) — outside the slot cap entirely. */
@@ -96,6 +105,12 @@ function resolveHolderKey(device: DeviceStatusEntry): DeviceStatusRow["holderKey
   return device.agentId ? "heldBy" : "unleased";
 }
 
+function resolveLabel(device: DeviceStatusEntry): string {
+  if (!device.deviceId) return "";
+  const short = shortDeviceId(device.deviceId);
+  return device.name ? `${device.name} · ${short}` : short;
+}
+
 function toRow(
   device: DeviceStatusEntry,
   index: number,
@@ -106,7 +121,11 @@ function toRow(
     key: device.deviceId ?? `starting-${device.platform}-${index}`,
     deviceId: device.deviceId,
     platform: device.platform,
-    label: device.deviceId ? shortDeviceId(device.deviceId) : "",
+    label: resolveLabel(device),
+    ...(device.name ? { name: device.name } : {}),
+    ...(device.runningForSeconds !== undefined
+      ? { runningForSeconds: device.runningForSeconds }
+      : {}),
     holderKey,
     reserved: device.reserved ?? false,
     isRunning: device.state === "running",
@@ -149,6 +168,14 @@ function countUnleased(devices: readonly DeviceStatusEntry[]): number {
     .length;
 }
 
+/** The last 4 characters that identify the phone. A wireless-debugging mDNS serial
+ * (`adb-<serial>-<id>._adb-tls-connect._tcp`) carries the USB serial inside it; its literal last
+ * 4 would be `_tcp` on every phone. */
+function physicalShortId(id: string): string {
+  const embedded = /^adb-(.+)-[^-.]+\._adb-tls-connect\._tcp/.exec(id)?.[1];
+  return (embedded ?? id).slice(-4);
+}
+
 function toPhysicalRow(
   device: PhysicalDeviceStatusEntry,
   agentLabels: Record<string, string>,
@@ -156,7 +183,7 @@ function toPhysicalRow(
   return {
     key: device.id,
     id: device.id,
-    shortId: device.id.slice(-4),
+    shortId: physicalShortId(device.id),
     platform: device.platform,
     transport: device.transport,
     connected: device.connected,
@@ -170,6 +197,18 @@ function toPhysicalRow(
       ? { agentLabel: agentLabels[device.agentId] }
       : {}),
     ...(device.heldForSeconds !== undefined ? { heldForSeconds: device.heldForSeconds } : {}),
+  };
+}
+
+/** Both gates' recent refusals, counted together; a list of only dry-run records refused
+ * nothing and must not read as refusals. */
+function summarizeBlocked(
+  payload: DeviceStatusPayload | undefined,
+): Pick<DeviceStatusStripModel, "blockedCount" | "blockedDryRunOnly"> {
+  const entries = [...(payload?.blocked ?? []), ...(payload?.physicalBlocked ?? [])];
+  return {
+    blockedCount: entries.length,
+    blockedDryRunOnly: entries.every((entry) => entry.dryRun),
   };
 }
 
@@ -196,6 +235,7 @@ export function buildDeviceStatusStripModel(
     rows: devices.map((device, index) => toRow(device, index, agentLabels)),
     waiting,
     blocked: payload?.blocked ?? [],
+    ...summarizeBlocked(payload),
     unleasedCount: countUnleased(devices),
     unenforcedProviders: resolveUnenforcedProviders(payload),
     physicalRows: physicalDevices.map((device) => toPhysicalRow(device, agentLabels)),

@@ -309,4 +309,92 @@ describe("buildDeviceStatusStripModel and physical devices", () => {
     const model = buildDeviceStatusStripModel(payload({ used: 1 }));
     expect(model.physicalRows).toEqual([]);
   });
+
+  test("a simulator row shows its simctl name, with the short UDID after it", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        devices: [
+          {
+            platform: "ios",
+            deviceId: "00000000-0000-0000-0000-000000000001",
+            name: "iPhone 17 Pro",
+            state: "running",
+            attribution: "none",
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({
+      name: "iPhone 17 Pro",
+      label: "iPhone 17 Pro · 00000000",
+    });
+  });
+
+  test("a held row carries how long it has been held and how long the device has run", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        devices: [
+          {
+            platform: "android",
+            deviceId: "yonderly_pixel",
+            state: "running",
+            attribution: "lease",
+            agentId: "agent-1",
+            heldForSeconds: 120,
+            runningForSeconds: 7_200,
+          },
+        ],
+      }),
+    );
+
+    expect(model.rows[0]).toMatchObject({ heldForSeconds: 120, runningForSeconds: 7_200 });
+  });
+
+  test("physical refusals count with the rest, and dry-run-only records say so", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        blocked: [
+          {
+            agentId: "agent-2",
+            platform: "ios",
+            command: "xcrun simctl boot X",
+            message: "m",
+            dryRun: true,
+            at: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+        physicalBlocked: [
+          {
+            agentId: "agent-3",
+            command: "adb install",
+            message: "m",
+            dryRun: true,
+            at: "2026-10-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    expect(model.blockedCount).toBe(2);
+    expect(model.blockedDryRunOnly).toBe(true);
+  });
+
+  test("a wireless-debugging serial shows the phone's own last four, not _tcp", () => {
+    const model = buildDeviceStatusStripModel(
+      payload({
+        physicalDevices: [
+          {
+            id: "adb-FAKESERIAL45291-AbCdEf._adb-tls-connect._tcp",
+            platform: "android",
+            transport: "network",
+            connected: true,
+            reserved: false,
+          },
+        ],
+      }),
+    );
+
+    expect(model.physicalRows[0]?.shortId).toBe("5291");
+  });
 });

@@ -2013,6 +2013,10 @@ export const ru: TranslationResources = {
     free: "Свободно — достанется следующему агенту, который запросит",
     reservedForYou: "Забронировано для вас",
     runningFor: "Работает уже {{duration}}",
+    heldFor: "Занято уже {{duration}}",
+    enforce: "Применять",
+    openAgent: "Открыть {{agent}}",
+    actionFailed: "Не удалось выполнить действие с устройством: {{message}}",
     mode: {
       off: "Выключено",
       offDescription: "Ничего не учитывается и не отклоняется.",
@@ -2039,6 +2043,8 @@ export const ru: TranslationResources = {
     },
     blocked_one: "{{count}} недавний отказ",
     blocked_other: "{{count}} недавних отказов",
+    blockedDryRun_one: "{{count}} запуск был бы отклонён",
+    blockedDryRun_other: "{{count}} запусков были бы отклонены",
     physical: {
       sectionTitle: "Физическое",
       platform: {

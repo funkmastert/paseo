@@ -1992,6 +1992,10 @@ export const ko: TranslationResources = {
     free: "여유 — 다음에 요청하는 에이전트가 사용합니다",
     reservedForYou: "회원님을 위해 예약됨",
     runningFor: "{{duration}} 동안 실행 중",
+    heldFor: "{{duration}} 동안 점유 중",
+    enforce: "적용",
+    openAgent: "{{agent}} 열기",
+    actionFailed: "기기 작업 실패: {{message}}",
     mode: {
       off: "꺼짐",
       offDescription: "아무것도 집계되거나 거부되지 않습니다.",
@@ -2018,6 +2022,8 @@ export const ko: TranslationResources = {
     },
     blocked_one: "최근 거부 {{count}}건",
     blocked_other: "최근 거부 {{count}}건",
+    blockedDryRun_one: "실행 {{count}}건이 거부되었을 것입니다",
+    blockedDryRun_other: "실행 {{count}}건이 거부되었을 것입니다",
     physical: {
       sectionTitle: "실기기",
       platform: {

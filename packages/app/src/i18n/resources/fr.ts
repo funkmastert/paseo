@@ -2033,6 +2033,10 @@ export const fr: TranslationResources = {
     free: "Libre — le prochain agent qui le demande l'obtient",
     reservedForYou: "Réservé pour vous",
     runningFor: "En cours depuis {{duration}}",
+    heldFor: "Réservé depuis {{duration}}",
+    enforce: "Appliquer",
+    openAgent: "Ouvrir {{agent}}",
+    actionFailed: "L’action sur l’appareil a échoué : {{message}}",
     mode: {
       off: "Désactivé",
       offDescription: "Rien n'est compté ni refusé.",
@@ -2059,6 +2063,8 @@ export const fr: TranslationResources = {
     },
     blocked_one: "{{count}} refus récent",
     blocked_other: "{{count}} refus récents",
+    blockedDryRun_one: "{{count}} lancement aurait été refusé",
+    blockedDryRun_other: "{{count}} lancements auraient été refusés",
     physical: {
       sectionTitle: "Physique",
       platform: {

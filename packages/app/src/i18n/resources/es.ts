@@ -2028,6 +2028,10 @@ export const es: TranslationResources = {
     free: "Libre — el próximo agente que lo pida lo obtiene",
     reservedForYou: "Reservado para ti",
     runningFor: "En ejecución desde hace {{duration}}",
+    heldFor: "Retenido desde hace {{duration}}",
+    enforce: "Aplicar",
+    openAgent: "Abrir {{agent}}",
+    actionFailed: "Falló la acción del dispositivo: {{message}}",
     mode: {
       off: "Desactivado",
       offDescription: "No se cuenta ni se rechaza nada.",
@@ -2054,6 +2058,8 @@ export const es: TranslationResources = {
     },
     blocked_one: "{{count}} rechazo reciente",
     blocked_other: "{{count}} rechazos recientes",
+    blockedDryRun_one: "{{count}} lanzamiento se habría rechazado",
+    blockedDryRun_other: "{{count}} lanzamientos se habrían rechazado",
     physical: {
       sectionTitle: "Físico",
       platform: {

@@ -6802,6 +6802,9 @@ export const DeviceStatusEntrySchema = z.object({
   // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
   // A simulator's name from simctl; absent for an emulator, whose deviceId is its AVD name.
   name: z.string().optional(),
+  // COMPAT(deviceManagement): added in v0.8.x, remove optional parsing after 2027-09-30.
+  // How long the device has been up, from `ps` — set even when `heldForSeconds` is lease age.
+  runningForSeconds: z.number().optional(),
 });
 
 // COMPAT(deviceLeaseEnforcement): added in v0.8.2, remove optional parsing after 2027-09-19.

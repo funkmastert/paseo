@@ -129,6 +129,8 @@ export interface DeviceStatusEntry {
   attribution: DeviceStatusAttribution;
   /** Since the lease was taken, or — for a device nobody leased — since the process started. */
   heldForSeconds?: number;
+  /** How long the device itself has been up, from `ps`. */
+  runningForSeconds?: number;
   source?: DeviceLease["source"];
   reason?: string;
   processCount?: number;
@@ -1739,6 +1741,7 @@ export class DeviceLeaseManager {
       state: "running",
       attribution: "none",
       processCount: device.pids.length,
+      ...(device.uptimeSeconds !== undefined ? { runningForSeconds: device.uptimeSeconds } : {}),
     };
     if (lease) {
       entry.attribution = "lease";

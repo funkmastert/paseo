@@ -1961,6 +1961,10 @@ export const zhCN: TranslationResources = {
     free: "空闲 — 下一个请求的代理将获得它",
     reservedForYou: "已为您保留",
     runningFor: "已运行 {{duration}}",
+    heldFor: "已占用 {{duration}}",
+    enforce: "强制执行",
+    openAgent: "打开 {{agent}}",
+    actionFailed: "设备操作失败：{{message}}",
     mode: {
       off: "已关闭",
       offDescription: "不计数，也不拒绝。",
@@ -1986,6 +1990,8 @@ export const zhCN: TranslationResources = {
     },
     blocked_one: "{{count}} 次最近的拒绝",
     blocked_other: "{{count}} 次最近的拒绝",
+    blockedDryRun_one: "{{count}} 次启动本会被拒绝",
+    blockedDryRun_other: "{{count}} 次启动本会被拒绝",
     physical: {
       sectionTitle: "实体设备",
       platform: {

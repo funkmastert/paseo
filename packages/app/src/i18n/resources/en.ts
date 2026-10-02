@@ -1981,6 +1981,10 @@ export const en = {
     unleased: "No lease",
     starting: "Starting",
     runningFor: "Running {{duration}}",
+    heldFor: "Held {{duration}}",
+    enforce: "Enforce",
+    openAgent: "Open {{agent}}",
+    actionFailed: "Device action failed: {{message}}",
     waiting_one: "{{count}} agent waiting for a slot",
     waiting_other: "{{count}} agents waiting for a slot",
     unleasedCount_one: "{{count}} device without a lease",
@@ -2018,6 +2022,8 @@ export const en = {
     },
     blocked_one: "{{count}} recent refusal",
     blocked_other: "{{count}} recent refusals",
+    blockedDryRun_one: "{{count}} launch would have been refused",
+    blockedDryRun_other: "{{count}} launches would have been refused",
     physical: {
       sectionTitle: "Physical",
       platform: {

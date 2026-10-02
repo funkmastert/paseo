@@ -2001,6 +2001,10 @@ export const ja: TranslationResources = {
     free: "空き — 最初にリクエストしたエージェントが使用します",
     reservedForYou: "あなたのために予約済み",
     runningFor: "{{duration}} 実行中",
+    heldFor: "{{duration}} 保持中",
+    enforce: "適用",
+    openAgent: "{{agent}} を開く",
+    actionFailed: "デバイス操作に失敗しました: {{message}}",
     mode: {
       off: "オフ",
       offDescription: "カウントも拒否も行われません。",
@@ -2027,6 +2031,8 @@ export const ja: TranslationResources = {
     },
     blocked_one: "最近の拒否 {{count}} 件",
     blocked_other: "最近の拒否 {{count}} 件",
+    blockedDryRun_one: "{{count}} 件の起動が拒否されていたはずです",
+    blockedDryRun_other: "{{count}} 件の起動が拒否されていたはずです",
     physical: {
       sectionTitle: "実機",
       platform: {
