@@ -950,6 +950,34 @@ test("agent run waits on the agent a moved message was delivered to", async () =
     }),
   );
   await expect(runPromise).resolves.toMatchObject({ status: "idle", lastMessage: "DONE" });
+  // The snapshot that came back is the successor's; the handle still names the retired agent.
+  expect(agent.current()).toBeNull();
+  await client.close();
+});
+
+test("agent send says where a message to a moved agent was delivered", async () => {
+  const { client, ws } = await connectClient();
+  const agent = client.agents.ref("agent_retired");
+
+  const sendPromise = agent.send("pick it up", { messageId: "send-moved" });
+  const sendRequest = parseSentSessionMessage(ws.sent.at(-1));
+  ws.message(
+    sessionMessage({
+      type: "send_agent_message_response",
+      payload: {
+        requestId: sendRequest.requestId,
+        agentId: "agent_retired",
+        accepted: true,
+        error: null,
+        deliveredToAgentId: "agent_successor",
+      },
+    }),
+  );
+
+  await expect(sendPromise).resolves.toEqual({
+    agentId: "agent_retired",
+    deliveredToAgentId: "agent_successor",
+  });
   await client.close();
 });
 

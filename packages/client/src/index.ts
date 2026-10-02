@@ -57,6 +57,7 @@ import type {
   FetchAgentTimelineProjection,
   JevDecidePayload,
   JevStatusPayload,
+  SendAgentMessageResult,
   WaitForFinishResult,
 } from "./daemon-client.js";
 import type { JevQuestions } from "@getpaseo/protocol/jev/rpc-schemas";
@@ -272,6 +273,7 @@ export interface PaseoAgentRunOptions extends PaseoAgentSendOptions {
 }
 
 export type PaseoAgentRunResult = WaitForFinishResult;
+export type PaseoAgentSendResult = SendAgentMessageResult;
 export type PaseoAgentPermissionResponse = AgentPermissionResponse;
 
 export interface PaseoAgentRespondToPermissionOptions {
@@ -341,7 +343,12 @@ export interface PaseoAgentHandle {
   readonly timeline: PaseoAgentTimelineHandle;
   current(): PaseoAgent | null;
   refresh(requestId?: string): Promise<PaseoAgentRefetchResult | null>;
-  send(text: string, options?: PaseoAgentSendOptions): Promise<void>;
+  /**
+   * Sends a prompt and resolves once the daemon accepts it. If this agent had moved to another
+   * account, `deliveredToAgentId` names the agent the prompt went to: wait on
+   * `deliveredToAgentId ?? agentId`, not on this handle, to see that turn.
+   */
+  send(text: string, options?: PaseoAgentSendOptions): Promise<PaseoAgentSendResult>;
   respondToPermission(options: PaseoAgentRespondToPermissionOptions): Promise<void>;
   /** Sends a prompt and resolves when that turn finishes or needs attention. */
   run(text: string, options?: PaseoAgentRunOptions): Promise<PaseoAgentRunResult>;
@@ -810,9 +817,7 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
         current = result?.agent ?? null;
         return result;
       },
-      send: async (text, options) => {
-        await daemonClient.sendAgentMessage(id, text, options);
-      },
+      send: async (text, options) => await daemonClient.sendAgentMessage(id, text, options),
       respondToPermission: async ({ requestId, response }) => {
         await daemonClient.respondToPermission(id, requestId, response);
       },
@@ -824,7 +829,8 @@ function createAgentHandleFactory(daemonClient: DaemonClient): AgentHandleFactor
           sent.deliveredToAgentId ?? id,
           timeoutMs ?? DEFAULT_WAIT_FOR_FINISH_MS,
         );
-        if (result.final) {
+        // A turn that ran on the agent this one moved to reports that agent, not this handle's.
+        if (result.final?.id === id) {
           current = result.final;
         }
         return result;

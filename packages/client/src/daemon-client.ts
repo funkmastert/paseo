@@ -372,7 +372,8 @@ export interface SendAgentMessageResult {
   agentId: string;
   /**
    * Where the message was delivered when that agent had moved to another account (account
-   * failover); null when it had not. Wait on this one. An older daemon never sets it.
+   * failover); null when it had not. An older daemon never sets it. A wait for the turn this
+   * message started belongs on `deliveredToAgentId ?? agentId`.
    */
   deliveredToAgentId: string | null;
 }
@@ -3429,8 +3430,13 @@ export class DaemonClient {
     return { agentId: payload.agentId, deliveredToAgentId: payload.deliveredToAgentId ?? null };
   }
 
-  async sendMessage(agentId: string, text: string, options?: SendMessageOptions): Promise<void> {
-    await this.sendAgentMessage(agentId, text, options);
+  /** See {@link SendAgentMessageResult}: wait on `deliveredToAgentId ?? agentId`. */
+  async sendMessage(
+    agentId: string,
+    text: string,
+    options?: SendMessageOptions,
+  ): Promise<SendAgentMessageResult> {
+    return await this.sendAgentMessage(agentId, text, options);
   }
 
   async rewindAgent(
