@@ -43,6 +43,7 @@ import {
   WorkspaceTabTargetStorageSchema,
   type SplitNode,
   type SplitPane,
+  type WorkspaceLayout,
 } from "@/stores/workspace-layout-store";
 
 const SERVER_ID = "server-1";
@@ -709,6 +710,12 @@ describe("workspace-layout-store actions", () => {
         workspaceId: `ws-moved-${movedWorkspaceIndex}`,
       }) as string;
     }
+    function seedLayout(workspaceKey: string, layout: WorkspaceLayout) {
+      const { layoutByWorkspace } = workspaceLayoutStore.getState();
+      workspaceLayoutStore.setState({
+        layoutByWorkspace: { ...layoutByWorkspace, [workspaceKey]: layout },
+      });
+    }
     function agentTargets(workspaceKey: string) {
       return collectAllTabs(workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].root)
         .filter((tab) => tab.target.kind === "agent")
@@ -783,6 +790,45 @@ describe("workspace-layout-store actions", () => {
 
       expect(agentTargets(workspaceKey)).toEqual([{ kind: "agent", agentId: "successor" }]);
       expect(focusedTarget(workspaceKey)).toEqual({ kind: "agent", agentId: "successor" });
+    });
+
+    it("keeps the focused pane when a handle in another pane closes into its successor", () => {
+      const workspaceKey = freshWorkspaceKey();
+      seedLayout(workspaceKey, {
+        root: {
+          kind: "group",
+          group: {
+            id: "group-root",
+            direction: "horizontal",
+            sizes: [0.5, 0.5],
+            children: [
+              createPane({
+                id: "left",
+                tabIds: ["diff"],
+                targetsByTabId: { diff: { kind: "working_diff" } },
+              }),
+              createPane({
+                id: "right",
+                tabIds: ["successor-tab", "handle-tab"],
+                focusedTabId: "handle-tab",
+                targetsByTabId: {
+                  "successor-tab": { kind: "agent", agentId: "successor" },
+                  "handle-tab": { kind: "agent", agentId: "retired" },
+                },
+              }),
+            ],
+          },
+        },
+        focusedPaneId: "left",
+      });
+
+      workspaceLayoutStore.getState().followMovedAgent(workspaceKey, "retired", "successor");
+
+      expect(agentTargets(workspaceKey)).toEqual([{ kind: "agent", agentId: "successor" }]);
+      expect(workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].focusedPaneId).toBe(
+        "left",
+      );
+      expect(focusedTarget(workspaceKey)).toEqual({ kind: "working_diff" });
     });
 
     it("hands an explicit pin on the handle to the successor", () => {
