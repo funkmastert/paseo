@@ -183,6 +183,15 @@ describe("formatMovedTitle", () => {
     );
   });
 
+  it("says why when the move was not a cap, so a settled-back handle does not read as broke", () => {
+    expect(formatMovedTitle("Orchestrator", "e8e58ad7", "back on the leader account")).toBe(
+      "[MOVED → e8e58ad7, back on the leader account] Orchestrator",
+    );
+    expect(
+      stripMovedTitlePrefix("[MOVED → e8e58ad7, back on the leader account] Orchestrator"),
+    ).toBe("Orchestrator");
+  });
+
   it("replaces an existing prefix instead of stacking a second one", () => {
     const manual = "[MOVED → 0734543f, out of budget] Build the failover service";
     expect(formatMovedTitle(manual, "new-1")).toBe(

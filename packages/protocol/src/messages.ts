@@ -357,7 +357,9 @@ const MutableAccountFailoverConfigSchema = z
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
     collapseToSharedAccount: z.boolean().optional(),
+    settleBack: z.boolean().optional(),
     // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
+    // settleBack replaced the return leg; returnHome: false does not turn it off.
     returnHome: z.boolean().optional(),
     returnMaxHomeUsedPct: z.number().nonnegative().optional(),
     returnMinIdleMinutes: z.number().nonnegative().optional(),

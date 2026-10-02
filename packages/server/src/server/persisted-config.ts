@@ -418,8 +418,10 @@ const AgentAccountFailoverSchema = z
     migrationConcurrency: z.number().int().positive().optional(),
     notifyParent: z.boolean().optional(),
     collapseToSharedAccount: z.boolean().optional(),
+    settleBack: z.boolean().optional(),
     // COMPAT(failoverReturn): accepted and ignored since 2026-09-24; remove after 2027-01-31.
-    // The return leg is gone; a config that still sets these must keep loading.
+    // The return leg is gone; a config that still sets these must keep loading. settleBack
+    // replaced it, and returnHome: false does not turn settleBack off.
     returnHome: z.boolean().optional(),
     returnMaxHomeUsedPct: z.number().nonnegative().optional(),
     returnMinIdleMinutes: z.number().nonnegative().optional(),
