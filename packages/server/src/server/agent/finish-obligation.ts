@@ -208,9 +208,10 @@ export interface ObligationContext {
   child: AgentPresence & { parentAgentId: string | null };
   /**
    * Who receives the owner's report: the owner, or — when account failover retired the owner by
-   * importing its conversation into a new agent — the successor carrying it on.
+   * importing its conversation into a new agent — the successor carrying it on. `migrationLoop`
+   * is set when the owner's `migrated-to` pointers loop, so no agent answers for it.
    */
-  owner: AgentPresence & { agentId: string };
+  owner: AgentPresence & { agentId: string; migrationLoop?: readonly string[] };
   /** The nearest live agent above the owner, when there is one. */
   orchestrator: { agentId: string; presence: AgentPresence } | null;
   config: FinishReportLadderConfig;
@@ -268,6 +269,15 @@ function planPending(obligation: FinishObligation, ctx: ObligationContext): Obli
 }
 
 function planOwnerRung(obligation: FinishObligation, ctx: ObligationContext): ObligationStep {
+  const loop = ctx.owner.migrationLoop;
+  if (loop) {
+    // Any hop of the loop would be a guess at where the conversation lives.
+    return {
+      kind: "escalate",
+      to: "orchestrator",
+      why: `its owner's account moves loop (${loop.join(" → ")}), so no agent answers for it`,
+    };
+  }
   const gate = gateDelivery(ctx.owner);
   if (gate === "unreachable") {
     // Unreachable at the owner rung means the owner was archived or deleted: whoever did that
