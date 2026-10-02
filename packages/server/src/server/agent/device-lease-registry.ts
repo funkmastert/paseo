@@ -147,6 +147,11 @@ function containsWholeToken(haystack: string, needle: string): boolean {
  * reason text, only if unambiguous; otherwise the longest-idle one nobody holds" — named-device
  * matching against an explicit `device` input lives in the caller, since only it knows whether
  * the name was a running device at all; this only does the reason-text and longest-idle legs.
+ *
+ * A device in a live agent's process tree is held by that agent even with no lease: it booted
+ * the device without checking out, and is very likely mid-build on it. It is offered back to
+ * that agent first and never to anybody else (`agentId` is only ever set for a live agent —
+ * process attribution walks the trees of the agents the daemon knows about).
  */
 export function selectReusableDevice(input: {
   platform: DevicePlatform;
@@ -154,6 +159,8 @@ export function selectReusableDevice(input: {
   leases: readonly DeviceLease[];
   reservedDeviceIds: ReadonlySet<string>;
   reason?: string;
+  /** The agent asking. A device in its own process tree is its own; one in anybody else's isn't. */
+  requesterAgentId?: string;
 }): RunningDevice | undefined {
   const held = new Set(
     input.leases
@@ -164,9 +171,13 @@ export function selectReusableDevice(input: {
     (device) =>
       device.platform === input.platform &&
       !held.has(device.deviceId) &&
-      !input.reservedDeviceIds.has(device.deviceId),
+      !input.reservedDeviceIds.has(device.deviceId) &&
+      (device.agentId === undefined || device.agentId === input.requesterAgentId),
   );
   if (candidates.length === 0) return undefined;
+
+  const own = candidates.find((device) => device.agentId !== undefined);
+  if (own) return own;
 
   if (input.reason) {
     const named = candidates.filter((device) =>
@@ -298,10 +309,13 @@ export function reconcileDeviceLeases(
     if (boundLeaseIds.has(lease.id)) continue;
     // A simulator's launchd_sim belongs to no tree, so most leases bind here: oldest lease to
     // the first unclaimed device of its platform, which is the order agents passed the gate in.
+    // Never a device in another live agent's process tree: that agent booted it, and binding it
+    // here would hand its device to whoever happened to be waiting.
     const match = input.runningDevices.find(
       (device) =>
         device.platform === lease.platform &&
         !claimedDeviceIds.has(device.deviceId) &&
+        (device.agentId === undefined || device.agentId === lease.agentId) &&
         startedAfterLease(device, lease, input.nowMs),
     );
     if (match) {

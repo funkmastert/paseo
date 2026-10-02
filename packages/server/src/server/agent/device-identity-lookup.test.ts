@@ -18,6 +18,11 @@ function fakeRunner(handlers: {
   };
 }
 
+/** `adb devices -l` output for these emulator serials. */
+function adbDeviceList(serials: readonly string[]): string {
+  return `List of devices attached\n${serials.map((serial) => `${serial}\tdevice`).join("\n")}\n`;
+}
+
 describe("DeviceIdentityLookup", () => {
   test("maps an AVD name to its adb serial", async () => {
     const lookup = new DeviceIdentityLookup(
@@ -30,7 +35,7 @@ describe("DeviceIdentityLookup", () => {
     expect(await lookup.androidSerial("yonderly_pixel")).toBe("emulator-5554");
   });
 
-  test("caches the map: a second lookup does not shell out again", async () => {
+  test("a second lookup re-checks the cached serial with one call, not a full adb sweep", async () => {
     const exec = vi.fn(async (command: string, args: readonly string[]) => {
       if (command === "adb" && args[0] === "devices") {
         return "List of devices attached\nemulator-5554\tdevice\n";
@@ -41,9 +46,45 @@ describe("DeviceIdentityLookup", () => {
 
     await lookup.androidSerial("yonderly_pixel");
     const callsAfterFirst = exec.mock.calls.length;
-    await lookup.androidSerial("yonderly_pixel");
+    expect(await lookup.androidSerial("yonderly_pixel")).toBe("emulator-5554");
 
-    expect(exec.mock.calls.length).toBe(callsAfterFirst);
+    expect(exec.mock.calls.slice(callsAfterFirst)).toEqual([
+      ["adb", ["-s", "emulator-5554", "emu", "avd", "name"]],
+    ]);
+  });
+
+  test("an emulator that restarted on another port is re-mapped, and its old port's new owner maps too", async () => {
+    let ports: Record<string, string> = { "emulator-5554": "pixel_a" };
+    const lookup = new DeviceIdentityLookup(
+      fakeRunner({
+        adbDevices: () => adbDeviceList(Object.keys(ports)),
+        adbEmuAvdName: (serial) => `${ports[serial] ?? ""}\nOK\n`,
+      }),
+    );
+    expect(await lookup.androidSerial("pixel_a")).toBe("emulator-5554");
+
+    // pixel_a was killed and came back on 5556; pixel_b booted into the freed 5554.
+    ports = { "emulator-5554": "pixel_b", "emulator-5556": "pixel_a" };
+
+    expect(await lookup.androidSerial("pixel_a")).toBe("emulator-5556");
+    expect(await lookup.androidSerial("pixel_b")).toBe("emulator-5554");
+  });
+
+  test("fresh: true rebuilds the whole map before answering", async () => {
+    let ports: Record<string, string> = { "emulator-5554": "pixel_a" };
+    const exec = vi.fn(async (command: string, args: readonly string[]) => {
+      if (command === "adb" && args[0] === "devices") {
+        return adbDeviceList(Object.keys(ports));
+      }
+      return `${ports[args[1] as string] ?? ""}\nOK\n`;
+    });
+    const lookup = new DeviceIdentityLookup({ exec });
+    await lookup.androidSerial("pixel_a");
+    ports = { "emulator-5556": "pixel_a" };
+    exec.mockClear();
+
+    expect(await lookup.androidSerial("pixel_a", { fresh: true })).toBe("emulator-5556");
+    expect(exec.mock.calls[0]).toEqual(["adb", ["devices", "-l"]]);
   });
 
   test("an AVD nobody has booted resolves to undefined, never a throw", async () => {

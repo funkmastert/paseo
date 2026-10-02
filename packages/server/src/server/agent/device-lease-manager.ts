@@ -113,11 +113,16 @@ export interface DeviceLeaseAgentSummary {
   /** `agents.providers.<provider>.extends`, when set — a claude-backup-style custom provider
    * enforces exactly like its base (device-launch-enforcement.ts's `resolveProviderExtends`). */
   extendsProviderId?: string;
+  /** What Tyler sees for this agent in the sidebar — used in confirmations that name it. */
+  title?: string;
 }
 
 export interface DeviceStatusEntry {
   platform: DevicePlatform;
   deviceId: string | null;
+  /** The simulator's name from `simctl list` (an Android deviceId already is the AVD name).
+   * Absent until the identity lookup has resolved it. */
+  name?: string;
   /** "running" comes from `ps`. "starting" is a lease whose device has not appeared yet. */
   state: "running" | "starting";
   agentId?: string;
@@ -257,6 +262,12 @@ export interface DeviceLeaseManagerOptions {
   identityLookup?: DeviceIdentityLookupLike;
   /** Runs the actual shutdown command. Defaults to the real `xcrun`/`adb`; tests inject a fake. */
   shutdownRunner?: DeviceShutdownRunner;
+  /**
+   * True when a launch's device selector names a connected PHYSICAL device (its serial, UDID,
+   * CoreDevice identifier or name). `expo run:ios --device <iPhone>` boots no simulator, so it
+   * is the physical install gate's business, not the slot cap's.
+   */
+  isPhysicalDeviceTarget?: (target: string) => boolean;
 }
 
 /** What the cap needs from a reservation store — DeviceReservationStore satisfies this. */
@@ -268,7 +279,7 @@ export interface DeviceReservations {
 }
 
 export interface DeviceIdentityLookupLike {
-  androidSerial(avdName: string): Promise<string | undefined>;
+  androidSerial(avdName: string, options?: { fresh?: boolean }): Promise<string | undefined>;
   iosSimulatorName(udid: string): Promise<string | undefined>;
 }
 
@@ -313,6 +324,8 @@ interface QueuedWaiter {
   agentId: string;
   platform: DevicePlatform;
   reason?: string;
+  /** Waiting for this specific running device to come free, not for any slot. */
+  deviceId?: string;
   enqueuedAtMs: number;
   resolve: (result: DeviceCheckoutResult) => void;
 }
@@ -332,6 +345,34 @@ export interface DeviceCheckoutInput {
    */
   device?: string;
 }
+
+/** What a checkout decided, before any response text is written. */
+type CheckoutDecision =
+  | { kind: "bound"; lease: DeviceLease; device: RunningDevice; alreadyHeld?: boolean }
+  | { kind: "granted"; leaseId: string }
+  | { kind: "dry-run"; leaseId: string; message: string }
+  | { kind: "reserved"; message: string }
+  | { kind: "busy"; deviceId: string; message: string }
+  | { kind: "refused"; message: string };
+
+/** A launch's device selector, resolved against what is running and connected. */
+type ResolvedLaunchTarget =
+  | { kind: "none" }
+  | { kind: "running"; deviceId: string }
+  | { kind: "physical" }
+  | { kind: "not-running" };
+
+/** What one launch intent did, for the steer that follows the decision. */
+type IntentOutcome =
+  | { kind: "allow" }
+  | { kind: "deny"; message: string }
+  /** An untargeted launch that will use a free running device, now leased to the agent. */
+  | { kind: "bound-untargeted"; device: RunningDevice }
+  /** An untargeted launch while every running device of the platform is someone else's. */
+  | { kind: "busy-untargeted"; devices: RunningDevice[] };
+
+const SIMULATOR_UDID = /^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$/;
+const EMULATOR_SERIAL = /^emulator-\d+$/;
 
 function formatDuration(seconds: number): string {
   if (seconds < 90) return `${Math.round(seconds)}s`;
@@ -405,8 +446,15 @@ export class DeviceLeaseManager {
   private readonly reservations: DeviceReservations;
   private readonly identityLookup: DeviceIdentityLookupLike;
   private readonly shutdownRunner: DeviceShutdownRunner;
+  private readonly isPhysicalDeviceTarget: (target: string) => boolean;
 
   private leases: DeviceLease[] = [];
+  /**
+   * Every decision that picks a device and leases it runs here, one at a time. Picking and
+   * binding are synchronous inside a decision, but a decision also samples `ps` first, and two
+   * launches landing together must not both pick the same free device off the same sample.
+   */
+  private decisionQueue: Promise<void> = Promise.resolve();
   private waiters: QueuedWaiter[] = [];
   private blocked: DeviceStatusBlocked[] = [];
   private sample: DeviceSample | undefined;
@@ -436,6 +484,7 @@ export class DeviceLeaseManager {
     this.reservations = options.reservations ?? new InMemoryDeviceReservations();
     this.identityLookup = options.identityLookup ?? new DeviceIdentityLookup();
     this.shutdownRunner = options.shutdownRunner ?? defaultDeviceShutdownRunner;
+    this.isPhysicalDeviceTarget = options.isPhysicalDeviceTarget ?? (() => false);
     this.modeLog = new MonitorModeLog(options.logger);
   }
 
@@ -477,7 +526,30 @@ export class DeviceLeaseManager {
     const config = this.resolveConfig(await this.resolveCaps());
     this.reconcile(config);
     await this.chargeUnleasedDevices(config);
+    if (config.enabled) this.adoptAttributedDevices();
     await this.drainWaiters();
+  }
+
+  /**
+   * A device in a live agent's process tree with no lease is that agent's: it booted it without
+   * checking out. Lease it to that agent so it stays held after the tree changes — the shell
+   * that started an emulator exits, the emulator is reparented, and process attribution is gone
+   * while the agent is still building against it. Runs after the charge above, so the agent
+   * still hears once that it took a slot without asking.
+   */
+  private adoptAttributedDevices(): void {
+    const liveAgentIds = new Set(this.listAgents().map((agent) => agent.agentId));
+    for (const device of this.sample?.devices ?? []) {
+      if (!device.agentId || !liveAgentIds.has(device.agentId)) continue;
+      if (this.leases.some((lease) => lease.deviceId === device.deviceId)) continue;
+      this.bindLease({
+        agentId: device.agentId,
+        platform: device.platform,
+        device,
+        source: "launch",
+        reason: undefined,
+      });
+    }
   }
 
   /**
@@ -571,7 +643,35 @@ export class DeviceLeaseManager {
     const config = this.resolveConfig(await this.resolveCaps());
     const sample = await this.ensureSample();
     this.reconcile(config);
-    return this.buildSnapshot(config, sample);
+    const names = await this.resolveSimulatorNames(sample.devices);
+    return this.buildSnapshot(config, sample, names);
+  }
+
+  /** Simulator names for the status rows. Cached by the identity lookup, so this shells out
+   * only the first time a UDID is seen. */
+  private async resolveSimulatorNames(
+    devices: readonly RunningDevice[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const names = new Map<string, string>();
+    await Promise.all(
+      devices
+        .filter((device) => device.platform === "ios")
+        .map(async (device) => {
+          const name = await this.identityLookup.iosSimulatorName(device.deviceId);
+          if (name) names.set(device.deviceId, name);
+        }),
+    );
+    return names;
+  }
+
+  /** Runs one decision at a time; see `decisionQueue`. */
+  private async exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.decisionQueue.then(work, work);
+    this.decisionQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await run;
   }
 
   async checkout(input: DeviceCheckoutInput): Promise<DeviceCheckoutResult> {
@@ -579,41 +679,145 @@ export class DeviceLeaseManager {
     if (!config.enabled) {
       return { status: "disabled" };
     }
+    // Names are resolved before the decision: matching a simulator by name or an emulator by
+    // its adb serial shells out, and nothing slow runs while a decision holds the queue.
     await this.ensureSample({ fresh: true });
-    this.reconcile(config);
-
-    // Reuse what's already running before allocating anything new. Prefer, in order: the
-    // device the caller names (only when it's actually running — a named device that isn't
-    // running means the caller wants THAT one booted, not a substitute); a device matched in
-    // the reason text; otherwise the longest-idle unheld, unreserved device of the platform.
-    const named = input.device
-      ? this.findNamedRunningDevice(input.platform, input.device)
+    const namedDeviceId = input.device
+      ? await this.resolveTargetDeviceId(input.platform, input.device)
       : undefined;
-    const reusable = input.device
-      ? named
-      : this.findReusableDevice({ platform: input.platform, reason: input.reason });
-    if (reusable) {
-      const lease = this.bindLease({
-        agentId: input.agentId,
+
+    const decision = await this.exclusive(async () => {
+      await this.ensureSample({ fresh: true });
+      this.reconcile(config);
+      return this.decideCheckout(input, namedDeviceId, config);
+    });
+
+    switch (decision.kind) {
+      case "bound": {
+        const device = await this.describeDevice(decision.device);
+        return {
+          status: "granted",
+          leaseId: decision.lease.id,
+          platform: input.platform,
+          note: decision.alreadyHeld
+            ? `You already hold the ${input.platform} device ${device.name ?? device.deviceId}.`
+            : `Using the already-running ${input.platform} device ${device.name ?? device.deviceId} instead of booting a new one.`,
+          device,
+        };
+      }
+      case "granted":
+        return { status: "granted", leaseId: decision.leaseId, platform: input.platform };
+      case "dry-run":
+        return {
+          status: "granted",
+          leaseId: decision.leaseId,
+          platform: input.platform,
+          note: `Device slots are in dry run: this would have waited (${decision.message}).`,
+        };
+      case "reserved":
+        return { status: "unavailable", platform: input.platform, message: decision.message };
+      case "busy":
+      case "refused":
+        if (!input.wait) {
+          return { status: "unavailable", platform: input.platform, message: decision.message };
+        }
+        return await this.enqueue(
+          input,
+          config,
+          decision.message,
+          decision.kind === "busy" ? decision.deviceId : undefined,
+        );
+    }
+  }
+
+  /**
+   * The synchronous half of a checkout, run inside `exclusive`: pick, then lease, with no await
+   * in between. Reuse what's already running before allocating anything new. Prefer, in order:
+   * the device the caller names (when it's running — a named device that isn't running means
+   * the caller wants THAT one booted, not a substitute); a device matched in the reason text;
+   * otherwise the longest-idle unheld, unreserved device of the platform.
+   */
+  private decideCheckout(
+    input: DeviceCheckoutInput,
+    namedDeviceId: string | undefined,
+    config: ResolvedDeviceLeaseConfig,
+  ): CheckoutDecision {
+    if (input.device) {
+      const named = namedDeviceId
+        ? (this.sample?.devices ?? []).find(
+            (device) => device.deviceId === namedDeviceId && device.platform === input.platform,
+          )
+        : undefined;
+      if (named) {
+        const lease = this.leases.find((entry) => entry.deviceId === named.deviceId);
+        if (lease?.agentId === input.agentId) {
+          return { kind: "bound", lease, device: named, alreadyHeld: true };
+        }
+        const label =
+          named.deviceId === input.device ? input.device : `${input.device} (${named.deviceId})`;
+        if (this.reservations.isReserved(named.deviceId) && !lease) {
+          return {
+            kind: "reserved",
+            message:
+              `${label} is reserved for Tyler, so it is never handed to an agent. Call ` +
+              `device_checkout without \`device\` to get a free ${input.platform} device instead.`,
+          };
+        }
+        const holder =
+          lease?.agentId ?? (named.agentId !== input.agentId ? named.agentId : undefined);
+        if (holder) {
+          if (config.dryRun) {
+            const pending = this.createLease({
+              agentId: input.agentId,
+              platform: input.platform,
+              source: "checkout",
+              reason: input.reason,
+              counted: false,
+            });
+            return {
+              kind: "dry-run",
+              leaseId: pending.id,
+              message: `${label} is held by ${this.describeAgent(holder)}`,
+            };
+          }
+          return {
+            kind: "busy",
+            deviceId: named.deviceId,
+            message:
+              `${label} is held by ${this.describeAgent(holder)}. Call device_checkout with ` +
+              `this \`device\` and \`wait: true\` to get it as soon as it is checked in, or ` +
+              `without \`device\` to get a free ${input.platform} device instead`,
+          };
+        }
+        const bound = this.bindLease({
+          agentId: input.agentId,
+          platform: input.platform,
+          device: named,
+          source: "checkout",
+          reason: input.reason,
+        });
+        return { kind: "bound", lease: bound, device: named };
+      }
+    } else {
+      const reusable = this.findReusableDevice({
         platform: input.platform,
-        device: reusable,
-        source: "checkout",
         reason: input.reason,
+        requesterAgentId: input.agentId,
       });
-      const device = await this.describeDevice(reusable);
-      return {
-        status: "granted",
-        leaseId: lease.id,
-        platform: input.platform,
-        note: `Using the already-running ${input.platform} device ${device.name ?? device.deviceId} instead of booting a new one.`,
-        device,
-      };
+      if (reusable) {
+        const lease = this.bindLease({
+          agentId: input.agentId,
+          platform: input.platform,
+          device: reusable,
+          source: "checkout",
+          reason: input.reason,
+        });
+        return { kind: "bound", lease, device: reusable };
+      }
     }
 
     const verdict = this.tryGrant(input.agentId, input.platform, "checkout", input.reason, config);
-    if (verdict.granted) {
-      return { status: "granted", leaseId: verdict.leaseId, platform: input.platform };
-    }
+    if (verdict.granted) return { kind: "granted", leaseId: verdict.leaseId };
     if (config.dryRun) {
       // Dry run never makes anybody wait; it reports what the queue would have done. The lease
       // it hands back does not fill a slot, because the agent it stands for would have been
@@ -627,17 +831,9 @@ export class DeviceLeaseManager {
         reason: input.reason,
         counted: false,
       });
-      return {
-        status: "granted",
-        leaseId: lease.id,
-        platform: input.platform,
-        note: `Device slots are in dry run: this would have waited (${verdict.message}).`,
-      };
+      return { kind: "dry-run", leaseId: lease.id, message: verdict.message };
     }
-    if (!input.wait) {
-      return { status: "unavailable", platform: input.platform, message: verdict.message };
-    }
-    return await this.enqueue(input, config, verdict.message);
+    return { kind: "refused", message: verdict.message };
   }
 
   /**
@@ -718,20 +914,24 @@ export class DeviceLeaseManager {
     if (!device) return { status: "not-running" };
 
     const lease = this.leases.find((entry) => entry.deviceId === device.deviceId);
-    const holder = lease
-      ? this.listAgents().find((agent) => agent.agentId === lease.agentId)
+    // A device in an agent's process tree is that agent's even without a lease.
+    const holderId = lease?.agentId ?? device.agentId;
+    const holder = holderId
+      ? this.listAgents().find((agent) => agent.agentId === holderId)
       : undefined;
     if (holder?.isRunning && !input.confirmMidTurnHolder) {
       return {
         status: "needs-confirmation",
-        message: `${holder.agentId} is mid-turn on this device. Shutting it down now will interrupt that turn. Confirm again to shut it down anyway.`,
+        message: `${holder.title ? `"${holder.title}"` : holder.agentId} is mid-turn on this device. Shutting it down now will interrupt that turn. Confirm again to shut it down anyway.`,
       };
     }
 
     try {
+      // Re-resolved from scratch every time: a cached serial can point at whichever emulator
+      // took this one's console port after a restart, and `emu kill` would kill that one.
       const serial =
         device.platform === "android"
-          ? await this.identityLookup.androidSerial(device.deviceId)
+          ? await this.identityLookup.androidSerial(device.deviceId, { fresh: true })
           : undefined;
       await runDeviceShutdown(
         { platform: device.platform, deviceId: device.deviceId, ...(serial ? { serial } : {}) },
@@ -758,9 +958,10 @@ export class DeviceLeaseManager {
 
   /**
    * The enforcement point. Called from the provider's PreToolUse hook before a shell command
-   * runs: a command that would boot a device is refused when there is no slot, and the refusal
-   * says what to do instead. A rogue agent is stopped here; a well-behaved one never sees it,
-   * because checkout already gave it a lease and this finds it.
+   * runs. Only a command that would boot a NEW device can be refused, and only when the cap or
+   * memory headroom has no room for it. A command that uses a device already running — a runner
+   * that names none, `open -a Simulator`, a boot of a device that is up — is always allowed, and
+   * the agent's lease binds to the device it will use.
    */
   async gateLaunch(input: { agentId: string; command: string }): Promise<DeviceLaunchGateDecision> {
     const intents = detectDeviceLaunchIntents(input.command);
@@ -769,17 +970,22 @@ export class DeviceLeaseManager {
     const config = this.resolveConfig(await this.resolveCaps());
     if (!config.enabled) return { decision: "allow" };
 
-    const sample = await this.ensureSample({ fresh: true });
-    this.reconcile(config);
+    await this.ensureSample({ fresh: true });
+    const targets = await Promise.all(intents.map((intent) => this.resolveLaunchTarget(intent)));
 
-    for (const intent of intents) {
-      const decision = await this.gateIntent(input.agentId, intent, config, sample);
-      if (decision) {
+    const outcomes = await this.exclusive(async () => {
+      await this.ensureSample({ fresh: true });
+      this.reconcile(config);
+      const decided: Array<{ intent: DeviceLaunchIntent; outcome: IntentOutcome }> = [];
+      for (const [index, intent] of intents.entries()) {
+        const outcome = this.gateIntent(input.agentId, intent, targets[index], config);
+        decided.push({ intent, outcome });
+        if (outcome.kind !== "deny") continue;
         this.recordBlocked({
           agentId: input.agentId,
           platform: intent.platform,
           command: intent.command,
-          message: decision,
+          message: outcome.message,
           dryRun: config.dryRun,
           at: new Date(this.now()).toISOString(),
         });
@@ -794,8 +1000,17 @@ export class DeviceLeaseManager {
           { agentId: input.agentId, command: intent.command, platform: intent.platform },
           "Device cap refused a device launch",
         );
-        return { decision: "deny", message: decision };
+        break;
       }
+      return decided;
+    });
+
+    const denied = outcomes.find(({ outcome }) => outcome.kind === "deny");
+    if (denied && !config.dryRun && denied.outcome.kind === "deny") {
+      return { decision: "deny", message: denied.outcome.message };
+    }
+    for (const { intent, outcome } of outcomes) {
+      this.steerAfterAllow(input.agentId, intent, outcome, config);
     }
     return { decision: "allow" };
   }
@@ -811,38 +1026,84 @@ export class DeviceLeaseManager {
   }
 
   /**
-   * One launch intent against the cap. Returns the denial message, or undefined to allow.
-   * Allowing takes a lease on the agent's behalf, so a device booted without asking still fills
-   * a slot and still shows a holder — the count is never quietly wrong.
+   * Resolves a launch's device selector before the decision, since matching a simulator by name
+   * or an emulator by adb serial shells out. Running devices win over physical ones: a simulator
+   * named "iPhone 16e" is the simulator.
    */
-  private async gateIntent(
+  private async resolveLaunchTarget(intent: DeviceLaunchIntent): Promise<ResolvedLaunchTarget> {
+    if (intent.target === undefined) return { kind: "none" };
+    const deviceId = await this.resolveTargetDeviceId(intent.platform, intent.target);
+    if (deviceId) return { kind: "running", deviceId };
+    if (this.isPhysicalDeviceTarget(intent.target)) return { kind: "physical" };
+    return { kind: "not-running" };
+  }
+
+  /**
+   * The running device a selector names: its UDID (any case) or AVD name, a simulator's name
+   * from `simctl list`, or an emulator's adb serial. Undefined when nothing running matches.
+   */
+  private async resolveTargetDeviceId(
+    platform: DevicePlatform,
+    target: string,
+  ): Promise<string | undefined> {
+    const devices = (this.sample?.devices ?? []).filter((device) => device.platform === platform);
+    const byId = devices.find((device) => targetMatchesRunningDevice(target, device, platform));
+    if (byId) return byId.deviceId;
+    if (platform === "ios" && !SIMULATOR_UDID.test(target)) {
+      for (const device of devices) {
+        const name = await this.identityLookup.iosSimulatorName(device.deviceId);
+        if (name && name.toLowerCase() === target.toLowerCase()) return device.deviceId;
+      }
+    }
+    if (platform === "android" && EMULATOR_SERIAL.test(target)) {
+      for (const device of devices) {
+        if ((await this.identityLookup.androidSerial(device.deviceId)) === target) {
+          return device.deviceId;
+        }
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * One launch intent against the cap, synchronously — it runs inside `exclusive`, and picking a
+   * device and leasing it must not be split by an await. Allowing a launch that boots a new
+   * device takes a lease on the agent's behalf, so a device booted without asking still fills a
+   * slot and still shows a holder — the count is never quietly wrong.
+   */
+  private gateIntent(
     agentId: string,
     intent: DeviceLaunchIntent,
+    target: ResolvedLaunchTarget,
     config: ResolvedDeviceLeaseConfig,
-    sample: DeviceSample,
-  ): Promise<string | undefined> {
-    // Booting a device that is already up costs nothing; refusing it would be nonsense. Bind a
-    // lease to it too (when it's unheld and unreserved), so naming a running device still
-    // shows a holder and never expires as never-started — the "stays allowed" rule is
-    // unchanged, only the bookkeeping behind it is new.
-    const matchedRunning = sample.devices.find((device) =>
-      targetMatchesRunningDevice(intent.target, device, intent.platform),
-    );
-    if (matchedRunning) {
+  ): IntentOutcome {
+    // A phone or a paired iPhone: no simulator boots. The install gate owns it.
+    if (target.kind === "physical") return { kind: "allow" };
+
+    // A device that is already up costs nothing; refusing it would be nonsense. Bind a lease to
+    // it when nobody holds it, so it shows a holder and never expires as never-started. A device
+    // another agent holds — by lease or by process tree — stays theirs.
+    if (target.kind === "running") {
+      const device = (this.sample?.devices ?? []).find(
+        (entry) => entry.deviceId === target.deviceId,
+      );
       if (
-        !this.reservations.isReserved(matchedRunning.deviceId) &&
-        !this.leases.some((lease) => lease.deviceId === matchedRunning.deviceId)
+        device &&
+        !this.reservations.isReserved(device.deviceId) &&
+        !this.leases.some((lease) => lease.deviceId === device.deviceId) &&
+        (device.agentId === undefined || device.agentId === agentId)
       ) {
         this.bindLease({
           agentId,
           platform: intent.platform,
-          device: matchedRunning,
+          device,
           source: "launch",
           reason: undefined,
         });
       }
-      return undefined;
+      return { kind: "allow" };
     }
+
     // The agent already holds a slot on this platform, so this launch costs nothing new.
     // Either it checked out and has not booted yet, or it booted and is launching again
     // against the device it already has: a rebuild loop runs `expo run:ios` over and over, and
@@ -855,35 +1116,26 @@ export class DeviceLeaseManager {
       (lease) =>
         lease.agentId === agentId &&
         lease.platform === intent.platform &&
-        (lease.deviceId === undefined || intent.target === undefined),
+        (lease.deviceId === undefined || target.kind === "none"),
     );
     if (held) {
       // Restart the never-started clock. The agent is demonstrably still trying to bring this
       // device up, and the build it is waiting on can outlast the TTL on its own.
       if (held.deviceId === undefined) held.lastLaunchAtMs = this.now();
-      return undefined;
+      return { kind: "allow" };
     }
 
-    // The gate hands over instead of duplicating: a launch that names no device (or names one
-    // that isn't running — that command is about to create it, which is fine) is about to boot
-    // a device while an unheld, unreserved one of the same platform already exists. Live mode
-    // leases the running device to this agent and refuses the new boot; dry run allows the
-    // launch through and only records what it would have done.
-    if (intent.target === undefined) {
-      const reusable = this.findReusableDevice({ platform: intent.platform, reason: undefined });
+    // A launch that names no device uses one that is already running — a booted simulator, the
+    // connected emulator — and boots nothing. Lease it the free one it will most likely land
+    // on. When every running device of the platform is somebody else's, it is still allowed: it
+    // boots nothing, so there is no slot to refuse it, and the agent is warned instead.
+    if (target.kind === "none") {
+      const reusable = this.findReusableDevice({
+        platform: intent.platform,
+        reason: undefined,
+        requesterAgentId: agentId,
+      });
       if (reusable) {
-        const device = await this.describeDevice(reusable);
-        if (config.dryRun) {
-          this.recordBlocked({
-            agentId,
-            platform: intent.platform,
-            command: intent.command,
-            message: `would have handed over the already-running ${device.name ?? device.deviceId} (${device.targetHint}) instead of letting \`${intent.command}\` boot a new device`,
-            dryRun: true,
-            at: new Date(this.now()).toISOString(),
-          });
-          return undefined;
-        }
         this.bindLease({
           agentId,
           platform: intent.platform,
@@ -891,31 +1143,89 @@ export class DeviceLeaseManager {
           source: "launch",
           reason: undefined,
         });
-        return this.handoverDenialMessage(intent, device);
+        return { kind: "bound-untargeted", device: reusable };
       }
+      const running = (this.sample?.devices ?? []).filter(
+        (device) => device.platform === intent.platform,
+      );
+      if (running.length > 0) return { kind: "busy-untargeted", devices: running };
     }
 
+    // Boots a new device: the cap and memory headroom decide.
     const verdict = this.tryGrant(agentId, intent.platform, "launch", undefined, config);
-    return verdict.granted ? undefined : this.denialMessage(intent, verdict.message);
+    return verdict.granted
+      ? { kind: "allow" }
+      : { kind: "deny", message: this.denialMessage(intent, verdict.message) };
   }
 
-  private handoverDenialMessage(
+  /**
+   * One line into the agent's turn after an allowed launch the cap had something to say about.
+   * Live mode only, and only a mid-turn agent (the steer path starts a new turn for an idle one).
+   * Fire and forget: the command must not wait on message delivery.
+   */
+  private steerAfterAllow(
+    agentId: string,
     intent: DeviceLaunchIntent,
-    device: DeviceCheckoutDeviceInfo,
-  ): string {
+    outcome: IntentOutcome,
+    config: ResolvedDeviceLeaseConfig,
+  ): void {
+    if (config.dryRun || !this.sendSystemMessageToAgent) return;
+    if (outcome.kind !== "bound-untargeted" && outcome.kind !== "busy-untargeted") return;
+    const agent = this.listAgents().find((entry) => entry.agentId === agentId);
+    if (!agent?.isRunning) return;
+    const send = this.sendSystemMessageToAgent;
+    void (async () => {
+      const body =
+        outcome.kind === "bound-untargeted"
+          ? await this.boundUntargetedMessage(intent, outcome.device)
+          : this.busyUntargetedMessage(intent, outcome.devices);
+      await send(agentId, body);
+    })().catch((error) => {
+      this.logger.warn({ err: error, agentId }, "Failed to steer a device cap note into the agent");
+    });
+  }
+
+  private async boundUntargetedMessage(
+    intent: DeviceLaunchIntent,
+    running: RunningDevice,
+  ): Promise<string> {
+    const device = await this.describeDevice(running);
     return (
-      `Bozeo device cap: \`${intent.command}\` was not run because an unheld ${intent.platform} ` +
-      `device is already running — ${device.name ?? device.deviceId} — and you now hold it. Use ` +
-      `it instead of booting a new one: \`${device.targetHint}\`. To get a different device ` +
-      `instead, call \`device_checkout\` with a \`device\` naming one, or check this one back in ` +
-      `with \`device_checkin\` first.`
+      `Bozeo device cap: \`${intent.command}\` names no device, so it will use the ` +
+      `already-running ${intent.platform} device ${device.name ?? device.deviceId}, which you ` +
+      `now hold. Target it explicitly from here on (\`${device.targetHint}\`) and call ` +
+      `\`device_checkin\` when you are done with it.`
+    );
+  }
+
+  private busyUntargetedMessage(intent: DeviceLaunchIntent, devices: RunningDevice[]): string {
+    const owners = devices
+      .map((device) => {
+        const lease = this.leases.find((entry) => entry.deviceId === device.deviceId);
+        const holder = lease?.agentId ?? device.agentId;
+        if (holder) return `${device.deviceId} (held by ${this.describeAgent(holder)})`;
+        return this.reservations.isReserved(device.deviceId)
+          ? `${device.deviceId} (reserved for Tyler)`
+          : device.deviceId;
+      })
+      .join(", ");
+    return (
+      `Bozeo device cap: \`${intent.command}\` names no device, and every running ` +
+      `${intent.platform} device is someone else's: ${owners}. It will most likely install onto ` +
+      `one of them. Call \`device_checkout\` with platform "${intent.platform}" to get your own, ` +
+      `then pass its id to the command (\`--device <udid>\`, \`-s <serial>\`).`
     );
   }
 
   private denialMessage(intent: DeviceLaunchIntent, reason: string): string {
     const holders = this.describeHolders(intent.platform);
+    const free = this.findReusableDevice({ platform: intent.platform, reason: undefined });
+    const freeHint = free
+      ? ` ${free.deviceId} is running and free: \`device_checkout\` with platform ` +
+        `"${intent.platform}" hands it to you at once.`
+      : "";
     return (
-      `Bozeo device cap: \`${intent.command}\` was not run because ${reason}. ` +
+      `Bozeo device cap: \`${intent.command}\` was not run because ${reason}.${freeHint} ` +
       `${holders} ` +
       `Do not retry the command and do not work around the cap. Call the \`device_checkout\` ` +
       `tool with platform "${intent.platform}" and wait — it returns as soon as a slot frees, ` +
@@ -931,11 +1241,15 @@ export class DeviceLeaseManager {
         const heldFor = formatDuration((this.now() - lease.acquiredAtMs) / 1000);
         return `${lease.agentId} (${heldFor}${lease.reason ? `, ${lease.reason}` : ""})`;
       });
-    const unleased = (this.sample?.devices ?? []).filter(
+    const unleasedOnPlatform = (this.sample?.devices ?? []).filter(
       (device) =>
         device.platform === platform &&
         !this.leases.some((lease) => lease.deviceId === device.deviceId),
     );
+    for (const device of unleasedOnPlatform) {
+      if (device.agentId) entries.push(`${device.agentId} (${device.deviceId}, never checked out)`);
+    }
+    const unleased = unleasedOnPlatform.filter((device) => device.agentId === undefined);
     const parts: string[] = [];
     if (entries.length > 0) parts.push(`Held by: ${entries.join(", ")}.`);
     if (unleased.length > 0) {
@@ -1078,10 +1392,12 @@ export class DeviceLeaseManager {
   }
 
   /** Every unheld, unreserved device of a platform, ranked by the reuse priority: an explicit
-   * name (resolved by the caller), then a match in the reason text, then longest-idle. */
+   * name (resolved by the caller), then a match in the reason text, then longest-idle. A device
+   * in another live agent's process tree is that agent's (device-lease-registry.ts). */
   private findReusableDevice(input: {
     platform: DevicePlatform;
     reason: string | undefined;
+    requesterAgentId?: string;
   }): RunningDevice | undefined {
     return selectReusableDevice({
       platform: input.platform,
@@ -1089,26 +1405,14 @@ export class DeviceLeaseManager {
       leases: this.leases,
       reservedDeviceIds: this.reservations.reservedDeviceIds(),
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.requesterAgentId ? { requesterAgentId: input.requesterAgentId } : {}),
     });
   }
 
-  /** A running device this platform's caller explicitly named, if it exists and isn't reserved
-   * or already held by somebody else. */
-  private findNamedRunningDevice(
-    platform: DevicePlatform,
-    named: string,
-  ): RunningDevice | undefined {
-    const device = (this.sample?.devices ?? []).find(
-      (candidate) =>
-        candidate.platform === platform &&
-        (candidate.platform === "ios"
-          ? candidate.deviceId.toLowerCase() === named.toLowerCase()
-          : candidate.deviceId === named),
-    );
-    if (!device) return undefined;
-    if (this.reservations.isReserved(device.deviceId)) return undefined;
-    if (this.leases.some((lease) => lease.deviceId === device.deviceId)) return undefined;
-    return device;
+  /** An agent as a person reads it: its title, with the id to tell two apart. */
+  private describeAgent(agentId: string): string {
+    const title = this.listAgents().find((agent) => agent.agentId === agentId)?.title;
+    return title ? `"${title}" (${agentId})` : agentId;
   }
 
   /** Exactly which device a grant is, in a form ready to paste into a shell command. */
@@ -1133,6 +1437,7 @@ export class DeviceLeaseManager {
     input: DeviceCheckoutInput,
     config: ResolvedDeviceLeaseConfig,
     message: string,
+    deviceId?: string,
   ): Promise<DeviceCheckoutResult> {
     const ahead = this.waiters.filter((waiter) => waiter.platform === input.platform).length;
     const timeoutMs = input.timeoutMs ?? config.queueTimeoutMs;
@@ -1159,12 +1464,15 @@ export class DeviceLeaseManager {
         settle(result);
       },
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(deviceId ? { deviceId } : {}),
     };
     const timer = setTimeout(() => {
       waiter.resolve({
         status: "unavailable",
         platform: input.platform,
-        message: `Waited ${formatDuration(timeoutMs / 1000)} for a ${input.platform} device slot and none came free: ${message}.`,
+        message: deviceId
+          ? `Waited ${formatDuration(timeoutMs / 1000)} for ${deviceId} and it was not checked in: ${message}.`
+          : `Waited ${formatDuration(timeoutMs / 1000)} for a ${input.platform} device slot and none came free: ${message}.`,
       });
       this.notify();
     }, timeoutMs);
@@ -1215,6 +1523,44 @@ export class DeviceLeaseManager {
     this.reconcile(config);
 
     for (const waiter of this.waiters.slice().sort((a, b) => a.enqueuedAtMs - b.enqueuedAtMs)) {
+      if (waiter.deviceId !== undefined) {
+        const device = (this.sample?.devices ?? []).find(
+          (entry) => entry.deviceId === waiter.deviceId,
+        );
+        if (device) {
+          // Still running: it is this device or nothing. Bind the moment it is free.
+          if (
+            this.leases.some((lease) => lease.deviceId === device.deviceId) ||
+            (device.agentId !== undefined && device.agentId !== waiter.agentId)
+          ) {
+            continue;
+          }
+          const lease = this.bindLease({
+            agentId: waiter.agentId,
+            platform: waiter.platform,
+            device,
+            source: "checkout",
+            reason: waiter.reason,
+          });
+          this.logger.info(
+            { agentId: waiter.agentId, deviceId: device.deviceId },
+            "Queued agent received the device it named",
+          );
+          const settle = waiter.resolve;
+          void this.describeDevice(device).then((info) =>
+            settle({
+              status: "granted",
+              leaseId: lease.id,
+              platform: waiter.platform,
+              note: `${info.name ?? info.deviceId} was checked in; it is yours now.`,
+              device: info,
+            }),
+          );
+          continue;
+        }
+        // It stopped while this agent waited. Naming a device that isn't running asks for a
+        // new boot of it, so the waiter now waits for a slot like everybody else.
+      }
       const verdict = this.tryGrant(
         waiter.agentId,
         waiter.platform,
@@ -1424,6 +1770,7 @@ export class DeviceLeaseManager {
   private buildSnapshot(
     config: ResolvedDeviceLeaseConfig,
     sample: DeviceSample,
+    names: ReadonlyMap<string, string>,
   ): DeviceStatusSnapshot {
     const nowMs = this.now();
     const agents = this.listAgents();
@@ -1435,14 +1782,16 @@ export class DeviceLeaseManager {
     );
 
     // Running devices come first and come from `ps`. A lease only decorates one with a holder.
-    const devices: DeviceStatusEntry[] = sample.devices.map((device) =>
-      this.applyReservation(
+    const devices: DeviceStatusEntry[] = sample.devices.map((device) => {
+      const entry = this.applyReservation(
         this.applyEnforcement(
           this.toRunningDeviceEntry(device, leaseByDeviceId.get(device.deviceId), nowMs),
           agentsById,
         ),
-      ),
-    );
+      );
+      const name = names.get(device.deviceId);
+      return name ? { ...entry, name } : entry;
+    });
 
     for (const lease of this.leases) {
       if (lease.deviceId !== undefined) continue;

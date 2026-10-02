@@ -134,6 +134,17 @@ describe("reconcileDeviceLeases", () => {
     expect(result.leases.find((entry) => entry.deviceId === "Pixel_7")?.id).toBe("owner");
   });
 
+  test("never binds another agent's pending lease to a device in a live agent's process tree", () => {
+    const result = reconcileDeviceLeases({
+      ...base,
+      leases: [lease({ id: "waiter", agentId: "a1", platform: "android", acquiredAtMs: 1 })],
+      runningDevices: [device({ deviceId: "Pixel_7", platform: "android", agentId: "a2" })],
+    });
+
+    expect(result.leases[0]).toMatchObject({ id: "waiter" });
+    expect(result.leases[0]?.deviceId).toBeUndefined();
+  });
+
   test("never binds to a device that was already running when the lease was taken", () => {
     // Otherwise a fresh checkout adopts somebody else's simulator, frees the slot it is about
     // to fill, and the device it then boots puts the machine over the cap.
@@ -301,6 +312,45 @@ describe("selectReusableDevice", () => {
     });
 
     expect(result?.deviceId).toBe("pixel_b");
+  });
+
+  test("a device attributed to a running agent by process tree is never reused by another", () => {
+    const result = selectReusableDevice({
+      platform: "android",
+      runningDevices: [
+        device({
+          deviceId: "pixel_a",
+          platform: "android",
+          agentId: "agent-a",
+          uptimeSeconds: 900,
+        }),
+      ],
+      leases: [],
+      reservedDeviceIds: noneReserved,
+      requesterAgentId: "agent-b",
+    });
+
+    expect(result).toBeUndefined();
+  });
+
+  test("a device in the requester's own process tree is offered back to it first", () => {
+    const result = selectReusableDevice({
+      platform: "android",
+      runningDevices: [
+        device({ deviceId: "pixel_free", platform: "android", uptimeSeconds: 99_999 }),
+        device({
+          deviceId: "pixel_own",
+          platform: "android",
+          agentId: "agent-a",
+          uptimeSeconds: 10,
+        }),
+      ],
+      leases: [],
+      reservedDeviceIds: noneReserved,
+      requesterAgentId: "agent-a",
+    });
+
+    expect(result?.deviceId).toBe("pixel_own");
   });
 
   test("otherwise picks the longest-idle unheld device", () => {
