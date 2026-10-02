@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
 import { createTestLogger } from "../../test-utils/test-logger.js";
@@ -682,18 +682,23 @@ class CappedThenHeldTurnSession extends HeldTurnSession {
  * A session whose `getRuntimeInfo` stalls until a test-controlled gate opens, so a test can land
  * a concurrent call while a reload's `registerSession` is paused mid-registration (the new agent
  * is already in `this.agents`, but `registerSession` has not returned to call `requeueHeldTurn`
- * yet).
+ * yet). `onGateEntered` fires the instant `getRuntimeInfo` starts waiting on the gate — the one
+ * moment that "already addressable, not yet returned" window is guaranteed open — so a test can
+ * await that instead of hoping a fixed real-time delay was long enough for registration to get
+ * there.
  */
 class GatedHeldTurnSession extends HeldTurnSession {
   constructor(
     config: AgentSessionConfig,
     private readonly gate: Promise<void>,
+    private readonly onGateEntered: () => void,
     onOutOfBand?: () => void,
   ) {
     super(config, onOutOfBand);
   }
 
   override async getRuntimeInfo() {
+    this.onGateEntered();
     await this.gate;
     return super.getRuntimeInfo();
   }
@@ -705,7 +710,10 @@ class GatedHeldTurnClient extends HeldTurnClient {
   /** The next `createSession` produces a session whose `getRuntimeInfo` stalls on the gate. */
   nextSessionIsGated = false;
 
-  constructor(private readonly gate: Promise<void>) {
+  constructor(
+    private readonly gate: Promise<void>,
+    private readonly onGateEntered: () => void,
+  ) {
     super();
   }
 
@@ -720,7 +728,7 @@ class GatedHeldTurnClient extends HeldTurnClient {
     }
     if (this.nextSessionIsGated) {
       this.nextSessionIsGated = false;
-      const session = new GatedHeldTurnSession(config, this.gate, () => {
+      const session = new GatedHeldTurnSession(config, this.gate, this.onGateEntered, () => {
         this.outOfBandRuns += 1;
       });
       this.sessions.push(session);
@@ -743,7 +751,11 @@ describe("a reload's requeue of a held turn", () => {
     const gate = new Promise<void>((resolve) => {
       resolveGate = resolve;
     });
-    const client = new GatedHeldTurnClient(gate);
+    let resolveGateEntered!: () => void;
+    const gateEntered = new Promise<void>((resolve) => {
+      resolveGateEntered = resolve;
+    });
+    const client = new GatedHeldTurnClient(gate, () => resolveGateEntered());
     const manager = new AgentManager({
       clients: { codex: client },
       registry: storage,
@@ -774,7 +786,10 @@ describe("a reload's requeue of a held turn", () => {
 
     // The child errors on its own first turn, for real, before anything queues behind it.
     await prompt(target.id, "hit the cap");
-    await flush();
+    await vi.waitFor(() =>
+      expect(manager.getAgent(target.id)?.attention?.attentionReason).toBe("error"),
+    );
+    await manager.flush();
     expect((await storage.get(target.id))?.attentionReason).toBe("error");
 
     // A sibling now takes the only slot, so the next prompt to the errored child queues behind
@@ -785,18 +800,22 @@ describe("a reload's requeue of a held turn", () => {
     await prompt(target.id, "queued task");
     await flush();
     expect(admission.isQueued(target.id)).toBe(true);
+    await manager.flush();
     expect((await storage.get(target.id))?.attentionReason).toBe("error");
 
     client.nextSessionIsGated = true;
     const reloadPromise = manager.reloadAgentSession(target.id);
-    await flush();
+    await gateEntered;
     // Detached for the reload; `registerSession` is now stalled at the gate, with the freshly
     // registered agent already addressable.
     expect(admission.isQueued(target.id)).toBe(false);
 
     // Claims the agentId's run slot before `registerSession` returns and calls `requeueHeldTurn`.
+    // `streamAgentInternal` tracks the pending run in `this.runs` synchronously, before the
+    // generator that actually starts the turn is ever iterated, so `hasInFlightRun` is already
+    // true by the time this `await` returns — no extra wait needed.
     await prompt(target.id, "sneaky");
-    await flush();
+    expect(manager.hasInFlightRun(target.id)).toBe(true);
 
     resolveGate();
     await reloadPromise;
