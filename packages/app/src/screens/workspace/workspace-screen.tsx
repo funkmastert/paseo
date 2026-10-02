@@ -94,6 +94,7 @@ import type {
 import { useCreateFlowStore } from "@/stores/create-flow-store";
 import { normalizeWorkspaceTabTarget, workspaceTabTargetsEqual } from "@/workspace-tabs/identity";
 import { useVisibleAgentIds } from "./visible-agent-ids";
+import { useFollowMovedAgentTabs } from "@/workspace-tabs/use-follow-moved-agent-tabs";
 import {
   getHostRuntimeStore,
   useHostRuntimeClient,
@@ -1979,6 +1980,15 @@ function WorkspaceScreenContent({
       }),
     [uiTabs, workspaceLayout, unfocusedPaneId],
   );
+  useFollowMovedAgentTabs({
+    serverId: normalizedServerId,
+    workspaceId: normalizedWorkspaceId,
+    workspaceKey: persistenceKey,
+    routeFocused: isRouteFocused,
+    layoutHydrated: hasHydratedWorkspaceLayoutStore,
+    tabs: uiTabs,
+    focusedTabId: focusedPaneTabState.activeTabId,
+  });
   const viewedTimelineSync = useSessionStore(
     (state) => state.sessions[normalizedServerId]?.viewedTimelineSync ?? null,
   );

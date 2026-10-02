@@ -1679,6 +1679,44 @@ export function retargetTabInLayout(
   };
 }
 
+/**
+ * Puts the agent account failover moved a conversation to wherever its retired handle has a tab:
+ * the handle's tab takes the successor in place, or closes into the successor's own tab. Focus
+ * moves only off a focused handle tab. Null when no tab shows the handle.
+ */
+export function followMovedAgentInLayout(input: {
+  layout: WorkspaceLayout;
+  fromAgentId: string;
+  toAgentId: string;
+}): WorkspaceLayout | null {
+  const from: WorkspaceTabTarget = { kind: "agent", agentId: input.fromAgentId };
+  const to: WorkspaceTabTarget = { kind: "agent", agentId: input.toAgentId };
+  const handleTabs = collectAllTabs(asInternalNode(input.layout.root)).filter((tab) =>
+    workspaceTabTargetsEqual(tab.target, from),
+  );
+  if (handleTabs.length === 0) {
+    return null;
+  }
+  let layout = input.layout;
+  for (const handleTab of handleTabs) {
+    const root = asInternalNode(layout.root);
+    const successorTab = collectAllTabs(root).find((tab) =>
+      workspaceTabTargetsEqual(tab.target, to),
+    );
+    if (!successorTab) {
+      layout =
+        retargetTabInLayout({ layout, tabId: handleTab.tabId, target: to })?.layout ?? layout;
+      continue;
+    }
+    const wasFocused = findPaneById(root, layout.focusedPaneId)?.focusedTabId === handleTab.tabId;
+    layout = closeTabInLayout({ layout, tabId: handleTab.tabId }) ?? layout;
+    if (wasFocused) {
+      layout = focusTabInLayout({ layout, tabId: successorTab.tabId }) ?? layout;
+    }
+  }
+  return layout;
+}
+
 /** Replaces one pane-local slot and never claims an equivalent tab elsewhere. */
 export function replaceTabTargetInLayout(
   input: ReplaceTabTargetInLayoutInput,

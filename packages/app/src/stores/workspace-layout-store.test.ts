@@ -700,6 +700,109 @@ describe("workspace-layout-store tree transforms", () => {
 });
 
 describe("workspace-layout-store actions", () => {
+  describe("followMovedAgent", () => {
+    let movedWorkspaceIndex = 0;
+    function freshWorkspaceKey(): string {
+      movedWorkspaceIndex += 1;
+      return buildWorkspaceTabPersistenceKey({
+        serverId: SERVER_ID,
+        workspaceId: `ws-moved-${movedWorkspaceIndex}`,
+      }) as string;
+    }
+    function agentTargets(workspaceKey: string) {
+      return collectAllTabs(workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].root)
+        .filter((tab) => tab.target.kind === "agent")
+        .map((tab) => tab.target);
+    }
+    function focusedTarget(workspaceKey: string) {
+      const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+      const pane = findPaneById(layout.root, layout.focusedPaneId);
+      return (
+        collectAllTabs(layout.root).find((tab) => tab.tabId === pane?.focusedTabId)?.target ?? null
+      );
+    }
+
+    it("retargets the handle's tab to the successor in place", () => {
+      const workspaceKey = freshWorkspaceKey();
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "retired" },
+        intent: "reveal",
+      });
+      const before = collectAllTabs(
+        workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].root,
+      ).length;
+
+      store.followMovedAgent(workspaceKey, "retired", "successor");
+
+      expect(agentTargets(workspaceKey)).toEqual([{ kind: "agent", agentId: "successor" }]);
+      expect(focusedTarget(workspaceKey)).toEqual({ kind: "agent", agentId: "successor" });
+      expect(
+        collectAllTabs(workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey].root),
+      ).toHaveLength(before);
+    });
+
+    it("closes a background handle tab without moving focus when the successor is open", () => {
+      const workspaceKey = freshWorkspaceKey();
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "successor" },
+        intent: "reveal",
+      });
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "retired" },
+        intent: "background",
+      });
+      store.openTab({ workspaceKey, target: { kind: "working_diff" }, intent: "reveal" });
+
+      store.followMovedAgent(workspaceKey, "retired", "successor");
+
+      expect(agentTargets(workspaceKey)).toEqual([{ kind: "agent", agentId: "successor" }]);
+      expect(focusedTarget(workspaceKey)).toEqual({ kind: "working_diff" });
+    });
+
+    it("focuses the successor's tab when the focused handle tab closes into it", () => {
+      const workspaceKey = freshWorkspaceKey();
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "successor" },
+        intent: "reveal",
+      });
+      store.openTab({ workspaceKey, target: { kind: "working_diff" }, intent: "reveal" });
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "retired" },
+        intent: "reveal",
+      });
+
+      store.followMovedAgent(workspaceKey, "retired", "successor");
+
+      expect(agentTargets(workspaceKey)).toEqual([{ kind: "agent", agentId: "successor" }]);
+      expect(focusedTarget(workspaceKey)).toEqual({ kind: "agent", agentId: "successor" });
+    });
+
+    it("hands an explicit pin on the handle to the successor", () => {
+      const workspaceKey = freshWorkspaceKey();
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "retired" },
+        intent: "reveal",
+        pin: true,
+      });
+
+      store.followMovedAgent(workspaceKey, "retired", "successor");
+
+      expect([
+        ...(workspaceLayoutStore.getState().pinnedAgentIdsByWorkspace[workspaceKey] ?? []),
+      ]).toEqual(["successor"]);
+    });
+  });
+
   it("creates duplicate Changes instances while reveal keeps the first instance", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();
